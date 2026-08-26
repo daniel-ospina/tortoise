@@ -124,7 +124,7 @@ class ProtocolState:
                 "protocol": "1509-run-protocol",
                 "created_at_utc": _utc(),
                 "steps": {},
-                "runs": {},        # step_number → {report, checkpoint, command, expected_direction}
+                "runs": {},        # step_number → {report, checkpoint, command, expected_direction, resume_quality}
                 "notes": {},       # step_number → operator notes
             }
             for s in STEPS:
@@ -198,10 +198,17 @@ class ProtocolState:
         self.save()
 
     def record_run(self, number: int, *, report: str, checkpoint: str,
-                   command: list[str], expected_direction: str | None = None) -> None:
+                   command: list[str], expected_direction: str | None = None,
+                   resume_quality: dict | None = None) -> None:
         """Record the artifacts of an executed run step (the protocol-level
         checkpoint: report + per-question checkpoint paths + the exact command
-        + the pre-stated expected delta direction for the confirmation)."""
+        + the pre-stated expected delta direction for the confirmation).
+
+        ``resume_quality`` (#1764) — the pre-run scan of the checkpoint's
+        outcomes against the resume-quality gate — is recorded so the state
+        file documents when a resume rejected stale/dead-retrieval outcomes
+        (population-purity note for the re-validation discipline).
+        """
         self.data["runs"][str(number)] = {
             "report": report,
             "checkpoint": checkpoint,
@@ -210,6 +217,8 @@ class ProtocolState:
         }
         if expected_direction:
             self.data["runs"][str(number)]["expected_direction"] = expected_direction
+        if resume_quality is not None:
+            self.data["runs"][str(number)]["resume_quality"] = resume_quality
         self.save()
 
 
@@ -321,6 +330,200 @@ def _report_qids(report_path: Path) -> list[str]:
             if o.get("question_id")]
 
 
+def checkpoint_resume_quality(checkpoint: Path,
+                              forwarded: str | None = None) -> dict | None:
+    """#1764 pre-resume health check: scan a checkpoint for outcomes the
+    runner's resume-quality gate will reject at load (dead FTS leg —
+    ``fts.count=0`` — or zero session recall). The per-outcome signal is
+    ``run.resume_gate_reject_reason`` (single source of truth), and the
+    scan mirrors the runner's per-outcome load decision: breaker_open
+    outcomes kept (legitimately dropped, never re-run) and outcomes
+    missing required keys counted as truncated (the runner re-encodes them
+    via the truncated path, before the gate). The required-key retriever
+    resolves via the runner's own helper (``run._retriever_from_checkpoint``
+    — forwarded → top-level field → run_key segment → hybrid) so the scan
+    can never report per a different retriever than the runner loads;
+    ``forwarded`` carries the runner command's --retriever (cmd_run passes
+    it, default "hybrid"). The zero_session count derives from the runner's
+    own type-strict ``session_recall_all_zero`` predicate (never a looser
+    duplicate).
+
+    The scan does NOT re-check the runner's whole-file load gates
+    (format / run_key / fingerprint mismatch — the runner refuses or
+    ignores the file wholesale there) nor the failures-list skip: those
+    are the runner's own load semantics and can only be resolved with the
+    effective run config.
+
+    Returns a summary dict, or None when there is nothing to scan — no
+    checkpoint file / non-dict / missing or empty ``outcomes`` / no
+    gate-eligible outcomes — or when the read itself is skipped: a
+    lock-busy (flock TimeoutError — concurrent writer) and an
+    existing-but-corrupt file both return None after a loud stderr warning
+    (see the read paragraph below). The read happens under the same
+    exclusive flock the writer uses (D8 — run.py's ``_load_checkpoint``
+    contract) so the scan never sees a mid-merge file; an existing-but-corrupt file
+    surfaces a loud stderr warning (mirroring the runner's corrupt-file
+    warning) before returning None, and a lock-busy (flock TimeoutError —
+    concurrent writer) is reported accurately as a skipped scan, never as
+    a corrupt file. The protocol records this in the run state so a
+    re-validation resume that rejected stale outcomes leaves a
+    population-purity note, never a silent blend.
+    """
+    from tortoise.shared_state.concurrency import flock_exclusive
+
+    from .run import (  # lazy — protocol CLI stays light
+        REQUIRED_OUTCOME_KEYS,
+        _retriever_from_checkpoint,
+        resume_gate_reject_reason,
+        session_recall_all_zero,
+        unknown_leg_reasons,
+    )
+    if not checkpoint.is_file():
+        return None
+    try:
+        with flock_exclusive(checkpoint.with_suffix(checkpoint.suffix + ".lock")):
+            data = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except TimeoutError as e:
+        # flock timeout — a concurrent writer holds the lock (D8). The
+        # scan is advisory; skip it with an ACCURATE message instead of
+        # swallowing TimeoutError (an OSError subclass) in the corrupt
+        # clause and misreporting a lock-busy as a corrupt checkpoint.
+        print(f"[run_protocol] WARNING: checkpoint {checkpoint} lock busy "
+              f"({e!r}) — resume-quality scan skipped (concurrent writer)",
+              file=sys.stderr)
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError) as e:
+        # An existing-but-corrupt checkpoint must NOT degrade silently (the
+        # runner itself warns loudly on the same failure) — the scan is a
+        # population-purity gate; a corrupt file is a loud event, not a
+        # quiet pass-through.
+        print(f"[run_protocol] WARNING: checkpoint {checkpoint} is corrupt "
+              f"({e!r}) — resume-quality scan skipped; the runner will "
+              f"ignore the file and re-encode every question",
+              file=sys.stderr)
+        return None
+    if not isinstance(data, dict):
+        return None
+    outcomes = data.get("outcomes")
+    if not isinstance(outcomes, list):
+        return None  # missing / explicit null / malformed — nothing to scan
+    # the runner keys required fields by retriever — resolve via the SAME
+    # helper the runner uses (run._retriever_from_checkpoint): the
+    # forwarded retriever when the caller has one (cmd_run forwards the
+    # runner command's --retriever, default "hybrid"), else the
+    # checkpoint's first-class top-level ``retriever`` field
+    # (run._save_checkpoint), else the run_key segment
+    # ``{surface}__{retriever}__{model}__{prompt}`` (older files), else
+    # "hybrid". Single source — the scan can never claim per a different
+    # retriever than the runner loads.
+    effective_retriever, _retriever_source = _retriever_from_checkpoint(
+        data, forwarded)
+    required = REQUIRED_OUTCOME_KEYS.get(effective_retriever,
+                                         ("question_id",))
+    checked = 0
+    truncated = 0
+    rejected: list[tuple[str, str, bool]] = []  # (qid, reason, session_all_zero)
+    # #1764/code-review: vocabulary-drift events — an fts leg with count==0
+    # and a reason OUTSIDE the known vocabulary is NOT rejected (fail-open)
+    # but is recorded here ({qid: [unknown reasons]}) so the run state
+    # documents the drift; the shared gate predicate is pure (never prints)
+    # and the scan itself prints nothing — the run-state dict carries it and
+    # _print_resume_quality surfaces it.
+    unknown_reasons: dict[str, list] = {}
+    for o in outcomes:
+        if not isinstance(o, dict) or not o.get("question_id"):
+            continue
+        if o.get("breaker_open"):
+            continue  # mirror the runner: legitimately dropped — kept
+        if any(k not in o for k in required):
+            truncated += 1  # runner re-encodes via the truncated path
+            continue
+        checked += 1
+        # qids are string-coerced (checkpoint question_ids may be ints).
+        unknown = unknown_leg_reasons(o)
+        if unknown:
+            unknown_reasons[str(o["question_id"])] = unknown
+        reason = resume_gate_reject_reason(o)
+        if reason is not None:
+            # zero_session derives from the runner's OWN type-strict
+            # predicate (run.session_recall_all_zero) — a corrupt bool
+            # False must not count as "all zeros" when the rejection was
+            # fts-only (the old looser all(v == 0) drifted from the gate).
+            sr = o.get("session_recall@k")
+            session_all_zero = session_recall_all_zero(sr)
+            rejected.append((o["question_id"], reason, session_all_zero))
+    if checked == 0 and truncated == 0:
+        return None  # no gate-eligible outcomes — silent (never a false "clean")
+    fts_dead = sum(1 for _, r, _ in rejected if r.startswith("fts.count"))
+    # per-signal PRESENCE counts: an outcome carrying both signals (the
+    # pilot's dead-FTS + zero-session artifact shape) counts in both fields.
+    zero_session = sum(1 for _, _, z in rejected if z)
+    return {
+        "checked": checked,
+        "rejected": len(rejected),
+        "fts_dead": fts_dead,
+        "zero_session": zero_session,
+        "truncated": truncated,
+        # qids are string-coerced — checkpoint question_ids may be ints
+        # (foreign/dataset shapes) and sorted()/join() would TypeError.
+        "qids": sorted({str(q) for q, _, _ in rejected}),
+        # {qid: [unknown fts-leg reasons]} — vocabulary drift (fail-open,
+        # never rejected) recorded so the run state documents it.
+        "unknown_reasons": unknown_reasons,
+    }
+
+
+def _print_resume_quality(resume_quality: dict | None) -> None:
+    """Loudly surface the #1764 pre-resume health check result (the run log
+    notes gate rejections — the operator must see population-purity events)."""
+    if resume_quality is None:
+        return
+    if resume_quality["rejected"]:
+        print(
+            f"[run_protocol] resume-quality gate: "
+            f"{resume_quality['rejected']}/{resume_quality['checked']} "
+            f"checkpointed outcomes REJECTED and will re-encode "
+            f"(fts_dead={resume_quality['fts_dead']}, "
+            f"zero_session={resume_quality['zero_session']}): "
+            f"{', '.join(str(q) for q in resume_quality['qids'])}",
+            file=sys.stderr)
+    if resume_quality["truncated"]:
+        print(
+            f"[run_protocol] resume-quality gate: "
+            f"{resume_quality['truncated']} truncated/corrupt outcomes "
+            f"(missing required keys) will also re-encode",
+            file=sys.stderr)
+    # #1764/code-review: vocabulary-drift events (fts leg with count==0 and
+    # a reason OUTSIDE the known vocabulary) are surfaced loudly — NOT
+    # rejected (fail-open), but the operator must see the drift; and the
+    # scan-clean verdict below must NEVER pair with a drift event (a clean
+    # claim would contradict the warning).
+    unknown = resume_quality.get("unknown_reasons") or {}
+    if unknown:
+        detail = ", ".join(
+            f"{qid}: {', '.join(repr(r) for r in reasons)}"
+            for qid, reasons in sorted(unknown.items()))
+        print(
+            f"[run_protocol] resume-quality gate: "
+            f"{len(unknown)} checkpointed outcome(s) carry an fts leg with "
+            f"count=0 and a reason OUTSIDE the known vocabulary — NOT "
+            f"rejected (fail-open on unknown vocabulary), but vocabulary "
+            f"drift: {detail}",
+            file=sys.stderr)
+    if (not resume_quality["rejected"] and not resume_quality["truncated"]
+            and not unknown):
+        # The scan mirrors the runner's PER-OUTCOME gate decision only — it
+        # does NOT re-check the whole-file load gates (format / run_key /
+        # fingerprint mismatch), so it cannot bless a file the runner would
+        # refuse wholesale.
+        print(
+            f"[run_protocol] resume-quality gate: scan-clean — "
+            f"all {resume_quality['checked']} outcomes pass the gate "
+            f"(whole-file load gates — format / run_key / fingerprint "
+            f"mismatch — NOT re-checked by this scan)",
+            file=sys.stderr)
+
+
 # ── CLI ─────────────────────────────────────────────────────────────────────
 
 def _resolve_step(raw: str) -> Step:
@@ -393,6 +596,30 @@ def cmd_gate(state: ProtocolState, args: argparse.Namespace) -> None:
         print("  mark with `gate <n> --pass --note '...'` or `--fail`")
 
 
+def _last_flag_value(cmd: list[str], flag: str) -> str | None:
+    """Value of the LAST ``flag`` occurrence in ``cmd`` (the runner's
+    argparse is last-wins — the protocol appends its own flags AFTER the
+    operator's extra ones), or None when the flag is absent (or has no
+    value — e.g. it is the final token).
+
+    #1764/code-review: the argparse-valid equals form (``--retriever=vector``)
+    is recognized alongside the space form (``--retriever vector``), and
+    last occurrence wins ACROSS both forms (argparse treats them
+    identically — the equals form is only sugar for a two-token sequence;
+    the space-form token itself is never a value candidate). This only
+    matters for flags that can come from operator extras (--retriever):
+    --checkpoint/--output are always appended space-form AFTER the extras
+    by build_command, so last-wins still resolves the protocol's own.
+    """
+    value: str | None = None
+    for i, tok in enumerate(cmd):
+        if tok == flag:
+            value = cmd[i + 1] if i + 1 < len(cmd) else None
+        elif tok.startswith(flag + "="):
+            value = tok[len(flag) + 1:]
+    return value
+
+
 def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     step = _resolve_step(args.step)
     if step.owner_gated and not args.owner_approve:
@@ -421,17 +648,46 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
             f"embedded FalkorDBLite without it (E2E-1). Set TORTOISE_DB_URI "
             f"or run the smoke/--mock wiring check instead.")
     print(f"$ {' '.join(cmd)}")
+    # #1764: pre-resume health check — scan the checkpoint (when it exists)
+    # for outcomes the resume-quality gate will reject; surface loudly and
+    # record the scan in the run state so the protocol documents when a
+    # resume dropped stale/dead-retrieval outcomes (population purity).
+    # Resolve the LAST --checkpoint occurrence: build_command prepends the
+    # operator's extra flags and appends the protocol's own --checkpoint
+    # AFTER them, and the runner's argparse is last-wins — so the scan and
+    # the recorded state must describe the file the runner actually uses.
+    checkpoint_arg = _last_flag_value(cmd, "--checkpoint")
+    if checkpoint_arg is None:
+        raise SystemExit(
+            "internal error: build_command must append a --checkpoint flag "
+            "to every run-step command (protocol bug — no flag found)")
+    resume_quality = checkpoint_resume_quality(
+        Path(checkpoint_arg),
+        # the scan must resolve the required-key retriever exactly as the
+        # runner will: the runner command's effective --retriever (last-wins
+        # via _last_flag_value), defaulting to "hybrid" — never the
+        # checkpoint's own claim alone, or a top-level-present/run_key-
+        # absent file would be scanned per one retriever and loaded per
+        # another.
+        forwarded=_last_flag_value(cmd, "--retriever") or "hybrid")
+    _print_resume_quality(resume_quality)
     if args.dry_run:
         print("[dry-run] not executing")
         return
     # The confirmation's expected-delta direction is recorded BEFORE the run
     # (pre-stated in advance — 03-scope step 7).
+    out_arg = _last_flag_value(cmd, "--output")
+    if out_arg is None:
+        raise SystemExit(
+            "internal error: build_command must append an --output flag to "
+            "every run-step command (protocol bug — no flag found)")
     state.record_run(
         step.number,
-        report=str(Path(cmd[cmd.index("--output") + 1])),
-        checkpoint=str(Path(cmd[cmd.index("--checkpoint") + 1])),
+        report=str(Path(out_arg)),
+        checkpoint=checkpoint_arg,
         command=cmd,
         expected_direction=args.expected_direction if step.runner == "confirm" else None,
+        resume_quality=resume_quality,
     )
     rc = subprocess.run(cmd, env=os.environ.copy())
     if rc.returncode != 0:

@@ -563,6 +563,467 @@ def test_checkpoint_truncated_outcome_reruns_just_that_question(tmp_path, capsys
         "corrupt" in capsys.readouterr().err.lower()
 
 
+def test_checkpoint_resume_gate_rejects_zero_session_recall(tmp_path, capsys):
+    """#1764 resume-quality gate: an outcome whose session_recall@k is all
+    zeros (the session never surfaced — dead-retrieval artifact) is rejected
+    at load and the question re-encodes; the healthy sibling resumes as-is
+    (single-population discipline — no stale outcomes in baselines)."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me")
+    dead = _minimal_outcome(
+        "mini_msr_002",
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0}})
+    runner._save_checkpoint(str(cp), [healthy, dead], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    # healthy outcome resumed untouched; the zero-recall one re-encoded
+    # (live mini retrieval is healthy — session_recall@5 == 1.0, no MARKER)
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"
+    assert by_id["mini_msr_002"].get("MARKER") is None
+    assert by_id["mini_msr_002"]["session_recall@k"] == {"5": 1.0}
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+
+
+def test_checkpoint_resume_gate_rejects_dead_fts_leg(tmp_path, capsys):
+    """#1764: an outcome whose legs trace records fts.count=0 (the pilot's
+    crash artifact — FTS ran but returned no hits) is rejected at load and
+    re-encodes; the healthy sibling resumes untouched."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me",
+                               legs=[{"leg": "fts", "ran": True,
+                                      "degraded": False, "reason": "ok",
+                                      "count": 4}])
+    # the dead outcome carries the FULL dead shape — a dead FTS leg AND
+    # zero session recall (the session never surfaced). A healthy vector
+    # leg with non-zero session recall is NOT retrieval-dead (see the
+    # guard-rail matrix) — the pilot's artifact had both signals dead.
+    dead = _minimal_outcome(
+        "mini_msr_002",
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0}},
+        legs=[{"leg": "fts", "ran": True, "degraded": False,
+               "reason": "empty_results", "count": 0},
+              {"leg": "vector", "ran": True, "degraded": False,
+               "reason": "ok", "count": 120}])
+    runner._save_checkpoint(str(cp), [healthy, dead], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=MockReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"
+    assert by_id["mini_msr_002"].get("MARKER") is None
+    # the re-encoded outcome carries a healthy fts leg (live retrieval)
+    fts = next(leg for leg in by_id["mini_msr_002"]["legs"]
+               if leg["leg"] == "fts")
+    assert fts["count"] > 0
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+
+
+def test_checkpoint_resume_gate_keeps_healthy_outcome(tmp_path):
+    """#1764: a healthy outcome (fts leg with count > 0, non-zero session
+    recall) resumes as-is — the reader is NOT invoked for it again."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    healthy = _minimal_outcome("mini_ie_user_001", MARKER="keep-me",
+                               legs=[{"leg": "fts", "ran": True,
+                                      "degraded": False, "reason": "ok",
+                                      "count": 4}])
+    runner._save_checkpoint(str(cp), [healthy], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"]["MARKER"] == "keep-me"  # reused
+    assert reader_calls["n"] == 1  # only the non-checkpointed qid ran
+
+
+def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
+    """#1764: breaker_open outcomes are LEGITIMATELY dropped — they must NOT
+    be re-run, even though their recorded session_recall@k is all zeros (the
+    breaker-open drop shape). The gate exempts them at load."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    dropped = {
+        "question_id": "mini_ie_user_001",
+        "question_type": "single-session-user",
+        "breaker_open": True,
+        "dropped_reason": "breaker_open",
+        "label": None, "hypothesis": None,
+        "session_recall@k": {"5": 0.0},
+        "turn_recall@k": {"5": 0.0},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+    runner._save_checkpoint(str(cp), [dropped], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    done, _ = runner._load_checkpoint(str(cp), run_key=key)
+    assert "mini_ie_user_001" in done  # kept — never re-run
+    assert done["mini_ie_user_001"]["breaker_open"] is True
+
+    # end-to-end: the breaker-open question stays dropped (reader untouched)
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:2], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_ie_user_001"].get("breaker_open") is True
+    assert reader_calls["n"] == 1  # mini_msr_002 only — breaker-open not re-run
+
+
+@pytest.mark.parametrize("outcome,expect", [
+    # guard rails: signals fire only on positive recorded evidence
+    (None, None),
+    ("not-a-dict", None),
+    ({}, None),
+    ({"question_id": "q"}, None),  # no legs, no recall keys
+    ({"question_id": "q", "legs": "not-a-list"}, None),
+    ({"question_id": "q", "legs": []}, None),
+    ({"question_id": "q", "legs": [{"leg": "vector", "count": 5}]}, None),
+    ({"question_id": "q", "legs": [{"leg": "fts"}]}, None),  # no count
+    ({"question_id": "q", "legs": [{"leg": "fts", "count": "0"}]},
+     None),  # non-numeric count is not evidence
+    ({"question_id": "q", "session_recall@k": {}}, None),
+    ({"question_id": "q", "session_recall@k": "x"}, None),
+    ({"question_id": "q", "session_recall@k": {"5": None}}, None),
+    # dead-FTS signal (single fts leg, no recall data recorded)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     "fts.count=0"),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "query_failed", "count": 0}]},
+     "fts.count=0"),
+    # timeout: the strategy deadline expired (R3 #1542 D4 as_completed
+    # merge) — the query never completed, results discarded, genuinely dead
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "timeout", "count": 0}]},
+     "fts.count=0"),
+    # timed-out fts leg + HEALTHY session (another leg surfaced the
+    # session) → NOT retrieval-dead — the session positively surfaced
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "timeout", "count": 0}],
+      "session_recall@k": {"5": 1.0}},
+     None),
+    # unknown / corrupt reason strings (future vocabulary, hand-edited
+    # files, reason=None) are NOT dead — fail-open (the index_missing
+    # livelock lesson); vocabulary drift is warned about separately
+    # (test_resume_gate_unknown_leg_reason_pure_and_surfaced)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "some_future_reason", "count": 0}]},
+     None),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": None, "count": 0}]},
+     None),
+    # R3 (#1542): index_missing is environmental/benign — expected in
+    # embedded FalkorDBLite (no FTS index); degrades quietly, does NOT trip
+    # the breaker. NOT a dead leg — rejecting it would reject every embedded
+    # outcome on every resume (livelock).
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "index_missing", "count": 0}]},
+     None),
+    # breaker_open is the breaker skipping the strategy — not a dead leg
+    # either (the caller separately keeps breaker_open OUTCOMES).
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": False, "degraded": True,
+                 "reason": "breaker_open", "count": 0}]},
+     None),
+    # dead-FTS + zero session recall (the pilot's artifact shape) — FTS
+    # reason surfaces first (both signals present)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": 0.0}},
+     "fts.count=0"),
+    # dead FTS leg + HEALTHY session (a vector leg rescued the session) →
+    # NOT retrieval-dead — rejecting it would livelock (the re-encode
+    # reproduces the same FTS-empty shape on the next resume)
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": 1.0}},
+     None),
+    # corrupt recall values (strings/None) do NOT prove the session
+    # surfaced — a dead FTS leg is still rejected on corrupt data instead
+    # of being silently resumed
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": "0.0"}},
+     "fts.count=0"),
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": None}},
+     "fts.count=0"),
+    # non-finite recall (json.loads parses Infinity → float('inf')): inf is
+    # NOT a finite positive value — the dead-FTS signal must stay fail-OPEN
+    # closed (reject), not be silently rescued by a corrupt Infinity
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": float("inf")}},
+     "fts.count=0"),
+    # inf without a dead FTS leg is neither healthy nor all-zero — no signal
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": float("inf")}},
+     None),
+    # bool False is an int subclass but NOT a recorded recall value — it
+    # must not count as "all zeros" (type-strict session_zero, mirroring
+    # session_healthy's bool exclusion)
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": False}},
+     None),
+    # TR dual-entity-type trace: a live point leg rescues the event leg
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "ok", "count": 2},
+                {"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     None),
+    # zero-session signal
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": 0.0}},
+     "session_recall@k all zeros"),
+    # legit sessionless (M6 N/A: turn_recall None) is exempt even when
+    # session_recall is all-zero and FTS is empty
+    ({"question_id": "q", "turn_recall@k": {"5": None},
+      "session_recall@k": {"5": 0.0},
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}]},
+     None),
+])
+def test_resume_gate_reject_reason_guard_rails(outcome, expect):
+    """#1764: the gate fires only on positive recorded evidence — absent /
+    malformed data never rejects; a healthy fts entry or a legitimately
+    session-less outcome (M6 N/A-not-0.0) always passes."""
+    reason = runner.resume_gate_reject_reason(outcome)
+    if expect is None:
+        assert reason is None
+    else:
+        assert reason is not None and reason.startswith(expect)
+
+
+def test_resume_gate_unknown_leg_reason_pure_and_surfaced(tmp_path, capsys):
+    """#1764/code-review: the gate predicate is PURE — an fts leg with
+    count==0 and a reason OUTSIDE the known vocabulary (future vocabulary,
+    hand-edited files, reason=None) stays fail-open (NOT dead — the
+    index_missing livelock lesson), the predicate prints NOTHING (it is the
+    shared single source of truth called by both the runner and the
+    protocol scan — a print inside it double-fires in a real cmd_run flow
+    and fires in --dry-run contexts where no load decision happens), and
+    the vocabulary-drift event is surfaced by the callers that own the
+    load decision: ``unknown_leg_reasons`` classifies it and
+    ``_load_checkpoint`` warns once per gate-eligible outcome, naming qid
+    + the unknown reason(s)."""
+    # predicate: pure + fail-open (unknown future reason → not dead, no print)
+    reason = runner.resume_gate_reject_reason({
+        "question_id": "q-unknown",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "some_future_reason", "count": 0}]})
+    assert reason is None
+    assert "unknown" not in capsys.readouterr().err.lower()
+    # helper: the unknown reason strings (raw values, deduplicated)
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-unknown",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "some_future_reason", "count": 0}]}) \
+        == ["some_future_reason"]
+    # reason=None (hand-edited/corrupt) → not dead, classified by helper
+    assert runner.resume_gate_reject_reason({
+        "question_id": "q-none",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": None, "count": 0}]}) is None
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-none",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": None, "count": 0}]}) == [None]
+    # a known benign reason (index_missing) is not unknown
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-benign",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "index_missing", "count": 0}]}) == []
+    # _load_checkpoint (the runner's load path) warns ONCE per gate-
+    # eligible outcome naming qid + the unknown reason(s), and still loads
+    # the outcome (fail-open)
+    cp = tmp_path / "state.json"
+    cp.write_text(json.dumps({
+        "format": runner.CHECKPOINT_FORMAT,
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [_minimal_outcome("q-unknown", **{
+            "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                       "reason": "some_future_reason", "count": 0}],
+            "session_recall@k": {"5": 1.0},  # healthy — NOT rejected
+        })],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__hybrid__default__default")
+    err = capsys.readouterr().err
+    assert "q-unknown" in err and "some_future_reason" in err
+    assert "unknown" in err.lower() and "fail-open" in err
+    assert "q-unknown" in done  # fail-open — loaded, not rejected
+
+
+def test_checkpoint_top_level_retriever_mismatch_warns(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint's retriever-mismatch warning
+    covers the checkpoint's first-class top-level ``retriever`` field as
+    well as the run_key segment — a top-level field that disagrees with
+    the forwarded retriever warns loudly, while the required-key set still
+    derives from the forwarded retriever (load behavior unchanged)."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001")  # hybrid keys only
+    # top-level field says vector but no run_key claims it — the runner
+    # (forwarded hybrid) loads with hybrid keys; the disagreement warns.
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "vector",
+        "outcomes": [outcome],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__hybrid__default__default")
+    err = capsys.readouterr().err
+    assert "retriever" in err and "!=" in err
+    assert "vector" in err
+    assert "mini_ie_user_001" in done  # hybrid keys → resumes
+
+    # matching top-level field → no warning
+    cp2 = tmp_path / "state2.json"
+    cp2.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "hybrid",
+        "outcomes": [outcome],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp2), run_key="embedded__hybrid__default__default")
+    assert "mini_ie_user_001" in done
+    assert "!=" not in capsys.readouterr().err
+
+
+def test_checkpoint_resume_gate_keeps_sessionless_abstention(tmp_path, capsys):
+    """#1764: a legitimately session-less outcome (abstention question —
+    turn_recall@k all None per the M6 N/A-not-0.0 contract, session_recall
+    all zeros, FTS legitimately empty) resumes as-is — it is NOT a dead-leg
+    artifact and must not re-encode on every resume forever."""
+    cp = tmp_path / "state.json"
+    key = "embedded__hybrid__default__default"
+    abstention = _minimal_outcome(
+        "mini_abs_005_abs", MARKER="keep-me", label=False,
+        **{"session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": None}},
+        legs=[{"leg": "fts", "ran": True, "degraded": False,
+               "reason": "empty_results", "count": 0}])
+    runner._save_checkpoint(str(cp), [abstention], [],
+                            run_key=key, surface="embedded", retriever="hybrid",
+                            model=None, prompt=None)
+
+    reader_calls = {"n": 0}
+
+    class _CountingReader(MockReader):
+        def answer(self, *args, **kwargs):
+            reader_calls["n"] += 1
+            return super().answer(*args, **kwargs)
+
+    outcomes, _report = runner.run_evaluation(
+        _mini()[:5], reader=_CountingReader(), judge=MockJudge(),
+        ks=(5,), top_k=5, split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+    )
+    by_id = {o["question_id"]: o for o in outcomes}
+    assert by_id["mini_abs_005_abs"]["MARKER"] == "keep-me"  # reused
+    assert reader_calls["n"] == 4  # only the 4 non-checkpointed qids ran
+
+
+def test_checkpoint_vector_truncation_requires_vector_keys(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint honors the retriever's required
+    key set (forwarded from run_evaluation) — a vector-mode outcome missing
+    vector-specific keys (ndcg@10/p@10/p@5/ranked_ids) is truncated and
+    re-encoded, mirroring the protocol scan's vector-key truncation."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001")  # hybrid keys only
+    runner._save_checkpoint(
+        str(cp), [outcome], [],
+        run_key="embedded__vector__minilm__default", surface="embedded",
+        retriever="vector", model="minilm", prompt=None)
+
+    # same key, retriever-aware load → truncated (missing vector keys)
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="vector")
+    assert "mini_ie_user_001" not in done
+    assert "truncated/corrupt" in capsys.readouterr().err.lower()
+
+    # the default (hybrid) load still sees the hybrid keys → resumes
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default")
+    assert "mini_ie_user_001" in done
+
+
+def test_checkpoint_retriever_mismatch_warns_not_refuses(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint cross-checks the forwarded
+    retriever against the run_key's retriever segment — a mismatch (vector
+    checkpoint loaded with the default hybrid retriever) emits a stderr
+    warning but does NOT change load behavior: the required-key set is
+    derived from the forwarded retriever, so the hybrid-keys outcome still
+    resumes."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001", **{
+        "ndcg@10": 0.5, "p@10": 0.5, "p@5": 0.5, "ranked_ids": ["a"]})
+    runner._save_checkpoint(
+        str(cp), [outcome], [],
+        run_key="embedded__vector__minilm__default", surface="embedded",
+        retriever="vector", model="minilm", prompt=None)
+
+    # forwarding hybrid against a vector-keyed checkpoint → warn only
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="hybrid")
+    err = capsys.readouterr().err
+    assert "retriever" in err and "!=" in err
+    assert "mini_ie_user_001" in done  # load behavior unchanged
+
+    # matching retriever → no warning
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="vector")
+    assert "mini_ie_user_001" in done
+    assert "forwarded retriever" not in capsys.readouterr().err
+
+
 def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):
     """An ENOSPC/OSError on the atomic checkpoint rename must surface as an
     error — never silently drop the question from the denominator."""
