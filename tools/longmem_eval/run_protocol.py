@@ -106,10 +106,12 @@ STEPS: list[Step] = [
          "run",
          "integrity.valid=true — census-class-aware (#1747): invalid_rate ≤ threshold "
          "AND n_hard_invalid == 0 (fatal_*/ingest/unknown census classes, non-census "
-         "error strings with an EMPTY census, permanent eval failures veto at any "
-         "threshold; recoverable parse_error/truncated/truncated_parse_error/partial_"
-         "parse/transient_* census classes AND reader/judge:retries_exhausted eval "
-         "failures are rate-limited, not vetoed); threshold "
+         "error strings with an EMPTY census, permanent eval failures, malformed "
+         "inputs — present non-bool valid flag / non-iterable or non-str "
+         "error_classes — fail closed to hard, veto at any threshold; recoverable "
+         "parse_error/truncated/truncated_parse_error/partial_parse/transient_* "
+         "census classes AND reader/judge:retries_exhausted eval failures are "
+         "rate-limited, not vetoed); threshold "
          f"{JUSTIFIED_BASELINE_THRESHOLD} justified default at 500-Q scale "
          f"(≤{JUSTIFIED_BASELINE_THRESHOLD * 500:.0f} of 500 questions with "
          "recoverable errors) — injected by `run 5`",

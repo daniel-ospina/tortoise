@@ -13,10 +13,12 @@ classes (parse_error / truncated / truncated_parse_error / partial_parse /
 transient_*) are rate-limited (a healthy run at 500-Q scale admits a handful
 — the old binary ``len(errors)==0`` invalidity made ``valid=true``
 unreachable); hard classes (fatal_* / ingest / unknown census classes /
-non-census error strings with an EMPTY census / permanent eval failures)
-veto the run at any threshold (a mixed recoverable+structural shape is
-rate-limited — the #1746 lane). Each qid is graded ONCE (failure-grade
-dominance on qid overlap — concurrent-checkpoint robustness); ``n_valid`` /
+non-census error strings with an EMPTY census / permanent eval failures /
+malformed inputs — present non-bool `valid` / non-iterable or non-str
+`error_classes` — fail closed to hard) veto the run at any threshold (a
+mixed recoverable+structural shape is rate-limited — the #1746 lane). Each
+qid is graded ONCE (failure-grade dominance on qid overlap —
+concurrent-checkpoint robustness); ``n_valid`` /
 ``n_invalid`` / ``invalid_rate`` keep their previous semantics for the
 production shape; the breakdown rides in the additive ``n_hard_invalid`` /
 ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` / ``criterion`` /
@@ -497,6 +499,21 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
                     threshold=1.0)["integrity"]
     assert integ["error_census"] == {}
     assert integ["error_census_malformed"]["parse_error"] == ["abc", [1, 2]]
+    # a None FIRST malformed value is not overwritten by a later one (the
+    # presence check treats a stored None as a recorded value).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": None}),
+                     _outcome("q1", valid=False,
+                              error_classes={"parse_error": "abc"})],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["parse_error"] == [None, "abc"]
+    # legacy flat-list junk ACCUMULATES across outcomes (no overwrite).
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes=[{"a": 1}]),
+                     _outcome("q1", valid=False,
+                              error_classes=[{"b": 2}])],
+                    threshold=1.0)["integrity"]
+    assert integ["error_census_malformed"]["<legacy-list>"] == [{"a": 1}, {"b": 2}]
 
 
 def test_report_integrity_non_bool_valid_flag_fails_closed():
@@ -626,7 +643,8 @@ def test_report_integrity_non_str_question_id_handling():
          "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"},
         "junk-failure-entry",
     ], threshold=0.5)["integrity"]
-    # 3 str-absent outcomes + 1 failure: all graded under sentinels.
+    # 2 str-absent outcomes + 1 str-absent failure: all three graded under
+    # collision-proof sentinel keys (plus the str-qid "q0" — n_attempted == 4).
     assert integ["n_attempted"] == 4
     assert integ["n_hard_invalid"] == 2   # hard outcome + fatal failure veto
     assert integ["n_valid"] == 2          # good + clean-sentinel
@@ -649,6 +667,64 @@ def test_report_integrity_non_dict_entries_excluded():
     assert integ["n_valid"] == 1
     assert integ["n_hard_invalid"] == 1   # reader:fatal vetoes
     assert integ["valid"] is False
+
+
+def test_report_integrity_malformed_dict_outcome_dropped():
+    """#1747 (security-review P1): a dict outcome missing the keys the
+    aggregation dereferences directly (label / session_recall@k as a dict /
+    context_tokens) is excluded at entry — a malformed checkpoint outcome
+    that passes run.py's presence-only loader gate must not KeyError/
+    AttributeError mid-report."""
+    bad = _outcome("q0", valid=True)
+    del bad["label"]
+    integ = _report([bad, _outcome("q1", valid=True)], threshold=0.5)["integrity"]
+    assert integ["n_attempted"] == 1
+    assert integ["n_valid"] == 1
+    assert integ["valid"] is True
+
+    bad = _outcome("q0", valid=True)
+    bad["session_recall@k"] = "not-a-dict"
+    integ = _report([bad, _outcome("q1", valid=True)], threshold=0.5)["integrity"]
+    assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
+
+    bad = _outcome("q0", valid=True)
+    bad["context_tokens"] = "abc"
+    integ = _report([bad, _outcome("q1", valid=True)], threshold=0.5)["integrity"]
+    assert integ["n_attempted"] == 1
+    assert integ["valid"] is True
+
+
+def test_report_integrity_sentinel_qid_collision_impossible():
+    """#1747 (security review): a crafted string question_id like
+    "<anon:0>" cannot collide with a malformed-qid sentinel key (tuple
+    keys) to overwrite a hard grade — and duplicate-qid collisions merge by
+    MAX severity, so a hard grade is never replaced by a weaker one."""
+    # non-str-qid hard outcome + crafted clean qid that looks like a sentinel
+    o1 = _outcome("q0", valid=False)
+    o1["question_id"] = ["x"]
+    o1["error_classes"] = {"fatal_402_billing": 1}
+    o2 = _outcome("<anon:0>", valid=True)
+    integ = _report([o1, o2], threshold=1.0)["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False
+    # duplicate str qids merge by max severity (hard wins over clean)
+    o3 = _outcome("dup", valid=True)
+    o4 = _outcome("dup", valid=False)
+    o4["error_classes"] = {"fatal_402_billing": 1}
+    integ = _report([o3, o4], threshold=1.0)["integrity"]
+    assert integ["n_attempted"] == 1
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False
+    # duplicate malformed-qid FAILURES dedupe by value (no double count)
+    integ = _report([_outcome("q0", valid=True)], failures=[
+        {"question_id": 9, "error_class": "reader:fatal",
+         "error": "x", "failed_at_utc": "x"},
+        {"question_id": 9, "error_class": "reader:fatal",
+         "error": "x", "failed_at_utc": "x"},
+    ], threshold=0.5)["integrity"]
+    assert integ["n_attempted"] == 2   # q0 + one deduped malformed failure
+    assert integ["n_hard_invalid"] == 1
 
 
 def test_run_protocol_step5_gate_string_pins_criterion():

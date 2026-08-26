@@ -79,10 +79,11 @@ max allowed `invalid_rate` over questions with recoverable-class signals
 (parse_error/truncated/truncated_parse_error/partial_parse/transient_*
 census classes, reader/judge:retries_exhausted eval failures); hard-failure
 questions (fatal_*/ingest/unknown census classes, non-census error strings
-with an empty census, permanent eval failures) VETO at any threshold — no
-override admits them; the override is recorded with its justification and a
-*violated* override still yields `valid=false`; default 0.0 = any
-failed/error-signal question marks the run invalid).
+with an empty census, permanent eval failures, malformed inputs — present
+non-bool `valid` / non-iterable or non-str `error_classes`) VETO at any
+threshold — no override admits them; the override is recorded with its
+justification and a *violated* override still yields `valid=false`; default
+0.0 = any failed/error-signal question marks the run invalid).
 
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
@@ -254,8 +255,9 @@ The report is self-explanatory: every run prints and persists
 
 - **`integrity`** — `valid` (#1747 census-class-aware: invalid_rate ≤
   threshold AND zero hard-failure questions — fatal_*/ingest/unknown/non-
-  census-error-string (empty-census)/permanent-eval-failure questions veto
-  at any threshold),
+  census-error-string (empty-census)/permanent-eval-failure questions, and
+  malformed inputs (present non-bool `valid`, non-iterable or non-str
+  `error_classes`) fail closed to hard and veto at any threshold),
   `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
   failed question OR a completed question with error-class/extraction-error
   signals; recoverable classes — parse_error/truncated/

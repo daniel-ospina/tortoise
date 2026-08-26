@@ -319,12 +319,15 @@ def build_report(
         gate criterion is CENSUS-CLASS-AWARE (#1747) — ``valid == True`` iff
         ``invalid_rate <= threshold`` AND zero hard-failure questions;
         recoverable classes (parse_error / truncated / truncated_parse_error
-        / partial_parse / transient_*) are rate-limited (a healthy 500-Q run
+        / partial_parse / transient_*, plus reader/judge:retries_exhausted
+        eval failures) are rate-limited (a healthy 500-Q run
         admits a handful — the OLD binary ``len(errors)==0`` per-question
         invalid made ``valid=true`` unreachable at scale); hard classes
         (fatal_* / ingest / unknown census classes, non-census error strings
-        with an EMPTY census, permanent eval failures) veto the run at any
-        threshold (a mixed recoverable+structural shape is rate-limited —
+        with an EMPTY census, permanent eval failures, malformed inputs —
+        a present non-bool valid flag / non-iterable or non-str error_classes
+        — fail closed to hard) veto the run at any threshold (a mixed
+        recoverable+structural shape is rate-limited —
         the #1746 lane); additive breakdown fields ``n_hard_invalid`` /
         ``n_recoverable_invalid`` / ``recoverable_invalid_rate`` /
         ``criterion`` ride the block, and malformed non-int census counts
@@ -363,26 +366,44 @@ def build_report(
             "computes it; programmatic callers must pass "
             "audit_dataset(instances)")
     trusted = is_trusted(dataset_semantics_audit)
-    # #1747 entry normalization (security review): a non-dict entry in
-    # outcomes/failures (malformed checkpoint JSON, e.g. a bare string) would
-    # AttributeError on the first .get — exclude it so the report ALWAYS
-    # builds and serializes (the run.py loader filters the same shape; the
-    # full_context loader crash is tracked in #1770). Non-str question_ids
-    # are NOT dropped — they are graded under a sentinel key so a hard census
-    # on a malformed-qid outcome still vetoes. error_classes keys are
-    # str()-coerced on the report's copies so json.dumps(sort_keys=True)
-    # never TypeErrors on a programmatic mixed-type key (JSON checkpoint keys
-    # are always strings; the coercion is identity for them).
-    outcomes = [dict(o) for o in outcomes if isinstance(o, dict)]
+    # #1747 entry normalization (security review): entries that cannot be
+    # aggregated are EXCLUDED (the report ALWAYS builds and serializes):
+    # non-dict entries, and dict outcomes missing the keys the aggregation
+    # dereferences directly (label / session_recall@k / turn_recall@k as
+    # dicts / numeric context_tokens / context_point_count) — a malformed
+    # checkpoint outcome that passes run.py's presence-only loader gate would
+    # otherwise KeyError/AttributeError mid-report (security-review P1;
+    # loader-side REQUIRED_OUTCOME_KEYS hardening is tracked in #1770).
+    # Outcomes are copied with error_classes keys str()-coerced so
+    # json.dumps(sort_keys=True) never TypeErrors on a programmatic
+    # mixed-type key (identity for JSON checkpoints, whose keys are always
+    # strings). Non-str question_ids are NOT dropped — they are graded under
+    # collision-proof tuple keys so a hard census on a malformed-qid outcome
+    # still VETOES.
+    def _outcome_shape_ok(o: dict[str, Any]) -> bool:
+        return (all(k in o for k in (
+                    "question_id", "label", "session_recall@k",
+                    "turn_recall@k", "context_tokens",
+                    "context_point_count"))
+                and isinstance(o.get("session_recall@k"), dict)
+                and isinstance(o.get("turn_recall@k"), dict)
+                and isinstance(o.get("context_tokens"), (int, float))
+                and isinstance(o.get("context_point_count"), (int, float)))
+
+    outcomes = [o for o in outcomes if isinstance(o, dict)]
+    # #1349: questions dropped by the vector arm (breaker_open) are excluded
+    # from the means and surfaced in ``dropped`` — never recall 0. The
+    # breaker_open split runs BEFORE the shape filter: dropped questions may
+    # legitimately lack retrieval keys (no retrieval was run) and never reach
+    # the aggregations.
+    dropped = [o for o in outcomes if o.get("breaker_open")]
+    outcomes = [dict(o) for o in outcomes
+                if not o.get("breaker_open") and _outcome_shape_ok(o)]
     for o in outcomes:
         ec = o.get("error_classes")
         if isinstance(ec, dict):
             o["error_classes"] = {str(k): v for k, v in ec.items()}
     failures = [f for f in (failures or []) if isinstance(f, dict)]
-    # #1349: questions dropped by the vector arm (breaker_open) are excluded
-    # from the means and surfaced in ``dropped`` — never recall 0.
-    dropped = [o for o in outcomes if o.get("breaker_open")]
-    outcomes = [o for o in outcomes if not o.get("breaker_open")]
     n = len(outcomes)
 
     # ── accuracy ──
@@ -522,8 +543,10 @@ def build_report(
     # n_hard_invalid + n_recoverable_invalid == n_invalid hold BY
     # CONSTRUCTION for every input — including the concurrent
     # checkpoint-merge overlap (a qid completed by one worker and failed by
-    # another lands in both lists; the OLD per-entry sum double-counted it
-    # and drove n_valid negative — history-review P1, #1747). ``n_valid`` /
+    # another lands in both lists; the OLD per-entry sum broke the
+    # n_valid + n_invalid == n_attempted invariant — an overlapped failure
+    # was under-counted as silently clean, and duplicate outcome entries for
+    # one qid drove n_invalid negative — history-review P1, #1747). ``n_valid`` /
     # ``n_invalid`` / ``invalid_rate`` keep their previous semantics for the
     # production shape (n_invalid = every error-carrying or failed question)
     # — the runner sets ``valid=False`` whenever error strings exist, so
@@ -532,25 +555,42 @@ def build_report(
     # only the ``valid`` VERDICT gains the hard veto on top of the rate
     # criterion.
     effective_threshold = float(integrity_threshold or 0.0)
-    # #1747 grading: each qid is graded ONCE under a stable key — str qids
-    # keyed by value; non-str qids (malformed checkpoint JSON) keyed by a
-    # sentinel so a hard census on a malformed-qid outcome still VETOES
-    # (security review; unhashable values can never be set/dict keys).
-    def _qid_key(o: dict[str, Any], idx: int) -> str:
-        qid = o.get("question_id")
-        return qid if isinstance(qid, str) else f"<anon:{idx}>"
+    # #1747 grading: each qid is graded ONCE under a stable key. Str qids
+    # key by value; non-str qids (malformed checkpoint JSON) key by a
+    # COLLISION-PROOF tuple — a real string question_id can never equal a
+    # tuple, so a crafted qid like "<anon:0>" cannot overwrite a sentinel
+    # grade (security review), and value-identical malformed qids dedupe
+    # across outcomes and failures (hashable values) so failure-grade
+    # dominance applies to them too. Collisions on duplicate qids merge by
+    # MAX severity (hard > recoverable > clean) — a hard grade is never
+    # overwritten by a weaker one.
+    _SEV = {"clean": 0, "recoverable": 1, "hard": 2}
 
-    grade_by_qid: dict[str, str] = {}
-    for idx, o in enumerate(outcomes):
-        grade_by_qid[_qid_key(o, idx)] = _outcome_grade(o)
+    def _qid_key(o: dict[str, Any]) -> tuple | str:
+        qid = o.get("question_id")
+        if isinstance(qid, str):
+            return qid
+        try:
+            hash(qid)
+        except TypeError:  # unhashable (list/dict) — per-object key
+            return ("__anon__", id(o))
+        # value-identical malformed qids share a key across outcomes AND
+        # failures so failure-grade dominance applies to them too.
+        return ("__anon__", qid)
+
+    def _merge_grade(prev: str | None, grade: str) -> str:
+        if prev is None or _SEV[grade] >= _SEV[prev]:
+            return grade
+        return prev
+
+    grade_by_qid: dict[Any, str] = {}
+    for o in outcomes:
+        key = _qid_key(o)
+        grade_by_qid[key] = _merge_grade(grade_by_qid.get(key), _outcome_grade(o))
     for f in (failures or []):
-        qid = f.get("question_id")
+        key = _qid_key(f)
         fg = _failure_grade(f.get("error_class"))
-        key = qid if isinstance(qid, str) else f"<anon-f:{id(f)}"
-        prev = grade_by_qid.get(key)
-        # failure grade dominates; hard beats recoverable/clean.
-        if prev is None or fg == "hard" or prev == "clean":
-            grade_by_qid[key] = fg
+        grade_by_qid[key] = _merge_grade(grade_by_qid.get(key), fg)
     n_hard_invalid = sum(1 for g in grade_by_qid.values() if g == "hard")
     n_recoverable_invalid = sum(
         1 for g in grade_by_qid.values() if g == "recoverable")
@@ -580,14 +620,14 @@ def build_report(
                 if isinstance(count, int) and not isinstance(count, bool):
                     census[str(cls)] += count
                 else:
-                    prev = malformed_census.get(str(cls))
-                    if prev is None:
-                        malformed_census[str(cls)] = count
-                    elif isinstance(prev, list):
-                        if count not in prev:
-                            prev.append(count)
-                    elif prev != count:
-                        malformed_census[str(cls)] = [prev, count]
+                    key = str(cls)
+                    if key not in malformed_census:
+                        malformed_census[key] = count
+                    elif isinstance(malformed_census[key], list):
+                        if count not in malformed_census[key]:
+                            malformed_census[key].append(count)
+                    elif malformed_census[key] != count:
+                        malformed_census[key] = [malformed_census[key], count]
         else:  # legacy flat-list shape (defensive back-compat): str elements
             # ride the census; non-str elements are evidence-preserved in
             # error_census_malformed (the grader fails the whole shape closed
@@ -596,7 +636,14 @@ def build_report(
                 census.update([str(c) for c in ec if isinstance(c, str) and c])
                 junk = [c for c in ec if not isinstance(c, str)]
                 if junk:
-                    malformed_census["<legacy-list>"] = junk
+                    # accumulate across outcomes (the dict branch's merge
+                    # logic) — a later outcome's junk must not overwrite an
+                    # earlier one's.
+                    prev = malformed_census.get("<legacy-list>")
+                    if prev is None:
+                        malformed_census["<legacy-list>"] = junk
+                    elif isinstance(prev, list) and isinstance(junk, list):
+                        prev.extend(junk)
     for f in (failures or []):
         eclass = f.get("error_class")
         if isinstance(eclass, str) and eclass:
@@ -1050,11 +1097,29 @@ def build_report(
     }
 
 
+def _json_safe(obj: Any) -> Any:
+    """#1747: recursive JSON-normalization for save_report — dict keys are
+    str()-coerced so ``json.dumps(sort_keys=True)`` never TypeErrors on a
+    mixed-type key (the programmatic mixed-key census shape, security
+    review), and sets become sorted lists (a malformed checkpoint value can
+    otherwise crash serialization). Identity for well-formed reports (JSON
+    keys are always strings; no sets)."""
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_json_safe(v) for v in obj]
+    if isinstance(obj, (set, frozenset)):
+        return sorted(_json_safe(v) for v in obj)
+    return obj
+
+
 def save_report(report: dict[str, Any], path: Path | str) -> Path:
     """Write the report JSON (pretty-printed) and return the path."""
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n",
+    p.write_text(json.dumps(_json_safe(report), indent=2, sort_keys=True) + "\n",
                  encoding="utf-8")
     return p
 
