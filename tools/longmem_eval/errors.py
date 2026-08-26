@@ -49,17 +49,19 @@ def classify_eval_error(exc: BaseException, *, site: str) -> str:
 def eval_failure_class(exc: BaseException, *, site: str) -> str:
     """Final failure-entry class (site-prefixed, one of EVAL_ERROR_CLASSES).
 
-    - ``site == "ingest"`` → ``ingest``: the failure is extractor-internal
-      by construction (the write path, not an LLM call) — the exception's
-      HTTP/parse shape is not the interesting dimension.
+    - ingest-site exceptions are classified through the SAME taxonomy first
+      (#1776): a transient/unknown at ingest (e.g. a FalkorDB/network blip
+      in ``--db`` mode) has burned its retry budget by the time it reaches
+      the run-loop → ``ingest:retries_exhausted`` (recoverable, rate-limited
+      like the identical reader/judge transients). Structurally-fatal /
+      parse at ingest stays bare ``ingest`` (unchanged, hard veto) — the
+      extractor-internal failure is permanent by construction.
     - reader/judge failures classified transient-safe (``transient`` or P2's
       ``unknown`` = transient-safe) have burned their retry budget by the
       time they reach the run-loop → ``retries_exhausted`` (a report must
       distinguish "retryable but exhausted" from "permanent").
     - fatal/fatal_config/parse pass through unchanged.
     """
-    if site == "ingest":
-        return "ingest"
     cls = classify_eval_error(exc, site=site)
     # Only transient/unknown convert to retries_exhausted — parse (a local
     # decode bug) is permanent and passes through, as do fatal/fatal_config.
@@ -67,6 +69,8 @@ def eval_failure_class(exc: BaseException, *, site: str) -> str:
     # coarse class is checked, not is_transient.)
     if cls.split(":", 1)[1] in ("transient", "unknown"):
         return f"{site}:retries_exhausted"
+    if site == "ingest":
+        return "ingest"
     return cls
 
 

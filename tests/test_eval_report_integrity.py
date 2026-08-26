@@ -317,6 +317,35 @@ def test_report_integrity_permanent_eval_failure_vetoes():
     assert ingest_fail["n_hard_invalid"] == 1
 
 
+def test_report_integrity_ingest_transient_recoverable_rates():
+    """#1776: an ingest-site TRANSIENT failure grades
+    ``ingest:retries_exhausted`` — recoverable, rate-limited at the
+    threshold like the identical reader/judge transients (a single
+    FalkorDB/network blip during ingest must not veto the whole run); a
+    bare ``ingest`` (structurally-fatal) still hard-vetoes at any
+    threshold (fail-closed)."""
+    outcomes = [_outcome("q1", valid=True)]
+    recoverable = _report(outcomes, failures=[{
+        "question_id": "q2", "error_class": "ingest:retries_exhausted",
+        "error": "FalkorDB blip", "failed_at_utc": "2026-08-20T00:00:00Z",
+    }], threshold=0.5)["integrity"]
+    assert recoverable["valid"] is True   # rate-limited, not vetoed
+    assert recoverable["n_hard_invalid"] == 0
+
+    above = _report(outcomes, failures=[{
+        "question_id": "q2", "error_class": "ingest:retries_exhausted",
+        "error": "FalkorDB blip", "failed_at_utc": "2026-08-20T00:00:00Z",
+    }], threshold=0.0)["integrity"]
+    assert above["valid"] is False        # recoverable still rate-limited
+
+    bare = _report(outcomes, failures=[{
+        "question_id": "q2", "error_class": "ingest",
+        "error": "extractor-internal boom",
+        "failed_at_utc": "2026-08-20T00:00:00Z",
+    }], threshold=1.0)["integrity"]
+    assert bare["valid"] is False         # bare ingest vetoes at ANY threshold
+
+
 def test_print_summary_integrity_before_score(capsys):
     report = _report([
         _outcome("q1", valid=True),

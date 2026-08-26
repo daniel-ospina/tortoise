@@ -79,12 +79,17 @@ RECOVERABLE_CENSUS_CLASSES = frozenset({
 #: vetoed. EXACT site-prefixed strings (errors.py emits
 #: ``<site>:retries_exhausted`` for transient/unknown burns; ``ingest`` is
 #: bare and permanent): a tampered suffix (``evil:retries_exhausted``) must
-#: NOT match (fail-closed, security review). Everything else (``:fatal`` /
+#: NOT match (fail-closed, security review). #1776: ingest-site transients
+#: grade ``ingest:retries_exhausted`` (recoverable — a single FalkorDB/
+#: network blip during ingest must not veto the whole run at any
+#: threshold), while structurally-fatal/parse ingest failures stay bare
+#: ``ingest`` (hard veto, excluded here). Everything else (``:fatal`` /
 #: ``:fatal_config`` / ``:parse`` — a local decode bug — / bare ``ingest`` /
 #: unclassified) is PERMANENT → hard veto.
 RECOVERABLE_EVAL_FAILURE_CLASSES = frozenset({
     "reader:retries_exhausted",
     "judge:retries_exhausted",
+    "ingest:retries_exhausted",  # #1776: transient-class ingest failures
 })
 
 
@@ -590,8 +595,8 @@ def build_report(
         n_attempted — a dropped run plus one recoverable failure entry must
         not certify);
         recoverable classes (parse_error / truncated / truncated_parse_error
-        / partial_parse / transient_*, plus reader/judge:retries_exhausted
-        eval failures) are rate-limited (a healthy 500-Q run
+        / partial_parse / transient_*, plus reader/judge/ingest:
+        retries_exhausted eval failures) are rate-limited (a healthy 500-Q run
         admits a handful — the OLD binary ``len(errors)==0`` per-question
         invalid made ``valid=true`` unreachable at scale); hard classes
         (fatal_* / ingest / unknown census classes, non-census error strings
@@ -860,7 +865,7 @@ def build_report(
     #                authority on whether error strings exist)
     # Eval ``failures`` are graded by their exact site-prefixed class:
     # permanent (fatal/fatal_config/parse/ingest) → hard veto;
-    # transient-safe (reader/judge:retries_exhausted) → recoverable.
+    # transient-safe (reader/judge/ingest:retries_exhausted) → recoverable.
     # Grading by qid (not per-entry) makes the invariant
     # n_hard_invalid + n_recoverable_invalid == n_invalid hold BY
     # CONSTRUCTION for every input — including the concurrent
@@ -1142,8 +1147,8 @@ def build_report(
             "(n_excluded_hard); "
             "recoverable = parse_error/truncated/truncated_parse_error/"
             "partial_parse/transient_* census classes + "
-            "reader/judge:retries_exhausted eval failures (rate-limited, "
-            "not vetoed)"
+            "reader/judge/ingest:retries_exhausted eval failures "
+            "(rate-limited, not vetoed)"
         ),
         "checks": checks,
     }
