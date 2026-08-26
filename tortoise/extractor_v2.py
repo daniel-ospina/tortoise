@@ -848,19 +848,23 @@ def _complete_parsed(model, system: str, user: str, *,
         attempts += 1
         response = _complete(model, system, user_msg,
                              max_tokens=max_tokens, stats=stats)
-        # D2 (#1746): read the finish reason IMMEDIATELY after the call;
-        # hold the FIRST parse-failing attempt's value — the class-decision
-        # signal for ``_ParseError.truncated``.
-        finish = getattr(model, "last_finish_reason", None)
+        # D2 (#1746) + F4 (#1780): the finish reason is captured race-free
+        # in the calling thread by ``_complete`` and recorded into stats —
+        # reading the shared adapter attribute here would be a cross-thread
+        # race under ``--workers > 1``. Hold the FIRST parse-failing
+        # attempt's value — the class-decision signal for
+        # ``_ParseError.truncated``.
+        finish = stats.get("finish_reason") if stats is not None else None
         stage_truncated = stage_truncated or finish == "length"
         if stats is not None:
             stats["truncated"] = stage_truncated
         try:
             return _parse_json_robust(response, stats=stats)
         except ValueError as e:
-            # _ParseError IS a ValueError subclass — the only ValueError
-            # source in the ladder; a raw adapter ValueError keeps the
-            # historical parse-retry path (max back-compat).
+            # _ParseError IS a ValueError subclass — the only exception the
+            # ladder raises; ``_complete`` sits OUTSIDE this try, so a raw
+            # adapter ValueError propagates to the stage except and is
+            # classed by ``_classify_error`` (no parse-retry).
             last = e
             if attempts == 1:
                 # D2 (#1746): the FIRST parse-failing attempt's finish
@@ -3211,9 +3215,12 @@ def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
 
 
 def _call_once(model, system: str, user: str, *, deadline_s: int,
-               max_tokens: int | None, stats: dict | None) -> str:
+               max_tokens: int | None, stats: dict | None) -> tuple[str | None, object | None]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
+
+    Returns ``(resp, finish_reason)`` — the finish reason captured in the
+    calling thread right after ``complete()`` returns (F4 #1780).
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
@@ -3226,6 +3233,13 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         try:
             kwargs = _cap_kwargs(model, max_tokens, stats)
             box["resp"] = model.complete(system=system, user=user, **kwargs)
+            # F4 (#1780): capture the finish reason in the SAME thread as
+            # the call (happens-before via the join below). Reading
+            # ``model.last_finish_reason`` later from the caller thread is a
+            # cross-thread race under ``--workers > 1``: another thread's
+            # complete() can overwrite the shared attribute between the
+            # return and the read.
+            box["finish_reason"] = getattr(model, "last_finish_reason", None)
         except BaseException as e:  # noqa: BLE001, RUF100
             box["exc"] = e
 
@@ -3246,7 +3260,7 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         raise TimeoutError(f"model call exceeded {deadline_s}s")
     if "exc" in box:
         raise box["exc"]
-    return box.get("resp")
+    return (box.get("resp"), box.get("finish_reason"))
 
 
 def _complete(model, system: str, user: str, *, deadline_s: int = 600,
@@ -3274,12 +3288,15 @@ def _complete(model, system: str, user: str, *, deadline_s: int = 600,
     keeps billing; accepted, bounded per attempt)."""
     for attempt in range(1, retries + 2):
         try:
-            resp = _call_once(model, system, user, deadline_s=deadline_s,
-                              max_tokens=max_tokens, stats=stats)
-            truncated = getattr(model, "last_finish_reason", None) == "length"
+            resp, finish_reason = _call_once(model, system, user,
+                                             deadline_s=deadline_s,
+                                             max_tokens=max_tokens,
+                                             stats=stats)
+            truncated = finish_reason == "length"
             if stats is not None:
                 stats.update(attempts=attempt, retries=attempt - 1,
-                             last_class=None, truncated=bool(truncated))
+                             last_class=None, truncated=bool(truncated),
+                             finish_reason=finish_reason)
             return resp
         except BaseException as e:  # noqa: BLE001, RUF100
             if not isinstance(e, Exception):  # never retry SystemExit/KeyboardInterrupt
@@ -3489,22 +3506,54 @@ _REPAIR_RULES: tuple[tuple[str, str], ...] = (
 )
 
 
+def _apply_repair_rule(working: str, find: str, repl: str) -> str | None:
+    """String-aware first-match application of one comma-insertion rule:
+    find the FIRST occurrence of ``find`` OUTSIDE any string literal
+    (in_str/esc tracker) and replace it; None when no outside-string
+    occurrence exists (a rule that only fires inside strings never
+    corrupts)."""
+    in_str = False
+    esc = False
+    n = len(find)
+    i = 0
+    while i <= len(working) - n:
+        c = working[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            i += 1
+            continue
+        if working.startswith(find, i):
+            return working[:i] + repl + working[i + n:]
+        i += 1
+    return None
+
+
 def _repair_candidates(working: str) -> list[str]:
-    """D4 rung 3 (#1746): bounded repair candidates on the working text —
-    (a) unterminated object → append up to 8 closers; (b) the bounded
-    missing-comma rule list; (c) the canonical tail-cuts re-run on the
-    working text (a sanitize may have altered lengths the rung-1 cuts
-    never saw). First-valid-wins + schema gate keep it safe; no free-form
+    """D4 rung 3 (#1746): bounded CONTENT-PRESERVING repair candidates on
+    the working text — (a) unterminated object → append up to 8 closers;
+    (b) the bounded missing-comma rule list, applied string-aware
+    (``_apply_repair_rule``: a rule that only fires inside a string value
+    is never applied — no silent in-string corruption). NO data-dropping
+    tail-cuts here (a truncation cut at an item boundary is a recorded
+    ERROR via the caller's cut-accept loop, never a warning-only
+    "repair"). First-valid-wins + schema gate keep it safe; no free-form
     repair library, no unbounded heuristics."""
     candidates: list[str] = []
     for k in range(1, 9):
         candidates.append(working + "}" * k)
     for find, repl in _REPAIR_RULES:
-        if find in working:
-            candidates.append(working.replace(find, repl))
-    for cut in (-1, -2, -3, -5, -10, -20):
-        if len(working) > abs(cut):
-            candidates.append(working[:cut])
+        r = _apply_repair_rule(working, find, repl)
+        if r is not None:
+            candidates.append(r)
     return candidates
 
 
@@ -3590,6 +3639,9 @@ def _parse_json_robust(response: str, *, stats: dict | None = None) -> dict:
     error class); 5 raise. The D5 schema gate backstops a mis-tracked scan
     before any rung-3/4 output is accepted — worst case it fails schema and
     falls through, never corrupting."""
+    response = response or ""  # a None adapter response (null provider
+    # content) must not crash rung 2's ``_sanitize_control_chars`` scan
+    # (the ``_error_excerpt`` docstring already claims None tolerance).
     last_err: ValueError | None = None
     # rung 1 — canonical (fences, brace-balance, tail-cuts)
     try:
@@ -3624,6 +3676,26 @@ def _parse_json_robust(response: str, *, stats: dict | None = None) -> dict:
         if ok:
             if recovery is not None:
                 recovery["repair"] = recovery.get("repair", 0) + 1
+            return parsed
+    # rung 3b — cut-accept (D4 contract: a schema-validated PARTIAL accept
+    # with a truncated tail dropped is a recorded ERROR, never a
+    # content-preserving "repair"): progressive tail-cuts that land at an
+    # item boundary. ``stats["partial"] = True`` signals the caller to
+    # record the partial_parse census class; ``recovery["repair"]`` is NOT
+    # incremented. The ≥1-non-empty-embed-section guard mirrors rung 4 so a
+    # partial the caller would discard never falsely classes partial_parse.
+    for cut in (-1, -2, -3, -5, -10, -20):
+        if len(working) <= abs(cut):
+            continue
+        try:
+            parsed = _parse_json(working[:cut])
+        except ValueError as e:
+            last_err = e
+            continue
+        ok, _ = _validate_output_shape(parsed)
+        if ok and any(parsed.get(s) for s in _EMBED_SECTIONS):
+            if stats is not None:
+                stats["partial"] = True
             return parsed
     # rung 4 — schema-validated partial-accept (H3 truncation)
     prefix = _longest_valid_prefix(working)

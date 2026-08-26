@@ -77,7 +77,7 @@ continues — one transient error never aborts the 500-Q run),
 #1747 census-class-aware: override the `integrity.valid` RATE criterion —
 max allowed `invalid_rate` over questions with recoverable-class signals
 (parse_error/truncated/truncated_parse_error/partial_parse/transient_*
-census classes, reader/judge:retries_exhausted eval failures); hard-failure
+census classes, reader/judge/ingest:retries_exhausted eval failures); hard-failure
 questions (fatal_*/ingest/unknown census classes, non-census error strings
 with an empty census, permanent eval failures, malformed inputs — present
 non-bool `valid` / non-iterable or non-str `error_classes`) VETO at any
@@ -177,7 +177,10 @@ python tools/longmem_eval/probe_json_mode.py --n 10 \
 
 The verdict JSON (`verdict` ∈ {honored, ignored, rejected, inconclusive} +
 per-mode malformed-rate/finish_reason blocks + `mode_delta`) lands in the
-closing-run record (Task 5 of the #1746 plan). `rejected` (any HTTP
+closing-run record (Task 5 of the #1746 plan). The closing-run record
+should also cross-tabulate `recovery["repair"]` with `llm_truncated > 0`
+per question, so truncation recovered as a content-complete repair is
+visible alongside the `truncated_valid_qids` list. `rejected` (any HTTP
 400/404) → abort the run pre-flight or re-run with `TORTOISE_JSON_MODE=0`;
 `inconclusive` → re-probe at `--n 20`; `honored`/`ignored` → proceed with
 the verdict noted. The probe exercises the PILOT's path (the same
@@ -347,7 +350,7 @@ The report is self-explanatory: every run prints and persists
   failed question OR a completed question with error-class/extraction-error
   signals; recoverable classes — parse_error/truncated/
   truncated_parse_error/partial_parse/transient_*, plus
-  reader/judge:retries_exhausted eval failures — are rate-limited, not
+  reader/judge/ingest:retries_exhausted eval failures — are rate-limited, not
   vetoed), the #1747 breakdown `n_hard_invalid` /
   `n_recoverable_invalid` / `recoverable_invalid_rate` /
   `n_excluded_hard`,

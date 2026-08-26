@@ -144,7 +144,7 @@ STEPS: list[Step] = [
          "excluded/dropped run never certifies; "
          "recoverable "
          "parse_error/truncated/truncated_parse_error/partial_parse/transient_* "
-         "census classes AND reader/judge:retries_exhausted eval failures are "
+         "census classes AND reader/judge/ingest:retries_exhausted eval failures are "
          "rate-limited, not vetoed); threshold "
          f"{JUSTIFIED_BASELINE_THRESHOLD} justified default at 500-Q scale "
          f"(≤{JUSTIFIED_BASELINE_THRESHOLD * 500:.0f} of 500 questions with "

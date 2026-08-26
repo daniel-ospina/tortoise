@@ -49,17 +49,21 @@ def classify_eval_error(exc: BaseException, *, site: str) -> str:
 def eval_failure_class(exc: BaseException, *, site: str) -> str:
     """Final failure-entry class (site-prefixed, one of EVAL_ERROR_CLASSES).
 
-    - ingest-site exceptions are classified through the SAME taxonomy first
-      (#1776): a transient/unknown at ingest (e.g. a FalkorDB/network blip
-      in ``--db`` mode) has burned its retry budget by the time it reaches
-      the run-loop → ``ingest:retries_exhausted`` (recoverable, rate-limited
-      like the identical reader/judge transients). Structurally-fatal /
-      parse at ingest stays bare ``ingest`` (unchanged, hard veto) — the
-      extractor-internal failure is permanent by construction.
-    - reader/judge failures classified transient-safe (``transient`` or P2's
-      ``unknown`` = transient-safe) have burned their retry budget by the
-      time they reach the run-loop → ``retries_exhausted`` (a report must
-      distinguish "retryable but exhausted" from "permanent").
+    - at ANY site, the coarse classes ``transient`` AND ``unknown`` convert
+      to ``<site>:retries_exhausted`` (the P2 taxonomy treats unknown as
+      transient-safe — the same rule as reader/judge). The site-level retry
+      budget has burned by the time the failure reaches the run-loop; the
+      class records "retryable but exhausted" as distinct from
+      "permanent".
+    - at ingest this conversion is a deliberate, documented WIDENING
+      (#1776) beyond network blips: unknown-class exceptions (incl.
+      extractor-internal bugs) are rate-limited rather than vetoed — a
+      transient/unknown ingest failure (e.g. a FalkorDB/network blip in
+      ``--db`` mode, or an unclassified extractor exception) grades
+      ``ingest:retries_exhausted`` (recoverable) instead of vetoing the
+      run at any threshold. Structurally-fatal / parse at ingest stays bare
+      ``ingest`` (unchanged, hard veto) — the extractor-internal failure is
+      permanent by construction.
     - fatal/fatal_config/parse pass through unchanged.
     """
     cls = classify_eval_error(exc, site=site)

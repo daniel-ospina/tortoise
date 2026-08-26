@@ -443,6 +443,49 @@ def test_report_truncation_readout_warning_only():
     assert report3["integrity"]["truncated_valid_qids"] == []
 
 
+def test_census_s1_chunk_summary_recoverable_grade():
+    """#1780 (F1): the ``s1_chunk_summary`` census class co-occurs with the
+    per-chunk exception-class bumps (``transient_*`` → recoverable;
+    ``fatal_*`` → still hard) — a question whose S1 chunk failed
+    TRANSIENTLY must grade recoverable (rate-limited), never hard.
+    ``s1_chunk_summary`` is pinned in RECOVERABLE_CENSUS_CLASSES."""
+    base = {
+        "question_id": "q-s1-transient",
+        "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 1,
+        "ingest_error_text": "S1: transient chunk failure",
+        "llm_calls": 3, "llm_retries": 0, "llm_truncated": 0,
+        "recovery": {},
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": False,
+        "error_classes": {"transient_unknown": 1, "s1_chunk_summary": 1},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    # the raw outcome grades recoverable — s1_chunk_summary must NOT flip
+    # a transient chunk failure to hard.
+    assert _outcome_grade(base) == "recoverable"
+    # rate-limited at threshold 1.0: the run stays valid (not vetoed) ...
+    report = outcomes_to_report(
+        [base], reader_model="r", judge_model="j", ks=(5,), top_k=5,
+        split="s", dataset_semantics_audit=_trusted_audit(),
+        integrity_threshold=1.0)
+    assert report["integrity"]["valid"] is True
+    # ... and vetoed at the strict 0.0 threshold (the question IS invalid).
+    report2 = outcomes_to_report(
+        [base], reader_model="r", judge_model="j", ks=(5,), top_k=5,
+        split="s", dataset_semantics_audit=_trusted_audit(),
+        integrity_threshold=0.0)
+    assert report2["integrity"]["valid"] is False
+
+
 def test_census_equality_integration_mixed_outcomes():
     """#1746 (D9, criterion 2): on a synthetic mixed-error outcome set —
     per-question ``n_ingest_errors == sum(error_classes.values())`` and the

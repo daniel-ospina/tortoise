@@ -71,6 +71,10 @@ RECOVERABLE_CENSUS_CLASSES = frozenset({
     "transient_timeout",       # call timeout (retry)
     "transient_network",       # connection/network error (retry)
     "transient_unknown",       # unclassified transient (retry-safe)
+    "s1_chunk_summary",        # #1780: co-occurs with the per-chunk
+    # exception-class bumps (transient_* → recoverable; fatal_* → still
+    # hard) — the S1-chunk summary duplicate must not flip a transient
+    # chunk failure to hard.
 })
 
 #: #1747: eval-failure classes that are transient-safe — the retry budget
