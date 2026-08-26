@@ -99,13 +99,17 @@ def _outcome_grade(o: dict[str, Any]) -> str:
       degradation that no retry or ladder can recover, so it must not ride
       the rate threshold). NOTE (reviewer-pinned, #1747): a non-census
       structural string CO-OCCURRING with a recoverable census class cannot
-      be distinguished from the report projection — error strings are not
-      carried into the outcomes layer, and count heuristics (n_ingest_errors
-      vs census total) false-positive on the S1-chunk summary duplicate
-      string that double-reports already-census-bumped chunk failures — so
-      that mixed shape grades recoverable (rate-limited). The extractor-side
-      fix (classify structural strings into the census) is the #1746 lane;
-      this limitation is documented here so the promise is scoped, not
+      be distinguished here — the raw outcomes DO carry the error strings
+      (``ingest_error_text`` / ``ingest.errors``), but the grading layer
+      deliberately consumes only ``valid`` + ``error_classes`` (string-
+      matching is brittle and count heuristics false-positive on the
+      S1-chunk summary duplicate that double-reports already-census-bumped
+      chunk failures), so that mixed shape grades recoverable
+      (rate-limited). The realistic worst case is an S2 parse failure that
+      cascades to the structural "no embed list produced" string — the
+      question embeds zero points yet rides the rate; the extractor-side
+      fix (classify structural strings into the census) is the #1746 lane.
+      This limitation is documented here so the promise is scoped, not
       overstated.
     * ``"recoverable"`` — only recoverable census classes and the runner's
       own flag agrees the question is invalid (``valid=False``).
@@ -125,8 +129,12 @@ def _outcome_grade(o: dict[str, Any]) -> str:
         # #1747).
         classes = {c for c, n in ec.items()
                    if not (isinstance(n, int) and n <= 0)}
-    else:  # legacy flat-list shape (defensive back-compat)
-        classes = {c for c in ec if c}
+    else:  # legacy flat-list shape (defensive back-compat) — non-iterable /
+        # unhashable values (malformed checkpoint JSON) fail CLOSED to hard
+        # instead of crashing the report (security review, #1747).
+        if not isinstance(ec, (list, tuple, set, frozenset)):
+            return "hard"
+        classes = {c for c in ec if isinstance(c, str) and c}
     if classes - RECOVERABLE_CENSUS_CLASSES:
         return "hard"
     if classes:
@@ -497,23 +505,32 @@ def build_report(
     recoverable_invalid_rate = (
         round(n_recoverable_invalid / n_attempted, 4) if n_attempted else 0.0)
     census: Counter = Counter()
+    malformed_census: dict[str, Any] = {}
     for o in outcomes:
         ec = o.get("error_classes") or {}
         if isinstance(ec, dict):
             for cls, count in ec.items():
-                # Tolerant roll-up (security review, #1747): an int count is
-                # summed; a malformed non-int count is recorded VERBATIM so
-                # it can never vanish from the published census (a class with
-                # a garbage count must not silently become 0).
-                if isinstance(count, int):
+                # Collision-safe roll-up (reviewer-pinned, #1747): an int
+                # count sums into the typed accumulator; a malformed non-int
+                # count is recorded in the SEPARATE ``error_census_malformed``
+                # field (never mixed into the Counter — a verbatim value would
+                # TypeError on a later int sum for the same class). A valid
+                # int later in the merge still sums; the malformed evidence is
+                # preserved alongside, so a tampered/legacy checkpoint cannot
+                # crash the report nor vanish from the published record.
+                if isinstance(count, int) and not isinstance(count, bool):
                     census[cls] += count
-                else:
-                    census[cls] = count
-        else:  # legacy flat-list shape (defensive back-compat)
-            census.update(ec)
+                elif count is None or isinstance(count, (str, float)):
+                    malformed_census.setdefault(cls, count)
+        else:  # legacy flat-list shape (defensive back-compat) — non-iterable
+            # values (malformed checkpoint JSON) are skipped here (the grader
+            # already grades them hard; the roll-up must not crash).
+            census.update(
+                [c for c in ec if isinstance(c, str) and c]
+                if isinstance(ec, (list, tuple, set, frozenset)) else [])
     for f in (failures or []):
         eclass = f.get("error_class")
-        if eclass:
+        if isinstance(eclass, str) and eclass:
             census[eclass] += 1
     error_census = dict(sorted(census.items()))
     checks = [
@@ -542,14 +559,18 @@ def build_report(
         "n_recoverable_invalid": n_recoverable_invalid,
         "recoverable_invalid_rate": recoverable_invalid_rate,
         "error_census": error_census,
+        "error_census_malformed": (dict(sorted(malformed_census.items()))
+                                    if malformed_census else {}),
         "criterion": (
             "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
             "(invalid_rate <= threshold); "
             "hard = fatal_*/ingest/unknown census classes + non-census error "
-            "strings + permanent eval failures; recoverable = parse_error/"
-            "truncated/truncated_parse_error/partial_parse/transient_* "
-            "census classes + reader/judge:retries_exhausted eval failures "
-            "(rate-limited, not vetoed)"
+            "strings with an EMPTY census (mixed recoverable+structural "
+            "grades recoverable — #1746 lane) + permanent eval failures; "
+            "recoverable = parse_error/truncated/truncated_parse_error/"
+            "partial_parse/transient_* census classes + "
+            "reader/judge:retries_exhausted eval failures (rate-limited, "
+            "not vetoed)"
         ),
         "checks": checks,
     }

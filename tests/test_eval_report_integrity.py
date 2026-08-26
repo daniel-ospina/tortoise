@@ -402,7 +402,8 @@ def test_report_integrity_malformed_census_count_fails_closed():
     schema-less checkpoint merge) must not crash build_report NOR silently
     drop the class: the class stays PRESENT in the graded set (a HARD class
     with a malformed count still vetoes — no fail-open), the malformed value
-    is recorded VERBATIM in the published census (never vanishes), and the
+    is recorded in the separate ``error_census_malformed`` field (never
+    vanishes, never poisons the int-summed ``error_census``), and the
     verdict counts QUESTIONS not census entries (a recoverable class with a
     malformed count is one rate-limited question)."""
     # hard class with a malformed count → veto (fail-closed).
@@ -411,15 +412,44 @@ def test_report_integrity_malformed_census_count_fails_closed():
                     threshold=1.0)["integrity"]
     assert integ["valid"] is False
     assert integ["n_hard_invalid"] == 1
-    assert integ["error_census"] == {"fatal_402_billing": "abc"}
+    assert integ["error_census"] == {}
+    assert integ["error_census_malformed"] == {"fatal_402_billing": "abc"}
     # recoverable class with a malformed count → one recoverable question
-    # (rate-limited); the malformed value is still recorded verbatim.
+    # (rate-limited); the malformed value is still recorded.
     integ = _report([_outcome("q0", valid=False,
                               error_classes={"parse_error": "abc"})],
                     threshold=1.0)["integrity"]
     assert integ["valid"] is True
     assert integ["n_recoverable_invalid"] == 1
-    assert integ["error_census"] == {"parse_error": "abc"}
+    assert integ["error_census_malformed"] == {"parse_error": "abc"}
+
+
+def test_report_integrity_mixed_malformed_and_int_census_counts():
+    """#1747 (reviewer-pinned P1): the same census class with a malformed
+    count in one outcome and a valid int in another (the realistic
+    checkpoint-merge shape) must not TypeError the roll-up — the int sums
+    into error_census, the malformed value is preserved in
+    error_census_malformed."""
+    outcomes = [
+        _outcome("q0", valid=False, error_classes={"parse_error": "abc"}),
+        _outcome("q1", valid=False, error_classes={"parse_error": 3}),
+        _outcome("q2", valid=True, error_classes={"transient_network": 2}),
+    ]
+    integ = _report(outcomes, threshold=0.0)["integrity"]
+    assert integ["error_census"] == {"parse_error": 3, "transient_network": 2}
+    assert integ["error_census_malformed"] == {"parse_error": "abc"}
+    assert integ["n_recoverable_invalid"] == 2
+
+
+def test_report_integrity_non_iterable_error_classes_fails_closed():
+    """#1747 (security review): error_classes that are non-iterable / non-
+    string (malformed checkpoint JSON: 5, true, [{"a": 1}]) fail CLOSED to
+    hard instead of crashing build_report."""
+    for bad in (5, True, [{"a": 1}], None):
+        integ = _report([_outcome("q0", valid=False, error_classes=bad)],
+                        threshold=1.0)["integrity"]
+        assert integ["valid"] is False, f"shape {bad!r} did not veto"
+        assert integ["n_hard_invalid"] == 1, f"shape {bad!r} not graded hard"
 
 
 def test_report_integrity_mixed_failure_grades():
@@ -507,10 +537,16 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     assert "invalid_rate ≤ threshold" in gate
     assert "n_hard_invalid == 0" in gate
     assert f"{JUSTIFIED_BASELINE_THRESHOLD}" in gate
+    # the allowance math is pinned (0.02 × 500 = 10 questions — a regression
+    # to percentage formatting fails here).
+    assert "≤10 of 500 questions" in gate
 
-    # the executed step-5 command injects the justified threshold (the
-    # operator never has to remember the flag — the run matches the gate).
+    # the executed step-5 command injects the justified threshold AND its
+    # recorded justification (M7: a non-default threshold is never silently
+    # applied) — the run matches the documented gate.
     state = ProtocolState(Path(tempfile.mkdtemp()) / "state.json")
     cmd = build_command(STEPS_BY_NUMBER[5], [], state=state)
     assert "--integrity-threshold" in cmd
     assert f"{JUSTIFIED_BASELINE_THRESHOLD}" in cmd
+    assert "--integrity-justification" in cmd
+    assert "#1747 justified" in " ".join(cmd)

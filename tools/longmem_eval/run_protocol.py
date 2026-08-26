@@ -102,10 +102,12 @@ STEPS: list[Step] = [
          "run",
          "integrity.valid=true — census-class-aware (#1747): invalid_rate ≤ threshold "
          "AND n_hard_invalid == 0 (fatal_*/ingest/non-census-error-string/permanent-"
-         "eval-failure questions veto at any threshold); threshold "
+         "eval-failure questions veto at any threshold; recoverable parse/truncated/"
+         "transient_* census classes AND reader/judge:retries_exhausted eval "
+         "failures are rate-limited, not vetoed); threshold "
          f"{JUSTIFIED_BASELINE_THRESHOLD} justified default at 500-Q scale "
-         f"(≤{JUSTIFIED_BASELINE_THRESHOLD * 100:.0f} of 500 questions with recoverable "
-         "errors) — injected by `run 5`",
+         f"(≤{JUSTIFIED_BASELINE_THRESHOLD * 500:.0f} of 500 questions with "
+         "recoverable errors) — injected by `run 5`",
          runner="baseline"),
     Step(6, "fix-500", "Mechanical + obvious fixes from the 500",
          "gate", "findings fixed"),
@@ -274,9 +276,16 @@ def build_command(step: Step, extra: list[str], *, state: ProtocolState,
         return _run_cmd(["--split", "s", "--limit", "50",
                          "--ingest-mode", "v2", *common])
     if step.runner == "baseline":       # step 5: full 500-Q run (V3 baseline)
+        # #1747: inject the justified threshold + its recorded justification
+        # so the EXECUTED run matches the documented gate and the M7
+        # contract (a non-default threshold is never silently applied — the
+        # report records the reason).
         return _run_cmd(["--split", "s", "--ingest-mode", "v2",
                          "--integrity-threshold",
-                         f"{JUSTIFIED_BASELINE_THRESHOLD}", *common])
+                         f"{JUSTIFIED_BASELINE_THRESHOLD}",
+                         "--integrity-justification",
+                         "step-5 baseline: #1747 justified 0.02 default at "
+                         "500-Q scale", *common])
     if step.runner == "confirm":        # step 7: confirmation set (subset file)
         if not expected_direction:
             raise SystemExit(
