@@ -2043,8 +2043,11 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     # ingest path (the worker factory). The flag was previously parsed but
     # never threaded — a silent no-op on every mode; now it is wired for
     # v2 and REJECTED loudly elsewhere (fail fast with an accurate message
-    # instead of a confusing fingerprint mismatch or a silent no-op).
-    if args.session_workers > 1 and args.ingest_mode != "v2":
+    # instead of a confusing fingerprint mismatch or a silent no-op). The
+    # --compare pure-artifact branch is flag-tolerant (handled before any
+    # run machinery).
+    if args.session_workers > 1 and args.ingest_mode != "v2" \
+            and not args.compare:
         parser.error("--session-workers > 1 requires --ingest-mode v2 "
                      "(session-parallel extraction exists only on the v2 "
                      "path)")
