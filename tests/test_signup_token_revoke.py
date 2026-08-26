@@ -469,3 +469,111 @@ class TestCmdTokenRevoke:
             rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
         assert rc == 1
         assert "Cannot reach API" in capsys.readouterr().err
+
+    # ── #1752: token source must MATCH the auth key source ────────────────
+    def test_token_revoke_env_key_divergent_token_warns(self, monkeypatch,
+                                                        tmp_path, capsys):
+        """#1752: TORTOISE_API_KEY (team A, env — no token lives there) +
+        a stored token for a DIFFERENT team (team B) — the token is read
+        from the store with a divergence warning naming the shadow source
+        (no more silent 403 'Not your signup token' dead-end)."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env_team_a")
+        token_b = "st_" + "bb" * 32
+        self._stored_cfg(tmp_path, signup_token=token_b)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-b"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.headers.get("Authorization") == "Bearer tt_env_team_a"
+        assert json.loads(req.data) == {"signup_token": token_b}  # correct token
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert "TORTOISE_API_KEY (env)" in err          # the KEY source named
+        assert "different teams" in err                 # hedged phrasing (#1752)
+        assert str(tmp_path / ".tortoise" / "credentials.json") in err  # token source named
+
+    def test_token_revoke_same_config_no_divergence_warning(
+            self, monkeypatch, tmp_path, capsys):
+        """#1752: key AND token live in the SAME config — the token is
+        read from there and NO divergence warning is printed."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        token = "st_" + "cc" * 32
+        self._stored_cfg(tmp_path, signup_token=token)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-9"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(token=None))
+        assert rc == 0
+        assert json.loads(urlopen.call_args.args[0].data) == {
+            "signup_token": token}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" not in err
+        assert "note:" not in err  # no divergence warning at all
+
+    def test_token_revoke_explicit_token_env_key_silent(
+            self, monkeypatch, tmp_path, capsys):
+        """#1752: an explicit --token is the user's own choice — it is used
+        as-is with NO divergence warning even when the env key points at a
+        different source (the warning is for the stored-token fallback)."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env_team_a")
+        explicit = "st_" + "ff" * 32
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-b"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(token=explicit))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.headers.get("Authorization") == "Bearer tt_env_team_a"
+        assert json.loads(req.data) == {"signup_token": explicit}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" not in err
+        assert "note:" not in err
+
+    def test_token_revoke_cwd_global_divergence_warns(self, monkeypatch,
+                                                      tmp_path, capsys):
+        """#1752: key in a cwd/.tortoise config WITHOUT a token + the token
+        in the global store — the fallback warns naming BOTH file sources
+        (cwd key wins per #1708 precedence)."""
+        import tortoise.__main__ as main
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (proj / ".tortoise").write_text(json.dumps({  # legacy cwd FILE shape
+            "api_key": "tt_cwd_team_a",
+            "api_url": "https://api.premiselabs.co"}))  # no signup_token
+        token_b = "st_" + "ee" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_global_team_b",
+            "api_url": "https://api.premiselabs.co",
+            "signup_token": token_b}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-b"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.headers.get("Authorization") == "Bearer tt_cwd_team_a"
+        assert json.loads(req.data) == {"signup_token": token_b}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert str(proj / ".tortoise") in err
+        assert str(d / "credentials.json") in err

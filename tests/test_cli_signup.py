@@ -991,4 +991,88 @@ class TestCmdRecover:
         assert rc == 1
         err = capsys.readouterr().err
         assert "malformed" in err
+
+    # ── #1752: recover token source must MATCH the auth key source ────────
+    def test_recover_stored_token_same_config_no_warning(
+            self, monkeypatch, tmp_path, capsys):
+        """#1752: recover with NO --token reads the stored token from the
+        SAME config that holds the key — used silently, no divergence
+        warning (mirrors revoke's (b) contract)."""
+        token = "st_" + "dd" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_team_d", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-d", "signup_token": token}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_mint({
+                            "key": "tt_rec_dd0000000000000000000000000000000000000000",
+                            "team_id": "team-d", "team_name": "agent-d",
+                            "graph_name": "team_team-d", "tier": "free"})) as urlopen:
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert json.loads(req.data) == {"signup_token": token}  # stored token
+        err = capsys.readouterr().err
+        assert "recovery token comes from" not in err
+        assert "note:" not in err  # no divergence warning at all
+
+    def test_recover_env_key_divergent_token_warns(self, monkeypatch,
+                                                   tmp_path, capsys):
+        """#1752 mirror of revoke (a): env key (team A, no token) + stored
+        token for a DIFFERENT team (team B) — the recover attempt uses the
+        stored token and prints the divergence warning naming the shadow
+        source instead of silently mixing teams."""
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env_team_a")
+        token_b = "st_" + "bb" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_team_b", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-b", "signup_token": token_b}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_mint({
+                            "key": "tt_rec_bb0000000000000000000000000000000000000000",
+                            "team_id": "team-b", "team_name": "agent-b",
+                            "graph_name": "team_team-b", "tier": "free"})) as urlopen:
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert json.loads(req.data) == {"signup_token": token_b}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert "TORTOISE_API_KEY (env)" in err  # the KEY source named
+        assert str(d / "credentials.json") in err  # the TOKEN source named
+
+    def test_recover_cwd_global_divergence_warns(self, monkeypatch,
+                                                 tmp_path, capsys):
+        """#1752 mirror of revoke (c): key in a cwd/.tortoise config WITHOUT
+        a token + the token in the global store — the fallback warns naming
+        BOTH file sources."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        (proj / ".tortoise").write_text(json.dumps({  # legacy cwd FILE shape
+            "api_key": "tt_cwd_team_a",
+            "api_url": "https://api.premiselabs.co"}))  # no signup_token
+        token_b = "st_" + "ee" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_global_team_b",
+            "api_url": "https://api.premiselabs.co",
+            "signup_token": token_b}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_mint({
+                            "key": "tt_rec_ee0000000000000000000000000000000000000000",
+                            "team_id": "team-b", "team_name": "agent-b",
+                            "graph_name": "team_team-b", "tier": "free"})) as urlopen:
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert json.loads(req.data) == {"signup_token": token_b}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert str(proj / ".tortoise") in err
+        assert str(d / "credentials.json") in err
         assert "Traceback" not in err

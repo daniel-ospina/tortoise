@@ -631,12 +631,15 @@ def _cmd_init(args):
 
 
 
-def _read_stored_signup_token() -> str | None:
-    """Stored st_ token from the active configs (#1709).
+def _read_stored_signup_token_with_source() -> tuple[str | None, Path | None]:
+    """Stored st_ token from the active configs (#1709), WITH its source.
 
     cwd/.tortoise first (legacy shape), then the #1708 global
     ~/.tortoise/credentials.json (the canonical store). The field is
-    additive in either file — the two land compatibly.
+    additive in either file — the two land compatibly. Returns
+    (token, source_path); #1752 needs the path to warn about source
+    divergence (revoke/recover read the token from a DIFFERENT config
+    than the auth key).
     """
     import json as _j
     from pathlib import Path
@@ -648,8 +651,56 @@ def _read_stored_signup_token() -> str | None:
             continue
         tok = cfg.get("signup_token") if isinstance(cfg, dict) else None
         if isinstance(tok, str) and tok:
+            return tok, path
+    return None, None
+
+
+def _read_stored_signup_token() -> str | None:
+    """Stored st_ token from the active configs (#1709) — token only.
+
+    Thin wrapper over _read_stored_signup_token_with_source preserving the
+    pre-#1752 single-value contract for _cmd_signup.
+    """
+    return _read_stored_signup_token_with_source()[0]
+
+
+def _resolve_same_source_token(args, cfg_path, cfg) -> str | None:
+    """#1752: signup token for revoke/recover resolved from the SAME
+    config the auth key came from (the #1708 env → cwd → global resolver).
+
+    --token wins (the user's explicit choice — used as-is, silently); else
+    the resolved config's OWN signup_token (same file as the key → no
+    divergence); else the cwd→global stored read — with a stderr warning
+    naming BOTH sources when they diverge (mirrors the #1708 env-shadow
+    warning style). An env key has NO token, so any stored token is
+    necessarily a different source → always warned. With no key source at
+    all (keyless `recover`) the stored token is used silently — there is
+    nothing to diverge from.
+    """
+    import os as _os
+    import sys as _sys
+    token = getattr(args, "token", None)
+    if token:
+        return token
+    if isinstance(cfg, dict):
+        tok = cfg.get("signup_token")
+        if isinstance(tok, str) and tok:
             return tok
-    return None
+    stored_token, stored_src = _read_stored_signup_token_with_source()
+    if stored_token is None:
+        return None
+    if stored_src == cfg_path:
+        return stored_token  # defensive — same file, nothing to warn about
+    if cfg_path is not None:
+        key_src = str(cfg_path)
+    elif _os.environ.get("TORTOISE_API_KEY", "").strip():
+        key_src = "TORTOISE_API_KEY (env)"
+    else:
+        return stored_token  # no key source at all (keyless recover)
+    print(f"⚠️  note: your recovery token comes from {stored_src}, but your "
+          f"API key comes from {key_src} — if they are different teams, "
+          "revoke/recover will fail with 403.", file=_sys.stderr)
+    return stored_token
 
 
 def _is_invalid_signup_token(body: str) -> bool:
@@ -670,12 +721,20 @@ def _cmd_recover(args) -> int:
     persistence this surface would be one-shot-only and the NEXT key-loss
     would silently fresh-mint and orphan the recovered team.
     """
-    import json, os, sys, time, uuid  # noqa: E401, I001
+    import json, os, sys, uuid  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    token = getattr(args, "token", None) or _read_stored_signup_token()
+    # #1752: resolve the token from the SAME config the auth key comes from
+    # (env → cwd → global). A corrupt config must NOT block keyless
+    # recovery via --token — fall back to the stored-token read with no
+    # key source, which prints no divergence warning (nothing to diverge).
+    try:
+        _cfg_path, _cfg, _api_key, _api_url = _resolve_config_path()
+    except _ConfigError:
+        _cfg_path, _cfg = None, None
+    token = _resolve_same_source_token(args, _cfg_path, _cfg)
     if not token:
         print("No recovery token found. Pass --token st_... or run "
               "'tortoise signup' first.", file=sys.stderr)
@@ -761,15 +820,10 @@ def _cmd_token_revoke(args) -> int:
     it is noticed. Prints confirmation; the stored config is left intact
     (the revoked token simply 422s on any later recover).
     """
-    import json, os, sys  # noqa: E401, I001
+    import json, sys  # noqa: E401, I001
     from urllib.error import HTTPError, URLError
     from urllib.request import Request, urlopen
 
-    token = getattr(args, "token", None) or _read_stored_signup_token()
-    if not token:
-        print("No recovery token found. Pass --token st_... or run "
-              "'tortoise signup' first.", file=sys.stderr)
-        return 1
     try:
         _cfg_path, _cfg, api_key, api_url = _resolve_config_path()
     except _ConfigError as e:
@@ -780,6 +834,15 @@ def _cmd_token_revoke(args) -> int:
         print("No stored API key found. Run 'tortoise signup' or "
               "'tortoise init --api-key <key>' first — the revoke request "
               "must be authenticated by the team's key.", file=sys.stderr)
+        return 1
+    # #1752: the token must come from the SAME config the auth key came
+    # from — an env key has no token, so a stored token from another source
+    # is used only with a warning naming the shadow source (no silent 403
+    # "Not your signup token" dead-end when the sources are different teams).
+    token = _resolve_same_source_token(args, _cfg_path, _cfg)
+    if not token:
+        print("No recovery token found. Pass --token st_... or run "
+              "'tortoise signup' first.", file=sys.stderr)
         return 1
     base = (api_url or "https://api.premiselabs.co").rstrip("/")
     print("Revoking the signup token — it can no longer recover keys on this team…")
