@@ -38,6 +38,7 @@ import re
 import sys
 import tempfile
 import time
+import warnings
 from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -52,7 +53,11 @@ from typing import Any
 # reaper.
 os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 
-from tortoise.model_adapters import is_fatal
+from tortoise.model_adapters import (
+    RotatingModel,
+    RoutingModel,
+    is_fatal,
+)
 from tortoise.sdk import TortoiseSDK
 from tortoise.shared_state.concurrency import flock_exclusive
 
@@ -513,6 +518,202 @@ class CheckpointStaleError(RuntimeError):
     silently reusing results from a different config (M7 #1527, D7)."""
 
 
+# Tuning knobs that change extraction output (M7 #1739, Gap 2): the MODELS
+# registry has entries sharing ONE wire id with different tuning — but note
+# only -noreason is actually discriminated from the trio: deepseek-v4-pro and
+# deepseek-v4-pro-xhigh are BYTE-IDENTICAL configs (both max_tokens=500 with
+# the fixed temperature=0.0 default → both fingerprint
+# 'deepseek/deepseek-v4-pro|max_tokens=500' — correct, nothing differs);
+# deepseek-v4-pro-noreason (max_tokens=8000, disable_reasoning=True) is the
+# discriminating variant. A wire-id-only fingerprint would silently resume a
+# reasoning-ON checkpoint under reasoning-OFF -noreason. Appended only when
+# non-default (max_tokens whenever not None; temperature when explicitly
+# non-default — not None and != 0.0, mirroring the max_tokens check's
+# explicit structure; thinking_budget/disable_reasoning when truthy), so a
+# default-tuning adapter's fingerprint stays its bare wire id (the #1732
+# literal contract: DeepSeekDirectModel('deepseek-chat') → 'deepseek-chat').
+_TUNING_FINGERPRINT_ATTRS = ("max_tokens", "temperature", "thinking_budget",
+                             "disable_reasoning")
+
+
+def _adapter_fingerprint(model: Any) -> str:
+    """Stable, tuning-aware fingerprint of a single (non-wrapper) adapter.
+
+    M4 #1732: adapters expose ``.id`` (the API-facing wire id), not
+    ``.model_id`` — prefer ``.model_id`` then ``.id``; repr is the last
+    resort, made LOUD (warnings.warn) so a future adapter missing both
+    attributes surfaces at fingerprint time instead of silently
+    re-introducing the #1732 address-bearing-repr failure class (a repr
+    embeds a memory address ``<... at 0x...>`` that would make the
+    fingerprint NON-deterministic across processes). M7 #1739 (Gap 2): the
+    tuning knobs that change extraction output ride the fingerprint when
+    non-default — ``max_tokens`` whenever not None (an explicit 0 cap is a
+    real value, only None is the uncapped default), ``temperature`` when
+    explicitly non-default (not None and != 0.0 — None means the provider
+    default ~1.0 on the wire, 0.0 is the fixed extractor default), the
+    rest when truthy (thinking_budget>0 / disable_reasoning=True) — so
+    two registry entries sharing a wire id but differing in tuning
+    fingerprint differently (note: deepseek-v4-pro ≡ deepseek-v4-pro-xhigh
+    — byte-identical configs, same fingerprint — only -noreason is
+    discriminated from that trio). Default-tuning adapters stay at the bare wire
+    id — the #1732 cross-provider contract is preserved (provider stays a
+    routing detail for single adapters)."""
+    for attr in ("model_id", "id"):
+        mid = getattr(model, attr, None)
+        if mid is not None and str(mid).strip():  # degenerate (whitespace) ids fall through
+            break
+    else:
+        warnings.warn(
+            f"model fingerprint: {type(model).__name__} has neither "
+            ".model_id nor .id — fingerprint falls back to repr(model) "
+            "(address-bearing, non-deterministic across processes); give "
+            "the adapter a stable id to keep the checkpoint-resume "
+            "contract", stacklevel=2)
+        return repr(model)  # last resort (never for production adapters)
+    parts = [mid]
+    for attr in _TUNING_FINGERPRINT_ATTRS:
+        value = getattr(model, attr, None)
+        if attr == "max_tokens":
+            if value is not None:  # None = uncapped (the only "off"); 0 is a real cap
+                parts.append(f"{attr}={value}")
+        elif attr == "temperature":
+            # Explicit non-default only (mirrors max_tokens' is-not-None
+            # structure): None (the provider default ~1.0 on the wire) and
+            # 0.0 (the fixed extractor default) are both omitted.
+            if value is not None and value != 0.0:
+                parts.append(f"{attr}={value}")
+        elif value:  # thinking_budget>0, disable_reasoning=True
+            parts.append(f"{attr}={value}")
+    return "|".join(parts)
+
+
+def _session_worker_spec_tuning(spec: str) -> tuple[str, int | None, float, str]:
+    """M5-gated resolution of an explicit ``--extractor-model`` for the
+    session-parallel worker path (M7 #1739 / review #1742):
+    ``(wire id, max_tokens, temperature, pinned id)`` — the registry
+    entry's REAL wire id (never the registry key — ``solar-pro4``/``claude-opus-5`` are not
+    valid wire ids) resolved through the ``REGISTRY_KEY_TO_ID`` remap so
+    every lane gets a valid id (``deepseek-flash-direct`` →
+    ``deepseek/deepseek-chat``: the direct lane strips to the non-reasoning
+    ``deepseek-chat``, the OpenRouter lane keeps the prefixed id — bare ids
+    404 there). The 4th element is the pinned entry's OWN id (pre-lane-
+    normalization) — the #1742 pin-rewrite warning in
+    ``_build_cli_extractor_model`` compares it against what the router
+    actually serves. REFUSES entries the ingest_v2 factory cannot express
+    (``thinking_budget`` / ``disable_reasoning`` — ``_build_single``
+    forwards only max_tokens/temperature): loud, never a silent reasoning
+    flip."""
+    from tests.model_adapters import MODELS
+    from tortoise.model_adapters import REGISTRY_KEY_TO_ID
+    if spec not in MODELS:
+        raise SystemExit(f"unknown extractor model {spec!r}; "
+                         f"known: {sorted(MODELS)}")
+    entry = MODELS[spec]()
+    try:
+        if (getattr(entry, "thinking_budget", 0)
+                or getattr(entry, "disable_reasoning", False)):
+            raise SystemExit(
+                f"--extractor-model {spec!r} with --session-workers > 1 is "
+                "refused: the session-parallel factory cannot express its "
+                "thinking_budget/disable_reasoning tuning (it would silently "
+                "flip to defaults) — drop --session-workers or use the "
+                "default extractor path")
+        return REGISTRY_KEY_TO_ID.get(spec, entry.id), \
+            entry.max_tokens, entry.temperature, entry.id
+    finally:
+        entry.close()
+
+
+def _served_wire_ids(model: Any) -> list[str]:
+    """The raw ``.id`` of every member adapter a wrapper serves (a bare
+    adapter → ``[model.id]``). Feed for the #1742 pin-rewrite warning — the
+    fingerprint records the SERVED composition, this surfaces what the wire
+    actually carries at build time."""
+    if isinstance(model, RoutingModel):
+        members = [m for m in (model.primary, model.fallback)
+                   if m is not None]
+    elif isinstance(model, RotatingModel):
+        members = list(model.providers)
+    else:
+        members = [model]
+    return [str(getattr(m, "id", "")) for m in members]
+
+
+def _warn_pin_rewrite(spec: str, pinned_id: str, built: Any) -> None:
+    """LOUD warning when a pinned ``--extractor-model`` id is NOT served
+    verbatim at ``session_workers > 1`` (review #1742): lane normalization
+    (#1549 ``_direct_wire_id`` — ``deepseek/deepseek-v4-flash`` →
+    ``deepseek-chat`` on the direct lane) can REWRITE the pin's wire id
+    with no user-visible signal; the "REFUSED (safe direction)" framing
+    only materializes at resume time. Compares WIRE IDS only (never
+    tuning — the -pro/-xhigh/-noreason trio shares one id and must not
+    trip this). A warning, not a refusal — fresh sw>1 runs keep working."""
+    served_ids = _served_wire_ids(built)
+    if not served_ids or pinned_id in served_ids:
+        return
+    warnings.warn(
+        f"--extractor-model {spec!r} pinned wire id {pinned_id!r} is not "
+        f"served verbatim at --session-workers > 1: lane normalization "
+        f"serves {sorted(set(served_ids))!r} instead (e.g. #1549 "
+        f"_direct_wire_id: deepseek/deepseek-v4-flash → deepseek-chat on "
+        f"the direct lane) — the checkpoint fingerprints the SERVED id, so "
+        f"a cross-lane/env resume is refused (safe direction); pin a "
+        f"lane-neutral id or accept the substitution",
+        stacklevel=2)
+
+
+def _build_cli_extractor_model(*, spec: str | None,
+                               session_workers: int):
+    """Build the extractor model a CLI run will actually serve AND
+    fingerprint (M7 #1739 / review #1742): the fingerprint must record the
+    EXTRACTING model, so the build mirrors the serving path.
+
+    ``session_workers == 1``: the run-level model IS the extracting model —
+    an explicit ``spec`` stays a MODELS registry lookup (M5 pinning, registry
+    tuning applies); unset delegates to the production router
+    (``build_extractor_model``, uncapped — the #1350 owner decision).
+    ``session_workers > 1``: requests per-worker models via the ingest_v2
+    ``model_factory``, so the run-level model — and the fingerprint — is
+    built the SAME way the factory does (``_session_worker_spec_tuning``
+    resolves the registry entry's real wire id + expressible tuning; the
+    unset case stays UNCAPPED, matching the session_workers=1 owner
+    decision). NOTE: the live ``ingest_haystack_v2`` on main currently
+    shadows the parallel factory path with a sequential copy (pre-existing
+    duplicate, tracked separately — #1744), so workers fall back to the
+    shared ``extractor_model``; the fingerprint-vs-served guard remains the
+    safety invariant and records the serving config either way. A spec'd
+    run therefore fingerprints identically across a session-workers toggle
+    only when the router resolves a SINGLE lane
+    matching the registry adapter (the same effective config — resume
+    accepted); in multi-lane environments the sw>1 path is provider-routed
+    (RoutingModel/RotatingModel composition) and a toggle is REFUSED —
+    safe direction, the fingerprint records what each path serves."""
+    if session_workers > 1:
+        from tests.model_adapters import build_extractor_model
+        if spec is not None:
+            wire_id, max_tokens, temperature, pinned_id = \
+                _session_worker_spec_tuning(spec)
+            built = build_extractor_model(
+                wire_id, max_tokens=max_tokens, temperature=temperature)
+            _warn_pin_rewrite(spec, pinned_id, built)
+            return built
+        return build_extractor_model(max_tokens=None, temperature=0.0)
+    if spec:
+        # M5 pinning: an explicit --extractor-model stays a registry lookup.
+        from tests.model_adapters import MODELS
+        if spec not in MODELS:
+            raise SystemExit(f"unknown extractor model {spec!r}; "
+                             f"known: {sorted(MODELS)}")
+        return MODELS[spec]()
+    # #1530 D9: the unset case delegates to the production router via the
+    # shim — single source of truth (removed the bespoke env branch). Same
+    # decision surface: TORTOISE_EXTRACTOR_PROVIDER picks the primary;
+    # DEEPSEEK_API_KEY alone → deepseek-direct; else OpenRouter. Uncapped
+    # (the #1350 owner decision).
+    from tests.model_adapters import build_extractor_model
+    return build_extractor_model(max_tokens=None, temperature=0.0)
+
+
 def _model_id(model: Any) -> str | None:
     """A stable fingerprint string for a model object (None → None).
 
@@ -524,17 +725,61 @@ def _model_id(model: Any) -> str | None:
     ``extractor_model`` even with identical git_sha). Prefer ``.model_id``
     then ``.id``; only fall back to repr as a last resort.
 
-    NOTE: wrapper models from ``build_extractor_model()`` (RoutingModel /
-    RotatingModel) expose neither attribute and still fall to repr —
-    tracked as follow-up #1739 (default CLI path).
+    M7 #1739 fix (Gap 1): wrapper models from ``build_extractor_model()``
+    (RoutingModel / RotatingModel — the DEFAULT CLI path) expose neither
+    attribute, so they are composed structurally instead:
+    ``provider:wire-id`` per member adapter, joined with ``+`` and carrying
+    each member's tuning suffix. A SINGLE-member wrapper emits the bare
+    member fingerprint (no provider prefix, no shape prefix) — one lane has
+    no routing, so the default path is comparable to the equivalent bare
+    ``MODELS`` entry (the #1732 single-adapter contract). Multi-lane
+    wrappers are shape-prefixed (``routing:`` / ``rotating:``) so a
+    failover wrapper and a rotation pool over the same members fingerprint
+    differently (RoutingModel keeps (primary, fallback) order — order IS
+    effective config; RotatingModel members are SORTED by provider — pool
+    order is a routing detail for the weighted rotation, so a reorder keeps
+    checkpoints valid while a membership change still invalidates them). A
+    memberless wrapper (degenerate) yields None, never an empty string.
+    RotatingModel weights are deliberately EXCLUDED: on the production path
+    (build_extractor_model) weights are a pure function of the member set
+    (fixed per-provider values), which IS fingerprinted; a programmatic
+    weight change is out of fingerprint scope (git_sha-protected). The
+    provider is part of the WRAPPER identity (which lanes the pool routes
+    to — a pool change is an effective-config change) but remains a routing
+    detail for single adapters (a bare adapter's fingerprint stays
+    wire-id-only, the #1732 cross-provider contract). Deterministic — no
+    repr/address — and identical across fresh instances, so the #1549
+    checkpoint-resumable protocol works on the default path.
     """
     if model is None:
         return None
-    for attr in ("model_id", "id"):
-        mid = getattr(model, attr, None)
-        if mid:
-            return mid
-    return repr(model)
+    # NOTE (fingerprint charset invariant): the composed literals use ``+``
+    # (member separator), ``:`` (provider separator) and ``|`` (tuning
+    # separator) — collision-free ONLY because wire ids are alphanumeric
+    # with ``/ - .`` (the MODELS registry and REGISTRY_KEY_TO_ID remaps
+    # enforce this; no id contains a separator). A future wire id carrying
+    # a separator must be rejected/escaped at the adapter boundary, not
+    # here.
+    if isinstance(model, RoutingModel):
+        members = [m for m in (model.primary, model.fallback)
+                   if m is not None]
+        if not members:
+            return None  # degenerate wrapper — no lane to fingerprint
+        if len(members) == 1:
+            return _adapter_fingerprint(members[0])  # single lane = bare adapter
+        return ("routing:"
+                + "+".join(f"{m.provider}:{_adapter_fingerprint(m)}"
+                           for m in members))
+    if isinstance(model, RotatingModel):
+        members = sorted(model.providers, key=lambda p: p.provider)
+        if not members:
+            return None  # degenerate wrapper — no lane to fingerprint
+        if len(members) == 1:
+            return _adapter_fingerprint(members[0])  # single lane = bare adapter
+        return ("rotating:"
+                + "+".join(f"{m.provider}:{_adapter_fingerprint(m)}"
+                           for m in members))
+    return _adapter_fingerprint(model)
 
 
 def _build_fingerprint(*, reader_model: str, judge_model: str,
@@ -550,6 +795,44 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     (``rerank_config``) — a config-mismatched resume is refused by the
     existing fingerprint gate (a baseline checkpoint resumed with
     ``--rerank``, a pool change with rerank off, … — Gate 8).
+
+    M7 #1739: ``extractor_model`` discriminates BOTH wire id and tuning —
+    tuning variants sharing a wire id (``deepseek-v4-pro-xhigh`` vs
+    ``deepseek-v4-pro-noreason``) fingerprint differently, so a cross-tuning
+    resume is refused (was silently accepted post-#1732); the default
+    wrapper path (RoutingModel/RotatingModel) composes its member adapters
+    (``provider:wire-id`` + tuning; single-lane wrappers emit the bare
+    member fingerprint; multi-lane wrappers are shape-prefixed routing:/rotating:)
+    — never an address-bearing repr. SESSION_WORKERS: ``--session-workers
+    > 1`` requests per-worker models via the ingest_v2 ``model_factory``
+    (note: the live ``ingest_haystack_v2`` on main currently shadows the
+    parallel factory path with a sequential copy — pre-existing duplicate,
+    tracked separately (#1744) — so workers fall back to the shared
+    ``extractor_model``; the fingerprint-vs-served guard remains the safety
+    invariant and records the serving config either way).
+    ``_build_cli_extractor_model`` builds the fingerprinted model and
+    run_main threads the resolved spec + tuning into the factory so the
+    workers serve EXACTLY what the fingerprint records (a spec'd run
+    fingerprints identically across a session-workers
+    toggle only in single-lane environments — the same effective config,
+    resume accepted; multi-lane envs are provider-routed at sw>1 and the
+    toggle is REFUSED, safe direction; the unset run stays UNCAPPED,
+    matching the session_workers=1 owner decision). Registry entries the
+    factory cannot express (thinking_budget/disable_reasoning) are refused
+    loudly at session_workers>1. WIRE-ID
+    MUTABILITY: wire ids are API-facing and mutable (e.g. #1706 renamed
+    deepseek-v4-flash → deepseek-chat) — a rename loudly invalidates every
+    existing checkpoint (CheckpointStaleError on ``extractor_model``): safe
+    by design, expected on any future normalization change.
+    ENV-DEPENDENCE (default path): with ``--extractor-model`` unset the
+    fingerprint resolves via ``resolve_extractor_provider`` — which lanes
+    the router serves is a function of the extractor-key env
+    (DEEPSEEK_API_KEY / OPENROUTER_API_KEY / VENICE_API_KEY /
+    TORTOISE_EXTRACTOR_PROVIDER). A resume is therefore only valid within
+    the SAME provider/key environment: identical git_sha + CLI across
+    machines with differing key env (e.g. DEEPSEEK_API_KEY-only vs
+    OPENROUTER_API_KEY-only) refuses with CheckpointStaleError — safe
+    direction, the env changes what the default path serves.
     """
     return {
         "git_sha": git_sha(),
@@ -652,10 +935,13 @@ def _load_checkpoint(path: str | None,
         diffs = ([] if fp is None
                  else _fingerprint_diffs(expected_fingerprint, fp))
         if diffs:
+            detail = ", ".join(
+                f"{k}: {expected_fingerprint.get(k)!r} != {fp.get(k)!r}"
+                for k in diffs)
             raise CheckpointStaleError(
                 f"checkpoint {p} is stale: effective run config differs on "
-                f"{sorted(diffs)} — refusing resume (delete the file to "
-                f"re-run the questions)")
+                f"{sorted(diffs)} ({detail}) — refusing resume (delete the "
+                f"file to re-run the questions)")
     required = REQUIRED_OUTCOME_KEYS.get(retriever, ("question_id",))
     outcomes: dict[str, dict] = {}
     for o in data.get("outcomes", []):
@@ -749,6 +1035,14 @@ def run_evaluation(
     extractor_model=None,
     workers: int = 1,
     session_workers: int = 1,
+    # M7 #1739 / #1742: the CLI extractor spec for the session-parallel
+    # worker factory — the RESOLVED wire id (never the registry key) plus
+    # the registry entry's expressible tuning, so the workers serve EXACTLY
+    # what _build_cli_extractor_model fingerprints. Threaded from run_main —
+    # the old free ``args`` closure was a latent NameError.
+    session_worker_model_spec: str | None = None,
+    session_worker_max_tokens: int | None = None,
+    session_worker_temperature: float = 0.0,
     preflight: dict | None = None,
     # R3 (#1542) D2: the embedder pre-flight status (from _preflight_embedder
     # in run_main) — forwarded to the report methodology (D5: embedder +
@@ -809,10 +1103,59 @@ def run_evaluation(
     checkpoint fingerprint from the effective run config (stale resume
     refused), and instruments every outcome with leg-mix / pool-size /
     evidence-written-·retrieved / ingest-latency fields.
+
+    M7 #1739 / review #1742 (session workers): ``session_workers > 1`` (v2
+    ingest ONLY — the sole mode with a worker factory) takes the three
+    ``session_worker_*`` args — ``session_worker_model_spec`` (the RESOLVED
+    wire id, never the registry key), ``session_worker_max_tokens`` and
+    ``session_worker_temperature`` — which carry the worker-factory config
+    run_main resolved (``_session_worker_spec_tuning``) so the workers serve
+    EXACTLY the fingerprinted extractor_model. A ``session_workers > 1``
+    call whose factory config fingerprints differently from the passed
+    ``extractor_model`` is REFUSED pre-loop (ValueError — before any
+    question runs, no network); run_main's CLI path threads the trio so the
+    legitimate path never trips it.
     """
     # E2E-3 Precondition 2: the audit is computed from the loaded instances
     # BEFORE anything else — no report can be produced without it.
     dataset_semantics_audit = audit_dataset(instances)
+    # M7 #1739 / #1742: the session-parallel worker factory must serve
+    # EXACTLY the fingerprinted config — a programmatic caller passing a
+    # spec'd extractor_model with session_workers > 1 but forgetting the
+    # resolved session_worker_* trio would fingerprint one config while the
+    # workers served another (the checkpoint would be accepted on resume
+    # over results produced by a different model). Fail loud on mismatch.
+    # Scoped to the v2 ingest path — the ONLY mode with a worker factory;
+    # non-v2 modes never build extractor_model (None) and the flag is
+    # rejected at the CLI (see run_main) / inert programmatically.
+    if session_workers > 1 and ingest_mode == "v2":
+        from tests.model_adapters import build_extractor_model
+        served = build_extractor_model(
+            session_worker_model_spec or None,
+            max_tokens=session_worker_max_tokens,
+            temperature=session_worker_temperature)
+        try:
+            if extractor_model is None:
+                raise ValueError(
+                    "session_workers > 1 (ingest_mode=v2) requires a "
+                    "fingerprinted extractor_model — build it with "
+                    "_build_cli_extractor_model(spec=..., "
+                    "session_workers=N) so the run fingerprints EXACTLY "
+                    "what the workers serve; a None extractor_model cannot "
+                    "match the worker-factory config (refusing fingerprint- "
+                    "vs served-config divergence)")
+            if _model_id(extractor_model) != _model_id(served):
+                raise ValueError(
+                    "session_workers > 1 requires the worker-factory config "
+                    "(session_worker_model_spec / max_tokens / temperature) "
+                    "to fingerprint identically to the extractor_model the "
+                    "run fingerprints — pass a router-built extractor_model "
+                    "(e.g. via _build_cli_extractor_model(spec=..., "
+                    "session_workers=N)) or the matching resolved "
+                    "session_worker_* args; refusing fingerprint- vs "
+                    "served-config divergence")
+        finally:
+            served.close()
     # R6 (#1545) D9: the effective rerank config resolves once, before the
     # loop — the fingerprint records it and refuses config-mismatched
     # resumes (three-valued resume: equal → allowed; different → refused;
@@ -879,18 +1222,32 @@ def run_evaluation(
                 # reader vs judge attribution).
                 t_ingest = time.monotonic()
                 if ingest_mode == "v2":
+                    from tests.model_adapters import build_extractor_model
+
                     from .ingest_v2 import ingest_haystack_v2
                     ingest_stats = ingest_haystack_v2(
                         sdk, question, extractor_model,
                         chunk_turns=chunk_turns,
                         # Pilot #1549: session-parallel extraction within a
                         # question (the LLM phase is the wall-clock dominant
-                        # cost; each worker gets a fresh model from the same
-                        # build path — no shared RoutingModel state).
+                        # cost). NOTE: the live ingest_haystack_v2 on main
+                        # shadows the parallel worker-factory path with a
+                        # sequential copy (pre-existing duplicate, tracked
+                        # separately — #1744), so workers currently fall
+                        # back to the shared extractor_model — which is
+                        # exactly what the fingerprint records.
                         session_workers=session_workers,
+                        # M7 #1739 / #1742: the factory spec + tuning are
+                        # threaded in (never the run_main-local ``args``
+                        # closure — that was a latent NameError) and mirror
+                        # exactly what _build_cli_extractor_model
+                        # fingerprints: the workers serve the SAME config
+                        # the checkpoint records.
                         model_factory=(
-                            lambda: build_extractor_model(
-                                args.extractor_model or None)
+                            (lambda: build_extractor_model(
+                                session_worker_model_spec or None,
+                                max_tokens=session_worker_max_tokens,
+                                temperature=session_worker_temperature))
                             if session_workers > 1 else None))
                 else:
                     ingest_stats = ingest_haystack(
@@ -1787,6 +2144,18 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     _assert_python_version()
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # M7 #1739 / #1742: session-parallel extraction exists only on the v2
+    # ingest path (the worker factory). The flag was previously parsed but
+    # never threaded — a silent no-op on every mode; now it is wired for
+    # v2 and REJECTED loudly elsewhere (fail fast with an accurate message
+    # instead of a confusing fingerprint mismatch or a silent no-op). The
+    # --compare pure-artifact branch is flag-tolerant (handled before any
+    # run machinery).
+    if args.session_workers > 1 and args.ingest_mode != "v2" \
+            and not args.compare:
+        parser.error("--session-workers > 1 requires --ingest-mode v2 "
+                     "(session-parallel extraction exists only on the v2 "
+                     "path)")
 
     # --db: FalkorDB URI handling mirroring tests/eval/retrieval/run.py:549
     # (URI → TORTOISE_DB_URI → TortoiseSDK()). Non-URI --db is rejected —
@@ -1939,90 +2308,108 @@ def _run_main(parser: argparse.ArgumentParser, args,
     judge = build_judge(args.judge_model, mock=args.mock)
 
     extractor_model = None
+    sw_model_spec = None
+    sw_max_tokens = None
+    sw_temperature = 0.0
     if args.ingest_mode == "v2":
-        if args.extractor_model:
-            # M5 pinning: an explicit --extractor-model stays a registry lookup.
-            from tests.model_adapters import MODELS
-            if args.extractor_model not in MODELS:
-                raise SystemExit(f"unknown extractor model {args.extractor_model!r}; "
-                                 f"known: {sorted(MODELS)}")
-            extractor_model = MODELS[args.extractor_model]()
-        else:
-            # #1530 D9: the unset case delegates to the production router via
-            # the shim — single source of truth (removed the bespoke env
-            # branch). Same decision surface: TORTOISE_EXTRACTOR_PROVIDER
-            # picks the primary; DEEPSEEK_API_KEY alone → deepseek-direct;
-            # else OpenRouter. Uncapped (the #1350 owner decision).
-            from tests.model_adapters import build_extractor_model
-            extractor_model = build_extractor_model(
-                max_tokens=None, temperature=0.0)
+        # M7 #1739 / #1742: the fingerprinted model must match what actually
+        # extracts — session_workers>1 fingerprints the worker-factory config
+        # (see _build_cli_extractor_model); the factory's spec + tuning are
+        # resolved once and threaded into run_evaluation so the workers
+        # serve EXACTLY the fingerprinted config.
+        if args.session_workers > 1 and args.extractor_model:
+            (sw_model_spec, sw_max_tokens, sw_temperature,
+             _sw_pinned_id) = _session_worker_spec_tuning(args.extractor_model)
+        extractor_model = _build_cli_extractor_model(
+            spec=args.extractor_model, session_workers=args.session_workers)
 
-    # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
-    # are built and BEFORE anything in the question loop starts. --mock skips
-    # it (no keys/network); --skip-preflight bypasses it for debugging (the
-    # run-protocol gate must be ON for pilot/500 runs).
-    if args.mock or args.skip_preflight:
-        preflight = {
-            "status": "skipped", "mock": args.mock,
-            "reason": "mock" if args.mock else "skip-preflight",
-            "checks": [],
-            "detail": "mock" if args.mock else "skipped via --skip-preflight",
-        }
-    else:
+    # M7 #1739 / review #1742 (resource lifecycle): the run-level
+    # extractor_model (built above) is closed on EVERY exit path via the
+    # try/finally — the CLI previously leaked its session. requests.Session
+    # is reusable after close(), so no double-close hazard with the
+    # fingerprint guard's served model. (Per-worker model_factory models are
+    # built inside ingest_v2.py's worker threads when the parallel path is
+    # live — out of run.py's reach and out of PR scope; on main the
+    # sequential copy shadows that path (pre-existing duplicate, tracked
+    # separately), so the shared extractor_model extracts instead.)
+    try:
+        # M2 (#1523): the pre-flight gate runs AFTER reader/judge/extractor_model
+        # are built and BEFORE anything in the question loop starts. --mock skips
+        # it (no keys/network); --skip-preflight bypasses it for debugging (the
+        # run-protocol gate must be ON for pilot/500 runs).
+        if args.mock or args.skip_preflight:
+            preflight = {
+                "status": "skipped", "mock": args.mock,
+                "reason": "mock" if args.mock else "skip-preflight",
+                "checks": [],
+                "detail": "mock" if args.mock else "skipped via --skip-preflight",
+            }
+        else:
+            try:
+                preflight = run_preflight(
+                    reader=reader, judge=judge, extractor_model=extractor_model)
+            except PreflightError as e:
+                print("[longmem_eval] PRE-FLIGHT GATE FAILED — aborting before "
+                      "the run starts (no questions executed):", file=sys.stderr)
+                print(str(e), file=sys.stderr)
+                raise SystemExit(1) from e
+
         try:
-            preflight = run_preflight(
-                reader=reader, judge=judge, extractor_model=extractor_model)
-        except PreflightError as e:
-            print("[longmem_eval] PRE-FLIGHT GATE FAILED — aborting before "
-                  "the run starts (no questions executed):", file=sys.stderr)
+            outcomes, report = run_evaluation(  # noqa: RUF059
+                instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
+                work_dir=args.work_dir, split=args.split,
+                checkpoint=args.checkpoint, max_retries=args.max_retries,
+                ingest_mode=args.ingest_mode, extractor_model=extractor_model,
+                workers=max(1, args.workers), preflight=preflight,
+                # M7 #1739 / #1742: wire the session-parallel path (the flag was
+                # parsed but never threaded — a silent no-op) and give the worker
+                # factory the resolved spec + tuning so the workers serve exactly
+                # what the fingerprint records.
+                session_workers=args.session_workers,
+                session_worker_model_spec=sw_model_spec,
+                session_worker_max_tokens=sw_max_tokens,
+                session_worker_temperature=sw_temperature,
+                embedder_status=embedder_status,
+                chunk_turns=chunk_turns, max_context_tokens=context_cap,
+                max_chunks_per_session=max_chunks_per_session,
+                tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
+                tr_events=tr_events,
+                rerank=rr["rerank_on"], rerank_model=rr["model"],
+                rerank_pool=rr["rerank_pool"],
+                per_session_cap=rr["per_session_cap"],
+                mmr_lambda=rr["mmr_lambda"],
+                rerank_prewarm=rerank_prewarm,
+                dataset_fingerprint=dataset_fingerprint,
+                integrity_threshold=args.integrity_threshold,
+                integrity_justification=args.integrity_justification,
+                # #1349 vector arm: retriever routing + injected model + mode.
+                retriever=args.retriever,
+                model=args.model,
+                query_prompt=args.query_prompt,
+                retrieval_only=args.retrieval_only,
+                db_uri=db_uri,
+            )
+        except FatalProviderError as e:
+            print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "
+                  "(a 401/402/403 means the key died; continuing would silently "
+                  "degrade the run):", file=sys.stderr)
             print(str(e), file=sys.stderr)
             raise SystemExit(1) from e
+        except ModelEncodeFailedError as e:
+            print(f"[longmem_eval] MODEL_ENCODE_FAILED: {e}", file=sys.stderr)
+            print(f"[longmem_eval] aborting this config run with exit code "
+                  f"{MODEL_ENCODE_FAILED_EXIT} (never report empty recall as a "
+                  f"result)", file=sys.stderr)
+            raise SystemExit(MODEL_ENCODE_FAILED_EXIT) from e
 
-    try:
-        outcomes, report = run_evaluation(  # noqa: RUF059
-            instances, reader=reader, judge=judge, ks=ks, top_k=top_k,
-            work_dir=args.work_dir, split=args.split,
-            checkpoint=args.checkpoint, max_retries=args.max_retries,
-            ingest_mode=args.ingest_mode, extractor_model=extractor_model,
-            workers=max(1, args.workers), preflight=preflight,
-            embedder_status=embedder_status,
-            chunk_turns=chunk_turns, max_context_tokens=context_cap,
-            max_chunks_per_session=max_chunks_per_session,
-            tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
-            tr_events=tr_events,
-            rerank=rr["rerank_on"], rerank_model=rr["model"],
-            rerank_pool=rr["rerank_pool"],
-            per_session_cap=rr["per_session_cap"],
-            mmr_lambda=rr["mmr_lambda"],
-            rerank_prewarm=rerank_prewarm,
-            dataset_fingerprint=dataset_fingerprint,
-            integrity_threshold=args.integrity_threshold,
-            integrity_justification=args.integrity_justification,
-            # #1349 vector arm: retriever routing + injected model + mode.
-            retriever=args.retriever,
-            model=args.model,
-            query_prompt=args.query_prompt,
-            retrieval_only=args.retrieval_only,
-            db_uri=db_uri,
-        )
-    except FatalProviderError as e:
-        print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "
-              "(a 401/402/403 means the key died; continuing would silently "
-              "degrade the run):", file=sys.stderr)
-        print(str(e), file=sys.stderr)
-        raise SystemExit(1) from e
-    except ModelEncodeFailedError as e:
-        print(f"[longmem_eval] MODEL_ENCODE_FAILED: {e}", file=sys.stderr)
-        print(f"[longmem_eval] aborting this config run with exit code "
-              f"{MODEL_ENCODE_FAILED_EXIT} (never report empty recall as a "
-              f"result)", file=sys.stderr)
-        raise SystemExit(MODEL_ENCODE_FAILED_EXIT) from e
-
-    out = args.output or str(default_report_path(args.split))
-    save_report(report, out)
-    _print_summary(report)
-    print(f"\nreport saved to: {out}")
-    return report
+        out = args.output or str(default_report_path(args.split))
+        save_report(report, out)
+        _print_summary(report)
+        print(f"\nreport saved to: {out}")
+        return report
+    finally:
+        if extractor_model is not None:
+            extractor_model.close()
 
 
 if __name__ == "__main__":

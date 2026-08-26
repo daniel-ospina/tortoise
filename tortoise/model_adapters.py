@@ -34,6 +34,7 @@ Taxonomy contract (M2/M3 import these — do not fork):
 """
 from __future__ import annotations
 
+import contextlib
 import enum
 import errno
 import os
@@ -472,6 +473,17 @@ class RoutingModel:
             self.failover_used = True
         return out
 
+    def close(self) -> None:
+        """Close the inner adapters (deadline interrupt — mirrors
+        RotatingModel.close; RoutingModel was missed by the #1655 fix)."""
+        for adapter in (self.primary, self.fallback):
+            if adapter is None:
+                continue
+            close = getattr(adapter, "close", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    close()
+
 
 def _strip_family_prefix(model_id: str) -> str:
     """Direct-route wire normalization (D6): ``deepseek/deepseek-chat`` →
@@ -628,6 +640,11 @@ _REGISTRY_KEY_TO_ID = {
     "deepseek-r1-xhigh": "deepseek/deepseek-r1-0528",
     "deepseek-v4-pro-xhigh": "deepseek/deepseek-v4-pro",
 }
+
+
+# Public alias — the eval harness (tools/longmem_eval/run.py) imports the
+# registry-key remap as a stable contract; keep this name public.
+REGISTRY_KEY_TO_ID = _REGISTRY_KEY_TO_ID
 
 
 def build_extractor_model(model_id: str | None = None, *,
