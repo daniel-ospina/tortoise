@@ -751,6 +751,92 @@ def _cmd_recover(args) -> int:
     return 0
 
 
+def _cmd_token_revoke(args) -> int:
+    """User-facing signup-token revocation (#1715): POST
+    /v1/agent/token/revoke with the saved (or --token) st_ token → the
+    token can no longer recover keys on the team. The request is
+    authenticated with the stored team key (env → cwd → global resolver,
+    #1708) — the same credential that proves team ownership server-side;
+    the endpoint is team-scoped, so a leaked token is killable the moment
+    it is noticed. Prints confirmation; the stored config is left intact
+    (the revoked token simply 422s on any later recover).
+    """
+    import json, os, sys  # noqa: E401, I001
+    from urllib.error import HTTPError, URLError
+    from urllib.request import Request, urlopen
+
+    token = getattr(args, "token", None) or _read_stored_signup_token()
+    if not token:
+        print("No recovery token found. Pass --token st_... or run "
+              "'tortoise signup' first.", file=sys.stderr)
+        return 1
+    try:
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Config at {e} is corrupt or unreadable — cannot authenticate "
+              "the revoke request.", file=sys.stderr)
+        return 1
+    if not api_key:
+        print("No stored API key found. Run 'tortoise signup' or "
+              "'tortoise init --api-key <key>' first — the revoke request "
+              "must be authenticated by the team's key.", file=sys.stderr)
+        return 1
+    base = (api_url or "https://api.premiselabs.co").rstrip("/")
+    print("Revoking the signup token — it can no longer recover keys on this team…")
+    try:
+        req = Request(
+            f"{base}/v1/agent/token/revoke",
+            data=json.dumps({"signup_token": token}).encode(),
+            headers={"Content-Type": "application/json",
+                     "Authorization": f"Bearer {api_key}"},
+            method="POST",
+        )
+        with urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        if e.code == 422:
+            print("Revoke failed: invalid signup token.", file=sys.stderr)
+            return 1
+        if e.code == 404:
+            print("Revoke failed: signup token not found on this team.",
+                  file=sys.stderr)
+            return 1
+        if e.code == 401:
+            print("Revoke failed (401): the stored API key was rejected. Run "
+                  "'tortoise signup' or 'tortoise init --api-key <key>'.",
+                  file=sys.stderr)
+            return 1
+        if e.code == 403:
+            sus = _suspended_info(body)
+            if sus is not None:
+                print(f"Revoke failed: {sus[0]}", file=sys.stderr)
+                return 1
+            print(f"Revoke failed (403): {body}", file=sys.stderr)
+            return 1
+        print(f"Revoke failed ({e.code}): {body}", file=sys.stderr)
+        return 1
+    except (URLError, ValueError, json.JSONDecodeError) as e:
+        print(f"Cannot reach API at {base}: {e}", file=sys.stderr)
+        return 1
+
+    if not isinstance(data, dict):
+        # #1715 fixer guard (mirrors _cmd_recover P2.2): a 200 with valid
+        # JSON but no fields must not KeyError-traceback.
+        print("Revoke may have succeeded but the response was malformed — "
+              "check the dashboard or retry once.", file=sys.stderr)
+        return 1
+    if data.get("already"):
+        print(f"ℹ️  The signup token {token[:14]}… was already revoked.")
+    else:
+        print(f"✅ Signup token {token[:14]}… revoked — it can no longer "
+              f"recover keys on this team.")
+    print("   If this was your saved recovery token, the next "
+          "'tortoise recover' or token-present signup will return an "
+          "invalid-signup-token error.")
+    return 0
+
+
 def _cmd_signup(args) -> int:
     """Zero-email signup (issue #663): mint a working tt_ key from the CLI.
 
@@ -4509,6 +4595,15 @@ def main(argv: list[str] | None = None) -> int:
         "--token", type=str, default=None,
         help="The st_ signup token (defaults to the stored one).",
     )
+    token_revoke_p = sp.add_parser(
+        "token-revoke",
+        help="Revoke the saved st_ signup token — it can no longer recover "
+             "keys on the team (#1715).",
+    )
+    token_revoke_p.add_argument(
+        "--token", type=str, default=None,
+        help="The st_ signup token (defaults to the stored one).",
+    )
     # tortoise index github <url>
     idx = sp.add_parser("index", help="Index content into the graph")
     idx_sp = idx.add_subparsers(dest="index_cmd")
@@ -4665,6 +4760,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_signup(args)
     elif args.cmd == "recover":
         return _cmd_recover(args)
+    elif args.cmd == "token-revoke":
+        return _cmd_token_revoke(args)
     elif args.cmd == "team":
         if args.team_cmd == "info":
             return _cmd_team_info(args)
