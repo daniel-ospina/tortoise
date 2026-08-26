@@ -23,7 +23,7 @@ import re
 import sys
 from pathlib import Path
 
-import pytest  # noqa: F401
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -149,8 +149,11 @@ def test_temporal_prompt_contains_date_reasoning_instructions():
     assert "Current Date" in system
     assert "days" in system  # commit to a day count, off-by-one acceptable
     # the hedge license is scoped to genuinely-lacking context, never for
-    # dated evidence: the type fragment tells the reader to commit
-    assert "do not hedge" in system
+    # dated evidence: the temporal fragment's OWN commit phrasing pins it
+    # ('do not hedge' also appears in the generic prompt — not a
+    # discriminator, review finding #1762)
+    assert "Commit to a specific numeric answer" in system
+    assert "do not hedge or refuse when the dated evidence" in system
 
 
 def test_preference_prompt_contains_option_commitment_instructions():
@@ -160,8 +163,10 @@ def test_preference_prompt_contains_option_commitment_instructions():
     system = r._model.calls[0][0]
     assert "preference" in system.lower()
     assert "option" in system.lower()
-    # no hedge license when the preference is in context
-    assert "do not hedge" in system
+    # the preference fragment's OWN commit phrasing pins the option
+    # commitment ('do not hedge' also appears in the generic prompt — not
+    # a discriminator, review finding #1762)
+    assert "commit to the specific option" in system
 
 
 def test_temporal_prompt_preserves_abstention_license():
@@ -173,8 +178,11 @@ def test_temporal_prompt_preserves_abstention_license():
              question="q", question_date="2025-06-15",
              question_type="temporal-reasoning")
     system = r._model.calls[0][0]
-    assert "commit" in system.lower()  # commit-first for evidence-present
-    assert "dated evidence" in system.lower()  # … but abstain when the
+    # commit-first for evidence-present — the temporal fragment's OWN
+    # phrasing ('commit' also appears in the A1 clause — not a
+    # discriminator, review finding #1762)
+    assert "Commit to a specific numeric answer" in system
+    assert "no dated evidence" in system.lower()  # … but abstain when the
     # event is absent from the dated context (judge requires markers)
 
 
@@ -188,11 +196,27 @@ def test_untouched_types_keep_generic_prompt():
                                 "has_answer": True}],
                  question="q", question_type=qt)
         system = r._model.calls[-1][0]
-        # the generic hardened prompt (no type-specific fragment for
-        # untouched types)
-        assert system == _SYSTEM_PROMPT or system.startswith(_SYSTEM_PROMPT)
-        assert "supersed" not in system.lower()
-        assert "aggregate" not in system.lower()
+        # the generic hardened prompt + the universal A1 clause — NO
+        # type-specific fragment for untouched types. Exact equality (not
+        # startswith — that tautology held unconditionally): a leaked
+        # temporal/preference/KU/MSR fragment would break this assert
+        # (exact equality also implies the supersed/aggregate vocabulary
+        # stays out — those substring checks were dead weight).
+        assert system == _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
+
+
+def test_type_fragments_append_after_universal_clause():
+    """#1762 review: the prompt assembly ORDER is pinned — the universal
+    A1 clause comes BEFORE the type fragment for touched types (the
+    type-specific instruction must land last, most salient). A reorder
+    that appended A1 after the fragment would pass every substring assert,
+    so exact-equality pins both touched types."""
+    assert system_prompt_for("temporal-reasoning") == \
+        _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT + \
+        _TYPE_FRAGMENTS["temporal-reasoning"]
+    assert system_prompt_for("single-session-preference") == \
+        _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT + \
+        _TYPE_FRAGMENTS["single-session-preference"]
 
 
 # ── 3. Behavior: the improved prompt fixes the hedge (red→green) ──────────
@@ -228,7 +252,20 @@ def test_temporal_question_answered_from_dates_end_to_end(tmp_path):
     """Full loop (ingest → retrieve → reader → MockJudge) with a
     prompt-faithful reader: the temporal fragment makes it compute
     "3 days ago" from Current Date vs session date (off-by-one tolerated by
-    the official judge); without the fragment it would hedge and fail."""
+    the official judge); without the fragment it would hedge and fail
+    (red leg proves the fragment is what unlocks the answer)."""
+    class _FragmentlessTemporalModel(_PromptFaithfulModel):
+        def complete(self, *, system, user):
+            # strip the type fragment so the fake takes the hedge branch
+            return super().complete(
+                system=system.replace("TEMPORAL REASONING INSTRUCTIONS", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_temporal_question()], reader=LLMReader(_FragmentlessTemporalModel(),
+                                                 model_id="pre-fragment"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False          # red: hedges without it
     reader = LLMReader(_PromptFaithfulModel(), model_id="prompt-faithful")
     outcomes, report = run_evaluation(
         [_temporal_question()], reader=reader, judge=MockJudge(),
@@ -244,7 +281,22 @@ def test_temporal_question_answered_from_dates_end_to_end(tmp_path):
 def test_preference_question_answered_from_option_end_to_end(tmp_path):
     """Full loop with a prompt-faithful reader: the preference fragment
     makes it commit to the user's stated option; without it it would hedge
-    and fail."""
+    and fail (red leg proves the fragment is what unlocks the answer)."""
+    class _FragmentlessPreferenceModel(_PromptFaithfulModel):
+        def complete(self, *, system, user):
+            # strip the type fragment so the fake takes the hedge branch
+            # ('preference' appears in both cases — strip both)
+            return super().complete(
+                system=system.replace("PREFERENCE", "X").replace(
+                    "preference", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_preference_question()],
+        reader=LLMReader(_FragmentlessPreferenceModel(),
+                         model_id="pre-fragment"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False          # red: hedges without it
     reader = LLMReader(_PromptFaithfulModel(), model_id="prompt-faithful")
     outcomes, report = run_evaluation(
         [_preference_question()], reader=reader, judge=MockJudge(),
@@ -291,7 +343,7 @@ def test_render_context_carries_dates_for_temporal_reader():
     assert out == "3 days ago"
 
 
-# ── 6. A1: partial-knowledge abstention clause (#1546) ────────────────────
+# ── 6. A1: partial-knowledge abstention clause (#1546, tightened #1762) ──
 
 _ABS_QUESTION = {
     "question_id": "pt_abs_001_abs",
@@ -327,22 +379,58 @@ def test_abstention_clause_present_for_all_question_types():
 
 def test_abstention_clause_keeps_commit_side_guard():
     """A1 must not re-license the #1366 hedge: when the exact fact IS
-    present the reader must answer directly, never abstain."""
+    present the reader must answer directly, never abstain. #1762: the
+    guard is now mid-sentence ('answer directly and concretely with it.
+    Do NOT abstain…') so the marker assert is case-insensitive — the
+    guard itself is unchanged in intent. ('exact information' alone is
+    the literal-match phrase that caused the #1762 over-abstention, so it
+    is NOT asserted as the discriminator — the commit directive is.)"""
     clause = _ABSTRACTION_FRAGMENT
-    assert "do NOT abstain" in clause
-    assert "exact information" in clause
+    assert "do not abstain" in clause.lower()
+    assert "answer directly and concretely with it" in clause.lower()
+
+
+def test_abstention_clause_commits_on_present_value_any_phrasing():
+    """#1762: the A1 commit test is the asked VALUE, not the wording — a
+    present-but-differently-phrased value is the answer, never 'related
+    information' (pilot finding #3, 6f9b354f: evidence_recall@20 = 1.0 yet
+    the reader answered 'does not mention repainting…')."""
+    clause = _ABSTRACTION_FRAGMENT
+    low = clause.lower()
+    assert "not whether it echoes the question's wording" in low
+    assert "in any phrasing, it is the answer" in low
+    # the hedge formulation is forbidden when the value IS the answer
+    # (pilot 8a137a7f: the gold string sat inside the hedge)
+    assert "forbidden when x is the answer" in low
+    assert "never frame the answer value" in low
+    # overshoot guard (#1762 review finding): a mention is only the
+    # answer when the context states it as the fact — negated/rejected/
+    # hypothetical mentions must not be committed to
+    assert "negated, rejected, or hypothetical" in low
+    assert "do not weaken your answer" in low
+
+
+def test_abstention_clause_scopes_abstention_to_true_gaps():
+    """#1762: abstention is reserved for genuine evidence gaps (vacuity) —
+    the decoy guard and the evidence-backed abstention branch stay intact."""
+    clause = _ABSTRACTION_FRAGMENT
+    low = clause.lower()
+    assert "genuinely absent" in low          # vacuity-only abstention
+    assert "do not commit to a near-miss decoy" in low
+    assert "explicitly state that the asked information is absent" in low
+    assert "is present" in low                # states what IS present
+    assert "contains nothing related" in low  # terminal vacuity branch
 
 
 def test_abstention_clause_never_keyed_on_abs():
     """No prompt/fragment text references the _abs convention — the clause
-    is evidence-derived by construction."""
+    is evidence-derived by construction. (The universal-section identity —
+    an abstention question gets the identical prompt as its non-abstention
+    twin — is covered by test_untouched_types_keep_generic_prompt, which
+    asserts the same equality for the abstention-questions' raw type.)"""
     all_text = _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT + \
         "".join(_TYPE_FRAGMENTS.values())
     assert "_abs" not in all_text
-    # an abstention question gets the identical universal section as its
-    # non-abstention twin of the same type
-    assert system_prompt_for("single-session-user") == \
-        _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
 
 
 class _EvidenceBackedAbstainingModel:
@@ -399,6 +487,413 @@ def test_decoy_commit_negative(tmp_path):
         judge=MockJudge(), ks=(5,), top_k=20, split="s",
         work_dir=str(tmp_path))
     assert post[0][0]["label"] is True          # green: clause present
+    hyp = post[0][0]["hypothesis"]
+    assert "bicycle" in hyp   # evidence-backed, not a content-free hedge
+    assert "does not contain" in hyp
+
+
+# ── #1762: commitment calibration on full evidence (pilot finding #3) ─────
+# The V3 pilot's 4/4 fresh failures were reader over-abstention: the asked
+# VALUE was fully in context yet the reader hedged ('does not mention…' /
+# gold string inside a 'mentions X but does not contain…' hedge). These
+# lock the tightening: full-evidence contexts commit; the hedge formulation
+# never carries the answer value; genuine gaps still abstain (covered by
+# test_clean_abstention_evidence_backed_end_to_end above).
+
+
+def _overabstention_question() -> dict:
+    """Mirrors pilot 6f9b354f: the asked value ('a lighter shade of gray')
+    is fully in the retrieved context, but the context does not echo the
+    question's verb ('repaint') — the pre-#1762 clause read that as a
+    literal-match miss and abstained."""
+    return {
+        "question_id": "pt_commit_001",
+        "question_type": "single-session-user",
+        "question": "What color did Ava repaint her bedroom walls?",
+        "answer": "a lighter shade of gray",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": ["sess-1"],
+        "haystack_sessions": [[
+            {"role": "user", "content": "I painted the walls a lighter "
+             "shade of gray for a calming effect.", "has_answer": True},
+            {"role": "assistant", "content": "That sounds relaxing."},
+        ]],
+    }
+
+
+class _CommitOnPresentValueModel:
+    """Fake reproducing the pilot's over-abstention: the asked VALUE is in
+    context but phrased differently from the question, and the reader
+    hedges. The green branch is CONTEXT-READING — it parses the value out
+    of the rendered context (proving the retrieval→render pipeline
+    delivered it), so the hypothesis assertions are not tautological; the
+    red branch simulates the pre-#1762 hedge (pilot 6f9b354f's 'lighter
+    gray walls' paraphrase, chosen so it does NOT embed the golden
+    string)."""
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "forbidden when X is the answer" not in system:
+            # pre-#1762: the differently-phrased value is treated as
+            # related information, so the reader over-abstains
+            return ("The memory mentions lighter gray walls, but it does "
+                    "not contain the asked information.")
+        # #1762: the value in context IS the answer — commit directly.
+        # Context-reading on purpose: if the rendered context ever stops
+        # carrying the value (retrieval/render regression), the regex
+        # misses and the fake falls back to the pre-#1762 hedge — the
+        # assertions fail loudly instead of passing on a hardcoded gold.
+        m = re.search(r"painted the walls (.+?) for ", user)
+        if not m:
+            return ("The memory mentions lighter gray walls, but it does "
+                    "not contain the asked information.")
+        return m.group(1).strip()
+
+
+def test_present_value_commits_end_to_end(tmp_path):
+    """#1762 red→green: on FULL evidence the reader commits instead of
+    over-abstaining. Without the tightening the fake reproduces the pilot's
+    hedge and MockJudge scores it wrong; with it the reader answers with
+    the value and passes."""
+    class _PreCommitModel(_CommitOnPresentValueModel):
+        def complete(self, *, system, user):
+            # strip the #1762 tightening so the fake takes the pre-#1762
+            # branch (the code now ships the tightened clause)
+            return super().complete(
+                system=system.replace("forbidden when X is the answer", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_overabstention_question()],
+        reader=LLMReader(_PreCommitModel(), model_id="pre-1762"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False          # red: over-abstention
+    post = run_evaluation(
+        [_overabstention_question()],
+        reader=LLMReader(_CommitOnPresentValueModel(), model_id="post-1762"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert post[0][0]["label"] is True          # green: commits
+    hyp = post[0][0]["hypothesis"]
+    # value alone — no decoy bleed, no hedge framing (#1762 review:
+    # 'do not weaken your answer with unrelated material')
+    assert hyp == "a lighter shade of gray"
+    assert "does not contain" not in hyp
+
+
+_NON_ANSWER_MENTIONS = {
+    "negated": "I never painted the walls gray — that color was never "
+                "part of the plan.",
+    "rejected": "Gray was ruled out for the walls — I would not want it.",
+    "hypothetical": "If I ever painted the walls gray, it would be too "
+                     "dark for the room.",
+}
+
+
+def _non_answer_mention_question(turn: str) -> dict:
+    """Overshoot guard (#1762 review finding): the value string ('gray')
+    appears in the context but is NOT the fact (negated / rejected /
+    hypothetical) — the tightened 'in any phrasing' commit rule must not
+    apply to a mention that is not the answer. Framed as an abstention
+    question so MockJudge scores the evidence-backed abstention."""
+    return {
+        "question_id": "pt_commit_003_abs",
+        "question_type": "single-session-user",
+        "question": "What color did Ava repaint her bedroom walls?",
+        "answer": "The user never mentioned repainting the bedroom walls.",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": [],
+        "haystack_sessions": [[
+            {"role": "user", "content": turn, "has_answer": False},
+        ]],
+    }
+
+
+class _NonAnswerMentionModel:
+    """Overshoot guard fake: with the guard sentence the reader abstains
+    on a value mention that is negated/rejected/hypothetical
+    (context-reading: it finds the mention pattern in the rendered
+    context); without it, the 'in any phrasing' commit rule commits to the
+    non-answer value — the hallucination the #1762 calibration must not
+    introduce."""
+
+    _NON_ANSWER = re.compile(
+        r"never painted the walls|ruled out for the walls|"
+        r"If I ever painted the walls")
+
+    def complete(self, *, system: str, user: str) -> str:
+        # gate on the OPERATIVE rule ('must not be committed to'), not the
+        # topic phrase — a rule-weakening that keeps 'negated, rejected,
+        # or hypothetical' must flip this branch red (review #1762)
+        guarded = ("must not be committed to" in system
+                   and self._NON_ANSWER.search(user))
+        if guarded:
+            return ("The memory does not mention repainting the bedroom "
+                    "walls.")
+        return "gray"  # pre-guard: commits to the non-answer value
+
+
+@pytest.mark.parametrize("turn",
+                         [pytest.param(v, id=k)
+                          for k, v in _NON_ANSWER_MENTIONS.items()])
+def test_non_answer_mention_not_committed(tmp_path, turn):
+    """#1762 overshoot guard red→green: a value that appears in the
+    context but is negated/rejected/hypothetical is NOT the answer — the
+    reader abstains, never commits (the tightening must not license
+    hallucination)."""
+    class _PreGuardModel(_NonAnswerMentionModel):
+        def complete(self, *, system, user):
+            # strip the guard sentence so the fake takes the pre-guard
+            # branch (commits to the non-answer value)
+            return super().complete(
+                system=system.replace(
+                    "Only commit when the context states the value as the "
+                    "fact the question asks about — a negated, rejected, "
+                    "or hypothetical mention does not answer the question "
+                    "and must not be committed to.", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_non_answer_mention_question(turn)],
+        reader=LLMReader(_PreGuardModel(), model_id="pre-guard"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False    # red: commits the non-answer
+    post = run_evaluation(
+        [_non_answer_mention_question(turn)],
+        reader=LLMReader(_NonAnswerMentionModel(), model_id="post-guard"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert post[0][0]["label"] is True    # green: evidence-backed
+    hyp = post[0][0]["hypothesis"]        # abstention
+    assert "does not mention" in hyp
+    assert "gray" not in hyp.lower()      # no commit to the non-answer
+
+
+def test_fake_commit_branch_keys_on_operative_rule():
+    """Test-sensitivity guard (#1762 review): the fake's commit branch must
+    key on the OPERATIVE rule, not mere marker presence. Mutating the rule
+    (removing the hedge ban) while keeping the rest of the clause flips the
+    fake to its pre-#1762 hedge branch — so a semantic regression that
+    preserves the pinned phrases would be caught by the e2e tests."""
+    user = ("[user] I painted the walls a lighter shade of gray for a "
+            "calming effect.")
+    mutated = system_prompt_for("single-session-user").replace(
+        "forbidden when X is the answer", "allowed when X is the answer")
+    assert "does not contain" in _CommitOnPresentValueModel().complete(
+        system=mutated, user=user)             # rule removed → hedges
+    assert "a lighter shade of gray" in _CommitOnPresentValueModel().complete(
+        system=system_prompt_for("single-session-user"), user=user)
+
+
+def test_guard_branch_keys_on_operative_rule():
+    """Test-sensitivity guard (#1762 review): the overshoot-guard fake must
+    key on the operative rule ('must not be committed to'), not the topic
+    phrase — mutating the rule flips the fake to its pre-guard commit, so a
+    rule-weakening regression fails loudly instead of passing."""
+    user = ("[user] I never painted the walls gray — that color was never "
+            "part of the plan.")
+    mutated = system_prompt_for("single-session-user").replace(
+        "must not be committed to.", "may be committed to.")
+    assert "gray" in _NonAnswerMentionModel().complete(
+        system=mutated, user=user)             # rule weakened → commits
+    assert "does not mention" in _NonAnswerMentionModel().complete(
+        system=system_prompt_for("single-session-user"), user=user)
+
+
+def _vacuity_question() -> dict:
+    """Terminal vacuity branch (#1762 review finding): the context
+    contains NOTHING related to the asked attribute — the reader must
+    abstain rather than fabricate. Framed as an abstention question."""
+    return {
+        "question_id": "pt_commit_004_abs",
+        "question_type": "single-session-user",
+        "question": "What color did Ava repaint her bedroom walls?",
+        "answer": "The user never mentioned repainting the bedroom walls.",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": [],
+        "haystack_sessions": [[
+            {"role": "user", "content": "I just bought a new bicycle.",
+             "has_answer": False},
+        ]],
+    }
+
+
+class _VacuityModel:
+    """Terminal-branch fake — CONTEXT-READING: abstains on a genuinely
+    empty context (nothing related), commits to the asked value when the
+    context states it (control: not unconditional abstention), fabricates
+    without the clause."""
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "PARTIAL-KNOWLEDGE ABSTENTION" not in system:
+            return "gray"  # pre-A1: fabricates a value from nothing
+        m = re.search(r"painted the walls (.+?) for ", user)
+        if m:
+            return m.group(1).strip()  # value present → commit (control)
+        return ("The memory does not mention repainting the bedroom "
+                "walls.")
+
+
+def test_empty_context_abstains_not_fabricates(tmp_path):
+    """#1762 terminal vacuity branch: with NOTHING related in context the
+    reader abstains ('does not mention') — never fabricates a value. Note:
+    the clause's literal terminal phrasing ('the asked information is
+    absent') is not in MockJudge's marker list (judge.py is outside this
+    change's files), so the fake uses the marker-compatible 'does not
+    mention' formulation the judge scores."""
+    class _PreClauseModel(_VacuityModel):
+        def complete(self, *, system, user):
+            # strip the A1 marker so the fake takes the pre-A1 branch
+            return super().complete(
+                system=system.replace("PARTIAL-KNOWLEDGE ABSTENTION", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_vacuity_question()], reader=LLMReader(_PreClauseModel(),
+                                                model_id="pre-a1"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False       # red: fabrication
+    post = run_evaluation(
+        [_vacuity_question()], reader=LLMReader(_VacuityModel(),
+                                                model_id="vacuity"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert post[0][0]["label"] is True       # green: abstains
+    hyp = post[0][0]["hypothesis"]
+    assert "does not mention" in hyp
+    assert "gray" not in hyp.lower()         # no fabricated value
+    # control: the fake is not unconditionally abstaining — with the value
+    # in the rendered context it commits (the green leg depends on the
+    # context being empty, not on the clause marker alone)
+    ctrl = _VacuityModel().complete(
+        system=system_prompt_for("single-session-user"),
+        user="[user] I painted the walls a lighter shade of gray for a "
+             "calming effect.")
+    assert ctrl == "a lighter shade of gray"
+
+
+def _mixed_mention_question() -> dict:
+    """Commit + overshoot guard interaction (#1762 review): the context
+    holds BOTH a negated mention of the value AND the affirmative fact —
+    the reader must commit to the affirmative fact, not let the negation
+    trigger abstention (the over-abstention class this issue fixes)."""
+    return {
+        "question_id": "pt_commit_005",
+        "question_type": "single-session-user",
+        "question": "What color did Ava repaint her bedroom walls?",
+        "answer": "a lighter shade of gray",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": ["sess-1"],
+        "haystack_sessions": [[
+            {"role": "user", "content": "I never painted the walls gray "
+             "— that was never the plan.", "has_answer": False},
+            {"role": "user", "content": "I painted the walls a lighter "
+             "shade of gray for a calming effect.", "has_answer": True},
+        ]],
+    }
+
+
+def test_mixed_negated_and_affirmative_commits(tmp_path):
+    """#1762: when the context carries BOTH a negated mention and the
+    affirmative fact, the reader commits to the fact — the negation must
+    not trigger abstention. Uses the context-reading
+    _CommitOnPresentValueModel: its regex matches the affirmative 'painted
+    the walls <value> for ' phrase, so the hypothesis is the value read
+    from the rendered context."""
+    reader = LLMReader(_CommitOnPresentValueModel(), model_id="commit")
+    outcomes, _ = run_evaluation(
+        [_mixed_mention_question()], reader=reader, judge=MockJudge(),
+        ks=(5,), top_k=20, split="s", work_dir=str(tmp_path))
+    assert outcomes[0]["label"] is True
+    hyp = outcomes[0]["hypothesis"]
+    assert hyp == "a lighter shade of gray"
+    assert "does not contain" not in hyp
+    assert "does not mention" not in hyp
+
+
+def _hedge_embedding_question() -> dict:
+    """Mirrors pilot 8a137a7f: the gold string ('Philips LED bulb') is in
+    the context and inside the hypothesis, but framed as a hedge — the
+    official judge rejects that under the subset rule ('if the response
+    only contains a subset of the information required by the answer')."""
+    return {
+        "question_id": "pt_commit_002",
+        "question_type": "single-session-user",
+        "question": "Which bulb did Ava replace in her bedside lamp?",
+        "answer": "Philips LED bulb",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": ["sess-1"],
+        "haystack_sessions": [[
+            {"role": "assistant", "content": "Did you replace the bulb?",
+             "has_answer": False},
+            {"role": "user", "content": "Yes, with the Philips LED bulb.",
+             "has_answer": True},
+        ]],
+    }
+
+
+class _HedgeEmbeddingModel:
+    """Fake reproducing pilot 8a137a7f: the gold string sits INSIDE the
+    hedge ('mentions a Philips LED bulb… but it does not contain any
+    information about replacing it'). The green branch is CONTEXT-READING
+    (parses the bulb value out of the rendered context); the red branch is
+    the pre-#1762 hedge with the gold embedded."""
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "forbidden when X is the answer" not in system:
+            return ("The memory mentions a Philips LED bulb in your "
+                    "bedside lamp, but it does not contain any information "
+                    "about replacing it.")
+        # #1762: state the value as the answer, never as a hedge.
+        # Context-reading on purpose: if the rendered context ever stops
+        # carrying the bulb value, the regex misses and the fake falls
+        # back to the pre-#1762 hedge — the assertions fail loudly.
+        m = re.search(r"with the (.+?)\.", user)
+        if not m:
+            return ("The memory mentions a Philips LED bulb in your "
+                    "bedside lamp, but it does not contain any information "
+                    "about replacing it.")
+        return m.group(1).strip()
+
+
+def test_hedge_never_embeds_the_answer_value(tmp_path):
+    """#1762: the 'mentions X but does not contain the asked information'
+    formulation must not be used when X is the answer (pilot 8a137a7f —
+    the official judge rejects that under its subset rule). MockJudge uses
+    plain containment (the embedded gold would pass it — the subset rule
+    is judge-side, outside this change's files), so the discriminating
+    assertion is the hypothesis TEXT: the red branch wraps the answer in
+    the hedge, the green branch states it directly."""
+    class _PreHedgeModel(_HedgeEmbeddingModel):
+        def complete(self, *, system, user):
+            # strip the #1762 tightening so the fake takes the pre-#1762
+            # branch (gold string inside the hedge)
+            return super().complete(
+                system=system.replace("forbidden when X is the answer", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_hedge_embedding_question()],
+        reader=LLMReader(_PreHedgeModel(), model_id="pre-1762"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert "does not contain" in pre[0][0]["hypothesis"]  # red: hedge
+    reader = LLMReader(_HedgeEmbeddingModel(), model_id="hedge-faithful")
+    outcomes, _ = run_evaluation(
+        [_hedge_embedding_question()], reader=reader, judge=MockJudge(),
+        ks=(5,), top_k=20, split="s", work_dir=str(tmp_path))
+    hyp = outcomes[0]["hypothesis"]
+    assert "Philips LED bulb" in hyp
+    assert "does not contain" not in hyp   # green: no hedge framing
+    assert outcomes[0]["label"] is True
 
 
 def test_abs_never_crosses_reader_call_site(tmp_path):
