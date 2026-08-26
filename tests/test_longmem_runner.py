@@ -187,6 +187,13 @@ def test_outcomes_to_report_golden_shape():
         "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
         "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "n_ingest_errors": 0,
+        "ingest_error_text": None,
+        # #1746 (D7): llm telemetry + recovery ride the outcome (the
+        # truncated_valid readout's source).
+        "llm_calls": 3,
+        "llm_retries": 1,
+        "llm_truncated": 0,
+        "recovery": {"sanitize": 0, "repair": 0},
         "context_tokens": 120,
         "context_point_count": 3,
         "retrieval_latency_ms": 11.0,
@@ -327,6 +334,11 @@ def test_outcomes_to_report_golden_shape():
         "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
         "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "n_ingest_errors": 0,
+        "ingest_error_text": None,
+        "llm_calls": 3,
+        "llm_retries": 1,
+        "llm_truncated": 0,
+        "recovery": {"sanitize": 0, "repair": 0},
         "context_tokens": 120,
         # M8 (#1528, D6): the projection now carries the live graph point
         # count (was present per-outcome but stripped) — the compare
@@ -369,6 +381,109 @@ def test_outcomes_to_report_golden_shape():
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
+
+
+def test_report_truncation_readout_warning_only():
+    """#1746 (D7): a truncated-but-clean question is LISTED in
+    ``integrity.truncated_valid_qids`` (warning-only — ``valid`` stays true,
+    never an ``error_census`` entry); a truncated question WITH an error
+    class is NOT listed (it is already recorded via the census)."""
+    ok = {
+        "question_id": "q-trunc-valid", "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0,
+        "ingest_error_text": None,
+        "llm_calls": 3, "llm_retries": 0, "llm_truncated": 1,
+        "recovery": {},
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    invalid = dict(ok)
+    invalid["question_id"] = "q-trunc-invalid"
+    invalid["n_ingest_errors"] = 1
+    invalid["valid"] = False
+    invalid["error_classes"] = {"truncated_parse_error": 1}
+    report = outcomes_to_report(
+        [ok, invalid], reader_model="r", judge_model="j", ks=(5,),
+        top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    integ = report["integrity"]
+    # the truncated-CLEAN question is listed warning-only; the truncated-
+    # INVALID one is recorded via its census class, not the list.
+    assert integ["truncated_valid_qids"] == ["q-trunc-valid"]
+    assert integ["n_truncated_valid"] == 1
+    # the invalid question's truncation IS in the census (recorded, not
+    # silently lost) — the readout only lists the CLEAN truncated ones.
+    assert integ["error_census"].get("truncated_parse_error") == 1
+    assert integ["valid"] is True  # recoverable, within threshold 1.0
+    assert integ["n_valid"] == 1
+    # the truncated-valid outcome's llm fields ride the Layer-1 projection.
+    pub = next(o for o in report["outcomes"]
+               if o.get("question_id") == "q-trunc-valid")
+    assert pub["llm_truncated"] == 1
+    assert pub["valid"] is True
+    # a clean question WITHOUT truncation is never listed.
+    report2 = outcomes_to_report(
+        [ok], reader_model="r", judge_model="j", ks=(5,), top_k=5,
+        split="s", dataset_semantics_audit=_trusted_audit(),
+        integrity_threshold=0.0)
+    assert report2["integrity"]["truncated_valid_qids"] == ["q-trunc-valid"]
+    report3 = outcomes_to_report(
+        [dict(ok, llm_truncated=0)], reader_model="r", judge_model="j",
+        ks=(5,), top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=0.0)
+    assert report3["integrity"]["truncated_valid_qids"] == []
+
+
+def test_census_equality_integration_mixed_outcomes():
+    """#1746 (D9, criterion 2): on a synthetic mixed-error outcome set —
+    per-question ``n_ingest_errors == sum(error_classes.values())`` and the
+    report-level ``integrity.error_census`` is the exact Σ of the per-
+    question error classes; ``valid`` is false exactly on questions with
+    error classes."""
+    base = {
+        "question_id": "q", "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0,
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    q1 = dict(base, question_id="q1")
+    q2 = dict(base, question_id="q2", n_ingest_errors=2, valid=False,
+              error_classes={"parse_error": 1, "s1_chunk_summary": 1},
+              ingest_error_text="S2 failed: _ParseError: x")
+    q3 = dict(base, question_id="q3", n_ingest_errors=1, valid=False,
+              error_classes={"truncated_parse_error": 1},
+              ingest_error_text="S4 failed: _ParseError: y")
+    report = outcomes_to_report(
+        [q1, q2, q3], reader_model="r", judge_model="j", ks=(5,),
+        top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=0.0)
+    for o in report["outcomes"]:
+        ec = o.get("error_classes") or {}
+        assert o.get("n_ingest_errors") == sum(ec.values())
+        assert o.get("valid") == (sum(ec.values()) == 0)
+    assert report["integrity"]["error_census"] == {
+        "parse_error": 1, "s1_chunk_summary": 1,
+        "truncated_parse_error": 1}
+    assert report["integrity"]["n_valid"] == 1
+    assert report["integrity"]["n_invalid"] == 2
 
 
 def test_breaker_drop_published_outcomes_grade_clean():

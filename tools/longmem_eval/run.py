@@ -1681,6 +1681,13 @@ def run_evaluation(
                 "ingest": ingest_stats,
                 "n_ingest_errors": len(ingest_errors),
                 "ingest_error_text": (ingest_errors or [None])[0],
+                # #1746 (D7): the per-question LLM telemetry + recovery
+                # counters — the report's warning-only truncation readout
+                # (criterion 3: no UNRECORDED truncation with valid=true).
+                "llm_calls": (ingest_stats.get("llm") or {}).get("calls", 0),
+                "llm_retries": (ingest_stats.get("llm") or {}).get("retries", 0),
+                "llm_truncated": (ingest_stats.get("llm") or {}).get("truncated", 0),
+                "recovery": ingest_stats.get("recovery", {}),
                 "session_recall@k": ret["session_recall@k"],
                 "turn_recall@k": ret["turn_recall@k"],
                 "evidence_recall@k": ret.get("evidence_recall@k"),
@@ -1918,7 +1925,11 @@ def outcomes_to_report(
                 "hypothesis", "session_recall@k", "turn_recall@k",
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
-                "n_ingest_errors", "context_tokens",
+                "n_ingest_errors", "ingest_error_text",
+                # #1746 (D7): llm telemetry + recovery ride the Layer-1
+                # projection — the truncated_valid readout consumes them.
+                "llm_calls", "llm_retries", "llm_truncated", "recovery",
+                "context_tokens",
                 # #1349 vector arm: the gate's per-question metrics ride the
                 # Layer-1 projection (extract_report in gate_1349.py reads
                 # them from the report's outcomes) + the breaker-open dropped

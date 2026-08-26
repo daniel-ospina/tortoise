@@ -1055,6 +1055,17 @@ def build_report(
                        for s in acc):
                 acc.append(stored)
     error_census = dict(sorted(census.items(), key=lambda kv: str(kv[0])))
+    # #1746 (D7): the warning-only truncation readout — every truncated
+    # question is either in an error class (invalid) or listed here
+    # (criterion 3 structural: no UNRECORDED truncation with valid=true).
+    # Grade-based (``_outcome_grade == "clean"``) so the readout agrees
+    # with the report's own verdict semantics (a malformed valid flag never
+    # launders a question into the list); legacy checkpoints without llm
+    # telemetry project None → ``or 0`` keeps them excluded.
+    truncated_valid_qids = [
+        o.get("question_id") for o in outcomes
+        if (o.get("llm_truncated") or 0) > 0 and _outcome_grade(o) == "clean"
+    ]
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -1106,6 +1117,13 @@ def build_report(
         "error_census_malformed": (dict(sorted(malformed_census.items(),
                                                 key=lambda kv: str(kv[0])))
                                     if malformed_census else {}),
+        # #1746 (D7): warning-only — a truncated question with no error
+        # classes is LISTED here (never in ``error_census``; ``valid``
+        # unaffected). A non-empty list is a #1747-flagged observation
+        # (benign truncation recovered by the ladder is legitimate), never
+        # a close-blocker by itself.
+        "truncated_valid_qids": truncated_valid_qids,
+        "n_truncated_valid": len(truncated_valid_qids),
         "criterion": (
             "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
             "(n_excluded_hard == 0) AND (invalid_rate <= threshold) AND "
