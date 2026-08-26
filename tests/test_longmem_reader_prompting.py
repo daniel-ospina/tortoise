@@ -650,10 +650,10 @@ def test_non_answer_mention_not_committed(tmp_path, turn):
             # branch (commits to the non-answer value)
             return super().complete(
                 system=system.replace(
-                    "Only commit when the context states the value as the "
-                    "fact the question asks about — a negated, rejected, "
-                    "or hypothetical mention does not answer the question "
-                    "and must not be committed to.", "X"),
+                    "A mere mention is not the answer: a negated, "
+                    "rejected, or hypothetical mention, or a different "
+                    "value for the asked attribute, does not answer the "
+                    "question and must not be committed to.", "X"),
                 user=user)
     pre = run_evaluation(
         [_non_answer_mention_question(turn)],
@@ -775,6 +775,74 @@ def test_empty_context_abstains_not_fabricates(tmp_path):
         user="[user] I painted the walls a lighter shade of gray for a "
              "calming effect.")
     assert ctrl == "a lighter shade of gray"
+
+
+def _near_miss_question() -> dict:
+    """Same-attribute near-miss (E2E-7 intent, code review #1768): the
+    context ADDRESSES the asked attribute with a DIFFERENT value ('muted
+    blue') — the asked value is absent, so the reader must abstain
+    evidence-backed, never commit the near-miss. The vacuity-only license
+    ('nothing addresses the attribute') would deadlock the commit/abstain
+    decision and push a commit of the near-miss value."""
+    return {
+        "question_id": "pt_commit_006_abs",
+        "question_type": "single-session-user",
+        "question": "What color did Ava repaint her bedroom walls?",
+        "answer": "The user never mentioned repainting the bedroom walls.",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": [],
+        "haystack_sessions": [[
+            {"role": "user", "content": "I painted the walls muted blue "
+             "— a calming tone.", "has_answer": False},
+        ]],
+    }
+
+
+class _NearMissModel:
+    """Near-miss license fake: with the corrected license (near-miss
+    information is abstention-licensed) the reader abstains on a
+    same-attribute different-value context; with the vacuity-only license
+    it commits the near-miss value (the confident-wrong class)."""
+
+    def complete(self, *, system: str, user: str) -> str:
+        del user
+        if "holds related or near-miss information" in system:
+            return ("The memory mentions muted blue walls, but it does not "
+                    "contain the asked information.")
+        return "muted blue"  # vacuity-only license: commits the near-miss
+
+
+def test_near_miss_same_attribute_abstains(tmp_path):
+    """#1762 review (E2E-7 intent): a DIFFERENT value for the asked
+    attribute in context is not the answer — the reader abstains
+    evidence-backed, never commits the near-miss."""
+    class _PreLicenseModel(_NearMissModel):
+        def complete(self, *, system, user):
+            # strip the corrected license so the fake takes the
+            # vacuity-only branch (commits the near-miss)
+            return super().complete(
+                system=system.replace(
+                    "Abstain when the asked value is genuinely absent — "
+                    "whether the context is empty, unrelated, or holds "
+                    "related or near-miss information", "X"),
+                user=user)
+    pre = run_evaluation(
+        [_near_miss_question()], reader=LLMReader(_PreLicenseModel(),
+                                                  model_id="pre-license"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False       # red: commits the near-miss
+    post = run_evaluation(
+        [_near_miss_question()], reader=LLMReader(_NearMissModel(),
+                                                  model_id="post-license"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert post[0][0]["label"] is True       # green: evidence-backed
+    hyp = post[0][0]["hypothesis"]           # abstention
+    assert "muted blue" in hyp               # states what IS present
+    assert "does not contain" in hyp         # … and that asked is absent
 
 
 def _mixed_mention_question() -> dict:
