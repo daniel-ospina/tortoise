@@ -992,3 +992,57 @@ class TestCmdRecover:
         err = capsys.readouterr().err
         assert "malformed" in err
         assert "Traceback" not in err
+
+    def test_recover_uses_config_api_url(self, monkeypatch, tmp_path):
+        """#1749: the recover POST URL must come from the stored config's
+        api_url (resolver chain), NOT the env-only default host — with a
+        config api_url on a non-default host, recovery used to POST to prod
+        and 422'd "invalid signup token" with misleading guidance."""
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_key", "api_url": "http://localhost:8010",
+            "team_id": "team-9", "signup_token": "st_" + "ef" * 32}))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = lambda req, timeout=None: _ok_json({
+                "key": "tt_rec_000000000000000000000000000000000000000000",
+                "team_id": "team-9", "team_name": "agent-9"})
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.full_url.startswith("http://localhost:8010/v1/agent/recover")
+
+    def test_recover_token_only_config_uses_api_url(self, monkeypatch, tmp_path):
+        """#1749 nuance: a config that parses but has NO api_key trips the
+        resolver's _ConfigError invariant — recover authenticates with the
+        signup token (no key needed), so it must still honor the stored
+        api_url instead of failing on the recover surface."""
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "api_url": "http://localhost:8010",
+            "signup_token": "st_" + "ef" * 32}))  # no api_key
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = lambda req, timeout=None: _ok_json({
+                "key": "tt_rec_000000000000000000000000000000000000000000",
+                "team_id": "team-9", "team_name": "agent-9"})
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.full_url.startswith("http://localhost:8010/v1/agent/recover")
+
+    def test_recover_env_fallback_when_no_config(self, monkeypatch, tmp_path):
+        """#1749: with no config anywhere the resolver returns None —
+        TORTOISE_API_URL must still be honored (env fallback, pre-fix
+        behavior preserved)."""
+        monkeypatch.setenv("TORTOISE_API_URL", "http://env-host:9999")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = lambda req, timeout=None: _ok_json({
+                "key": "tt_rec_000000000000000000000000000000000000000000",
+                "team_id": "team-9", "team_name": "agent-9"})
+            rc = main._cmd_recover(mock.Mock(token="st_" + "ef" * 32))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.full_url.startswith("http://env-host:9999/v1/agent/recover")
