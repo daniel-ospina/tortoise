@@ -679,7 +679,7 @@ def _build_cli_extractor_model(*, spec: str | None,
     unset case stays UNCAPPED, matching the session_workers=1 owner
     decision). NOTE: the live ``ingest_haystack_v2`` on main currently
     shadows the parallel factory path with a sequential copy (pre-existing
-    duplicate, tracked separately — #1752), so workers fall back to the
+    duplicate, tracked separately — #1744), so workers fall back to the
     shared ``extractor_model``; the fingerprint-vs-served guard remains the
     safety invariant and records the serving config either way. A spec'd
     run therefore fingerprints identically across a session-workers toggle
@@ -807,7 +807,7 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     > 1`` requests per-worker models via the ingest_v2 ``model_factory``
     (note: the live ``ingest_haystack_v2`` on main currently shadows the
     parallel factory path with a sequential copy — pre-existing duplicate,
-    tracked separately (#1752) — so workers fall back to the shared
+    tracked separately (#1744) — so workers fall back to the shared
     ``extractor_model``; the fingerprint-vs-served guard remains the safety
     invariant and records the serving config either way).
     ``_build_cli_extractor_model`` builds the fingerprinted model and
@@ -1233,7 +1233,7 @@ def run_evaluation(
                         # cost). NOTE: the live ingest_haystack_v2 on main
                         # shadows the parallel worker-factory path with a
                         # sequential copy (pre-existing duplicate, tracked
-                        # separately — #1752), so workers currently fall
+                        # separately — #1744), so workers currently fall
                         # back to the shared extractor_model — which is
                         # exactly what the fingerprint records.
                         session_workers=session_workers,
