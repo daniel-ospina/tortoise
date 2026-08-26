@@ -739,25 +739,40 @@ def _token_only_config_path():
     _ConfigError on this shape (missing/non-str api_key trips its
     invariant), so _cmd_signup can point at `tortoise recover` instead of
     the destructive "delete it / --force" boilerplate.
+
+    Returns (token_only_path, shadow_path): shadow_path is a LATER
+    candidate holding a usable api_key (the user's key is NOT lost — a
+    legacy token-only file shadows it); None when the key is genuinely
+    lost.
     """
     import json as _j
     from pathlib import Path
-    for path in (Path.cwd() / ".tortoise",
-                 Path.home() / ".tortoise" / "credentials.json"):
+    candidates = (Path.cwd() / ".tortoise",
+                  Path.home() / ".tortoise" / "credentials.json")
+    seen_token_only = None
+    for path in candidates:
         try:
             cfg = _j.loads(path.read_text())
         except Exception:
             continue
         if not isinstance(cfg, dict):
             continue
-        tok = cfg.get("signup_token")
-        if not (isinstance(tok, str) and tok):
-            continue
         key = cfg.get("api_key")
         if isinstance(key, str) and key.strip():
-            continue  # usable key — the resolver would not have failed here
-        return path
-    return None
+            if seen_token_only is not None:
+                # a later candidate holds a usable key — the token-only file
+                # only SHADOWS it; recover would write the global store and
+                # leave the shadow in place (the next command fails the same
+                # way). The handler prints a shadow note instead of the
+                # "key lost" hint (review P2, #1756).
+                return seen_token_only, path
+            continue
+        tok = cfg.get("signup_token")
+        if isinstance(tok, str) and tok and seen_token_only is None:
+            seen_token_only = path
+    if seen_token_only is not None:
+        return seen_token_only, None
+    return None, None
 
 
 def _is_invalid_signup_token(body: str) -> bool:
@@ -1071,14 +1086,26 @@ def _cmd_signup(args) -> int:
             # is destructive here: deleting destroys the recovery token and
             # --force mints a NEW team, orphaning the old one. Point at
             # recovery; genuinely corrupt files keep the boilerplate below.
-            token_only = _token_only_config_path()
+            token_only, shadow = _token_only_config_path()
             if token_only is not None:
-                print(f"⚠️  Found a recovery token but no API key in "
-                      f"{token_only} — your key was likely lost. Run "
-                      "`tortoise recover` to get a NEW key on the SAME team "
-                      "(data intact). Do NOT delete this file and do NOT use "
-                      "--force — that would orphan your team.",
-                      file=sys.stderr)
+                if shadow is not None:
+                    # "key lost" is false here: a later candidate holds a
+                    # usable key and the token-only file only shadows it —
+                    # recover would write the global store and leave the
+                    # shadow in place (the next command fails identically).
+                    print(f"⚠️  Found a recovery token but no API key in "
+                          f"{token_only} — however, a usable API key exists "
+                          f"in {shadow}. Your key is NOT lost: you can delete "
+                          f"{token_only} (or run `tortoise recover` to mint a "
+                          f"fresh key on the same team).",
+                          file=sys.stderr)
+                else:
+                    print(f"⚠️  Found a recovery token but no API key in "
+                          f"{token_only} — your key was likely lost. Run "
+                          "`tortoise recover` to get a NEW key on the SAME team "
+                          "(data intact). Do NOT delete this file and do NOT use "
+                          "--force — that would orphan your team.",
+                          file=sys.stderr)
                 return 1
             print(f"Config at {e} is corrupt or unreadable — fix or delete it, "
                   "or use --force.", file=sys.stderr)

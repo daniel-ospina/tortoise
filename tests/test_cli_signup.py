@@ -1055,6 +1055,33 @@ class TestSignupRecoverHint:
         urlopen.assert_not_called()
 
 
+    def test_token_only_cwd_shadows_global_key_not_lost(self, monkeypatch, tmp_path, capsys):
+        """Review P2 (#1756): a legacy cwd token-only file SHADOWING a healthy
+        global key — the key is NOT lost; the message must say so (recover
+        would write the global store and leave the shadow in place)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        # a subdir as cwd so the two candidates differ:
+        #   cwd/.tortoise = token-only shadow, ~/.tortoise/credentials.json = usable key
+        work = tmp_path / "proj"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        (work / ".tortoise").write_text(json.dumps({
+            "signup_token": "st_" + "dd" * 32}))
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_good_global", "api_url": "https://api.premiselabs.co",
+            "team_id": "t-global", "signup_token": "st_" + "ee" * 32}))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Your key is NOT lost" in err
+        assert "usable API key exists" in err
+        assert "recover" in err
+        urlopen.assert_not_called()
+
 class TestCmdRecover:
     """tortoise recover --token st_... → POST /v1/agent/recover → config
     rewritten; the token is PERSISTED back (recovery must not be one-shot)."""
