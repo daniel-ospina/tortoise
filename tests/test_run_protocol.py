@@ -473,6 +473,106 @@ def test_checkpoint_resume_quality_guard_rails(tmp_path):
     assert scan["truncated"] == 1 and scan["checked"] == 0
 
 
+def test_checkpoint_resume_quality_prefers_top_level_retriever(tmp_path):
+    """#1764/code-review: the scan derives the required-key retriever from
+    the checkpoint's first-class top-level ``retriever`` field (written by
+    run._save_checkpoint) when it names a known key set, falling back to the
+    run_key segment (``{surface}__{retriever}__...``) for older files — a
+    stale run_key segment must not override the authoritative field."""
+    # top-level retriever="vector" wins over a run_key whose segment says
+    # hybrid → hybrid-keys outcome is truncated (missing vector keys)
+    cp = tmp_path / "prefer.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "vector",
+        "outcomes": [{"question_id": "q-vec",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
+
+    # unknown top-level retriever value → falls back to the run_key segment
+    cp = tmp_path / "fallback.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__vector__minilm__default",
+        "retriever": "bogus-retriever",
+        "outcomes": [{"question_id": "q-vec",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
+
+
+def test_checkpoint_resume_quality_int_question_ids(tmp_path, capsys):
+    """#1764/code-review: int question_ids (foreign/dataset shapes) must not
+    TypeError in the scan's sorted() or the print path's join() — qids are
+    string-coerced end to end."""
+    cp = tmp_path / "ints.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": 123,
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results", "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["rejected"] == 1
+    assert scan["qids"] == ["123"]  # coerced, sorted
+    rp._print_resume_quality(scan)  # the join must not raise
+    assert "123" in capsys.readouterr().err
+
+
+def test_checkpoint_resume_quality_corrupt_warns_loudly(tmp_path, capsys):
+    """#1764/code-review: an existing-but-corrupt checkpoint must NOT degrade
+    silently (the runner itself warns loudly on the same failure) — the scan
+    prints a loud stderr warning and returns None."""
+    cp = tmp_path / "corrupt.json"
+    cp.write_text("{not json!!", encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    err = capsys.readouterr().err
+    assert "corrupt" in err.lower() and str(cp) in err
+
+
+def test_print_resume_quality_clean_verdict_softened(tmp_path, capsys):
+    """#1764/code-review: the clean-path verdict must not bless a file the
+    runner would refuse wholesale — the scan only re-checks per-outcome gate
+    decisions, never the whole-file load gates (format / run_key /
+    fingerprint mismatch), and the verdict says so."""
+    rp._print_resume_quality({
+        "checked": 3, "rejected": 0, "fts_dead": 0, "zero_session": 0,
+        "truncated": 0, "qids": [],
+    })
+    err = capsys.readouterr().err
+    assert "scan-clean" in err
+    assert "not re-checked" in err.lower() or "NOT re-checked" in err
+    assert "checkpoint clean" not in err
+
+
+def test_last_flag_value_helper():
+    """#1764/code-review: _last_flag_value resolves the LAST occurrence
+    (argparse last-wins), and returns None for absent flags or a flag with
+    no value — never an unhandled ValueError/IndexError."""
+    cmd = ["python", "-m", "tools.longmem_eval.run",
+           "--checkpoint", "a", "--output", "b", "--checkpoint", "c"]
+    assert rp._last_flag_value(cmd, "--checkpoint") == "c"
+    assert rp._last_flag_value(cmd, "--output") == "b"
+    assert rp._last_flag_value(["python", "-m", "x"], "--checkpoint") is None
+    # flag as the final token (no value) → None, not IndexError
+    assert rp._last_flag_value(["python", "--checkpoint"],
+                               "--checkpoint") is None
+
+
+
 def test_cmd_run_scan_uses_last_checkpoint_flag(tmp_path, monkeypatch):
     """#1764: the pre-resume scan resolves the LAST --checkpoint occurrence —
     build_command prepends the operator's extra flags and appends the

@@ -721,9 +721,23 @@ def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
                  "reason": "empty_results", "count": 0}]},
      "fts.count=0"),
     ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "query_failed", "count": 0}]},
+     "fts.count=0"),
+    # R3 (#1542): index_missing is environmental/benign — expected in
+    # embedded FalkorDBLite (no FTS index); degrades quietly, does NOT trip
+    # the breaker. NOT a dead leg — rejecting it would reject every embedded
+    # outcome on every resume (livelock).
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                 "reason": "index_missing", "count": 0}]},
+     None),
+    # breaker_open is the breaker skipping the strategy — not a dead leg
+    # either (the caller separately keeps breaker_open OUTCOMES).
+    ({"question_id": "q",
       "legs": [{"leg": "fts", "ran": False, "degraded": True,
                  "reason": "breaker_open", "count": 0}]},
-     "fts.count=0"),
+     None),
     # dead-FTS + zero session recall (the pilot's artifact shape) — FTS
     # reason surfaces first (both signals present)
     ({"question_id": "q",
@@ -752,6 +766,24 @@ def test_checkpoint_resume_gate_keeps_breaker_open(tmp_path):
                  "reason": "empty_results", "count": 0}],
       "session_recall@k": {"5": None}},
      "fts.count=0"),
+    # non-finite recall (json.loads parses Infinity → float('inf')): inf is
+    # NOT a finite positive value — the dead-FTS signal must stay fail-OPEN
+    # closed (reject), not be silently rescued by a corrupt Infinity
+    ({"question_id": "q",
+      "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                 "reason": "empty_results", "count": 0}],
+      "session_recall@k": {"5": float("inf")}},
+     "fts.count=0"),
+    # inf without a dead FTS leg is neither healthy nor all-zero — no signal
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": float("inf")}},
+     None),
+    # bool False is an int subclass but NOT a recorded recall value — it
+    # must not count as "all zeros" (type-strict session_zero, mirroring
+    # session_healthy's bool exclusion)
+    ({"question_id": "q", "turn_recall@k": {"5": 0.0},
+      "session_recall@k": {"5": False}},
+     None),
     # TR dual-entity-type trace: a live point leg rescues the event leg
     ({"question_id": "q",
       "legs": [{"leg": "fts", "ran": True, "degraded": False,
@@ -837,6 +869,37 @@ def test_checkpoint_vector_truncation_requires_vector_keys(tmp_path, capsys):
     done, _ = runner._load_checkpoint(
         str(cp), run_key="embedded__vector__minilm__default")
     assert "mini_ie_user_001" in done
+
+
+def test_checkpoint_retriever_mismatch_warns_not_refuses(tmp_path, capsys):
+    """#1764/code-review: _load_checkpoint cross-checks the forwarded
+    retriever against the run_key's retriever segment — a mismatch (vector
+    checkpoint loaded with the default hybrid retriever) emits a stderr
+    warning but does NOT change load behavior: the required-key set is
+    derived from the forwarded retriever, so the hybrid-keys outcome still
+    resumes."""
+    cp = tmp_path / "state.json"
+    outcome = _minimal_outcome("mini_ie_user_001", **{
+        "ndcg@10": 0.5, "p@10": 0.5, "p@5": 0.5, "ranked_ids": ["a"]})
+    runner._save_checkpoint(
+        str(cp), [outcome], [],
+        run_key="embedded__vector__minilm__default", surface="embedded",
+        retriever="vector", model="minilm", prompt=None)
+
+    # forwarding hybrid against a vector-keyed checkpoint → warn only
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="hybrid")
+    err = capsys.readouterr().err
+    assert "retriever" in err and "!=" in err
+    assert "mini_ie_user_001" in done  # load behavior unchanged
+
+    # matching retriever → no warning
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__vector__minilm__default",
+        retriever="vector")
+    assert "mini_ie_user_001" in done
+    assert "forwarded retriever" not in capsys.readouterr().err
 
 
 def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):

@@ -883,7 +883,9 @@ def _legit_sessionless(outcome: dict) -> bool:
     forced 0.0 for empty evidence (an M6 divergence from the hybrid path),
     so a vector-mode abstention is not recognized as sessionless here and
     is re-encoded per resume. The M6 fix belongs in retrieve.py (vector
-    arm); tracked with the retrieve-leg issue (#1745).
+    arm); not yet tracked — #1745 is the point-level evidence-recall gap
+    (evidence@20 vs chunk-level), which does NOT cover this forced-0.0-vs-
+    None divergence.
     """
     tr = outcome.get("turn_recall@k")
     return isinstance(tr, dict) and bool(tr) and all(
@@ -902,29 +904,33 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
     retrieval-dead:
 
       - the ``legs`` trace (R3 #1542 D4: {"leg", "ran", "degraded",
-        "reason", "count"}) shows the FTS leg dead — every fts entry has
-        ``count == 0`` (empty_results / index_missing / breaker_open — all
-        dead legs; TR questions trace one entry per entity type, so a live
-        point leg rescues a legitimately-empty event leg) AND recall data
-        does not positively show the session surfaced: the dead-FTS signal
-        fires only when ``session_recall@k`` is all-zero or
-        absent/unrecorded. A healthy (non-zero) vector-rescued session
-        (FTS empty but recall > 0) is NOT retrieval-dead — rejecting it
-        would livelock, since the re-encode reproduces the same FTS-empty
-        shape on the next resume;
+        "reason", "count"}) shows the FTS leg dead — a genuinely-dead
+        reason (``empty_results`` — the pilot artifact: FTS ran clean and
+        found nothing; or ``query_failed`` — a real driver failure) with
+        ``count == 0`` and no live fts entry (TR questions trace one entry
+        per entity type, so a live point leg rescues a legitimately-empty
+        event leg) AND recall data does not positively show the session
+        surfaced: ``index_missing`` (R3 #1542: environmental/benign —
+        expected in embedded FalkorDBLite with no FTS index; degrades
+        quietly, never trips the breaker) and ``breaker_open`` (the breaker
+        skipped the strategy) are NOT dead legs — treating them as dead
+        would reject every embedded outcome on every resume (livelock). A
+        healthy (non-zero) vector-rescued session (FTS empty but recall > 0)
+        is NOT retrieval-dead — rejecting it would livelock, since the
+        re-encode reproduces the same FTS-empty shape on the next resume;
       - every ``session_recall@k`` value is 0.0 (the session never
         surfaced at any depth).
 
     Signals fire ONLY on positive recorded evidence: an outcome with no
     ``legs`` trace (pre-R3 checkpoint, vector arm) or no fts entry is NOT
-    refused — absent data ≠ dead leg (embedded-mode checkpoints whose
-    vector leg records no_embedder legitimately still pass via their
-    healthy fts leg). Legitimately session-less outcomes (abstention
-    questions — ``turn_recall@k`` all None per the M6 N/A-not-0.0
-    contract) are exempt: their all-zero session recall and legitimately
-    empty FTS are the question's shape, not a dead backend. breaker_open
-    outcomes are excluded by the caller (kept — a legitimately dropped
-    question must never re-run).
+    refused — absent data ≠ dead leg, and an fts entry recording
+    ``index_missing`` (embedded FalkorDBLite — no FTS index) or
+    ``breaker_open`` is benign, not dead. Legitimately session-less
+    outcomes (abstention questions — ``turn_recall@k`` all None per the M6
+    N/A-not-0.0 contract) are exempt: their all-zero session recall and
+    legitimately empty FTS are the question's shape, not a dead backend.
+    breaker_open outcomes are excluded by the caller (kept — a legitimately
+    dropped question must never re-run).
     """
     if not isinstance(outcome, dict):
         return None
@@ -938,25 +944,43 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
     # corrupt recall data instead of being silently resumed.
     session_healthy = (isinstance(sr, dict) and bool(sr)
                        and any(isinstance(v, (int, float))
-                               and not isinstance(v, bool) and v > 0
+                               and not isinstance(v, bool)
+                               and math.isfinite(v) and v > 0
                                for v in sr.values()))
+    # type-strict zero: bool False is an int subclass but is NOT a recorded
+    # recall value — a corrupt boolean must not count as "all zeros" (and
+    # sibling session_healthy already excludes bools).
     session_zero = (isinstance(sr, dict) and bool(sr)
-                    and all(v == 0 for v in sr.values()))
+                    and all(isinstance(v, (int, float))
+                            and not isinstance(v, bool) and v == 0
+                            for v in sr.values()))
     if isinstance(legs, list):
         # TR questions trace one fts entry PER entity type (point + event
-        # share the leg_trace) — the leg is dead only when EVERY fts entry
-        # has count 0 (a live point leg rescues a legitimately-empty event
-        # leg).
+        # share the leg_trace) — the leg is dead only when no fts entry
+        # shows live retrieval (a live point leg rescues a legitimately-
+        # empty event leg).
         fts_entries = [leg for leg in legs
                        if isinstance(leg, dict) and leg.get("leg") == "fts"]
+        # R3 (#1542) leg-reason vocabulary: only genuinely-dead reasons
+        # mark the leg dead — ``empty_results`` (the pilot artifact: FTS
+        # ran clean and found nothing) and ``query_failed`` (a real driver
+        # failure). ``index_missing`` is environmental/benign (expected in
+        # embedded FalkorDBLite — no FTS index; degrades quietly, does not
+        # trip the breaker) and ``breaker_open`` is the breaker skipping
+        # the strategy — neither is retrieval-dead, or every embedded
+        # outcome would be rejected on every resume (livelock).
+        dead_reasons = {"empty_results", "query_failed"}
+        dead_fts = [leg for leg in fts_entries
+                    if leg.get("reason") in dead_reasons
+                    and leg.get("count") == 0]
+        live_fts = any(leg.get("reason") == "ok"
+                       and leg.get("count", 0) > 0 for leg in fts_entries)
         # The dead-FTS signal fires only when the session did NOT
         # positively surface: a healthy vector leg that rescued the session
         # (session_recall > 0) is NOT retrieval-dead — rejecting it would
         # livelock, since the re-encode reproduces the same FTS-empty shape
         # on the next resume.
-        if (fts_entries and all(leg.get("count") == 0
-                                for leg in fts_entries)
-                and not session_healthy):
+        if dead_fts and not live_fts and not session_healthy:
             return "fts.count=0 (dead FTS retrieval leg)"
     if session_zero:
         return "session_recall@k all zeros (session never surfaced)"
@@ -1029,6 +1053,18 @@ def _load_checkpoint(path: str | None,
               f"refusing cross-config resume (per-model checkpoint keying); "
               f"every question re-encodes", file=sys.stderr)
         return {}, []
+    # #1764/code-review: cross-check the FORWARDED retriever against the
+    # run_key's retriever segment — a mismatch means the caller's required
+    # key set is derived from a different retriever than the checkpoint's
+    # own. Warn only; load behavior is unchanged (the required-key set comes
+    # from the forwarded retriever, per run_evaluation's call).
+    if run_key is not None and saved_key is not None:
+        saved_parts = saved_key.split("__")
+        if len(saved_parts) >= 2 and saved_parts[1] != retriever:
+            print(f"[longmem_eval] WARNING: checkpoint {p} retriever "
+                  f"{saved_parts[1]!r} != forwarded retriever "
+                  f"{retriever!r} — required-key set derived from "
+                  f"{retriever!r}", file=sys.stderr)
     if expected_fingerprint is not None:
         fp = data.get("fingerprint")
         # #1349 merge: a checkpoint written by the vector-arm path carries

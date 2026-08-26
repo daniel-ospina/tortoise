@@ -347,31 +347,51 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
     effective run config.
 
     Returns a summary dict, or None when there is nothing to scan (no
-    checkpoint file / unreadable / non-dict / missing or empty ``outcomes``
-    / no gate-eligible outcomes). The protocol records this in the run
+    checkpoint file / non-dict / missing or empty ``outcomes`` / no
+    gate-eligible outcomes). The read happens under the same exclusive
+    flock the writer uses (D8 — run.py's ``_load_checkpoint`` contract) so
+    the scan never sees a mid-merge file; an existing-but-corrupt file
+    surfaces a loud stderr warning (mirroring the runner's corrupt-file
+    warning) before returning None. The protocol records this in the run
     state so a re-validation resume that rejected stale outcomes leaves a
     population-purity note, never a silent blend.
     """
+    from tortoise.shared_state.concurrency import flock_exclusive
+    from .run import (  # lazy — protocol CLI stays light
+        REQUIRED_OUTCOME_KEYS,
+        resume_gate_reject_reason,
+    )
     if not checkpoint.is_file():
         return None
     try:
-        data = json.loads(checkpoint.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError, ValueError):
+        with flock_exclusive(checkpoint.with_suffix(checkpoint.suffix + ".lock")):
+            data = json.loads(checkpoint.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, ValueError) as e:
+        # An existing-but-corrupt checkpoint must NOT degrade silently (the
+        # runner itself warns loudly on the same failure) — the scan is a
+        # population-purity gate; a corrupt file is a loud event, not a
+        # quiet pass-through.
+        print(f"[run_protocol] WARNING: checkpoint {checkpoint} is corrupt "
+              f"({e!r}) — resume-quality scan skipped; the runner will "
+              f"ignore the file and re-encode every question",
+              file=sys.stderr)
         return None
     if not isinstance(data, dict):
         return None
     outcomes = data.get("outcomes")
     if not isinstance(outcomes, list):
         return None  # missing / explicit null / malformed — nothing to scan
-    from .run import (  # lazy — protocol CLI stays light
-        REQUIRED_OUTCOME_KEYS,
-        resume_gate_reject_reason,
-    )
-    # the runner keys required fields by retriever (from the run's own
-    # run_key ``{surface}__{retriever}__{model}__{prompt}`` when present).
+    # the runner keys required fields by retriever — the checkpoint writes a
+    # first-class top-level ``retriever`` field (run._save_checkpoint); fall
+    # back to the run_key segment ``{surface}__{retriever}__{model}__
+    # {prompt}`` (older files), then "hybrid".
     retriever = "hybrid"
+    retriever_field = data.get("retriever")
     saved_key = data.get("run_key")
-    if isinstance(saved_key, str):
+    if (isinstance(retriever_field, str)
+            and retriever_field in REQUIRED_OUTCOME_KEYS):
+        retriever = retriever_field
+    elif isinstance(saved_key, str):
         parts = saved_key.split("__")
         if len(parts) >= 2 and parts[1] in REQUIRED_OUTCOME_KEYS:
             retriever = parts[1]
@@ -406,7 +426,9 @@ def checkpoint_resume_quality(checkpoint: Path) -> dict | None:
         "fts_dead": fts_dead,
         "zero_session": zero_session,
         "truncated": truncated,
-        "qids": sorted(qid for qid, _, _ in rejected),
+        # qids are string-coerced — checkpoint question_ids may be ints
+        # (foreign/dataset shapes) and sorted()/join() would TypeError.
+        "qids": sorted({str(q) for q, _, _ in rejected}),
     }
 
 
@@ -422,7 +444,7 @@ def _print_resume_quality(resume_quality: dict | None) -> None:
             f"checkpointed outcomes REJECTED and will re-encode "
             f"(fts_dead={resume_quality['fts_dead']}, "
             f"zero_session={resume_quality['zero_session']}): "
-            f"{', '.join(resume_quality['qids'])}",
+            f"{', '.join(str(q) for q in resume_quality['qids'])}",
             file=sys.stderr)
     if resume_quality["truncated"]:
         print(
@@ -431,9 +453,15 @@ def _print_resume_quality(resume_quality: dict | None) -> None:
             f"(missing required keys) will also re-encode",
             file=sys.stderr)
     if not resume_quality["rejected"] and not resume_quality["truncated"]:
+        # The scan mirrors the runner's PER-OUTCOME gate decision only — it
+        # does NOT re-check the whole-file load gates (format / run_key /
+        # fingerprint mismatch), so it cannot bless a file the runner would
+        # refuse wholesale.
         print(
-            f"[run_protocol] resume-quality gate: checkpoint clean — "
-            f"all {resume_quality['checked']} outcomes pass the gate",
+            f"[run_protocol] resume-quality gate: scan-clean — "
+            f"all {resume_quality['checked']} outcomes pass the gate "
+            f"(whole-file load gates — format / run_key / fingerprint "
+            f"mismatch — NOT re-checked by this scan)",
             file=sys.stderr)
 
 
@@ -509,6 +537,19 @@ def cmd_gate(state: ProtocolState, args: argparse.Namespace) -> None:
         print("  mark with `gate <n> --pass --note '...'` or `--fail`")
 
 
+def _last_flag_value(cmd: list[str], flag: str) -> str | None:
+    """Value of the LAST ``flag`` occurrence in ``cmd`` (the runner's
+    argparse is last-wins — the protocol appends its own flags AFTER the
+    operator's extra ones), or None when the flag is absent (or has no
+    value — e.g. it is the final token)."""
+    if flag not in cmd:
+        return None
+    idx = len(cmd) - 1 - cmd[::-1].index(flag)
+    if idx + 1 >= len(cmd):
+        return None
+    return cmd[idx + 1]
+
+
 def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     step = _resolve_step(args.step)
     if step.owner_gated and not args.owner_approve:
@@ -545,8 +586,11 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
     # operator's extra flags and appends the protocol's own --checkpoint
     # AFTER them, and the runner's argparse is last-wins — so the scan and
     # the recorded state must describe the file the runner actually uses.
-    last_idx = len(cmd) - 1 - cmd[::-1].index("--checkpoint")
-    checkpoint_arg = cmd[last_idx + 1]
+    checkpoint_arg = _last_flag_value(cmd, "--checkpoint")
+    if checkpoint_arg is None:
+        raise SystemExit(
+            "internal error: build_command must append a --checkpoint flag "
+            "to every run-step command (protocol bug — no flag found)")
     resume_quality = checkpoint_resume_quality(Path(checkpoint_arg))
     _print_resume_quality(resume_quality)
     if args.dry_run:
@@ -554,10 +598,14 @@ def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
         return
     # The confirmation's expected-delta direction is recorded BEFORE the run
     # (pre-stated in advance — 03-scope step 7).
-    out_idx = len(cmd) - 1 - cmd[::-1].index("--output")
+    out_arg = _last_flag_value(cmd, "--output")
+    if out_arg is None:
+        raise SystemExit(
+            "internal error: build_command must append an --output flag to "
+            "every run-step command (protocol bug — no flag found)")
     state.record_run(
         step.number,
-        report=str(Path(cmd[out_idx + 1])),
+        report=str(Path(out_arg)),
         checkpoint=checkpoint_arg,
         command=cmd,
         expected_direction=args.expected_direction if step.runner == "confirm" else None,
