@@ -17,7 +17,13 @@ Run:  python -m pytest tests/e2e/ -q
 Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co/welcome)
        SUPABASE_URL/SUPABASE_SERVICE_KEY enable the live no-429 signup smoke
        (skipped by default — no creds in CI; see #801).
+
+#1721: the playwright chain is module-scoped in tests/e2e/conftest.py (the
+# root-cause fix for the full-suite asyncio event-loop cascade — a
+# session-scoped playwright loop parked in the main thread poisoned every
+# later asyncio.run()/@pytest.mark.asyncio test).
 """
+
 from __future__ import annotations
 
 import json
@@ -33,6 +39,8 @@ from playwright.sync_api import Page, expect
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
 PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-prompt.md")
+
+
 
 # ── Live/static tests (no auth) ─────────────────────────────────────
 
@@ -61,8 +69,10 @@ def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
     regression guard for the deploy pipeline fixes (#545/#609/#610)."""
     resp = page.request.post(
         "https://api.premiselabs.co/mcp/",
-        headers={"Content-Type": "application/json",
-                 "Accept": "application/json, text/event-stream"},
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+        },
         data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}),
         timeout=15_000,
     )
@@ -83,11 +93,18 @@ def test_welcome_signed_in_redirects_to_app(page: Page) -> None:
     no longer provisions (except recovery mode)."""
     user_id = _fake_user_id()
     _seed_local_session(page, user_id)
-    page.route("**://app.premiselabs.co/**", lambda r: r.fulfill(
-        status=200, content_type="text/html",
-        body="<html><body>APP-WELCOME</body></html>"))
-    page.goto(WELCOME_URL + "#access_token=fake-at&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
-              wait_until="domcontentloaded", timeout=30_000)
+    page.route(
+        "**://app.premiselabs.co/**",
+        lambda r: r.fulfill(
+            status=200, content_type="text/html", body="<html><body>APP-WELCOME</body></html>"
+        ),
+    )
+    page.goto(
+        WELCOME_URL
+        + "#access_token=fake-at&refresh_token=fake-rt&expires_in=3600&token_type=bearer",
+        wait_until="domcontentloaded",
+        timeout=30_000,
+    )
     expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co"), timeout=20_000)
 
 
@@ -112,20 +129,6 @@ def _seed_local_session(page: Page, user_id: str) -> None:
       localStorage.setItem("sb-ybetwichurajbfswfeqa-auth-token", session);
       localStorage.setItem("sb-127-auth-token", session);
     """)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ── Live signup E2E (requires real Supabase creds + session) ────────
@@ -167,13 +170,18 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     page.on("response", _on_response)
     # #801: the account is created pre-confirmed, so the page redirects to
     # /welcome — block it so the welcome page's provisioning never runs.
-    page.route("**/welcome*", lambda route: route.fulfill(
-        status=200, content_type="text/html", body="<html><body>ok</body></html>"
-    ))
+    page.route(
+        "**/welcome*",
+        lambda route: route.fulfill(
+            status=200, content_type="text/html", body="<html><body>ok</body></html>"
+        ),
+    )
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
     password = f"E2eLivePass-{uuid.uuid4().hex[:8]}!"
     try:
-        page.goto("https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000)
+        page.goto(
+            "https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000
+        )
         page.locator("#email").fill(email)
         page.locator("#password").fill(password)
         page.locator("#btn-submit").click()
@@ -185,7 +193,8 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             page.wait_for_timeout(250)
         assert signup["status"] is not None, "no /v1/signup/email response observed"
         assert signup["status"] == 200, (
-            f"live signup returned {signup['status']} — rate-limited or error: {signup['body']!r}")
+            f"live signup returned {signup['status']} — rate-limited or error: {signup['body']!r}"
+        )
         # #801: created pre-confirmed → the page auto-signs-in.
         deadline = time.time() + 30
         while token["status"] is None and time.time() < deadline:
@@ -195,10 +204,10 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         # The flow redirects to /welcome (route-blocked stub above) — the
         # redirect itself is the user-visible success state of #801.
         page.wait_for_url("**/welcome*", timeout=15_000)
-        assert "email=" not in page.url and "password=" not in page.url, \
+        assert "email=" not in page.url and "password=" not in page.url, (
             f"credentials echoed into URL: {page.url}"
+        )
     finally:
         from supabase_admin import delete_user_by_email
-        delete_user_by_email(os.environ["SUPABASE_URL"],
-                             os.environ["SUPABASE_SERVICE_KEY"], email)
 
+        delete_user_by_email(os.environ["SUPABASE_URL"], os.environ["SUPABASE_SERVICE_KEY"], email)
