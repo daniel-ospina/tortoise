@@ -52,7 +52,11 @@ from typing import Any
 # reaper.
 os.environ.setdefault("TORTOISE_FAST_ATEXIT", "1")
 
-from tortoise.model_adapters import is_fatal
+from tortoise.model_adapters import (
+    RotatingModel,
+    RoutingModel,
+    is_fatal,
+)
 from tortoise.sdk import TortoiseSDK
 from tortoise.shared_state.concurrency import flock_exclusive
 
@@ -513,6 +517,47 @@ class CheckpointStaleError(RuntimeError):
     silently reusing results from a different config (M7 #1527, D7)."""
 
 
+# Tuning knobs that change extraction output (M7 #1739, Gap 2): the MODELS
+# registry has entries sharing ONE wire id with different tuning
+# (deepseek-v4-pro / -xhigh / -noreason all construct
+# OpenRouterModel('deepseek/deepseek-v4-pro', ...)) — a wire-id-only
+# fingerprint would silently resume a reasoning-ON checkpoint under
+# reasoning-OFF -noreason. Appended only when non-default (temperature=0.0
+# is the fixed extractor default — falsy → omitted), so a default-tuning
+# adapter's fingerprint stays its bare wire id (the #1732 literal contract:
+# DeepSeekDirectModel('deepseek-chat') → 'deepseek-chat').
+_TUNING_FINGERPRINT_ATTRS = ("max_tokens", "temperature", "thinking_budget",
+                             "disable_reasoning")
+
+
+def _adapter_fingerprint(model: Any) -> str:
+    """Stable, tuning-aware fingerprint of a single (non-wrapper) adapter.
+
+    M4 #1732: adapters expose ``.id`` (the API-facing wire id), not
+    ``.model_id`` — prefer ``.model_id`` then ``.id``; repr is the last
+    resort (never reached for production adapters — a repr embeds a memory
+    address ``<... at 0x...>`` that would make the fingerprint
+    NON-deterministic across processes). M7 #1739 (Gap 2): the tuning knobs
+    that change extraction output ride the fingerprint when non-default
+    (``max_tokens`` / ``temperature`` / ``thinking_budget`` /
+    ``disable_reasoning``), so two registry entries sharing a wire id but
+    differing in tuning fingerprint differently. Default-tuning adapters
+    stay at the bare wire id — the #1732 cross-provider contract is
+    preserved (provider stays a routing detail for single adapters)."""
+    for attr in ("model_id", "id"):
+        mid = getattr(model, attr, None)
+        if mid:
+            break
+    else:
+        return repr(model)  # last resort (never for production adapters)
+    parts = [mid]
+    for attr in _TUNING_FINGERPRINT_ATTRS:
+        value = getattr(model, attr, None)
+        if value:  # None/0/False tuning → omit (default tuning = bare id)
+            parts.append(f"{attr}={value}")
+    return "|".join(parts)
+
+
 def _model_id(model: Any) -> str | None:
     """A stable fingerprint string for a model object (None → None).
 
@@ -524,17 +569,35 @@ def _model_id(model: Any) -> str | None:
     ``extractor_model`` even with identical git_sha). Prefer ``.model_id``
     then ``.id``; only fall back to repr as a last resort.
 
-    NOTE: wrapper models from ``build_extractor_model()`` (RoutingModel /
-    RotatingModel) expose neither attribute and still fall to repr —
-    tracked as follow-up #1739 (default CLI path).
+    M7 #1739 fix (Gap 1): wrapper models from ``build_extractor_model()``
+    (RoutingModel / RotatingModel — the DEFAULT CLI path) expose neither
+    attribute, so they are composed structurally instead:
+    ``provider:wire-id`` per member adapter, joined with ``+`` and carrying
+    each member's tuning suffix. RoutingModel members are joined in
+    (primary, fallback) order — order IS effective config there (the
+    primary serves); RotatingModel members are SORTED by provider — pool
+    order is a routing detail for the weighted rotation (weights are
+    per-provider), so a reorder keeps checkpoints valid while a membership
+    change (add/remove a lane) still invalidates them. The provider is part
+    of the WRAPPER identity (which lanes the pool routes to — a pool change
+    is an effective-config change) but remains a routing detail for single
+    adapters (a bare adapter's fingerprint stays wire-id-only, the #1732
+    cross-provider contract). Deterministic — no repr/address — and
+    identical across fresh instances, so the #1549 checkpoint-resumable
+    protocol works on the default path.
     """
     if model is None:
         return None
-    for attr in ("model_id", "id"):
-        mid = getattr(model, attr, None)
-        if mid:
-            return mid
-    return repr(model)
+    if isinstance(model, RoutingModel):
+        members = [m for m in (model.primary, model.fallback)
+                   if m is not None]
+        return "+".join(f"{m.provider}:{_adapter_fingerprint(m)}"
+                        for m in members)
+    if isinstance(model, RotatingModel):
+        members = sorted(model.providers, key=lambda p: p.provider)
+        return "+".join(f"{m.provider}:{_adapter_fingerprint(m)}"
+                        for m in members)
+    return _adapter_fingerprint(model)
 
 
 def _build_fingerprint(*, reader_model: str, judge_model: str,
@@ -550,6 +613,18 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     (``rerank_config``) — a config-mismatched resume is refused by the
     existing fingerprint gate (a baseline checkpoint resumed with
     ``--rerank``, a pool change with rerank off, … — Gate 8).
+
+    M7 #1739: ``extractor_model`` discriminates BOTH wire id and tuning —
+    tuning variants sharing a wire id (``deepseek-v4-pro-xhigh`` vs
+    ``deepseek-v4-pro-noreason``) fingerprint differently, so a cross-tuning
+    resume is refused (was silently accepted post-#1732); the default
+    wrapper path (RoutingModel/RotatingModel) composes its member adapters
+    (``provider:wire-id`` + tuning; RotatingModel members sorted by
+    provider) — never an address-bearing repr. WIRE-ID
+    MUTABILITY: wire ids are API-facing and mutable (e.g. #1706 renamed
+    deepseek-v4-flash → deepseek-chat) — a rename loudly invalidates every
+    existing checkpoint (CheckpointStaleError on ``extractor_model``): safe
+    by design, expected on any future normalization change.
     """
     return {
         "git_sha": git_sha(),

@@ -1,4 +1,3 @@
-<!-- research-path: docs/epics/2026-08-20-1509-extractor-v3/02-research-brief.md -->
 ---
 title: "Plan — #1527 M7: self-explanatory report + run hygiene (leg-mix, cost, workers, checkpoint fingerprint, py≥3.12, dataset recall re-validation)"
 type: plan
@@ -8,6 +7,8 @@ created: 2026-08-20
 ownedBy: epistemic-team
 governingAgreement: "#1527 (epic #1509, M7)"
 ---
+
+<!-- research-path: docs/epics/2026-08-20-1509-extractor-v3/02-research-brief.md -->
 
 # Plan — #1527 M7: Self-explanatory report + run hygiene
 
@@ -131,6 +132,8 @@ Checkpoint schema v2:
 - `workers` is deliberately **excluded** from the fingerprint (per-question isolation ⇒ results are workers-invariant) but recorded in `methodology.workers`.
 - `dataset_fingerprint` is computed in `run_main` (where the file/cache path is known) and threaded into `run_evaluation`; programmatic/test callers pass `"unknown"` (stable within a run).
 - The fingerprint fields are also persisted in `report["methodology"]` (git_sha already there; add python/workers/dataset_fingerprint) — a report always says *what code and dataset produced it*.
+- Extractor identity (M7 #1739): `extractor_model` discriminates **both** wire id and tuning. Bare adapters fingerprint as `wire-id` plus a tuning suffix (`|max_tokens=…|temperature=…|thinking_budget=…|disable_reasoning=…`) when non-default, so registry entries sharing a wire id but differing in tuning (`deepseek-v4-pro-xhigh` vs `deepseek-v4-pro-noreason`) differ and a cross-tuning resume is refused. The default CLI wrapper path (`RoutingModel`/`RotatingModel` — neither exposes `.model_id`/`.id`) is composed structurally as `provider:wire-id` per member adapter joined by `+` — deterministic across processes, never an address-bearing repr. `RoutingModel` members join in (primary, fallback) order (order is effective config — the primary serves); `RotatingModel` members are sorted by provider (pool order is a routing detail — weights are per-provider — so a reorder keeps checkpoints valid while a membership change invalidates them). Provider is a routing detail for single adapters (wire-id-only, the #1732 cross-provider contract) but part of the wrapper identity (a pool change is an effective-config change).
+- WIRE-ID MUTABILITY (documented hazard, #1706): wire ids are API-facing and mutable — #1706 renamed the direct flash id `deepseek-v4-flash` → `deepseek-chat`. A future rename **loudly invalidates all existing checkpoints** (`CheckpointStaleError` on `extractor_model`): safe by design, expected, and the correct direction (refuse, never silently reuse).
 
 ### D8 — Checkpoint flock: merge-under-lock, no lost updates
 - `_save_checkpoint` becomes: acquire an exclusive **flock on `<checkpoint>.lock`** (reuse the `fcntl` mechanics of `tortoise/shared_state/concurrency.py::locked_append` — extract a small `flock_exclusive(path)` context manager into `tools/longmem_eval/errors.py`-adjacent `_checkpoint.py` or reuse `tortoise/shared_state/concurrency.py` directly), then **re-read the file under the lock**, merge disk outcomes/failures with the in-memory snapshot (dict-by-qid for outcomes, list-merge for failures), write tmp, `os.replace`, release.

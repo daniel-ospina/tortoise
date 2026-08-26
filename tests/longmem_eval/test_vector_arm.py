@@ -45,7 +45,15 @@ from tools.longmem_eval.ingest import ingest_haystack
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
 from tools.longmem_eval.retrieve import retrieve_for_question
-from tortoise.model_adapters import DeepSeekDirectModel, OpenRouterModel, VeniceModel
+from tortoise.model_adapters import (
+    MODELS,
+    DeepSeekDirectModel,
+    OpenRouterModel,
+    RotatingModel,
+    RoutingModel,
+    VeniceModel,
+    build_extractor_model,
+)
 from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent.parent / "fixtures" / "longmemeval_mini.json"
@@ -769,6 +777,165 @@ def test_model_id_fingerprint_deterministic_at_composition_layer():
             model.close()
 
 
+def _pin_extractor_env(monkeypatch, *, keys: tuple[str, ...] = (),
+                       provider: str | None = None) -> None:
+    """Pin the extractor-router env to a deterministic provider set:
+    ``keys`` selects which of deepseek/openrouter/venice are "configured"
+    (env presence only — offline) and ``provider`` optionally sets an
+    explicit TORTOISE_EXTRACTOR_PROVIDER. 0 keys → the lenient
+    single-OpenRouter fallback (RoutingModel, 1 member); deepseek+openrouter
+    → RoutingModel (primary deepseek-direct + openrouter fallback — the
+    unset-env production default); all 3 → RotatingModel; an explicit
+    openrouter primary + deepseek fallback key → RoutingModel with a
+    NON-alphabetical primary (pins the (primary, fallback) join order)."""
+    for var in ("TORTOISE_EXTRACTOR_PROVIDER", "TORTOISE_EXTRACT_MODEL",
+                "DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "VENICE_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    if provider is not None:
+        monkeypatch.setenv("TORTOISE_EXTRACTOR_PROVIDER", provider)
+    if "deepseek" in keys:
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    if "openrouter" in keys:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "x")
+    if "venice" in keys:
+        monkeypatch.setenv("VENICE_API_KEY", "x")
+
+
+def test_model_id_wrapper_path_stable_no_address(monkeypatch):
+    """M7 #1739, Gap 1: the DEFAULT CLI extractor path (``--extractor-model``
+    unset → ``build_extractor_model()``) returns RoutingModel (1-2
+    providers) or RotatingModel (3+) — neither exposes ``.model_id`` nor
+    ``.id``, so the pre-fix ``_model_id`` fell through to ``repr(model)`` →
+    ``<...RoutingModel object at 0x...>``: every cross-process resume via
+    the default path raised CheckpointStaleError even with identical
+    git_sha (the #1549 baseline protocol's "run it in slices" path).
+
+    Post-fix ``_model_id`` composes the member adapters structurally
+    (``provider:wire-id``, joined by ``+``): deterministic, never
+    address-bearing, IDENTICAL across fresh instances. Pinned: 1-provider
+    RoutingModel (no keys), 2-provider RoutingModel (deepseek+openrouter:
+    primary deepseek-direct + openrouter fallback) AND its non-alphabetical
+    mirror (explicit openrouter primary — discriminates the (primary,
+    fallback) join order from a sorted join), 3-provider RotatingModel
+    (members SORTED by provider — pool order is a routing detail, so the
+    joined literal is exact-pinnable), plus tuned wrappers (max_tokens,
+    temperature) proving the member tuning suffix rides the wrapper
+    composition. Constructing adapters is offline (requests.Session only)."""
+    shapes = [
+        dict(keys=(), max_tokens=None, temperature=0.0,
+             cls=RoutingModel,
+             expected="openrouter:deepseek/deepseek-v4-flash"),
+        dict(keys=("deepseek", "openrouter"), max_tokens=None,
+             temperature=0.0, cls=RoutingModel,
+             expected=("deepseek-direct:deepseek-chat"
+                       "+openrouter:deepseek/deepseek-v4-flash")),
+        dict(provider="openrouter", keys=("deepseek", "openrouter"),
+             max_tokens=None, temperature=0.0, cls=RoutingModel,
+             # non-alphabetical primary: a sorted-join regression would flip
+             # the members (deepseek-direct < openrouter), changing this
+             # literal — order IS effective config for RoutingModel
+             expected=("openrouter:deepseek/deepseek-v4-flash"
+                       "+deepseek-direct:deepseek-chat")),
+        dict(keys=("deepseek", "openrouter", "venice"), max_tokens=None,
+             temperature=0.0, cls=RotatingModel,
+             expected=("deepseek-direct:deepseek-chat"
+                       "+openrouter:deepseek/deepseek-v4-flash"
+                       "+venice:deepseek-v4-flash")),
+        # tuning rides the wrapper composition too (member suffixes) — the
+        # ingest_v2 session-worker model_factory builds wrappers at
+        # max_tokens=4000, so real wrapper fingerprints carry the suffix
+        dict(keys=(), max_tokens=500, temperature=0.0, cls=RoutingModel,
+             expected="openrouter:deepseek/deepseek-v4-flash|max_tokens=500"),
+        dict(keys=(), max_tokens=500, temperature=0.5, cls=RoutingModel,
+             expected=("openrouter:deepseek/deepseek-v4-flash"
+                       "|max_tokens=500|temperature=0.5")),
+    ]
+    for shape in shapes:
+        _pin_extractor_env(monkeypatch, keys=shape["keys"],
+                           provider=shape.get("provider"))
+        adapters = []
+        try:
+            adapters.append(build_extractor_model(
+                max_tokens=shape["max_tokens"],
+                temperature=shape["temperature"]))
+            adapters.append(build_extractor_model(
+                max_tokens=shape["max_tokens"],
+                temperature=shape["temperature"]))
+            a, b = adapters
+            fp_a = runner._model_id(a)
+            fp_b = runner._model_id(b)
+            assert isinstance(a, shape["cls"]), (
+                f"keys={shape['keys']}: wrong wrapper class")
+            assert fp_a == fp_b, (
+                f"keys={shape['keys']}: not stable across instances")
+            assert "0x" not in fp_a, (
+                f"keys={shape['keys']}: address-bearing repr leaked: {fp_a!r}")
+            assert fp_a == shape["expected"], (
+                f"keys={shape['keys']}: {fp_a!r}")
+        finally:
+            for m in adapters:
+                close = getattr(m, "close", None)
+                if close is not None:
+                    close()
+                else:  # RoutingModel has no close — close the inner adapters
+                    for inner in (getattr(m, "primary", None),
+                                  getattr(m, "fallback", None)):
+                        if inner is not None:
+                            inner.close()
+
+
+def test_model_id_tuning_variants_discriminate():
+    """M7 #1739, Gap 2: three MODELS registry entries construct the SAME
+    wire id (``deepseek/deepseek-v4-pro``) with DIFFERENT tuning:
+    ``deepseek-v4-pro`` (max_tokens=500), ``deepseek-v4-pro-xhigh``
+    (max_tokens=500, temperature=0.0), ``deepseek-v4-pro-noreason``
+    (max_tokens=8000, disable_reasoning=True — reasoning OFF). The pre-fix
+    fingerprint was wire-id-only: identical fingerprints → a reasoning-ON
+    checkpoint silently resumed by reasoning-OFF ``-noreason`` — the "wrong
+    fix silently reuses mismatched-config results" hazard. Post-fix:
+    non-default tuning rides the fingerprint, so ``-xhigh`` and
+    ``-noreason`` differ; identical tuning (base vs ``-xhigh`` are the same
+    effective config) stays equal. Also pins the THIRD tuning knob
+    (``thinking_budget`` — deepseek-r1-xhigh) and the default-tuning
+    omission branch for the pro wire-id family (bare id, no suffix — the
+    #1732 bare-wire-id contract)."""
+    adapters = []
+    try:
+        adapters.append(MODELS["deepseek-v4-pro-xhigh"]())
+        adapters.append(MODELS["deepseek-v4-pro-noreason"]())
+        adapters.append(MODELS["deepseek-v4-pro"]())
+        adapters.append(MODELS["deepseek-v4-pro-noreason"]())
+        adapters.append(MODELS["deepseek-r1-xhigh"]())
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro",
+                                        max_tokens=500, temperature=0.5))
+        (xhigh, noreason, base, twin, r1_xhigh, default_pro,
+         warm) = adapters
+        fp_xhigh = runner._model_id(xhigh)
+        fp_noreason = runner._model_id(noreason)
+        assert fp_xhigh == "deepseek/deepseek-v4-pro|max_tokens=500"
+        assert fp_noreason == (
+            "deepseek/deepseek-v4-pro|max_tokens=8000|disable_reasoning=True")
+        assert fp_xhigh != fp_noreason
+        # base and -xhigh are the same effective config → same fingerprint
+        assert runner._model_id(base) == fp_xhigh
+        # determinism twin (the resume-acceptance contract)
+        assert runner._model_id(twin) == fp_noreason
+        # the third tuning knob: thinking_budget rides the fingerprint
+        assert runner._model_id(r1_xhigh) == (
+            "deepseek/deepseek-r1-0528|max_tokens=500|thinking_budget=2000")
+        # default tuning → bare wire id, no suffix (the omission branch)
+        assert runner._model_id(default_pro) == "deepseek/deepseek-v4-pro"
+        # the fourth knob: non-default temperature rides the fingerprint —
+        # same wire id + max_tokens as -xhigh, different temperature
+        assert runner._model_id(warm) == (
+            "deepseek/deepseek-v4-pro|max_tokens=500|temperature=0.5")
+        assert runner._model_id(warm) != fp_xhigh
+    finally:
+        for m in adapters:
+            m.close()
+
+
 def test_checkpoint_resume_gate_accepts_same_model_fresh_instance(tmp_path):
     """M4 #1732, end-to-end: the checkpoint resume gate must accept a fresh
     instance of the SAME extractor model (identical fingerprint) and refuse
@@ -873,6 +1040,156 @@ def test_checkpoint_resume_gate_accepts_same_model_fresh_instance(tmp_path):
     finally:
         for model in adapters:
             model.close()
+
+
+def test_checkpoint_resume_refuses_cross_tuning(tmp_path):
+    """M7 #1739, Gap 2 integration: a checkpoint written with
+    ``--extractor-model deepseek-v4-pro-xhigh`` (reasoning-ON, max_tokens=
+    500) REFUSES resume under ``deepseek-v4-pro-noreason`` (reasoning-OFF,
+    max_tokens=8000) — CheckpointStaleError naming ``extractor_model`` —
+    and a fresh same-tuning instance resumes. The wire id is IDENTICAL on
+    both sides: only the tuning discriminator can refuse (the exact
+    cross-tuning hazard the issue calls out — silently reusing
+    mismatched-config results). The default-tuning ↔ tuned directions are
+    also refused (every distinct tuning fingerprints differently)."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+    cp = tmp_path / "state.json"
+    adapters = []
+    try:
+        adapters.append(MODELS["deepseek-v4-pro-xhigh"]())
+        adapters.append(MODELS["deepseek-v4-pro-xhigh"]())
+        adapters.append(MODELS["deepseek-v4-pro-noreason"]())
+        adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))
+        xhigh, xhigh_twin, noreason, default_pro = adapters
+        runner._save_checkpoint(
+            str(cp), [_minimal_outcome("q1")], [],
+            fingerprint=runner._build_fingerprint(
+                extractor_model=xhigh, **kw))
+        # fresh same-tuning instance → accepted
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=xhigh_twin, **kw))
+        assert "q1" in done
+        # cross-tuning (same wire id!) → refused, naming extractor_model
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=noreason, **kw))
+        # default tuning → also refused against the -xhigh checkpoint
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=default_pro, **kw))
+    finally:
+        for m in adapters:
+            m.close()
+
+
+def test_checkpoint_wrapper_path_resume_same_config(tmp_path, monkeypatch):
+    """M7 #1739, Gap 1 integration: the DEFAULT wrapper path
+    (``build_extractor_model()``) must be checkpoint-resumable — a fresh
+    wrapper instance with the same effective config resumes (the #1549
+    "run it in slices" protocol); a different extractor wire id is refused
+    naming ``extractor_model``. Exercised at ALL THREE provider shapes the
+    default path can produce (1/2-provider RoutingModel, 3-provider
+    RotatingModel — the #1549 pilot default) PLUS the wrapper cross-tuning
+    direction: two wrappers differing ONLY in max_tokens must refuse each
+    other's checkpoints (the member tuning suffix discriminates on the
+    wrapper path, mirroring test_checkpoint_resume_refuses_cross_tuning).
+    Pre-fix every fresh instance embedded a distinct 0x... repr → all
+    resumes refused even with identical git_sha."""
+    kw = dict(
+        reader_model="r", judge_model="j", ks=(5,), top_k=5, split="s",
+        ingest_mode="embedded", max_retries=1, dataset_fingerprint="x",
+        rerank_config={},
+    )
+    for keys in ((), ("deepseek", "openrouter"),
+                 ("deepseek", "openrouter", "venice")):
+        _pin_extractor_env(monkeypatch, keys=keys)
+        cp = tmp_path / f"state-{len(keys)}.json"
+        adapters = []
+        try:
+            adapters.append(build_extractor_model(
+                max_tokens=None, temperature=0.0))
+            adapters.append(build_extractor_model(
+                max_tokens=None, temperature=0.0))  # fresh, same config
+            adapters.append(build_extractor_model(
+                model_id="deepseek/deepseek-v4-pro",
+                max_tokens=None, temperature=0.0))  # diff wire id
+            a, b, c = adapters
+            runner._save_checkpoint(
+                str(cp), [_minimal_outcome("q1")], [],
+                fingerprint=runner._build_fingerprint(
+                    extractor_model=a, **kw))
+            # fresh wrapper, same effective config → accepted
+            done, _ = runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=b, **kw))
+            assert "q1" in done, f"keys={keys}"
+            # different wire id → refused, naming extractor_model
+            with pytest.raises(runner.CheckpointStaleError,
+                               match=r"differs on \['extractor_model'\]"):
+                runner._load_checkpoint(
+                    str(cp),
+                    expected_fingerprint=runner._build_fingerprint(
+                        extractor_model=c, **kw))
+        finally:
+            for m in adapters:
+                close = getattr(m, "close", None)
+                if close is not None:
+                    close()
+                else:  # RoutingModel has no close — close the inner adapters
+                    for inner in (getattr(m, "primary", None),
+                                  getattr(m, "fallback", None)):
+                        if inner is not None:
+                            inner.close()
+    # wrapper cross-tuning: same wire id + provider set, different max_tokens
+    # → refused (only the member tuning suffix discriminates)
+    _pin_extractor_env(monkeypatch, keys=())
+    cp = tmp_path / "state-tuning.json"
+    adapters = []
+    try:
+        adapters.append(build_extractor_model(
+            max_tokens=500, temperature=0.0))
+        adapters.append(build_extractor_model(
+            max_tokens=500, temperature=0.0))  # fresh, same tuning
+        adapters.append(build_extractor_model(
+            max_tokens=8000, temperature=0.0))  # diff tuning
+        a, b, c = adapters
+        runner._save_checkpoint(
+            str(cp), [_minimal_outcome("q1")], [],
+            fingerprint=runner._build_fingerprint(extractor_model=a, **kw))
+        done, _ = runner._load_checkpoint(
+            str(cp),
+            expected_fingerprint=runner._build_fingerprint(
+                extractor_model=b, **kw))
+        assert "q1" in done
+        with pytest.raises(runner.CheckpointStaleError,
+                           match=r"differs on \['extractor_model'\]"):
+            runner._load_checkpoint(
+                str(cp),
+                expected_fingerprint=runner._build_fingerprint(
+                    extractor_model=c, **kw))
+    finally:
+        for m in adapters:
+            close = getattr(m, "close", None)
+            if close is not None:
+                close()
+            else:  # RoutingModel has no close — close the inner adapters
+                for inner in (getattr(m, "primary", None),
+                              getattr(m, "fallback", None)):
+                    if inner is not None:
+                        inner.close()
 
 
 def test_run_evaluation_resume_accepts_fresh_same_model_extractor(tmp_path):
