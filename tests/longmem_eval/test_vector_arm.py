@@ -984,6 +984,19 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
                         inner.close()
 
 
+def test_run_main_rejects_session_workers_without_v2(capsys):
+    """M7 #1739 / #1742: ``--session-workers > 1`` requires
+    ``--ingest-mode v2`` (the only mode with a worker factory) — rejected
+    loudly at the CLI (parser.error, exit 2, accurate message) instead of a
+    silent no-op (the flag was previously parsed but never threaded) or a
+    confusing fingerprint mismatch (the guard is v2-scoped)."""
+    with pytest.raises(SystemExit) as exc:
+        runner.run_main(["--session-workers", "2"])
+    assert exc.value.code == 2
+    assert ("session-workers > 1 requires --ingest-mode v2"
+            in capsys.readouterr().err)
+
+
 def test_run_evaluation_refuses_fingerprint_served_mismatch_at_session_workers(
         tmp_path, monkeypatch):
     """M7 #1739 / #1742: with ``session_workers > 1``, run_evaluation

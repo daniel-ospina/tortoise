@@ -1035,7 +1035,10 @@ def run_evaluation(
     # resolved session_worker_* trio would fingerprint one config while the
     # workers served another (the checkpoint would be accepted on resume
     # over results produced by a different model). Fail loud on mismatch.
-    if session_workers > 1:
+    # Scoped to the v2 ingest path — the ONLY mode with a worker factory;
+    # non-v2 modes never build extractor_model (None) and the flag is
+    # rejected at the CLI (see run_main) / inert programmatically.
+    if session_workers > 1 and ingest_mode == "v2":
         from tests.model_adapters import build_extractor_model
         served = build_extractor_model(
             session_worker_model_spec or None,
@@ -2036,6 +2039,15 @@ def run_main(argv: list[str] | None = None) -> dict[str, Any]:
     _assert_python_version()
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # M7 #1739 / #1742: session-parallel extraction exists only on the v2
+    # ingest path (the worker factory). The flag was previously parsed but
+    # never threaded — a silent no-op on every mode; now it is wired for
+    # v2 and REJECTED loudly elsewhere (fail fast with an accurate message
+    # instead of a confusing fingerprint mismatch or a silent no-op).
+    if args.session_workers > 1 and args.ingest_mode != "v2":
+        parser.error("--session-workers > 1 requires --ingest-mode v2 "
+                     "(session-parallel extraction exists only on the v2 "
+                     "path)")
 
     # --db: FalkorDB URI handling mirroring tests/eval/retrieval/run.py:549
     # (URI → TORTOISE_DB_URI → TortoiseSDK()). Non-URI --db is rejected —
