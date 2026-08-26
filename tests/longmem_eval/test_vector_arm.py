@@ -839,38 +839,64 @@ def test_resume_gate_reject_reason_guard_rails(outcome, expect):
         assert reason is not None and reason.startswith(expect)
 
 
-def test_resume_gate_warns_on_unknown_leg_reason(capsys):
-    """#1764/code-review: an fts leg with count==0 and a reason OUTSIDE
-    the known vocabulary (future vocabulary, hand-edited files,
-    reason=None) stays fail-open — NOT dead (the index_missing livelock
-    lesson) — but emits a LOUD stderr warning naming the leg and reason so
-    vocabulary drift is visible (mirrors the corrupt-file warning
-    pattern)."""
-    # unknown future-vocabulary reason → not dead, warning fires
+def test_resume_gate_unknown_leg_reason_pure_and_surfaced(tmp_path, capsys):
+    """#1764/code-review: the gate predicate is PURE — an fts leg with
+    count==0 and a reason OUTSIDE the known vocabulary (future vocabulary,
+    hand-edited files, reason=None) stays fail-open (NOT dead — the
+    index_missing livelock lesson), the predicate prints NOTHING (it is the
+    shared single source of truth called by both the runner and the
+    protocol scan — a print inside it double-fires in a real cmd_run flow
+    and fires in --dry-run contexts where no load decision happens), and
+    the vocabulary-drift event is surfaced by the callers that own the
+    load decision: ``unknown_leg_reasons`` classifies it and
+    ``_load_checkpoint`` warns once per gate-eligible outcome, naming qid
+    + the unknown reason(s)."""
+    # predicate: pure + fail-open (unknown future reason → not dead, no print)
     reason = runner.resume_gate_reject_reason({
         "question_id": "q-unknown",
         "legs": [{"leg": "fts", "ran": True, "degraded": True,
                    "reason": "some_future_reason", "count": 0}]})
     assert reason is None
-    err = capsys.readouterr().err
-    assert "unknown" in err.lower()
-    assert "some_future_reason" in err and "q-unknown" in err
-    # reason=None (hand-edited/corrupt) → not dead, warning fires
-    reason = runner.resume_gate_reject_reason({
+    assert "unknown" not in capsys.readouterr().err.lower()
+    # helper: the unknown reason strings (raw values, deduplicated)
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-unknown",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": "some_future_reason", "count": 0}]}) \
+        == ["some_future_reason"]
+    # reason=None (hand-edited/corrupt) → not dead, classified by helper
+    assert runner.resume_gate_reject_reason({
         "question_id": "q-none",
         "legs": [{"leg": "fts", "ran": True, "degraded": True,
-                   "reason": None, "count": 0}]})
-    assert reason is None
-    err = capsys.readouterr().err
-    assert "unknown" in err.lower()
-    assert "None" in err and "q-none" in err
-    # a known benign reason (index_missing) does NOT warn
-    reason = runner.resume_gate_reject_reason({
+                   "reason": None, "count": 0}]}) is None
+    assert runner.unknown_leg_reasons({
+        "question_id": "q-none",
+        "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                   "reason": None, "count": 0}]}) == [None]
+    # a known benign reason (index_missing) is not unknown
+    assert runner.unknown_leg_reasons({
         "question_id": "q-benign",
         "legs": [{"leg": "fts", "ran": True, "degraded": True,
-                   "reason": "index_missing", "count": 0}]})
-    assert reason is None
-    assert "unknown" not in capsys.readouterr().err.lower()
+                   "reason": "index_missing", "count": 0}]}) == []
+    # _load_checkpoint (the runner's load path) warns ONCE per gate-
+    # eligible outcome naming qid + the unknown reason(s), and still loads
+    # the outcome (fail-open)
+    cp = tmp_path / "state.json"
+    cp.write_text(json.dumps({
+        "format": runner.CHECKPOINT_FORMAT,
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [_minimal_outcome("q-unknown", **{
+            "legs": [{"leg": "fts", "ran": True, "degraded": True,
+                       "reason": "some_future_reason", "count": 0}],
+            "session_recall@k": {"5": 1.0},  # healthy — NOT rejected
+        })],
+    }), encoding="utf-8")
+    done, _ = runner._load_checkpoint(
+        str(cp), run_key="embedded__hybrid__default__default")
+    err = capsys.readouterr().err
+    assert "q-unknown" in err and "some_future_reason" in err
+    assert "unknown" in err.lower() and "fail-open" in err
+    assert "q-unknown" in done  # fail-open — loaded, not rejected
 
 
 def test_checkpoint_top_level_retriever_mismatch_warns(tmp_path, capsys):

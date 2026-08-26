@@ -1008,8 +1008,13 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
     An fts entry with ``count == 0`` and a reason OUTSIDE the known
     vocabulary (future vocabulary, hand-edited files, reason=None) is NOT
     treated as dead either (fail-open — the index_missing livelock
-    lesson), but emits a loud stderr warning naming the leg and reason so
-    vocabulary drift is visible. Legitimately session-less outcomes
+    lesson); the vocabulary-drift event is surfaced by the CALLERS that
+    own the load decision (see ``unknown_leg_reasons``) — this predicate
+    is PURE, no side effects: it is the shared single source of truth for
+    both the runner's ``_load_checkpoint`` and the protocol's pre-resume
+    scan, and a print here would double-fire in a real ``cmd_run`` flow
+    and fire in ``--dry-run`` contexts where no load decision happens.
+    Legitimately session-less outcomes
     (abstention questions — ``turn_recall@k`` all None per the M6
     N/A-not-0.0 contract) are exempt: their all-zero session recall and
     legitimately empty FTS are the question's shape, not a dead backend.
@@ -1061,18 +1066,12 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
                     and leg.get("count") == 0]
         # #1764/code-review: an fts entry with count==0 and a reason
         # OUTSIDE the known vocabulary (future vocabulary, hand-edited
-        # files, reason=None) is NOT dead (fail-open — the index_missing
-        # livelock lesson) but is warned about LOUDLY so vocabulary drift
-        # is visible (mirrors the corrupt-file warning pattern).
-        for leg in fts_entries:
-            if (leg.get("count") == 0
-                    and leg.get("reason") not in KNOWN_LEG_REASONS):
-                print(f"[longmem_eval] WARNING: outcome "
-                      f"{outcome.get('question_id')!r} fts leg has unknown "
-                      f"reason {leg.get('reason')!r} with count=0 — NOT "
-                      f"treated as dead (fail-open on unknown vocabulary); "
-                      f"known reasons: {KNOWN_LEG_REASONS}",
-                      file=sys.stderr)
+        # files, reason=None) is NOT dead — the ``dead_fts`` filter above
+        # only matches DEAD_LEG_REASONS (fail-open; the index_missing
+        # livelock lesson). The predicate is PURE (no side effects — it is
+        # the shared single source of truth for the runner and the
+        # protocol scan), so the vocabulary-drift event is surfaced by the
+        # callers via ``unknown_leg_reasons`` — never printed here.
         live_fts = any(leg.get("reason") == "ok"
                        and leg.get("count", 0) > 0 for leg in fts_entries)
         # The dead-FTS signal fires only when the session did NOT
@@ -1085,6 +1084,40 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
     if session_zero:
         return "session_recall@k all zeros (session never surfaced)"
     return None
+
+
+def unknown_leg_reasons(outcome: dict) -> list:
+    """#1764/code-review: the fts-leg reason strings OUTSIDE the known
+    vocabulary with ``count == 0`` (future vocabulary, hand-edited files,
+    reason=None) — the classification data behind the gate's fail-open
+    unknown-reason handling (see ``resume_gate_reject_reason``). PURE
+    helper, no side effects: ``resume_gate_reject_reason`` is the shared
+    single source of truth called by BOTH the runner (``_load_checkpoint``)
+    and the protocol scan (run_protocol.checkpoint_resume_quality), so
+    vocabulary-drift surfacing belongs to the callers that own the load
+    decision — this helper just answers "which unknown reasons does this
+    outcome carry?".
+
+    Returns the raw reason values in first-seen order, deduplicated
+    (normally ``str``; ``None``/other corrupt values pass through raw so a
+    caller's repr matches the recorded value). An unknown reason does NOT
+    make the leg dead — it is fail-open (the index_missing livelock
+    lesson) — it only marks vocabulary drift the callers surface loudly.
+    """
+    if not isinstance(outcome, dict):
+        return []
+    legs = outcome.get("legs")
+    if not isinstance(legs, list):
+        return []
+    seen: list = []
+    for leg in legs:
+        if (isinstance(leg, dict) and leg.get("leg") == "fts"
+                and leg.get("count") == 0
+                and leg.get("reason") not in KNOWN_LEG_REASONS):
+            reason = leg.get("reason")
+            if reason not in seen:
+                seen.append(reason)
+    return seen
 
 
 def _load_checkpoint(path: str | None,
@@ -1221,6 +1254,22 @@ def _load_checkpoint(path: str | None,
         # completed set so the question re-encodes (single-population
         # discipline: no stale dead-leg outcomes in baselines).
         reason = resume_gate_reject_reason(o)
+        # #1764/code-review: the gate predicate is PURE (no side effects —
+        # it is the shared single source of truth called by both this
+        # loader and the protocol's pre-resume scan; the old in-predicate
+        # print double-fired in a real cmd_run flow and fired in --dry-run
+        # contexts where no load decision happens), so the unknown-reason
+        # vocabulary-drift warning is surfaced HERE — once per gate-
+        # eligible outcome, naming qid + the unknown reason(s), same loud
+        # wording as before (fail-open — NOT dead).
+        unknown = unknown_leg_reasons(o)
+        if unknown:
+            print(f"[longmem_eval] WARNING: outcome "
+                  f"{o.get('question_id')!r} fts leg has unknown "
+                  f"reason(s) {', '.join(repr(r) for r in unknown)} with "
+                  f"count=0 — NOT treated as dead (fail-open on unknown "
+                  f"vocabulary); known reasons: {KNOWN_LEG_REASONS}",
+                  file=sys.stderr)
         if reason is not None:
             gate_rejected += 1
             print(f"[longmem_eval] WARNING: checkpoint outcome "

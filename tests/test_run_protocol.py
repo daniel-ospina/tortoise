@@ -622,10 +622,11 @@ def test_print_resume_quality_clean_verdict_softened(tmp_path, capsys):
     """#1764/code-review: the clean-path verdict must not bless a file the
     runner would refuse wholesale — the scan only re-checks per-outcome gate
     decisions, never the whole-file load gates (format / run_key /
-    fingerprint mismatch), and the verdict says so."""
+    fingerprint mismatch), and the verdict says so. (And a drift-free scan
+    carries an empty ``unknown_reasons`` — no vocabulary event.)"""
     rp._print_resume_quality({
         "checked": 3, "rejected": 0, "fts_dead": 0, "zero_session": 0,
-        "truncated": 0, "qids": [],
+        "truncated": 0, "qids": [], "unknown_reasons": {},
     })
     err = capsys.readouterr().err
     assert "scan-clean" in err
@@ -633,10 +634,65 @@ def test_print_resume_quality_clean_verdict_softened(tmp_path, capsys):
     assert "checkpoint clean" not in err
 
 
+def test_checkpoint_resume_quality_unknown_reasons_surfaced(tmp_path, capsys):
+    """#1764/code-review: an fts leg with count==0 and a reason OUTSIDE the
+    known vocabulary is NOT rejected (fail-open) — the scan carries the
+    vocabulary-drift event in the ``unknown_reasons`` field ({qid: [...]})
+    of the returned dict instead of printing a per-outcome warning (the
+    shared gate predicate is pure — single source of truth, no side
+    effects), and _print_resume_quality surfaces it loudly WITHOUT pairing
+    it with a 'scan-clean' verdict (a drift event must never carry a clean
+    claim)."""
+    cp = tmp_path / "unknown.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-unknown",
+                       "session_recall@k": {"20": 1.0},
+                       "turn_recall@k": {"20": 1.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": True,
+                                  "reason": "some_future_reason",
+                                  "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["rejected"] == 0  # fail-open — not dead
+    assert scan["unknown_reasons"] == {"q-unknown": ["some_future_reason"]}
+    # the scan prints NO per-outcome warning (the pure predicate never
+    # prints; the run-state dict carries the event)
+    assert "unknown" not in capsys.readouterr().err.lower()
+    # the print path surfaces it loudly — and NEVER pairs it with scan-clean
+    rp._print_resume_quality(scan)
+    err = capsys.readouterr().err
+    assert "q-unknown" in err and "some_future_reason" in err
+    assert "vocabulary" in err
+    assert "scan-clean" not in err
+
+    # a rejected outcome (dead fts leg) with no unknown reason → empty map
+    cp2 = tmp_path / "dead.json"
+    cp2.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-dead",
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results",
+                                  "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp2)
+    assert scan["rejected"] == 1
+    assert scan["unknown_reasons"] == {}
+
+
 def test_last_flag_value_helper():
     """#1764/code-review: _last_flag_value resolves the LAST occurrence
-    (argparse last-wins), and returns None for absent flags or a flag with
-    no value — never an unhandled ValueError/IndexError."""
+    (argparse last-wins), recognizes BOTH the space form (--flag value) and
+    the argparse-valid equals form (--flag=value) with last-wins ACROSS
+    forms, and returns None for absent flags or a flag with no value —
+    never an unhandled ValueError/IndexError."""
     cmd = ["python", "-m", "tools.longmem_eval.run",
            "--checkpoint", "a", "--output", "b", "--checkpoint", "c"]
     assert rp._last_flag_value(cmd, "--checkpoint") == "c"
@@ -645,6 +701,23 @@ def test_last_flag_value_helper():
     # flag as the final token (no value) → None, not IndexError
     assert rp._last_flag_value(["python", "--checkpoint"],
                                "--checkpoint") is None
+    # equals form (argparse-valid): --retriever=vector == --retriever vector
+    assert rp._last_flag_value(["--retriever=vector", "--checkpoint",
+                                "s.json"], "--retriever") == "vector"
+    # last occurrence wins ACROSS forms (argparse treats both identically)
+    assert rp._last_flag_value(["--retriever", "hybrid",
+                                "--retriever=vector"], "--retriever") \
+        == "vector"
+    assert rp._last_flag_value(["--retriever=vector", "--retriever",
+                                "hybrid"], "--retriever") == "hybrid"
+    # space-form --checkpoint/--output behavior unchanged alongside equals
+    # forms of other flags
+    assert rp._last_flag_value(
+        ["--retriever=vector", "--checkpoint", "a", "--output", "b"],
+        "--checkpoint") == "a"
+    assert rp._last_flag_value(
+        ["--retriever=vector", "--checkpoint", "a", "--output", "b"],
+        "--output") == "b"
 
 
 

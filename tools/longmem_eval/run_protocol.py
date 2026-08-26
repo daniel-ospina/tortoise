@@ -354,11 +354,14 @@ def checkpoint_resume_quality(checkpoint: Path,
     are the runner's own load semantics and can only be resolved with the
     effective run config.
 
-    Returns a summary dict, or None when there is nothing to scan (no
+    Returns a summary dict, or None when there is nothing to scan — no
     checkpoint file / non-dict / missing or empty ``outcomes`` / no
-    gate-eligible outcomes). The read happens under the same exclusive
-    flock the writer uses (D8 — run.py's ``_load_checkpoint`` contract) so
-    the scan never sees a mid-merge file; an existing-but-corrupt file
+    gate-eligible outcomes — or when the read itself is skipped: a
+    lock-busy (flock TimeoutError — concurrent writer) and an
+    existing-but-corrupt file both return None after a loud stderr warning
+    (see the read paragraph below). The read happens under the same
+    exclusive flock the writer uses (D8 — run.py's ``_load_checkpoint``
+    contract) so the scan never sees a mid-merge file; an existing-but-corrupt file
     surfaces a loud stderr warning (mirroring the runner's corrupt-file
     warning) before returning None, and a lock-busy (flock TimeoutError —
     concurrent writer) is reported accurately as a skipped scan, never as
@@ -373,6 +376,7 @@ def checkpoint_resume_quality(checkpoint: Path,
         _retriever_from_checkpoint,
         resume_gate_reject_reason,
         session_recall_all_zero,
+        unknown_leg_reasons,
     )
     if not checkpoint.is_file():
         return None
@@ -419,6 +423,13 @@ def checkpoint_resume_quality(checkpoint: Path,
     checked = 0
     truncated = 0
     rejected: list[tuple[str, str, bool]] = []  # (qid, reason, session_all_zero)
+    # #1764/code-review: vocabulary-drift events — an fts leg with count==0
+    # and a reason OUTSIDE the known vocabulary is NOT rejected (fail-open)
+    # but is recorded here ({qid: [unknown reasons]}) so the run state
+    # documents the drift; the shared gate predicate is pure (never prints)
+    # and the scan itself prints nothing — the run-state dict carries it and
+    # _print_resume_quality surfaces it.
+    unknown_reasons: dict[str, list] = {}
     for o in outcomes:
         if not isinstance(o, dict) or not o.get("question_id"):
             continue
@@ -428,6 +439,10 @@ def checkpoint_resume_quality(checkpoint: Path,
             truncated += 1  # runner re-encodes via the truncated path
             continue
         checked += 1
+        # qids are string-coerced (checkpoint question_ids may be ints).
+        unknown = unknown_leg_reasons(o)
+        if unknown:
+            unknown_reasons[str(o["question_id"])] = unknown
         reason = resume_gate_reject_reason(o)
         if reason is not None:
             # zero_session derives from the runner's OWN type-strict
@@ -452,6 +467,9 @@ def checkpoint_resume_quality(checkpoint: Path,
         # qids are string-coerced — checkpoint question_ids may be ints
         # (foreign/dataset shapes) and sorted()/join() would TypeError.
         "qids": sorted({str(q) for q, _, _ in rejected}),
+        # {qid: [unknown fts-leg reasons]} — vocabulary drift (fail-open,
+        # never rejected) recorded so the run state documents it.
+        "unknown_reasons": unknown_reasons,
     }
 
 
@@ -475,7 +493,25 @@ def _print_resume_quality(resume_quality: dict | None) -> None:
             f"{resume_quality['truncated']} truncated/corrupt outcomes "
             f"(missing required keys) will also re-encode",
             file=sys.stderr)
-    if not resume_quality["rejected"] and not resume_quality["truncated"]:
+    # #1764/code-review: vocabulary-drift events (fts leg with count==0 and
+    # a reason OUTSIDE the known vocabulary) are surfaced loudly — NOT
+    # rejected (fail-open), but the operator must see the drift; and the
+    # scan-clean verdict below must NEVER pair with a drift event (a clean
+    # claim would contradict the warning).
+    unknown = resume_quality.get("unknown_reasons") or {}
+    if unknown:
+        detail = ", ".join(
+            f"{qid}: {', '.join(repr(r) for r in reasons)}"
+            for qid, reasons in sorted(unknown.items()))
+        print(
+            f"[run_protocol] resume-quality gate: "
+            f"{len(unknown)} checkpointed outcome(s) carry an fts leg with "
+            f"count=0 and a reason OUTSIDE the known vocabulary — NOT "
+            f"rejected (fail-open on unknown vocabulary), but vocabulary "
+            f"drift: {detail}",
+            file=sys.stderr)
+    if (not resume_quality["rejected"] and not resume_quality["truncated"]
+            and not unknown):
         # The scan mirrors the runner's PER-OUTCOME gate decision only — it
         # does NOT re-check the whole-file load gates (format / run_key /
         # fingerprint mismatch), so it cannot bless a file the runner would
@@ -564,13 +600,24 @@ def _last_flag_value(cmd: list[str], flag: str) -> str | None:
     """Value of the LAST ``flag`` occurrence in ``cmd`` (the runner's
     argparse is last-wins — the protocol appends its own flags AFTER the
     operator's extra ones), or None when the flag is absent (or has no
-    value — e.g. it is the final token)."""
-    if flag not in cmd:
-        return None
-    idx = len(cmd) - 1 - cmd[::-1].index(flag)
-    if idx + 1 >= len(cmd):
-        return None
-    return cmd[idx + 1]
+    value — e.g. it is the final token).
+
+    #1764/code-review: the argparse-valid equals form (``--retriever=vector``)
+    is recognized alongside the space form (``--retriever vector``), and
+    last occurrence wins ACROSS both forms (argparse treats them
+    identically — the equals form is only sugar for a two-token sequence;
+    the space-form token itself is never a value candidate). This only
+    matters for flags that can come from operator extras (--retriever):
+    --checkpoint/--output are always appended space-form AFTER the extras
+    by build_command, so last-wins still resolves the protocol's own.
+    """
+    value: str | None = None
+    for i, tok in enumerate(cmd):
+        if tok == flag:
+            value = cmd[i + 1] if i + 1 < len(cmd) else None
+        elif tok.startswith(flag + "="):
+            value = tok[len(flag) + 1:]
+    return value
 
 
 def cmd_run(state: ProtocolState, args: argparse.Namespace) -> None:
