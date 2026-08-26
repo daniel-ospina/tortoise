@@ -121,14 +121,15 @@ def _outcome_grade(o: dict[str, Any]) -> str:
     """
     ec = o.get("error_classes") or {}
     if isinstance(ec, dict):
-        # Fail-closed coercion: an int count > 0 marks the class PRESENT; an
-        # int count <= 0 marks it absent (the extractor emits only positive
-        # counts — zeros are artifacts); a NON-int count (malformed JSON from
-        # a schema-less checkpoint merge) keeps the class PRESENT so it trips
-        # the hard veto instead of being silently dropped (security review,
-        # #1747).
-        classes = {c for c, n in ec.items()
-                   if not (isinstance(n, int) and n <= 0)}
+        # Class presence = KEY presence (security review, #1747). The count
+        # VALUE never decides presence: a tampered checkpoint zeroing or
+        # falsing a hard class's count (``{"fatal_402_billing": 0}`` /
+        # ``false``) would otherwise launder it to clean — grader and record
+        # must agree, and the extractor never emits zero/absent counts, so
+        # ANY present key is a real (or anomalous, fail-closed) signal.
+        # Malformed count values ride only the census roll-up
+        # (``error_census_malformed``).
+        classes = set(ec)
     else:  # legacy flat-list shape (defensive back-compat) — non-iterable /
         # unhashable values (malformed checkpoint JSON) fail CLOSED to hard
         # instead of crashing the report (security review, #1747).
@@ -137,11 +138,14 @@ def _outcome_grade(o: dict[str, Any]) -> str:
         classes = {c for c in ec if isinstance(c, str) and c}
     if classes - RECOVERABLE_CENSUS_CLASSES:
         return "hard"
-    # The runner's binary ``valid`` flag must be a REAL bool: a missing or
-    # non-bool flag (``"valid": "false"`` from a schema-less checkpoint) is
-    # malformed input and fails CLOSED to hard — truthiness coercion would
-    # fail OPEN and certify a structurally-degraded run as clean (security
-    # review, #1747).
+    # The runner's binary ``valid`` flag must be a REAL bool when PRESENT: a
+    # present non-bool flag (``"valid": "false"`` from a schema-less
+    # checkpoint) is malformed input and fails CLOSED to hard — truthiness
+    # coercion would fail OPEN and certify a structurally-degraded run as
+    # clean (security review, #1747). A MISSING flag keeps the historical
+    # back-compat default True (full_context cell outcomes and legacy pre-M7
+    # checkpoints carry no flag; a tampered checkpoint can always clear
+    # ``error_classes`` anyway — same trust model, documented).
     flag = o.get("valid", True)
     if not isinstance(flag, bool):
         return "hard"
@@ -477,9 +481,13 @@ def build_report(
     #                error string with an empty census (structural
     #                degradation) → VETOES the run at any threshold
     #   recoverable — only parse_error/truncated/truncated_parse_error/
-    #                partial_parse/transient_* classes → INVALID but
-    #                rate-limited (threshold)
-    #   clean      — no error signal
+    #                partial_parse/transient_* classes with the runner flag
+    #                valid=False → INVALID but rate-limited (threshold)
+    #   clean      — no error signal; a recoverable-only census with the
+    #                runner flag valid=True also grades clean (drift-pin:
+    #                test_report_integrity_recoverable_census_with_runner_
+    #                clean_is_valid — the runner's binary flag is the
+    #                authority on whether error strings exist)
     # Eval ``failures`` are graded by their exact site-prefixed class:
     # permanent (fatal/fatal_config/parse/ingest) → hard veto;
     # transient-safe (reader/judge:retries_exhausted) → recoverable.
@@ -497,14 +505,25 @@ def build_report(
     # only the ``valid`` VERDICT gains the hard veto on top of the rate
     # criterion.
     effective_threshold = float(integrity_threshold or 0.0)
-    failure_qids = {f.get("question_id") for f in (failures or [])}
-    attempted_qids = {o["question_id"] for o in outcomes} | failure_qids
+    # qid guards (security review, #1747): a non-str question_id (malformed
+    # checkpoint JSON) is skipped, not indexed — unhashable values would
+    # otherwise crash the set/dict grades (the run.py loader crash for the
+    # same shape is tracked in #1770).
+    failure_qids = {f.get("question_id")
+                    for f in (failures or [])
+                    if isinstance(f.get("question_id"), str)}
+    attempted_qids = ({o["question_id"] for o in outcomes
+                       if isinstance(o.get("question_id"), str)}
+                      | failure_qids)
     n_attempted = len(attempted_qids)
     grade_by_qid: dict[str, str] = {}
     for o in outcomes:
-        grade_by_qid[o["question_id"]] = _outcome_grade(o)
+        if isinstance(o.get("question_id"), str):
+            grade_by_qid[o["question_id"]] = _outcome_grade(o)
     for f in (failures or []):
         qid = f.get("question_id")
+        if not isinstance(qid, str):
+            continue
         fg = _failure_grade(f.get("error_class"))
         prev = grade_by_qid.get(qid)
         # failure grade dominates; hard beats recoverable/clean.
@@ -525,19 +544,18 @@ def build_report(
         if isinstance(ec, dict):
             for cls, count in ec.items():
                 # Collision-safe roll-up (reviewer-pinned, #1747): an int
-                # count sums into the typed accumulator; a malformed non-int
-                # count is recorded in the SEPARATE ``error_census_malformed``
-                # field (never mixed into the Counter — a verbatim value would
-                # TypeError on a later int sum for the same class). A valid
-                # int later in the merge still sums; the malformed evidence is
-                # preserved alongside, so a tampered/legacy checkpoint cannot
-                # crash the report nor vanish from the published record.
+                # count sums into the typed accumulator; EVERY other count
+                # value (None / str / float / bool / list / dict — malformed
+                # JSON from a schema-less checkpoint) is recorded in the
+                # SEPARATE ``error_census_malformed`` field, so the
+                # "malformed evidence never vanishes" promise holds for every
+                # shape and a verbatim value can never TypeError a later int
+                # sum for the same class. Grading is presence-by-key and
+                # independent of these fields (the veto cannot be laundered
+                # through them).
                 if isinstance(count, int) and not isinstance(count, bool):
                     census[cls] += count
-                elif count is None or isinstance(count, (str, float, bool)):
-                    # bool counts (JSON true/false) and other malformed
-                    # values are recorded in the separate field — the "never
-                    # vanishes" promise covers every malformed shape.
+                else:
                     malformed_census.setdefault(cls, count)
         else:  # legacy flat-list shape (defensive back-compat) — non-iterable
             # values (malformed checkpoint JSON) are skipped here (the grader

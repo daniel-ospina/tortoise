@@ -73,11 +73,16 @@ questions that still fail are recorded in `report['failures']` and the run
 continues — one transient error never aborts the 500-Q run),
 `--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`
 (R1 #1540 knobs — env-first, CLI overrides, all validated ≥ 1),
-`--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527:
-override the `integrity.valid` gate — max allowed `invalid_rate`; the
-override is recorded with its justification and a *violated* override still
-yields `valid=false`; default 0.0 = any failed/ingest-error question marks
-the run invalid).
+`--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
+#1747 census-class-aware: override the `integrity.valid` RATE criterion —
+max allowed `invalid_rate` over questions with recoverable-class signals
+(parse_error/truncated/truncated_parse_error/partial_parse/transient_*
+census classes, reader/judge:retries_exhausted eval failures); hard-failure
+questions (fatal_*/ingest/unknown census classes, non-census error strings
+with an empty census, permanent eval failures) VETO at any threshold — no
+override admits them; the override is recorded with its justification and a
+*violated* override still yields `valid=false`; default 0.0 = any
+failed/error-signal question marks the run invalid).
 
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),

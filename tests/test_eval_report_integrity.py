@@ -374,28 +374,37 @@ def test_report_integrity_all_clean_nonempty_run():
 
 
 def test_report_integrity_zero_count_census_semantics():
-    """#1747 (reviewer-pinned): zero-count census entries are artifacts (the
-    extractor emits only positive counts) — they are ABSENT from the graded
-    class set but still recorded in the published census."""
-    # zero-count recoverable + valid=False → the census is effectively empty
-    # → the invalidity is non-census/structural → HARD (empty-census branch).
+    """#1747 (security-review P1 flip): class presence is KEY presence — a
+    present class with a zero/false count is still PRESENT (the extractor
+    never emits zero counts, so a zero entry is anomalous and must fail
+    closed; count-value presence would let a tampered checkpoint launder a
+    hard class to clean). The count value only feeds the published census."""
+    # zero-count recoverable + valid=False → the class is present and
+    # recoverable-only → RECOVERABLE (rate-limited), not the empty-census
+    # hard path.
     integ = _report([_outcome("q0", valid=False,
                               error_classes={"parse_error": 0})],
                     threshold=1.0)["integrity"]
-    assert integ["n_hard_invalid"] == 1
-    assert integ["valid"] is False
+    assert integ["n_recoverable_invalid"] == 1
+    assert integ["n_hard_invalid"] == 0
+    assert integ["valid"] is True
     assert integ["error_census"] == {"parse_error": 0}
-    # zero-count HARD class does NOT veto (no actual errors of that class),
-    # but a positive recoverable class in the same census still grades
-    # recoverable (rate-limited).
+    # zero-count HARD class DOES veto (presence-by-key — the launder is
+    # closed); the census still records the zero.
     integ = _report([_outcome("q0", valid=False,
                               error_classes={"fatal_402_billing": 0,
                                               "parse_error": 1})],
                     threshold=1.0)["integrity"]
-    assert integ["n_hard_invalid"] == 0
-    assert integ["n_recoverable_invalid"] == 1
-    assert integ["valid"] is True
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False
     assert integ["error_census"] == {"fatal_402_billing": 0, "parse_error": 1}
+    # false (bool) count on a hard class — the F1 laundering repro — vetoes.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"fatal_402_billing": False})],
+                    threshold=1.0)["integrity"]
+    assert integ["n_hard_invalid"] == 1
+    assert integ["valid"] is False
+    assert integ["error_census_malformed"] == {"fatal_402_billing": False}
 
 
 def test_report_integrity_malformed_census_count_fails_closed():
@@ -444,8 +453,9 @@ def test_report_integrity_mixed_malformed_and_int_census_counts():
 
 def test_report_integrity_bool_and_mixed_key_census_robustness():
     """#1747 (reviewer-pinned): bool counts (JSON true/false) are recorded in
-    error_census_malformed (never vanish from the record); mixed-type class
-    keys never crash the sorted() roll-up."""
+    error_census_malformed (never vanish from the record) and the class stays
+    PRESENT for grading (presence-by-key); mixed-type class keys never crash
+    the sorted() roll-up; container-valued counts are preserved verbatim."""
     # bool count on a hard class → veto fires AND the evidence is preserved.
     integ = _report([_outcome("q0", valid=False,
                               error_classes={"fatal_402_billing": True})],
@@ -461,6 +471,14 @@ def test_report_integrity_bool_and_mixed_key_census_robustness():
     assert integ["valid"] is False
     assert integ["n_hard_invalid"] == 1  # non-str key fails closed
     assert integ["error_census"]["parse_error"] == 2
+    # container-valued counts (list/dict — tampered JSON) are preserved
+    # verbatim in error_census_malformed.
+    integ = _report([_outcome("q0", valid=False,
+                              error_classes={"parse_error": [1, 2]})],
+                    threshold=1.0)["integrity"]
+    assert integ["n_recoverable_invalid"] == 1
+    assert integ["error_census"] == {}
+    assert integ["error_census_malformed"] == {"parse_error": [1, 2]}
 
 
 def test_report_integrity_non_bool_valid_flag_fails_closed():
@@ -571,6 +589,23 @@ def test_report_integrity_qid_overlap_failure_grade_dominates():
     assert i["n_recoverable_invalid"] == 1
     assert i["n_invalid"] == 1
     assert i["n_hard_invalid"] == 0
+
+
+def test_report_integrity_non_str_question_id_skipped():
+    """#1747 (security-review F4): a non-str question_id (malformed
+    checkpoint JSON: a list/dict is truthy and would be indexed) is SKIPPED,
+    not indexed — an unhashable value must not crash build_report; the
+    malformed qid simply does not count toward n_attempted."""
+    good = _outcome("q0", valid=True)
+    bad = _outcome("q1", valid=True)
+    bad["question_id"] = ["not", "a", "string"]
+    integ = _report([good, bad], failures=[{
+        "question_id": 7, "error_class": "reader:fatal",
+        "error": "x", "failed_at_utc": "2026-08-20T00:00:00Z"}])["integrity"]
+    assert integ["n_attempted"] == 1     # only the str qid counts
+    assert integ["n_valid"] == 1
+    assert integ["n_hard_invalid"] == 0  # the int-qid failure is skipped
+    assert integ["valid"] is True
 
 
 def test_run_protocol_step5_gate_string_pins_criterion():

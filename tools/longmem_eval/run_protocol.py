@@ -70,7 +70,11 @@ DEFAULT_RUN_DIR = REPO_ROOT / ".longmemeval_cache" / "runs"
 #: structural non-census strings / permanent eval failures) still veto at
 #: ANY threshold (report.py). Injected into the step-5 command by
 #: ``build_command`` so the executed run matches the documented gate — the
-#: operator never has to remember the flag.
+#: operator never has to remember the flag. An operator override via extra
+#: flags (`run 5 -- --integrity-threshold 0.5`) still wins — argparse
+#: last-occurrence-wins — but they should pair it with their own
+#: ``--integrity-justification``: the injected text records the BASELINE
+#: default, so an overridden threshold keeps a visible (not silent) reason.
 JUSTIFIED_BASELINE_THRESHOLD = 0.02
 
 
