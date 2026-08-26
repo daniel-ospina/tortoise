@@ -34,7 +34,11 @@ from typing import Any
 
 import numpy as np
 
-from tortoise.embeddings import EMBEDDING_MODEL, EmbeddingModel
+from tortoise.embeddings import (  # noqa: F401 - probe.EMBEDDING_MODEL_REVISION is read by tests/test_embedder_probe.py
+    EMBEDDING_MODEL,
+    EMBEDDING_MODEL_REVISION,
+    EmbeddingModel,
+)
 
 #: Short name → HF model id. Revision pins use the ``id@<commit>`` form —
 #: parsed by :func:`_split_pin`; the resolved revision is recorded at load.
