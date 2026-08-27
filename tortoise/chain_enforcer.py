@@ -26,17 +26,23 @@ e.g. a customer mapped straight to an architecture requirement).
 violating pairs and, per item and per chain:
 
 1. **Detect**: chain members present in the item, in list order.
-2. **Nearest valid position**: the smallest chain position strictly above
-   the LOWEST-position member that has an entity in the embed list.
+2. **Distance rule**: the repair target is the position IMMEDIATELY above
+   the LOWEST-position member — the nearest valid chain position to the
+   value source (never skipping to a farther hop, even when a farther
+   position has a list entity).
 3. **Unambiguous rule**: exactly ONE entity at that nearest position →
    rewire (insert it at its chain position + reorder the members
    ascending); zero entities at the nearest position → the repair is
-   distance-unreachable → warn-and-keep (never skip to a farther hop);
-   multiple entities at the nearest position → ambiguous → warn-and-keep
-   (never guess).
+   distance-unreachable → warn-and-keep; multiple entities at the nearest
+   position → ambiguous → warn-and-keep (never guess).
 4. **Never-invent / never-drop**: the rewire only wires through EXISTING
-   entities; every referenced entity survives (the rewired list is a
-   superset of the original refs).
+   entities; every referenced entry survives (the rewired list is a
+   superset of the original refs — non-string entries are carried through
+   at their slots).
+
+Fixes COMPOSE across chains in one item: each chain's splice is built from
+the accumulated list, so a second violating chain never overwrites the
+first chain's repair.
 
 The returned list is a DEEP COPY — the caller's input is never mutated
 (byte-identity safety). Pure logic: no embeddings, no LLM, no DB — lane-
@@ -113,11 +119,10 @@ def validate_and_rewire(
         about = item.get("about_entities")
         if not isinstance(about, list) or not about:
             continue
-        names = [str(a) for a in about if isinstance(a, str)]
-        if not names:
+        if not any(isinstance(a, str) for a in about):
             continue
         stats["items_checked"] += 1
-        new_about, item_notes = _rewire_item(names, _kind_pos, position_entities, chain_paths)
+        new_about, item_notes = _rewire_item(list(about), _kind_pos, position_entities, chain_paths)
         if item_notes:
             item["about_entities"] = new_about
             for n in item_notes:
@@ -131,20 +136,22 @@ def validate_and_rewire(
 
 
 def _rewire_item(
-    names: list[str], kind_pos, position_entities: dict, chain_paths: dict
-) -> tuple[list[str], list[dict]]:
+    about: list, kind_pos, position_entities: dict, chain_paths: dict
+) -> tuple[list, list[dict]]:
     """Per-item rewire: returns (new_about, notes).
 
-    ``kind_pos(name)`` → ``(chain, position)`` or None; ``position_entities``
-    maps ``(chain, position)`` → entity names present in the list.
+    ``about`` is the RAW about_entities list (non-string entries are carried
+    through at their slots — the splice never drops a ref). ``kind_pos``
+    maps an entity name → ``(chain, position)`` or None.
     """
+    names = [str(a) for a in about if isinstance(a, str)]
     positioned: dict[str, list[tuple[str, tuple[str, int]]]] = {}
     for name in names:
         p = kind_pos(name)
         if p is not None:
             positioned.setdefault(p[0], []).append((name, p))
     notes: list[dict] = []
-    new_about = list(names)
+    new_about = list(about)
     for chain in sorted(positioned):  # deterministic chain iteration
         # members in ORIGINAL list order (the connection path as emitted)
         members = positioned[chain]
@@ -219,9 +226,13 @@ def _rewire_item(
         mid_pos = kind_pos(mid_name)[1]
         si = 0
         mid_pending = mid_name not in member_names
-        spliced: list[str] = []
-        for name in names:
-            if name in member_names:
+        # Splice is built from the ACCUMULATED new_about (previous chains'
+        # fixes compose — a second violating chain in the same item must
+        # not overwrite the first chain's repair), and non-string refs are
+        # carried through at their slots (never dropped).
+        spliced: list = []
+        for name in new_about:
+            if isinstance(name, str) and name in member_names:
                 spliced.append(seq_members[si])
                 si += 1
                 if mid_pending and kind_pos(seq_members[si - 1])[1] < mid_pos:

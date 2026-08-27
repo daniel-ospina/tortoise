@@ -433,48 +433,55 @@ class TestEnforcerFixtures:
         assert _about(result) == ["arch", "workflow", "useCase"]  # kept
         assert stats["warned"] == 1 and stats["rewired"] == 0
 
-    def test_multi_chain_items_independent(self):
-        """Two chains in one item repair independently; non-member refs keep
-        their exact slots (F5 pin: unrelated refs never relocate)."""
-        embed = _embed_with_pair(
-            ["arch", "useCase", "campaign", "channel", "helper"],
-            [
-                "product-strategy:architecture",
-                "product-strategy:useCase",
-                "marketing:campaign",
-                "marketing:channel",
-            ],
-            extra_entities=[
-                {
-                    "name": "feature",
-                    "kind": "product-strategy:feature",
-                    "lifecycle": "created",
-                    "supersedes": None,
-                    "note": None,
-                },
-                {
-                    "name": "content",
-                    "kind": "marketing:content",
-                    "lifecycle": "created",
-                    "supersedes": None,
-                    "note": None,
-                },
-            ],
-        )
-        # campaign@0 → channel@2 is in order (ascending); only the
-        # productDelivery pair is reversed.
-        embed["points"][0]["about_entities"] = ["arch", "useCase", "campaign", "helper", "channel"]
-        result, notes, _ = validate_and_rewire(embed)
-        actions = {n["action"] for n in notes}
-        assert "rewired" in actions
-        about = result["points"][0]["about_entities"]
-        # F5 pin: non-member refs keep their RELATIVE order (helper still
-        # sits between campaign and channel — the in-place member re-splice
-        # never relocates unrelated refs)
-        assert "helper" in about
-        non_members = [n for n in about if n not in ("arch", "useCase", "feature")]
-        assert non_members == ["campaign", "helper", "channel"]
+    def test_two_rewirable_chains_compose(self):
+        """P1 pin (final-review): TWO violating chains in ONE item with both
+        intermediates present — the fixes COMPOSE (the second chain's splice
+        builds on the first's repair; neither note lies about a rewire)."""
+        embed = {"entities": [
+            {"name": "customer", "kind": "product-strategy:customer",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "architecture", "kind": "product-strategy:architecture",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "useCase", "kind": "product-strategy:useCase",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "code", "kind": "dev:code",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "epic", "kind": "dev:epic",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "feature", "kind": "product-strategy:feature",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "issue", "kind": "dev:issue",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "cross-chain connections",
+                         "pointKind": "statement",
+                         "about_entities": ["customer", "architecture",
+                                             "useCase", "code", "epic"]}]}
+        result, notes, stats = validate_and_rewire(embed)
+        rewired = [n for n in notes if n["action"] == "rewired"]
+        assert len(rewired) == 2, "both chains must be rewired"
+        assert stats["rewired"] == 2
         assert v2.validate_chains(result) == []
+
+    def test_non_string_refs_carried_through_splice(self):
+        """Never-drop extends to schema-violating non-string refs: the
+        rewire carries them through at their slots (final-review P3 pin)."""
+        embed = {"entities": [
+            {"name": "arch", "kind": "product-strategy:architecture",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "useCase", "kind": "product-strategy:useCase",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "feature", "kind": "product-strategy:feature",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "c", "pointKind": "statement",
+                         "about_entities": ["arch", 123, "useCase"]}]}
+        result, _notes, _ = validate_and_rewire(embed)
+        about = result["points"][0]["about_entities"]
+        assert 123 in about, "non-string ref must survive the splice"
+        assert "arch" in about and "useCase" in about
 
     def test_orchestrator_notes_authoritative_not_duplicated(self, monkeypatch):
         """F2/F3 pin at the orchestrator: when the enforcer rules a pair

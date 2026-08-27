@@ -1047,8 +1047,13 @@ def run_s2(model, story: str, master: dict | None = None, *,
 
     ``story`` threads into the render (A′ #1695 Task 2): the label-order
     shuffle seed derives from the story, so a paired canonical re-run under
-    a different order reproduces the SAME session — and compact-mode pack
-    selection matches S4's (both render with the story)."""
+    a different order reproduces the SAME session. NOTE (flag-off
+    byte-identity scope): under ``TORTOISE_EXTRACTOR_PROMPT=compact`` the
+    story ALSO story-filters the pack-kind injection — aligning S2 with
+    S4's selection (origin ran S2 with story=None → full set). The DEFAULT
+    verbose path is unaffected (story only feeds the seed, which is a
+    no-op when the shuffle is unset), so the flag-off byte-identity claim
+    holds for the default render mode."""
     return _complete_parsed(model,
                             render_s2_prompt(master, session_date=session_date,
                                              edus=edus, story=story,
@@ -3107,13 +3112,13 @@ def _restamp_s2_kinds(merged: dict, register: dict,
                 keeper = next(
                     (it for it in group
                      if str(it.get(kind_field) or "").strip() == s2_reg), group[0])
-                for it in group:
+                for it in list(group):
                     if it is not keeper:
                         warnings.append(
                             f"entity '{str(it.get('name'))[:60]}' re-typed by S4 "
                             f"(kind {it.get(kind_field)!r}) — folded into the S2 "
                             f"classifier kind {s2_reg!r} (no duplicate :Object)")
-                        items.remove(it)
+                        items[:] = [x for x in items if x is not it]
                 overrides += len(group) - 1
         for it in items:
             if not isinstance(it, dict):
@@ -3152,7 +3157,7 @@ def _rekey_slots(embed_list: dict) -> int:
                 for s in slots.get(role) or []:
                     if isinstance(s, dict) and s.get("name"):
                         k = kind_by_name.get(_norm(s["name"]))
-                        if k:
+                        if k and str(s.get("kind")) != k:
                             s["kind"] = k
                             rekeyed += 1
     return rekeyed
@@ -3234,12 +3239,15 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 "minted_kinds": [], "stats": {"llm": llm_stats,
                                                 "recovery": recovery_stats},
                 "errors": errors, "error_census": error_census,
-                # #1695 Task 5: the evidence surface is always present
+                # #1695 Task 5: the evidence surfaces are always present
                 # (additive keys, empty when the flag is off)
                 "classify_later": {"enabled": classify_later,
                                    "s2": {}, "union": {},
                                    "restamp_overrides": 0,
-                                   "slot_rekeys": 0}}
+                                   "slot_rekeys": 0},
+                "chain_enforcer": {"notes": [], "stats": {
+                    "items_checked": 0, "violations": 0,
+                    "rewired": 0, "warned": 0}}}
 
     t0 = time.time()
     # ── S1: chunked story summary + compile ────────────────────────────────
