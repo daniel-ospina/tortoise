@@ -179,7 +179,7 @@ dashboard.
 
 | Asset | Host | Notes |
 | --- | --- | --- |
-| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all three sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
+| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
 | `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
 | `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/signup`, `/signin`, `/self-hosted`, `/security`, 5 legal pages |
 | `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
@@ -202,7 +202,7 @@ Rules:
 - **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/self-hosted/signin/signup. Legal pages already had them.
 - **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signin/signup stay indexable (legit entry points). Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
 - **Middleware** (runs before `_redirects`) 301s `/product`, `/product.html`, `/index.html` → `/` on the tortoise host (dedupe of the root rewrite); the company host keeps the 404 for `/product*`.
-- **Search Console submission:** add all three sitemap URLs from robots.txt as separate properties (one per host).
+- **Search Console submission:** add all four sitemap URLs from robots.txt as separate properties (one per host).
 
 ## 6.6 Blog surface (2026-08-27)
 
