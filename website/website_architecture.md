@@ -45,6 +45,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | --- | --- | --- |
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
 | Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Pro/Team), self-hosted section |
+| Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `sitemap.xml.ts` (`/blog/sitemap.xml`) · `feed.xml.ts` (`/blog/feed.xml`) · `api/posts.ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
 | Auth (single page) | `website/signup.html` served at `/auth` | Combined Log in / Sign up card — GitHub / Google / email+password (modal login + forgot-password) / API key; `/signin*` 301 → `/auth`; `/signup` is a redirect-free alias |
 | Welcome | `website/welcome.html` | Post-signup provisioning: team + API key (reveal-once), two-path chooser (one-click MCP prompt vs SDK quickstart), auto-redirect to dashboard |
@@ -178,7 +179,7 @@ dashboard.
 
 | Asset | Host | Notes |
 | --- | --- | --- |
-| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all three sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
+| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
 | `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
 | `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/signup`, `/signin`, `/self-hosted`, `/security`, 5 legal pages |
 | `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
@@ -201,7 +202,15 @@ Rules:
 - **Canonical tags:** all indexable pages carry `<link rel="canonical">` — `index.html` → `https://premiselabs.co/`, `product.html` → `https://tortoise.premiselabs.co/` (served at `/`), plus docs/self-hosted/signin/signup. Legal pages already had them.
 - **Auth-gated pages** (`welcome.html`, `invite-accept.html`) are `noindex,nofollow` and excluded from sitemaps. Signin/signup stay indexable (legit entry points). Keep `.html` auth URLs as-is — OAuth `redirectTo` and invite emails reference them directly.
 - **Middleware** (runs before `_redirects`) 301s `/product`, `/product.html`, `/index.html` → `/` on the tortoise host (dedupe of the root rewrite); the company host keeps the 404 for `/product*`.
-- **Search Console submission:** add all three sitemap URLs from robots.txt as separate properties (one per host).
+- **Search Console submission:** add all four sitemap URLs from robots.txt as separate properties (one per host).
+
+## 6.6 Blog surface (2026-08-27)
+
+- **Public:** `/blog` (index: card grid, tag filter, SSR) + `/blog/:slug` (article, SSR) via `website/functions/blog/[[path]].ts` — markdown→sanitized HTML, full SEO head (title/meta/OG/Twitter/JSON-LD BlogPosting + BreadcrumbList), canonical, consent.js + PostHog snippet, ASSETS fallback for static assets.
+- **Agent API:** `blog/api/posts.ts` (#1795) — `X-Agent-Key` (sha256 vs `blog_agent_keys`); POST (default `draft` → review queue; `published` on explicit owner instruction, audited) + PATCH own posts; rate-limited.
+- **SEO:** dynamic `sitemap.xml` (published only) + RSS `feed.xml` (published only); `/blog*` prefix rule in middleware 301s the company host to the tortoise host; robots.txt cross-submission now lists the blog sitemap.
+- **Content:** Supabase `blog_posts`/`blog_agent_keys`/`blog_admins` (migration `20260827000001_blog_cms.sql`); admin SPA (ElDato editor port, #1798) at `/admin/blog`; images in `blog-images` bucket.
+- **Epic:** docs/epics/2026-08-27-tortoise-blog-cms/.
 
 ## 7. Key paths
 
