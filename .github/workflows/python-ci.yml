@@ -438,7 +438,7 @@ jobs:
         # pytest step's 55m watchdog budget — the collect-only wall can
         # never ride the run). The manifest keys off the SAME space-joined
         # $FILES the run step builds (identical construction below) x the
-        # same `-m 'not track_b'` filter (plan-review P1-7: never a
+        # same `-m 'not track_b and not live'` filter (plan-review P1-7: never a
         # re-derived matrix list), so the expected set is exactly what
         # pytest will run; the skip-guard step reconciles it against the
         # junitxml (Task 3) — a vanished nodeid (deselected, file dropped
@@ -883,7 +883,7 @@ jobs:
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
         # pytest step (off the 75m watchdog), using each leg's committed
-        # ${{ matrix.files }} x --collect-only -m 'not track_b' (the same
+        # ${{ matrix.files }} x --collect-only -m 'not track_b and not live' (the same
         # construction the run step builds) -> /tmp/expected-nodeids.txt.
         run: |
           FILES=""

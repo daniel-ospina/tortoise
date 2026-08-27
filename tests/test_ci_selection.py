@@ -814,6 +814,20 @@ def test_canary_streak_job_consumes_half_b_artifacts_only():
     assert up["with"]["path"] == "config/testdb-canary-streak.json"
 
 
+def _extract_pytest_marker(run_script: str) -> str:
+    """Pull the `-m <marker>` filter from a job's pytest run script. The
+    docker lanes quote it (`-m 'not track_b and not live'`); the track-b
+    job's is bare (`-m track_b`). The launcher's own `python -m pytest`
+    module form is never a marker — the unquoted fallback skips 'pytest'."""
+    quoted = _re.search(r"-m '([^']+)'", run_script)
+    if quoted:
+        return quoted.group(1)
+    for m in _re.finditer(r"-m\s+([^\s]+)", run_script):
+        if m.group(1) != "pytest":
+            return m.group(1)
+    raise AssertionError(f"no -m marker found in run script:\n{run_script}")
+
+
 def test_run_marker_matches_manifest_marker():
     """#1787 (PR #1811): the live-probe seam raises the docker lanes' run
     filter to `-m 'not track_b and not live'` while the skip-guard manifest
@@ -821,21 +835,24 @@ def test_run_marker_matches_manifest_marker():
     contract (tools/skip-guard.py ~L107) requires the manifest's collect-only
     marker to match the run's marker EXACTLY, or the manifest expects nodeids
     the run deselects and every run reds on vanished nodeids. Pin the
-    equality for the three run jobs (fast/slow/carve-out) so a future edit
-    that changes one side reds at test time instead of CI runtime."""
+    equality for ALL FOUR run jobs (fast/slow/carve-out + track-b) so a
+    future edit that changes one side reds at test time instead of CI
+    runtime. The track-b job (epic #902 A8/#1058) has the same vanished-
+    nodeid class: its manifest collects with `--marker "track_b"` and its
+    run filters with the UNQUOTED `-m track_b` — the extraction helper
+    handles both quoted and bare forms."""
     wf = _load_python_ci()
     run_prefixes = {
         "test": "Run fast test suite",
         "test-slow": "Run slow test suite",
         "test-carve-out": "Run carve-out suite",
+        "test-track-b": "Run Track B tests",
     }
     for job_name, run_prefix in run_prefixes.items():
         steps = wf["jobs"][job_name]["steps"]
         run = next(s for s in steps
                    if s.get("name", "").startswith(run_prefix))
-        run_line = next(line for line in run["run"].splitlines()
-                        if "python -m pytest" in line)
-        run_marker = _re.search(r"-m '([^']+)'", run_line).group(1)
+        run_marker = _extract_pytest_marker(run["run"])
         manifest = next(s for s in steps
                         if s.get("name", "").startswith("Generate coverage manifest"))
         manifest_marker = _re.search(r'--marker "([^"]+)"', manifest["run"]).group(1)
