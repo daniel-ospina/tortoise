@@ -59,8 +59,8 @@ async function verifyJwt(token: string, secret: string): Promise<JwtPayload | nu
     if (!valid) return null;
 
     const payload = jsonFromBytes(base64UrlDecode(parts[1])) as JwtPayload;
-    // Expiry (epoch seconds)
-    if (typeof payload.exp === "number" && payload.exp * 1000 < Date.now()) return null;
+    // Expiry REQUIRED (epoch seconds) + sub REQUIRED — strict verification
+    if (typeof payload.exp !== "number" || payload.exp * 1000 < Date.now()) return null;
     if (typeof payload.sub !== "string") return null;
     return payload;
   } catch {
@@ -88,22 +88,34 @@ function getAccessToken(request: Request): string | null {
 }
 
 async function isAdmin(env: Env, userId: string): Promise<boolean> {
-  const url = `${env.SUPABASE_URL ?? ""}/rest/v1/blog_admins?select=user_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`;
-  const res = await fetch(url, {
-    headers: {
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
-      Accept: "application/json",
-    },
-  });
-  if (!res.ok) return false;
-  const rows = (await res.json()) as Array<{ user_id: string }>;
-  return rows.length > 0;
+  try {
+    const url = `${env.SUPABASE_URL ?? ""}/rest/v1/blog_admins?select=user_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`;
+    const res = await fetch(url, {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return false;
+    const rows = (await res.json()) as Array<{ user_id: string }>;
+    return rows.length > 0;
+  } catch {
+    return false; // fail-closed: upstream unreachable → not admin → redirect
+  }
 }
 
-async function serveShell(env: Env): Promise<Response> {
-  // Serve the built admin SPA when present (#1798); placeholder until then.
-  const res = await env.ASSETS.fetch(new Request(`https://placeholder/admin/index.html`));
+async function serveShell(env: Env, request: Request): Promise<Response> {
+  // Real assets (built SPA bundles: /admin/assets/*.js|css, etc.) pass through
+  // — the gate must NOT answer them with the HTML shell (MIME mismatch).
+  const assetRes = await env.ASSETS.fetch(request);
+  if (assetRes.status !== 404) return assetRes;
+
+  // Client route → serve the shell (built SPA index.html when #1798 lands;
+  // placeholder until then).
+  const origin = new URL(request.url).origin;
+  const res = await env.ASSETS.fetch(`${origin}/admin/index.html`);
   if (res.status === 200 && (res.headers.get("content-type") ?? "").includes("text/html")) {
     return new Response(res.body, {
       status: 200,
@@ -129,7 +141,7 @@ a{color:#06b6d4}</style></head>
 function redirectToAuth(): Response {
   return new Response(null, {
     status: 302,
-    headers: { Location: AUTH_URL, ...HSTS_REDIRECT },
+    headers: { Location: AUTH_URL, "Cache-Control": "no-store", ...HSTS_REDIRECT },
   });
 }
 
@@ -148,5 +160,5 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   const admin = await isAdmin(env, payload.sub);
   if (!admin) return redirectToAuth();
 
-  return serveShell(env);
+  return serveShell(env, request);
 };
