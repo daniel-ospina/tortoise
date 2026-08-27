@@ -4,7 +4,7 @@ Covers the S15 pipeline-state surfaces: ``_complete`` retries transient
 classes (429/5xx/network/timeout) with exponential backoff and raises on the
 final failure; fatal 4xx (401/402/403 + other 4xx) raise immediately with
 ZERO retries; unknown classes are transient-safe; bounded ``max_tokens`` per
-stage (S1 1500 / S2,S4 8000, TORTOISE_EXTRACTOR_MAX_TOKENS override);
+stage (S1 1500 / S2,S4 16000, TORTOISE_EXTRACTOR_MAX_TOKENS override);
 truncation detection (last_finish_reason == "length"); and the per-session
 error census / stats['llm'] roll-up of ``extract_session_v2`` (D3).
 """
@@ -180,7 +180,9 @@ def test_complete_passes_stage_cap(monkeypatch):
     v2.run_s1(m, "transcript")
     v2.run_s2(m, "story")
     v2.run_s4(m, "story", {}, {})
-    assert m.captured == [1500, 8000, 8000]
+    # #1787: S2/S4 cap raised 8000 → 16000 (V4 ceiling 384K; the old cap was
+    # stale from the V3-era 8K ceiling). The env override still wins (below).
+    assert m.captured == [1500, 16000, 16000]
 
 
 def test_complete_env_override(monkeypatch):
@@ -616,12 +618,12 @@ def _probe_filler(repeat: int = 6000):
         import tiktoken  # PRIMARY: no HF-hub MODEL download; BPE ranks fetched once on first use, cached
         tok = tiktoken.get_encoding("cl100k_base")  # approx, ±15%
         tokenizer_name = f"tiktoken/{tok.name}"
-    except Exception:  # noqa: BLE001 — optional precision paths
+    except Exception:
         try:
             from transformers import AutoTokenizer  # OPTIONAL precision check
             tok = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3")  # REQUIRES NETWORK (HF hub)
             tokenizer_name = "transformers/DeepSeek-V3"
-        except Exception:  # noqa: BLE001
+        except Exception:
             tok = None  # no tokenizer — pessimistic char-bound fallback
     if tok is not None:
         n = len(tok.encode(payload))
@@ -651,10 +653,9 @@ def test_probe_max_tokens_above_8k():
     clamp-at-8192 → length at ~8K; exhaust-at-16K → length at ~16K. The echo
     is ALSO fidelity-checked (P1-B): a well-formed-but-short echo
     (elided/shortened) must not be misread as a clamp signal. Runs through
-    _complete's deadline machinery (deadline_s=800 = 0.05 × 16000, the scaled
-    default's math) so a stalled chunked response is bounded and classifiable.
-    #1787 Task 2 Step 6 owns the deadline_s=800 → None edit once the scaled
-    sentinel lands (inherits the same 800s)."""
+    _complete's deadline machinery (deadline_s=None → the scaled default
+    0.05 × 16000 = 800s, Task 2 Step 6) so a stalled chunked response is
+    bounded and classifiable."""
     import os
     if not os.environ.get("DEEPSEEK_API_KEY"):
         pytest.skip("no DEEPSEEK_API_KEY")
@@ -668,7 +669,7 @@ def test_probe_max_tokens_above_8k():
     json.loads(payload)  # P1-3: well-formed-JSON guarantee before the call
     resp = v2._complete(
         m, system="Emit the exact JSON object from the user message, unchanged.",
-        user=payload, max_tokens=16000, deadline_s=800)
+        user=payload, max_tokens=16000)
     assert isinstance(resp, str) and resp
     tokens = m.last_completion_tokens or 0
     if m.last_finish_reason == "length":
@@ -707,20 +708,19 @@ def test_probe_v4_flash_non_thinking():
     `deepseek-chat`. This probe documents the collapse as a baseline; a
     400/unknown-model on this wire id is itself DOCUMENTED (xfail), not a
     hard failure. Routed through _complete's deadline machinery
-    (deadline_s=800) like the alias probe."""
+    (deadline_s=None → the scaled default) like the alias probe."""
     import os
     if not os.environ.get("DEEPSEEK_API_KEY"):
         pytest.skip("no DEEPSEEK_API_KEY")
-    from tortoise.model_adapters import DeepSeekDirectModel
     from tortoise import extractor_v2 as v2
+    from tortoise.model_adapters import DeepSeekDirectModel
     m = DeepSeekDirectModel("deepseek-v4-flash", max_tokens=None, temperature=0.0)
     try:
         resp = v2._complete(m, system="Reply ok.",
-                            user="JSON: {\"ok\": true}", max_tokens=16000,
-                            deadline_s=800)
-    except Exception as e:  # noqa: BLE001 — P2-G: 400/unknown-model is documented, not fatal
+                            user="JSON: {\"ok\": true}", max_tokens=16000)
+    except Exception as e:
         status = getattr(e, 'response', None) and getattr(e.response, 'status_code', None)
-        if status == 400 or 'model' in str(e).lower() and 'unknown' in str(e).lower():
+        if status == 400 or ('model' in str(e).lower() and 'unknown' in str(e).lower()):
             pytest.xfail("direct API does not serve deepseek-v4-flash (400 "
                          "unknown-model on this wire id) — recorded on #1787 "
                          "(P2-G); re-enable after the companion adapter "
@@ -748,10 +748,11 @@ def test_live_probe_markers_pinned():
     (-m "not live") never re-executes live API calls. A dropped marker on
     either probe fails here."""
     import inspect
-    from tests.test_extractor_reliability import (  # noqa: F401 — module access
-        test_probe_max_tokens_above_8k as alias_probe)
+
     from tests.test_extractor_reliability import (
-        test_probe_v4_flash_non_thinking as v4_probe)
+        test_probe_max_tokens_above_8k as alias_probe,
+    )
+    from tests.test_extractor_reliability import test_probe_v4_flash_non_thinking as v4_probe
     for name, fn in (("test_probe_max_tokens_above_8k", alias_probe),
                      ("test_probe_v4_flash_non_thinking", v4_probe)):
         marker = getattr(fn, "pytestmark", None)
@@ -760,3 +761,225 @@ def test_live_probe_markers_pinned():
         # sanity: the test body calls the live API (not a stub)
         src = inspect.getsource(fn)
         assert "DEEPSEEK_API_KEY" in src and "DeepSeekDirectModel" in src
+
+
+# ── #1787 Task 2 Step 5/6: env-override pins + threaded cap + deadline ─────
+
+def test_stage_cap_override_above_default(monkeypatch):
+    """#1787 (folded from former Task 3) — TORTOISE_EXTRACTOR_MAX_TOKENS
+    env override wins over the stage default for ANY default value (the
+    override is read at call time by _stage_cap): 24000 beats 16000."""
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_MAX_TOKENS", "24000")
+    assert v2._stage_cap(16000) == 24000
+
+
+def test_stage_cap_invalid_override_warns_and_defaults(monkeypatch):
+    """#1787 P1-F (cycle 5) — an INVALID TORTOISE_EXTRACTOR_MAX_TOKENS
+    override ("abc") warns (pytest.warns) and falls back to the stage
+    default — never a crash, never a silent garbage cap (_stage_cap's
+    fail-open-with-visibility contract)."""
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_MAX_TOKENS", "abc")
+    with pytest.warns(UserWarning):
+        assert v2._stage_cap(16000) == 16000  # falls back to the default
+
+
+def test_stage_cap_thread_safety_mixed_env(monkeypatch):
+    """#1787 P2-12 — threaded: 8 threads × N calls through
+    _complete_parsed/_stage_cap with MIXED caps (env-override phase, then a
+    mixed stage-default phase). Every call receives its own correct cap and
+    its own stats dict — per-call `partial` flags never cross-contaminate
+    (an 8000-cap thread's partial=True must not bleed into a clean thread)."""
+    import threading
+    captured, lock = [], threading.Lock()
+
+    class FakeModel:
+        def __init__(self):
+            self.last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            with lock:
+                captured.append(max_tokens)
+            # finish_reason keys off the PASSED cap, so a thread that received
+            # the wrong cap is observable as a wrong finish/partial signal.
+            self.last_finish_reason = ("length" if max_tokens and max_tokens <= 8000
+                                       else "stop")
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": []}' if self.last_finish_reason == "stop"
+                    # the truncated branch carries ONE complete point + an
+                    # unterminated second so rung 4 _longest_valid_prefix
+                    # partial-accepts and stats["partial"] is actually
+                    # asserted (a zero-complete-item cut falls through to
+                    # _ParseError and the thread dies silently).
+                    else '{"entities": [], "points": [{"content": "p", '
+                         '"pointKind": "statement"}, {"content": "q"')
+
+    def worker(default_arg, expected):
+        for _ in range(25):
+            stats = {"llm": {}}
+            cap = v2._stage_cap(default_arg)
+            assert cap == expected, f"wrong cap {cap} (expected {expected})"
+            v2._complete_parsed(FakeModel(), "sys", "usr", max_tokens=cap, stats=stats)
+            # per-call stats isolation: an 8000-cap thread partial-accepts
+            # (backstop), a clean thread must never see that partial flag.
+            assert (stats.get("partial") is True) == (expected == 8000)
+
+    # Phase 1 — env override wins for EVERY thread (env constant → race-free):
+    monkeypatch.setenv("TORTOISE_EXTRACTOR_MAX_TOKENS", "24000")
+    ts = [threading.Thread(target=worker, args=(16000, 24000)) for _ in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(captured) == 8 * 25 and all(c == 24000 for c in captured)
+
+    # Phase 2 — mixed stage-defaults with no env (4 threads → 16000, 4 → 8000):
+    captured.clear()
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    ts = [threading.Thread(target=worker,
+                           args=((16000, 16000) if i % 2 == 0 else (8000, 8000)))
+          for i in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(captured) == 8 * 25
+    assert set(captured) == {16000, 8000}  # no stray/mis-derived cap
+
+
+# ── #1787 Task 2 Step 6: deadline scaling with max_tokens ──────────────────
+
+def test_complete_deadline_scales_with_max_tokens():
+    """#1787 P2-10 — _complete's effective deadline must clear a worst-case
+    16K emission (~640s at the conservative 25 tok/s), not stay at 600s.
+    (The `(max_tokens or 0)` None-guard: `_scaled_deadline(600, None)` must
+    NOT TypeError. Cycle 4 P2-K: the multiplier is 0.05, so the scaled 16K
+    deadline is 800s.)"""
+    assert v2._scaled_deadline(600, None) == 600          # None-guarded
+    assert v2._scaled_deadline(600, 16000) >= 800         # clears 16K emission w/ margin
+    assert v2._scaled_deadline(0, 16000) == 800           # scaling ENGAGED
+
+
+def test_complete_wires_scaled_deadline(monkeypatch):
+    """#1787 P1-8 — _complete must WIRE the scaled default into the deadline
+    it passes to _call_once (not just expose the helper): max_tokens=16000
+    runs with an effective deadline >= 800s, an explicit deadline_s still
+    wins, and the S1 fast path (1500) keeps 600s."""
+    seen = {}
+
+    class _Rec:
+        last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            return '{"ok": true}'
+
+    def fake_call_once(model, system, user, *, deadline_s, max_tokens, stats):
+        seen["deadline_s"], seen["max_tokens"] = deadline_s, max_tokens
+        return ("ok", model.last_finish_reason)
+
+    monkeypatch.setattr(v2, "_call_once", fake_call_once)
+    assert v2._complete(_Rec(), "s", "u", max_tokens=16000) == "ok"
+    assert seen["deadline_s"] >= 800        # scaled default wired into the call
+    v2._complete(_Rec(), "s", "u", max_tokens=16000, deadline_s=0.05)
+    assert seen["deadline_s"] == 0.05       # explicit arg still wins
+    v2._complete(_Rec(), "s", "u", max_tokens=1500)
+    assert seen["deadline_s"] == 600        # S1 fast path unchanged
+
+
+def test_complete_total_budget_exhausted_on_deadline(monkeypatch):
+    """#1787 P2-K(a) — when EVERY attempt hits the scaled deadline, _complete
+    consumes the FULL retry budget (attempts × deadline_s — the documented
+    total worst-case wall clock) and raises transient_timeout; it never
+    hangs and never returns a partial."""
+    calls, stats = [], {"llm": {}}
+
+    class _Rec:
+        last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            return '{"ok": true}'
+
+    def fake_call_once(model, system, user, *, deadline_s, max_tokens, stats):
+        calls.append(deadline_s)
+        raise TimeoutError(f"model call exceeded {deadline_s}s")  # always times out
+
+    monkeypatch.setattr(v2, "_call_once", fake_call_once)
+    with pytest.raises(TimeoutError):
+        v2._complete(_Rec(), "s", "u", max_tokens=16000, retries=2, stats=stats)
+    assert len(calls) == 3  # retries+1 attempts — total budget consumed
+    assert all(c == v2._scaled_deadline(600, 16000) for c in calls)  # scaled per attempt
+    assert stats["last_class"] == "transient_timeout"  # classifiable, not a hang
+
+
+def test_complete_deadline_margin_at_throughput_boundary():
+    """#1787 P2-K(b) — boundary at the conservative throughput assumption:
+    the scaled 16K deadline (800s = 0.05 × 16000) must clear the 25 tok/s
+    worst-case emission (640s) with margin AND keep a ~20 tok/s straggler
+    (800s) alive."""
+    assert v2._scaled_deadline(600, 16000) == 800     # 0.05 × 16000
+    assert v2._scaled_deadline(600, 16000) >= 640     # 25 tok/s emission (640s) completes
+    assert v2._scaled_deadline(600, 16000) >= 800     # ~20 tok/s straggler (800s) completes
+
+
+# ── #1787 Task 5 Step 0 (group f): deadline_aborts counting seam ────────────
+
+def test_complete_deadline_kill_counts_deadline_aborts():
+    """#1787 P1-E — a deadline-killed call (the _call_once seam raise —
+    TimeoutError("model call exceeded Ns")) increments
+    stats['deadline_aborts']; the same call is classifiable as
+    transient_timeout (the harness bounds the abandoned-thread billing
+    loss via this counter)."""
+    class _Slow:
+        def complete(self, *, system, user, max_tokens=None):
+            time.sleep(1.0)
+            return "late"
+
+    stats: dict = {"llm": {}}
+    with pytest.raises(TimeoutError):
+        v2._complete(_Slow(), "s", "u", deadline_s=0.05, retries=0, stats=stats)
+    assert stats["deadline_aborts"] == 1
+    assert stats["last_class"] == "transient_timeout"
+
+
+def test_complete_network_timeout_does_not_count_deadline_aborts():
+    """#1787 P1-E — a network-transport TimeoutError (no "model call
+    exceeded" message — raised by the adapter inside the call thread) is a
+    DIFFERENT seam than the deadline kill and must NOT increment
+    deadline_aborts (both classify as transient_timeout — the message is
+    the only distinguishing marker)."""
+    class _NetTimeout:
+        def complete(self, *, system, user, max_tokens=None):
+            raise TimeoutError("read timed out (transport)")
+
+    stats: dict = {"llm": {}}
+    with pytest.raises(TimeoutError):
+        v2._complete(_NetTimeout(), "s", "u", retries=0, stats=stats)
+    assert stats.get("deadline_aborts", 0) == 0   # not a deadline kill
+    assert stats["last_class"] == "transient_timeout"
+
+
+def test_deadline_aborts_threaded_exact_count():
+    """#1787 P1-E — threaded variant: 8 threads × N deadline-killed calls on
+    a SHARED stats dict → deadline_aborts equals the exact injected count.
+    MUST fail without the lock (LOAD/INPLACE_ADD/STORE loses updates across
+    threads, exactly like the accumulator)."""
+    import threading
+
+    class _Slow:
+        def complete(self, *, system, user, max_tokens=None):
+            time.sleep(0.5)
+            return "late"
+
+    stats: dict = {"llm": {}}
+    results, lock = [], threading.Lock()
+
+    def worker():
+        try:
+            v2._complete(_Slow(), "s", "u", deadline_s=0.02, retries=0, stats=stats)
+        except TimeoutError:
+            with lock:
+                results.append(1)
+
+    ts = [threading.Thread(target=worker) for _ in range(8)]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+    assert len(results) == 8              # every thread hit the deadline kill
+    assert stats["deadline_aborts"] == 8  # exact injected count — lock held

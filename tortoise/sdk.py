@@ -2298,7 +2298,9 @@ class TortoiseSDK:
             # The constructor default stays UNCAPPED (max_tokens=None — the
             # adapter-level #1468 semantics are unchanged); the output bound
             # now applies at the _complete seam (M3 #1524): S1 → 1500 / S2,S4
-            # → 8000 tokens per stage, overridable via
+            # → 16000 tokens per stage (#1787 — raised from 8000; the V4
+            # ceiling is 384K and the old cap silently truncated dense embed
+            # lists), overridable via
             # TORTOISE_EXTRACTOR_MAX_TOKENS, with truncation DETECTED
             # (finish_reason=="length" → census) instead of silently lost. An
             # explicit TORTOISE_EXTRACT_MODEL override keeps the bounded

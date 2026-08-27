@@ -54,7 +54,8 @@ _PROBE_PROMPT = (
     "change production semantics; the old approach was dropped."
 )
 
-_MAX_TOKENS = 8000  # mirror the S2/S4 stage cap (truncation is part of the signal)
+_MAX_TOKENS = 16000  # mirror the S2/S4 stage cap (#1787: 8000 → 16000 —
+# truncation is part of the signal, so the diagnostic probes the ACTIVE cap)
 
 
 def _parses(text: str) -> bool:
