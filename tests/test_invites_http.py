@@ -30,7 +30,7 @@ from datetime import datetime, timedelta, timezone  # noqa: F401
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import pytest  # noqa: I001
+import pytest
 from fastapi.testclient import TestClient
 
 from tortoise.auth import verify_api_key

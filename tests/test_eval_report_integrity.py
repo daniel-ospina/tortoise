@@ -33,8 +33,8 @@ production shape; the breakdown rides in the additive ``n_hard_invalid`` /
 """
 from __future__ import annotations
 
-import sys
 import math
+import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

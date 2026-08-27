@@ -2912,8 +2912,11 @@ async def _session_login_exchange(
     shape tree + 503 map (Task 4), GoTrue mint, TOCTOU backstop, audit.
     Charges are owned by the session_login wrapper (Task 5)."""
     from tortoise.supabase_control import (
-        _is_uuid, get_control_plane, is_anon_team, mint_target_user_for_key,
+        _is_uuid,
+        get_control_plane,
+        is_anon_team,
         membership_for_user_team,
+        mint_target_user_for_key,
     )
     if not token.startswith("tt_"):
         await _audit_auth_failure(request, "invalid_key")
@@ -2945,7 +2948,7 @@ async def _session_login_exchange(
         # to an honest 503, never the global-handler 500 the client mapped
         # to "Invalid API key.". The shape-gate (Task 2) already prevents
         # the non-UUID 22P02 class; this catches the residual causes.
-        raise _control_plane_unavailable()
+        raise _control_plane_unavailable() from None
     if target is None:
         # Pinned evaluation order (plan Task 2): the claim funnel is for
         # IDENTITY-shaped creators (anon-team keys from provisioning) ONLY —
@@ -2959,7 +2962,7 @@ async def _session_login_exchange(
                     and not _is_uuid(created_by)
                     and is_anon_team(cp, team_id))
         except RuntimeError:
-            raise _control_plane_unavailable()
+            raise _control_plane_unavailable() from None
         if anon:
             raise HTTPException(
                 status_code=403,
@@ -3023,7 +3026,7 @@ async def _session_login_exchange(
     try:
         still_member = membership_for_user_team(cp, target, team_id) is not None
     except RuntimeError:
-        raise _control_plane_unavailable()
+        raise _control_plane_unavailable() from None
     if not still_member:
         raise HTTPException(
             status_code=403,
@@ -7887,7 +7890,7 @@ async def claim_team(request: Request):
         # #1719 (Task 4): the claim funnel shares the unwrapped
         # team_memberships reads — an outage must degrade to 503, never a
         # raw 500 (the dashboard claim card renders the error_code message).
-        raise _control_plane_unavailable()
+        raise _control_plane_unavailable() from None
     if not anon:
         raise HTTPException(status_code=409,
                             detail="Team has already been claimed")
@@ -7969,7 +7972,7 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
         anon = is_anon_team(cp, team_id)
     except RuntimeError:
         # #1719 (Task 4): claim funnel control-plane outage → honest 503.
-        raise _control_plane_unavailable()
+        raise _control_plane_unavailable() from None
     if not anon:
         raise HTTPException(status_code=409, detail="This team already has a verified identity")
 
@@ -8055,7 +8058,7 @@ async def claim_status(request: Request):
         # welcome/claim guard must NOT 500 (and must not report claimable).
         # 503 tells the client to retry later; the resolve_api_key
         # fail-closed {"claimable": false} behavior above is unchanged.
-        raise _control_plane_unavailable()
+        raise _control_plane_unavailable() from None
     if not anon:
         # Already claimed — distinguish this-user idempotency for the UI.
         from tortoise.supabase_control import membership_for_user_team
@@ -8063,7 +8066,7 @@ async def claim_status(request: Request):
             claimed_by_user = membership_for_user_team(
                 get_control_plane(), session["user_id"], team_id) is not None
         except RuntimeError:
-            raise _control_plane_unavailable()
+            raise _control_plane_unavailable() from None
         if claimed_by_user:
             return {"claimable": False, "claimed": True, "team_id": team_id}
         return {"claimable": False}

@@ -2140,8 +2140,7 @@ class TestClassifyStage:
         index's "points" section contains ONLY "statement", so the point
         classification is trivial (design doc) and the write gate never
         sees a pack point kind on a point."""
-        from tortoise.value_extractor import _clear_kind_spec_cache, \
-            compile_kind_index_spec
+        from tortoise.value_extractor import _clear_kind_spec_cache, compile_kind_index_spec
         _clear_kind_spec_cache()
         spec = compile_kind_index_spec()
         points = {k for k, md in spec.items()
