@@ -193,9 +193,10 @@ class TestBuildOrQueryRedisearchEscape:
         assert build_or_query("|") == r"\|"
 
     def test_max_terms_zero_returns_escaped_raw(self):
-        # max_terms < 1 would produce an EMPTY OR-union ('' — the #1791
-        # crash class "Syntax error at offset 0"); degrade to the same
-        # escaped-raw fallback as degenerate inputs instead.
+        # max_terms=0 would produce an EMPTY OR-union ('' — the #1791 crash
+        # class "Syntax error at offset 0"); negative caps degrade to the
+        # same escaped-raw fallback as degenerate inputs instead (not the
+        # N-1 token slice they previously triggered).
         assert build_or_query("ab cd ef gh", max_terms=0) == "ab cd ef gh"
         assert build_or_query("10:00", max_terms=0) == r"10\:00"
         assert build_or_query("ab cd", max_terms=-1) == "ab cd"

@@ -13,7 +13,8 @@ RediSearch's default strict-AND semantics (all whitespace terms required);
 OR-union + RediSearch's TFIDF scorer ranks docs by term-overlap, which is
 the BM25-style rank behavior the epic's scope prescribes (issue #1541 D1/D2).
 Single-token queries and stopword-only queries fall back to the raw string —
-behavior byte-identical to the pre-R2 code path.
+byte-identical to the pre-R2 code path for inputs WITHOUT RediSearch-special
+characters (escaped via :func:`escape_redisearch_literal`, see below).
 
 Escaping is structural: tokens are alnum-only, so RediSearch reserved
 characters (``|`` included) cannot be injected into the OR-union path. The
@@ -122,8 +123,17 @@ def build_or_query(query: str, *, max_terms: int = DEFAULT_MAX_OR_TERMS) -> str:
     ``queryNodes`` from a NON-empty input. #1791: the escape is what keeps a
     degenerate input like ``10:00`` (all-digit tokens → 0 surviving) from
     raising "Syntax error at offset N" and tripping the FTS circuit breaker.
-    ``max_terms < 1`` degrades to the same escaped-raw fallback (a ``''``
-    OR-union would be the #1791 crash class — "Syntax error at offset 0").
+    Note: operator-shaped single-token queries (``meet*``, ``-x``, ``~x``)
+    change semantics on the raw fallback — the escaped form is a LITERAL
+    (``meet\\*``), not a RediSearch operator, so those shapes intentionally
+    drop FTS recall (the index never contains the literal operator text).
+    Deliberate, version-safe tradeoff: the blanket 21-char escape set is a
+    superset of the 12 empirically crash-inducing chars (a future engine
+    dialect could reject others), so escaping all of them is dialect-safe.
+    ``max_terms=0`` would produce an empty OR-union (the #1791 crash class —
+    "Syntax error at offset 0"); NEGATIVE caps are treated as degenerate
+    inputs (escaped-raw) rather than the ``tokens[:-1]`` slice behavior they
+    previously triggered.
     """
     tokens = tokenize_sparse_query(query)
     if len(tokens) <= 1 or max_terms < 1:

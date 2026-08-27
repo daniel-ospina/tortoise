@@ -719,7 +719,12 @@ class TestFtsSpecialCharEscape:
         for term in ("10:00", '"(maybe)"', "@home", "100%", "A|B",
                      "{urgent}", "a~", "(maybe", 'say"', ":",
                      "-x", "[x]", "x;y", "a,b", "a<b", "a>b", "a=b",
-                     "$x", "a\\b", "foo*"):
+                     "$x", "a\\b", "foo*",
+                     # excluded-char boundary probes: the unit layer pins
+                     # . ! # ' ^ & + as NON-escaped, so live-verify the
+                     # excluded boundary parses on a real RediSearch dialect
+                     # too — w's (DIALECT-2 w'...' wildcard edge), &, !.
+                     "w's", "x&y", "bang!x"):
             # self-verifying: the loop only exercises the escape if the term
             # actually lands on the raw fallback (≤1 surviving token).
             assert len(tokenize_sparse_query(term)) <= 1, term
