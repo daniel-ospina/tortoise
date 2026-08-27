@@ -96,10 +96,15 @@ try {
 // _control_plane_unavailable()).
 const UNAVAILABLE_COPY = 'Sign-in is temporarily unavailable — try again in a moment.'
 function apiErrorText(status, b) {
+  // #1738: a server-provided STRING detail wins BEFORE the >=500 blanket —
+  // /v1/signup/email returns the signup-flavored "Signup service temporarily
+  // unavailable — try again in a moment." on 5xx, so a signup failure shows
+  // signup copy while sign-in surfaces keep the unified copy (503 dict
+  // details → message field, or no detail → blanket below, unchanged).
+  if (b && b.detail && typeof b.detail === 'string') return b.detail
   if (status >= 500) return UNAVAILABLE_COPY
   if (b && b.detail) {
     const d = b.detail
-    if (typeof d === 'string') return d
     if (typeof d === 'object' && d !== null) {
       if (typeof d.message === 'string' && d.message) return d.message
       return JSON.stringify(d)
