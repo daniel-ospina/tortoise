@@ -362,6 +362,15 @@ class TestClassifierConstruction:
 
         monkeypatch.setattr(ki, "_DefaultEncoder", FakeDefault)
         monkeypatch.setattr(ki, "DEFAULT_CACHE_DIR", tmp_path)
+        # #1784 cycle-3: the degraded branch fires when EmbeddingModel.get()
+        # is None (real embedder absent) — it rebuilds persist=False and
+        # EVICTS the memo (FIX-N: degraded builds never pin the cache), so
+        # two constructions build twice. This test promises the PRODUCTION
+        # path (load-then-build with memo+persist), so the embedder must be
+        # present: patch get() to return a non-None sentinel.
+        from tortoise import embeddings as emb_mod
+        monkeypatch.setattr(emb_mod.EmbeddingModel, "get",
+                            lambda *a, **k: object())
         clf1 = KindClassifier(model=None, llm_tail=False)
         clf2 = KindClassifier(model=None, llm_tail=False)
         assert clf1.index is not None and clf2.index is not None
