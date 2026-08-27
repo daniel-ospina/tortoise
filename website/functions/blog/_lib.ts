@@ -54,6 +54,13 @@ export function validUrl(u: string): boolean {
   }
 }
 
+// Cover URLs embedded in CSS style attributes — stricter: scheme-checked AND
+// no quotes/parens/spaces (escapeHtml cannot protect a CSS url('...') string
+// from quote-decoding; validated here before embedding).
+export function validCoverUrl(u: string): boolean {
+  return validUrl(u) && /^https?:\/\/[^\s"'()<>]+$/i.test(u);
+}
+
 // ── Supabase REST (anon — published-only reads are RLS-gated) ──────────────
 function supabaseBase(env: Env): string {
   if (!env.SUPABASE_URL) throw new Error("SUPABASE_URL not configured");
@@ -94,7 +101,11 @@ export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost 
 // only allowlisted tags are emitted; href/src validated https/http.
 
 function inline(text: string): string {
-  const re = /(`[^`]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(!\[([^\]]*)\]\(([^)\s]+)\))|(\[([^\]]*)\]\(([^)\s]+)\))/g;
+  // Bounded quantifiers: catastrophic backtracking on attacker input is a CPU
+  // DoS on the edge function (verified: 100K "[" → 16.8s before bounding, 100ms
+  // after). Link/image content capped at 200 chars, href/src at 300.
+  const re =
+    /(`[^`]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(!\[([^\]\n]{0,200})\]\(([^)\s]{1,300})\))|(\[([^\]\n]{0,200})\]\(([^)\s]{1,300})\))/g;
   let out = "";
   let last = 0;
   let m: RegExpExecArray | null;
@@ -122,6 +133,7 @@ function inline(text: string): string {
 }
 
 export function renderMarkdown(markdown: string): string {
+  const paragraphBuf: string[] = []; // per-render buffer (no cross-render leakage)
   const lines = markdown.replace(/\r\n/g, "\n").split("\n");
   const out: string[] = [];
   let i = 0;
@@ -232,9 +244,6 @@ export function renderMarkdown(markdown: string): string {
 
   return out.join("\n");
 }
-
-// paragraph accumulation buffer (declared after use in closures above)
-const paragraphBuf: string[] = [];
 
 // ── HTML shell ─────────────────────────────────────────────────────────────
 // JSON-LD must never break out of the <script> block (stored XSS): escape < >.

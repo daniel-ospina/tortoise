@@ -10,7 +10,7 @@
 
 import {
   type Env, fetchPublishedPosts, fetchPostBySlug, renderMarkdown,
-  headHtml, htmlPage, navHtml, formatDate, shareBarHtml, validUrl,
+  headHtml, htmlPage, navHtml, formatDate, shareBarHtml, validCoverUrl,
   ok, notFound, upstreamError, SITE_URL, escapeHtml, SLUG_RE,
 } from "./_lib.ts";
 
@@ -50,7 +50,7 @@ async function renderIndex(env: Env, url: URL): Promise<Response> {
   const tags = [...new Set(posts.flatMap((p) => p.tags))].sort();
 
   const cards = filtered.map((p) => {
-    const coverUrl = p.cover_image_url && validUrl(p.cover_image_url) ? p.cover_image_url : null;
+    const coverUrl = p.cover_image_url && validCoverUrl(p.cover_image_url) ? p.cover_image_url : null;
     const cover = coverUrl ? `style="background-image:url('${escapeHtml(coverUrl)}')"` : "";
     const excerpt = p.excerpt ? `<p>${escapeHtml(p.excerpt)}</p>` : "";
     return `<a class="card" href="/blog/${escapeHtml(p.slug)}">
@@ -152,7 +152,7 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
   });
 
   const tags = post.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join(" ");
-  const cover = post.cover_image_url && validUrl(post.cover_image_url)
+  const cover = post.cover_image_url && validCoverUrl(post.cover_image_url)
     ? `<div class="cover-img" style="background-image:url('${escapeHtml(post.cover_image_url)}')"></div>`
     : "";
 
