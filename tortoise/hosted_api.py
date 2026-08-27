@@ -2777,8 +2777,12 @@ async def topic_summary(
 
 
 @app.get("/v1/team", response_model=TeamInfoResponse)
-async def team_info(team: dict = Depends(get_current_team)):  # noqa: B008
-    """Get current team info: tier, usage, limits."""
+async def team_info(team: dict = Depends(get_current_team_session)):  # noqa: B008
+    """Get current team info: tier, usage, limits.
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard overview reads
+    the team on the signed-in session, so it renders without a fresh
+    bootstrap-key mint (agents keep passing their tt_ key)."""
     sdk = _make_sdk(namespace=team["team_id"])
     # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
     # graph (half-failed provisioning, restores) must not dead-end the
@@ -3979,8 +3983,13 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 
 
 @app.get("/v1/team/keys")
-async def list_api_keys(team: dict = Depends(get_current_team)):  # noqa: B008
+async def list_api_keys(team: dict = Depends(get_current_team_session)):  # noqa: B008
     """List API keys for the team (hashes only — no plaintext).
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard's overview API
+    Keys card reads on the session, so it renders without a fresh bootstrap
+    mint; agents keep passing their tt_ key. Only team["team_id"] is read,
+    so a session team dict (no key_id/created_by) resolves identically.
 
     #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
@@ -5250,8 +5259,12 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
 
 
 @app.get("/v1/sessions")
-async def list_sessions(team: dict = Depends(get_current_team)):  # noqa: B008
+async def list_sessions(team: dict = Depends(get_current_team_session)):  # noqa: B008
     """List captured sessions with turn and extracted point counts (#714).
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard's overview
+    sessions card reads on the session, so it renders without a fresh
+    bootstrap mint; agents keep passing their tt_ key.
 
     #1591: FAIL SOFT — a missing team graph (half-failed provisioning)
     returns an empty list, never a 500 (a 500 also strips the CORS headers
@@ -8140,7 +8153,9 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     no pre-existing key required. Two purposes (plan §6.2 E1):
     - bootstrap: 24h ephemeral, cap-EXEMPT (R13), 3-active backstop (dashboard auth)
     - recovery: persistent (no expiry), revocable, counts against max_api_keys;
-      at cap, auto-revokes the oldest orphaned key so recovery never dead-ends.
+      at cap, auto-revokes the oldest other key, then the user's own OLDEST
+      bootstrap key (#1828 — 24h ephemeral, safe to rotate) so recovery never
+      dead-ends; 402 only when nothing at all is rotatable.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -8236,7 +8251,28 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     params={"id": oldest[0][0], "now": now},
                 )
             else:
-                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                # #1828: at max_api_keys with no OTHER key to revoke, the
+                # recovery fallback dead-locks on the user's OWN persistent
+                # keys (#750.10 refuses to touch them). Bootstrap keys are
+                # 24h ephemeral session credentials (re-minted per login) —
+                # rotating the user's own OLDEST bootstrap key breaks the
+                # deadlock (create-new → revoke-old) without touching
+                # persistent user-minted keys. Fail-closed: 402 when even
+                # the own bootstrap keys can't be rotated.
+                own_boot = reg.query(
+                    "MATCH (k:APIKey {team_id:$tid, created_via:'bootstrap', "
+                    "created_by:$uid}) WHERE k.revoked_at IS NULL "
+                    "AND (k.expires_at IS NULL OR k.expires_at > $now) "
+                    "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                    params={"tid": tid, "uid": user_id, "now": now},
+                ).result_set
+                if own_boot:
+                    reg.query(
+                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                        params={"id": own_boot[0][0], "now": now},
+                    )
+                else:
+                    raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
         expires_at = None
         created_via = "recovery"
 
@@ -8259,11 +8295,12 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     """E1 session-key mint against Supabase (#767 E2E-2 round-trip).
 
     Mirrors the registry mint exactly (bootstrap: 24h expiry, 3-active cap;
-    recovery: persistent, max_api_keys cap with oldest-OTHER auto-revoke so
-    recovery never dead-ends) with reads/writes on team_memberships / teams /
-    api_keys. The minted key lands in api_keys with lookup_hash + created_via
-    + expires_at, so get_current_team / MCP resolve it via the unique
-    lookup_hash index, and api_keys.revoked_at is the authoritative revoke.
+    recovery: persistent, max_api_keys cap with oldest-OTHER auto-revoke, then
+    the user's own OLDEST bootstrap key (#1828) so recovery never dead-ends)
+    with reads/writes on team_memberships / teams / api_keys. The minted key
+    lands in api_keys with lookup_hash + created_via + expires_at, so
+    get_current_team / MCP resolve it via the unique lookup_hash index, and
+    api_keys.revoked_at is the authoritative revoke.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -8329,7 +8366,21 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
             if others:
                 revoke_api_key(cp, others[0]["id"], now)
             else:
-                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                # #1828: at max_api_keys with no OTHER key to revoke, the
+                # recovery fallback dead-locks on the user's OWN persistent
+                # keys (#750.10 refuses to touch them). Bootstrap keys are
+                # 24h ephemeral session credentials (re-minted per login) —
+                # rotating the user's own OLDEST bootstrap key breaks the
+                # deadlock (create-new → revoke-old) without touching
+                # persistent user-minted keys. Fail-closed: 402 when even
+                # the own bootstrap keys can't be rotated.
+                own_boot = active_api_keys(cp, tid, created_via="bootstrap",
+                                           created_by=user_id)
+                own_boot.sort(key=lambda r: r.get("created_at") or "")
+                if own_boot:
+                    revoke_api_key(cp, own_boot[0]["id"], now)
+                else:
+                    raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
         expires_at = None
         created_via = "recovery"
 
@@ -8521,8 +8572,12 @@ class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
-async def get_onboarding_state(team: dict = Depends(get_current_team)):  # noqa: B008
-    """Return the team's onboarding progress + team email."""
+async def get_onboarding_state(team: dict = Depends(get_current_team_session)):  # noqa: B008
+    """Return the team's onboarding progress + team email.
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard re-entry card
+    reads on the session (it already calls this with useSession: true), so it
+    renders without a fresh bootstrap mint."""
     return {
         "onboarding": _get_onboarding_state(team["team_id"]),
         "email": _team_email(team["team_id"]),

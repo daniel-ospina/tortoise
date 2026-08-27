@@ -299,8 +299,10 @@ class TestRecoveryMint:
 
     def test_at_cap_keeps_own_keys_and_402s_when_nothing_else_to_revoke(
             self, client, reg):
-        """#750.10: recovery never dead-ends by killing the user's own key —
-        when ALL active keys are the caller's, the mint 402s."""
+        """#750.10 + #1828 fail-closed: recovery never dead-ends by killing
+        the user's own PERSISTENT key — when ALL active cap-counting keys are
+        the caller's own recovery keys AND there is no own bootstrap key to
+        rotate (#1828), the mint 402s."""
         _seed_team(reg, "team-a")
         _seed_membership(reg, "team-a", _U1, "owner")
         _seed_api_key(reg, "team-a", "own-1", created_by=_U1,
@@ -313,6 +315,43 @@ class TestRecoveryMint:
         # Own keys untouched
         rows = reg.query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-1','own-2'] RETURN k.revoked_at",
+        ).result_set
+        assert all(revoked is None for (revoked,) in rows)
+
+    def test_at_cap_rotates_own_oldest_bootstrap_key(self, client, reg):
+        """#1828: at max_api_keys with only OWN keys, the recovery fallback
+        rotates the user's own OLDEST bootstrap key (24h ephemeral — safe to
+        rotate) and mints — breaking the dashboard deadlock (bootstrap 429 →
+        recovery 402) instead of 402ing. Persistent user-minted keys stay
+        untouched (#750.10)."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # 2 own PERSISTENT recovery keys fill the free-tier cap (2)...
+        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-rec-2", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1))
+        # ...and 2 own 24h bootstrap keys are rotatable (oldest first).
+        _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(8),
+                      expires_at=_hours_ahead(1))
+        _seed_api_key(reg, "team-a", "own-boot-2", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(2),
+                      expires_at=_hours_ahead(1))
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-boot-1','own-boot-2'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-boot-1"] is not None  # oldest own bootstrap rotated
+        assert by_id["own-boot-2"] is None      # newest own bootstrap survives
+        # Persistent keys untouched (#750.10)
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2'] "
+            "RETURN k.revoked_at",
         ).result_set
         assert all(revoked is None for (revoked,) in rows)
 

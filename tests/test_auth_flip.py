@@ -239,6 +239,39 @@ class TestSessionKeyRoundTrip:
         assert new_rows[0]["revoked_at"] is None  # minted key lands unrevoked
         assert new_rows[0]["created_via"] == "recovery"
 
+    def test_recovery_cap_rotates_own_bootstrap_when_all_keys_own(
+            self, rest_client, authed_user):
+        """#1828: at max_api_keys with only OWN keys, the recovery fallback
+        rotates the user's own OLDEST bootstrap key (24h ephemeral — safe to
+        rotate) and mints — breaking the dashboard deadlock (bootstrap 429 →
+        recovery 402) instead of 402ing. Persistent user-minted keys stay
+        untouched (#750.10)."""
+        tc, fake = rest_client
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("api_keys", [
+            _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-rec-2", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h2", created_at="2026-08-02T00:00:00Z"),
+            _key_row(id="own-boot-1", created_via="bootstrap", created_by=_USER1,
+                     lookup_hash="h3", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-boot-2", created_via="bootstrap", created_by=_USER1,
+                     lookup_hash="h4", created_at="2026-08-03T00:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        by_id = {row["id"]: row for row in fake.tables["api_keys"]}
+        assert by_id["own-boot-1"]["revoked_at"] is not None  # oldest own bootstrap rotated
+        assert by_id["own-boot-2"]["revoked_at"] is None
+        assert by_id["own-rec-1"]["revoked_at"] is None       # persistent keys untouched
+        assert by_id["own-rec-2"]["revoked_at"] is None
+        new_rows = [row for row in fake.tables["api_keys"]
+                    if row["id"] not in ("own-rec-1", "own-rec-2",
+                                          "own-boot-1", "own-boot-2")]
+        assert len(new_rows) == 1
+        assert new_rows[0]["revoked_at"] is None
+        assert new_rows[0]["created_via"] == "recovery"
+
     def test_mint_requires_membership(self, rest_client, authed_user):
         tc, fake = rest_client
         fake.tables["team_memberships"] = []

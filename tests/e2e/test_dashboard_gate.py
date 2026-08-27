@@ -398,25 +398,28 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams"):
+            # #1828: loadAll pins ?team_id= on overview reads — match on the
+            # query-stripped path so /v1/team/keys?team_id=… still resolves.
+            path = urllib.parse.urlsplit(url).path
+            if path.endswith("/v1/teams"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([{"team_id": "team_frag", "name": "Frag Team"}]))
                 return
-            if url.endswith("/v1/session/key"):
+            if path.endswith("/v1/session/key"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"key": "tt_frag_key_1234567890abcdef", "team_id": "team_frag"}))
                 return
-            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"team_id": "team_frag", "name": "Frag Team", "tier": "free"}))
                 return
-            if url.endswith("/v1/team/keys"):
+            if path.endswith("/v1/team/keys"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
                 return
-            if url.endswith("/v1/sessions"):
+            if path.endswith("/v1/sessions"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": []}))
                 return
-            if url.endswith("/backups"):
+            if path.endswith("/backups"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"backups": []}))
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
@@ -465,7 +468,10 @@ def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/session/key"):
+            # #1828: loadAll pins ?team_id= on overview reads — match on the
+            # query-stripped path so /v1/team/keys?team_id=… still resolves.
+            path = _up.urlsplit(url).path
+            if path.endswith("/v1/session/key"):
                 body = json.loads(route.request.post_data or "{}")
                 if body.get("purpose") == "bootstrap":
                     route.fulfill(status=429, content_type="application/json",
@@ -480,21 +486,21 @@ def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"key": "tt_recovery_key_1234567890abcdef", "team_id": "team_cap"}))
                 return
-            if url.endswith("/v1/teams"):
+            if path.endswith("/v1/teams"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([{"team_id": "team_cap", "name": "Cap"}]))
                 return
-            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"team_id": "team_cap", "name": "Cap", "tier": "free"}))
                 return
-            if url.endswith("/v1/team/keys"):
+            if path.endswith("/v1/team/keys"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
                 return
-            if url.endswith("/v1/sessions"):
+            if path.endswith("/v1/sessions"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": []}))
                 return
-            if url.endswith("/backups"):
+            if path.endswith("/backups"):
                 route.fulfill(status=200, content_type="application/json", body=json.dumps({"backups": []}))
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")

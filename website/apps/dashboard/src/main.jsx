@@ -1436,12 +1436,19 @@ function claimIntentInFlight() {
   async function loadAll(key) {
     const _teamAtCall = teamIdRef.current // Round-10: staleness guard — a rapid
                                           // A→B→C switch must not land B's data
-                                          // under team C's header    // P2 (code-review): /v1/team/keys + /v1/sessions resolve the team from the
-    // API key — fetch them with the SELECTED team's key so the overview cards
-    // track the team switcher, not the bootstrap team.
-    const h = key ? { headers: { Authorization: `Bearer ${key}` } } : {}
+                                          // under team C's header
+    // #1828: overview reads ride the SESSION JWT (get_current_team_session
+    // dual-auth) instead of the freshly-minted bootstrap key — the overview
+    // renders even when the 3-active bootstrap cap + max_api_keys deadlock
+    // the mint. Multi-team: pin ?team_id= so the cards track the team
+    // switcher (session resolution defaults to the first membership); the
+    // key param is accepted for backwards-compatible callers but unused.
+    const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
-      const [k, s] = await Promise.all([api('/v1/team/keys', h), api('/v1/sessions', h)])
+      const [k, s] = await Promise.all([
+        api(`/v1/team/keys${q}`, { useSession: true }),
+        api(`/v1/sessions${q}`, { useSession: true }),
+      ])
       if (teamIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
       setSessions(Array.isArray(s) ? s : s.sessions || [])
