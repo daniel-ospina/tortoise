@@ -28,15 +28,17 @@ export interface BlogPost {
 export interface Env {
   SUPABASE_URL?: string;
   SUPABASE_ANON_KEY?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string; // Pages Function secret — server-side only (agent API, admin)
   ASSETS: { fetch: (req: Request | string) => Promise<Response> };
 }
 
 export const SITE_URL = "https://tortoise.premiselabs.co";
 export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/; // shared with the agent API (#1795)
-const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
+export const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
 export function escapeHtml(s: string): string {
   return s
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "") // strip XML-invalid control chars (whole-feed blast radius)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")

@@ -74,18 +74,22 @@ export const onRequest: PagesFunction = async (context) => {
 
   // Blog prefix rule (#1796): /blog and /blog/<anything> (incl. trailing
   // slash) are tortoise-host-only — 301 to the canonical host. Exact prefix
-  // only: /blogpost and /blog-extra must NOT match (E2E-7).
+  // only: /blogpost and /blog-extra must NOT match (E2E-7). The agent API
+  // (/blog/api/*) is EXCLUDED — it must not be 301'd (a redirect would turn
+  // POST into GET and drop the body); it is tortoise-host-only by convention.
   const isBlogPath =
-    url.pathname === "/blog" ||
-    url.pathname === "/blog/" ||
-    url.pathname.startsWith("/blog/");
+    !url.pathname.startsWith("/blog/api/") &&
+    (url.pathname === "/blog" ||
+      url.pathname === "/blog/" ||
+      url.pathname.startsWith("/blog/"));
 
   // Host-header hygiene: strip port + trailing dot before matching.
   const hostKey = host.replace(/:\d+$/, "").replace(/\.$/, "");
   if (COMPANY_HOSTS.has(hostKey)) {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     if (isBlogPath) {
-      const target = "https://tortoise.premiselabs.co" + (path === "/blog/" ? "/blog" : path) + url.search;
+      // path already has trailing slashes stripped (replace above) → /blog/ → /blog
+      const target = "https://tortoise.premiselabs.co" + path + url.search;
       return new Response(null, {
         status: 301,
         headers: { Location: target, ...HSTS },

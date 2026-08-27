@@ -2,7 +2,7 @@
 // Published + !hold only, newest first, absolute URLs (E2E-11).
 // Route: /blog/feed.xml (longest-prefix beats the blog/[[path]] catch-all).
 
-import { type Env, fetchPublishedPosts, SITE_URL, escapeHtml } from "./_lib.ts";
+import { type Env, fetchPublishedPosts, SITE_URL, escapeHtml, SLUG_RE, HSTS } from "./_lib.ts";
 
 function rfc822(iso: string | null): string {
   if (!iso) return "";
@@ -18,6 +18,7 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   try {
     const posts = await fetchPublishedPosts(env);
     const items = posts
+      .filter((p) => SLUG_RE.test(p.slug))
       .map((p) => {
         const desc = escapeHtml(p.excerpt ?? p.title);
         return `  <item>
@@ -41,12 +42,12 @@ ${items}
 </rss>`;
     return new Response(xml, {
       status: 200,
-      headers: { "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "public, max-age=300" },
+      headers: { "Content-Type": "application/rss+xml; charset=utf-8", "Cache-Control": "public, max-age=300", ...HSTS },
     });
   } catch {
     return new Response("Service Unavailable", {
       status: 503,
-      headers: { "Cache-Control": "no-store" },
+      headers: { "Cache-Control": "no-store", ...HSTS },
     });
   }
 };

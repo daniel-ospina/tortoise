@@ -207,9 +207,9 @@ Rules:
 ## 6.6 Blog surface (2026-08-27)
 
 - **Public:** `/blog` (index: card grid, tag filter, SSR) + `/blog/:slug` (article, SSR) via `website/functions/blog/[[path]].ts` — markdown→sanitized HTML, full SEO head (title/meta/OG/Twitter/JSON-LD BlogPosting + BreadcrumbList), canonical, consent.js + PostHog snippet, ASSETS fallback for static assets.
-- **Agent API:** `blog/api/posts.ts` — `X-Agent-Key` (sha256 vs `blog_agent_keys`); POST (default `draft` → review queue; `published` on explicit owner instruction, audited) + PATCH own posts; rate-limited.
+- **Agent API:** `blog/api/posts.ts` (#1795) — `X-Agent-Key` (sha256 vs `blog_agent_keys`); POST (default `draft` → review queue; `published` on explicit owner instruction, audited) + PATCH own posts; rate-limited.
 - **SEO:** dynamic `sitemap.xml` (published only) + RSS `feed.xml` (published only); `/blog*` prefix rule in middleware 301s the company host to the tortoise host; robots.txt cross-submission now lists the blog sitemap.
-- **Content:** Supabase `blog_posts`/`blog_agent_keys`/`blog_admins` (migration `20260827000001_blog_cms.sql`); admin SPA (ElDato editor port) at `/admin/blog`; images in `blog-images` bucket.
+- **Content:** Supabase `blog_posts`/`blog_agent_keys`/`blog_admins` (migration `20260827000001_blog_cms.sql`); admin SPA (ElDato editor port, #1798) at `/admin/blog`; images in `blog-images` bucket.
 - **Epic:** docs/epics/2026-08-27-tortoise-blog-cms/.
 
 ## 7. Key paths
