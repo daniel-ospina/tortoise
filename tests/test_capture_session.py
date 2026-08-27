@@ -2055,8 +2055,8 @@ def test_session_links_first_match_per_point_all_for_session(consent_client):
     FIRST match (pinned trigger rule)."""
     _opt_in()
     proj = _graph()
-    _object(proj, "github-issue/test/repo-1", "test/repo#1")
-    _object(proj, "github-issue/test/repo-2", "test/repo#2")
+    _object(proj, "github-issue-test/repo-1", "test/repo#1")
+    _object(proj, "github-issue-test/repo-2", "test/repo#2")
     conv = [{"role": "user",
              "content": "test/repo#1 and test/repo#2 are both in flight"}]
     r = consent_client.post("/v1/sessions",
@@ -2065,10 +2065,10 @@ def test_session_links_first_match_per_point_all_for_session(consent_client):
     assert r.status_code == 200, r.text
     sid = r.json()["session_id"]
     assert _link_edges(proj, "Session", sid) == {
-        "github-issue/test/repo-1", "github-issue/test/repo-2"}
+        "github-issue-test/repo-1", "github-issue-test/repo-2"}
     # The single turn point links only the FIRST ref (#1).
     turn_edges = _link_edges(proj, "Point", f"{sid}_t0")
-    assert turn_edges == {"github-issue/test/repo-1"}, turn_edges
+    assert turn_edges == {"github-issue-test/repo-1"}, turn_edges
 
 
 def test_session_links_no_match_honest(consent_client):
@@ -2104,10 +2104,10 @@ def test_session_links_resolve_after_index(consent_client):
     assert _link_edges(proj, "Session", "s-link-late") == set(), \
         "no entity yet — honest no-match at capture time"
     # Index lands → entity materializes → re-link resolves.
-    _object(proj, "github-issue/test/repo-99", "test/repo#99")
+    _object(proj, "github-issue-test/repo-99", "test/repo#99")
     _ha._relink_sessions_after_index(_CONSENT_TEAM["team_id"])
     assert _link_edges(proj, "Session", "s-link-late") == \
-        {"github-issue/test/repo-99"}, "re-link on index completion must resolve"
+        {"github-issue-test/repo-99"}, "re-link on index completion must resolve"
     rows = proj.g.query(
         "MATCH (s:Session {id:'s-link-late'}) "
         "RETURN s.entity_links_attempted, s.entity_links_created").result_set
