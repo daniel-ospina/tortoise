@@ -244,6 +244,10 @@ def test_quota_honest_fail(client, tmp_path, monkeypatch):
     body = _poll_until(client.tc, job_id, "failed")
     assert "limit reached" in body["error"]
     assert body["points_created"] == 0
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert not state["github_indexed"], \
+        "a 0-repo quota-preflight failure must leave github_indexed UNSET — " \
+        "the next run keeps the ONE-repo bounded first-run pacing (P2, PR #1792)"
 
 
 # ── Single-flight (T2-P2 + cycle-3 P1-3) ──────────────────────────
@@ -434,6 +438,10 @@ def test_resolve_repos_404_fails_job(client, tmp_path, monkeypatch):
     body = _poll_until(client.tc, job_id, "failed")
     assert "not found" in body["error"] or "no access" in body["error"]
     assert body["status"] == "failed"
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert not state["github_indexed"], \
+        "a 0-repo 404 failure must leave github_indexed UNSET — the next " \
+        "run keeps the ONE-repo bounded first-run pacing (P2, PR #1792)"
 
 
 def test_quota_break_cursor_stamps_truncated(client, tmp_path, monkeypatch):
@@ -494,6 +502,9 @@ def test_preflight_failure_preserves_persisted_cursors(client, tmp_path,
         "acme/repo1": {"updated_at": "2026-07-19T12:00:00Z",
                         "number": 7}}, \
         "preflight failure must not wipe persisted cursors"
+    assert state["github_indexed"] is True, \
+        "an already-indexed team must NOT be downgraded to first-run by a " \
+        "0-repo preflight failure (github_indexed only flips on progress)"
 
 
 def test_owner_token_eviction_aborts_stale_run(client, tmp_path, monkeypatch):

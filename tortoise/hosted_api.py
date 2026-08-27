@@ -9050,8 +9050,14 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
         # PARTIAL runs (mid-walk raise, quota-interrupted) leave a
         # resumable state — previously the accumulated cursors were lost on
         # a mid-walk raise and the next run re-walked from the old cursor.
-        _update_onboarding_state(
-            team_id, github_index_cursor=cursors, github_indexed=True)
+        # github_indexed flips True ONLY on real progress (>=1 repo
+        # processed): a 0-repo failure (quota preflight, resolve_repos
+        # 404) leaves it untouched so the next run keeps the ONE-repo
+        # bounded first-run pacing (P2, PR #1792).
+        updates: dict = {"github_index_cursor": cursors}
+        if totals["repos_processed"] > 0:
+            updates["github_indexed"] = True
+        _update_onboarding_state(team_id, **updates)
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).
         import asyncio as _asyncio
