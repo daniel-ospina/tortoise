@@ -2965,6 +2965,24 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # uncensused resolution failure path.
                 _bump_census_class(error_census, "entity_resolution_failed")
 
+    # ── chain enforcement (#1695 Task 1): DETERMINISTIC rewire between the
+    # resolution pass and S5 — the prompts' advisory "TRY TO REPAIR" becomes
+    # guaranteed. Never-invent / never-drop: reverse-chain about_entities
+    # pairs rewire through the nearest valid chain intermediate ONLY when
+    # unambiguous; else warn-and-keep. Runs on EVERY arm (independent of the
+    # classify-later flag — the A/B holds it constant). Never blocks capture.
+    chain_enforcer_notes: list[dict] = []
+    chain_enforcer_stats: dict = {}
+    try:
+        from tortoise.chain_enforcer import validate_and_rewire
+        complete_list, chain_enforcer_notes, chain_enforcer_stats = \
+            validate_and_rewire(complete_list, master)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        errors.append(f"chain enforcement failed: {type(e).__name__}: {e}")
+        # D1 (#1746): deterministic class for the previously-uncensused
+        # chain-enforcement failure path.
+        _bump_census_class(error_census, "chain_enforcement_failed")
+
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
@@ -2984,6 +3002,20 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                   "supersessions": [], "noops": [], "deletions": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
                   "minted_kinds": [], "stats": {}}
+    result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
+        "notes": chain_enforcer_notes,
+        "stats": chain_enforcer_stats,
+    }
+    # The enforcer's notes are authoritative for every violation it examined
+    # (backstop note ⟹ enforcer note — both scan the same item/chain
+    # subsequences). When it ruled anything, its notes + the model's OWN
+    # chain_notes (from the embed list) replace the backstop's advisory
+    # notes, which would otherwise duplicate/contradict (a warned-and-kept
+    # pair gets re-flagged by validate_chains with its weaker recommendation).
+    if chain_enforcer_notes:
+        llm_chain_notes = [dict(c) for c in (complete_list.get("chain_notes") or [])
+                           if isinstance(c, dict)]
+        result["chain_notes"] = chain_enforcer_notes + llm_chain_notes
     result["session_id"] = session_id
     result["story_arc"] = story_arc
     result["embed_list"] = complete_list

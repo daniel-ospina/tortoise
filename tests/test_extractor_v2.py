@@ -3,8 +3,11 @@
 Covers the verification checklist surfaces: chunker+compiler (unit),
 S2 map-to-embed (unit, mock), S3 graph search (graceful degradation +
 integration with the real backend, skip-if-unavailable), S5 embed execution
-(dependency order, link-before-create, supersession, chains, minted kinds),
-and the extract_session_v2 orchestrator (mock model, no LLM).
+(dependency order, link-before-create, supersession, minted kinds),
+and the extract_session_v2 orchestrator (mock model, no LLM). Chain
+enforcement scenarios live in tests/test_chain_enforcer.py (issue #1695,
+Task 1 — the deterministic validate_and_rewire superset; this module keeps
+validate_chains' warn-only backstop unit surface).
 """
 from __future__ import annotations
 
@@ -1162,59 +1165,6 @@ class TestE5FactValueContradiction:
         assert v2._fact_value_contradiction("gym at 5pm", ["gym"], existing)
         assert v2._fact_value_contradiction(
             "gym at 5pm", ["gym"], existing, when="")
-
-
-class TestChains:
-    def _embed_with_pair(self, about, kinds):
-        embed = {"entities": [
-            {"name": "arch", "kind": kinds[0], "lifecycle": "created",
-             "supersedes": None, "note": None},
-            {"name": "useCase", "kind": kinds[1], "lifecycle": "created",
-             "supersedes": None, "note": None}],
-            "events": [], "operators": [], "chain_notes": [],
-            "link_before_create": [],
-            "points": [{"content": "arch connects to useCase",
-                        "pointKind": "statement", "about_entities": about}]}
-        return embed
-
-    def test_reverse_chain_repaired_when_intermediate_exists(self):
-        # architecture (pos 6) connects to useCase (pos 1) — reverse chain
-        # order in productDelivery; a feature (pos 2) in the list is the
-        # nearest valid intermediate → repair is possible.
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        embed["entities"].append({"name": "feature", "kind": "product-strategy:feature",
-                                  "lifecycle": "created", "supersedes": None,
-                                  "note": None})
-        notes = v2.validate_chains(embed)
-        assert notes, "reverse architecture→useCase must be flagged"
-        assert notes[0]["action"] == "repaired"
-        assert "feature" in notes[0]["note"]
-
-    def test_reverse_chain_warned_without_intermediate(self):
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        notes = v2.validate_chains(embed)
-        assert notes[0]["action"] == "warned"
-        assert "do NOT invent" in notes[0]["note"]
-
-    def test_chain_order_ok_not_flagged(self):
-        embed = self._embed_with_pair(["useCase", "feature"],
-                                      ["product-strategy:useCase",
-                                       "product-strategy:feature"])
-        assert v2.validate_chains(embed) == []
-
-    def test_never_blocks(self):
-        # chain violations surface as notes; execute_embed never raises
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        result = v2.execute_embed(embed, {}, session_id="s1")
-        assert any(n["action"] in ("repaired", "warned")
-                   for n in result["chain_notes"])
-        assert result["payload"]["points"]  # still emitted
 
 
 # ── Participant slots (#1418: object + event-as-content) ─────────────────────
