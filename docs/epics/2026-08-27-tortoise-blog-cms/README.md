@@ -12,7 +12,7 @@ epic: tortoise-blog-cms
 
 # Epic: Tortoise Blog + CMS
 
-Blog + CMS for tortoise.premiselabs.co — agent-publish → human-review, SSR public pages, ElDato-editor port, SEO/analytics/RSS. **Status: READY (planned, awaiting implementation).**
+Blog + CMS for tortoise.premiselabs.co — agent-publish → human-review, SSR public pages, ElDato-editor port, SEO/analytics/RSS. **Status: IMPLEMENTED (all 8 issues merged + reviewed, 2026-08-27); live surface pending the deployment ops checklist below.**
 
 ## Pipeline artifacts
 
