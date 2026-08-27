@@ -17,7 +17,7 @@
 //     per-isolate; unit-tested at lowered thresholds).
 
 import {
-  type Env, SLUG_RE, validUrl,
+  type Env, SLUG_RE, validUrl, SITE_URL,
 } from "../_lib.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
@@ -47,6 +47,12 @@ function err(status: number, code: string, message: string): Response {
   return json({ error: code, message }, status);
 }
 
+// 400 {field: message} shape (plan §6) — 422 for body content errors
+function validationError(errors: Record<string, string>): Response {
+  const status = errors.body_422 ? 422 : 400;
+  return json(errors, status);
+}
+
 async function sha256Hex(s: string): Promise<string> {
   const data = new TextEncoder().encode(s);
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -57,23 +63,38 @@ interface AgentIdentity {
   agentName: string;
 }
 
-async function authenticate(env: Env, request: Request): Promise<AgentIdentity | null> {
+type AuthResult = { ok: true; identity: AgentIdentity } | { ok: false; code: 401 | 404 };
+
+async function authenticate(env: Env, request: Request): Promise<AuthResult> {
   const key = request.headers.get("X-Agent-Key");
-  if (!key) return null;
+  if (!key) return { ok: false, code: 401 };
   const hash = await sha256Hex(key);
-  const url = `${env.SUPABASE_URL ?? ""}/rest/v1/blog_agent_keys?select=agent_name,active&key_hash=eq.${hash}&limit=1`;
-  const res = await fetch(url, {
-    headers: {
-      apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-      Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
-      Accept: "application/json",
-    },
-  });
-  if (!res.ok) throw new Error(`supabase ${res.status}`);
-  const rows = (await res.json()) as Array<{ agent_name: string; active: boolean }>;
-  const row = rows[0];
-  if (!row || !row.active) return null;
-  return { agentName: row.agent_name };
+  try {
+    const url = `${env.SUPABASE_URL ?? ""}/rest/v1/blog_agent_keys?select=agent_name,active&key_hash=eq.${hash}&limit=1`;
+    const res = await fetch(url, {
+      headers: {
+        apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
+        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) throw new Error(`supabase ${res.status}`);
+    const rows = (await res.json()) as Array<{ agent_name: string; active: boolean }>;
+    const row = rows[0];
+    if (!row) return { ok: false, code: 401 };
+    if (!row.active) return { ok: false, code: 404 }; // known-but-inactive key (contract)
+    return { ok: true, identity: { agentName: row.agent_name } };
+  } catch {
+    return { ok: false, code: 401 }; // upstream unreachable — treat as unauthorized (no key info leak)
+  }
+}
+
+function balancedFences(markdown: string): boolean {
+  let inFence = false;
+  for (const line of markdown.split("\n")) {
+    if (/^```/.test(line.trimStart())) inFence = !inFence;
+  }
+  return !inFence;
 }
 
 // ── Validation (zero-dep) ───────────────────────────────────────────────────
@@ -97,11 +118,14 @@ function str(v: unknown): string | null {
 
 function validateCreate(input: PostInput): { ok: true; value: CreateValues } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
+  const status = str(input.status);
   const title = str(input.title) ?? "";
   if (!title || title.length > TITLE_MAX) errors.title = `title required, max ${TITLE_MAX} chars`;
 
   const body = str(input.body) ?? "";
-  if (body.length > BODY_MAX) errors.body = `body max ${BODY_MAX} chars`;
+  if (body.length > BODY_MAX) errors.body_422 = `body max ${BODY_MAX} chars`;
+  if (body && !balancedFences(body)) errors.body_422 = "malformed markdown: unbalanced code fence";
+  if (body.trim() === "" && status === "published") errors.body = "body required when status=published";
 
   const slug = str(input.slug) ?? "";
   if (slug && (slug.length > SLUG_MAX || !SLUG_RE.test(slug))) errors.slug = "slug must match ^[a-z0-9]+(?:-[a-z0-9]+)*$ (≤100)";
@@ -120,8 +144,8 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
   const author = str(input.author);
   if (author && author.length > 100) errors.author = "author max 100 chars";
 
-  const status = str(input.status);
   if (status && status !== "draft" && status !== "published") errors.status = "status must be draft | published";
+  if (status === "published" && input.hold_for_review === true) errors.hold_for_review = "hold_for_review cannot be combined with status=published";
 
   if (input.tags !== undefined && input.tags !== null) {
     if (!Array.isArray(input.tags) || input.tags.length > TAGS_MAX || !input.tags.every((t) => typeof t === "string" && t.length <= 40)) {
@@ -168,8 +192,19 @@ interface CreateValues {
 
 function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
-  const allowed = ["title", "body", "excerpt", "cover_image_url", "tags", "meta_title", "meta_description", "author", "hold_for_review", "status"];
   const value: PatchValues = {};
+  const stringKeys = ["title", "body", "excerpt", "cover_image_url", "meta_title", "meta_description", "author"] as const;
+  for (const k of stringKeys) {
+    if (input[k] !== undefined && input[k] !== null && typeof input[k] !== "string") {
+      errors[k] = "must be a string";
+    }
+  }
+  if (input.status !== undefined && input.status !== null && typeof input.status !== "string") {
+    errors.status = "must be a string";
+  }
+  if (input.hold_for_review !== undefined && input.hold_for_review !== null && typeof input.hold_for_review !== "boolean") {
+    errors.hold_for_review = "must be a boolean";
+  }
 
   const title = str(input.title);
   if (title !== null && (title.length === 0 || title.length > TITLE_MAX)) errors.title = `title max ${TITLE_MAX} chars`;
@@ -177,7 +212,8 @@ function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { o
 
   const body = str(input.body);
   if (body !== null) {
-    if (body.length > BODY_MAX) errors.body = `body max ${BODY_MAX} chars`;
+    if (body.length > BODY_MAX) errors.body_422 = `body max ${BODY_MAX} chars`;
+    else if (body && !balancedFences(body)) errors.body_422 = "malformed markdown: unbalanced code fence";
     else value.body = body;
   }
 
@@ -222,7 +258,10 @@ function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { o
   const status = str(input.status);
   if (status !== null) {
     if (status !== "draft" && status !== "published") errors.status = "status must be draft | published";
-    else value.status = status;
+    else {
+      if (status === "published" && input.hold_for_review === true) errors.hold_for_review = "hold_for_review cannot be combined with status=published";
+      else value.status = status;
+    }
   }
 
   if (Object.keys(errors).length) return { ok: false, errors };
@@ -264,6 +303,7 @@ function serviceHeaders(env: Env): Record<string, string> {
     apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
     Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
     "Content-Type": "application/json",
+    Accept: "application/json",
     Prefer: "return=representation",
   };
 }
@@ -272,9 +312,13 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return err(503, "not_configured", "agent API not configured");
   }
-  const agent = await authenticate(env, request);
-  if (!agent) return err(401, "unauthorized", "invalid or missing X-Agent-Key");
+  const auth = await authenticate(env, request);
+  if (!auth.ok) return err(auth.code, auth.code === 404 ? "inactive_agent" : "unauthorized", "invalid or missing X-Agent-Key");
+  const agent = auth.identity;
   if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
+
+  const contentLength = Number(request.headers.get("content-length") ?? "0");
+  if (contentLength > 150_000) return err(422, "body_too_large", "request body too large");
 
   let input: PostInput;
   try {
@@ -284,7 +328,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   }
 
   const v = validateCreate(input);
-  if (!v.ok) return err(400, "validation", JSON.stringify(v.errors));
+  if (!v.ok) return validationError(v.errors);
 
   const slug = v.value.slug ?? slugify(v.value.title);
   if (!SLUG_RE.test(slug) || slug.length > SLUG_MAX) {
@@ -310,11 +354,16 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
     published_at: isDirect ? now : null,
   };
 
-  const res = await fetch(`${env.SUPABASE_URL}/rest/v1/blog_posts`, {
-    method: "POST",
-    headers: serviceHeaders(env),
-    body: JSON.stringify(row),
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${env.SUPABASE_URL}/rest/v1/blog_posts`, {
+      method: "POST",
+      headers: serviceHeaders(env),
+      body: JSON.stringify(row),
+    });
+  } catch {
+    return err(503, "upstream", "supabase unreachable");
+  }
 
   if (res.status === 409) {
     return err(409, "slug_conflict", "slug already exists — use PATCH to update your own post, or a new slug");
@@ -333,12 +382,16 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return err(503, "not_configured", "agent API not configured");
   }
-  const agent = await authenticate(env, request);
-  if (!agent) return err(401, "unauthorized", "invalid or missing X-Agent-Key");
+  const auth = await authenticate(env, request);
+  if (!auth.ok) return err(auth.code, auth.code === 404 ? "inactive_agent" : "unauthorized", "invalid or missing X-Agent-Key");
+  const agent = auth.identity;
   if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
 
   const slug = (params.slug as string) ?? "";
   if (!SLUG_RE.test(slug)) return err(400, "validation", "invalid slug");
+
+  const contentLength = Number(request.headers.get("content-length") ?? "0");
+  if (contentLength > 150_000) return err(422, "body_too_large", "request body too large");
 
   let input: PostInput;
   try {
@@ -348,19 +401,30 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
   }
 
   const v = validatePatch(input);
-  if (!v.ok) return err(400, "validation", JSON.stringify(v.errors));
+  if (!v.ok) return validationError(v.errors);
 
   // Load the post — check existence, ownership, terminal state
-  const getRes = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/blog_posts?select=id,status,created_by,reviewed_at&slug=eq.${encodeURIComponent(slug)}&limit=1`,
-    { headers: serviceHeaders(env) },
-  );
+  let getRes: Response;
+  try {
+    getRes = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?select=id,status,created_by,body&slug=eq.${encodeURIComponent(slug)}&limit=1`,
+      { headers: serviceHeaders(env) },
+    );
+  } catch {
+    return err(503, "upstream", "supabase unreachable");
+  }
   if (!getRes.ok) return err(503, "upstream", `supabase ${getRes.status}`);
-  const rows = (await getRes.json()) as Array<{ id: string; status: string; created_by: string | null }>;
+  const rows = (await getRes.json()) as Array<{ id: string; status: string; created_by: string | null; body: string }>;
   const post = rows[0];
   if (!post) return err(404, "not_found", "post not found");
   if (post.status === "archived") return err(409, "archived", "archived is terminal");
   if (post.created_by !== agent.agentName) return err(403, "forbidden", "you can only edit posts you created");
+
+  // Empty-body-at-publish guard: resulting body must be non-empty
+  const resultingBody = v.value.body ?? post.body;
+  if (v.value.status === "published" && resultingBody.trim() === "") {
+    return err(400, "validation", "body required when status=published");
+  }
 
   // Build the PATCH body: status→published requires audit fields (trigger guard)
   const now = new Date().toISOString();
@@ -370,17 +434,23 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
     patch.published_at = now;
   }
 
-  const res = await fetch(
-    `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}`,
-    {
-      method: "PATCH",
-      headers: serviceHeaders(env),
-      body: JSON.stringify(patch),
-    },
-  );
+  // status=not.eq.archived guards the TOCTOU window (post archived between GET and PATCH)
+  let res: Response;
+  try {
+    res = await fetch(
+      `${env.SUPABASE_URL}/rest/v1/blog_posts?slug=eq.${encodeURIComponent(slug)}&status=not.eq.archived`,
+      {
+        method: "PATCH",
+        headers: serviceHeaders(env),
+        body: JSON.stringify(patch),
+      },
+    );
+  } catch {
+    return err(503, "upstream", "supabase unreachable");
+  }
   if (!res.ok) return err(503, "upstream", `supabase ${res.status}`);
 
-  return json({ id: post.id, slug, url: `https://tortoise.premiselabs.co/blog/${slug}` }, 200);
+  return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
 };
 
 export const onRequestOptions: PagesFunction<Env> = async () => {

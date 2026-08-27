@@ -28,6 +28,7 @@ export interface BlogPost {
 export interface Env {
   SUPABASE_URL?: string;
   SUPABASE_ANON_KEY?: string;
+  SUPABASE_SERVICE_ROLE_KEY?: string; // Pages Function secret — server-side only (agent API, admin)
   ASSETS: { fetch: (req: Request | string) => Promise<Response> };
 }
 
