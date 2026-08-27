@@ -54,6 +54,11 @@ def _st_token() -> str:
     return "st_" + uuid.uuid4().hex
 
 
+# #1719 (Task 3): Membership.user_id is a uuid column — a non-UUID claim
+# literal would 22P02 (HTTP 400) under the fake's fidelity check / PostgREST.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+
+
 @pytest.fixture(scope="module")
 def client():
     with TestClient(app) as c:
@@ -158,7 +163,7 @@ class TestSequentialIdempotency:
         # claim emulation: attach a user to the membership
         sdk = ha_mod._make_sdk(namespace="registry")
         sdk._get_registry().query(
-            "MATCH (m:Membership {team_id:$tid}) SET m.user_id = 'user-1709-claim'",
+            f"MATCH (m:Membership {{team_id:$tid}}) SET m.user_id = '{_U1}'",
             params={"tid": team_id},
         )
         r = client.post("/v1/agent/signup", json={"signup_token": token})

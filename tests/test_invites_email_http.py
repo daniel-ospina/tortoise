@@ -17,6 +17,11 @@ from fastapi.testclient import TestClient
 from tortoise import email_notify
 from tortoise.hosted_api import app, get_current_user
 
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
+
 
 def _patch_tortoise_sdk_init(db_path: str):
     import tortoise.hosted_api as ha_mod
@@ -45,7 +50,7 @@ def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-1",
+            "user_id": _U1,
             "email": "owner@example.com",
         }
         _orig_init = _patch_tortoise_sdk_init(db_path)
@@ -100,7 +105,7 @@ def _env(monkeypatch):
 def test_full_journey_invite_info_accept(client, reg, monkeypatch):
     """invite → email scheduled with token → info returns variables → accept."""
     _seed_team(reg, "team-1")
-    _seed_membership(reg, "team-1", "user-1")
+    _seed_membership(reg, "team-1", _U1)
 
     scheduled = {}
 
@@ -135,7 +140,7 @@ def test_full_journey_invite_info_accept(client, reg, monkeypatch):
     # 4. Invitee (bob, different user) accepts — email-match guard passes
     from tortoise.hosted_api import app as _app
     _app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": "user-2",
+        "user_id": _U2,
         "email": "bob@example.com",
     }
     r = client.post("/v1/invites/accept", json={"token": token})
@@ -145,14 +150,14 @@ def test_full_journey_invite_info_accept(client, reg, monkeypatch):
     # 5. Membership is active
     rows = reg.query(
         "MATCH (m:Membership {team_id:$tid, user_id:$uid}) RETURN m.status",
-        params={"tid": "team-1", "uid": "user-2"},
+        params={"tid": "team-1", "uid": _U2},
     ).result_set
     assert rows and rows[0][0] == "active"
 
 
 def test_info_unknown_token_404(client, reg):
     _seed_team(reg, "team-1")
-    _seed_membership(reg, "team-1", "user-1")
+    _seed_membership(reg, "team-1", _U1)
     r = client.get("/v1/invites/info?token=nonexistent-token")
     assert r.status_code == 404
     assert r.json()["detail"] == "Invite not found or expired"
@@ -161,7 +166,7 @@ def test_info_unknown_token_404(client, reg):
 def test_info_consumed_token_404(client, reg, monkeypatch):
     """An accepted invite is no longer visible via info (no oracle)."""
     _seed_team(reg, "team-1")
-    _seed_membership(reg, "team-1", "user-1")
+    _seed_membership(reg, "team-1", _U1)
 
     def fake_send(*a, **k):
         pass
@@ -173,7 +178,7 @@ def test_info_consumed_token_404(client, reg, monkeypatch):
 
     from tortoise.hosted_api import app as _app
     _app.dependency_overrides[get_current_user] = lambda: {
-        "user_id": "user-2",
+        "user_id": _U2,
         "email": "bob@example.com",
     }
     assert client.post("/v1/invites/accept", json={"token": token}).status_code == 200
@@ -182,7 +187,7 @@ def test_info_consumed_token_404(client, reg, monkeypatch):
 
 def test_invite_email_failure_does_not_fail_mint(client, reg, monkeypatch, caplog):
     _seed_team(reg, "team-1")
-    _seed_membership(reg, "team-1", "user-1")
+    _seed_membership(reg, "team-1", _U1)
 
     def boom(*a, **k):
         raise RuntimeError("resend down")
@@ -196,7 +201,7 @@ def test_invite_email_failure_does_not_fail_mint(client, reg, monkeypatch, caplo
 def test_info_link_host_never_from_host_header(client, reg, monkeypatch):
     """EMAIL_LINK_BASE_URL drives the link — never the request Host header."""
     _seed_team(reg, "team-1")
-    _seed_membership(reg, "team-1", "user-1")
+    _seed_membership(reg, "team-1", _U1)
 
     captured = {}
 

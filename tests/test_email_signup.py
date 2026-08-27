@@ -37,6 +37,10 @@ from tortoise.hosted_api import app
 _SUPABASE_URL = "https://testref.supabase.co"
 _SERVICE_KEY = "test-service-role-key-123"
 
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs, so non-UUID user_id literals are prod-impossible.
+_U_REG_CLAIM = "9f2c1a40-0000-4a00-8000-00000000000c"
+
 
 @pytest.fixture(scope="module")
 def client():
@@ -327,7 +331,7 @@ class TestEmailSignupClaim:
         })
 
         async def _verify(request):
-            return {"user_id": "user-reg-claim", "email": "verified-b@example.com",
+            return {"user_id": _U_REG_CLAIM, "email": "verified-b@example.com",
                     "app_metadata": {"providers": ["github"]}}
 
         monkeypatch.setattr(ha_mod, "verify_session_jwt", _verify)
@@ -342,5 +346,5 @@ class TestEmailSignupClaim:
             f"reg- email must be overwritten A→B, got {team_row['email']}")
         mem = next(m for m in fake.tables["team_memberships"]
                    if m["team_id"] == team_id)
-        assert mem["user_id"] == "user-reg-claim"
+        assert mem["user_id"] == _U_REG_CLAIM
         assert mem["identity"] is None

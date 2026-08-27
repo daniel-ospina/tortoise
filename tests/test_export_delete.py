@@ -36,7 +36,16 @@ from tests.test_supabase_control import (
 )
 
 TEAM_ID = "team-free-001"
-OWNER = "user-1"
+
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID literals 22P02 (HTTP 400) under
+# FakeControlPlane's fidelity check. user-1 → _U1; registry owner
+# "u-owner" → _U2; JWT overrides for non-members → _U3/_U4.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
+_U3 = "9f2c1a40-0000-4a00-8000-000000000003"
+_U4 = "9f2c1a40-0000-4a00-8000-000000000004"
+OWNER = _U1
 
 
 def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
@@ -191,7 +200,9 @@ def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
     reg.query("CREATE (t:Team {id:$id, name:$name, tier:'free'})",
               params={"id": team_id, "name": team_id})
     reg.query(
-        "CREATE (m:Membership {id:'m-1', user_id:'u-owner', team_id:$tid, "
+        # user_id mirrors _U2 (9f2c1a40-...-0002) — registry Membership
+        # user_id is the same uuid column as team_memberships (#1719 T3).
+        "CREATE (m:Membership {id:'m-1', user_id:'9f2c1a40-0000-4a00-8000-000000000002', team_id:$tid, "
         "role:'owner', status:'active', joined_at:'2026-08-01T00:00:00Z'})",
         params={"tid": team_id},
     )
@@ -414,7 +425,7 @@ class TestDeleteSupabase:
         assert r.status_code == 200
         assert r.json()["already"] is True
         # non-owner → 403
-        app.dependency_overrides[get_current_user] = lambda: {"user_id": "intruder"}
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": _U4}
         r2 = tc.delete(f"/v1/teams/{TEAM_ID}")
         assert r2.status_code == 403
 
@@ -445,7 +456,7 @@ class TestExportDeleteRegistry:
         tc, db_path = reg_client
         _seed_registry(db_path)
         seed_sdk = _seed_graph(db_path, team_id="reg-team-1")
-        as_user(user_id="u-owner")
+        as_user(user_id=_U2)
         r = tc.get("/v1/teams/reg-team-1/export")
         assert r.status_code == 200, r.text
         body = r.json()
@@ -457,7 +468,7 @@ class TestExportDeleteRegistry:
     def test_export_requires_owner_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
-        as_user(user_id="someone-else")  # no membership at all
+        as_user(user_id=_U3)  # no membership at all
         assert tc.get("/v1/teams/reg-team-1/export").status_code == 403
 
     def test_export_uses_stored_graph_name(self, reg_client, as_user):
@@ -471,11 +482,11 @@ class TestExportDeleteRegistry:
             "graph_name:'team_Acme'})"
         )
         reg.query(
-            "CREATE (m:Membership {id:'m-2', user_id:'u-owner', "
+            "CREATE (m:Membership {id:'m-2', user_id:'9f2c1a40-0000-4a00-8000-000000000002', "
             "team_id:'reg-named', role:'owner', status:'active'})"
         )
         seed_sdk = _seed_graph(db_path, team_id="Acme", n_points=1, n_events=0)
-        as_user(user_id="u-owner")
+        as_user(user_id=_U2)
         r = tc.get("/v1/teams/reg-named/export")
         assert r.status_code == 200, r.text
         assert r.json()["summary"]["points"] == 1
@@ -483,7 +494,7 @@ class TestExportDeleteRegistry:
     def test_export_deleted_team_410_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path, deleted_at=datetime.now(timezone.utc).isoformat())  # noqa: UP017
-        as_user(user_id="u-owner")
+        as_user(user_id=_U2)
         r = tc.get("/v1/teams/reg-team-1/export")
         assert r.status_code == 410
 
@@ -496,7 +507,7 @@ class TestExportDeleteRegistry:
             "CREATE (i:Invitation {id:'inv-r', team_id:'reg-team-1', "
             "email:'bob@example.com', role:'member', status:'pending'})"
         )
-        as_user(user_id="u-owner")
+        as_user(user_id=_U2)
         r = tc.delete("/v1/teams/reg-team-1")
         assert r.status_code == 202, r.text
         assert r.json()["status"] == "delete_scheduled"
@@ -524,7 +535,7 @@ class TestExportDeleteRegistry:
     def test_delete_idempotent_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
-        as_user(user_id="u-owner")
+        as_user(user_id=_U2)
         assert tc.delete("/v1/teams/reg-team-1").status_code == 202
         second = tc.delete("/v1/teams/reg-team-1")
         assert second.status_code == 200
@@ -545,10 +556,10 @@ class TestExportDeleteRegistry:
             params={"pfx": TOKEN[:10], "hash": hash_api_key(TOKEN)},
         )
         reg.query(
-            "CREATE (m:Membership {id:'m-1', user_id:'u-owner', "
+            "CREATE (m:Membership {id:'m-1', user_id:'9f2c1a40-0000-4a00-8000-000000000002', "
             "team_id:'reg-team-1', role:'owner', status:'active'})"
         )
-        as_user(user_id="u-owner")
+        as_user(user_id=_U2)
         assert tc.delete("/v1/teams/reg-team-1").status_code == 202
         r = tc.get("/v1/team", headers={"Authorization": f"Bearer {TOKEN}"})
         assert r.status_code == 401

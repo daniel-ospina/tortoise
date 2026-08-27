@@ -822,7 +822,7 @@ class TestOnboardingTeam:
         provisioning must never block the recovery/claim path."""
         tc, fake, _ = team_client
         app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-1", "email": "user-1@example.com"}
+            "user_id": _USER1, "email": "user-1@example.com"}
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
         sub_team_id = r.json()["team_id"]
@@ -830,7 +830,7 @@ class TestOnboardingTeam:
                 if k["team_id"] == sub_team_id] == []
         # session user gains an owner membership (the claim path) → mint
         fake.tables.setdefault("team_memberships", []).append({
-            "id": "mem-sub-1", "user_id": "user-1", "team_id": sub_team_id,
+            "id": "mem-sub-1", "user_id": _USER1, "team_id": sub_team_id,
             "role": "owner", "status": "active", "identity": None,
             "lookup_hash": None,
         })

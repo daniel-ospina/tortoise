@@ -35,6 +35,12 @@ from tortoise.session_auth import get_current_user
 
 _INTERNAL_KEY = "test-internal-shared-secret-xyz"
 
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible.
+# api_keys.created_by stays TEXT and remains non-UUID.
+_U740 = "9f2c1a40-0000-4a00-8000-000000000740"
+_U_CLAIM_A = "9f2c1a40-0000-4a00-8000-00000000000b"
+
 
 def _wait_for(predicate, timeout_s: float = 5.0):
     """Poll for a fire-and-forget side effect (the R8 feed runs via
@@ -229,7 +235,7 @@ class TestProvisionMembershipStatus:
                     "team_id": f"prov{os.urandom(3).hex()}",
                     "team_name": "Provisioned Team",
                     "api_key_hash": "ab" * 64,
-                    "created_by": "user-740-provision",
+                    "created_by": _U740,
                 },
             )
             assert r.status_code == 200, r.text
@@ -240,7 +246,7 @@ class TestProvisionMembershipStatus:
             # test_hosted_api.py; not timing-sensitive like monkeypatching the
             # underlying verify_session_jwt, which flakes under load).
             app.dependency_overrides[get_current_user] = lambda: {
-                "user_id": "user-740-provision",
+                "user_id": _U740,
                 "email": "prov@test.dev",
             }
             try:
@@ -309,7 +315,7 @@ class TestAgentSignupClaim:
         )
         assert r.status_code == 200, r.text
 
-        self._patch_jwt(monkeypatch, "user-claim-a", "verified@example.com",
+        self._patch_jwt(monkeypatch, _U_CLAIM_A, "verified@example.com",
                         ["github"])
         r = client.post(
             "/v1/claim",
@@ -351,7 +357,7 @@ class TestAgentSignupClaim:
             "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
             "p_graph_size_cap": 10000,
         })
-        self._patch_jwt(monkeypatch, "user-claim-a", "fresh-verified@example.com",
+        self._patch_jwt(monkeypatch, _U_CLAIM_A, "fresh-verified@example.com",
                         ["google"])
         r = client.post(
             "/v1/claim",

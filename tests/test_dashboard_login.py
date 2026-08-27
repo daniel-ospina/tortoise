@@ -93,7 +93,7 @@ class TestDashboardKeyLoginFlag:
 
     def test_toggle_dashboard_login_session_owner(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)  # noqa: RUF059
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         # claim the team first so it's not anon (toggle is for claimed owners);
         # claim_membership links the real anon owner row → session user IS owner
@@ -113,7 +113,7 @@ class TestDashboardKeyLoginFlag:
 
     def test_toggle_dashboard_login_rejects_non_owner(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)  # noqa: RUF059
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         # NO membership seeded → _require_owner_admin 403s
         r = client.patch(
@@ -127,7 +127,7 @@ class TestDashboardKeyLoginFlag:
 class TestPerKeyToggle:
     def test_disable_key_rejects_auth(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         # find the key id
@@ -148,7 +148,7 @@ class TestPerKeyToggle:
 
     def test_reenable_key_restores_auth(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -173,7 +173,7 @@ class TestKeyRenameSupabase:
 
     def test_rename_key_persists_label(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -197,7 +197,7 @@ class TestKeyRenameSupabase:
 
     def test_rename_clears_label_with_empty_string(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -223,7 +223,7 @@ class TestKeyRenameSupabase:
         # The dashboard sends JSON null to clear a label — null must be
         # applied (field present), not treated as absent (P1 review fix).
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -247,7 +247,7 @@ class TestKeyRenameSupabase:
 
     def test_rename_requires_owner(self, client, fake, monkeypatch):
         key, _ = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         # NO membership seeded → _require_owner_admin 403s
         from tortoise.auth import lookup_hash
@@ -265,7 +265,7 @@ class TestKeyRenameSupabase:
         # The dashboard's rename used to echo `enabled`; the API supports a
         # combined body — both mutations must land in supabase mode.
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -289,7 +289,7 @@ class TestKeyRenameSupabase:
     def test_rename_revoked_key_409(self, client, fake, monkeypatch):
         # The revoked guard covers rename too (P3 review fix parity).
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -309,7 +309,7 @@ class TestKeyRenameSupabase:
 
     def test_rename_clamps_to_64_chars(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -327,7 +327,7 @@ class TestKeyRenameSupabase:
     def test_patch_empty_body_422(self, client, fake, monkeypatch):
         # At least one of enabled/name must be present (code-review P2).
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -345,7 +345,7 @@ class TestKeyRenameSupabase:
         # An explicit null for enabled must be treated as absent — it must
         # never re-enable a disabled key (re-review P2).
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, team_id, user_id)
         from tortoise.auth import lookup_hash
@@ -374,7 +374,7 @@ class TestKeyRenameSupabase:
                           headers={"Authorization": f"Bearer {key}"}).status_code == 401
 
     def test_rename_unknown_key_404(self, client, fake, monkeypatch):
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         _seed_owner_membership(fake, "team-404-xyz", user_id)
         r = client.patch(
@@ -388,7 +388,7 @@ class TestKeyRenameSupabase:
 class TestDashboardLoginGate:
     def test_key_auth_mgmt_403_when_disabled(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(key),
@@ -413,7 +413,7 @@ class TestDashboardLoginGate:
         # _session_user_team) and skips the dashboard-login gate — so a
         # session user can still mint keys even with dashboard_key_login=false.
         key, team_id = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(key),
@@ -432,7 +432,7 @@ class TestDashboardLoginGate:
         plan's surface map states (a revert to the raw combined query would
         500 here with no other test catching it)."""
         key, team_id = _provision_anon(client, fake)  # noqa: RUF059
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(key),
@@ -465,7 +465,7 @@ class TestClaimEmail:
 
     def test_claim_email_rejects_claimed_team(self, client, fake, monkeypatch):
         key, team_id = _provision_anon(client, fake)  # noqa: RUF059
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(key),
                             user_id=user_id, email="owner@example.com")
@@ -491,7 +491,7 @@ class TestCrossTeamMintProtection:
         # two anon teams
         keyA, teamA = _provision_anon(client, fake)
         keyB, teamB = _provision_anon(client, fake)  # noqa: RUF059
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         # user owns ONLY team A (claim links the real anon owner row)
         from tortoise.auth import lookup_hash
@@ -514,7 +514,7 @@ class TestCrossTeamMintProtection:
     def test_session_cannot_toggle_dashboard_login_for_other_team(self, client, fake, monkeypatch):
         keyA, teamA = _provision_anon(client, fake)  # noqa: RUF059
         _, teamB = _provision_anon(client, fake)
-        user_id = f"user-{uuid.uuid4().hex[:8]}"
+        user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         from tortoise.auth import lookup_hash
         sc.claim_membership(fake, lookup_hash=lookup_hash(keyA),

@@ -87,7 +87,13 @@ def _embedded_local_file_lane():
 
 
 TEAM_ID = "team-free-001"
-OWNER = "user-1"
+
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID literals 22P02 (HTTP 400) under
+# FakeControlPlane's fidelity check. user-1 → _U1 (mirrors the constant
+# in test_supabase_control, which _membership_row already seeds).
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+OWNER = _U1
 GRAPH_NAME = "team_import_g"  # teams.graph_name in Supabase mode (import target)
 IMPORT_KEY_HEADER = "X-Tortoise-Import-Key"
 

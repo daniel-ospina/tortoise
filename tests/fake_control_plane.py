@@ -26,10 +26,40 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
+# #1719 (Task 3): columns whose PostgREST filter values are cast to uuid —
+# a non-UUID literal 22P02s (HTTP 400) in prod. Default-on fidelity makes
+# the fake raise the SAME RuntimeError surface the real query() raises, so
+# a future unsanitized call site fails CI instead of silently no-matching
+# ("CI green while prod 500s"). Extendable registry (mirrors missing_columns).
+UUID_FILTER_COLUMNS: set[tuple[str, str]] = {("team_memberships", "user_id")}
+
+
+def _assert_uuid_fidelity(table: str, filters: list[tuple[str, str, object]] | None) -> None:
+    """Raise RuntimeError("... HTTP 400") when a filter value on a registered
+    uuid column is a non-None non-UUID string — mirroring PostgREST 22P02.
+    None (is.null) and real UUIDs pass. Only eq/neq carry a cast; is does not."""
+    if not filters:
+        return
+    for col, op, value in filters:
+        if op not in ("eq", "neq"):
+            continue
+        if (table, col) not in UUID_FILTER_COLUMNS:
+            continue
+        if value is None or not isinstance(value, str):
+            continue
+        try:
+            import uuid as _uuid
+            _uuid.UUID(value)
+        except (ValueError, TypeError, AttributeError):
+            raise RuntimeError(
+                f"Supabase control-plane query failed ({table}): HTTP 400"
+            ) from None
+
 
 class FakeControlPlane:
     def __init__(self, tables: dict[str, list[dict]] | None = None,
-                 *, missing_columns: dict[str, set[str]] | None = None):
+                 *, missing_columns: dict[str, set[str]] | None = None,
+                 uuid_fidelity: bool = True):
         # rows are stored as dicts keyed by column name
         self.tables: dict[str, list[dict]] = tables or {}
         self.query_count = 0
@@ -38,6 +68,7 @@ class FakeControlPlane:
         # table (mirrors PostgREST 400 PGRST204 on select/filter of an
         # absent column). Default None → behavior identical to before.
         self.missing_columns: dict[str, set[str]] | None = missing_columns
+        self.uuid_fidelity = uuid_fidelity
         # #1709: serializes recover_team_key emulation (the real RPC SELECTs
         # the token row FOR UPDATE — the fake must be atomic under the
         # concurrency E2E).
@@ -430,6 +461,11 @@ class FakeControlPlane:
               method: str = "GET", json_body: dict | None = None,
               order: str | None = None, limit: int | None = None) -> list[dict]:
         self.query_count += 1
+        # #1719 (Task 3): fidelity check BEFORE method dispatch — GET builds
+        # filters in the loop below, but PATCH/DELETE flow through _matches;
+        # 22P02 in prod is method-agnostic.
+        if self.uuid_fidelity:
+            _assert_uuid_fidelity(table, filters)
         if method == "PATCH":
             # mutate the STORED rows (mirrors PostgREST update semantics);
             # return=representation when a select is given → the UPDATED

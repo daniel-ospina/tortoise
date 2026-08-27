@@ -75,6 +75,23 @@ TEAM_TIER_TEAM = {
 }
 
 
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs, so non-UUID user_id literals are prod-impossible test
+# artifacts (a non-UUID literal 22P02s → PostgREST 400, which
+# FakeControlPlane's fidelity check raises). Fixtures/filters use these
+# constants; identity / api_keys.created_by / invitations.invited_by stay
+# TEXT and remain non-UUID.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
+_U3 = "9f2c1a40-0000-4a00-8000-000000000003"
+_U4 = "9f2c1a40-0000-4a00-8000-000000000004"
+_U5 = "9f2c1a40-0000-4a00-8000-000000000005"
+_U6 = "9f2c1a40-0000-4a00-8000-000000000006"
+_U7 = "9f2c1a40-0000-4a00-8000-000000000007"
+_U8 = "9f2c1a40-0000-4a00-8000-000000000008"
+_U9 = "9f2c1a40-0000-4a00-8000-000000000009"
+
+
 def _key_row(**overrides) -> dict:
     row = {
         "id": "key-001", "team_id": "team-free-001",
@@ -93,7 +110,7 @@ def _key_row(**overrides) -> dict:
 
 def _membership_row(**overrides) -> dict:
     row = {
-        "user_id": "user-1", "team_id": "team-free-001",
+        "user_id": _U1, "team_id": "team-free-001",
         "lookup_hash": lookup_hash(TOKEN),
         "role": "owner", "status": "active", "identity": None,
     }
@@ -520,7 +537,7 @@ class TestTeamByID:
             datetime.now(timezone.utc).isoformat()  # noqa: UP017
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         with pytest.raises(InvitationError) as ei:
-            invitation_accept(fake, inv["token"], "user-2")
+            invitation_accept(fake, inv["token"], _U2)
         assert ei.value.status == 410
 
 
@@ -586,21 +603,21 @@ class TestEnvGating:
 class TestSessionHelpers:
     def test_user_memberships_active_only_no_placeholder(self, fake):
         fake.seed("team_memberships", [
-            _membership_row(team_id="team-a", user_id="user-1", lookup_hash=None),
-            _membership_row(team_id="team-b", user_id="user-1", lookup_hash=None,
+            _membership_row(team_id="team-a", user_id=_U1, lookup_hash=None),
+            _membership_row(team_id="team-b", user_id=_U1, lookup_hash=None,
                             status="removed"),
-            _membership_row(team_id="", user_id="user-1", lookup_hash=None),
+            _membership_row(team_id="", user_id=_U1, lookup_hash=None),
         ])
-        got = user_memberships(fake, "user-1")
+        got = user_memberships(fake, _U1)
         assert got == [{"team_id": "team-a", "role": "owner"}]
 
     def test_membership_for_user_team(self, fake):
         fake.seed("team_memberships", [
-            _membership_row(team_id="team-a", user_id="user-1", lookup_hash=None),
+            _membership_row(team_id="team-a", user_id=_U1, lookup_hash=None),
         ])
-        assert membership_for_user_team(fake, "user-1", "team-a") == {
+        assert membership_for_user_team(fake, _U1, "team-a") == {
             "team_id": "team-a", "role": "owner"}
-        assert membership_for_user_team(fake, "user-1", "team-b") is None
+        assert membership_for_user_team(fake, _U1, "team-b") is None
 
     def test_team_by_id_returns_row(self, fake):
         row = team_by_id(fake, "team-free-001")
@@ -645,7 +662,7 @@ class TestInvitationSeam:
     rejected (E2E-3).
     """
 
-    def _owner(self, fake, team_id="team-1", user_id="owner-1"):
+    def _owner(self, fake, team_id="team-1", user_id=_U3):
         fake.seed("team_memberships", [{
             "user_id": user_id, "team_id": team_id,
             "role": "owner", "status": "active",
@@ -692,7 +709,7 @@ class TestInvitationSeam:
         """Dedup is on PENDING only — a consumed invite doesn't block a
         fresh re-invite (NULLs are distinct; the partial index enforces)."""
         inv1 = invitation_mint(fake, "team-1", "bob@example.com", "admin", "u1")
-        invitation_accept(fake, inv1["token"], "user-2")
+        invitation_accept(fake, inv1["token"], _U2)
         inv2 = invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
         assert inv2["token"] != inv1["token"]
         assert len(fake.tables["invitations"]) == 2
@@ -712,12 +729,12 @@ class TestInvitationSeam:
         carrying the INVITED role; pending invite consumed."""
         inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
                               "owner-1")
-        result = invitation_accept(fake, inv["token"], "user-2")
+        result = invitation_accept(fake, inv["token"], _U2)
         assert result == {"team_id": "team-1", "role": "admin"}
 
         mem = fake.tables["team_memberships"]
         assert len(mem) == 1
-        assert mem[0]["user_id"] == "user-2"
+        assert mem[0]["user_id"] == _U2
         assert mem[0]["team_id"] == "team-1"
         assert mem[0]["role"] == "admin"  # invited role preserved (O/I/T)
         assert mem[0]["status"] == "active"
@@ -730,13 +747,13 @@ class TestInvitationSeam:
     def test_accept_role_member_preserved(self, fake):
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        invitation_accept(fake, inv["token"], "user-2")
+        invitation_accept(fake, inv["token"], _U2)
         assert fake.tables["team_memberships"][0]["role"] == "member"
 
     def test_accept_unknown_token_rejected(self, fake):
         invitation_mint(fake, "team-1", "bob@example.com", "member", "u1")
         with pytest.raises(InvitationError, match="Invalid or expired"):
-            invitation_accept(fake, "not-the-token", "user-2")
+            invitation_accept(fake, "not-the-token", _U2)
 
     def test_accept_expired_rejected(self, fake):
         """E2E-3: expiry enforced (expires_at <= now → rejected)."""
@@ -745,16 +762,16 @@ class TestInvitationSeam:
         past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()  # noqa: UP017
         fake.tables["invitations"][0]["expires_at"] = past
         with pytest.raises(InvitationError, match="expired"):
-            invitation_accept(fake, inv["token"], "user-2")
+            invitation_accept(fake, inv["token"], _U2)
         assert fake.tables["team_memberships"] == []
 
     def test_accept_used_invite_rejected(self, fake):
         """E2E-3: a used invite cannot be re-accepted."""
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        invitation_accept(fake, inv["token"], "user-2")
+        invitation_accept(fake, inv["token"], _U2)
         with pytest.raises(InvitationError, match="accepted"):
-            invitation_accept(fake, inv["token"], "user-3")
+            invitation_accept(fake, inv["token"], _U5)
         assert len(fake.tables["team_memberships"]) == 1  # no double join
 
     def test_accept_revoked_invite_rejected(self, fake):
@@ -762,21 +779,21 @@ class TestInvitationSeam:
         self._owner(fake)
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        invitation_rescind(fake, inv["id"], "team-1", _U3)
         with pytest.raises(InvitationError, match="revoked"):
-            invitation_accept(fake, inv["token"], "user-2")
+            invitation_accept(fake, inv["token"], _U2)
         # no membership created for the invitee (owner-1's row is the actor)
-        assert all(m["user_id"] != "user-2"
+        assert all(m["user_id"] != _U2
                    for m in fake.tables["team_memberships"])
 
     def test_accept_rejects_when_already_active_member(self, fake):
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
         fake.seed("team_memberships", [{
-            "user_id": "user-2", "team_id": "team-1",
+            "user_id": _U2, "team_id": "team-1",
             "role": "member", "status": "active"}])
         with pytest.raises(InvitationError) as ei:
-            invitation_accept(fake, inv["token"], "user-2")
+            invitation_accept(fake, inv["token"], _U2)
         assert ei.value.status == 409
 
     def test_accept_resurrects_removed_membership(self, fake):
@@ -786,9 +803,9 @@ class TestInvitationSeam:
         inv = invitation_mint(fake, "team-1", "bob@example.com", "admin",
                               "owner-1")
         fake.seed("team_memberships", [{
-            "id": "mem-1", "user_id": "user-2", "team_id": "team-1",
+            "id": "mem-1", "user_id": _U2, "team_id": "team-1",
             "role": "member", "status": "removed"}])
-        invitation_accept(fake, inv["token"], "user-2")
+        invitation_accept(fake, inv["token"], _U2)
         rows = fake.tables["team_memberships"]
         assert len(rows) == 1
         assert rows[0]["status"] == "active"
@@ -799,7 +816,7 @@ class TestInvitationSeam:
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
         with pytest.raises(InvitationError) as ei:
-            invitation_accept(fake, inv["token"], "user-2",
+            invitation_accept(fake, inv["token"], _U2,
                               user_email="mallory@example.com")
         assert ei.value.status == 403
         assert fake.tables["team_memberships"] == []
@@ -808,7 +825,7 @@ class TestInvitationSeam:
         """No email claim in the JWT → no guard (mirrors registry path)."""
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        invitation_accept(fake, inv["token"], "user-2", user_email=None)
+        invitation_accept(fake, inv["token"], _U2, user_email=None)
         assert len(fake.tables["team_memberships"]) == 1
 
     def test_accept_402_when_team_at_member_cap(self, fake):
@@ -822,7 +839,7 @@ class TestInvitationSeam:
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
         with pytest.raises(InvitationError) as ei:
-            invitation_accept(fake, inv["token"], "user-2")
+            invitation_accept(fake, inv["token"], _U2)
         assert ei.value.status == 402
         # invite still pending — the gate fires BEFORE consumption
         assert fake.tables["invitations"][0]["status"] == "pending"
@@ -849,7 +866,7 @@ class TestInvitationSeam:
 
         flaky = _FlakyAfterAccept(fake)
         with pytest.raises(RuntimeError):
-            invitation_accept(flaky, inv["token"], "user-2")
+            invitation_accept(flaky, inv["token"], _U2)
         # compensating rollback: invite is pending again, not burned
         row = fake.tables["invitations"][0]
         assert row["status"] == "pending"
@@ -879,7 +896,7 @@ class TestInvitationSeam:
 
         racer = _AcceptMidRace(fake)
         with pytest.raises(InvitationError) as ei:
-            invitation_rescind(racer, inv["id"], "team-1", "owner-1")
+            invitation_rescind(racer, inv["id"], "team-1", _U3)
         assert ei.value.status == 409
         assert fake.tables["invitations"][0]["status"] == "accepted"
 
@@ -911,7 +928,7 @@ class TestInvitationSeam:
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
         with pytest.raises(InvitationError) as ei:
-            invitation_rescind(fake, inv["id"], "team-1", "outsider")
+            invitation_rescind(fake, inv["id"], "team-1", _U4)
         assert ei.value.status == 403
         assert fake.tables["invitations"][0]["status"] == "pending"
 
@@ -919,7 +936,7 @@ class TestInvitationSeam:
         self._owner(fake)
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        result = invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        result = invitation_rescind(fake, inv["id"], "team-1", _U3)
         assert result == {"revoked": True, "invitation_id": inv["id"]}
         assert fake.tables["invitations"][0]["status"] == "revoked"
 
@@ -927,8 +944,8 @@ class TestInvitationSeam:
         self._owner(fake)
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        invitation_rescind(fake, inv["id"], "team-1", "owner-1")
-        again = invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+        invitation_rescind(fake, inv["id"], "team-1", _U3)
+        again = invitation_rescind(fake, inv["id"], "team-1", _U3)
         assert again["already"] is True
 
     def test_rescind_rejects_accepted_invite(self, fake):
@@ -936,9 +953,9 @@ class TestInvitationSeam:
         self._owner(fake)
         inv = invitation_mint(fake, "team-1", "bob@example.com", "member",
                               "owner-1")
-        invitation_accept(fake, inv["token"], "user-2")
+        invitation_accept(fake, inv["token"], _U2)
         with pytest.raises(InvitationError) as ei:
-            invitation_rescind(fake, inv["id"], "team-1", "owner-1")
+            invitation_rescind(fake, inv["id"], "team-1", _U3)
         assert ei.value.status == 409
 
     def test_rescind_unknown_or_other_team_404(self, fake):
@@ -949,10 +966,10 @@ class TestInvitationSeam:
         # (role check passes for team-OTHER, but the id is not scoped there)
         self._owner(fake, team_id="team-OTHER")
         with pytest.raises(InvitationError) as ei:
-            invitation_rescind(fake, inv["id"], "team-OTHER", "owner-1")
+            invitation_rescind(fake, inv["id"], "team-OTHER", _U3)
         assert ei.value.status == 404
         with pytest.raises(InvitationError) as ei:
-            invitation_rescind(fake, "no-such-id", "team-1", "owner-1")
+            invitation_rescind(fake, "no-such-id", "team-1", _U3)
         assert ei.value.status == 404
 
     # ── list ────────────────────────────────────────────────────────────
@@ -964,7 +981,7 @@ class TestInvitationSeam:
         invitation_mint(fake, "team-2", "other@example.com", "member", "u1")
         used = invitation_mint(fake, "team-1", "dave@example.com", "member",
                                "u1")
-        invitation_accept(fake, used["token"], "user-2")
+        invitation_accept(fake, used["token"], _U2)
         rows = pending_invitations(fake, "team-1")
         assert [r["email"] for r in rows] == ["bob@example.com", "carol@example.com"]
         assert all(r["status"] == "pending" for r in rows)
@@ -979,9 +996,9 @@ class TestInvitationSeam:
         with pytest.raises(RuntimeError):
             invitation_mint(cp, "team-1", "bob@example.com", "member", "u1")
         with pytest.raises(RuntimeError):
-            invitation_accept(cp, "some-token", "user-2")
+            invitation_accept(cp, "some-token", _U2)
         with pytest.raises(RuntimeError):
-            invitation_rescind(cp, "inv-1", "team-1", "owner-1")
+            invitation_rescind(cp, "inv-1", "team-1", _U3)
 # ── Onboarding / email / GitHub connect (plan Task 6, issue #764) ─────────
 
 class TestOnboardingState:
@@ -1265,17 +1282,17 @@ class TestTask8Helpers:
         excluded."""
         recent = "2026-08-01T00:00:00Z"
         fake.seed("team_memberships", [
-            {"id": "m1", "user_id": "u1", "identity": None,
+            {"id": "m1", "user_id": _U1, "identity": None,
              "created_at": "2026-08-02T00:00:00Z"},
-            {"id": "m2", "user_id": "u1", "identity": None,
+            {"id": "m2", "user_id": _U1, "identity": None,
              "created_at": "2026-07-01T00:00:00Z"},  # old — excluded
             {"id": "m3", "user_id": None, "identity": "anon-x",
              "created_at": "2026-08-03T00:00:00Z"},
-            {"id": "m4", "user_id": "u1", "identity": None,
+            {"id": "m4", "user_id": _U1, "identity": None,
              "created_at": None},  # NULL — excluded (SQL semantics)
         ])
         assert membership_count_since(
-            fake, cutoff=recent, user_id="u1") == 1
+            fake, cutoff=recent, user_id=_U1) == 1
         assert membership_count_since(
             fake, cutoff=recent, identity="anon-x") == 1
         assert membership_count_since(
@@ -1283,19 +1300,19 @@ class TestTask8Helpers:
 
     def test_team_members_active_and_invited_with_identity(self, fake):
         fake.seed("team_memberships", [
-            {"id": "m1", "user_id": "u1", "team_id": "team-free-001",
+            {"id": "m1", "user_id": _U1, "team_id": "team-free-001",
              "identity": None, "role": "owner", "status": "active",
              "invited_email": None},
             {"id": "m2", "user_id": None, "team_id": "team-free-001",
              "identity": "anon-abc", "role": "member", "status": "active",
              "invited_email": None},
-            {"id": "m3", "user_id": "u2", "team_id": "team-free-001",
+            {"id": "m3", "user_id": _U2, "team_id": "team-free-001",
              "identity": None, "role": "member", "status": "invited",
              "invited_email": "bob@example.com"},
-            {"id": "m4", "user_id": "u3", "team_id": "team-free-001",
+            {"id": "m4", "user_id": _U3, "team_id": "team-free-001",
              "identity": None, "role": "member", "status": "removed",
              "invited_email": None},
-            {"id": "m5", "user_id": "u4", "team_id": "team-other",
+            {"id": "m5", "user_id": _U4, "team_id": "team-other",
              "identity": None, "role": "member", "status": "active",
              "invited_email": None},
         ])
@@ -1304,7 +1321,7 @@ class TestTask8Helpers:
         # identity rows surface their anon anchor as user_id (round-trip)
         by_id = {r["user_id"]: r for r in rows}
         assert by_id["anon-abc"]["role"] == "member"
-        assert by_id["u2"]["email"] == "bob@example.com"
+        assert by_id[_U2]["email"] == "bob@example.com"
 
     def test_membership_role_and_set_membership(self, fake):
         # #1719 split (codebase-review cycle-2 P1): the user_id fixture is a
@@ -1363,11 +1380,11 @@ class TestTask8Helpers:
         with pytest.raises(RuntimeError):
             team_by_name(cp, "acme")
         with pytest.raises(RuntimeError):
-            membership_count_since(cp, cutoff="2026-01-01", user_id="u")
+            membership_count_since(cp, cutoff="2026-01-01", user_id=_U1)
         with pytest.raises(RuntimeError):
-            membership_role(cp, "team-x", "u")
+            membership_role(cp, "team-x", _U1)
         with pytest.raises(RuntimeError):
-            set_membership(cp, "team-x", "u", status="removed")
+            set_membership(cp, "team-x", _U1, status="removed")
 
 
 # ── Constructor sanity ──────────────────────────────────────────────────────
@@ -1701,11 +1718,11 @@ class TestClaimSeam:
         _provision_anon_team(fake, team_id="team-claim-1",
                              identity="anon-claim-1", api_key="tt_claim_1")
         claim_membership(fake, lookup_hash=lookup_hash("tt_claim_1"),
-                         user_id="user-claim", email="verified@example.com")
+                         user_id=_U6, email="verified@example.com")
 
         rows = fake.tables["team_memberships"]
         owner = next(r for r in rows if r["team_id"] == "team-claim-1")
-        assert owner["user_id"] == "user-claim"
+        assert owner["user_id"] == _U6
         assert owner["identity"] is None
         assert owner["role"] == "owner"
         assert owner["status"] == "active"
@@ -1723,18 +1740,18 @@ class TestClaimSeam:
         _provision_anon_team(fake, team_id="team-merge-1",
                              identity="anon-merge-1", api_key="tt_merge_1")
         fake.seed("team_memberships", [{
-            "id": "mem-user-merge", "user_id": "user-merge",
+            "id": "mem-user-merge", "user_id": _U7,
             "team_id": "team-merge-1", "role": "member", "status": "removed",
             "identity": None, "lookup_hash": None, "key_hash": "old-hash",
         }])
         claim_membership(fake, lookup_hash=lookup_hash("tt_merge_1"),
-                         user_id="user-merge", email="m@example.com")
+                         user_id=_U7, email="m@example.com")
 
         rows = [r for r in fake.tables["team_memberships"]
                 if r["team_id"] == "team-merge-1"]
         assert len(rows) == 1, f"merge must collapse to one row: {rows}"
         row = rows[0]
-        assert row["user_id"] == "user-merge"
+        assert row["user_id"] == _U7
         assert row["role"] == "owner"
         assert row["status"] == "active"  # removed row reactivated (P4)
         # key material copied from the identity row (same-key continuity)
@@ -1746,10 +1763,10 @@ class TestClaimSeam:
         _provision_anon_team(fake, team_id="team-wins-1",
                              identity="anon-wins-1", api_key="tt_wins_1")
         claim_membership(fake, lookup_hash=lookup_hash("tt_wins_1"),
-                         user_id="user-a", email="a@example.com")
+                         user_id=_U8, email="a@example.com")
         with pytest.raises(ClaimError) as ei:
             claim_membership(fake, lookup_hash=lookup_hash("tt_wins_1"),
-                             user_id="user-b", email="b@example.com")
+                             user_id=_U9, email="b@example.com")
         assert ei.value.status == 409
         assert ei.value.code == "already_claimed"
 
@@ -1758,9 +1775,9 @@ class TestClaimSeam:
         _provision_anon_team(fake, team_id="team-idem-1",
                              identity="anon-idem-1", api_key="tt_idem_1")
         claim_membership(fake, lookup_hash=lookup_hash("tt_idem_1"),
-                         user_id="user-a", email="a@example.com")
+                         user_id=_U8, email="a@example.com")
         claim_membership(fake, lookup_hash=lookup_hash("tt_idem_1"),
-                         user_id="user-a", email="a2@example.com")  # no raise
+                         user_id=_U8, email="a2@example.com")  # no raise
         rows = [r for r in fake.tables["team_memberships"]
                 if r["team_id"] == "team-idem-1"]
         assert len(rows) == 1
@@ -1775,7 +1792,7 @@ class TestClaimSeam:
                 r["role"] = "member"  # demote to anon member
         with pytest.raises(ClaimError) as ei:
             claim_membership(fake, lookup_hash=lookup_hash("tt_nonown_1"),
-                             user_id="user-a", email="a@example.com")
+                             user_id=_U8, email="a@example.com")
         assert ei.value.code == "already_claimed"
         row = next(r for r in fake.tables["team_memberships"]
                    if r["team_id"] == "team-nonown-1")
@@ -1790,7 +1807,7 @@ class TestClaimSeam:
         _provision_anon_team(fake, team_id="team-t2",
                              identity="anon-t2", api_key="tt_t2")
         claim_membership(fake, lookup_hash=lookup_hash("tt_t1"),
-                         user_id="user-a", email="a@example.com")
+                         user_id=_U8, email="a@example.com")
         other = next(r for r in fake.tables["team_memberships"]
                      if r["team_id"] == "team-t2")
         assert other["user_id"] is None
@@ -1809,13 +1826,13 @@ class TestClaimSeam:
         }])
         with pytest.raises(ClaimError) as ei:
             claim_membership(fake, lookup_hash=lookup_hash("tt_sess_1"),
-                             user_id="user-a", email="a@example.com")
+                             user_id=_U8, email="a@example.com")
         assert ei.value.code == "key_not_claimable"
 
     def test_claim_unknown_key_404(self, fake):
         with pytest.raises(ClaimError) as ei:
             claim_membership(fake, lookup_hash=lookup_hash("tt_nope"),
-                             user_id="user-a", email="a@example.com")
+                             user_id=_U8, email="a@example.com")
         assert ei.value.code == "key_not_found"
         assert ei.value.status == 404
 
@@ -1828,7 +1845,7 @@ class TestClaimSeam:
                              api_key="tt_e2")
         with pytest.raises(ClaimError) as ei:
             claim_membership(fake, lookup_hash=lookup_hash("tt_e2"),
-                             user_id="user-a", email="shared@example.com")
+                             user_id=_U8, email="shared@example.com")
         assert ei.value.code == "email_in_use"
         row = next(r for r in fake.tables["team_memberships"]
                    if r["team_id"] == "team-e2")
@@ -1840,12 +1857,12 @@ class TestClaimSeam:
         _provision_anon_team(fake, team_id="team-ph-1",
                              identity="anon-ph-1", api_key="tt_ph_1")
         fake.seed("team_memberships", [{
-            "id": "ph-user", "user_id": "user-a", "team_id": "",
+            "id": "ph-user", "user_id": _U8, "team_id": "",
             "role": "owner", "status": "active", "identity": None,
         }])
         claim_membership(fake, lookup_hash=lookup_hash("tt_ph_1"),
-                         user_id="user-a", email="a@example.com")
-        assert not any(r["team_id"] == "" and r["user_id"] == "user-a"
+                         user_id=_U8, email="a@example.com")
+        assert not any(r["team_id"] == "" and r["user_id"] == _U8
                        for r in fake.tables["team_memberships"])
 
     def test_is_anon_team_predicate(self, fake):
@@ -1855,6 +1872,6 @@ class TestClaimSeam:
                              api_key="tt_anon_p", email="reg@example.com")
         assert is_anon_team(fake, "team-anon-p") is True  # email set but anon
         claim_membership(fake, lookup_hash=lookup_hash("tt_anon_p"),
-                         user_id="user-a", email="reg@example.com")
+                         user_id=_U8, email="reg@example.com")
         assert is_anon_team(fake, "team-anon-p") is False
         assert is_anon_team(fake, "no-such-team") is False
