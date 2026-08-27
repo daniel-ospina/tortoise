@@ -63,6 +63,9 @@ await db.exec(`
   GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role;
   GRANT ALL ON storage.buckets, storage.objects TO anon, authenticated, service_role;
   ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+  ALTER TABLE storage.buckets ENABLE ROW LEVEL SECURITY;
+  CREATE POLICY storage_buckets_public_read ON storage.buckets FOR SELECT TO anon, authenticated
+    USING (public = true);
 `);
 
 // ── Apply migrations 0001-20260813000005 in order ──
@@ -92,7 +95,7 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260825000001_api_key_names.sql',
                '20260825214233_provision_team_keyless.sql',
                '20260826000001_revoke_signup_token.sql',
-               '20260827000001_blog_cms.sql'];  // appended last: is_admin() depends on 20260813000001 teams.deleted_at — lexical order
+               '20260827000001_blog_cms.sql'];  // appended last: timestamp prefix sorts after the 2026 batch (fresh-DB safe)
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {

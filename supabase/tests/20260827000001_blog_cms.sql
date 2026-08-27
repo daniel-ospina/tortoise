@@ -1,5 +1,5 @@
 -- ============================================================================
--- SQL-level verification for migration 0017 (issue #1793 — blog CMS)
+-- SQL-level verification for migration 20260827000001 (issue #1793 — blog CMS)
 -- blog_posts lifecycle triggers, RLS, is_admin(), blog_agent_keys isolation.
 --
 -- HOW TO RUN (no Docker — PGlite harness):
@@ -57,7 +57,7 @@ DO $$
 BEGIN
   BEGIN
     INSERT INTO public.blog_posts (slug, title, status) VALUES ('Bad_Slug', 't', 'draft');
-    RAISE EXCEPTION '0017: invalid slug NOT rejected';
+    RAISE EXCEPTION '0017: invalid slug NOT rejected' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN
     NULL; -- expected
   END;
@@ -74,7 +74,7 @@ DO $$
 BEGIN
   BEGIN
     INSERT INTO public.blog_posts (slug, title, status) VALUES ('bad-status', 't', 'bogus');
-    RAISE EXCEPTION '0017: invalid status NOT rejected';
+    RAISE EXCEPTION '0017: invalid status NOT rejected' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN
     NULL; -- expected
   END;
@@ -86,7 +86,7 @@ DO $$
 BEGIN
   BEGIN
     INSERT INTO public.blog_posts (slug, title, status) VALUES ('publish-guard', 't', 'published');
-    RAISE EXCEPTION '0017: publish without published_by NOT rejected';
+    RAISE EXCEPTION '0017: publish without published_by NOT rejected' USING ERRCODE = 'P0002';
   EXCEPTION WHEN raise_exception THEN
     NULL; -- expected
   END;
@@ -119,7 +119,7 @@ DO $$
 BEGIN
   BEGIN
     UPDATE public.blog_posts SET status = 'published' WHERE slug = 'publish-ok-blog';
-    RAISE EXCEPTION '0017: transition out of archived NOT rejected';
+    RAISE EXCEPTION '0017: transition out of archived NOT rejected' USING ERRCODE = 'P0002';
   EXCEPTION WHEN raise_exception THEN
     NULL; -- expected
   END;
@@ -183,9 +183,9 @@ BEGIN
   BEGIN
     INSERT INTO public.blog_posts (slug, title, status, published_by, published_at)
     VALUES ('anon-insert-blog', 'x', 'published', 'anon', now());
-    RAISE EXCEPTION '0017 RLS: anon INSERT NOT blocked';
+    RAISE EXCEPTION '0017 RLS: anon INSERT NOT blocked' USING ERRCODE = 'P0002';
   EXCEPTION WHEN raise_exception OR insufficient_privilege THEN
-    NULL; -- expected
+    NULL; -- expected (marker P0002 escapes)
   END;
 END $$;
 RESET ROLE;
@@ -204,9 +204,9 @@ DO $$
 BEGIN
   BEGIN
     INSERT INTO storage.objects (bucket_id, name) VALUES ('blog-images', 'anon-img.png');
-    RAISE EXCEPTION '0017 storage: anon INSERT NOT blocked';
+    RAISE EXCEPTION '0017 storage: anon INSERT NOT blocked' USING ERRCODE = 'P0002';
   EXCEPTION WHEN raise_exception OR insufficient_privilege THEN
-    NULL; -- expected
+    NULL; -- expected (marker P0002 escapes)
   END;
 END $$;
 RESET ROLE;

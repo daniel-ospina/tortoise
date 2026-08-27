@@ -10,9 +10,9 @@
 --   authenticated admin  → SELECT ALL + full CRUD (blog_admins allowlist)
 --   service_role         → ALL (agent publish API + seed/ops scripts)
 --
--- NOTE: named 20260827000001 (not 0017) — is_admin() depends on
--- teams.deleted_at (20260813000001) only in the allowlist-seed path; the
--- timestamp prefix sorts after the 2026 batch for fresh-DB applies.
+-- NOTE: named 20260827000001 (not 0017) — the timestamp prefix sorts after
+-- the 2026 batch for fresh-DB applies (repo precedent renamed off numeric
+-- prefixes after a fresh-DB ordering break).
 --
 -- Lifecycle (plan W4): draft → published → archived (terminal);
 -- published → draft (unpublish / request-changes, clears review state but
