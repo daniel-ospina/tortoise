@@ -10039,6 +10039,12 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
             repos = await indexer.resolve_repos(org)
         totals["repos_total"] = len(repos)
 
+        # team_root = the ingest corpus root — rel-paths embed
+        # {owner}/{repo}/docs/... so doc ids stay REPO-UNIQUE (two repos with
+        # identical docs paths never share a Document node — the
+        # derive_document_id path-collision edge).
+        team_root = GitHubDocsIndexer.team_root(team_id)
+
         def _docs_quota_check() -> None:
             enforce_team_limit(limits, "documents", sdk=team_sdk)
 
@@ -10046,31 +10052,28 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
             if _INDEX_JOB_OWNERS.get(job_id) != owner:
                 break  # lost ownership (entry evicted/replaced) — abort
             try:
-                _docs_quota_check()  # per-repo re-check (documents gate)
-            except QuotaExceededError as e:
-                totals["quota_hit"] = True
-                totals["errors"].append(str(e))
-                break
-            walk = await indexer.walk_repo(
-                team_id, repo_name, branch=branch or "main")
+                walk = await indexer.walk_repo(
+                    team_id, repo_name, branch=branch or "main")
+            except GitHubFetchError as e:
+                # Fix 4: a bad repo must not starve the others — record and
+                # continue; already-staged repos are ingested below.
+                totals["errors"].append(f"{repo_name}: {e}")
+                continue
             totals["blobs_fetched"] += walk["blobs_fetched"]
             totals["blobs_skipped_binary"] += walk["skipped_binary"]
             totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
             totals["repos_processed"] += 1
 
-        # ── Deterministic corpus ingest (Sources only — NO claim extraction;
-        # compute_file_hash dedup + derive_document_id + classification via
-        # index_directory). Runs whenever any repo was processed (self-healing:
-        # a staged-but-uningested corpus — e.g. a quota-interrupted prior run —
-        # is picked up on the next run; unchanged files skip on the fast path,
-        # so re-ingest stays 0-new — falsification (f)). corpus_root = the
-        # TEAM partition root: rel-paths embed {owner}/{repo}/docs/... so doc
-        # ids are REPO-UNIQUE (two repos with identical docs paths never share
-        # a Document node). Skipped entirely when the team hit the documents
-        # cap (quota_hit — the gate is the gate). ──
-        if totals["repos_processed"] > 0 and not totals["quota_hit"]:
+            # Fix 3: re-check the DOCUMENTS gate immediately BEFORE each ingest
+            # (sees the running count after prior repos' ingests — bounds the
+            # overshoot to ONE repo's docs, not the whole org).
             try:
-                team_root = GitHubDocsIndexer.team_root(team_id)
+                _docs_quota_check()
+            except QuotaExceededError as e:
+                totals["quota_hit"] = True
+                totals["errors"].append(str(e))
+                break
+            try:
                 ingest = team_sdk.index_directory(
                     str(team_root), file_type="doc", extract_metadata=False,
                     corpus_name=f"{org}-docs")

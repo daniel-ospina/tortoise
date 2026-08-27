@@ -183,7 +183,7 @@ def test_staging_cleanup_partial_failure(tmp_path, monkeypatch):
     t = MockGitHubDocsTransport(
         trees=_docs_tree(sha="tree-v1", entries=[a, b]),
         blobs={a["sha"]: b"# docs/a.md\n", b["sha"]: b"# docs/b.md\n"},
-        fail_blobs={b["sha"]})
+        fail_blobs={b["sha"]}, fail_blobs_status=401)  # terminal — no backoff
     idx = _indexer(t, monkeypatch)
     with pytest.raises(GitHubFetchError):
         _run(idx.walk_repo(TEAM_A, "acme/repo1"))
@@ -196,6 +196,89 @@ def test_staging_cleanup_partial_failure(tmp_path, monkeypatch):
     manifest_path = os.path.join(base, TEAM_A, ".manifest", "acme",
                                  "repo1.json")
     assert not os.path.exists(manifest_path)
+
+
+def test_staging_cleanup_after_prior_success_keeps_old_files(
+        tmp_path, monkeypatch):
+    """Deferred-commit invariant (Fix 1): after a SUCCESSFUL walk, a later
+    walk that fails mid-fetch must leave the OLD manifest + previously-staged
+    files untouched — the new (never-fetched) content never lands, the
+    failing run's staged temp files are discarded, and the manifest never
+    advances past a failed run."""
+    base = str(tmp_path / "ingest")
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
+    a1 = gh_docs_entry("docs/a.md")
+    t1 = MockGitHubDocsTransport(
+        trees=_docs_tree(sha="tree-v1", entries=[a1]),
+        blobs={a1["sha"]: b"# docs/a.md v1\n"})
+    idx = _indexer(t1, monkeypatch)
+    first = _run(idx.walk_repo(TEAM_A, "acme/repo1"))
+    assert first["tree_changed"] is True
+    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    a_file = os.path.join(corpus, "docs", "a.md")
+    assert os.path.isfile(a_file)
+
+    # tree v2: docs/c.md NEW (would stage fine) + docs/z.md CHANGED whose
+    # blob fetch fails terminally (401). Path order ⇒ c stages first, then
+    # z fails — exercising temp cleanup AND old-file preservation.
+    c = gh_docs_entry("docs/c.md", text="# docs/c.md new\n")
+    z = gh_docs_entry("docs/z.md", text="# docs/z.md v2\n")
+    t2 = MockGitHubDocsTransport(
+        trees=_docs_tree(sha="tree-v2", entries=[c, z]),
+        blobs={a1["sha"]: b"# docs/a.md v1\n",
+               c["sha"]: b"# docs/c.md new\n",
+               z["sha"]: b"# docs/z.md v2\n"},
+        fail_blobs={z["sha"]}, fail_blobs_status=401)
+    idx2 = _indexer(t2, monkeypatch)
+    with pytest.raises(GitHubFetchError):
+        _run(idx2.walk_repo(TEAM_A, "acme/repo1"))
+
+    # ── deferred-commit invariants ──
+    manifest_path = os.path.join(base, TEAM_A, ".manifest", "acme",
+                                 "repo1.json")
+    with open(manifest_path, encoding="utf-8") as mf:
+        manifest = json.load(mf)
+    assert manifest["tree_sha"] == "tree-v1", \
+        "manifest must NOT advance past a failed run"
+    assert manifest["branch"] == "main"
+    with open(a_file, encoding="utf-8") as f:
+        assert f.read() == "# docs/a.md v1\n", \
+            "previously-staged content must survive a failed re-walk"
+    # the failing run's newly-staged file (c) is discarded + the failed
+    # blob (z) never lands
+    assert not os.path.exists(os.path.join(corpus, "docs", "c.md"))
+    assert not os.path.exists(os.path.join(corpus, "docs", "z.md"))
+    # stats2["tree_changed"]: the second walk could NOT have short-circuited
+    # — it reached the blob-fetch stage (a short-circuit returns
+    # tree_changed=False after the tree fetch with ZERO blob requests).
+    assert any("git/blobs/" in str(r.url) for r in t2.requests), \
+        "a changed tree must not short-circuit"
+
+
+def test_tree_truncated_surfaced(tmp_path, monkeypatch):
+    """A truncated recursive tree (GitHub 100k-entry cap) must NOT
+    short-circuit the walk — a truncated tree is a PARTIAL view, so the
+    tree-by-sha shortcut is disabled (Fix 5) and the flag is surfaced in
+    stats."""
+    base = str(tmp_path / "ingest")
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
+    entries, blobs = _mk_files("docs/README.md")
+    t = MockGitHubDocsTransport(
+        trees=_docs_tree(sha="tree-v1", entries=entries), blobs=blobs,
+        tree_truncated=True)
+    idx = _indexer(t, monkeypatch)
+    first = _run(idx.walk_repo(TEAM_A, "acme/repo1"))
+    assert first["tree_truncated"] is True
+    assert first["tree_changed"] is True
+
+    # same tree sha on a second walk: WITHOUT the truncated guard this would
+    # short-circuit (tree_changed=False) — it must re-walk instead.
+    idx2 = _indexer(t, monkeypatch)
+    stats2 = _run(idx2.walk_repo(TEAM_A, "acme/repo1"))
+    assert stats2["tree_truncated"] is True
+    assert stats2["tree_changed"] is True, \
+        "a truncated tree must never short-circuit (partial view)"
+    assert stats2["blobs_unchanged"] == 1  # unchanged blobs still dedup
 
 
 # ── dedup (tree-by-sha + per-path blob sha) ──────────────────────

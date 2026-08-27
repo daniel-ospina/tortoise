@@ -31,7 +31,7 @@ from tortoise.hosted_api import (
     app,
 )
 from tortoise.indexer.github_docs import GitHubDocsIndexer
-from tortoise.quota import count_team_usage
+from tortoise.quota import QuotaExceededError, count_team_usage
 from tortoise.sdk import TortoiseSDK
 
 TEAM_A = "test-docs-team-a"
@@ -271,6 +271,7 @@ def test_docs_job_single_repo_and_unchanged_rerun_zero_new(
     body2 = _poll_until(provisioned.tc, r2.json()["job_id"], "completed")
     assert body2["blobs_fetched"] == 0  # tree-by-sha short-circuit
     assert body2["documents_indexed"] == 0
+    assert body2["documents_skipped"] == 2  # unchanged re-run skips both files
     assert _docs_count(provisioned) == 2, \
         "unchanged re-ingest must add 0 new Document nodes (falsification (f))"
 
@@ -279,6 +280,73 @@ def test_docs_job_requires_github_connection(client, ingest_base):
     r = client.tc.post("/v1/index/docs", json={"org": "acme"})
     assert r.status_code == 400
     assert "GitHub not connected" in r.json()["detail"]
+
+
+def test_docs_job_unresolvable_org_fails(provisioned, ingest_base,
+                                         monkeypatch):
+    """An org whose repo resolution 404s (org not found / no access) fails
+    the job honestly — 0 documents indexed, 0 graph writes, no
+    github_docs_indexed state flip (P2, PR #1792)."""
+    transport = MockGitHubDocsTransport(repos=["acme/repo1"],
+                                        resolve_404=True)
+
+    async def _fake_get_client(self):
+        if self._client is None or self._client.is_closed:
+            self._client = httpx.AsyncClient(transport=transport)
+        return self._client
+
+    monkeypatch.setattr(GitHubDocsIndexer, "_get_client", _fake_get_client)
+    r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "failed")
+    assert body["documents_indexed"] == 0
+    assert _docs_count(provisioned) == 0
+    assert body["error"], "failed job must report a readable error"
+    assert "not found or no access" in body["error"]
+    state = provisioned.tc.get(
+        "/v1/onboarding/state").json()["onboarding"]
+    assert not state.get("github_docs_indexed"), \
+        "an unresolved org is not progress — the state key must not flip"
+
+
+def test_docs_job_token_undecryptable(client, ingest_base):
+    """A garbage (non-Fernet) github_token_enc fails the job fast with an
+    honest error — no fetches, no writes."""
+    _provision(client.db_path, team_id=client.team_id)
+    reg_sdk = TortoiseSDK(db_path=client.db_path, namespace="registry")
+    reg_sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) SET t.github_token_enc=$tok",
+        params={"id": client.team_id,
+                "tok": "garbage-not-a-fernet-token"})
+    reg_sdk.close()
+    r = client.tc.post("/v1/index/docs", json={"org": "acme"})
+    body = _poll_until(client.tc, r.json()["job_id"], "failed")
+    assert "Token undecryptable" in body["error"]
+    assert _docs_count(client) == 0
+
+
+def test_docs_job_midwalk_quota_hit(provisioned, mock_github, ingest_base,
+                                    monkeypatch):
+    """The per-repo DOCUMENTS gate (Fix 3) bounds the overshoot to ONE
+    repo's docs, not the whole org: the 3rd enforce_team_limit call
+    (repo2's pre-ingest check) raises → repo1's 2 docs are ingested, repo2's
+    are not, quota_hit is reported honestly."""
+    import tortoise.quota as quota_mod
+    real_enforce = quota_mod.enforce_team_limit
+    calls = {"n": 0}
+
+    def _counting_enforce(limits, resource, *, sdk=None):
+        calls["n"] += 1
+        if calls["n"] == 3:  # preflight=1, repo1 pre-ingest=2, repo2 = 3
+            raise QuotaExceededError("documents limit reached (test)")
+        return real_enforce(limits, resource, sdk=sdk)
+
+    monkeypatch.setattr(quota_mod, "enforce_team_limit", _counting_enforce)
+    r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
+    assert body["quota_hit"] is True
+    assert body["documents_indexed"] == 2, \
+        "only repo1's docs are ingested — the overshoot is ONE repo, not the org"
+    assert _docs_count(provisioned) == 2
 
 
 # ── documents gate (derived-constant cap) ────────────────────────
@@ -442,5 +510,14 @@ def test_docs_single_flight_kind_scoped(provisioned, mock_github, ingest_base,
     docs_job2, docs_new2 = _start_index_job(provisioned.team_id, kind="docs")
     assert docs_new2 is False
     assert docs_job2 == docs_job
+    # github-reuse direction: a second github job reuses the in-flight one
+    gh_job2, gh_new2 = _start_index_job(provisioned.team_id, kind="github")
+    assert gh_new2 is False
+    assert gh_job2 == gh_job
     # and the github job is untouched by the docs reuse
     assert gh_job in _INDEX_JOBS
+    # mark the directly-created entries terminal so the fixture teardown's
+    # _drain_jobs exits immediately instead of spinning the full 5s
+    for jid in (gh_job, docs_job):
+        if jid in _INDEX_JOBS:
+            _INDEX_JOBS[jid]["status"] = "completed"

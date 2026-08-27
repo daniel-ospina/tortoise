@@ -53,12 +53,18 @@ class MockGitHubDocsTransport(httpx.AsyncBaseTransport):
                  trees: dict | None = None,
                  blobs: dict | None = None,
                  fail_blobs: set[str] | None = None,
-                 tree_404_branches: set[tuple[str, str]] | None = None):
+                 tree_404_branches: set[tuple[str, str]] | None = None,
+                 fail_blobs_status: int = 503,
+                 tree_truncated: bool = False,
+                 resolve_404: bool = False):
         self.repos = repos or ["acme/repo1"]
         self.trees = trees or {}
         self.blobs = dict(blobs or {})
         self.fail_blobs = set(fail_blobs or [])
         self.tree_404_branches = set(tree_404_branches or [])
+        self.fail_blobs_status = fail_blobs_status
+        self.tree_truncated = tree_truncated
+        self.resolve_404 = resolve_404
         self.requests: list[httpx.Request] = []
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
@@ -78,12 +84,14 @@ class MockGitHubDocsTransport(httpx.AsyncBaseTransport):
             return httpx.Response(200, json={
                 "sha": t["sha"],
                 "tree": t["entries"],
-                "truncated": False,
+                "truncated": self.tree_truncated,
             }, request=request)
         if "/git/blobs/" in url:
             sha = url.split("git/blobs/")[1].split("?")[0]
             if sha in self.fail_blobs:
-                return httpx.Response(503, json={"message": "injected 503"},
+                return httpx.Response(self.fail_blobs_status,
+                                      json={"message": "injected "
+                                            f"{self.fail_blobs_status}"},
                                       request=request)
             data = self.blobs.get(sha)
             if data is None:
@@ -94,6 +102,11 @@ class MockGitHubDocsTransport(httpx.AsyncBaseTransport):
                 "size": len(data),
             }, request=request)
         if "/repos" in url:
+            if self.resolve_404:
+                # org/user repo-list resolves to 404 (org not found / no
+                # access) — the tree/blob branches are matched earlier, so
+                # this branch only sees repo-resolution URLs.
+                return httpx.Response(404, json={}, request=request)
             return httpx.Response(
                 200, json=[{"full_name": r} for r in self.repos],
                 request=request)

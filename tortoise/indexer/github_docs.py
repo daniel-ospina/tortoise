@@ -269,7 +269,7 @@ class GitHubDocsIndexer(GitHubIndexer):
         stats["staged_corpus"] = str(corpus_dir)
         manifest = self._load_manifest(manifest_path)
         client = await self._get_client()
-        written: list[Path] = []  # THIS run's staged files — cleanup scope
+        pending: list[tuple[Path, Path]] = []  # (temp, target) staged this run
         try:
             tree, branch_used, fell_back = await self._get_tree(
                 client, repo, branch)
@@ -280,29 +280,33 @@ class GitHubDocsIndexer(GitHubIndexer):
             entries = self._docs_entries(tree)
             stats["docs_entries"] = len(entries)
 
-            # Incremental tree-by-sha: an unchanged tree (same sha + branch)
-            # short-circuits the whole walk — 0 fetches, 0 staging writes.
-            if (tree.get("sha") == manifest.get("tree_sha")
+            # Fix 5: never short-circuit a truncated tree (partial view)
+            if (not tree.get("truncated")
+                    and tree.get("sha") == manifest.get("tree_sha")
                     and branch_used == manifest.get("branch")):
                 stats["tree_changed"] = False
                 await self._close()
                 return stats
 
             manifest_blobs = manifest.get("blobs") or {}
-            current_paths = {e.get("path", "") for e in entries}
+            kept: dict[str, str] = {}  # path -> sha we will keep staged on disk
             for entry in entries:
                 path = entry.get("path", "")
+                sha = entry.get("sha")
                 try:
                     size = int(entry.get("size") or 0)
                 except (TypeError, ValueError):
                     size = 0
-                # max-blob-size guard — BEFORE the fetch (tree entry size).
+                # Fix 2a: oversized -> skip (NOT kept; stale file removed at
+                # commit — never a staged file whose manifest sha was never
+                # fetched).
                 if size > MAX_DOCS_BLOB_BYTES:
                     stats["skipped_oversized"] += 1
                     continue
                 # per-path blob-sha dedup — unchanged blob, no fetch.
-                if manifest_blobs.get(path) == entry.get("sha"):
+                if manifest_blobs.get(path) == sha:
                     stats["blobs_unchanged"] += 1
+                    kept[path] = sha
                     continue
                 data = await self._fetch_blob(client, repo, entry)
                 # text-type guard: binary / non-UTF-8 blobs are skipped with
@@ -317,16 +321,24 @@ class GitHubDocsIndexer(GitHubIndexer):
                     stats["skipped_binary"] += 1
                     continue
                 target = self._stage_path(corpus_dir, path)
-                self._atomic_write(target, text)
-                written.append(target)
+                tmp = target.with_name(f".{target.name}.staging")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write(text)
+                pending.append((tmp, target))
+                kept[path] = sha
                 stats["blobs_fetched"] += 1
                 stats["files_staged"] += 1
 
-            # Reconciled staging: remove files staged by an EARLIER walk that
-            # are no longer in the tree (deleted docs) — no stale files for
-            # the next corpus pass.
-            for old_path, _sha in manifest_blobs.items():
-                if old_path in current_paths:
+            # ── COMMIT (only reached on full success) ──
+            # 1. atomically move staged temp files into place.
+            for tmp, target in pending:
+                os.replace(tmp, target)
+            # 2. remove stale files: any path the OLD manifest knew about that
+            #    is no longer kept (deleted from tree, OR now skipped as
+            #    oversized/binary) — Fix 2b.
+            for old_path in manifest_blobs:
+                if old_path in kept:
                     continue
                 stale = self._stage_path(corpus_dir, old_path)
                 try:
@@ -339,26 +351,27 @@ class GitHubDocsIndexer(GitHubIndexer):
 
             # Manifest only on FULL success — a failed run re-walks from the
             # old manifest (refetching everything changed since; idempotent).
+            # ``kept`` records ONLY staged/unchanged paths — skipped blobs are
+            # excluded so their stale files are reconciled next run.
             manifest = {
                 "tree_sha": tree.get("sha"),
                 "branch": branch_used,
-                "blobs": {e.get("path", ""): e.get("sha")
-                          for e in entries},
+                "blobs": kept,
             }
             self._write_manifest(manifest_path, manifest)
             await self._close()
             return stats
         except Exception as e:
-            # Atomic-or-reconciled cleanup on partial failure: remove THIS
-            # run's staged files (never leave half-fetched content for the
-            # next corpus pass). The manifest stays at its pre-run state.
-            for target in written:
+            # Fix 1: on failure, discard ONLY the temp staging files; existing
+            # corpus files + the manifest are left exactly as pre-run (a prior
+            # successful corpus is never destroyed by a failed re-walk).
+            for tmp, _target in pending:
                 try:
-                    if target.is_file():
-                        target.unlink()
+                    if tmp.exists():
+                        tmp.unlink()
                 except OSError as ue:
                     logger.warning("docs staging cleanup failed for %s: %s",
-                                   target, ue)
+                                   tmp, ue)
             await self._close()
             if isinstance(e, GitHubFetchError):
                 raise
