@@ -308,11 +308,12 @@ def _classify_later_enabled() -> bool:
     threading a param. Unset/0 → the legacy pipeline: the classify-later
     machinery is entirely off-path and the flag-off renders are
     byte-identical to main — scoped to the DEFAULT (verbose) render (the
-    compact-mode S2 story-threading is a documented drift, and the chain
-    enforcer runs unconditionally on every arm; the two additive result
-    keys ``chain_enforcer`` / ``classify_later`` are always present as
-    empty blocks — see ``extract_session_v2``). Value matching is
-    case-insensitive (True/TRUE/ON/yes all enable — review FIX B)."""
+    compact-mode S2 story-threading is pre-existing and identical to main;
+    the chain enforcer runs unconditionally on every arm and its result key
+    reflects that run; only the additive ``classify_later`` result key is
+    an empty block when the flag is off — see ``extract_session_v2``).
+    Value matching is case-insensitive (True/TRUE/ON/yes all enable —
+    review FIX B)."""
     import os
     return os.environ.get("TORTOISE_CLASSIFY_LATER", "").strip().lower() in (
         "1", "true", "yes", "on")
@@ -1565,7 +1566,7 @@ def _norm(s: str) -> str:
     """Normalize a classification key for identity comparisons. Defensive
     str() coercion (review FIX C): LLM-emitted items may carry numeric/
     non-str names/content — a raw .strip() would raise AttributeError on
-    them and abort the whole union-classify block.``
+    them and abort the whole union-classify block.
     """
     return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
@@ -1711,7 +1712,12 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
         warnings.append(f"{ctx}: slots must be an object — dropped")
         return None
     master = master or {}
-    entity_forms = master_kind_forms(master) if master else None
+    # FIX M slot-lane consistency: the subject/object lane gates against the
+    # SAME widened object vocabulary as execute_embed's entity gate
+    # (_object_kind_forms — master + pack object/document kinds) — a slot
+    # referencing an emitted pack-kind entity (e.g. dev:apiSpec) must keep
+    # its kind and resolve, not be repaired to core:other and dropped.
+    entity_forms = _object_kind_forms(master) if master else None
     event_forms = {k.lower() for k in master.get("events", {})}
     event_forms_bare = {k.lower().rsplit(":", 1)[-1]
                         for k in master.get("events", {})}
@@ -1739,7 +1745,16 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
             # entity/event sentinels).
             sentinel = kind.lower() == UNCLASSIFIED
             if role == "event":
-                if not sentinel and kind.lower() not in event_forms and \
+                if sentinel:
+                    # FIX O: the sentinel is only advertised for top-level
+                    # fields — an EVENT-role slot passes through to the
+                    # payload untouched (_resolve_slot_refs drops only
+                    # subject/object strays, fail-closed), so carrying it
+                    # would write kind="unclassified" into a slot. Repair
+                    # to the event fallback SILENTLY (a terminal, not a
+                    # minted kind — FIX G's no-noise intent).
+                    kind = _EVENT_FALLBACK["kind"]
+                elif kind.lower() not in event_forms and \
                         kind.lower().rsplit(":", 1)[-1] not in event_forms_bare:
                     warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
                                     f") → repaired to {_EVENT_FALLBACK['kind']}")
@@ -2343,12 +2358,18 @@ def validate_chains(embed_list: dict, master: dict | None = None) -> list[dict]:
 
 
 def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[str]:
-    """Every kind used in entities/events/points that is NOT in the master
-    list (indicator: 0 minted kinds)."""
+    """Every kind used in entities/events/points that is NOT writable by
+    the matching write gate (indicator: 0 minted kinds). Each lane uses the
+    SAME vocabulary as its execute_embed gate: entities → the EXTENDED
+    object vocabulary (master + pack object/document kinds — FIX M),
+    events → the EXTENDED event vocabulary (FIX A), points → the master's
+    "points" section ONLY (FIX P — pack point kinds are never writable)."""
     master = master or build_master_list()
-    forms = master_kind_forms(master)
-    full = {k.lower() for k in forms if ":" in k}
-    bare = {k.lower().rsplit(":", 1)[-1] for k in forms}
+    obj_forms = _object_kind_forms(master)
+    full = {k.lower() for k in obj_forms if ":" in k}
+    bare = {k.lower().rsplit(":", 1)[-1] for k in obj_forms}
+    point_full = {k.lower() for k in master["points"]}
+    point_bare = {k.lower().rsplit(":", 1)[-1] for k in master["points"]}
     minted: list[str] = []
     for e in embed_list.get("entities", []) or []:
         if not isinstance(e, dict):
@@ -2358,6 +2379,10 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         # kind — below-floor items on the flag-on path carry it through
         # to the report and must NOT be flagged (the write path resolves
         # it with its own census).
+        # entities: the EXTENDED object vocabulary (master + pack declared
+        # object/document kinds — FIX M: a classifier-assigned synthesized
+        # object kind is writable at execute_embed, so it is NOT minted;
+        # the report must agree with the write gate).
         if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
     for ev in embed_list.get("events", []) or []:
@@ -2375,7 +2400,13 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         if not isinstance(p, dict):
             continue
         k = str(p.get("pointKind", ""))
-        if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
+        # points: the master's "points" section ONLY (full + bare forms) —
+        # the point write gate repairs EVERYTHING else to statement, so the
+        # report must flag pack point kinds WITH kindDefs (dev:requirement,
+        # product-strategy:useCase/...) that master_kind_forms would
+        # otherwise accept (FIX P — the report agrees with the gate).
+        if k and k.lower() != UNCLASSIFIED and \
+                k.lower() not in point_full and k.lower() not in point_bare:
             minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
     return minted
 
@@ -2622,6 +2653,47 @@ def _event_kind_forms(master: dict) -> set[str]:
     return forms | _PACK_EVENT_FORMS
 
 
+#: The pack-DECLARED object/document kinds (objectKinds + documentKinds) —
+#: including the kindDefs-less ones: the classifier can assign them via the
+#: kind index's "objects" section (FIX L synthesis), so the entity write
+#: gate must accept them (FIX M candidate/write-gate alignment — the events
+#: lane's FIX A mirror). Full + bare forms, case-folded. Derived once per
+#: process from the default packs (packs are static per process — mirrors
+#: _PACK_EVENT_FORMS).
+_PACK_OBJECT_FORMS: set[str] | None = None
+
+
+def _object_kind_forms(master: dict) -> set[str]:
+    """The writable entity-kind vocabulary (FIX M candidate/write-gate
+    alignment): the master's object/subject/point/event forms
+    (``master_kind_forms``) PLUS the namespaced pack DECLARED object and
+    document kinds (objectKinds + documentKinds — including kindDefs-less
+    ones the classifier can assign, e.g. dev:apiSpec, pm:milestone,
+    marketing:keyword). Full + bare forms, case-folded. The gate must never
+    raise: a pack-registry failure degrades to the master-forms-only set
+    (mirrors _event_kind_forms)."""
+    global _PACK_OBJECT_FORMS
+    forms = master_kind_forms(master)
+    if _PACK_OBJECT_FORMS is None:
+        _PACK_OBJECT_FORMS = set()
+        try:
+            from pathlib import Path  # noqa: I001 — lazy (module has no
+            # module-level pathlib import)
+            from tortoise.pack_registry import PackRegistry
+            packs_dir = Path(__file__).resolve().parent.parent / "packs"
+            reg = PackRegistry(packs_dir)
+            reg.load_all()
+            for ns, pack in reg.packs.items():
+                for k in (pack.object_kinds or []) + \
+                        (pack.document_kinds or []):
+                    _PACK_OBJECT_FORMS.add(f"{ns}:{k}".lower())
+                    _PACK_OBJECT_FORMS.add(k.lower())
+        except Exception:  # noqa: BLE001, RUF100 — never let the write
+            # gate raise (fail-open to the master-forms-only gate)
+            _PACK_OBJECT_FORMS = set()
+    return forms | _PACK_OBJECT_FORMS
+
+
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
                   extractor_version: str = "value@0.5.0+v2",
@@ -2662,7 +2734,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not name:
             continue
         kind = str(e.get("kind", "")).strip() or "core:other"
-        forms = master_kind_forms(master)
+        # FIX M candidate/write-gate alignment: the entity gate uses the
+        # EXTENDED object vocabulary (master + pack object/document kinds —
+        # the classifier's synthesized object kinds, e.g. dev:apiSpec,
+        # pm:milestone, marketing:keyword, must survive un-repaired).
+        forms = _object_kind_forms(master)
         if kind.lower() == UNCLASSIFIED:
             # #1695 Task 5: the classify-later sentinel is NEVER written to
             # the graph — best core kind + warning (the orchestrator's
@@ -3240,8 +3316,9 @@ def _rekey_slots(embed_list: dict) -> int:
         if isinstance(e, dict) and e.get("name") and e.get("kind"):
             k = str(e["kind"])
             if k.lower() == UNCLASSIFIED:
-                # never copy the sentinel into a slot kind — _clean_slots
-                # would emit a spurious "minted slot kind" warning for it
+                # the sentinel is a terminal, never copied into a slot
+                # kind; slots must reference real kinds (the write path
+                # resolves the terminal on the top-level field itself)
                 continue
             kind_by_name[_norm(str(e["name"]) or "")] = k
     rekeyed = 0
@@ -3284,13 +3361,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     slot re-key) is entirely off-path, and the flag-off renders are
     byte-identical to main. Scope of that byte-identity guarantee: the
     DEFAULT (verbose) render + the shared pipeline stages — NOT the whole
-    result dict. Documented drifts, not regressions: (a) the chain enforcer
-    (Task 1) runs UNCONDITIONALLY on every arm (the A/B holds it constant)
-    and may deterministically rewire about_entities on the flag-off path;
-    (b) compact-mode S2 story-threading (``_select_pack_kinds``) is a
-    documented compact-only drift; (c) two ADDITIVE result keys
-    (``chain_enforcer`` / ``classify_later``) are always present — empty
-    blocks when the flag is off.
+    result dict. Documented non-regressions: (a) the chain enforcer (Task 1)
+    runs UNCONDITIONALLY on every arm (the A/B holds it constant) and may
+    deterministically rewire about_entities on the flag-off path — its
+    result key reflects that run (``items_checked`` >= 1 whenever
+    about_entities exist on any arm); (b) compact mode keeps its
+    pre-existing story-threaded pack selection (``_select_pack_kinds``,
+    identical in main) — the byte-identity guarantee is pinned to the
+    default verbose render; (c) two ADDITIVE result keys (``chain_enforcer``
+    / ``classify_later``) are always present — only ``classify_later`` is
+    an empty block when the flag is off.
     When set (or the env toggle is on), the stage order becomes
     S1 → S2 → classify(S2) → S3 → S4 → E4+re-stamp → classify(union,
     kind-missing only) → slot re-key → resolve_entities → post-resolution

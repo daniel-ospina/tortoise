@@ -119,15 +119,19 @@ class KindClassifier:
         LOADED when present and BUILT+PERSISTED when missing (the Task 3
         deliverable — the 54-kind vocabulary is embedded once per content
         hash, never per session). Two degraded-persistence guards (cycle-3
-        P2): a persisted index that was built DEGRADED (embedder down at
-        build time) never loads — ``KindIndex.load`` returns None and the
-        caller rebuilds; and when the CURRENT process's embedder is
+        P2 + FIX-N): a persisted index that was built DEGRADED (embedder
+        down at build time) never loads — ``KindIndex.load`` returns None
+        and the caller rebuilds; and when the CURRENT process's embedder is
         unavailable, a good npz is NOT loaded — the index is rebuilt
         in-process DEGRADED (persist=False, so the good npz survives for
         when the embedder recovers) so the degraded TF-IDF item lane stays
-        dimension-matched. Injected stub encoders change the vector space:
-        their builds are never memoized/persisted (a stub build must never
-        shadow the production index)."""
+        dimension-matched. That degraded in-process build is evicted from
+        the load-once memo immediately (FIX-N: the memo must never pin a
+        degraded index — a mid-process embedder recovery rebuilds good
+        instead of memo-hitting the degraded build for the process
+        lifetime). Injected stub encoders change the vector space: their
+        builds are never memoized/persisted (a stub build must never shadow
+        the production index)."""
         import tortoise.kind_index as ki
         from tortoise.value_extractor import compile_kind_index_spec
 
@@ -139,9 +143,15 @@ class KindClassifier:
                 # would dimension-mismatch the degraded TF-IDF item lane.
                 # Rebuild in-process degraded and do NOT overwrite the good
                 # npz. The memo is evicted for this key so a previously
-                # loaded/built good-dim index can't shadow the rebuild.
+                # loaded/built good-dim index can't shadow the rebuild — and
+                # the degraded build is evicted AGAIN after building (FIX-N:
+                # the classifier holds its own reference; the memo must not
+                # retain a degraded entry that a recovered embedder's
+                # load() could later memo-hit).
                 ki._evict_index(ki.cache_key_for(spec))
-                return ki.KindIndex.build(spec, persist=False)
+                idx = ki.KindIndex.build(spec, persist=False)
+                ki._evict_index(ki.cache_key_for(spec))
+                return idx
             idx = ki.KindIndex.load(spec)
             if idx is not None:
                 return idx

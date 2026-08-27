@@ -180,6 +180,40 @@ class TestPersistLoad:
 
         assert "kind_index" in str(DEFAULT_CACHE_DIR)
 
+    def test_load_pops_degraded_memo_entry(self, monkeypatch, tmp_path):
+        """FIX-N: a DEGRADED index memoized in-process (embedder down during
+        a default-encoder build) is POPPED on load — treated as a miss so a
+        recovered embedder rebuilds good (persist=True). The disk guard
+        cannot cover the memo path; without this, every classify_items would
+        fail-open for the process lifetime."""
+        import tortoise.kind_index as ki
+
+        state = {"up": False}
+
+        class FakeDefault:
+            def encode(self, texts):
+                rng = np.random.default_rng(1)
+                return rng.standard_normal((len(texts), 4)), not state["up"]
+
+        monkeypatch.setattr(ki, "_DefaultEncoder", FakeDefault)
+        monkeypatch.setattr(ki, "DEFAULT_CACHE_DIR", tmp_path)
+        spec = compile_kind_index_spec()
+        state["up"] = False
+        idx = KindIndex.build(spec, persist=False)
+        assert idx.degraded is True, "embedder down → degraded build"
+        key = cache_key_for(spec)
+        with ki._INDEX_LOCK:
+            assert key in ki._INDEX_CACHE
+            assert ki._INDEX_CACHE[key].degraded is True
+        state["up"] = True
+        assert KindIndex.load(spec) is None, \
+            "a memoized degraded index is popped + treated as a miss"
+        with ki._INDEX_LOCK:
+            assert key not in ki._INDEX_CACHE, \
+                "the degraded entry must not survive the load"
+        good = KindIndex.build(spec, persist=True)
+        assert good.degraded is False, "recovery rebuilds good"
+
 
 class TestNearest:
     def test_returns_top_k_in_order(self, spec):

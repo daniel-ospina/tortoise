@@ -176,12 +176,24 @@ class KindIndex:
         """Load the persisted index for this spec's cache key; None when the
         file is missing OR the stored index was built DEGRADED (embedder was
         down — never trust a degraded persisted index; the caller rebuilds
-        in-process, cycle-3 P2). Encoder is only used when building."""
+        in-process, cycle-3 P2). A memoized DEGRADED entry is popped and
+        treated as a miss (FIX-N: the process memo must not pin a degraded
+        build — a recovered embedder rebuilds good, persist=True). Encoder
+        is only used when building."""
         key = cache_key_for(spec)
         with _INDEX_LOCK:
             cached = _INDEX_CACHE.get(key)
             if cached is not None:
-                return cached
+                if cached.degraded:
+                    # FIX-N: a degraded index memoized in-process (embedder
+                    # was down during its build) must NOT stick — the disk
+                    # guard below can't cover the memo path, and every
+                    # classify_items would fall back for the process
+                    # lifetime. Pop it and treat as a miss so a recovered
+                    # embedder rebuilds good (persist=True).
+                    _INDEX_CACHE.pop(key, None)
+                else:
+                    return cached
         path = cls._path_for(key, cache_dir)
         if not path.exists():
             return None
@@ -189,9 +201,10 @@ class KindIndex:
             if bool(data.get("degraded", False)):
                 # A persisted index built while the embedder was DOWN
                 # (degraded vectors) is never trusted — return None so the
-                # caller rebuilds in-process (cycle-3 P2: a degraded npz
-                # must not load forever after the embedder recovers; the
-                # in-process rebuild self-heals on recovery).
+                # caller rebuilds (cycle-3 P2 + FIX-N: a degraded npz must
+                # not load forever after the embedder recovers, and the
+                # in-process rebuild is dimension-matched with the degraded
+                # item lane — recovery rebuilds good).
                 return None
             idx = cls(
                 [str(x) for x in data["kind_names"]],

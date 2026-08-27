@@ -2097,6 +2097,44 @@ class TestClassifyStage:
             "the writable pack event kind is not flagged minted"
         assert any("totally:madeup" in m for m in res["minted_kinds"])
 
+    def test_pack_object_kind_survives_execute_embed(self):
+        """FIX M candidate/write-gate alignment: a classifier-assigned pack
+        object/document kind (dev:apiSpec, pm:milestone, marketing:keyword —
+        declared but kindDefs-less, synthesized into the index's "objects"
+        section) is writable at execute_embed — it survives un-repaired and
+        is not flagged minted, while a genuinely minted kind still repairs
+        + flags."""
+        embed = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "the milestone", "kind": "pm:milestone",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "the keyword", "kind": "marketing:keyword",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "totally minted", "kind": "totally:madeup",
+             "lifecycle": "created", "supersedes": None, "note": None},
+        ], "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        kinds = {e["name"]: e["kind"] for e in res["payload"]["entities"]}
+        assert kinds["the api spec"] == "dev:apiSpec", \
+            "synthesized object kind survives execute_embed un-repaired"
+        assert kinds["the milestone"] == "pm:milestone"
+        assert kinds["the keyword"] == "marketing:keyword"
+        assert kinds["totally minted"] == "core:other"
+        assert not any(m for m in res["minted_kinds"]
+                       if "dev:apiSpec" in m or "pm:milestone" in m
+                       or "marketing:keyword" in m), \
+            "the writable pack object kinds are not flagged minted"
+        assert any("totally:madeup" in m for m in res["minted_kinds"])
+        # the report alone agrees: only the genuine minted kind is flagged
+        clean = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec"},
+            {"name": "the milestone", "kind": "pm:milestone"},
+            {"name": "the keyword", "kind": "marketing:keyword"},
+        ], "events": [], "points": []}
+        assert v2._minted_kind_report(clean) == []
+
     def test_point_item_never_assigned_pack_point_kind(self, monkeypatch):
         """FIX A: a point item is never assigned a pack point kind — the
         index's "points" section contains ONLY "statement", so the point
@@ -2417,6 +2455,56 @@ class TestClassifyStage:
                              "note": None}]
         assert any("worktree" in m for m in v2._minted_kind_report(bad))
 
+    def test_point_kind_report_agrees_with_point_gate(self):
+        """FIX P: the report's points lane agrees with the point write gate
+        — pack point kinds WITH kindDefs (dev:requirement,
+        product-strategy:useCase/...) sit in the master's pack_kinds
+        (the master-wide ``master_kind_forms`` bare forms would hide them)
+        but the gate repairs them to statement — the report must FLAG them."""
+        embed = {"entities": [], "events": [],
+                 "points": [
+                     {"content": "p1",
+                      "pointKind": "dev:requirement"},
+                     {"content": "p2",
+                      "pointKind": "product-strategy:useCase"},
+                     {"content": "p3", "pointKind": "statement"}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        minted = v2._minted_kind_report(embed)
+        assert any("dev:requirement" in m for m in minted), minted
+        assert any("product-strategy:useCase" in m for m in minted), minted
+        assert not any("statement" in m for m in minted)
+        # and execute_embed's point gate agrees: those kinds repair
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pk = {p["content"]: p["pointKind"] for p in res["payload"]["points"]}
+        assert pk["p1"] == "statement" and pk["p2"] == "statement"
+
+    def test_slot_survives_for_pack_object_kind(self):
+        """FIX M slot-lane consistency (reviewer P2): _clean_slots' subject/
+        object lane gates against the SAME widened object vocabulary as
+        execute_embed's entity gate — a slot referencing an emitted
+        dev:apiSpec entity keeps its kind and resolves (previously it was
+        repaired to core:other and dropped, silently losing the relation
+        for exactly the synthesized kinds FIX M preserves)."""
+        embed = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the api spec is v2",
+                         "pointKind": "statement",
+                         "about_entities": ["the api spec"],
+                         "slots": {"subject": [
+                             {"name": "the api spec",
+                              "kind": "dev:apiSpec",
+                              "confidence": 0.9}]}}]}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pt = res["payload"]["points"][0]
+        assert pt["slots"]["subject"][0]["kind"] == "dev:apiSpec", \
+            "the slot kind survives _clean_slots + _resolve_slot_refs"
+        assert not any("minted slot kind" in w for w in res["warnings"]), \
+            res["warnings"]
+
     def test_fold_never_drops_different_non_sentinel_kind(self):
         """A same-name duplicate carrying a DIFFERENT non-sentinel kind is
         a distinct (name, kind) :Object (Layer-1) — the name-collision
@@ -2467,6 +2555,37 @@ class TestClassifyStage:
             warnings2, "ctx", master)
         assert any("minted slot kind" in w for w in warnings2)
         assert slots2["subject"][0]["kind"] == "core:other"
+
+    def test_no_slot_kind_ever_carries_sentinel(self):
+        """FIX O: after _clean_slots + _resolve_slot_refs, NO payload slot
+        ever carries 'unclassified' — subject/object sentinel slots fail
+        closed at _resolve_slot_refs (no emitted entity resolves them),
+        and an EVENT-role sentinel slot (which passes through untouched)
+        is repaired to core:occurrence SILENTLY (the sentinel is only
+        advertised for top-level fields; 'sentinel never written' holds for
+        slot kinds too)."""
+        warnings: list[str] = []
+        master = v2.build_master_list()
+        slots = v2._clean_slots(
+            {"subject": [{"name": "s", "kind": "unclassified",
+                            "confidence": 0.8}],
+             "object": [{"name": "o", "kind": "unclassified",
+                          "confidence": 0.8}],
+             "event": [{"name": "e", "kind": "unclassified",
+                         "confidence": 0.8}]},
+            warnings, "ctx", master)
+        assert not any("minted slot kind" in w for w in warnings), warnings
+        resolved = v2._resolve_slot_refs(slots, set(), warnings, "ctx")
+        assert resolved is not None and "event" in resolved
+        # the event slot survives but with the fallback kind — never the
+        # sentinel
+        assert resolved["event"][0]["kind"] == "core:occurrence"
+        assert "subject" not in resolved and "object" not in resolved, \
+            "sentinel subject/object slots fail closed downstream"
+        # sweeping assertion: no slot kind across any role is the sentinel
+        for refs in resolved.values():
+            for r in refs:
+                assert r["kind"] != "unclassified"
 
     def test_rekey_slots_skips_sentinel_entity_kind(self):
         """An entity still carrying the 'unclassified' sentinel must not

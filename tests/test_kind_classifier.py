@@ -381,6 +381,54 @@ class TestClassifierConstruction:
         with ki._INDEX_LOCK:
             assert ki._INDEX_CACHE == {}, "stub builds must never touch the production memo"
 
+    def test_degraded_build_never_memoized_recovery_rebuilds_good(
+            self, monkeypatch, tmp_path):
+        """FIX-N recovery: embedder down → the classifier's degraded
+        in-process build must NOT stay in the process memo; once the
+        embedder is back, a fresh classifier construction produces a
+        NON-degraded index (previously the degraded memo entry would have
+        dimension-mismatched every item and failed it via the fail-open
+        fallback for the process lifetime)."""
+        import tortoise.kind_index as ki
+        from tortoise.embeddings import EmbeddingModel
+        from tortoise.kind_classifier import KindClassifier
+
+        state = {"up": False}
+
+        class FakeDefault:
+            def encode(self, texts):
+                rng = np.random.default_rng(1)
+                return rng.standard_normal((len(texts), 4)), not state["up"]
+
+        def fake_get():
+            return object() if state["up"] else None
+
+        monkeypatch.setattr(ki, "_DefaultEncoder", FakeDefault)
+        monkeypatch.setattr(ki, "DEFAULT_CACHE_DIR", tmp_path)
+        monkeypatch.setattr(EmbeddingModel, "get", staticmethod(fake_get))
+
+        # embedder DOWN: first construction builds degraded in-process
+        state["up"] = False
+        clf_down = KindClassifier(model=None, llm_tail=False)
+        assert clf_down.index.degraded is True
+        with ki._INDEX_LOCK:
+            assert ki._INDEX_CACHE == {}, \
+                "the degraded in-process build must not stay in the memo"
+
+        # embedder UP: a fresh construction must NOT memo-hit the degraded
+        # build — it loads/rebuilds a NON-degraded index
+        state["up"] = True
+        clf = KindClassifier(model=None, llm_tail=False)
+        assert clf.index.degraded is False, \
+            "recovery must rebuild/load a good index"
+        out = clf.classify_items(
+            [{"id": "i0", "type": "entity", "text": "the ticket fix"}])
+        assert out["stats"]["embedding_errors"] == 0
+        assert out["stats"]["classify_errors"] == 0, \
+            "no dimension mismatch — the item lane and index agree"
+        assert out["assignments"]["i0"]["mode"] in ("knn", "rerank",
+                                                       "unclassified")
+
 
 class TestTypeRestriction:
     def test_events_restricted_to_event_kinds(self, classifier):
