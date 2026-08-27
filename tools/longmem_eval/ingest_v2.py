@@ -247,26 +247,34 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 event_props["startedAt"] = str(started)
             event_name = content[:80]
             event_kind = str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1]
-            # #1786 (code-review F5 cycle 2): event idempotency — ``create_event``
-            # mints a FRESH ``self.ulid()`` per call with NO existence guard
-            # (unlike points [E7 probe] / entities [deterministic MERGE] /
-            # operators [dup-edge probe] / supersessions [terminal-status
-            # probe]), so a mid-payload retry left N+1 Event nodes for an
-            # N-event payload (the TR retrieval pool is the point+event
-            # union — duplicate events inflate recall denominators). The
-            # probe keys on the payload event's DETERMINISTIC content id
-            # (``ev_entry["id"] = _content_id("ev", content)`` — emitted by
-            # extractor_v2) — never the lossy content[:80] prefix (two
+            # #1786 (code-review F5 cycle 2, cycle 3): event idempotency —
+            # ``create_event`` mints a FRESH ``self.ulid()`` per call with NO
+            # existence guard (unlike points [E7 probe] / entities
+            # [deterministic MERGE] / operators [dup-edge probe] /
+            # supersessions [terminal-status probe]), so a mid-payload retry
+            # left N+1 Event nodes for an N-event payload (the TR retrieval
+            # pool is the point+event union — duplicate events inflate recall
+            # denominators). The probe keys on the DETERMINISTIC content id
+            # (``_content_id("ev", content)``) — NEVER the payload ``id``:
+            # extractor_v2's S3 prior-graph search REUSES a prior event's
+            # ``eventId`` (a fresh ulid) when content matches, so the payload
+            # ``id`` is NOT a stable idempotency key (it would miss on a
+            # --retry-failed resume / in-run R2 re-ingest and mint a
+            # duplicate). The key is the (content-hash, question, session)
+            # triple: the content hash alone collides across sessions of the
+            # SAME question with identical event content (the extractor dedups
+            # per-session only) — ``lme_session_index`` disambiguates so both
+            # sessions' events persist while a same-session retry (same si)
+            # still dedups exactly. Never the lossy content[:80] prefix (two
             # distinct events sharing the first 80 chars + kind + session
-            # would otherwise collapse into one node). The id is stored on
-            # the node as ``lme_event_id`` so retry-idempotency is EXACT
-            # with zero collapse risk.
-            eid = str(ev.get("id") or "") or _content_id("ev", content)
+            # would otherwise collapse into one node).
+            eid = _content_id("ev", content)
             event_props["lme_event_id"] = eid
             dup = proj.g.query(
                 "MATCH (e:Event {lme_event_id:$eid, "
-                "lme_question_id:$qid}) RETURN count(*) LIMIT 1",
-                params={"eid": eid, "qid": qid},
+                "lme_question_id:$qid, lme_session_index:$si}) "
+                "RETURN count(*) LIMIT 1",
+                params={"eid": eid, "qid": qid, "si": si},
             ).result_set
             if dup and dup[0][0]:
                 logger.info("v2 ingest event %r already present — skipping",
@@ -973,8 +981,8 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         # transient anywhere in the probe-or-write section re-runs the
         # WHOLE attempt (E7 probe + writes — never a blind re-CREATE; a
         # probe failure fails that attempt and is retried like any write
-        # failure). The helper returns per-attempt deltas so a retried
-        # attempt cannot double-count the stats. ──
+        # failure). The helper returns the FINAL successful attempt's
+        # deltas (a retried partial write is approximate — see below). ──
         _retries_a: dict[str, int] = {"n": 0}
         # #1786 (R1): the write-stage stats reflect the FINAL successful
         # attempt's deltas — on a retried partial write the provenance

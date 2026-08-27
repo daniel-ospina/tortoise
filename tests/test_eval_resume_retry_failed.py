@@ -426,6 +426,13 @@ def test_schema_validation_cases(tmp_path):
     with pytest.raises(runner.CheckpointStaleError):
         runner._load_checkpoint(str(cp))
 
+    # a boolean pid is NOT an int (isinstance(True, int) is True) — refuse
+    # so os.kill(True, 0) can never probe pid 1
+    _write_checkpoint(cp, failures=[_transient_entry(in_progress={
+        "in_progress_utc": "2026-08-27T02:10:34+00:00", "pid": True})])
+    with pytest.raises(runner.CheckpointStaleError):
+        runner._load_checkpoint(str(cp))
+
     # legacy-shaped entry passes (missing retryable/attempts/in_progress)
     legacy = _transient_entry()
     del legacy["retryable"]

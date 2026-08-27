@@ -831,7 +831,8 @@ def _claim_reattempt(checkpoint: str | None, qid: str, cap: int, *,
     with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError, OSError):
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError,
+                RecursionError):
             return False  # corrupt — _load_checkpoint's quarantine governs
         entries = data.get("failures", []) or []
         prior = next((f for f in entries
@@ -1860,7 +1861,8 @@ def _validate_failures_schema(failures_raw: Any, *, checkpoint: Path) -> list[di
                     f"{f.get('question_id')!r} in_progress must be a dict, "
                     f"got {in_progress!r} — refusing load")
             pid = in_progress.get("pid")
-            if pid is not None and not isinstance(pid, int):
+            if pid is not None and (isinstance(pid, bool)
+                                    or not isinstance(pid, int)):
                 raise CheckpointStaleError(
                     f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
                     f"in_progress.pid must be int, got {pid!r} — refusing load")

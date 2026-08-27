@@ -69,27 +69,31 @@ def test_hybrid_seam_threads_elevated_timeout(tmp_path, monkeypatch):
 
 
 def test_deadline_degradation_records_timeout_reason(tmp_path, monkeypatch):
-    """A fake leg slower than the deadline degrades with reason='timeout'
-    recorded in the leg trace (the degradation_chain contract); a slow-but-
-    under-deadline leg completes."""
-    captured: dict = {}
+    """A leg slower than the collective deadline degrades with reason='timeout'
+    recorded in the leg trace (the degradation_chain as_completed contract):
+    the fts strategy sleeps past the 1500 ms deadline, as_completed raises
+    TimeoutError, and the leg trace self-records {"leg": "fts", "ran": True,
+    "degraded": True, "reason": "timeout", "count": 0}."""
+    import tortoise.search_engine as se
 
-    def _slow_fts(self_or_sdk, query, entity_type="point", limit=10, **kw):
+    def _slow_fts(graph, query, entity_type="point", limit=20,
+                  timeout_ms=500, excluded_statuses=None, leg_trace=None):
         import time as _t
-        _t.sleep(0.01)
-        captured["timeout"] = kw.get("_elevated_timeout_ms")
+        _t.sleep(2.0)  # exceeds the 1500 ms collective deadline
         return []
 
-    monkeypatch.setattr(TortoiseSDK, "tortoise_fts_query", _slow_fts)
+    monkeypatch.setattr(se, "run_fts_query", _slow_fts)
     sdk = _fresh_sdk(tmp_path)
     try:
         q = _mini()[0]
         ret = retrieve_for_question(
-            sdk, q, ks=(5,), top_k=5, retrieval_budget_ms=EVAL_RETRIEVAL_BUDGET_MS)
-        # the empty-results leg traces as empty_results (clean run, no
-        # timeout) — the deadline is a collective as_completed cap, so a
-        # fast empty leg is a legit no-hit, never a timeout
-        assert ret["retrieval_latency_ms"] > 0
+            sdk, q, ks=(5,), top_k=5,
+            retrieval_budget_ms=EVAL_RETRIEVAL_BUDGET_MS)
+        legs = ret["legs"]
+        timeout_legs = [l for l in legs if l.get("reason") == "timeout"]
+        assert timeout_legs, f"expected a timeout leg, got {legs}"
+        assert any(l.get("leg") == "fts" and l.get("ran") is True
+                   and l.get("degraded") is True for l in timeout_legs)
     finally:
         sdk.close()
 

@@ -345,29 +345,35 @@ def test_probe_failure_is_retried(tmp_path, monkeypatch):
 
 def test_parse_error_never_retried(tmp_path, monkeypatch):
     """Task 1 test (d): a parse-class error (ValueError) at the write stage is
-    NOT retried — attempts == 1, the exception propagates (P1-A)."""
-    def _exploding_write(model, conversation, **kw):
-        payload = _payload()
-        payload["points"][0]["id"] = ""  # degenerate — never reaches a write
-        return {"payload": payload, "minted_kinds": [], "supersessions": [],
-                "errors": [], "warnings": []}
+    NOT retried — exactly one attempt, the exception propagates unchanged
+    (never a WriteStageRetriesExhausted sentinel), and the writes that
+    completed before the failure persist."""
+    real_create = TortoiseSDK.create_point
+    calls = {"n": 0}
+    fail_id = "lme:retry_q_001:s0:t1"
 
-    monkeypatch.setattr(ev2, "extract_session_v2", _exploding_write)
+    def _parse_fail(self, kind, content, *, is_episodic=None, **props):
+        calls["n"] += 1
+        if props.get("id") == fail_id:
+            raise ValueError("parse: bad point payload")
+        return real_create(self, kind, content, is_episodic=is_episodic,
+                           **props)
+
     sdk = _fresh_sdk(tmp_path)
+    monkeypatch.setattr(TortoiseSDK, "create_point", _parse_fail)
     try:
-        # a ValueError raised inside the payload write (e.g. a bad op type)
-        def _bad_op(model, conversation, **kw):
-            payload = _payload()
-            payload["operators"] = [{"src": "x", "dst": "y",
-                                     "op_type": "NOTIMPL"}]
-            return {"payload": payload, "minted_kinds": [],
-                    "supersessions": [], "errors": [], "warnings": []}
-
-        monkeypatch.setattr(ev2, "extract_session_v2", _bad_op)
-        stats = ingest_haystack_v2(sdk, _v2_question(), object())
-        # the malformed op is silently skipped (existing per-item behavior)
-        assert stats["operators"] == 0
-        assert stats["points"] == 2
+        with pytest.raises(ValueError, match="parse: bad point payload"):
+            ingest_haystack_v2(sdk, _v2_question(), object())
+        # exactly one attempt — the failing point was written once, never
+        # retried (a retry would re-run phase A: turn 0 + turn 1 again)
+        assert calls["n"] == 2
+        # the non-failed writes persisted (turn 0's point); the failed
+        # point did not
+        assert _count_points(sdk) == 1
+        rows = sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$id}) RETURN count(*)",
+            params={"id": fail_id}).result_set
+        assert rows and rows[0][0] == 0
     finally:
         sdk.close()
 
@@ -476,6 +482,90 @@ def test_idempotent_replay_partial_session_no_duplicates(tmp_path, monkeypatch):
             "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(*)"
         ).result_set[0][0]
         assert contains_now == contains_after  # no duplicate CONTAINS edges
+    finally:
+        sdk.close()
+
+
+# ── Task 6 (R8) extension: the event-probe key (content-hash, qid, si) ────
+
+
+def _two_session_question() -> dict:
+    return {
+        "question_id": "event_sess_q",
+        "haystack_session_ids": ["sess-1", "sess-2"],
+        "haystack_dates": ["2026-08-01", "2026-08-02"],
+        "haystack_sessions": [
+            [{"role": "user", "content": "identical event across sessions",
+              "has_answer": True}],
+            [{"role": "assistant", "content": "same event content again",
+              "has_answer": False}],
+        ],
+        "answer": "identical event across sessions",
+    }
+
+
+def test_event_probe_keys_on_content_hash_not_payload_id(tmp_path, monkeypatch):
+    """#1786 (code-review F5 cycle 3): the event idempotency probe keys on the
+    DETERMINISTIC content id, NEVER the payload ``id`` — extractor_v2's S3
+    prior-match branch REUSES a prior event's ``eventId`` (a fresh ulid) when
+    content matches, so a payload ``id`` is not a stable key; keying on it
+    would miss on replay and mint a duplicate Event."""
+    from tortoise.extractor_v2 import _content_id
+
+    def _s3_prior_match(model, conversation, **kw):
+        payload = _payload()
+        payload["events"] = [{
+            "content": "we decided X", "eventKind": "core:decision",
+            "id": "01J_prior_match_ulid",  # NOT the content hash
+        }]
+        return {"payload": payload, "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": []}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _s3_prior_match)
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        content_id = _content_id("ev", "we decided X")
+        stats1 = ingest_haystack_v2(sdk, _v2_question(), object())
+        assert stats1["events"] == 1
+        # the node stores the DETERMINISTIC content id, not the payload ulid
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event {lme_event_id:$eid}) RETURN count(*)",
+            params={"eid": content_id}).result_set
+        assert rows and rows[0][0] == 1
+        rows_ulid = sdk._get_proj().g.query(
+            "MATCH (e:Event {lme_event_id:$eid}) RETURN count(*)",
+            params={"eid": "01J_prior_match_ulid"}).result_set
+        assert rows_ulid and rows_ulid[0][0] == 0
+
+        # replay → the probe (content-hash + question + session) hits, no dup
+        stats2 = ingest_haystack_v2(sdk, _v2_question(), object())
+        assert stats2["events"] == 0
+        rows2 = sdk._get_proj().g.query(
+            "MATCH (e:Event) RETURN count(*)").result_set
+        assert rows2 and rows2[0][0] == 1  # exactly one Event, never two
+    finally:
+        sdk.close()
+
+
+def test_event_probe_session_scoped_identical_content(tmp_path, monkeypatch):
+    """#1786 (code-review F5 cycle 3): the event probe key is (content-hash,
+    question, session) — two sessions of the SAME question with IDENTICAL
+    event content both persist (the extractor dedups per-session only); the
+    content hash alone would silently skip the second session's event."""
+    def _identical(model, conversation, **kw):
+        return _fake_extract_factory(_payload())(model, conversation, **kw)
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _identical)
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _two_session_question()
+        stats = ingest_haystack_v2(sdk, q, object())
+        assert stats["events"] == 2  # one per session, identical content
+        rows = sdk._get_proj().g.query(
+            "MATCH (e:Event {lme_question_id:$qid}) "
+            "RETURN e.lme_session_index ORDER BY e.lme_session_index",
+            params={"qid": q["question_id"]}).result_set
+        assert [r[0] for r in rows] == [0, 1]
     finally:
         sdk.close()
 
