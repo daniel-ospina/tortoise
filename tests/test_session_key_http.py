@@ -399,3 +399,82 @@ class TestMintedKeyRoundTrip:
         app.dependency_overrides.clear()
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 401
+
+
+# ── #1828: the mint is EXEMPT from the per-IP rate limiter ────────────────
+
+class _FakeRateLimitRequest:
+    """Minimal starlette-like request for dispatch-level tests (mirrors the
+    helper in test_hosted_api.py — the middleware only touches
+    request.url.path / request.headers / request.state)."""
+
+    def __init__(self, scope: dict):
+        self.scope = scope
+        self.state = _FakeState()
+
+        class _Headers(dict):
+            def get(self, key, default=None):
+                for k, v in self.items():
+                    if k.lower() == key.lower():
+                        return v
+                return default
+
+        self.headers = _Headers({
+            k.decode(): v.decode() for k, v in scope["headers"]
+        })
+
+    @property
+    def url(self):
+        return type("U", (), {"path": self.scope["path"]})()
+
+
+class _FakeState:
+    pass
+
+
+class TestMintNotRateLimited:
+    """#1828: POST /v1/session/key bypasses the per-IP limiter.
+
+    The mint is session-authenticated (get_current_user JWT — a valid
+    `Bearer <jwt>` is NOT tt_-prefixed, so _bucket_key would fall to the
+    general 100/min per-IP bucket) and abuse is already bounded by the
+    3-active bootstrap cap + max_api_keys, so the per-IP limit adds no
+    security — and the #1559 incident showed it 429s every new user's
+    bootstrap mint from a shared IP.
+    """
+
+    def test_session_key_path_is_in_rate_limit_skip(self):
+        import tortoise.hosted_api as ha
+        assert "/v1/session/key" in ha.RateLimitMiddleware.SKIP, \
+            "the session-key mint must bypass the per-IP limiter (#1828)"
+
+    def test_dispatch_reaches_call_next_without_bucketing(self, monkeypatch):
+        """A session-JWT mint request must hit call_next via the SKIP
+        short-circuit — the bucket machinery never runs."""
+        import asyncio
+        import tortoise.hosted_api as ha
+
+        async def _noop(scope, receive, send):
+            pass
+
+        mw = ha.RateLimitMiddleware(_noop, max_per_minute=100)
+        mw._disabled = False  # the test env sets RATE_LIMIT_DISABLED=1
+
+        def _must_not_be_called(*a, **kw):
+            raise AssertionError(
+                "_bucket_key must not run for /v1/session/key (#1828)")
+
+        monkeypatch.setattr(mw, "_bucket_key", _must_not_be_called)
+
+        async def _next(req):
+            return "OK"
+
+        scope = {
+            "type": "http", "method": "POST", "path": "/v1/session/key",
+            "headers": [(b"authorization", b"Bearer eyJ.sess")],
+            "client": ("1.2.3.4", 443), "query_string": b"",
+            "server": ("api.premiselabs.co", 443), "scheme": "https",
+            "http_version": "1.1", "asgi": {"version": "3.0"},
+        }
+        result = asyncio.run(mw.dispatch(_FakeRateLimitRequest(scope), _next))
+        assert result == "OK"

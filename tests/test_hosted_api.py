@@ -3082,7 +3082,13 @@ class TestRateLimitRealClientIP:
     TORTOISE_TRUST_FLY_CLIENT_IP=1), never request.client.host (behind Fly
     that is the proxy IP — a GLOBAL bucket shared by every session-JWT and
     unauthenticated request, which 429'd every new user's bootstrap
-    session-key mint at busy moments)."""
+    session-key mint at busy moments).
+
+    #1828: the session-key mint itself is now EXEMPT from the per-IP limiter
+    (RateLimitMiddleware.SKIP), so these tests exercise a different
+    session-JWT endpoint (POST /v1/teams — the dashboard's first call after
+    login) to keep verifying the real-IP bucketing principle for the rest of
+    the session-JWT surface."""
 
     def _run(self, monkeypatch, scope, set_state):
         import tortoise.hosted_api as ha
@@ -3115,7 +3121,7 @@ class TestRateLimitRealClientIP:
         Fly-Client-IP — the bucket key uses THAT (the real user), not the
         proxy peer."""
         scope = {
-            "type": "http", "method": "POST", "path": "/v1/session/key",
+            "type": "http", "method": "POST", "path": "/v1/teams",
             "headers": [(b"authorization", b"Bearer eyJ.sess"),
                         (b"fly-client-ip", b"203.0.113.42")],
             "client": ("fly-proxy-ip", 443), "query_string": b"",
@@ -3132,7 +3138,7 @@ class TestRateLimitRealClientIP:
         unset / standalone), the old client.host key is preserved — a future
         simplification must not silently drop per-IP limiting."""
         scope = {
-            "type": "http", "method": "POST", "path": "/v1/session/key",
+            "type": "http", "method": "POST", "path": "/v1/teams",
             "headers": [(b"authorization", b"Bearer eyJ.sess")],
             "client": ("10.0.0.9", 443), "query_string": b"",
             "server": ("api.premiselabs.co", 443), "scheme": "https",
