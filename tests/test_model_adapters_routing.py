@@ -190,15 +190,32 @@ def test_json_mode_gate_case_insensitive(monkeypatch):
     assert _prompt_requests_json(None, None) is False
 
 
+def test_should_send_json_mode_env_gate(monkeypatch):
+    """#1782: pin the env branch of the 2x2 gate matrix directly on
+    ``_should_send_json_mode`` — prompt-requests-JSON x env-flag.
+    env=0 alone must suppress the mode even when the prompt asks for
+    JSON; env unset/1 must enable it; a non-JSON prompt never sends it."""
+    from tortoise.model_adapters import _should_send_json_mode
+    monkeypatch.setenv("TORTOISE_JSON_MODE", "0")
+    assert _should_send_json_mode("Return a JSON object", "u") is False
+    monkeypatch.setenv("TORTOISE_JSON_MODE", "1")
+    assert _should_send_json_mode("Return a JSON object", "u") is True
+    monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
+    assert _should_send_json_mode("Return a JSON object", "u") is True
+    assert _should_send_json_mode("You are a summarizer.", "Tell a story.") is False
+
+
 def test_deepseek_direct_json_mode_disabled(monkeypatch):
     """#1746 (D6): TORTOISE_JSON_MODE=0 omits ``response_format`` entirely
-    (the documented escape hatch)."""
+    (the documented escape hatch). The prompt REQUESTS JSON so the absence
+    is attributable to the env toggle alone, not the prompt gate — mirrors
+    test_deepseek_direct_json_mode_default_on (env is the only delta)."""
     log, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("TORTOISE_JSON_MODE", "0")
     model = build_extractor_model("deepseek/deepseek-v4-flash")
-    model.complete(system="s", user="u")
+    model.complete(system="Return a JSON object per the contract", user="u")
     assert "response_format" not in log[0][1]
 
 

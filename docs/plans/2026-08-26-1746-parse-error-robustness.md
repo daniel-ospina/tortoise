@@ -160,7 +160,7 @@ This plan changes no S2/S4 template text: the ladder operates on provider OUTPUT
 
 ### Task 3: JSON-mode parity on DeepSeekDirectModel + pre-flight probe (H1)
 
-**Intent:** test H1 for pennies and make the direct path's JSON-mode behavior identical to the OpenRouter path — reversible, prompt-agnostic.
+**Intent:** test H1 for pennies and make the direct path's JSON-mode behavior identical to the OpenRouter path — reversible, prompt-gated (mode only when the prompt requests JSON — #1782).
 **Acceptance:** `DeepSeekDirectModel.complete` sends `response_format={"type":"json_object"}` when `TORTOISE_JSON_MODE=1` (default) AND the prompt requests JSON ("json" present, case-insensitive — #1782) and omits it when `=0` or the prompt lacks the text "json" (DeepSeek 400s on the mode-without-token combination; non-JSON calls like the preflight probe/ping omit the mode); `probe_json_mode.py` CLI produces a verdict JSON applying the D6 rules (both-zero → inconclusive pinned in `test_probe_verdict_logic`); the live probe selects the adapter per the D6 rule and the @slow live test skips when the direct-path key/provider env is absent; a dry-run mode is unit-testable.
 **Files:**
 - Modify: `tortoise/model_adapters.py` (`DeepSeekDirectModel.complete`)
