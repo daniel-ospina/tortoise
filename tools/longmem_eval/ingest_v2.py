@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from tortoise.sdk import TortoiseSDK
@@ -42,6 +43,11 @@ logger = logging.getLogger(__name__)
 from .evidence import (EVIDENCE_QUOTE_CAP, anchor_quote, evidence_sessions,  # noqa: E402, I001
                        mark_for)
 from .evidence import _overlap  # noqa: F401, E402 — back-compat re-export
+from .errors import (  # noqa: E402
+    INGEST_WRITE_RETRIES,
+    call_with_predicate,
+    retryable_transient,
+)
 from .ingest import (SESSION_TRANSCRIPT_KIND, EXTRACTION_POINT_KIND,  # noqa: E402
                      UNDATED_SENTINEL,
                      _existing_point_ids, _session_chunks)
@@ -82,6 +88,9 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0, "answer_string": 0}}
     proj = sdk._get_proj()
+    # deferred — extractor_v2 is tortoise-internal (no cycle risk); the module
+    # already defers _classify_error/extract_session_v2 imports the same way.
+    from tortoise.extractor_v2 import _content_id
     # R5 (#1544): points in a dated session carry the session date as their
     # creation time; undated sessions get the explicit sentinel (never the
     # server default createdAt=now — deterministic-oldest → recency 0.0).
@@ -114,6 +123,13 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                               is_episodic=True)
             stats["entities"] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
+            # #1786 (R1): a transport transient must reach the stage-level
+            # retry loop (swallow-and-continue would silently drop the
+            # entity — the plan's own Goal violation); log-and-continue is
+            # preserved ONLY for predicate-FALSE (deterministic per-item)
+            # errors.
+            if retryable_transient(ex):
+                raise
             logger.warning("v2 ingest entity %r failed: %s", name, ex)
 
     # ── points (the search surface) ──
@@ -209,6 +225,11 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                 if fired:
                     stats["evidence_marks"][mk] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
+            # #1786 (R1): see the entity catch — re-raise-when-retryable so
+            # the stage-level loop retries the whole attempt (probe + writes)
+            # instead of completing with a silently-missing point.
+            if retryable_transient(ex):
+                raise
             logger.warning("v2 ingest point %r failed: %s", pid, ex)
 
     # ── events (decision/occurrence — the timeline) ──
@@ -224,14 +245,51 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                        or session_date)
             if started:
                 event_props["startedAt"] = str(started)
+            event_name = content[:80]
+            event_kind = str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1]
+            # #1786 (code-review F5 cycle 2, cycle 3): event idempotency —
+            # ``create_event`` mints a FRESH ``self.ulid()`` per call with NO
+            # existence guard (unlike points [E7 probe] / entities
+            # [deterministic MERGE] / operators [dup-edge probe] /
+            # supersessions [terminal-status probe]), so a mid-payload retry
+            # left N+1 Event nodes for an N-event payload (the TR retrieval
+            # pool is the point+event union — duplicate events inflate recall
+            # denominators). The probe keys on the DETERMINISTIC content id
+            # (``_content_id("ev", content)``) — NEVER the payload ``id``:
+            # extractor_v2's S3 prior-graph search REUSES a prior event's
+            # ``eventId`` (a fresh ulid) when content matches, so the payload
+            # ``id`` is NOT a stable idempotency key (it would miss on a
+            # --retry-failed resume / in-run R2 re-ingest and mint a
+            # duplicate). The key is the (content-hash, question, session)
+            # triple: the content hash alone collides across sessions of the
+            # SAME question with identical event content (the extractor dedups
+            # per-session only) — ``lme_session_index`` disambiguates so both
+            # sessions' events persist while a same-session retry (same si)
+            # still dedups exactly. Never the lossy content[:80] prefix (two
+            # distinct events sharing the first 80 chars + kind + session
+            # would otherwise collapse into one node).
+            eid = _content_id("ev", content)
+            event_props["lme_event_id"] = eid
+            dup = proj.g.query(
+                "MATCH (e:Event {lme_event_id:$eid, "
+                "lme_question_id:$qid, lme_session_index:$si}) "
+                "RETURN count(*) LIMIT 1",
+                params={"eid": eid, "qid": qid, "si": si},
+            ).result_set
+            if dup and dup[0][0]:
+                logger.info("v2 ingest event %r already present — skipping",
+                            eid)
+                continue
             sdk.create_event(
-                content[:80], str(ev.get("eventKind", "core:occurrence"))
-                .rsplit(":", 1)[-1],
+                event_name, event_kind,
                 sessionId=sid, lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, **event_props,
             )
             stats["events"] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
+            # #1786 (R1): see the entity catch — re-raise-when-retryable.
+            if retryable_transient(ex):
+                raise
             logger.warning("v2 ingest event failed: %s", ex)
 
     # ── operators (IMPL/NAND edges; MITIGATES recorded, not written) ──
@@ -263,6 +321,9 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                                 promote_source=False)
             stats["operators"] += 1
         except Exception as ex:  # noqa: BLE001, RUF100
+            # #1786 (R1): see the entity catch — re-raise-when-retryable.
+            if retryable_transient(ex):
+                raise
             logger.warning("v2 ingest operator %s->%s failed: %s",
                            src, dst, ex)
 
@@ -306,6 +367,11 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             sdk.supersede(old_id, new_id)     # EXISTING canonical unified tool
             stats["supersessions_written"] += 1
         except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
+            # #1786 (R1): re-raise-when-retryable — a timeout mid-supersession
+            # is absorbed by the stage-level retry (never a silently-missing
+            # supersede record).
+            if retryable_transient(ex):
+                raise
             logger.warning("v2 supersede %s→%s failed: %s", old_id, new_id, ex)
 
     stats["minted_kinds"] = len(payload.get("minted_kinds", []) or [])
@@ -353,6 +419,12 @@ def _apply_noops(sdk: TortoiseSDK, noops: list[dict], *, s_node: str,
                 params={"sid": s_node, "pid": pid})
             applied += 1
         except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
+            # #1786 (R1): re-raise-when-retryable — a timeout mid-consolidation
+            # must reach the stage-level retry loop (swallow-and-continue
+            # would silently drop the fold); deterministic per-item errors
+            # keep the log-and-continue posture.
+            if retryable_transient(ex):
+                raise
             logger.warning("v2 noop stamp on %s failed: %s", pid, ex)
     return applied
 
@@ -538,6 +610,10 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                         session_id=ctx["s_node"],
                         session_date=ctx["session_date"] or None)}
         except Exception as ex:  # noqa: BLE001, RUF100
+            # #1786 (P2-2): provider transients propagate (see the session
+            # loop); deterministic bugs ride the result as today.
+            if retryable_transient(ex):
+                raise
             return {"si": si, "exc": ex}
 
     if session_workers > 1 and len(ctxs) > 1:
@@ -658,6 +734,12 @@ def _apply_noops(sdk: TortoiseSDK, noops: list[dict], *, s_node: str,
                 params={"sid": s_node, "pid": pid})
             applied += 1
         except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
+            # #1786 (R1): re-raise-when-retryable — a timeout mid-consolidation
+            # must reach the stage-level retry loop (swallow-and-continue
+            # would silently drop the fold); deterministic per-item errors
+            # keep the log-and-continue posture.
+            if retryable_transient(ex):
+                raise
             logger.warning("v2 noop stamp on %s failed: %s", pid, ex)
     return applied
 
@@ -682,10 +764,150 @@ def _apply_deletions(sdk: TortoiseSDK, deletions: list[dict]) -> int:
     return applied
 
 
+def _write_v2_phase_a(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
+                      s_node: str, session: list[dict], session_date: str,
+                      point_created_at: str, chunk_turns: int) -> dict:
+    """#1786 (R1): one Phase-A write attempt — session node + turn/chunk raw
+    leg (the E7 batch existence probe FIRST, then the writes). Module-level
+    (no loop-variable closure — B023-clean) so the live ingest loop can wrap
+    the WHOLE attempt (probe + writes) in the write-stage retry loop: a probe
+    failure fails THAT attempt and is retried like any write failure (P2-12),
+    never a blind re-CREATE. Returns per-attempt deltas so a retried attempt
+    cannot double-count the caller's stats."""
+    a = {"sessions": 0, "chunks": 0}
+    # ── Session node (mirrors the deterministic leg) ──
+    sdk._get_proj().g.query(
+        "MERGE (s:Session {id:$id}) "
+        "SET s.created_at=coalesce(s.created_at, $ts), "
+        "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
+        "    s.lme_session_index=$si, s.lme_source_session_id=$sid",
+        params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
+                "qid": qid, "si": si, "sid": sid},
+    )
+    a["sessions"] = 1
+    proj = sdk._get_proj()
+
+    # E7 (#1539 D6): ONE batch existence probe per session (turn ids
+    # + raw chunk ids) — the per-turn/per-chunk ``_point_exists``
+    # N+1 collapses to O(1) queries per session at 500-Q run scale.
+    turn_ids = [f"lme:{qid}:s{si}:t{ti}" for ti in range(len(session))]
+    session_chunks = list(_session_chunks(session, chunk_turns))
+    chunk_ids = [f"lme:{qid}:s{si}:c{ci}" for ci, _, _ in session_chunks]
+    existing = _existing_point_ids(proj, turn_ids + chunk_ids)
+
+    # ── E3 (D8): turn points — the speaker-derivation substrate.
+    # Same deterministic ids + speaker property as the v1 leg;
+    # has_answer is NOT set (v2 turn/evidence recall measures
+    # extracted points). ──
+    for ti, turn in enumerate(session):
+        role = str(turn.get("role") or "unknown")
+        turn_id = f"lme:{qid}:s{si}:t{ti}"
+        if turn_id not in existing:
+            sdk.create_point(
+                "event", f"[{role}] {turn.get('content') or ''!s}",
+                id=turn_id, session_id=sid, lme_question_id=qid,
+                lme_session_index=si, speaker=role,
+                is_episodic=True, status="draft",
+                createdAt=point_created_at,  # R5: session date (sentinel)
+            )
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": s_node, "tid": turn_id})
+
+    # ── Raw verbatim turn-granular chunks (R1 #1540) + containment
+    # marks (M6, mark c). Written BEFORE extraction so verbatim
+    # retention + marks survive an extractor failure on this session
+    # (fail-closed — the raw evidence leg is never silently lost). ──
+    # v2 chunks ARE marked (D5): a chunk is an evidence chunk iff any
+    # contained turn is an evidence turn (the union of a session's
+    # chunks is the session, so no evidence turn is orphaned).
+    for ci, text, turn_idxs in session_chunks:
+        chunk_id = f"lme:{qid}:s{si}:c{ci}"
+        contains_evidence = any(
+            bool(turn.get("has_answer"))
+            for ti, turn in enumerate(session) if ti in turn_idxs)
+        if chunk_id not in existing:
+            sdk.create_point(
+                SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
+                session_id=sid, lme_question_id=qid,
+                lme_session_index=si, lme_chunk_index=ci,
+                lme_chunk_turns=len(turn_idxs), is_episodic=True,
+                has_answer=contains_evidence, status="draft",
+                createdAt=point_created_at,  # R5: session date (sentinel)
+            )
+            a["chunks"] += 1  # written (post-guard) — stats == graph
+        elif contains_evidence:
+            # Idempotent OR-in: never overwrite a True with False.
+            proj.g.query(
+                "MATCH (p:Point {id:$id}) SET p.has_answer = true",
+                params={"id": chunk_id})
+        proj.g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": s_node, "tid": chunk_id},
+        )
+    return a
+
+
+def _write_v2_phase_c(sdk: TortoiseSDK, *, qid: str, si: int, sid: str,
+                      s_node: str, session_date: str | None,
+                      all_evidence_turns: list[str], turns: list[dict],
+                      payload: dict, out: dict, ev_sessions: set[str],
+                      evidence_turns: list[str],
+                      gold_answer: str) -> tuple[dict, int, int]:
+    """#1786 (R1): one Phase-C write attempt — the Layer-1 payload write +
+    the E7 consolidation records (NOOP folds, DELETE-soft retractions) + the
+    extracted-point CONTAINS edges. Module-level (B023-clean) so the live
+    ingest loop wraps the whole attempt: a timeout mid-consolidation (noop /
+    deletion / supersession write) is absorbed here instead of falling
+    straight to the ~25-min R2 re-burn. Returns (written-stats, noops_applied,
+    deletions_applied)."""
+    written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
+                             evidence_turns=all_evidence_turns,
+                             turns=turns, ev_sessions=ev_sessions,
+                             session_date=session_date,
+                             gold_answer=gold_answer,
+                             n_turns=len(turns))
+    # E7 (D4/D5): apply the result-level consolidation records —
+    # NOOP folds (duplicates stamp + CONTAINS link + has_answer
+    # OR-in) and DELETE-soft retractions (retract_point tombstone).
+    # Both stay OUT of the Layer-1 payload (D8) — they ride the
+    # extractor result.
+    noops = _apply_noops(sdk, out.get("noops") or [], s_node=s_node,
+                         has_evidence=bool(evidence_turns))
+    deletions = _apply_deletions(sdk, out.get("deletions") or [])
+    # ── Session CONTAINS the extracted points ──
+    for p in payload.get("points", []) or []:
+        pid = str(p.get("id", "")).strip()
+        if not pid:
+            continue
+        sdk._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
+            "MERGE (s)-[:CONTAINS]->(t)",
+            params={"sid": s_node, "tid": pid},
+        )
+    return written, noops, deletions
+
+
+def _bump_retry(counter: dict[str, int], _exc: BaseException) -> None:
+    """#1786 (Task 1 Step 5): the ``ingest_retries`` per-question counter —
+    module-level (B023-clean) hook passed to ``call_with_predicate``."""
+    counter["n"] += 1
+
+
 def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
                        model: Any, *, chunk_turns: int = 2,
                        session_workers: int = 1,
-                       model_factory: Callable | None = None) -> dict:
+                       model_factory: Callable | None = None,
+                       # #1786 (R1): write-stage retry config — the SAME
+                       # value run.py fingerprints (INGEST_WRITE_RETRIES);
+                       # ``write_marker_armed`` is DISARMED during
+                       # ``--retry-failed`` resume re-attempts so no
+                       # resume-internal whole-question retry (R2) budget
+                       # is granted (P1-1).
+                       ingest_write_retries: int = INGEST_WRITE_RETRIES,
+                       write_marker_armed: bool = True) -> dict:
     """v2 ingest: each haystack session through extract_session_v2 → the
     payload written to the eval graph (Session + turn-granular raw chunks
     retained — the verbatim recall mitigation). Returns stats for
@@ -725,7 +947,11 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
              # report's warning-only truncation readout (criterion 3: no
              # UNRECORDED truncation with valid=true).
              "llm": {"calls": 0, "retries": 0, "truncated": 0},
-             "recovery": {}}
+             "recovery": {},
+             # #1786 (R1, Task 1 Step 5): the per-question write-stage retry
+             # count (distinct from the R2 whole-question counter — the E2E
+             # asserts R2 via ``whole_question_retries``, never this).}
+             "ingest_retries": 0}
     # M6: the evidence-session id set (haystack sessions containing >=1
     # has_answer turn) + ALL answer-turn contents (question-wide — marks
     # (b)/(c) match against every answer turn, wherever it lives).
@@ -750,77 +976,33 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         # their creation time; undated sessions get the explicit sentinel.
         point_created_at = session_date or UNDATED_SENTINEL
 
-        # ── Session node (mirrors the deterministic leg) ──
-        sdk._get_proj().g.query(
-            "MERGE (s:Session {id:$id}) "
-            "SET s.created_at=coalesce(s.created_at, $ts), "
-            "    s.turn_count=$tc, s.is_episodic=true, s.lme_question_id=$qid, "
-            "    s.lme_session_index=$si, s.lme_source_session_id=$sid",
-            params={"id": s_node, "ts": session_date or _now_iso(), "tc": len(session),
-                    "qid": qid, "si": si, "sid": sid},
-        )
-        stats["sessions"] += 1
-        proj = sdk._get_proj()
-
-        # E7 (#1539 D6): ONE batch existence probe per session (turn ids +
-        # raw chunk ids) — the per-turn/per-chunk ``_point_exists`` N+1
-        # collapses to O(1) queries per session at 500-Q run scale.
-        turn_ids = [f"lme:{qid}:s{si}:t{ti}" for ti in range(len(session))]
-        session_chunks = list(_session_chunks(session, chunk_turns))
-        chunk_ids = [f"lme:{qid}:s{si}:c{ci}" for ci, _, _ in session_chunks]
-        existing = _existing_point_ids(proj, turn_ids + chunk_ids)
-
-        # ── E3 (D8): turn points — the speaker-derivation substrate. Same
-        # deterministic ids + speaker property as the v1 leg; has_answer is
-        # NOT set (v2 turn/evidence recall measures extracted points). ──
-        for ti, turn in enumerate(session):
-            role = str(turn.get("role") or "unknown")
-            turn_id = f"lme:{qid}:s{si}:t{ti}"
-            if turn_id not in existing:
-                sdk.create_point(
-                    "event", f"[{role}] {turn.get('content') or ''!s}",
-                    id=turn_id, session_id=sid, lme_question_id=qid,
-                    lme_session_index=si, speaker=role,
-                    is_episodic=True, status="draft",
-                    createdAt=point_created_at,  # R5: session date (sentinel)
-                )
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": s_node, "tid": turn_id})
-
-        # ── Raw verbatim turn-granular chunks (R1 #1540) + containment
-        # marks (M6, mark c). Written BEFORE extraction so verbatim
-        # retention + marks survive an extractor failure on this session
-        # (fail-closed — the raw evidence leg is never silently lost). ──
-        # v2 chunks ARE marked (D5): a chunk is an evidence chunk iff any
-        # contained turn is an evidence turn (the union of a session's chunks
-        # is the session, so no evidence turn is orphaned).
-        for ci, text, turn_idxs in session_chunks:
-            chunk_id = f"lme:{qid}:s{si}:c{ci}"
-            contains_evidence = any(
-                bool(turn.get("has_answer"))
-                for ti, turn in enumerate(session) if ti in turn_idxs)
-            if chunk_id not in existing:
-                sdk.create_point(
-                    SESSION_TRANSCRIPT_KIND, text, id=chunk_id,
-                    session_id=sid, lme_question_id=qid,
-                    lme_session_index=si, lme_chunk_index=ci,
-                    lme_chunk_turns=len(turn_idxs), is_episodic=True,
-                    has_answer=contains_evidence, status="draft",
-                    createdAt=point_created_at,  # R5: session date (sentinel)
-                )
-                stats["chunks"] += 1  # written (post-guard) — stats == graph
-            elif contains_evidence:
-                # Idempotent OR-in: never overwrite a True with False.
-                proj.g.query(
-                    "MATCH (p:Point {id:$id}) SET p.has_answer = true",
-                    params={"id": chunk_id})
-            proj.g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": s_node, "tid": chunk_id},
-            )
+        # ── Phase-A writes (session node + turn/chunk raw leg) wrapped in
+        # the bounded write-stage retry loop (R1 #1786): a transport
+        # transient anywhere in the probe-or-write section re-runs the
+        # WHOLE attempt (E7 probe + writes — never a blind re-CREATE; a
+        # probe failure fails that attempt and is retried like any write
+        # failure). The helper returns the FINAL successful attempt's
+        # deltas (a retried partial write is approximate — see below). ──
+        _retries_a: dict[str, int] = {"n": 0}
+        # #1786 (R1): the write-stage stats reflect the FINAL successful
+        # attempt's deltas — on a retried partial write the provenance
+        # counters are approximate (attempt-1 items now in the graph but
+        # skipped by the re-probe are NOT re-counted). Recall@k is computed
+        # from live graph queries, so outcomes are UNAFFECTED.
+        _phase_a = call_with_predicate(
+            partial(_write_v2_phase_a, sdk, qid=qid, si=si, sid=sid,
+                    s_node=s_node, session=session,
+                    session_date=session_date,
+                    point_created_at=point_created_at,
+                    chunk_turns=chunk_turns),
+            predicate=retryable_transient,
+            retries=ingest_write_retries,
+            what=f"session raw-leg write for {qid} s{si}",
+            marker_armed=write_marker_armed,
+            on_retry=partial(_bump_retry, _retries_a))
+        stats["sessions"] += _phase_a["sessions"]
+        stats["chunks"] += _phase_a["chunks"]
+        stats["ingest_retries"] += _retries_a["n"]
 
         # ── The v2 extraction (production pipeline, embedded-safe S3) ──
         turns = [{"role": str(t.get("role") or "unknown"),
@@ -831,6 +1013,16 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
                                      session_id=s_node,
                                      session_date=session_date or None)
         except Exception as ex:  # noqa: BLE001, RUF100
+            # #1786 (P2-2): an ingest-site LLM-provider transient (requests
+            # Timeout/URLError from the extractor) must REACH the run.py
+            # handler — retryable=True / attempts=0 → --retry-failed
+            # eligible. Swallow-and-continue would complete the question
+            # with partial evidence and NO failure entry (the transient
+            # would never be recoverable). Deterministic extractor bugs
+            # (retryable=False) stay swallowed → valid=False, rate-limited
+            # (the #1776 posture).
+            if retryable_transient(ex):
+                raise
             stats["errors"].append(f"s{si}: {type(ex).__name__}: {ex}")  # kill the run
             # M4 (D4): the session-level exception is CLASSIFIED into the same
             # granular census vocabulary (S1/S2/S4 failures already ride in
@@ -858,43 +1050,40 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
             stats["recovery"][_k] = stats["recovery"].get(_k, 0) + _v
 
         # the ACTUAL writes (the _write_payload stats are authoritative —
-        # they skip duplicates, so payload-len double-counts)
-        written = _write_payload(sdk, payload, sid=sid, qid=qid, si=si,
-                                 evidence_turns=all_evidence_turns,
-                                 turns=turns, ev_sessions=ev_sessions,
-                                 session_date=session_date or None,
-                                 gold_answer=gold_answer,
-                                 n_turns=len(session))
+        # they skip duplicates, so payload-len double-counts) + the E7
+        # consolidation records (NOOP folds, DELETE-soft retractions) +
+        # the extracted-point CONTAINS edges — all wrapped in the SAME
+        # bounded write-stage retry loop (R1 #1786): a timeout
+        # mid-consolidation (noop/deletion/supersession write) is absorbed
+        # here instead of falling straight to the ~25-min R2 re-burn.
+        _retries_c: dict[str, int] = {"n": 0}
+        # #1786 (R1): same FINAL-attempt delta semantics as phase A — the
+        # counters reflect the last successful attempt (a retried partial
+        # write is approximate; recall@k is live-graph-derived, unaffected).
+        _written, _noops, _deletions = call_with_predicate(
+            partial(_write_v2_phase_c, sdk, qid=qid, si=si, sid=sid,
+                    s_node=s_node, session_date=session_date or None,
+                    all_evidence_turns=all_evidence_turns, turns=turns,
+                    payload=payload, out=out, ev_sessions=ev_sessions,
+                    evidence_turns=evidence_turns,
+                    gold_answer=gold_answer),
+            predicate=retryable_transient,
+            retries=ingest_write_retries,
+            what=f"payload write for {qid} s{si}",
+            marker_armed=write_marker_armed,
+            on_retry=partial(_bump_retry, _retries_c))
+        stats["ingest_retries"] += _retries_c["n"]
         for k in ("points", "events", "entities", "operators",
                   "evidence_points"):
-            stats[k] += written.get(k, 0)
-        stats["supersessions_written"] += written.get("supersessions_written", 0)
+            stats[k] += _written.get(k, 0)
+        stats["supersessions_written"] += _written.get("supersessions_written", 0)
         for mk in ("source_session", "verbatim", "raw_chunk",
                    "answer_string"):
             stats["evidence_marks"][mk] = (
                 stats["evidence_marks"].get(mk, 0)
-                + written.get("evidence_marks", {}).get(mk, 0))
-
-        # E7 (D4/D5): apply the result-level consolidation records — NOOP
-        # folds (duplicates stamp + CONTAINS link + has_answer OR-in) and
-        # DELETE-soft retractions (retract_point tombstone). Both stay
-        # OUT of the Layer-1 payload (D8) — they ride the extractor result.
-        stats["noops_applied"] += _apply_noops(
-            sdk, out.get("noops") or [], s_node=s_node,
-            has_evidence=bool(evidence_turns))
-        stats["deletions_applied"] += _apply_deletions(
-            sdk, out.get("deletions") or [])
-
-        # ── Session CONTAINS the extracted points ──
-        for p in payload.get("points", []) or []:
-            pid = str(p.get("id", "")).strip()
-            if not pid:
-                continue
-            sdk._get_proj().g.query(
-                "MATCH (s:Session {id:$sid}), (t:Point {id:$tid}) "
-                "MERGE (s)-[:CONTAINS]->(t)",
-                params={"sid": s_node, "tid": pid},
-            )
+                + _written.get("evidence_marks", {}).get(mk, 0))
+        stats["noops_applied"] += _noops
+        stats["deletions_applied"] += _deletions
     return stats
 
 

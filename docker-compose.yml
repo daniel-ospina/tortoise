@@ -51,7 +51,21 @@ services:
       - "127.0.0.1:6379:6379"   # loopback only — host-side MCP configs reach the sidecar
     environment:
       # Entrypoint expands $REDIS_ARGS — `command:` is ignored by run.sh.
-      REDIS_ARGS: "--requirepass falkordb --appendonly yes"
+      # #1786 (R4): automatic RDB BGSAVE is DISABLED (`--save ""` — the
+      # escaped spelling because run.sh expands $REDIS_ARGS UNQUOTED: a bare
+      # `--save` would reach redis-server as a flag with no value) — the
+      # eval's own ingest load triggered ~every-5-min forks of the 4.8 GB
+      # heap (server-side stalls > the 10 s socket bound → the verified
+      # write-path loss mechanism). AOF everysec is strictly more durable
+      # (appendonly yes already on) and the loader prefers AOF. The
+      # `--auto-aof-rewrite-min-size 1gb` bump prevents BGREWRITEAOF (also
+      # a fork) from firing on small growth mid-run (live aof_current_size
+      # ~167 MB). ⚠️ Task 3's preflight persistence gate (preflight.py — a
+      # separate owner's surface) does NOT exist yet: until it lands and is
+      # verified against the LIVE server, a drifted server (aof off + save
+      # empty) has NO tripwire in the repo — do not apply this config to a
+      # container carrying eval data without first landing that gate.
+      REDIS_ARGS: "--requirepass falkordb --appendonly yes --save \"\" --auto-aof-rewrite-min-size 1gb"
     volumes:
       - falkordb-data:/var/lib/falkordb/data
     healthcheck:

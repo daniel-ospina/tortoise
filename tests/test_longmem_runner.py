@@ -406,6 +406,10 @@ def test_outcomes_to_report_golden_shape():
         "evidence_boost": None,
         "breaker_open": None,
         "dropped_reason": None,
+        # #1786: o.get-based projection — the golden input outcome lacks
+        # the recovery counters, so they project as None.
+        "ingest_retries": None,
+        "whole_question_retries": None,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
@@ -2450,9 +2454,9 @@ class TestE3SpeakerDerivation:
                 rt, "hybrid_search",
                 lambda sdk, query, limit, *, leg_trace=None,
                        entity_types=("point",), recency_fields=None,
-                       recency_boost=0.0: [{"id": "pt_x",
-                                            "content": "my 5K best is 27:12",
-                                            "match_source": "fts"}])
+                       recency_boost=0.0, retrieval_budget_ms=None:
+                       [{"id": "pt_x", "content": "my 5K best is 27:12",
+                         "match_source": "fts"}])
             question = {
                 "question_id": "q1", "question": "what is the 5K best",
                 "answer_session_ids": ["s0"], "haystack_dates": ["2026-08-01"],
@@ -2509,6 +2513,7 @@ def test_session_dedup_cap_in_pool(tmp_path, monkeypatch):
                          lme_session_index=1, is_episodic=True, status="draft")
 
         def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
                  entity_types=("point",), recency_fields=None,
                  recency_boost=0.0):
             return ([{"id": f"a{ci}", "content": f"chunk {ci}",
@@ -2596,6 +2601,7 @@ def test_session_crowded_out_still_surfaces(tmp_path, monkeypatch):
         captured = {}
 
         def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
                  entity_types=("point",), recency_fields=None,
                  recency_boost=0.0):
             captured["limit"] = limit
@@ -2644,6 +2650,7 @@ def test_recall_on_deduped_pool(tmp_path, monkeypatch):
                              is_episodic=True, has_answer=True, status="draft")
 
         def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
                  entity_types=("point",), recency_fields=None,
                  recency_boost=0.0):
             return [{"id": f"e{ci}", "content": f"evidence chunk {ci}",
@@ -3041,6 +3048,7 @@ def test_boost_before_recall_metrics(tmp_path, monkeypatch):
                              is_episodic=True, status="draft")
 
         def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
                          entity_types=("point",), recency_fields=None,
                          recency_boost=0.0):
             hits = [{"id": f"fill{i}",
@@ -3196,6 +3204,7 @@ def test_max_chunks_per_session_three(tmp_path, monkeypatch):
                          is_episodic=True, has_answer=True, status="draft")
 
         def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
                          entity_types=("point",), recency_fields=None,
                          recency_boost=0.0):
             hits = [{"id": f"c{ci}", "content": f"filler chunk {ci}",
@@ -3282,6 +3291,7 @@ def test_reader_context_contains_chunk_evidence(tmp_path, monkeypatch):
                          is_episodic=True, has_answer=True, status="draft")
 
         def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
                          entity_types=("point",), recency_fields=None,
                          recency_boost=0.0):
             hits = [{"id": f"fill{i}",

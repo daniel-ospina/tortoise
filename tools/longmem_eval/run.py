@@ -37,9 +37,12 @@ import random
 import re
 import sys
 import tempfile
+import threading
 import time
 import warnings
-from datetime import UTC, datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -68,7 +71,14 @@ from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
 from . import encode_cache
 from .dataset_audit import audit_dataset
-from .errors import eval_failure_class
+from .errors import (
+    INGEST_QUESTION_RETRIES,
+    INGEST_WRITE_RETRIES,
+    RESUME_ATTEMPTS_CAP,
+    WriteStageRetriesExhausted,
+    eval_failure_class,
+    retryable_transient,
+)
 from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
 from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
@@ -89,8 +99,11 @@ from .retrieve import (
     DEFAULT_EVIDENCE_BOOST_SOURCE,
     DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_RETRIEVAL_BUDGET_MS,
     DEFAULT_TR_TOP_K,
+    EVAL_RETRIEVAL_BUDGET_MS,
     MODEL_ENCODE_FAILED_EXIT,
+    VECTOR_TIMEOUT_MS,
     ModelEncodeFailedError,
     VectorBreakerOpenError,
     retrieve_for_question,
@@ -101,6 +114,30 @@ DEFAULT_TOP_K = 20
 DEFAULT_MAX_RETRIES = 3
 BACKOFF_BASE_S = 2.0
 BACKOFF_CAP_S = 30.0
+
+# ── #1786 (R2/R3): whole-question retry + resume-claim constants ─────────
+#: R2 full-jitter start-spread max (s) — pinned ≥ the maximum expected
+#: stall duration (the E2E's forced 40-60 s pause). The REAL anti-\
+#: amplification enforcement is the BoundedSemaphore below; the jitter only
+#: spreads start times so exhausted workers do not re-burn in lockstep.
+R2_JITTER_MAX_S = 60.0
+#: Resume-claim stamp TTL (s): sized from the ingest-duration TAIL, not the
+#: mean — ≥ 2.5× the ~40-min worst-case legitimate re-attempt. PID-liveness
+#: is primary; the TTL is the pid-reuse backstop.
+RESUME_CLAIM_TTL_S = 90 * 60
+#: Persisted failure-entry ``error`` repr cap (P2-7) — a multi-MB exception
+#: repr must not bloat the checkpoint or break the JSON round-trip.
+ERROR_REPR_CAP = 2000
+
+#: #1786 (P2-6/P2-1): the shared resume-tier concurrency limiter — ≤ 2
+#: concurrent ~25-min re-ingests across BOTH tiers (R2 re-attempts inside
+#: the initial attempt + ``--retry-failed`` resume re-attempts). The tiers
+#: never contend (R2 runs in the initial attempt's process; resumes run in
+#: later processes), but the retry-amplification bound is enforced across
+#: the recovery surface WITHIN each process — a ``BoundedSemaphore`` is
+#: process-local, so cross-process concurrency is bounded by the flocked
+#: claim CAS (Task 2 Step 7), never by this limiter.
+_REINGEST_LIMITER = threading.BoundedSemaphore(2)
 
 #: #1349 HNSW spot-check artifact dir — gate_1349.py's "HNSW artifact
 #: present+cleared" check reads exactly this file.
@@ -550,6 +587,330 @@ class CheckpointStaleError(RuntimeError):
     silently reusing results from a different config (M7 #1527, D7)."""
 
 
+# ── #1786 (R3): failure-entry lifecycle + resume-claim helpers ────────────
+# The failure-entry schema (Task 1 Step 4, additive to the existing
+# ``error``/``error_class``/``failed_at_utc`` shape — no format bump):
+# ``{question_id, question_type, error, error_class, retryable, attempts,
+#  failed_at_utc, in_progress: {in_progress_utc, pid} | null}``.
+
+
+def _utc_now() -> datetime:
+    """Injectably clocked UTC now — the resume-claim liveness/age checks
+    share this seam (a test advances the clock without sleeping the 90-min
+    TTL; monkeypatch ``run._utc_now``)."""
+    return datetime.now(UTC)
+
+
+def _quarantine_corrupt(path: Path) -> Path:
+    """Rename ``<path>`` → ``<name>.corrupt.<utc>`` (P2-12). Guarded: only
+    rename if the file still exists; swallow ``FileNotFoundError`` (a
+    concurrent process that passed its ``is_file`` pre-check, waited on the
+    flock, then read a file the other process renamed must not crash on its
+    OWN rename). Caller MUST hold the checkpoint flock."""
+    stamp = _utc_now().strftime("%Y%m%dT%H%M%S%f")
+    qpath = path.with_name(f"{path.name}.corrupt.{stamp}")
+    with contextlib.suppress(FileNotFoundError):
+        # a concurrent process that passed its is_file pre-check, waited on
+        # the flock, then read a file the other process renamed must not
+        # crash on its OWN rename.
+        path.rename(qpath)
+    return qpath
+
+
+def _write_json_atomic(p: Path, data: dict) -> None:
+    """Atomic tmp+``os.replace`` JSON write (mirrors ``_save_checkpoint``'s
+    write). Caller MUST hold the checkpoint flock."""
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+
+def _read_checkpoint_or_quarantine(p: Path) -> dict:
+    """Read the checkpoint JSON; on corrupt, quarantine (guarded rename)
+    and REFUSE via ``CheckpointStaleError`` (P2-8/P2-12 — never silently
+    merge-into-{} and overwrite on-disk state). Caller MUST hold the flock."""
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
+        qpath = _quarantine_corrupt(p)
+        raise CheckpointStaleError(
+            f"checkpoint {p} is corrupt ({e!r}) — quarantined to {qpath}; "
+            f"refusing to proceed (fix or restore a backup)") from e
+    except OSError as e:
+        raise CheckpointStaleError(
+            f"checkpoint {p} is unreadable ({e!r}) — refusing to proceed") from e
+
+
+def _stamp_age(stamp: Any, *, now: datetime | None = None) -> float | None:
+    """The claim stamp's age in seconds (None when absent/unparseable).
+    TZ-naive ``in_progress_utc`` values are coerced to UTC (P2-3 review
+    hardening — ``fromisoformat`` accepts naive strings, and an
+    aware-minus-naive subtraction would TypeError the claim path)."""
+    if not isinstance(stamp, dict):
+        return None
+    ts = stamp.get("in_progress_utc")
+    if not ts:
+        return None
+    try:
+        parsed = datetime.fromisoformat(ts)
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return (now or _utc_now()) - parsed
+
+
+def _stamp_live(stamp: Any) -> bool:
+    """True when the claim stamp is a LIVE pid (POSIX ``os.kill(pid, 0)``
+    probe). PID-liveness is PRIMARY (P1-4); the TTL is the pid-reuse
+    backstop handled by :func:`_stamp_claimable`."""
+    if not isinstance(stamp, dict):
+        return False
+    pid = stamp.get("pid")
+    if not isinstance(pid, int):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # alive but owned by another user — never steal
+
+
+def _stamp_claimable(stamp: Any, *, now: datetime | None = None) -> bool:
+    """A stamp is claimable iff ``os.kill(pid, 0)`` FAILS or the stamp age
+    EXCEEDS the TTL (P2-3 precedence, pinned in one sentence). A live-pid
+    stamp below the TTL is NEVER claimable."""
+    if not isinstance(stamp, dict) or not stamp:
+        return True
+    pid = stamp.get("pid")
+    alive = False
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+            alive = True
+        except ProcessLookupError:
+            alive = False
+        except PermissionError:
+            alive = True
+    if not alive:
+        return True  # dead pid → claimable immediately (PID-liveness primary)
+    age = _stamp_age(stamp, now=now)
+    return age is not None and age.total_seconds() > RESUME_CLAIM_TTL_S
+
+
+def _legacy_repr_match(err: str) -> bool:
+    """P1-5 legacy rescue: a pre-feature failure entry (no ``retryable``
+    field) is re-attempted when its persisted ``error`` repr matches a
+    transport transient class name (``network:TimeoutError`` / plain
+    ``TimeoutError(...)`` / ``network:ConnectionError`` — the reprs the 4
+    motivating reval-run entries carry). Repr-substring matching is brittle,
+    so this is ONLY the legacy fallback, never the primary signal."""
+    return ("TimeoutError" in err) or ("ConnectionError" in err)
+
+
+def _retry_failed_skip_reason(entry: dict, *,
+                              cap: int = RESUME_ATTEMPTS_CAP,
+                              check_stamp: bool = True) -> str | None:
+    """Why a failure entry is NOT ``--retry-failed`` eligible (None =
+    eligible). The gate (Task 2 Step 2): ``error_class ==
+    ingest:retries_exhausted`` AND (``retryable`` True OR the legacy repr
+    rescue) AND ``attempts < cap``. All reads are ``.get()``-based (P1-5 —
+    legacy entries lack the additive fields).
+
+    ``check_stamp`` (P1-3): the ``in_progress`` stamp check is an ADVISORY
+    fast path only — it evaluates against the startup-loaded (unlocked)
+    failures list. The flocked claim CAS (Step 7) re-verifies with
+    ``_stamp_claimable`` (TTL-aware) and passes ``check_stamp=False`` here —
+    the advisory live-stamp check must NOT veto a claim that the TTL age
+    branch admits."""
+    if entry.get("error_class") != "ingest:retries_exhausted":
+        return (f"error_class={entry.get('error_class')!r} — only "
+                f"ingest:retries_exhausted entries are re-attempted "
+                f"(reader:/judge: entries stay permanently skipped)")
+    if entry.get("retryable") is False:
+        return "retryable=false (deterministic failure — never re-attempted)"
+    if entry.get("retryable") is None and not _legacy_repr_match(
+            str(entry.get("error") or "")):
+        # Legacy entry without a 'retryable' field: the repr-string check is
+        # the defined legacy rescue (P1-5 — a non-matching repr is skipped).
+        return ("legacy entry without a 'retryable' field whose error "
+                "repr does not match a transport transient — skipped")
+    attempts = entry.get("attempts")
+    if not isinstance(attempts, int):
+        attempts = 0
+    if attempts >= cap:
+        return (f"attempt budget exhausted (attempts={attempts} >= cap={cap}) "
+                f"— entry retained; free disk / wait out the outage, then "
+                f"raise the cap (fingerprint-refusing — rotate the "
+                f"checkpoint) or hand-remove the retained entry")
+    # Advisory fast path (P1-3/P2-3): a stamp that is NOT claimable (a
+    # LIVE pid below the TTL) means another process is mid-re-attempt — the
+    # flocked CAS re-verifies this under the flock (this check is an
+    # unlocked read, advisory only). TTL-aware: a dead-pid stamp or a
+    # >90-min hung-live stamp IS claimable, so it must pass this fast path
+    # and reach the flocked CAS (which re-verifies authoritatively) — the
+    # old age-AGNOSTIC ``_stamp_live`` check here hard-vetoed exactly the
+    # claims the TTL is designed to admit.
+    if check_stamp and not _stamp_claimable(entry.get("in_progress")):
+        return "currently claimed by another process (live in_progress stamp)"
+    return None
+
+
+def _retry_failed_gate_ok(entry: dict) -> bool:
+    return _retry_failed_skip_reason(entry) is None
+
+
+def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
+                   stage: str, attempts: int, prior: dict | None = None) -> dict:
+    """Build a persisted failure entry (Task 1 Step 4 schema). The handler
+    must UNWRAP the sentinel BEFORE calling this — ``error``/``error_class``/
+    ``retryable`` are derived from the INNER exception, never the sentinel.
+
+    ``prior`` (the ON-DISK entry re-read under the flock) drives the
+    recovery-tier preservation (P1-1): a qid that once entered the recovery
+    tier (``ingest:retries_exhausted``) stays tier-eligible even when a
+    re-attempt fails at a NON-ingest stage (the re-extraction advances
+    ``_stage`` to reader/judge — without preservation an LLM-provider
+    transient there would re-classify the entry and silently exclude it)."""
+    retryable = retryable_transient(exc)
+    error_class = eval_failure_class(exc, site=stage)
+    if prior and prior.get("error_class") == "ingest:retries_exhausted":
+        error_class = "ingest:retries_exhausted"
+    err = repr(exc)
+    if len(err) > ERROR_REPR_CAP:
+        err = err[:ERROR_REPR_CAP] + "…<truncated>"
+    return {
+        "question_id": qid,
+        "question_type": question_type,
+        "error": err,
+        "error_class": error_class,
+        "retryable": retryable,
+        "attempts": attempts,
+        "failed_at_utc": _utc_now().isoformat(),
+        "in_progress": None,
+    }
+
+
+def _build_failure_entry(qid: str, question_type: str, exc: BaseException,
+                         stage: str, r2_attempted: int,
+                         resume_reattempt: bool, prior: dict | None) -> dict:
+    """The run-loop failure-entry builder (module-level — B023-clean so the
+    per-question loop can pass it via ``functools.partial``). Counter
+    semantics (P1-6): the in-run R2 increments the persisted counter (an
+    R2-exhausted entry starts at ``attempts=1``); a provider transient that
+    never entered the write-stage loop starts at ``attempts=0``; each failed
+    ``--retry-failed`` re-attempt increments from the ON-DISK ``prior``
+    (never the stale in-memory copy; never at claim — a kill -9 mid-attempt
+    leaves the counter untouched so the dead-pid re-claim stays admitted)."""
+    attempts = ((1 if r2_attempted else 0)
+                if not resume_reattempt
+                else (int((prior or {}).get("attempts", 0) or 0) + 1))
+    return _failure_entry(qid, question_type, exc, stage=stage,
+                          attempts=attempts, prior=prior)
+
+
+def _claim_reattempt(checkpoint: str | None, qid: str, cap: int, *,
+                     now: datetime | None = None) -> bool:
+    """Task 2 Step 7 concurrent-resume CLAIM — compare-and-swap under ONE
+    flock acquisition: (1) acquire the same exclusive flock as
+    ``_save_checkpoint``; (2) RE-READ the on-disk entry; (3) re-verify the
+    gate + the stamp is dead (the Step 2 unlocked check is an ADVISORY fast
+    path — this flocked re-verify is authoritative); (4) write the FULL
+    entry with the ``in_progress`` stamp added — every additive field
+    (``error``/``error_class``/``retryable``/``attempts``) preserved, never
+    a wholesale ``{question_id, in_progress}`` replacement; (5) release.
+
+    ``now`` is the injectable clock seam for the TTL tests."""
+    if not checkpoint:
+        return False
+    p = Path(checkpoint)
+    if not p.is_file():
+        return False
+    with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError,
+                RecursionError):
+            return False  # corrupt — _load_checkpoint's quarantine governs
+        entries = data.get("failures", []) or []
+        prior = next((f for f in entries
+                      if isinstance(f, dict) and f.get("question_id") == qid),
+                     None)
+        if prior is None or _retry_failed_skip_reason(
+                prior, cap=cap, check_stamp=False) is not None:
+            return False
+        # Authoritative stamp re-verify: claimable iff the pid is dead or
+        # the stamp age EXCEEDS the TTL (P2-3 precedence).
+        if not _stamp_claimable(prior.get("in_progress"), now=now):
+            return False
+        claimed = dict(prior)
+        claimed["in_progress"] = {
+            "in_progress_utc": _utc_now().isoformat(),
+            "pid": os.getpid(),
+        }
+        data["failures"] = [
+            claimed if (isinstance(f, dict) and f.get("question_id") == qid)
+            else f for f in entries]
+        _write_json_atomic(p, data)
+        return True
+
+
+def _upsert_failure(checkpoint: str | None, qid: str,
+                    build: Callable[[dict | None], dict], *,
+                    fingerprint: dict | None = None,
+                    run_key: str | None = None, surface: str | None = None,
+                    retriever: str | None = None, model: str | None = None,
+                    prompt: str | None = None) -> dict:
+    """Task 2 Step 4 append-site: ONE flocked write — re-read the on-disk
+    base, REPLACE any prior entry for ``qid`` with ``build(prior)`` (never
+    append a duplicate — ``n_failed = len(failures)`` must never
+    double-count a qid), write the full file inline. The replacement is
+    built from the ON-DISK prior (never the stale in-memory copy), so a
+    capped qid cannot be re-admitted and a recovery-tier entry written by
+    another process cannot be missed. Returns the final persisted entry.
+
+    #1786 (code-review F6): the FRESH-file branch (no checkpoint exists yet)
+    emits the FULL checkpoint key set (``format``/``run_key``/``surface``/
+    ``retriever``/``model``/``prompt``/``fingerprint``) via
+    ``_write_checkpoint_locked`` — a kill -9 between this write and the
+    trailing ``_save_checkpoint`` used to leave a PARTIAL-shape file
+    (``{failures, outcomes}`` with no markers) that the next resume REFUSED
+    in entirety ("predates the fingerprint contract")."""
+    if not checkpoint:
+        return build(None)
+    p = Path(checkpoint)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
+        if p.is_file():
+            data = _read_checkpoint_or_quarantine(p)
+        else:
+            data = {"failures": [], "outcomes": []}
+        entries = data.get("failures", []) or []
+        prior = next((f for f in entries
+                      if isinstance(f, dict) and f.get("question_id") == qid),
+                     None)
+        entry = build(prior)
+        data["failures"] = [
+            entry if (isinstance(f, dict) and f.get("question_id") == qid)
+            else f for f in entries]
+        if not any(isinstance(f, dict) and f.get("question_id") == qid
+                   for f in data["failures"]):
+            data["failures"].append(entry)
+        if p.is_file():
+            _write_json_atomic(p, data)
+        else:
+            # Fresh-file branch: write the FULL checkpoint shape so a
+            # kill -9 in the window before the trailing save cannot leave
+            # a markerless file the loader refuses wholesale.
+            _write_checkpoint_locked(
+                p, data.get("outcomes", []), data["failures"], fingerprint,
+                run_key=run_key, surface=surface, retriever=retriever,
+                model=model, prompt=prompt)
+        return entry
+
+
 # Tuning knobs that change extraction output (M7 #1739, Gap 2): the MODELS
 # registry has entries sharing ONE wire id with different tuning — but note
 # only -noreason is actually discriminated from the trio: deepseek-v4-pro and
@@ -823,7 +1184,24 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        evidence_boost: bool | None = None,
                        evidence_boost_verbatim: float | None = None,
                        evidence_boost_source: float | None = None,
-                       max_chunks_per_session: int | None = None) -> dict:
+                       max_chunks_per_session: int | None = None,
+                       # #1786 (P1-1/P1-2/P2-4): the write-path retry knobs —
+                       # ALWAYS present (results-relevant by construction: a
+                       # question that dies at 0 write retries survives at 2 —
+                       # the same class as max_retries). A pre-feature
+                       # checkpoint therefore refuses via CheckpointStaleError
+                       # (the SAFE direction — Task 8 requires a fresh
+                       # checkpoint anyway).
+                       ingest_write_retries: int = INGEST_WRITE_RETRIES,
+                       ingest_question_retries: int = INGEST_QUESTION_RETRIES,
+                       resume_attempts_cap: int = RESUME_ATTEMPTS_CAP,
+                       # #1786 (R5): the eval's HYBRID-arm retrieval deadline
+                       # (ms) — conditional presence (present iff non-default:
+                       # the eval always passes EVAL_RETRIEVAL_BUDGET_MS, so a
+                       # 500-ms-budget checkpoint refuses a 1500-ms resume).
+                       # The vector arm's VECTOR_TIMEOUT_MS stays OUT of this
+                       # key (SDK-pinned, not eval-configurable — P2-5).
+                       retrieval_budget_ms: int | None = None) -> dict:
     """The effective-run-config fingerprint (M7 #1527, D7 schema).
 
     ``workers`` is deliberately EXCLUDED (per-question isolation makes
@@ -886,6 +1264,15 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "reader_prompt_hash": _sha16(reader_prompt_source()),
         "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
         "rerank": rerank_config,
+        # #1786 (P1-1/P1-2): the three retry constants are ALWAYS present —
+        # a deliberate default-fingerprint change so a pre-feature checkpoint
+        # resumed under post-feature DEFAULTS refuses instead of silently
+        # changing retry semantics (0 retries → 2 write retries + 1 R2 + 2
+        # resumes). ``--retry-failed`` is NOT fingerprinted (a recorded
+        # resume-mode, methodology + checkpoint field — Task 2 Step 1).
+        "ingest_write_retries": ingest_write_retries,
+        "ingest_question_retries": ingest_question_retries,
+        "resume_attempts_cap": resume_attempts_cap,
     } | {
         # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
         # knobs ride the fingerprint (present only when the caller passes
@@ -902,6 +1289,10 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("max_chunks_per_session", max_chunks_per_session),
+            # #1786 (R5): the eval's hybrid retrieval budget — conditional
+            # presence (the eval always passes 1500, so a pre-feature /
+            # 500-ms-budget checkpoint refuses via CheckpointStaleError).
+            ("retrieval_budget_ms", retrieval_budget_ms),
         ) if v is not None}),
     }
 
@@ -1198,7 +1589,8 @@ def unknown_leg_reasons(outcome: dict) -> list:
 def _load_checkpoint(path: str | None,
                      expected_fingerprint: dict | None = None,
                      *, run_key: str | None = None,
-                     retriever: str = "hybrid"
+                     retriever: str = "hybrid",
+                     retry_failed: bool = False
                      ) -> tuple[dict[str, dict], list[dict]]:
     """Load (completed-by-qid, failures) from the checkpoint state file.
 
@@ -1221,6 +1613,20 @@ def _load_checkpoint(path: str | None,
     backend (or a failed re-encode) keeps the outcome rejected on every
     resume — surfaced via the run log / protocol resume-quality note so
     the dead backend is seen, never silently converged.
+
+    #1786 (P2-12, P2-6): the corrupt-file contract CHANGED — a
+    JSONDecodeError checkpoint is now QUARANTINED (guarded
+    ``<name>.corrupt.<utc>`` rename) and REFUSED with an actionable error
+    (never the old silent fresh-start: that discarded the failures list,
+    the in_progress claim stamps, and bypassed the fingerprint gate —
+    ``--retry-failed`` state evaporated). Valid-JSON-wrong-shape
+    ``failures`` entries are schema-validated (P2-10/P2-3) — type-checks on
+    PRESENT fields only (legacy tolerance, P2-2: missing optional keys
+    are allowed so pre-feature entries pass), never an unhandled crash.
+
+    #1786 (R3): ``retry_failed`` drives the load-time advisory warnings —
+    recoverable-class failures skipped without the flag, and the per-entry
+    eligibility warnings when the flag is on (never a silent skip).
     """
     if not path:
         return {}, []
@@ -1238,10 +1644,22 @@ def _load_checkpoint(path: str | None,
               f"concurrent writer; ignoring for now — every question "
               f"re-encodes", file=sys.stderr)
         return {}, []
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
-        print(f"[longmem_eval] WARNING: checkpoint {p} is corrupt ({e!r}) — "
-              f"ignoring; every question re-encodes", file=sys.stderr)
-        return {}, []
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
+        # #1786 (P2-12): refuse-and-quarantine — the file is renamed under
+        # the SAME exclusive flock as _save_checkpoint (guarded rename),
+        # and the loader refuses instead of silently fresh-starting (the
+        # old contract discarded the failures list + claim stamps and
+        # bypassed the fingerprint gate). RecursionError (a deeply nested
+        # crafted JSON) quarantines + refuses identically to JSONDecodeError.
+        with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
+            qpath = _quarantine_corrupt(p)
+        raise CheckpointStaleError(
+            f"checkpoint {p} is corrupt ({e!r}) — quarantined to {qpath}; "
+            f"refusing to resume (fix or restore a backup; a fresh start "
+            f"would discard the failures list + in-progress claims)") from e
+    except OSError as e:
+        raise CheckpointStaleError(
+            f"checkpoint {p} is unreadable ({e!r}) — refusing to resume") from e
     fmt = data.get("format")
     saved_key = data.get("run_key")
     if fmt is None and saved_key is None:
@@ -1355,30 +1773,160 @@ def _load_checkpoint(path: str | None,
         outcomes[o["question_id"]] = o
     failures = [f for f in data.get("failures", [])
                 if isinstance(f, dict) and f.get("question_id")]
+    # #1786 (P2-10/P2-3): schema-validate the failures list — valid-JSON-
+    # wrong-shape entries REFUSE (a string ``attempts`` would TypeError the
+    # gate's ``<`` comparison, a non-dict entry would AttributeError on
+    # ``.get``, a string ``in_progress.pid`` would TypeError the claim's
+    # ``os.kill`` probe). Legacy tolerance (P2-2): ONLY PRESENT keys are
+    # type-checked — missing optional keys (``retryable``/``attempts``/
+    # ``in_progress``) are allowed so pre-feature entries pass. A MISSING
+    # ``failures`` key is the defined skip-with-WARNING (empty list — the
+    # historical behavior); an explicit non-list is a shape violation.
+    raw_failures = data.get("failures")
+    if raw_failures is None:
+        print(f"[longmem_eval] WARNING: checkpoint {p} has no 'failures' "
+              f"list — treating as empty", file=sys.stderr)
+        raw_failures = []
+    failures = _validate_failures_schema(raw_failures, checkpoint=p)
     print(f"[longmem_eval] resumed checkpoint {p}: {len(outcomes)} completed, "
           f"{len(failures)} failed (skipping both)"
           + (f"; {gate_rejected} rejected by the resume-quality gate "
              f"(re-encoding)" if gate_rejected else ""), file=sys.stderr)
+    # #1786 (R3, Task 2 Steps 1-2): the load-time advisory + eligibility
+    # warnings — recoverable-class failures skipped without ``--retry-failed``
+    # are a LOUD event, never silent; the per-entry skip reasons warn too.
+    if failures:
+        recoverable = [f for f in failures
+                       if f.get("error_class") == "ingest:retries_exhausted"]
+        if recoverable and not retry_failed:
+            print(f"[longmem_eval] WARNING: {len(recoverable)} recoverable-"
+                  f"class failure(s) exist (ingest:retries_exhausted) — "
+                  f"WITHOUT --retry-failed they are skipped on resume (delete "
+                  f"the checkpoint to re-run them)", file=sys.stderr)
+        elif retry_failed:
+            for f in failures:
+                reason = _retry_failed_skip_reason(f)
+                if reason:
+                    print(f"[longmem_eval] WARNING: --retry-failed skips "
+                          f"{f.get('question_id')!r}: {reason}",
+                          file=sys.stderr)
     return outcomes, failures
 
 
+def _validate_failures_schema(failures_raw: Any, *, checkpoint: Path) -> list[dict]:
+    """#1786 (P2-10/P2-3): schema validation for the checkpoint's
+    ``failures`` list — REFUSES (via ``CheckpointStaleError``) on shape
+    violations instead of crashing the resume gate. Type-checks ONLY
+    PRESENT fields (legacy tolerance P2-2); recurses INTO the
+    ``in_progress`` dict (pid must be an int — a string pid would TypeError
+    the claim's ``os.kill(pid, 0)`` probe; ``in_progress_utc`` must parse as
+    ISO-8601 — an unparseable value would ValueError the age computation)."""
+    if not isinstance(failures_raw, list):
+        raise CheckpointStaleError(
+            f"checkpoint {checkpoint} 'failures' must be a list, got "
+            f"{type(failures_raw).__name__} — refusing load")
+    out: list[dict] = []
+    for f in failures_raw:
+        if not isinstance(f, dict):
+            raise CheckpointStaleError(
+                f"checkpoint {checkpoint} failure entry is not a dict: {f!r} "
+                f"— refusing load")
+        if not f.get("question_id"):
+            continue
+        attempts = f.get("attempts")
+        if attempts is not None and (isinstance(attempts, bool)
+                                     or not isinstance(attempts, int)):
+            raise CheckpointStaleError(
+                f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
+                f"attempts must be int, got {attempts!r} — refusing load")
+        # #1786 (code-review F7): the gate's only budget check is
+        # ``attempts >= cap`` (False for negatives), so a crafted negative
+        # attempts would otherwise be re-attempted N+2 times across resumes.
+        # Clamp the range (a sane upper bound refuses pathological crafted
+        # values too — the cap is small, so anything far past it is corrupt).
+        if attempts is not None and (attempts < 0 or attempts > 1_000_000):
+            raise CheckpointStaleError(
+                f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
+                f"attempts out of range, got {attempts!r} — refusing load")
+        retryable = f.get("retryable")
+        if retryable is not None and not isinstance(retryable, bool):
+            raise CheckpointStaleError(
+                f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
+                f"retryable must be bool, got {retryable!r} — refusing load")
+        in_progress = f.get("in_progress")
+        if in_progress is not None:
+            if not isinstance(in_progress, dict):
+                raise CheckpointStaleError(
+                    f"checkpoint {checkpoint} failure "
+                    f"{f.get('question_id')!r} in_progress must be a dict, "
+                    f"got {in_progress!r} — refusing load")
+            pid = in_progress.get("pid")
+            if pid is not None and (isinstance(pid, bool)
+                                    or not isinstance(pid, int)):
+                raise CheckpointStaleError(
+                    f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
+                    f"in_progress.pid must be int, got {pid!r} — refusing load")
+            ts = in_progress.get("in_progress_utc")
+            if ts is not None:
+                try:
+                    datetime.fromisoformat(ts)
+                except (TypeError, ValueError) as e:
+                    raise CheckpointStaleError(
+                        f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
+                        f"in_progress_utc unparseable: {ts!r} — refusing load") from e
+        out.append(f)
+    return out
+
+
 def _merge_checkpoint(path: Path, outcomes: list[dict],
-                      failures: list[dict]) -> tuple[list[dict], list[dict]]:
+                      failures: list[dict], *,
+                      remove_failures: list[str] | None = None
+                      ) -> tuple[list[dict], list[dict]]:
     """Merge the on-disk checkpoint with the in-memory snapshot (M7 #1527,
     D8 — cross-process merge-under-lock): outcomes dict-by-qid (the fresh
     in-memory outcome wins on tie), failures append-only by qid. A missing
-    or corrupt disk file → the in-memory snapshot wins (fresh start)."""
+    disk file → the in-memory snapshot wins (fresh start).
+
+    #1786 (P2-8): a CORRUPT disk base is QUARANTINED and REFUSED — the
+    in-memory snapshot never silently wins over a corrupt base via
+    ``os.replace`` (that dropped on-disk-only claim stamps + failure
+    entries). #1786 (P1-3/P2-1): read-through reconciliation —
+    ``remove_failures`` tombstones are honored (a removed entry stays
+    removed), a live ``in_progress`` claim stamp on the disk base survives
+    a stale unstamped in-memory copy (the CAS protection is never erased),
+    and the ``attempts`` counter reconciles with MAX semantics (a
+    concurrent process's increment is never regressed below the disk value
+    — a capped qid must not be re-admitted for an unbudgeted re-burn)."""
     if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, ValueError):
-            data = {}
-        disk_out = {o["question_id"]: o for o in data.get("outcomes", [])}
-        disk_fail = {f["question_id"]: f for f in data.get("failures", [])}
+        data = _read_checkpoint_or_quarantine(path)
+        disk_out = {o["question_id"]: o for o in data.get("outcomes", [])
+                    if isinstance(o, dict) and o.get("question_id")}
+        disk_fail = {f["question_id"]: f for f in data.get("failures", [])
+                     if isinstance(f, dict) and f.get("question_id")}
     else:
         disk_out, disk_fail = {}, {}
     merged_out = {**disk_out, **{o["question_id"]: o for o in outcomes}}
-    merged_fail = {**disk_fail, **{f["question_id"]: f for f in failures}}
+    merged_fail = dict(disk_fail)
+    for f in failures:
+        qid = f["question_id"]
+        disk = merged_fail.get(qid)
+        if disk is None:
+            merged_fail[qid] = f
+            continue
+        merged = {**disk, **f}
+        # Counter monotonicity (P2-1): the disk-base attempts wins on tie
+        # when greater — a concurrent process's later save must not regress
+        # a capped qid below the disk value.
+        da, ma = disk.get("attempts"), f.get("attempts")
+        if isinstance(da, int) and isinstance(ma, int) and da > ma:
+            merged["attempts"] = da
+        # Live claim stamp preservation (P1-3): a stale unstamped in-memory
+        # copy must not overwrite a live on-disk claim.
+        if _stamp_live(disk.get("in_progress")):
+            merged["in_progress"] = disk["in_progress"]
+        merged_fail[qid] = merged
+    for qid in (remove_failures or []):
+        merged_fail.pop(qid, None)
     return list(merged_out.values()), list(merged_fail.values())
 
 
@@ -1386,13 +1934,21 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
                      failures: list[dict], fingerprint: dict | None = None, *,
                      run_key: str | None = None, surface: str | None = None,
                      retriever: str | None = None, model: str | None = None,
-                     prompt: str | None = None) -> None:
+                     prompt: str | None = None,
+                     remove_failures: list[str] | None = None) -> None:
     """Atomically persist partial results after each question (resume).
 
     M7 (#1527, D7/D8): writes the code fingerprint; the write happens under
     an exclusive flock with a re-read-and-merge, so two concurrent run
     PROCESSES sharing one checkpoint lose nothing (each merge adds its
     qids). ``os.replace`` keeps the final file atomic.
+
+    #1786 (P2-10): ``remove_failures`` prunes the named qids' failure
+    entries IN THE SAME flocked write as the outcome save — the atomic
+    single-write that makes ``--retry-failed`` remove-on-success correct
+    (a kill -9 between an outcome write and a separate removal write would
+    leave a stale failure entry for a completed qid → the next resume
+    re-burns a completed question and the report misgrades it).
     """
     if not path:
         return
@@ -1400,21 +1956,35 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
     p.parent.mkdir(parents=True, exist_ok=True)
     with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
         merged_outcomes, merged_failures = _merge_checkpoint(
-            p, outcomes, failures)
-        tmp = p.with_suffix(p.suffix + ".tmp")
-        tmp.write_text(json.dumps({
-            "format": CHECKPOINT_FORMAT,
-            "run_key": run_key,
-            "surface": surface,
-            "retriever": retriever,
-            "model": model or "default",
-            "prompt": prompt or "default",
-            "fingerprint": fingerprint,
-            "outcomes": merged_outcomes,
-            "failures": merged_failures,
-            "updated_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
-        }, indent=2), encoding="utf-8")
-        os.replace(tmp, p)
+            p, outcomes, failures, remove_failures=remove_failures)
+        _write_checkpoint_locked(
+            p, merged_outcomes, merged_failures, fingerprint,
+            run_key=run_key, surface=surface, retriever=retriever,
+            model=model, prompt=prompt)
+
+
+def _write_checkpoint_locked(
+        p: Path, outcomes: list[dict], failures: list[dict],
+        fingerprint: dict | None = None, *, run_key: str | None = None,
+        surface: str | None = None, retriever: str | None = None,
+        model: str | None = None, prompt: str | None = None) -> None:
+    """Inline atomic checkpoint write (tmp + ``os.replace``) for callers
+    ALREADY holding the checkpoint flock (P2-1 flock-reentrancy pin: never
+    call ``_save_checkpoint`` from inside a held flock — the nested
+    ``flock_exclusive`` would spin 5 s and raise ``TimeoutError`` (an
+    OSError subclass, misreportable as corruption)."""
+    _write_json_atomic(p, {
+        "format": CHECKPOINT_FORMAT,
+        "run_key": run_key,
+        "surface": surface,
+        "retriever": retriever,
+        "model": model or "default",
+        "prompt": prompt or "default",
+        "fingerprint": fingerprint,
+        "outcomes": outcomes,
+        "failures": failures,
+        "updated_at_utc": _utc_now().isoformat(),
+    })
 
 
 def run_evaluation(
@@ -1478,6 +2048,21 @@ def run_evaluation(
     dataset_fingerprint: str = "unknown",
     integrity_threshold: float = 0.0,
     integrity_justification: str | None = None,
+    # #1786 (R3): ``--retry-failed`` resume mode — re-attempts
+    # ``ingest:retries_exhausted`` failure entries (retryable + attempts <
+    # RESUME_ATTEMPTS_CAP). NOT fingerprinted (a recorded resume-mode,
+    # methodology + checkpoint field); the marker is DISARMED during
+    # re-attempts so no resume-internal whole-question retry gets a budget.
+    retry_failed: bool = False,
+    # #1786 (R1/R2): the write-path retry budget — the SAME values
+    # ``_build_fingerprint`` records (always-present fingerprint members).
+    ingest_write_retries: int = INGEST_WRITE_RETRIES,
+    ingest_question_retries: int = INGEST_QUESTION_RETRIES,
+    resume_attempts_cap: int = RESUME_ATTEMPTS_CAP,
+    # #1786 (R5): the eval's HYBRID-arm retrieval deadline (ms) — the eval
+    # (run_main) always passes EVAL_RETRIEVAL_BUDGET_MS (1500); None keeps
+    # the SDK-default 500 ms for programmatic callers.
+    retrieval_budget_ms: int | None = None,
     # #1349 vector arm: retriever routing + injected model + retrieval-only.
     retriever: str = "hybrid",
     model: str | None = None,
@@ -1633,10 +2218,19 @@ def run_evaluation(
         evidence_boost_verbatim=evidence_boost_verbatim,
         evidence_boost_source=evidence_boost_source,
         max_chunks_per_session=max_chunks_per_session,
+        # #1786 (P1-1/P1-2/P2-4): the three retry knobs (ALWAYS present —
+        # results-relevant) + the hybrid retrieval budget (conditional
+        # presence — the eval always passes the non-default 1500). All four
+        # stale pre-feature checkpoints via CheckpointStaleError.
+        ingest_write_retries=ingest_write_retries,
+        ingest_question_retries=ingest_question_retries,
+        resume_attempts_cap=resume_attempts_cap,
+        retrieval_budget_ms=retrieval_budget_ms,
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
                                             run_key=run_key,
-                                            retriever=retriever)
+                                            retriever=retriever,
+                                            retry_failed=retry_failed)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
     import threading
@@ -1656,274 +2250,458 @@ def run_evaluation(
             with _lock:
                 outcomes.append(done[qid])
             return
-        if any(f["question_id"] == qid for f in failures):
-            print(f"  [resume] {qid} previously failed — skipping "
-                  f"(delete the checkpoint to retry)", file=sys.stderr)
-            return
+        # #1786 (R3): the resume gate — a previously-failed qid is skipped
+        # UNLESS --retry-failed re-attempts it (ingest:retries_exhausted +
+        # retryable [+ the legacy repr rescue] + attempts < cap). The
+        # eligibility warnings surfaced at load; the flocked CAS claim
+        # (Step 7) is the AUTHORITATIVE re-verify (this .get()-based check
+        # is the advisory fast path — stale the moment a concurrent process
+        # claims).
+        prior_failure = next((f for f in failures
+                              if f.get("question_id") == qid), None)
+        resume_reattempt = False
+        resume_semaphore_held = False
+        _need_claim = False
+        if prior_failure is not None:
+            if not retry_failed or _retry_failed_skip_reason(
+                    prior_failure, cap=resume_attempts_cap) is not None:
+                print(f"  [resume] {qid} previously failed — skipping "
+                      f"(delete the checkpoint to retry)", file=sys.stderr)
+                return
+            _need_claim = True
         t_q_start = time.monotonic()
         # M7 (D6): the failure site for the error census. Covers the non-LLM
         # graph pipeline (ingest + retrieve) first; reader/judge set it just
         # before their calls.
         _stage = "ingest"
+        # #1786 (R2): the whole-question retry state. ``r2_retained`` holds
+        # the ORIGINAL write-stage exception — the tier-identity source:
+        # whenever R2 fails at ANY non-write stage (a reader/judge transient
+        # during R2's re-extraction), the failure entry's error_class grades
+        # from this RETAINED exception, never the live one (P2-1).
+        # ``r2_attempted`` counts the R2 launches (0 or 1 — the marker is
+        # armed only for the INITIAL attempt, so a resume re-attempt or a
+        # second R2-internal exhaustion never re-fires it: a disarm bug
+        # would triple the ~25-min re-burn and corrupt the counter). The
+        # BoundedSemaphore is held for the R2 re-ingest DURATION (the
+        # retry-amplification enforcement, AWS REL05-BP03).
+        r2_retained: BaseException | None = None
+        r2_attempted = 0
+        r2_semaphore_held = False
+        # #1786 (code-review F3): the success/breaker paths fall through to
+        # the SAME trailing save as the failure path (under ``_lock``) —
+        # this flag carries their ``remove_failures`` tombstone so a
+        # --retry-failed re-attempt's remove-on-success stays ONE flocked
+        # write without saving inside the per-question try (the old
+        # in-try save snapshotted ``done`` OUTSIDE the lock → a concurrent
+        # ``done`` mutation raised RuntimeError → bogus failure entry).
+        _save_remove_failures: list[str] | None = None
         try:
-            sdk, cleanup = _make_question_sdk(
-                db_uri=db_uri,
-                namespace=question_graph_namespace(model, query_prompt, qid)
-                if db_uri else None,
-                work_dir=work_dir)
-            try:
-                _sdk_cleanup = cleanup
-                # M7 (D5): ingest is timed in isolation — the write-path
-                # cost is a report component (extractor vs retrieve vs
-                # reader vs judge attribution).
-                t_ingest = time.monotonic()
-                if ingest_mode == "v2":
-                    from tests.model_adapters import build_extractor_model
+            # #1786 (code-review F9 cycle 2): acquire-then-claim INSIDE the
+            # try — (a) the limiter slot is released by the outer finally even
+            # on a raise between acquire and the claim; (b) the flocked CAS
+            # re-reads the on-disk entry AFTER the wait, so a worker blocked
+            # on acquire no longer holds a live claim stamp while not working
+            # (a stale claim stolen + completed by another process reads as
+            # ``prior is None`` → claim fails → self-healing skip, never a
+            # duplicate ~25-min re-ingest). P2-1: the resume tier shares the
+            # limiter with R2 (released on completion/failure in the outer
+            # finally) — N eligible entries + workers=N must not launch N
+            # concurrent ~25-min re-ingests (retry-amplification,
+            # AWS REL05-BP03).
+            if _need_claim:
+                _REINGEST_LIMITER.acquire()
+                resume_semaphore_held = True
+                if not _claim_reattempt(checkpoint, qid, resume_attempts_cap):
+                    print(f"  [resume] {qid} re-attempt claimed by another "
+                          f"process — skipping", file=sys.stderr)
+                    return
+                resume_reattempt = True
+                print(f"  [resume] {qid} re-attempting transient failure "
+                      f"(--retry-failed)", file=sys.stderr)
+            while True:
+                try:
+                    sdk, cleanup = _make_question_sdk(
+                        db_uri=db_uri,
+                        namespace=question_graph_namespace(model, query_prompt, qid)
+                        if db_uri else None,
+                        work_dir=work_dir)
+                    try:
+                        _sdk_cleanup = cleanup
+                        # M7 (D5): ingest is timed in isolation — the write-path
+                        # cost is a report component (extractor vs retrieve vs
+                        # reader vs judge attribution).
+                        t_ingest = time.monotonic()
+                        if ingest_mode == "v2":
+                            from tests.model_adapters import build_extractor_model
 
-                    from .ingest_v2 import ingest_haystack_v2
-                    ingest_stats = ingest_haystack_v2(
-                        sdk, question, extractor_model,
-                        chunk_turns=chunk_turns,
-                        # Pilot #1549: session-parallel extraction within a
-                        # question (the LLM phase is the wall-clock dominant
-                        # cost). NOTE: the live ingest_haystack_v2 on main
-                        # shadows the parallel worker-factory path with a
-                        # sequential copy (pre-existing duplicate, tracked
-                        # separately — #1744), so workers currently fall
-                        # back to the shared extractor_model — which is
-                        # exactly what the fingerprint records.
-                        session_workers=session_workers,
-                        # M7 #1739 / #1742: the factory spec + tuning are
-                        # threaded in (never the run_main-local ``args``
-                        # closure — that was a latent NameError) and mirror
-                        # exactly what _build_cli_extractor_model
-                        # fingerprints: the workers serve the SAME config
-                        # the checkpoint records.
-                        model_factory=(
-                            (lambda: build_extractor_model(
-                                session_worker_model_spec or None,
-                                max_tokens=session_worker_max_tokens,
-                                temperature=session_worker_temperature))
-                            if session_workers > 1 else None))
-                else:
-                    ingest_stats = ingest_haystack(
-                        sdk, question, chunk_turns=chunk_turns)
-                ingest_latency_ms = round(
-                    (time.monotonic() - t_ingest) * 1000.0, 2)
-                # M7 (D3): the authoritative live graph pool size — the
-                # retrieval-pool denominator the methodology documents
-                # (single Cypher, no N+1).
-                pool_rows = sdk._get_proj().g.query(
-                    "MATCH (p:Point {lme_question_id:$q}) RETURN count(*)",
-                    params={"q": qid}).result_set
-                pool_size = pool_rows[0][0] if pool_rows else 0
-                ret = retrieve_for_question(
-                    sdk, question, ks=ks, top_k=top_k,
-                    retriever=retriever,
-                    max_context_tokens=max_context_tokens,
-                    max_chunks_per_session=max_chunks_per_session,
-                    tr_top_k=tr_top_k,
-                    tr_date_weight=tr_date_weight,
-                    tr_events=tr_events,
-                    rerank=rr["rerank_on"],
-                    rerank_model=rr["model"],
-                    rerank_pool=rr["rerank_pool"],
-                    per_session_cap=rr["per_session_cap"],
-                    mmr_lambda=rr["mmr_lambda"],
-                    # C1/C2 (#1745): reader-context item cap + evidence-
-                    # mark boost (OFF by default; the re-validation run
-                    # enables it via env/flag).
-                    context_item_cap=context_item_cap,
-                    evidence_boost=evidence_boost,
-                    evidence_boost_verbatim=evidence_boost_verbatim,
-                    evidence_boost_source=evidence_boost_source)
+                            from .ingest_v2 import ingest_haystack_v2
+                            ingest_stats = ingest_haystack_v2(
+                                sdk, question, extractor_model,
+                                chunk_turns=chunk_turns,
+                                # Pilot #1549: session-parallel extraction within a
+                                # question (the LLM phase is the wall-clock dominant
+                                # cost). NOTE: the live ingest_haystack_v2 on main
+                                # shadows the parallel worker-factory path with a
+                                # sequential copy (pre-existing duplicate, tracked
+                                # separately — #1744), so workers currently fall
+                                # back to the shared extractor_model — which is
+                                # exactly what the fingerprint records.
+                                session_workers=session_workers,
+                                # M7 #1739 / #1742: the factory spec + tuning are
+                                # threaded in (never the run_main-local ``args``
+                                # closure — that was a latent NameError) and mirror
+                                # exactly what _build_cli_extractor_model
+                                # fingerprints: the workers serve the SAME config
+                                # the checkpoint records.
+                                model_factory=(
+                                    (lambda: build_extractor_model(
+                                        session_worker_model_spec or None,
+                                        max_tokens=session_worker_max_tokens,
+                                        temperature=session_worker_temperature))
+                                    if session_workers > 1 else None),
+                                # #1786 (R1): the write-stage retry budget — the
+                                # SAME value the fingerprint records — + marker
+                                # arming (DISARMED during a --retry-failed resume
+                                # re-attempt: no resume-internal whole-question
+                                # retry budget, P1-1).
+                                ingest_write_retries=ingest_write_retries,
+                                write_marker_armed=not resume_reattempt)
+                        else:
+                            ingest_stats = ingest_haystack(
+                                sdk, question, chunk_turns=chunk_turns)
+                        ingest_latency_ms = round(
+                            (time.monotonic() - t_ingest) * 1000.0, 2)
+                        # M7 (D3): the authoritative live graph pool size — the
+                        # retrieval-pool denominator the methodology documents
+                        # (single Cypher, no N+1).
+                        pool_rows = sdk._get_proj().g.query(
+                            "MATCH (p:Point {lme_question_id:$q}) RETURN count(*)",
+                            params={"q": qid}).result_set
+                        pool_size = pool_rows[0][0] if pool_rows else 0
+                        ret = retrieve_for_question(
+                            sdk, question, ks=ks, top_k=top_k,
+                            retriever=retriever,
+                            max_context_tokens=max_context_tokens,
+                            max_chunks_per_session=max_chunks_per_session,
+                            tr_top_k=tr_top_k,
+                            tr_date_weight=tr_date_weight,
+                            tr_events=tr_events,
+                            rerank=rr["rerank_on"],
+                            rerank_model=rr["model"],
+                            rerank_pool=rr["rerank_pool"],
+                            per_session_cap=rr["per_session_cap"],
+                            mmr_lambda=rr["mmr_lambda"],
+                            # C1/C2 (#1745): reader-context item cap + evidence-
+                            # mark boost (OFF by default; the re-validation run
+                            # enables it via env/flag).
+                            context_item_cap=context_item_cap,
+                            evidence_boost=evidence_boost,
+                            evidence_boost_verbatim=evidence_boost_verbatim,
+                            evidence_boost_source=evidence_boost_source,
+                            # #1786 (R5): the eval's elevated HYBRID-arm
+                            # retrieval deadline via the existing seam (the
+                            # vector arm keeps VECTOR_TIMEOUT_MS=5000).
+                            retrieval_budget_ms=retrieval_budget_ms)
 
-                # #1349 retrieval-only: reader/judge never invoked — the
-                # outcome carries retrieval + breaker accounting only.
-                if retrieval_only:
-                    hypothesis = None
-                    label = None
-                    reader_ms = 0.0
-                    judge_ms = 0.0
-                else:
-                    _stage = "reader"
-                    t0 = time.monotonic()
-                    # A1 #1546 invariant: the reader receives question_type
-                    # ONLY. The _abs marker (question_id suffix) must never
-                    # cross — abstention is derived by the reader from the
-                    # evidence (rendered hits + dates), via the universal
-                    # partial-knowledge clause in system_prompt_for.
-                    hypothesis = _call_with_backoff(
-                        lambda: reader.answer(
-                            # R1 (#1540) D6: the reader consumes EXACTLY the
-                            # budget-capped rank-interleaved context the token
-                            # metric reports (was the full uncapped pool).
-                            context_hits=ret["context_points"],
-                            question=question["question"],
-                            question_date=question.get("question_date", "") or None,
-                            question_type=question.get("question_type", "") or None,
-                        ),
-                        what=f"reader for {qid}", retries=max_retries)
-                    reader_ms = (time.monotonic() - t0) * 1000.0
+                        # #1349 retrieval-only: reader/judge never invoked — the
+                        # outcome carries retrieval + breaker accounting only.
+                        if retrieval_only:
+                            hypothesis = None
+                            label = None
+                            reader_ms = 0.0
+                            judge_ms = 0.0
+                        else:
+                            _stage = "reader"
+                            t0 = time.monotonic()
+                            # A1 #1546 invariant: the reader receives question_type
+                            # ONLY. The _abs marker (question_id suffix) must never
+                            # cross — abstention is derived by the reader from the
+                            # evidence (rendered hits + dates), via the universal
+                            # partial-knowledge clause in system_prompt_for.
+                            hypothesis = _call_with_backoff(
+                                lambda _ret=ret: reader.answer(
+                                    # R1 (#1540) D6: the reader consumes EXACTLY the
+                                    # budget-capped rank-interleaved context the token
+                                    # metric reports (was the full uncapped pool).
+                                    context_hits=_ret["context_points"],
+                                    question=question["question"],
+                                    question_date=question.get("question_date", "") or None,
+                                    question_type=question.get("question_type", "") or None,
+                                ),
+                                what=f"reader for {qid}", retries=max_retries)
+                            reader_ms = (time.monotonic() - t0) * 1000.0
 
-                    _stage = "judge"
-                    t0 = time.monotonic()
-                    label = _call_with_backoff(
-                        lambda: judge.judge(
-                            question_type=question.get("question_type", ""),
-                            question=question["question"],
-                            answer=question.get("answer", ""),
-                            hypothesis=hypothesis,
-                            abstention=is_abstention(qid),
-                        ),
-                        what=f"judge for {qid}", retries=max_retries)
-                    judge_ms = (time.monotonic() - t0) * 1000.0
-            finally:
-                sdk.close()
-                with contextlib.suppress(Exception):
-                    _sdk_cleanup()
+                            _stage = "judge"
+                            t0 = time.monotonic()
+                            label = _call_with_backoff(
+                                lambda _hyp=hypothesis: judge.judge(
+                                    question_type=question.get("question_type", ""),
+                                    question=question["question"],
+                                    answer=question.get("answer", ""),
+                                    hypothesis=_hyp,
+                                    abstention=is_abstention(qid),
+                                ),
+                                what=f"judge for {qid}", retries=max_retries)
+                            judge_ms = (time.monotonic() - t0) * 1000.0
+                    finally:
+                        sdk.close()
+                        with contextlib.suppress(Exception):
+                            _sdk_cleanup()
 
-            # M7 (D4): evidence written = the ingest leg's own count
-            # (deterministic → evidence_turns; v2 → evidence_points);
-            # error_classes = ingest-stage classes + (later) the failure class.
-            ingest_errors = ingest_stats.get("errors") or []
-            evidence_written = (
-                ingest_stats.get("evidence_points", 0) if ingest_mode == "v2"
-                else ingest_stats.get("evidence_turns", 0))
-            outcome = {
-                "question_id": qid,
-                "question_type": question.get("question_type", ""),
-                "question_date": question.get("question_date", ""),
-                "label": label,
-                "hypothesis": hypothesis,
-                "ingest": ingest_stats,
-                "n_ingest_errors": len(ingest_errors),
-                "ingest_error_text": (ingest_errors or [None])[0],
-                # #1746 (D7): the per-question LLM telemetry + recovery
-                # counters — the report's warning-only truncation readout
-                # (criterion 3: no UNRECORDED truncation with valid=true).
-                "llm_calls": (ingest_stats.get("llm") or {}).get("calls", 0),
-                "llm_retries": (ingest_stats.get("llm") or {}).get("retries", 0),
-                "llm_truncated": (ingest_stats.get("llm") or {}).get("truncated", 0),
-                "recovery": ingest_stats.get("recovery", {}),
-                "session_recall@k": ret["session_recall@k"],
-                "turn_recall@k": ret["turn_recall@k"],
-                "evidence_recall@k": ret.get("evidence_recall@k"),
-                # R1 (#1540): the M6 raw-chunk containment view, wired
-                # end-to-end (T5's sweep collection has a defined source).
-                "chunk_evidence_recall@k": ret.get("chunk_evidence_recall@k"),
-                "context_tokens": ret["context_tokens"],
-                "context_point_count": ret["context_point_count"],
-                "retrieval_latency_ms": ret["retrieval_latency_ms"],
-                "reader_latency_ms": round(reader_ms, 2),
-                "judge_latency_ms": round(judge_ms, 2),
-                "total_ms": round((time.monotonic() - t_q_start) * 1000.0, 2),
-                # M7 (#1527, D1–D5): per-question validity + instrumentation
-                # (all persisted in the Layer-1 outcomes projection). M4
-                # (#1524, D4): ``error_classes`` is the ingest CENSUS dict
-                # (class → count, granular extractor vocabulary) — not a flat
-                # per-error list — so the run-level census rolls exact counts.
-                # ``valid`` is extraction integrity only (S15): reader/judge
-                # failures stay in the top-level ``failures`` list.
-                "valid": len(ingest_errors) == 0,
-                "error_classes": ingest_stats.get("error_census", {}),
-                "leg_mix": ret.get("match_source_counts"),
-                "leg_mix@k": ret.get("match_source_counts@k"),
-                "pool_size": pool_size,
-                "evidence_written": evidence_written,
-                "evidence_retrieved@k": ret.get("evidence_retrieved@k"),
-                "ingest_latency_ms": ingest_latency_ms,
-                # R3 (#1542) D3/D4: write-time embedding coverage + the
-                # per-leg trace (vector/fts/structural/fallback — E2E-1
-                # never-null leg-mix, recorded per question).
-                "points_total": ret.get("points_total"),
-                "points_embedded": ret.get("points_embedded"),
-                "embedding_coverage": ret.get("embedding_coverage"),
-                "legs": ret.get("legs"),
-                # R5 (#1544): the TR-constraint surface per question — the
-                # detected kind (TR only) + whether the window filter fell
-                # back to the unfiltered pool (never starve the reader).
-                "tr_constraint": ret.get("tr_constraint"),
-                "tr_window_fallback": ret.get("tr_window_fallback", False),
-                # C4 (#1745): the reader-surface evidence metric
-                # (context-level; the metric C1 actually moves).
-                "reader_evidence@k": ret.get("reader_evidence@k"),
-                # Task 0 (#1745): ranked ids + evidence-turn matches
-                # populated for BOTH arms (the pilot's context composition
-                # was unreconstructable — 0/50); ranked_ids_pre_boost is
-                # the C2 ablation surface (identical when the boost is
-                # off). The #1349 vector-arm gate metrics (ndcg@10/p@10/
-                # p@5) stay conditional on the vector arm's keys.
-                "ranked_ids": ret.get("ranked_ids"),
-                "ranked_ids_pre_boost": ret.get("ranked_ids_pre_boost"),
-                "evidence_turn_matches": ret.get("evidence_turn_matches"),
-                "evidence_boost": ret.get("evidence_boost"),
-                # R6 (#1545): the rerank pass + latency ride the outcome —
-                # they stay ABSENT on baseline outcomes (the projection in
-                # outcomes_to_report adds them conditionally).
-                **({"rerank_pass": ret["rerank_pass"],
-                    "rerank_latency_ms": ret.get("rerank_latency_ms", 0.0)}
-                   if "rerank_pass" in ret else {}),
-                # #1349 vector arm: gate metrics + breaker-open dropped marker.
-                **({"ndcg@10": ret["ndcg@10"],
-                    "p@10": ret["p@10"],
-                    "p@5": ret["p@5"]}
-                   if "ndcg@10" in ret else {}),
-            }
-            with _lock:
-                outcomes.append(outcome)
-                done[qid] = outcome
-        except VectorBreakerOpenError:
-            # #1349: vector-arm breaker drops are NOT failures — the question
-            # is marked breaker_open and excluded from the means (count
-            # surfaced in report["dropped"]). Never recall 0.
-            with _lock:
-                dropped_outcome = {
-                    "question_id": qid,
-                    "question_type": question.get("question_type", ""),
-                    "breaker_open": True,
-                    "dropped_reason": "breaker_open",
-                    "label": None,
-                    "hypothesis": None,
-                    "session_recall@k": {str(k): 0.0 for k in ks},
-                    "turn_recall@k": {str(k): 0.0 for k in ks},
-                    "ndcg@10": None, "p@10": None, "p@5": None,
-                }
-                outcomes.append(dropped_outcome)
-                done[qid] = dropped_outcome
-        except ModelEncodeFailedError:
-            # #1349: the graph has ZERO embedding-bearing points — empty
-            # recall is indistinguishable from a legit no-hit. ABORT the
-            # whole config run (never report empty recall as a result); the
-            # runner exits MODEL_ENCODE_FAILED_EXIT.
-            raise
-        except Exception as e:  # noqa: BLE001, RUF100
-            # M2 (#1523, D4): a fatal-class provider error mid-run means the
-            # key died (billing cap hit, revocation) — continuing would
-            # silently produce garbage questions. Abort the run instead of
-            # recording a per-question failure (E2E-2: no silent degradation).
-            # Transient-exhausted errors still record into ``failures`` and
-            # the run continues (existing behavior — the per-question
-            # isolation semantics are unchanged for transients).
-            if is_fatal(e):
-                raise FatalProviderError(where="run-loop", exc=e, qid=qid) from e
-            print(f"[longmem_eval] question {qid} FAILED (non-fatal, "
-                  f"continuing): {e!r}", file=sys.stderr)
-            with _lock:
-                failures.append({
-                    "question_id": qid,
-                    "question_type": question.get("question_type", ""),
-                    "error": repr(e),
-                    # M7 (D6): the P2-aligned eval error class, site-prefixed
-                    # (reader:retries_exhausted / judge:fatal / ingest:…).
-                    "error_class": eval_failure_class(e, site=_stage),
-                    "failed_at_utc": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
-                })
+                    # M7 (D4): evidence written = the ingest leg's own count
+                    # (deterministic → evidence_turns; v2 → evidence_points);
+                    # error_classes = ingest-stage classes + (later) the failure class.
+                    ingest_errors = ingest_stats.get("errors") or []
+                    evidence_written = (
+                        ingest_stats.get("evidence_points", 0) if ingest_mode == "v2"
+                        else ingest_stats.get("evidence_turns", 0))
+                    outcome = {
+                        "question_id": qid,
+                        "question_type": question.get("question_type", ""),
+                        "question_date": question.get("question_date", ""),
+                        "label": label,
+                        "hypothesis": hypothesis,
+                        "ingest": ingest_stats,
+                        "n_ingest_errors": len(ingest_errors),
+                        "ingest_error_text": (ingest_errors or [None])[0],
+                        # #1746 (D7): the per-question LLM telemetry + recovery
+                        # counters — the report's warning-only truncation readout
+                        # (criterion 3: no UNRECORDED truncation with valid=true).
+                        "llm_calls": (ingest_stats.get("llm") or {}).get("calls", 0),
+                        "llm_retries": (ingest_stats.get("llm") or {}).get("retries", 0),
+                        "llm_truncated": (ingest_stats.get("llm") or {}).get("truncated", 0),
+                        "recovery": ingest_stats.get("recovery", {}),
+                        "session_recall@k": ret["session_recall@k"],
+                        "turn_recall@k": ret["turn_recall@k"],
+                        "evidence_recall@k": ret.get("evidence_recall@k"),
+                        # R1 (#1540): the M6 raw-chunk containment view, wired
+                        # end-to-end (T5's sweep collection has a defined source).
+                        "chunk_evidence_recall@k": ret.get("chunk_evidence_recall@k"),
+                        "context_tokens": ret["context_tokens"],
+                        "context_point_count": ret["context_point_count"],
+                        "retrieval_latency_ms": ret["retrieval_latency_ms"],
+                        "reader_latency_ms": round(reader_ms, 2),
+                        "judge_latency_ms": round(judge_ms, 2),
+                        "total_ms": round((time.monotonic() - t_q_start) * 1000.0, 2),
+                        # M7 (#1527, D1–D5): per-question validity + instrumentation
+                        # (all persisted in the Layer-1 outcomes projection). M4
+                        # (#1524, D4): ``error_classes`` is the ingest CENSUS dict
+                        # (class → count, granular extractor vocabulary) — not a flat
+                        # per-error list — so the run-level census rolls exact counts.
+                        # ``valid`` is extraction integrity only (S15): reader/judge
+                        # failures stay in the top-level ``failures`` list.
+                        "valid": len(ingest_errors) == 0,
+                        "error_classes": ingest_stats.get("error_census", {}),
+                        "leg_mix": ret.get("match_source_counts"),
+                        "leg_mix@k": ret.get("match_source_counts@k"),
+                        "pool_size": pool_size,
+                        "evidence_written": evidence_written,
+                        "evidence_retrieved@k": ret.get("evidence_retrieved@k"),
+                        "ingest_latency_ms": ingest_latency_ms,
+                        # R3 (#1542) D3/D4: write-time embedding coverage + the
+                        # per-leg trace (vector/fts/structural/fallback — E2E-1
+                        # never-null leg-mix, recorded per question).
+                        "points_total": ret.get("points_total"),
+                        "points_embedded": ret.get("points_embedded"),
+                        "embedding_coverage": ret.get("embedding_coverage"),
+                        "legs": ret.get("legs"),
+                        # R5 (#1544): the TR-constraint surface per question — the
+                        # detected kind (TR only) + whether the window filter fell
+                        # back to the unfiltered pool (never starve the reader).
+                        "tr_constraint": ret.get("tr_constraint"),
+                        "tr_window_fallback": ret.get("tr_window_fallback", False),
+                        # C4 (#1745): the reader-surface evidence metric
+                        # (context-level; the metric C1 actually moves).
+                        "reader_evidence@k": ret.get("reader_evidence@k"),
+                        # Task 0 (#1745): ranked ids + evidence-turn matches
+                        # populated for BOTH arms (the pilot's context composition
+                        # was unreconstructable — 0/50); ranked_ids_pre_boost is
+                        # the C2 ablation surface (identical when the boost is
+                        # off). The #1349 vector-arm gate metrics (ndcg@10/p@10/
+                        # p@5) stay conditional on the vector arm's keys.
+                        "ranked_ids": ret.get("ranked_ids"),
+                        "ranked_ids_pre_boost": ret.get("ranked_ids_pre_boost"),
+                        "evidence_turn_matches": ret.get("evidence_turn_matches"),
+                        "evidence_boost": ret.get("evidence_boost"),
+                        # R6 (#1545): the rerank pass + latency ride the outcome —
+                        # they stay ABSENT on baseline outcomes (the projection in
+                        # outcomes_to_report adds them conditionally).
+                        **({"rerank_pass": ret["rerank_pass"],
+                            "rerank_latency_ms": ret.get("rerank_latency_ms", 0.0)}
+                           if "rerank_pass" in ret else {}),
+                        # #1349 vector arm: gate metrics + breaker-open dropped marker.
+                        **({"ndcg@10": ret["ndcg@10"],
+                            "p@10": ret["p@10"],
+                            "p@5": ret["p@5"]}
+                           if "ndcg@10" in ret else {}),
+                        # #1786 (Task 1 Step 5): the two distinct per-question
+                        # recovery counters — ingest_retries (write-stage retry
+                        # count, from the ingest stats) and whole_question_retries
+                        # (R2 count, 0 or 1). The E2E asserts the R2 counter,
+                        # NEVER ingest_retries, as the R2-fired signal (P1-4).
+                        "ingest_retries": ingest_stats.get("ingest_retries", 0),
+                        "whole_question_retries": r2_attempted,
+                    }
+                    with _lock:
+                        outcomes.append(outcome)
+                        done[qid] = outcome
+                        if resume_reattempt:
+                            # remove-on-success IN ONE flocked write (P2-10) —
+                            # the trailing _save_checkpoint carries the
+                            # remove_failures tombstone.
+                            failures[:] = [f for f in failures
+                                           if f.get("question_id") != qid]
+                    # #1786 (code-review F3): the save is NOT done here — it
+                    # falls through to the SAME trailing ``with _lock:
+                    # _save_checkpoint(...)`` as the failure path so the
+                    # snapshot of ``done``/``failures`` happens UNDER the lock
+                    # (the old in-try save iterated ``done`` unlocked → a
+                    # concurrent worker's append raised RuntimeError → the
+                    # generic handler fabricated a bogus failure entry for an
+                    # already-succeeded qid).
+                    _save_remove_failures = [qid] if resume_reattempt else None
+                    break
+                except VectorBreakerOpenError:
+                    # #1349: vector-arm breaker drops are NOT failures — the
+                    # question is marked breaker_open and excluded from the
+                    # means (count surfaced in report["dropped"]). Never
+                    # recall 0.
+                    with _lock:
+                        dropped_outcome = {
+                            "question_id": qid,
+                            "question_type": question.get("question_type", ""),
+                            "breaker_open": True,
+                            "dropped_reason": "breaker_open",
+                            "label": None,
+                            "hypothesis": None,
+                            "session_recall@k": {str(k): 0.0 for k in ks},
+                            "turn_recall@k": {str(k): 0.0 for k in ks},
+                            "ndcg@10": None, "p@10": None, "p@5": None,
+                        }
+                        outcomes.append(dropped_outcome)
+                        done[qid] = dropped_outcome
+                        if resume_reattempt:
+                            # #1786 (review P2): a --retry-failed re-attempt
+                            # that ends breaker-open must NOT leave the
+                            # failure entry (with its live claim stamp)
+                            # behind — the qid is now in ``done`` and would
+                            # otherwise double-count (outcome + n_failed)
+                            # and the stale entry would never be cleaned
+                            # (resume short-circuits on done). Purge +
+                            # tombstone in ONE flocked write.
+                            failures[:] = [f for f in failures
+                                           if f.get("question_id") != qid]
+                    # #1786 (code-review F3): same fall-through as the
+                    # success path — the trailing save snapshots under
+                    # ``_lock``; a save-time CheckpointStaleError (corrupt
+                    # base quarantine) must abort loudly, never become a
+                    # per-question failure entry.
+                    _save_remove_failures = [qid] if resume_reattempt else None
+                    break
+                except ModelEncodeFailedError:
+                    # #1349: the graph has ZERO embedding-bearing points — empty
+                    # recall is indistinguishable from a legit no-hit. ABORT the
+                    # whole config run (never report empty recall as a result); the
+                    # runner exits MODEL_ENCODE_FAILED_EXIT.
+                    raise
+                except Exception as e:  # noqa: BLE001, RUF100
+                    # M2 (#1523, D4): a fatal-class provider error mid-run means the
+                    # key died (billing cap hit, revocation) — continuing would
+                    # silently produce garbage questions. Abort the run instead of
+                    # recording a per-question failure (E2E-2: no silent degradation).
+                    # Transient-exhausted errors still record into ``failures`` and
+                    # the run continues (existing behavior — the per-question
+                    # isolation semantics are unchanged for transients). The
+                    # predicate-FALSE re-raise (never sentinel-wrapped) keeps the
+                    # abort path seeing the RAW fatal exception.
+                    if is_fatal(e):
+                        raise FatalProviderError(where="run-loop", exc=e, qid=qid) from e
+                    # #1786: unwrap the write-stage sentinel FIRST — error /
+                    # error_class / retryable are ALL derived from the INNER
+                    # exception (evaluating the predicate on the sentinel itself
+                    # would persist retryable=False → permanent loss).
+                    inner = (e.original
+                             if isinstance(e, WriteStageRetriesExhausted) else e)
+                    marker = (isinstance(e, WriteStageRetriesExhausted)
+                              and retryable_transient(inner))
+                    if r2_retained is None and marker:
+                        r2_retained = inner
+                    # R2 (Task 1 Step 4): the whole-question last-resort retry —
+                    # ONLY on a write-stage-exhausted marker from the INITIAL
+                    # attempt (never a reader/judge exhaustion, never a resume
+                    # re-attempt, never twice). Fires AFTER the is_fatal check —
+                    # a fatal-class exception aborts immediately (a dead API key
+                    # must never re-burn ~25 min) and creates NO failure entry.
+                    if (marker and not resume_reattempt and r2_attempted == 0
+                            and ingest_question_retries > 0):
+                        r2_attempted += 1
+                        print(f"[longmem_eval] question {qid} write-stage "
+                              f"retries exhausted — whole-question retry "
+                              f"{r2_attempted}/{ingest_question_retries} "
+                              f"(jittered start ≤{R2_JITTER_MAX_S:.0f}s)",
+                              file=sys.stderr)
+                        if not r2_semaphore_held:
+                            _REINGEST_LIMITER.acquire()
+                            r2_semaphore_held = True
+                        # Full-jitter start spread [0, 60]s — the REAL
+                        # anti-amplification bound is the semaphore (≤ 2
+                        # concurrent ~25-min re-ingests); the jitter only
+                        # spreads start times so exhausted workers do not
+                        # re-burn into a just-recovered server in lockstep.
+                        # R2's OWN write-stage retry window (~36 s) absorbs
+                        # a pause tail — a mid-pause start is NOT burned.
+                        time.sleep(random.uniform(0.0, R2_JITTER_MAX_S))
+                        _stage = "ingest"  # stage reset at retry start
+                        continue
+                    print(f"[longmem_eval] question {qid} FAILED (non-fatal, "
+                          f"continuing): {e!r}", file=sys.stderr)
+                    # Tier identity (P2-1): the RETAINED original write-stage
+                    # exception grades the R2-failure entry even when R2
+                    # failed at a NON-write stage (a reader/judge transient
+                    # during R2's re-extraction has NO sentinel and would
+                    # otherwise grade reader:/judge:retries_exhausted — the
+                    # exact permanent-exclusion bug this pin targets).
+                    if r2_retained is not None:
+                        tier_exc = r2_retained
+                        entry_stage = "ingest"
+                    else:
+                        tier_exc = inner
+                        entry_stage = _stage
+
+                    with _lock:
+                        # Counter semantics (P1-6): the in-run R2 DOES
+                        # increment the persisted counter (R2-exhausted
+                        # entry starts at attempts=1); a provider transient
+                        # that never entered the write-stage loop starts at
+                        # attempts=0; each failed --retry-failed re-attempt
+                        # increments from the ON-DISK prior (never the stale
+                        # in-memory copy; never at claim — a kill -9 mid-
+                        # attempt leaves the counter untouched).
+                        entry = _upsert_failure(
+                            checkpoint, qid,
+                            partial(_build_failure_entry, qid,
+                                    question.get("question_type", ""),
+                                    tier_exc, entry_stage, r2_attempted,
+                                    resume_reattempt),
+                            fingerprint=fingerprint, run_key=run_key,
+                            surface=surface, retriever=retriever,
+                            model=model, prompt=query_prompt)
+                        failures[:] = (
+                            [f for f in failures
+                             if f.get("question_id") != qid] + [entry])
+                    break
+        finally:
+            if r2_semaphore_held:
+                _REINGEST_LIMITER.release()
+            if resume_semaphore_held:
+                _REINGEST_LIMITER.release()
         with _lock:
             _save_checkpoint(
                 checkpoint, list(done.values()), failures, fingerprint,
                 run_key=run_key, surface=surface, retriever=retriever,
-                model=model, prompt=query_prompt)
+                model=model, prompt=query_prompt,
+                remove_failures=_save_remove_failures)
 
     # ── dispatch: sequential (workers=1) or a thread pool ──
     if workers <= 1:
@@ -1980,14 +2758,34 @@ def run_evaluation(
                 evidence_boost_source
                 if evidence_boost_source is not None
                 else DEFAULT_EVIDENCE_BOOST_SOURCE),
+            # #1786 (Task 2 Step 5): the recoverable-class resume-mode flag
+            # + the write-path retry knobs recorded in the methodology so
+            # the revalidation comparison can distinguish retried outcomes
+            # (the flag is NOT fingerprinted — a recorded resume-mode;
+            # the knobs are fingerprinted AND recorded here for truthfulness).
+            "retry_failed": bool(retry_failed),
+            "ingest_write_retries": ingest_write_retries,
+            "ingest_question_retries": ingest_question_retries,
+            "resume_attempts_cap": resume_attempts_cap,
         },
         # R5 (#1544) D7: TR knob values recorded verbatim in the
         # methodology (the run protocol step-2/6 knob sweeps consume them;
         # tr_top_k and R1's context cap are complementary flood controls).
+        # #1786 (R5): the per-arm retrieval budgets ride the same channel —
+        # methodology.retrieval_config.hybrid_budget_ms (the eval's elevated
+        # deadline via the _elevated_timeout_ms seam; recorded as the SDK
+        # default when the caller did not elevate) + vector_budget_ms (the
+        # SDK-pinned VECTOR_TIMEOUT_MS — NOT eval-configurable).
         r5_knobs={
             "tr_top_k": tr_top_k,
             "tr_date_weight": tr_date_weight,
             "tr_events": tr_events,
+            "retrieval_config": {
+                "hybrid_budget_ms": (retrieval_budget_ms
+                                      if retrieval_budget_ms is not None
+                                      else DEFAULT_RETRIEVAL_BUDGET_MS),
+                "vector_budget_ms": VECTOR_TIMEOUT_MS,
+            },
         },
         # R6 (#1545): the effective rerank config + pre-warm outcome → the
         # report's rerank block (config + aggregates). None on baseline runs
@@ -2097,6 +2895,11 @@ def outcomes_to_report(
                 "valid", "error_classes", "leg_mix", "leg_mix@k",
                 "pool_size", "evidence_written", "evidence_retrieved@k",
                 "ingest_latency_ms",
+                # #1786 (Task 1 Step 5): the per-question recovery counters
+                # (ingest_retries = write-stage retry count; whole_question_
+                # retries = the R2 count, 0 or 1 — read via o.get so a
+                # pre-feature checkpoint resumes without KeyError).
+                "ingest_retries", "whole_question_retries",
                 # R3 (#1542) D3/D4: dense-leg observability — read via
                 # o.get so a pre-R3 checkpoint resumes with the defaults
                 # (coverage keys → None, legs → []) instead of KeyError.
@@ -2470,7 +3273,11 @@ def _build_parser() -> argparse.ArgumentParser:
                         "Each question runs in its own isolated graph; the "
                         "practical ceiling is provider rate limits + machine "
                         "memory (each worker spawns an embedded redislite "
-                        "server). 8-16 on a quiet machine")
+                        "server). 8-16 on a quiet machine; #1786 (R7): ≤ 3 "
+                        "recommended for --db runs on contended hosts — the "
+                        "eval ingest is itself a load generator (5 workers × "
+                        "~25 min ingest per question on a shared FalkorDB "
+                        "container stalls the write path)")
     # R6 (#1545): the rerank layer — tri-state --rerank/--no-rerank (None
     # default so the TORTOISE_LME_RERANK env still applies), pool/cap/lambda
     # validated at parse time (boundary values accepted; the env path is
@@ -2507,6 +3314,18 @@ def _build_parser() -> argparse.ArgumentParser:
                    help="partial-results state file (JSON) for error isolation "
                         "+ resume: completed/failed questions are checkpointed "
                         "after every question and skipped on re-run")
+    p.add_argument("--retry-failed", action="store_true",
+                   help="#1786 (R3): on resume, RE-ATTEMPT transient-failed "
+                        "questions instead of skipping them — only "
+                        "ingest:retries_exhausted failure entries with "
+                        "retryable=true (or a legacy transport repr) and "
+                        f"attempts < {RESUME_ATTEMPTS_CAP}; attempts are "
+                        "bounded across resumes (the in-run whole-question "
+                        "retry counts as the first); on success the failure "
+                        "entry is removed in one flocked write and the report "
+                        "grades the qid clean. NOT fingerprinted (a recorded "
+                        "resume-mode — the revalidation protocol sets it); "
+                        "default off for back-compat")
     p.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES,
                    help="per-question LLM-call retries with exponential backoff "
                         "before the question is recorded as failed (default 3)")
@@ -3034,6 +3853,18 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 query_prompt=args.query_prompt,
                 retrieval_only=args.retrieval_only,
                 db_uri=db_uri,
+                # #1786 (R3/R1/R2/R5): the write-path retry budget + the
+                # --retry-failed resume mode (default off) + the eval's
+                # elevated HYBRID-arm retrieval deadline (1500 ms via the
+                # _elevated_timeout_ms seam — the vector arm keeps
+                # VECTOR_TIMEOUT_MS=5000). All four fingerprint keys stale
+                # pre-feature checkpoints (CheckpointStaleError — the SAFE
+                # direction; Task 8 requires a fresh checkpoint anyway).
+                retry_failed=args.retry_failed,
+                ingest_write_retries=INGEST_WRITE_RETRIES,
+                ingest_question_retries=INGEST_QUESTION_RETRIES,
+                resume_attempts_cap=RESUME_ATTEMPTS_CAP,
+                retrieval_budget_ms=EVAL_RETRIEVAL_BUDGET_MS,
             )
         except FatalProviderError as e:
             print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "
