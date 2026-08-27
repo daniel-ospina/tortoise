@@ -422,6 +422,40 @@ class TestMintPathOutage503:
         assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
 
 
+class TestResolveLegOutage503:
+    """#1737: the resolve-leg (api_keys read) shares the control-plane
+    outage class — a RuntimeError escaping the resolve must degrade to 503
+    control_plane_unavailable, never the raw 500 "Auth error" (the mint-path
+    map landed in #1719; this closes the resolve-leg gap on the SAME
+    endpoint, which previously 500'd depending on which query failed first).
+    """
+
+    def test_resolve_leg_outage_503(self, client, fake, monkeypatch):
+        """The REAL failure class: resolve_api_key (inside the shared
+        _get_current_team_supabase) raises RuntimeError on a control-plane
+        outage; the function converts it to HTTPException(500, 'Auth error')
+        internally, and the call-site map must turn that into 503
+        control_plane_unavailable — not the raw 500 'Auth error'."""
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        # Patch the inner resolve seam (what _get_current_team_supabase
+        # calls) so the REAL conversion path (RuntimeError → 500
+        # "Auth error") is exercised, then the call-site 500→503 map fires.
+        def _boom_resolve(cp, token):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(api_keys): HTTP 400")
+
+        monkeypatch.setattr(sc, "resolve_api_key", _boom_resolve)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
+        assert "temporarily unavailable" in body["detail"]["message"].lower()
+
+
 class TestRateLimitChargePoints:
     """#1719 Task 5: server faults must not consume the 5/hr login bucket —
     charge only on terminal 200/401/403 (server decisions), never on 5xx."""
