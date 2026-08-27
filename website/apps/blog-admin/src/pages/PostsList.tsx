@@ -245,7 +245,7 @@ function PostRow({ post, showQueueKind }: { post: BlogPostRow; showQueueKind?: b
         <div className="flex items-center gap-2">
           <button
             className="font-medium text-left hover:text-primary transition-colors"
-            onClick={() => navigate(`#/edit/${post.id}`)}
+            onClick={() => { if (post.status !== 'archived') navigate(`#/edit/${post.id}`); }}
           >
             {post.title}
           </button>

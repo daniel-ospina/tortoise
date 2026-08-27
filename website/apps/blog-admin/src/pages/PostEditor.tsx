@@ -193,6 +193,7 @@ export default function PostEditor() {
 
   /** Inline image: file picker → upload to blog-images/{slug}/ → insert. */
   async function handleInlineImageUpload() {
+    if (isArchived) return; // terminal — read-only
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = 'image/jpeg,image/png,image/webp';
@@ -214,6 +215,7 @@ export default function PostEditor() {
   const [uploadingCover, setUploadingCover] = useState(false);
 
   async function handleCoverUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    if (isArchived) return; // terminal — read-only
     const file = e.target.files?.[0];
     if (!file) return;
     e.target.value = ''; // allow re-selecting the same file
@@ -231,6 +233,7 @@ export default function PostEditor() {
   }
 
   async function handleRemoveCover() {
+    if (isArchived) return; // terminal — read-only
     if (!form.cover_image_url) return;
     try {
       await deleteBlogImage(form.cover_image_url);
@@ -405,7 +408,7 @@ export default function PostEditor() {
             variant="ghost"
             size="sm"
             onClick={() => clearNoteMutation.mutate()}
-            disabled={clearNoteMutation.isPending}
+            disabled={clearNoteMutation.isPending || isArchived}
             title="Dismiss this note"
           >
             Dismiss
@@ -517,6 +520,7 @@ export default function PostEditor() {
                 <button
                   type="button"
                   onClick={handleRemoveCover}
+                  disabled={isArchived}
                   className="absolute top-2 right-2 p-1 bg-destructive text-white rounded-full hover:bg-destructive/90 transition-colors"
                   aria-label="Remove cover"
                 >
@@ -533,6 +537,7 @@ export default function PostEditor() {
                 type="file"
                 accept="image/jpeg,image/png,image/webp"
                 onChange={handleCoverUpload}
+                disabled={isArchived}
                 className="hidden"
                 id="cover-image-upload"
               />
