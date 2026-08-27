@@ -199,13 +199,11 @@
   cursor: grabbing;
 }
 
-/* Drop indicator — horizontal line between blocks for reorder */
-.block-drop-indicator-horizontal {
-  height: 2px;
-  background: #06b6d4;
+/* Drop indicator — rendered by @tiptap/extension-dropcursor (block reorder).
+   The extension positions/sizes inline; we just round the corners. */
+.prosemirror-dropcursor-block,
+.prosemirror-dropcursor-inline {
   border-radius: 1px;
-  margin: -1px 0;
-  pointer-events: none;
 }
 
 /* Block context menu (shown on handle click) */

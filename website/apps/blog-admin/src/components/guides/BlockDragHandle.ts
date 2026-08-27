@@ -159,8 +159,6 @@ export const BlockDragHandle = Extension.create({
     // Set on mousedown (before dragstart) so the DOM rebuild from setting
     // NodeSelection is complete before the browser starts the drag.
     let dragFromPos: number | null = null;
-    // Distinguishes click (show menu) from drag (reorder).
-    let didDrag = false;
 
     return [
       new Plugin({
@@ -199,7 +197,6 @@ export const BlockDragHandle = Extension.create({
 
               // Set NodeSelection NOW, before dragstart fires.
               dragFromPos = blockPos;
-              didDrag = false;
               removeBlockMenu();
               view.dispatch(
                 view.state.tr.setSelection(NodeSelection.create(view.state.doc, blockPos)),
@@ -210,10 +207,10 @@ export const BlockDragHandle = Extension.create({
               // the handle DOM after the NodeSelection dispatch above.
               const onMouseUp = () => {
                 document.removeEventListener('mouseup', onMouseUp);
-                if (!didDrag && dragFromPos === blockPos) {
+                if (dragFromPos === blockPos) {
                   showBlockMenu(view, blockPos);
                 }
-                if (!didDrag) dragFromPos = null;
+                dragFromPos = null;
               };
               document.addEventListener('mouseup', onMouseUp);
 

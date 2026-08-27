@@ -25,15 +25,23 @@ import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Card } from '@/components/ui/card';
 import { Switch } from '@/components/ui/switch';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Badge } from '@/components/ui/badge';
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel,
+} from '@/components/ui/alert-dialog';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { useAuth } from '@/hooks/useAuth';
 import { useHashRoute, navigate } from '@/hooks/useHashRoute';
+import { wasAbandoned } from '@/lib/unsaved-guard';
 import {
-  getPost, createPost, updatePost, uploadBlogImage, deleteBlogImage,
+  getPost, uploadBlogImage, deleteBlogImage, updatePost,
+  isValidSlug, tagsError,
   type BlogPostRow,
 } from '@/lib/blog-api';
+import { createSaveHandler } from '@/lib/save';
+import { setDirty } from '@/lib/unsaved-guard';
 import { buildEditorExtensions, editorToMarkdown } from '@/lib/markdown';
 import { BlogEditorToolbar } from '@/components/guides/BlogEditorToolbar';
 
@@ -45,7 +53,6 @@ interface PostFormData {
   tags: string;
   meta_title: string;
   meta_description: string;
-  status: 'draft' | 'published';
   hold_for_review: boolean;
 }
 
@@ -57,11 +64,8 @@ const INITIAL_FORM: PostFormData = {
   tags: '',
   meta_title: '',
   meta_description: '',
-  status: 'draft',
   hold_for_review: false,
 };
-
-const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 function slugify(text: string): string {
   return text
@@ -75,6 +79,15 @@ function slugify(text: string): string {
     .slice(0, 100);
 }
 
+/** Read-only status badge synced from the current row (the save buttons are the status controls). */
+function statusBadge(status: BlogPostRow['status']) {
+  switch (status) {
+    case 'published': return <Badge variant="default">Published</Badge>;
+    case 'draft': return <Badge variant="secondary">Draft</Badge>;
+    case 'archived': return <Badge variant="outline">Archived</Badge>;
+  }
+}
+
 export default function PostEditor() {
   const { segments } = useHashRoute();
   const isNew = segments[0] !== 'edit';
@@ -86,7 +99,10 @@ export default function PostEditor() {
   const [form, setForm] = useState<PostFormData>(INITIAL_FORM);
   const [saving, setSaving] = useState(false);
   const [inTable, setInTable] = useState(false);
+  const [confirmUnpublish, setConfirmUnpublish] = useState(false);
   const slugTouched = useRef(false);
+  // Hydration setContent must not mark the post dirty.
+  const ignoreDirtyRef = useRef(true);
 
   // TipTap editor (markdown import/export via tiptap-markdown)
   const editor = useEditor({
@@ -97,7 +113,17 @@ export default function PostEditor() {
     onTransaction: ({ editor: e }) => {
       setInTable(e.isActive('table'));
     },
+    onUpdate: () => {
+      if (!ignoreDirtyRef.current) setDirty(true);
+    },
   });
+
+  // Refs mirror the CURRENT render's form/editor so the save mutation reads
+  // state at execution time, never from a stale closure (PR #1818 P2).
+  const formRef = useRef(form);
+  formRef.current = form;
+  const editorRef = useRef(editor);
+  editorRef.current = editor;
 
   // Load existing post
   const { data: existingPost, isLoading: loadingPost } = useQuery({
@@ -122,7 +148,6 @@ export default function PostEditor() {
       tags: (existingPost.tags || []).join(', '),
       meta_title: existingPost.meta_title || '',
       meta_description: existingPost.meta_description || '',
-      status: existingPost.status === 'published' ? 'published' : 'draft',
       hold_for_review: existingPost.hold_for_review || false,
     });
     slugTouched.current = true;
@@ -134,10 +159,16 @@ export default function PostEditor() {
     if (postHydrated && editor && existingPost) {
       editor.commands.setContent(existingPost.body || '');
     }
+    if (postHydrated) ignoreDirtyRef.current = false;
     // Run once when hydration just flipped — body updates from background
     // refetches must NOT overwrite user edits.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [postHydrated]);
+
+  // Clear the shared dirty flag when the editor unmounts (route change completes).
+  useEffect(() => {
+    return () => setDirty(false);
+  }, []);
 
   // Auto-slug from title (only on new posts with untouched slug)
   useEffect(() => {
@@ -149,6 +180,7 @@ export default function PostEditor() {
 
   const updateField = useCallback((field: keyof PostFormData, value: PostFormData[keyof PostFormData]) => {
     setForm(prev => ({ ...prev, [field]: value }));
+    setDirty(true);
   }, []);
 
   // ── Image uploads ────────────────────────────────────────────────────────
@@ -205,60 +237,25 @@ export default function PostEditor() {
   // ── Save ─────────────────────────────────────────────────────────────────
 
   const saveMutation = useMutation({
-    mutationFn: async (mode: 'draft' | 'publish') => {
-      if (!editor) throw new Error('Editor not ready');
+    mutationFn: (mode: 'draft' | 'publish') => {
       if (!session?.user?.id) throw new Error('No session');
-
-      const body = editorToMarkdown(editor);
-      const tags = form.tags
-        .split(',')
-        .map(t => t.trim())
-        .filter(Boolean);
-
-      const record: Partial<BlogPostRow> = {
-        title: form.title,
-        slug: form.slug,
-        body,
-        excerpt: form.excerpt.trim() || null,
-        cover_image_url: form.cover_image_url || null,
-        tags,
-        meta_title: form.meta_title.trim() || null,
-        meta_description: form.meta_description.trim() || null,
-        hold_for_review: form.hold_for_review,
-      };
-
-      if (mode === 'publish') {
-        record.status = 'published';
-        record.published_at = new Date().toISOString();
-        record.published_by = session.user.id;
-        // Republish semantics (W2): a publish always re-enters the review
-        // queue (reviewed_at=NULL) — never silently pre-reviewed.
-        record.reviewed_by = null;
-        record.reviewed_at = null;
-      } else {
-        // Save as draft. If the post was published this is an unpublish —
-        // the caller confirms first (human gate, plan W2).
-        record.status = 'draft';
-        record.published_at = null;
-        record.published_by = null;
-        record.reviewed_by = null;
-        record.reviewed_at = null;
-      }
-
-      if (isNew) {
-        record.created_by = session.user.id;
-        const created = await createPost(record);
-        return created.id;
-      }
-      await updatePost(id!, record);
-      return id!;
+      // Reads the CURRENT form + editor body via refs at execution time
+      // (stale-closure guard).
+      return createSaveHandler(() => ({
+        form: formRef.current,
+        editorBody: editorRef.current ? editorToMarkdown(editorRef.current) : '',
+        userId: session.user.id,
+        isNew,
+        id,
+      }))(mode);
     },
     onSuccess: (savedId) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'posts'] });
       queryClient.invalidateQueries({ queryKey: ['admin', 'post', savedId] });
       toast.success(isNew ? 'Post created' : 'Post saved');
+      setDirty(false);
       if (isNew) {
-        navigate(`#/edit/${savedId}`);
+        if (!wasAbandoned()) navigate(`#/edit/${savedId}`);
       }
     },
     onError: (err) => {
@@ -279,7 +276,7 @@ export default function PostEditor() {
       toast.error('Slug is required');
       return false;
     }
-    if (!SLUG_RE.test(form.slug) || form.slug.length > 100) {
+    if (!isValidSlug(form.slug)) {
       toast.error('Slug must be lowercase letters/numbers separated by dashes (max 100 chars)');
       return false;
     }
@@ -290,23 +287,33 @@ export default function PostEditor() {
     return true;
   }
 
-  async function handleSave(mode: 'draft' | 'publish') {
-    if (!validateForm()) return;
-
-    // Human gate: saving a published post as draft unpublishes it (W2).
-    if (mode === 'draft' && existingPost?.status === 'published') {
-      const ok = window.confirm(
-        'This post is currently published. Saving as draft will UNPUBLISH it and remove it from the public blog. Continue?',
-      );
-      if (!ok) return;
-    }
-
+  async function doSave(mode: 'draft' | 'publish') {
     setSaving(true);
     try {
       await saveMutation.mutateAsync(mode);
     } finally {
       setSaving(false);
     }
+  }
+
+  async function handleSave(mode: 'draft' | 'publish') {
+    if (!validateForm()) return;
+
+    // Client-side tag cap — matches the API contract (max 10).
+    const tagErr = tagsError(form.tags);
+    if (tagErr) {
+      toast.error(tagErr);
+      return;
+    }
+
+    // Human gate: saving a published post as draft unpublishes it (W2).
+    // Confirmed via AlertDialog (not window.confirm).
+    if (mode === 'draft' && existingPost?.status === 'published') {
+      setConfirmUnpublish(true);
+      return;
+    }
+
+    await doSave(mode);
   }
 
   /** Clear a request-changes note after addressing it (completes W2 loop). */
@@ -345,7 +352,7 @@ export default function PostEditor() {
       {/* Header */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-3">
-          <Button variant="ghost" size="icon" onClick={navigateBack}>
+          <Button variant="ghost" size="icon" onClick={navigateBack} aria-label="Back to posts">
             <ArrowLeft className="w-5 h-5" />
           </Button>
           <h1 className="text-xl font-bold font-serif">{isNew ? 'New Post' : 'Edit Post'}</h1>
@@ -495,7 +502,7 @@ export default function PostEditor() {
                   type="button"
                   onClick={handleRemoveCover}
                   className="absolute top-2 right-2 p-1 bg-destructive text-white rounded-full hover:bg-destructive/90 transition-colors"
-                  title="Remove cover"
+                  aria-label="Remove cover"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -531,18 +538,11 @@ export default function PostEditor() {
           <Card className="p-4 space-y-4 rounded-xl">
             <div className="flex items-center justify-between">
               <Label htmlFor="status">Status</Label>
-              <Select
-                value={form.status}
-                onValueChange={(v: 'draft' | 'published') => updateField('status', v)}
-              >
-                <SelectTrigger id="status" className="w-36 h-8">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="draft">Draft</SelectItem>
-                  <SelectItem value="published">Published</SelectItem>
-                </SelectContent>
-              </Select>
+              {/* Read-only — Save-as-draft / Publish buttons are the status controls */}
+              <div className="flex items-center gap-2">
+                {statusBadge(existingPost?.status ?? 'draft')}
+                {form.hold_for_review && <Badge variant="warning">Held</Badge>}
+              </div>
             </div>
             <div className="flex items-center justify-between">
               <div>
@@ -555,7 +555,7 @@ export default function PostEditor() {
                 onCheckedChange={v => updateField('hold_for_review', v)}
               />
             </div>
-            {form.status === 'published' && existingPost?.slug && (
+            {(existingPost?.status ?? 'draft') === 'published' && existingPost?.slug && (
               <a
                 href={`https://tortoise.premiselabs.co/blog/${existingPost.slug}`}
                 target="_blank"
@@ -565,12 +565,36 @@ export default function PostEditor() {
                 https://tortoise.premiselabs.co/blog/{existingPost.slug}
               </a>
             )}
-            {form.status === 'draft' && (
+            {(existingPost?.status ?? 'draft') === 'draft' && (
               <p className="text-xs text-muted-foreground mt-1">Draft — not visible to the public blog</p>
             )}
           </Card>
         </div>
       </div>
+
+      {/* Unpublish human gate (W2) — AlertDialog replaces the native confirm */}
+      <AlertDialog open={confirmUnpublish} onOpenChange={setConfirmUnpublish}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Unpublish this post?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This post is currently published. Saving as draft will UNPUBLISH it and remove it from the public blog. Continue?
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive/20 text-destructive border border-destructive/40 hover:bg-destructive/30"
+              onClick={() => {
+                setConfirmUnpublish(false);
+                void doSave('draft');
+              }}
+            >
+              Unpublish & save as draft
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

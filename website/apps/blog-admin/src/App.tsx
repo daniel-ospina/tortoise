@@ -10,9 +10,16 @@
  * Routes (hash-based): #/ list · #/new editor · #/edit/:id editor · #/audit.
  */
 
+import { useEffect, useRef, useState } from 'react';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import {
+  AlertDialog, AlertDialogContent, AlertDialogHeader, AlertDialogTitle,
+  AlertDialogDescription, AlertDialogFooter, AlertDialogAction, AlertDialogCancel,
+} from '@/components/ui/alert-dialog';
 import { useAuth } from '@/hooks/useAuth';
 import { useHashRoute, navigate } from '@/hooks/useHashRoute';
+import { markAbandoned } from '@/lib/unsaved-guard';
+import { isDirty } from '@/lib/unsaved-guard';
 import PostsList from '@/pages/PostsList';
 import PostEditor from '@/pages/PostEditor';
 import AuditView from '@/pages/AuditView';
@@ -60,6 +67,61 @@ export default function App() {
   const { loading, session, isAdmin } = useAuth();
   const route = useHashRoute();
 
+  // ── Unsaved-changes guard ────────────────────────────────────────────────
+  // Dirty editor → beforeunload warning + hash-route interception. A nav away
+  // from a dirty editor is reverted and a confirm dialog shown; the nav only
+  // proceeds after explicit confirmation.
+  const [pendingNav, setPendingNav] = useState<string | null>(null);
+  const lastHash = useRef(window.location.hash || '#/');
+  const confirmedNav = useRef(false);
+  const reverting = useRef(false);
+
+  useEffect(() => {
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isDirty()) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    const onHashChange = () => {
+      if (reverting.current) {
+        reverting.current = false;
+        return;
+      }
+      const next = window.location.hash || '#/';
+      if (isDirty() && !confirmedNav.current) {
+        const prev = lastHash.current;
+        if (prev !== next) {
+          // Revert the hash so the editor stays mounted; ask first.
+          reverting.current = true;
+          window.location.hash = prev;
+        }
+        setPendingNav(next);
+        return;
+      }
+      lastHash.current = next;
+      confirmedNav.current = false;
+    };
+    // Capture phase: run BEFORE useHashRoute's bubble listener so a dirty-route
+    // change is reverted before the router reads the hash — the editor never
+    // unmounts and its state survives the intercepted navigation.
+    window.addEventListener('hashchange', onHashChange, true);
+    return () => {
+      window.removeEventListener('beforeunload', onBeforeUnload);
+      window.removeEventListener('hashchange', onHashChange, true);
+    };
+  }, []);
+
+  const confirmDiscard = () => {
+    markAbandoned(); // save-in-flight nav guard: onSuccess must not yank back into the editor
+    if (pendingNav) {
+      confirmedNav.current = true;
+      lastHash.current = pendingNav;
+      window.location.hash = pendingNav;
+    }
+    setPendingNav(null);
+  };
+
   if (loading || !session || !isAdmin) {
     return (
       <div className="flex items-center justify-center min-h-screen">
@@ -89,6 +151,27 @@ export default function App() {
         <ShellHeader />
         <main className="pb-16">{view}</main>
       </div>
+
+      {/* Unsaved-changes confirm (route intercept) */}
+      <AlertDialog open={pendingNav !== null} onOpenChange={open => { if (!open) setPendingNav(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Discard unsaved changes?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This post has unsaved changes. Leaving the editor will discard them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Keep editing</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive/20 text-destructive border border-destructive/40 hover:bg-destructive/30"
+              onClick={confirmDiscard}
+            >
+              Discard changes
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </TooltipProvider>
   );
 }

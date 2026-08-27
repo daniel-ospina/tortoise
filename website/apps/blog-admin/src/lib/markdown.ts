@@ -14,6 +14,7 @@
 
 import StarterKit from '@tiptap/starter-kit';
 import Link from '@tiptap/extension-link';
+import Dropcursor from '@tiptap/extension-dropcursor';
 import { Table } from '@tiptap/extension-table';
 import { TableRow } from '@tiptap/extension-table-row';
 import { TableCell } from '@tiptap/extension-table-cell';
@@ -32,10 +33,16 @@ export function buildEditorExtensions(): Extensions {
   return [
     StarterKit.configure({
       heading: { levels: [1, 2, 3, 4] },
+      // Dropcursor is explicit below (styled cyan block indicator) — avoid
+      // double-registering StarterKit's built-in one.
+      dropcursor: false,
       // codeBlock stays in StarterKit (toolbar "code block" button)
     }),
     Link.configure({ openOnClick: false }),
     ImageWithDelete,
+    // Block-drag drop indicator (PR #1818 P2) — a cyan bar between blocks so
+    // drags show where the block will land.
+    Dropcursor.configure({ color: '#06b6d4', width: 4 }),
     Table.configure({ resizable: false }),
     TableRow,
     TableCell,

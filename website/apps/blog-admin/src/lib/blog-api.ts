@@ -11,7 +11,7 @@
  * (status='published' AND reviewed_at IS NULL) + held (hold_for_review=true).
  */
 
-import { supabase } from '@/lib/supabase';
+import { supabase, SUPABASE_URL } from '@/lib/supabase';
 import type { BlogPostRow, BlogPostInsert, BlogPostUpdate } from '@/lib/types';
 
 export type { BlogPostRow };
@@ -45,12 +45,13 @@ export async function listPosts(): Promise<BlogPostRow[]> {
   return (data ?? []) as BlogPostRow[];
 }
 
-/** Review queue — the three item kinds from plan W2. */
+/** Review queue — the three item kinds from plan W2 (archived rows excluded — archive is terminal). */
 export async function listQueue(): Promise<BlogPostRow[]> {
   const { data, error } = await supabase
     .from('blog_posts')
     .select(POST_SELECT)
     .or(`status.eq.draft,and(status.eq.published,reviewed_at.is.null),hold_for_review.eq.true`)
+    .neq('status', 'archived')
     .order('updated_at', { ascending: false });
   if (error) throw error;
   return (data ?? []) as BlogPostRow[];
@@ -135,8 +136,12 @@ export async function markReviewedPost(post: BlogPostRow, identity: AuditIdentit
 /**
  * Request changes (W2): status → draft + review_note (the note survives the
  * transition; the agent reads it and rewrites via the agent API PATCH).
+ * Archived posts are terminal — refuse rather than corrupting the row.
  */
 export async function requestChangesPost(post: BlogPostRow, note: string): Promise<BlogPostRow> {
+  if (post.status === 'archived') {
+    throw new Error('Archived posts are terminal — cannot request changes');
+  }
   return updatePost(post.id, {
     status: 'draft',
     published_at: null,
@@ -201,6 +206,93 @@ function sanitizeUpdate(patch: Partial<BlogPostRow>): BlogPostUpdate {
   return record;
 }
 
+// ── Save contract helpers (shared with PostEditor's save mutation) ────────
+
+/** Slug contract — lowercase letters/numbers separated by single dashes. */
+export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+export const MAX_SLUG_LENGTH = 100;
+export const MAX_TAGS = 10;
+
+export function isValidSlug(slug: string): boolean {
+  return SLUG_RE.test(slug) && slug.length <= MAX_SLUG_LENGTH;
+}
+
+/** Split a comma-separated tag input into a clean tag array. */
+export function parseTags(raw: string): string[] {
+  return raw
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean);
+}
+
+/** Client-side tag-cap check — returns an error message or null (max 10). */
+export function tagsError(raw: string): string | null {
+  return parseTags(raw).length > MAX_TAGS ? `Too many tags — max ${MAX_TAGS}` : null;
+}
+
+/** Form fields that flow into the saved record (subset of PostFormData). */
+export interface SaveFormFields {
+  title: string;
+  slug: string;
+  excerpt: string;
+  cover_image_url: string;
+  tags: string;
+  meta_title: string;
+  meta_description: string;
+  hold_for_review: boolean;
+}
+
+export type SaveMode = 'draft' | 'publish';
+
+/**
+ * Build the record for a save (draft or publish) from form fields + the
+ * editor's CURRENT body. Pure — no I/O, so it is unit-testable and the
+ * mutation reads current state at execution time (stale-closure guard).
+ */
+export function buildSaveRecord(
+  form: SaveFormFields,
+  body: string,
+  mode: SaveMode,
+  userId: string,
+): Partial<BlogPostRow> {
+  const tags = parseTags(form.tags);
+  if (tags.length > MAX_TAGS) {
+    throw new Error(`Too many tags — max ${MAX_TAGS}`);
+  }
+
+  const record: Partial<BlogPostRow> = {
+    title: form.title,
+    slug: form.slug,
+    body,
+    excerpt: form.excerpt.trim() || null,
+    cover_image_url: form.cover_image_url || null,
+    tags,
+    meta_title: form.meta_title.trim() || null,
+    meta_description: form.meta_description.trim() || null,
+    hold_for_review: form.hold_for_review,
+  };
+
+  if (mode === 'publish') {
+    record.status = 'published';
+    record.published_at = new Date().toISOString();
+    record.published_by = userId;
+    // Republish semantics (W2): a publish always re-enters the review
+    // queue (reviewed_at=NULL) — never silently pre-reviewed.
+    record.reviewed_by = null;
+    record.reviewed_at = null;
+  } else {
+    // Save as draft. If the post was published this is an unpublish —
+    // the caller confirms first (human gate, plan W2).
+    record.status = 'draft';
+    record.published_at = null;
+    record.published_by = null;
+    record.reviewed_by = null;
+    record.reviewed_at = null;
+  }
+
+  return record;
+}
+
 // ── Image upload (plan §4 blog-images contract) ───────────────────────────
 
 export const IMAGE_BUCKET = 'blog-images';
@@ -236,9 +328,13 @@ export async function uploadBlogImage(file: File, slug: string): Promise<string>
   if (file.size > MAX_IMAGE_BYTES) {
     throw new Error('Image too large — max 5MB');
   }
+  // Slug is user-controlled until the post is saved — never trust it in the
+  // storage key. Invalid slugs fall back to the 'draft' folder (the same
+  // fallback the editor uses for unsaved posts).
+  const folder = isValidSlug(slug) ? slug : 'draft';
   const safe = sanitizeObjectKey(file.name);
   const filename = `${Date.now()}-${safe || 'image'}`;
-  const path = `${slug}/${filename}`;
+  const path = `${folder}/${filename}`;
 
   const { error } = await supabase.storage.from(IMAGE_BUCKET).upload(path, file, {
     contentType: file.type,
@@ -250,12 +346,29 @@ export async function uploadBlogImage(file: File, slug: string): Promise<string>
   return data.publicUrl;
 }
 
-/** Delete an image object from its public URL (cover removal). */
+const STORAGE_OBJECT_PREFIX = `/storage/v1/object/public/${IMAGE_BUCKET}/`;
+
+/**
+ * Delete an image object from its public URL (cover removal).
+ * Only deletes when the URL belongs to THIS Supabase project and points at
+ * the blog-images public object path — arbitrary external URLs are ignored
+ * (never let an attacker point the delete at another bucket/object).
+ */
 export async function deleteBlogImage(publicUrl: string): Promise<void> {
-  const marker = `/${IMAGE_BUCKET}/`;
-  const idx = publicUrl.indexOf(marker);
-  if (idx === -1) return;
-  const path = publicUrl.slice(idx + marker.length);
+  if (!publicUrl) return;
+  let url: URL;
+  try {
+    url = new URL(publicUrl);
+  } catch {
+    return; // not a parseable URL — nothing to delete
+  }
+
+  const projectOrigin = new URL(SUPABASE_URL).origin;
+  if (url.origin !== projectOrigin) return;
+  if (!url.pathname.startsWith(STORAGE_OBJECT_PREFIX)) return;
+
+  const path = url.pathname.slice(STORAGE_OBJECT_PREFIX.length);
+  if (!path) return;
   const { error } = await supabase.storage.from(IMAGE_BUCKET).remove([path]);
   if (error) throw error;
 }

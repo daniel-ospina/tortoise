@@ -142,36 +142,39 @@ function RowActions({ post }: { post: BlogPostRow }) {
         </Button>
       )}
 
-      <Dialog open={noteOpen} onOpenChange={setNoteOpen}>
-        <DialogTrigger asChild>
-          <Button size="sm" variant="outline" className="h-8">
-            <MessageSquareWarning className="w-3.5 h-3.5 mr-1" />
-            Request changes
-          </Button>
-        </DialogTrigger>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Request changes</DialogTitle>
-            <DialogDescription>
-              Sends the post back to draft with a note. The agent reads the note and rewrites via the publish API.
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            value={note}
-            onChange={e => setNote(e.target.value)}
-            placeholder="What needs to change? e.g. verify the pricing claim, tighten the intro, add a table…"
-            className="min-h-[120px]"
-            autoFocus
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setNoteOpen(false)}>Cancel</Button>
-            <Button onClick={() => doRequestChanges.mutate()} disabled={doRequestChanges.isPending || !note.trim()}>
-              {doRequestChanges.isPending && <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />}
-              Send request
+      {/* Request changes — not offered on archived rows (archive is terminal) */}
+      {post.status !== 'archived' && (
+        <Dialog open={noteOpen} onOpenChange={setNoteOpen}>
+          <DialogTrigger asChild>
+            <Button size="sm" variant="outline" className="h-8">
+              <MessageSquareWarning className="w-3.5 h-3.5 mr-1" />
+              Request changes
             </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          </DialogTrigger>
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Request changes</DialogTitle>
+              <DialogDescription>
+                Sends the post back to draft with a note. The agent reads the note and rewrites via the publish API.
+              </DialogDescription>
+            </DialogHeader>
+            <Textarea
+              value={note}
+              onChange={e => setNote(e.target.value)}
+              placeholder="What needs to change? e.g. verify the pricing claim, tighten the intro, add a table…"
+              className="min-h-[120px]"
+              autoFocus
+            />
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setNoteOpen(false)}>Cancel</Button>
+              <Button onClick={() => doRequestChanges.mutate()} disabled={doRequestChanges.isPending || !note.trim()}>
+                {doRequestChanges.isPending && <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />}
+                Send request
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
 
       {post.status !== 'archived' && (
         <Button variant="ghost" size="icon" className={iconBtn} title="Edit" onClick={() => navigate(`#/edit/${post.id}`)}>

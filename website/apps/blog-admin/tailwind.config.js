@@ -13,7 +13,7 @@ export default {
         popover: { DEFAULT: '#0b1220', foreground: '#cbd5e1' },
         primary: { DEFAULT: '#06b6d4', foreground: '#04121a' },
         secondary: { DEFAULT: '#12223d', foreground: '#cbd5e1' },
-        muted: { DEFAULT: '#0f1c31', foreground: '#64748b' },
+        muted: { DEFAULT: '#0f1c31', foreground: '#94a3b8' },
         accent: { DEFAULT: '#0891b2', foreground: '#04121a' },
         destructive: { DEFAULT: '#f87171', foreground: '#04121a' },
         success: '#4ade80',

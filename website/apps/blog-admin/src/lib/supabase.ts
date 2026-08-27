@@ -30,6 +30,8 @@ export const AUTH_URL = 'https://tortoise.premiselabs.co/auth';
 const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL;
 const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
+export { SUPABASE_URL };
+
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   throw new Error(
     'Missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY — copy .env.example to .env (see website/apps/blog-admin/README.md)',

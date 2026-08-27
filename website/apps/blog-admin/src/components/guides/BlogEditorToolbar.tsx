@@ -51,6 +51,7 @@ function ToolbarButton({
           className="h-8 w-8"
           onClick={onClick}
           disabled={disabled}
+          aria-label={title}
         >
           {children}
         </Button>
@@ -74,6 +75,12 @@ function TableGridPicker({ onSelect }: { onSelect: (rows: number, cols: number) 
     setHoverCol(c);
   }, []);
 
+  const handleFocus = useCallback((r: number, c: number) => {
+    // Keyboard users: mirror hover so the size readout stays in sync.
+    setHoverRow(r);
+    setHoverCol(c);
+  }, []);
+
   return (
     <div className="p-2">
       <div className="grid gap-0.5" style={{ gridTemplateColumns: `repeat(${MAX_COLS}, 1fr)` }}>
@@ -85,12 +92,15 @@ function TableGridPicker({ onSelect }: { onSelect: (rows: number, cols: number) 
             <button
               key={i}
               type="button"
+              aria-label={`${r}×${c}`}
+              title={`Insert ${r}×${c} table`}
               className={`w-5 h-5 border rounded-sm transition-colors ${
                 highlighted
                   ? 'bg-primary/20 border-primary'
                   : 'bg-background border-border hover:border-muted-foreground/50'
               }`}
               onMouseEnter={() => handleMouseEnter(r, c)}
+              onFocus={() => handleFocus(r, c)}
               onClick={() => onSelect(r, c)}
             />
           );
