@@ -156,6 +156,13 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
     ? `<div class="cover-img" style="background-image:url('${escapeHtml(post.cover_image_url)}')"></div>`
     : "";
 
+  const config = `<script id="blog-config" type="application/json">${JSON.stringify({
+    slug: post.slug,
+    url,
+    title: post.title,
+  }).replace(/</g, "\\u003c")}</script>
+<script src="/blog/blog.js" defer></script>`;
+
   const body = `${navHtml("blog")}
 <div class="art">
   <div class="crumb"><a href="/blog">Blog</a><span class="sep">/</span><span>${escapeHtml(post.title)}</span></div>
@@ -171,7 +178,7 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
   <div class="end-note"><strong>More from the blog →</strong> Follow Tortoise updates via <a href="/blog/feed.xml">RSS</a>.</div>
 </div>`;
 
-  return ok(htmlPage({ head, body, extraHead: analyticsHead() }), noCache);
+  return ok(htmlPage({ head, body, extraHead: analyticsHead() + config }), noCache);
 }
 
 function isRecentlyEdited(updatedAtIso: string): boolean {
@@ -184,16 +191,9 @@ function isRecentlyEdited(updatedAtIso: string): boolean {
 }
 
 function analyticsHead(): string {
-  // consent.js + PostHog snippet — statically included (#1794 owns the head;
-  // #1799 wires events only).
-  return `<script src="/consent.js" defer></script>
-<script>
-(function () {
-  var consent = window.consentState ? window.consentState() : null;
-  if (consent === "granted") {
-    !function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.async=!0,p.src="https://us-assets.i.posthog.com/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;u._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
-    posthog.init("phc_zvBi25UoCxrq79qS7cudZhfAS3XQwEfrzEoZfR2EHkjS", { api_host: "https://us.i.posthog.com" });
-  }
-})();
-</script>`;
+  // consent.js owns PostHog init (#1794): always loads posthog-js opted-out by
+  // default, opt-ins on granted consent. This head adds ONLY the consent
+  // script — #1799's blog.js fires events when posthog exists (SDK-level
+  // gating decides whether they flow). No second snippet, no inline init.
+  return `<script src="/consent.js" defer></script>`;
 }
