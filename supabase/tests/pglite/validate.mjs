@@ -44,6 +44,23 @@ await db.exec(`
     $$ SELECT coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), '00000000-0000-0000-0000-000000000000')::uuid $$;
   CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS
     $$ SELECT coalesce(nullif(current_setting('request.jwt.claims', true), ''), '{}')::jsonb $$;
+
+  -- Minimal Supabase storage schema (for migrations/policies that touch buckets)
+  CREATE SCHEMA storage;
+  CREATE TABLE storage.buckets (
+    id text PRIMARY KEY,
+    name text NOT NULL,
+    public boolean NOT NULL DEFAULT false
+  );
+  CREATE TABLE storage.objects (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    bucket_id text NOT NULL,
+    name text NOT NULL,
+    owner uuid,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+  );
+  GRANT ALL ON storage.buckets, storage.objects TO anon, authenticated, service_role;
 `);
 
 // ── Apply migrations 0001-20260813000005 in order ──
@@ -71,7 +88,8 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260814000001_agent_signup_tokens.sql',
                '20260825000001_api_key_names.sql',
                '20260825214233_provision_team_keyless.sql',
-               '20260826000001_revoke_signup_token.sql'];
+               '20260826000001_revoke_signup_token.sql',
+               '0017_blog_cms.sql'];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {
@@ -94,6 +112,7 @@ const suites = [
   '20260813000004_claim_membership.sql',
   '20260814000001_agent_signup_tokens.sql',
   '20260826000001_revoke_signup_token.sql',
+  '0017_blog_cms.sql',
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
