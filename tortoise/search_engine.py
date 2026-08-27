@@ -320,7 +320,8 @@ def run_fts_query(
     The operator path (label CONTAINS) is structural and unchanged; full-
     scan mode (query=None) never reaches this function. Single-token and
     stopword-only queries return the raw string — byte-identical to the
-    pre-R2 behavior.
+    pre-R2 behavior for inputs without RediSearch-special characters
+    (escaped via escape_redisearch_literal, issue #1791).
 
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side,
@@ -386,7 +387,7 @@ def run_fts_query(
         id_field = "id"
     # R2 (#1541) D1: OR-union tolerance for the text path — all labels
     # share the tokenizer (single-token/degenerate inputs pass the raw
-    # string through unchanged).
+    # string through backslash-escaped).
     from .sparse import build_or_query
     fts_query = build_or_query(query)
     # #689/#1391: terminal-status Points must not leak into FTS results
