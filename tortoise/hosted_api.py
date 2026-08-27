@@ -576,16 +576,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     consume nor are consumed by the general per-key budget.
     """
 
-    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/v1/session/key"}  # noqa: RUF012
-    # #1828: /v1/session/key is EXEMPT from the per-IP limiter on purpose.
-    # The mint is session-authenticated (get_current_user JWT — a valid
-    # `Bearer <jwt>` is NOT tt_-prefixed, so _bucket_key falls to the
-    # `ip:<client_ip>` bucket with the general 100/min limit). A user's
-    # repeated login attempts from one IP exhaust that bucket and the
-    # bootstrap session-key mint 429s (the #1559 bug class: "a busy moment
-    # 429'd every new user's bootstrap session-key mint"). Abuse is already
-    # bounded by the 3-active bootstrap cap + max_api_keys per team, so the
-    # per-IP limit adds no security here. Do NOT remove the other entries.
+    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}  # noqa: RUF012
     # R-13: path → dedicated per-key limit. The commit endpoint's bucket is
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
     # general 100/min bucket.

@@ -744,22 +744,6 @@ function claimIntentInFlight() {
         if (body && typeof body.detail === 'string' && /active session keys/i.test(body.detail)) {
           return await mint(tid || null, 'recovery')
         }
-        // #1828: the per-IP rate limiter (100/min for session-JWT requests)
-        // 429s the bootstrap mint when a user's repeated login attempts
-        // exhaust their IP bucket (the #1559 bug class) — the detail is
-        // "Rate limit exceeded. …points/minute per API key.", which the
-        // /active session keys/ recovery fallback above does NOT catch, so
-        // the old code threw and the overview rendered empty. Retry the
-        // bootstrap mint once after a short delay: the limiter window is 60s
-        // and the bucket prunes entries older than 60s, so a 2s retry clears
-        // a single user's small mint burst. If the retry ALSO 429s, return
-        // the res — the caller throws → error card (honest fallback).
-        if (body && typeof body.detail === 'string' && /rate limit/i.test(body.detail)) {
-          await new Promise(r => setTimeout(r, 2000))
-          const retry = await mint(tid || null, 'bootstrap')
-          // If the retry ALSO 429s, return it — the caller throws → error card.
-          return retry
-        }
       }
       return res
     }
