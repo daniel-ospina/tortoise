@@ -408,6 +408,7 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
 
   const v = validatePatch(input);
   if (!v.ok) return validationError(v.errors);
+  if (Object.keys(v.value).length === 0) return err(400, "validation", "empty patch — nothing to update");
 
   // Load the post — check existence, ownership, terminal state
   let getRes: Response;
@@ -431,6 +432,10 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
   const resultStatus = v.value.status ?? post.status;
   if (resultStatus === "published" && resultingBody.trim() === "") {
     return err(400, "validation", "body required when status=published");
+  }
+  // No invisible limbo: hold_for_review=true on a published post (current or resulting) → 400
+  if (resultStatus === "published" && v.value.hold_for_review === true) {
+    return err(400, "validation", "hold_for_review cannot be combined with a published post");
   }
 
   // Build the PATCH body: status→published requires audit fields (trigger guard)
@@ -461,7 +466,13 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
     return err(503, "upstream", `supabase ${res.status}`);
   }
   // TOCTOU: post archived between GET and PATCH → PostgREST returns 200 + [] rows
-  const updated = (await res.json()) as Array<{ id: string; slug: string }>;
+  let updated: Array<{ id: string; slug: string }> = [];
+  try {
+    updated = (await res.json()) as Array<{ id: string; slug: string }>;
+  } catch {
+    // 204 no-content (no-op) — already rejected above; treat empty as no-op success
+    return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
+  }
   if (updated.length === 0) return err(409, "archived", "post was archived concurrently");
 
   return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
