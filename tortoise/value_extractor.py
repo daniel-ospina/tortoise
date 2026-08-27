@@ -73,6 +73,82 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
     return {**core, **kinds, "memory_granularity": granularity}
 
 
+def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
+    """The FULL kind-classification candidate set (issue #1695, Task 3):
+    ``{kind: {"text", "section", "description", "synonyms", "examples",
+    "nearMisses"}}`` for every classifiable kind — core §5 objects, the
+    subject kinds, the point kind, the event kinds, and the pack kindDefs
+    WITH their full key set (description/synonyms/examples/nearMisses).
+
+    Unlike ``compile_value_brief`` (which drops synonyms/examples — only
+    description + nearMisses ride through), this accessor reads
+    ``PackManifest.kind_defs`` in full so the kind INDEX can embed a
+    re-weighted classification surface (the D0-2 probe refinement path:
+    description + synonyms + examples — the plan's mandated re-weight
+    before the build commits). The ``text`` field is the surface the index
+    embeds; the metadata fields feed the classifier's nearMiss rerank and
+    the eval's confusability analysis.
+
+    Lazy imports keep the module importable without the pack machinery
+    (``extractor_v2`` imports this module's ``compile_value_brief``)."""
+    from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
+
+    def _surface(kind: str, desc: str, syns: list, exs: list) -> str:
+        parts = [f"{kind}: {desc}"] if desc else [kind]
+        if syns:
+            parts.append("synonyms: " + ", ".join(str(s) for s in syns))
+        if exs:
+            parts.append("examples: " + ", ".join(str(e) for e in exs))
+        return " | ".join(parts)
+
+    brief = compile_value_brief(packs_dir)
+    spec: dict[str, dict] = {}
+    for k in CORE_OBJECT_KEYS:
+        desc = str(brief.get(k, "") or "")
+        spec[k] = {"text": _surface(k, desc, [], []), "section": "objects",
+                   "description": desc, "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    for k, desc in SUBJECTS.items():
+        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "subjects",
+                   "description": str(desc), "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    for k, desc in POINTS.items():
+        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "points",
+                   "description": str(desc), "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    for k, desc in EVENTS.items():
+        spec[k] = {"text": _surface(k, str(desc), [], []), "section": "events",
+                   "description": str(desc), "synonyms": [], "examples": [],
+                   "nearMisses": []}
+    # packs: the kindDefs FULL key set (compile_value_brief drops
+    # synonyms/examples — read the manifests directly); the section is
+    # derived from the pack's kind declarations (pointKinds → points,
+    # eventKinds → events, documentKinds/objectKinds → objects) so Task 4's
+    # per-type candidate restriction is correct.
+    from tortoise.pack_registry import PackRegistry
+    packs_dir = Path(packs_dir) if packs_dir else \
+        Path(__file__).resolve().parent.parent / "packs"
+    reg = PackRegistry(packs_dir)
+    reg.load_all()
+    for ns, pack in reg.packs.items():
+        declared = {k: "points" for k in (pack.point_kinds or [])}
+        declared.update({k: "events" for k in (pack.event_kinds or [])})
+        for k in (pack.object_kinds or []) + (pack.document_kinds or []):
+            declared.setdefault(k, "objects")
+        for kind, kd in (pack.kind_defs or {}).items():
+            k = f"{ns}:{kind}"
+            desc = str(kd.get("description", brief.get(k, "")) or "")
+            syns = [str(s) for s in (kd.get("synonyms") or [])]
+            exs = [str(e) for e in (kd.get("examples") or [])]
+            nms = [str(n) for n in (kd.get("nearMisses") or [])]
+            spec[k] = {"text": _surface(k, desc, syns, exs),
+                       "section": declared.get(kind, "objects"),
+                       "description": desc,
+                       "synonyms": syns, "examples": exs,
+                       "nearMisses": nms}
+    return spec
+
+
 _VOCAB_CACHE: dict | None = None
 
 
