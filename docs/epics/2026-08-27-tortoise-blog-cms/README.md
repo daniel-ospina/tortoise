@@ -12,7 +12,7 @@ epic: tortoise-blog-cms
 
 # Epic: Tortoise Blog + CMS
 
-Blog + CMS for tortoise.premiselabs.co — agent-publish → human-review, SSR public pages, ElDato-editor port, SEO/analytics/RSS. **Status: READY (planned, awaiting implementation).**
+Blog + CMS for tortoise.premiselabs.co — agent-publish → human-review, SSR public pages, ElDato-editor port, SEO/analytics/RSS. **Status: IMPLEMENTED (all 8 issues merged + reviewed, 2026-08-27); live surface pending the deployment ops checklist below.**
 
 ## Pipeline artifacts
 
@@ -50,3 +50,16 @@ Blog + CMS for tortoise.premiselabs.co — agent-publish → human-review, SSR p
 ## Prototype
 
 `docs/prototypes/2026-08-27-tortoise-blog/prototype.html` — index card grid, editorial article, share bar + mobile bottom bar, empty state (dark slate/cyan).
+
+## Deployment ops checklist (required before the blog surface is live)
+
+1. **Pages Function env bindings** on the `premise-labs` Cloudflare Pages project (dashboard → Settings → Environment variables):
+   - `SUPABASE_URL` (https://ybetwichurajbfswfeqa.supabase.co)
+   - `SUPABASE_ANON_KEY` (public anon key)
+   - `SUPABASE_SERVICE_ROLE_KEY` (server-side secret — agent API + admin gate)
+   - `SUPABASE_JWT_SECRET` (Supabase project JWT secret — admin gate)
+2. **Repo secrets** (for the deploy build step): `SUPABASE_URL`, `SUPABASE_ANON_KEY` (GitHub → Settings → Secrets).
+3. **Supabase migration** applied: `20260827000001_blog_cms.sql` (supabase-deploy CI applies it; verify `blog_posts` exists).
+4. **Agent keys seeded**: `blog_agent_keys` INSERT (sha256 of the plaintext key, printed once) — the ops seed script.
+5. **Owner seeded**: `blog_admins` INSERT with the owner's auth user id.
+6. Post-deploy: run `RUN_BLOG_E2E=1 ALLOW_PROD=1 ... pytest tests/e2e/test_blog.py` (wired as the verify-blog job, warn-only).
