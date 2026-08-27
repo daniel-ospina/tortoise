@@ -357,6 +357,16 @@ surfaces:
   - test_sdk_props_coercion.py
   - test_tortoise_client.py
   - test_version_vector.py
+  classify:
+  # Issue #1695 (extractor-v3 classify-later): the kind-classification and
+  # chain-enforcement surface. Pure-logic files (stub encoders, golden
+  # fixtures) are lane-agnostic — no carve-out, TEST_NO_REDIRECT_STEMS
+  # untouched; real-model smoke subsets skip without the cached bge-small
+  # embedder (pytest.importorskip + timeout markers).
+  - test_chain_enforcer.py
+  - test_kind_index.py
+  - test_kind_classifier.py
+  - test_kind_eval_set.py
   eval:
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py

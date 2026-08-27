@@ -54,3 +54,7 @@ battery/config/.gold_store/
 
 # Battery eval run artifacts (local, never committed)
 battery-out/
+# Content-addressed kind-embedding index cache (#1695 Task 3) — the .npz
+# files are gitignored; the directory convention (.gitkeep) is committed.
+data/kind_index/*
+!data/kind_index/.gitkeep

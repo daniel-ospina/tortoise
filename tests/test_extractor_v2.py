@@ -3,8 +3,11 @@
 Covers the verification checklist surfaces: chunker+compiler (unit),
 S2 map-to-embed (unit, mock), S3 graph search (graceful degradation +
 integration with the real backend, skip-if-unavailable), S5 embed execution
-(dependency order, link-before-create, supersession, chains, minted kinds),
-and the extract_session_v2 orchestrator (mock model, no LLM).
+(dependency order, link-before-create, supersession, minted kinds),
+and the extract_session_v2 orchestrator (mock model, no LLM). Chain
+enforcement scenarios live in tests/test_chain_enforcer.py (issue #1695,
+Task 1 — the deterministic validate_and_rewire superset; this module keeps
+validate_chains' warn-only backstop unit surface).
 """
 from __future__ import annotations
 
@@ -1164,59 +1167,6 @@ class TestE5FactValueContradiction:
             "gym at 5pm", ["gym"], existing, when="")
 
 
-class TestChains:
-    def _embed_with_pair(self, about, kinds):
-        embed = {"entities": [
-            {"name": "arch", "kind": kinds[0], "lifecycle": "created",
-             "supersedes": None, "note": None},
-            {"name": "useCase", "kind": kinds[1], "lifecycle": "created",
-             "supersedes": None, "note": None}],
-            "events": [], "operators": [], "chain_notes": [],
-            "link_before_create": [],
-            "points": [{"content": "arch connects to useCase",
-                        "pointKind": "statement", "about_entities": about}]}
-        return embed
-
-    def test_reverse_chain_repaired_when_intermediate_exists(self):
-        # architecture (pos 6) connects to useCase (pos 1) — reverse chain
-        # order in productDelivery; a feature (pos 2) in the list is the
-        # nearest valid intermediate → repair is possible.
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        embed["entities"].append({"name": "feature", "kind": "product-strategy:feature",
-                                  "lifecycle": "created", "supersedes": None,
-                                  "note": None})
-        notes = v2.validate_chains(embed)
-        assert notes, "reverse architecture→useCase must be flagged"
-        assert notes[0]["action"] == "repaired"
-        assert "feature" in notes[0]["note"]
-
-    def test_reverse_chain_warned_without_intermediate(self):
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        notes = v2.validate_chains(embed)
-        assert notes[0]["action"] == "warned"
-        assert "do NOT invent" in notes[0]["note"]
-
-    def test_chain_order_ok_not_flagged(self):
-        embed = self._embed_with_pair(["useCase", "feature"],
-                                      ["product-strategy:useCase",
-                                       "product-strategy:feature"])
-        assert v2.validate_chains(embed) == []
-
-    def test_never_blocks(self):
-        # chain violations surface as notes; execute_embed never raises
-        embed = self._embed_with_pair(
-            ["arch", "useCase"],
-            ["product-strategy:architecture", "product-strategy:useCase"])
-        result = v2.execute_embed(embed, {}, session_id="s1")
-        assert any(n["action"] in ("repaired", "warned")
-                   for n in result["chain_notes"])
-        assert result["payload"]["points"]  # still emitted
-
-
 # ── Participant slots (#1418: object + event-as-content) ─────────────────────
 
 SLOTS_FIXTURE = {
@@ -1828,6 +1778,911 @@ class TestOrchestrator:
         # the raw conversation is untouched by S1–S5
         assert conv == [{"role": "user", "content": "my personal best 5K time is 27:12"},
                         {"role": "assistant", "content": "consider interval training"}]
+
+
+# ── A′ (#1695 Task 2): label-order randomization hook ────────────────────
+
+# The canonical kind order (insertion order of build_master_list) — the
+# golden the env-unset render must match byte-for-byte.
+def _canonical_verbose_render():
+    return v2._render_master_verbose(v2.build_master_list())
+
+
+class TestLabelOrder:
+    def test_env_unset_default_order_byte_identical(self, monkeypatch):
+        """Regression pin: TORTOISE_LABEL_ORDER unset → the render is
+        byte-identical to the canonical (pre-shuffle) order, through the
+        _render_master dispatcher."""
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER", raising=False)
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER_SEED", raising=False)
+        assert v2._label_order_rng("any story") is None
+        assert v2._render_master(v2.build_master_list()) == _canonical_verbose_render()
+
+    def test_seeded_shuffle_deterministic_per_story(self, monkeypatch):
+        """Same story → same seeded shuffle; different story → different
+        order (the A′ paired re-run contract)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        m = v2.build_master_list()
+        r1 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        r2 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        assert r1 == r2, "same story must reproduce the same kind order"
+        r3 = v2._render_master_verbose(m, v2._label_order_rng("story B"))
+        keys = lambda r: [ln for ln in r.split("\n") if ln.startswith("- core:")]  # noqa: E731
+        assert keys(r1) != keys(r3), "different stories must shuffle differently"
+        assert len(keys(r1)) == len(keys(r3))
+
+    def test_env_seed_override_deterministic_across_stories(self, monkeypatch):
+        """TORTOISE_LABEL_ORDER_SEED pins the order across stories (the
+        A/B's per-arm order confound control)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER_SEED", "7")
+        m = v2.build_master_list()
+        r1 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        r2 = v2._render_master_verbose(m, v2._label_order_rng("story B"))
+        assert r1 == r2, "the env seed overrides the story-derived seed"
+
+    def test_shuffle_reorders_kind_groups_only(self, monkeypatch):
+        """Only the KIND vocabulary randomizes — hint blocks (chains,
+        user-personal-state, memory-granularity, carve-out) keep their
+        canonical positions (byte-identical outside the kind groups)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        m = v2.build_master_list()
+        plain = v2._render_master_verbose(m)
+        shuffled = v2._render_master_verbose(m, v2._label_order_rng("s"))
+        for marker in ("CHAINS (the business logic",
+                       "USER-PERSONAL-STATE VOCABULARY",
+                       "MEMORY GRANULARITY (what to keep",
+                       "STATE-VALUE CARVE-OUT"):
+            assert plain.index(marker) == shuffled.index(marker)
+
+    def test_compact_render_shuffles_too(self, monkeypatch):
+        """Label-order randomization ships in ALL render modes; the compact
+        env-unset render stays byte-identical to its canonical form."""
+        m = v2.build_master_list()
+        compact_canonical = v2._render_master_compact(m, "story")
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        r1 = v2._render_master_compact(m, "a", v2._label_order_rng("x"))
+        r2 = v2._render_master_compact(m, "a", v2._label_order_rng("x"))
+        assert r1 == r2
+        assert r1 != compact_canonical
+
+    def test_s2_prompt_uses_shuffled_master(self, monkeypatch):
+        """The end-to-end hook: render_s2_prompt picks up the shuffle via
+        _render_master when the env is set; byte-identical when unset."""
+        m = v2.build_master_list()
+        baseline = v2.render_s2_prompt(m)
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        a = v2.render_s2_prompt(m)
+        b = v2.render_s2_prompt(m)
+        assert a == b
+        assert a != baseline  # the shuffle reorders the kind vocabulary
+
+
+# ── #1695 Task 5: the classify-later stage (flag-on pipeline) ─────────────
+
+CLASSIFY_SPEC = {
+    "dev:issue": {"text": "dev:issue: A tracked work item (synonyms: ticket)",
+                   "section": "objects", "description": "A tracked work item",
+                   "synonyms": ["ticket"], "examples": [],
+                   "nearMisses": ["dev:code"]},
+    "dev:code": {"text": "dev:code: Source code that implements features",
+                  "section": "objects", "description": "Source code",
+                  "synonyms": [], "examples": [], "nearMisses": []},
+    "core:plan": {"text": "core:plan: A plan state (commitment-state family)",
+                   "section": "objects", "description": "A plan state",
+                   "synonyms": [], "examples": [], "nearMisses": []},
+    "core:workflow": {"text": "core:workflow: A reusable procedural sequence",
+                       "section": "objects", "description": "A reusable sequence",
+                       "synonyms": [], "examples": [], "nearMisses": []},
+    "core:occurrence": {"text": "core:occurrence: A done-state event",
+                         "section": "events", "description": "An occurrence",
+                         "synonyms": [], "examples": [], "nearMisses": []},
+    "statement": {"text": "statement: A durable belief or claim",
+                   "section": "points", "description": "A claim",
+                   "synonyms": [], "examples": [], "nearMisses": []},
+}
+
+_CLASSIFY_KEYWORDS = ("ticket", "code", "plan", "workflow", "occurrence", "claim")
+
+
+class _KeywordEncoder:
+    """One-hot fixture encoder shared with tests/test_kind_classifier.py."""
+
+    def encode(self, texts):
+        import numpy as np
+        out = np.zeros((len(texts), len(_CLASSIFY_KEYWORDS)))
+        for i, t in enumerate(texts):
+            low = str(t).lower()
+            for j, kw in enumerate(_CLASSIFY_KEYWORDS):
+                if kw in low:
+                    out[i, j] = 1.0
+        return out, False
+
+
+class _BoomEncoder:
+    """Fail-open pin: encode() raises — the pipeline must never break."""
+
+    def encode(self, texts):
+        raise RuntimeError("embedder down")
+
+
+def _stub_classifier(model=None, encoder=None, llm_tail=False):
+    from tortoise.kind_classifier import KindClassifier
+    from tortoise.kind_index import KindIndex
+    return KindClassifier(encoder=encoder or _KeywordEncoder(),
+                          index=KindIndex.build(CLASSIFY_SPEC,
+                                                encoder=_KeywordEncoder(),
+                                                persist=False),
+                          model=model, llm_tail=llm_tail)
+
+
+def _hand_built_master() -> dict:
+    """The core-only golden's source of truth: a HAND-BUILT master list with
+    FIXED dict order — zero dependency on installed packs or on the pack-
+    manifest glob order (build_master_list()'s memory_granularity order
+    follows the filesystem readdir order of packs/*/manifest.yaml, which
+    differs across platforms: macOS HFS/APFS vs Linux ext4). The byte-pinned
+    golden fixture is generated from THIS dict and nothing else, so the
+    golden test is platform-independent. pack_kinds and chains are retained
+    for build_master_list() shape parity — the core-only render omits them
+    (asserted in test_core_only_render_byte_pinned_golden)."""
+    return {
+        "objects": {
+            "core:Project": "A project",
+            "core:WorkItem": "A unit of work",
+            "core:document": "A document artifact",
+            "core:tag": "A tag",
+            "core:user": "A user",
+            "core:skill": "A skill",
+            "core:tool": "A tool, CLI, or utility",
+            "core:agent": "An agent",
+            "core:workflow": "A reusable procedural sequence",
+            "core:agreement": "An agreement",
+            "core:standard": "A standard, spec, or canonical reference",
+            "core:other": "No fitting kind - the explicit uncertain bucket",
+            "core:strategy": "A strategy state (commitment-state family)",
+            "core:plan": "A plan state (commitment-state family)",
+            "core:goal": "A goal state (commitment-state family)",
+            "core:target": "A target state (commitment-state family)",
+        },
+        "subjects": {
+            "core:organization": "An organization — a company, agency, or "
+                                 "other collective entity",
+            "core:team": "A team — a group of people working together toward "
+                         "shared goals",
+            "core:role": "A role — a defined function or position held by a "
+                         "person or a team",
+            "core:legalPerson": "A legal person — an entity with legal "
+                                "standing (company, foundation, org)",
+            "core:naturalPerson": "A natural person — an individual human "
+                                  "being",
+        },
+        "points": {
+            "statement": "A durable belief, claim, or proposition — the "
+                          "extraction write kind",
+        },
+        "events": {
+            "core:decision": "A commitment event — a choice made with "
+                              "reasons that resolves confidence",
+            "core:occurrence": "An occurrence — something that happened at a "
+                                "point in time",
+            "core:deployment": "A deployment event — a product or release "
+                               "shipped to an environment",
+            "core:review": "A review event — a review of work, code, plan, or "
+                           "content",
+            "core:meeting": "A meeting event — a gathering that changed or "
+                            "confirmed state",
+            "core:experiment": "An experiment event — a test or calibration "
+                               "run with measured results",
+            "core:friction": "A friction event — a discovered obstacle, pain "
+                             "point, or workflow failure",
+        },
+        "pack_kinds": {
+            # Representative only — the core-only render drops the whole
+            # section (pack vocabulary is typed by the classify-later stage).
+            "dev:issue": "A unit of tracked work",
+        },
+        "chains": {
+            "epicToCode": {"path": ["epic", "issue", "code"],
+                            "note": "Work decomposition"},
+        },
+        "user_personal_state": {
+            "personal_best": "A personal record/achievement VALUE — times, "
+                             "distances, scores, quantities ('my personal best "
+                             "5K time is 27:12'). The VALUE is the fact; "
+                             "retain it verbatim.",
+            "schedule": "A recurring commitment VALUE — regular times, days, "
+                         "frequencies ('gym at 6pm', 'standup at 9:30'). The "
+                         "TIME is the fact; retain it verbatim.",
+            "preference": "A stated preference/choice VALUE — likes, "
+                           "dislikes, defaults, chosen options ('prefers dark "
+                           "mode', 'coffee not tea'). The CHOICE is the fact; "
+                           "retain it verbatim.",
+        },
+        # FIXED order (dev, marketing, pm, product-strategy) — the golden
+        # pins THIS order; it is independent of the packs' readdir order.
+        "memory_granularity": {
+            "dev": "Durable: root-cause analysis, the chosen fix approach vs "
+                   "rejected alternatives, durable constraints (e.g. preserve "
+                   "production semantics), and environment beliefs that affect "
+                   "future work (e.g. subagents stall under load). Ephemeral: "
+                   "issue/PR numbers, CI status, test counts, commit hashes, "
+                   "tool workarounds.",
+            "marketing": "Durable: campaign strategy — which "
+                          "campaigns/channels/audiences are being pursued and "
+                          "why, the positioning decisions, the reasoning, the "
+                          "actual content pieces (they ARE the product), and "
+                          "the metric snapshots showing whether a strategy is "
+                          "working. Ephemeral: publishing mechanics, "
+                          "scheduling logistics.",
+            "pm": "Durable: plan/goal/target state — what was decided, what's "
+                   "committed, the reasoning, and milestone outcomes. "
+                   "Ephemeral: card/board status, sprint burndown, assignment "
+                   "logistics, issue triage.",
+            "product-strategy": "Durable: the productDelivery chain itself — "
+                                 "which JTBDs/use-cases/features are being "
+                                 "pursued, the chosen vs rejected options at "
+                                 "each step, and the reasoning (what supports, "
+                                 "undermines, tempers each choice). A customer "
+                                 "/ competitor / market fact is durable if it "
+                                 "changes a decision. Ephemeral: ticket status, "
+                                 "sprint mechanics, meeting logistics.",
+        },
+    }
+
+
+class TestClassifyStage:
+    """The flag-on pipeline: stage order, kind-preservation re-stamp, slot
+    re-key, sentinel terminal, census wiring; and the flag-off
+    byte-identity regression."""
+
+    def _run(self, monkeypatch, s2_body, s4_body=None, session_id="fixed-s1",
+             kind_classifier=None, story="We shipped the ticket fix."):
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+
+        def resp(system, user):
+            if "STORY SUMMARIZER" in system:
+                return story
+            if "GRAPH MAPPER" in system:
+                return json.dumps(s2_body)
+            if "GAP REVIEWER" in system:
+                return json.dumps(s4_body if s4_body is not None else {
+                    "entities": [], "events": [], "points": [],
+                    "operators": [], "chain_notes": [],
+                    "link_before_create": []})
+            raise AssertionError(f"unexpected system prompt: {system[:50]}")
+
+        conv = [{"role": "user", "content": story}]
+        return v2.extract_session_v2(MockModel(resp), conv, session_id=session_id,
+                                     kind_classifier=kind_classifier)
+
+    def test_flag_on_happy_path_assigns_pack_kinds(self, monkeypatch):
+        """S2 emits pack-domain entities as 'unclassified'; the classifier
+        assigns real kinds that land in the payload (no minted kinds)."""
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the claim is durable",
+                         "pointKind": "unclassified", "about_entities": []}]}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        assert out["classify_later"]["enabled"] is True
+        assert out["classify_later"]["s2"]["assigned_knn"] >= 1
+        kinds = {e["kind"] for e in out["payload"]["entities"]}
+        assert "dev:issue" in kinds  # the classifier's kind, not unclassified
+        assert "unclassified" not in kinds
+        assert not out["minted_kinds"]
+        assert out["errors"] == []
+
+    def test_pack_event_kind_survives_execute_embed(self):
+        """FIX A candidate/write-gate alignment: a classifier-assigned pack
+        event kind (pm eventKinds — declared but kindDefs-less) is writable
+        at execute_embed — it survives unwritten-repaired (and is not flagged
+        minted), while a genuinely minted kind still repairs + flags."""
+        embed = {"entities": [], "events": [
+            {"content": "a card was created",
+             "eventKind": "pm:cardCreated", "about_entities": []},
+            {"content": "totally minted",
+             "eventKind": "totally:madeup", "about_entities": []},
+        ], "points": [], "operators": [], "chain_notes": [],
+            "link_before_create": []}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        kinds = {e["content"]: e["eventKind"] for e in res["payload"]["events"]}
+        assert kinds["a card was created"] == "cardCreated", \
+            "pack event kind survives execute_embed unwritten-repaired"
+        assert kinds["totally minted"] == "occurrence"
+        assert not any("pm:cardCreated" in m for m in res["minted_kinds"]), \
+            "the writable pack event kind is not flagged minted"
+        assert any("totally:madeup" in m for m in res["minted_kinds"])
+
+    def test_pack_object_kind_survives_execute_embed(self):
+        """FIX M candidate/write-gate alignment: a classifier-assigned pack
+        object/document kind (dev:apiSpec, pm:milestone, marketing:keyword —
+        declared but kindDefs-less, synthesized into the index's "objects"
+        section) is writable at execute_embed — it survives un-repaired and
+        is not flagged minted, while a genuinely minted kind still repairs
+        + flags."""
+        embed = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "the milestone", "kind": "pm:milestone",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "the keyword", "kind": "marketing:keyword",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "totally minted", "kind": "totally:madeup",
+             "lifecycle": "created", "supersedes": None, "note": None},
+        ], "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        kinds = {e["name"]: e["kind"] for e in res["payload"]["entities"]}
+        assert kinds["the api spec"] == "dev:apiSpec", \
+            "synthesized object kind survives execute_embed un-repaired"
+        assert kinds["the milestone"] == "pm:milestone"
+        assert kinds["the keyword"] == "marketing:keyword"
+        assert kinds["totally minted"] == "core:other"
+        assert not any(m for m in res["minted_kinds"]
+                       if "dev:apiSpec" in m or "pm:milestone" in m
+                       or "marketing:keyword" in m), \
+            "the writable pack object kinds are not flagged minted"
+        assert any("totally:madeup" in m for m in res["minted_kinds"])
+        # the report alone agrees: only the genuine minted kind is flagged
+        clean = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec"},
+            {"name": "the milestone", "kind": "pm:milestone"},
+            {"name": "the keyword", "kind": "marketing:keyword"},
+        ], "events": [], "points": []}
+        assert v2._minted_kind_report(clean) == []
+
+    def test_point_item_never_assigned_pack_point_kind(self, monkeypatch):
+        """FIX A: a point item is never assigned a pack point kind — the
+        index's "points" section contains ONLY "statement", so the point
+        classification is trivial (design doc) and the write gate never
+        sees a pack point kind on a point."""
+        from tortoise.value_extractor import _clear_kind_spec_cache, \
+            compile_kind_index_spec
+        _clear_kind_spec_cache()
+        spec = compile_kind_index_spec()
+        points = {k for k, md in spec.items()
+                  if md.get("section") == "points"}
+        assert points == {"statement"}
+        assert "dev:requirement" not in spec
+        assert "dev:bug" not in spec
+
+    def test_flag_off_byte_identical_no_telemetry_growth(self, monkeypatch):
+        """kind_classifier=None + env unset → the pipeline is byte-
+        identical: fixed session_id, canonical payload equality across runs,
+        and the Layer-1 payload key set does NOT grow."""
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+        r1 = self._run(monkeypatch, S2_FIXTURE)
+        r2 = self._run(monkeypatch, S2_FIXTURE)
+        assert r1["classify_later"]["enabled"] is False
+        assert r1["classify_later"]["s2"] == {} \
+            and r1["classify_later"]["union"] == {}
+        p1, p2 = r1["payload"], r2["payload"]
+        for skip in ("captured_at",):
+            p1.pop(skip), p2.pop(skip)
+        assert p1 == p2, "flag-off payloads must be canonically identical"
+        assert set(p1) == {
+            "schema_version", "session_id", "client_commit_id", "extractor",
+            "summary", "story_arc", "provenance_refs", "sources",
+            "entities", "points", "events", "operators", "supersessions",
+            "telemetry"}
+
+    def test_flag_off_prompts_byte_identical(self, monkeypatch):
+        """The flag-off S2/S4 prompts are byte-identical to the base
+        templates (the core-only variants are separate constants). The
+        exact-fragment pins catch template regressions (e.g. a joined
+        newline) that self-referential compares miss."""
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER", raising=False)
+        assert v2.render_s2_prompt() == v2.render_s2_prompt()
+        base = (v2.S2_TMPL
+                .replace("{master_list}", v2._render_master(v2.build_master_list()))
+                .replace("{chains_text}", v2._render_chains(v2.build_master_list()))
+                .replace("{date_anchor}", v2._date_anchor(None, include_emission_rules=True))
+                .replace("{output_contract}", v2.OUTPUT_CONTRACT))
+        assert v2.render_s2_prompt() == base
+        assert v2.OUTPUT_CONTRACT_CORE_ONLY != v2.OUTPUT_CONTRACT
+        # exact-fragment pins (byte-regression guard for the templates)
+        s2 = v2.render_s2_prompt()
+        assert "OPERATOR REFERENCING (hard rule)\nOperators wire POINTS" in s2
+        assert "- CHAINS — mapping must respect the chain positions" in s2
+        assert "PACK-DOMAIN CONTENT" not in s2
+
+    def test_kind_preservation_restamp_observable(self, monkeypatch):
+        """S4 re-types an S2 classifier-typed entity as 'unclassified' → the
+        re-stamp folds the duplicate and the S2 kind survives; the override
+        is counted (census-observable)."""
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        # S4 re-emits the SAME entity re-typed as unclassified (violating
+        # the re-emit clause) — the re-stamp must fold it
+        s4 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "unchanged", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2, s4_body=s4,
+                        kind_classifier=_stub_classifier())
+        assert out["classify_later"]["restamp_overrides"] >= 1
+        entities = out["payload"]["entities"]
+        assert len(entities) == 1, "no duplicate :Object on kind mismatch"
+        assert entities[0]["kind"] == "dev:issue"
+        assert any("re-typed by S4" in w for w in out["warnings"])
+
+    def test_section_aware_freeze(self, monkeypatch):
+        """The kind-freeze is section-aware: an entity named 'plan' with a
+        classifier kind does NOT freeze a point with the same content."""
+        s2 = {"entities": [
+            {"name": "plan", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "plan", "pointKind": "unclassified",
+                         "about_entities": []}]}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        # the entity freezes to core:plan; the POINT is classified
+        # independently (statement — the only point kind) — never re-stamped
+        # as core:plan by the entity's freeze
+        ent = out["payload"]["entities"][0]
+        pt = out["payload"]["points"][0]
+        assert ent["kind"] == "core:plan"
+        assert pt["pointKind"] == "statement"
+
+    def test_embedder_down_fail_open(self, monkeypatch):
+        """The embedder is down → the classifier falls back to best-core
+        kinds; the pipeline never raises; census counts embedding_error."""
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2,
+                        kind_classifier=_stub_classifier(encoder=_BoomEncoder()))
+        assert out["payload"]["entities"][0]["kind"] == "core:other"
+        assert out["error_census"]["embedding_error"] >= 1
+        assert out["classify_later"]["s2"]["embedding_errors"] >= 1
+
+    def test_adjudication_fail_falls_back(self, monkeypatch):
+        """The LLM adjudication tail fails → kNN top-1 fallback + census
+        classify_error; kinds still land."""
+        class BoomModel(MockModel):
+            def complete(self, *, system, user, max_tokens=None):
+                if "KIND ADJUDICATOR" in system:
+                    raise RuntimeError("adjudicator down")
+                return "x"
+
+        s2 = {"entities": [
+            {"name": "the plan workflow", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        clf = _stub_classifier(model=BoomModel([]), llm_tail=True)
+        out = self._run(monkeypatch, s2, kind_classifier=clf)
+        kinds = {e["kind"] for e in out["payload"]["entities"]}
+        assert "unclassified" not in kinds
+        assert out["error_census"]["classify_error"] >= 1
+
+    def test_unclassified_terminal_resolved_at_write(self, monkeypatch):
+        """A below-floor item keeps the sentinel in the list; execute_embed
+        repairs it to the best core kind + warning; the census counts the
+        terminal."""
+        s2 = {"entities": [
+            {"name": "xyzzy no keyword", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        assert out["payload"]["entities"][0]["kind"] == "core:other"
+        assert any("unclassified" in w for w in out["warnings"])
+        assert out["error_census"]["unclassified_terminal"] >= 1
+
+    def test_s4_reemit_clause_in_core_only_template(self):
+        """The S4 core-only template teaches the re-emit clause; the flag-
+        off template never mentions it."""
+        assert "S2 ITEMS ARE TYPED" in v2.S4_TMPL_CORE_ONLY
+        assert "classifier" in v2.S4_TMPL_CORE_ONLY.lower()
+        assert "S2 ITEMS ARE TYPED" not in v2.S4_TMPL
+
+    def test_core_only_render_golden_structure(self):
+        """The core-only render is a pinned structural golden: kind groups
+        in order, no pack kinds, no chains; hint blocks retained."""
+        m = v2.build_master_list()
+        r = v2._render_master_core_only(m)
+        assert r.startswith("MASTER LIST — the closed vocabulary (CORE ONLY)")
+        order = [r.index(s) for s in
+                 ("OBJECTS (core)", "SUBJECTS (core)", "POINTS", "EVENTS",
+                  "USER-PERSONAL-STATE VOCABULARY", "MEMORY GRANULARITY",
+                  "STATE-VALUE CARVE-OUT")]
+        assert order == sorted(order), "section order is pinned"
+        assert "PACK KINDS" not in r and "CHAINS" not in r
+        assert "product-strategy:product" not in r
+        assert r == v2._render_master_core_only(m)  # deterministic (no shuffle)
+
+    def test_core_only_render_byte_pinned_golden(self):
+        """Task 5's byte-pinned golden fixture: the core-only master render
+        equals the committed golden byte-for-byte. The golden is rendered
+        from a HAND-BUILT master (fixed dict order — see _hand_built_master),
+        never from the installed packs, so the test is platform-independent
+        (build_master_list()'s memory-granularity order follows the pack-
+        manifest glob order, which differs between macOS and Linux). Also
+        pins determinism (render twice → equal) and the absence of the
+        PACK KINDS / CHAINS sections (the classify-later split).
+
+        FIX K (cycle 3): production coverage — the byte-pin never saw
+        build_master_list()'s readdir-order memory_granularity. Render BOTH
+        the fixture and the production master; assert byte-equality of every
+        section EXCEPT MEMORY GRANULARITY, whose entries must be
+        SET-EQUAL (order-independent) to the golden's."""
+        m = _hand_built_master()
+        r = v2._render_master_core_only(m)
+        assert r == v2._render_master_core_only(m)  # deterministic (no shuffle)
+        assert "PACK KINDS" not in r and "CHAINS" not in r
+        golden = (Path(__file__).resolve().parent / "fixtures"
+                  / "core_only_master.golden.txt")
+        assert golden.read_text(encoding="utf-8") == r, \
+            "core-only master render drifted from the golden fixture " \
+            "(regenerate via _hand_built_master: see the golden test docstring)"
+
+        # FIX K: production-render coverage — the granularity block is the
+        # ONLY readdir-order-dependent section; everything else must be
+        # byte-identical to the golden, and the granularity entries must be
+        # set-equal (same entries, any order).
+        marker = "MEMORY GRANULARITY (what to keep, what to strip)"
+        carve = "\nSTATE-VALUE CARVE-OUT"
+
+        def _split(render: str):
+            head, sep, tail = render.partition(marker)
+            assert sep, "granularity section present in the render"
+            g_lines, _, rest = tail.partition(carve)
+            return head, sorted(g_lines.split("\n")), carve + rest
+
+        prod = v2._render_master_core_only(v2.build_master_list())
+        p_head, p_g, p_rest = _split(prod)
+        g_head, g_g, g_rest = _split(r)
+        assert p_head == g_head, "production render (pre-granularity) must " \
+            "match the golden byte-for-byte"
+        assert p_rest == g_rest, "production render (post-granularity) must " \
+            "match the golden byte-for-byte"
+        assert p_g == g_g, "production granularity entries must be set-equal " \
+            "to the golden (readdir order differs across platforms)"
+        assert len(p_g) >= 4, "production render carries the installed packs"
+
+    def test_core_only_ups_block_keeps_not_kinds_guard(self):
+        """The core-only USER-PERSONAL-STATE block carries the E2 (#1534)
+        guard — the vocabulary is a classification hint, never a kind."""
+        r = v2._render_master_core_only(v2.build_master_list())
+        assert "USER-PERSONAL-STATE VOCABULARY (Tier-A classification " \
+               "hint — the VALUE is the fact, retain verbatim; these are " \
+               "NOT kinds: do NOT emit them as entity/event/point kinds)" in r
+
+    def test_core_only_s2_prompt_pack_namespaces_dynamic(self):
+        """The core-only S2 prompt's pack-namespace list is DYNAMIC —
+        derived from the INSTALLED packs (never hardcoded: epistemic-team
+        is not installed, and a future pack must route to unclassified)."""
+        m = v2.build_master_list()
+        prompt = v2.render_s2_prompt(m, core_only=True)
+        ns = sorted({k.rsplit(":", 1)[0] + ":" for k in m["pack_kinds"]})
+        assert ns, "installed pack namespaces must be non-empty"
+        assert "({})".format("/".join(ns)) in prompt
+        assert "epistemic-team:" not in prompt
+        assert "{pack_namespaces}" not in prompt, "placeholder must be filled"
+
+    def test_core_only_contract_sentinel_only_top_level(self):
+        """The sentinel lands on the TOP-LEVEL entities/events/points kind
+        fields — never on the participant-slot kind fields (the slots
+        schema keeps plain str; the write path would otherwise silently
+        undo the contract's slots advertisement)."""
+        c = v2.OUTPUT_CONTRACT_CORE_ONLY
+        # top-level fields widen
+        assert '"name": str, "kind": str|"unclassified", "lifecycle"' in c
+        assert '"eventKind": str|"unclassified",' in c
+        assert '"pointKind": "statement"|"unclassified",' in c
+        # slot schemas keep plain str — never advertise the sentinel
+        assert '"subject": [{"name": str, "kind": str' in c
+        assert '"object": [{"name": str, "kind": str' in c
+        assert '"event": [{"name": str, "kind": str' in c
+        assert '"kind": str|"unclassified", "confidence"' not in c
+
+    def test_core_only_derivations_anchors_present_in_base(self):
+        """The _CORE_ONLY constants are .replace-derivations of the base
+        templates/contract; a future base edit that breaks an anchor would
+        silently no-op the derives (a half-applied flag-on template). These
+        pins make that fail loudly in CI."""
+        # S2 anchors
+        assert ("- CHAINS — mapping must respect the chain positions "
+                "(WARN, then TRY TO REPAIR):\n"
+                "{chains_text}\n"
+                "  If a mapping would connect across a chain in a way that "
+                "violates it, WARN in\n"
+                "  chain_notes and TRY TO REPAIR by re-mapping toward the "
+                "nearest valid chain\n"
+                "  position. NEVER invent entities to satisfy a chain."
+                in v2.S2_TMPL)
+        assert ("MASTER LIST\n{master_list}\n\nCONDENSED SEMANTIC CORE"
+                in v2.S2_TMPL)
+        # S4 anchors
+        assert ("MASTER LIST (same closed vocabulary as S2 — no minted "
+                "kinds)\n{master_list}\n\n"
+                "CHAINS\n{chains_text}\n\nS1 STORY" in v2.S4_TMPL)
+        assert ("- Re-emit the S2 items you keep, corrected where the "
+                "search results show they\n"
+                "  already exist (lifecycle changed/unchanged + supersedes "
+                "= the existing id)." in v2.S4_TMPL)
+        # OUTPUT_CONTRACT anchors
+        assert '"name": str, "kind": str, "lifecycle"' in v2.OUTPUT_CONTRACT
+        assert '"eventKind": str,' in v2.OUTPUT_CONTRACT
+        assert '"pointKind": "statement",' in v2.OUTPUT_CONTRACT
+        # FIX D (cycle 3): the base's advisory "TRY TO REPAIR" chain_notes
+        # bullet exists EXACTLY ONCE in S4_TMPL, and the core-only
+        # derivation swaps it for the deterministic-enforcement wording
+        # ("CHAIN ENFORCEMENT IS DETERMINISTIC" must not be contradicted).
+        assert v2.S4_TMPL.count(
+            "- chain_notes: flag violations, TRY TO REPAIR toward the nearest "
+            "valid chain\n  position, never invent entities.") == 1
+        assert "deterministic post-extraction" in v2.S4_TMPL_CORE_ONLY
+        assert "do NOT attempt repairs yourself" in v2.S4_TMPL_CORE_ONLY
+        assert "TRY TO REPAIR toward the nearest valid chain" not in \
+            v2.S4_TMPL_CORE_ONLY
+        assert "TRY TO REPAIR toward the nearest valid chain" in v2.S4_TMPL
+
+    def test_unclassified_constant_shared_with_classifier(self):
+        """The sentinel constant must not drift between modules (a mismatch
+        would silently break the classify-later sentinel round-trip)."""
+        from tortoise.kind_classifier import UNCLASSIFIED as CL_UNCLASSIFIED
+
+        assert v2.UNCLASSIFIED == CL_UNCLASSIFIED == "unclassified"
+
+    def test_sentinel_never_flagged_minted(self):
+        """Below-floor items carry kind='unclassified' through to the
+        minted-kind report — the reserved sentinel is a terminal, not a
+        minted kind (final-review P2 false positive)."""
+        embed = {"entities": [
+            {"name": "xyzzy", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [{"content": "e", "eventKind": "unclassified"}],
+            "points": [{"content": "p", "pointKind": "unclassified"}],
+            "operators": [], "chain_notes": [], "link_before_create": []}
+        assert v2._minted_kind_report(embed) == []
+        # a real minted kind is still flagged (the report is not gutted)
+        bad = dict(embed)
+        bad["entities"] = [{"name": "x", "kind": "worktree",
+                             "lifecycle": "created", "supersedes": None,
+                             "note": None}]
+        assert any("worktree" in m for m in v2._minted_kind_report(bad))
+
+    def test_point_kind_report_agrees_with_point_gate(self):
+        """FIX P: the report's points lane agrees with the point write gate
+        — pack point kinds WITH kindDefs (dev:requirement,
+        product-strategy:useCase/...) sit in the master's pack_kinds
+        (the master-wide ``master_kind_forms`` bare forms would hide them)
+        but the gate repairs them to statement — the report must FLAG them."""
+        embed = {"entities": [], "events": [],
+                 "points": [
+                     {"content": "p1",
+                      "pointKind": "dev:requirement"},
+                     {"content": "p2",
+                      "pointKind": "product-strategy:useCase"},
+                     {"content": "p3", "pointKind": "statement"}],
+                 "operators": [], "chain_notes": [],
+                 "link_before_create": []}
+        minted = v2._minted_kind_report(embed)
+        assert any("dev:requirement" in m for m in minted), minted
+        assert any("product-strategy:useCase" in m for m in minted), minted
+        assert not any("statement" in m for m in minted)
+        # and execute_embed's point gate agrees: those kinds repair
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pk = {p["content"]: p["pointKind"] for p in res["payload"]["points"]}
+        assert pk["p1"] == "statement" and pk["p2"] == "statement"
+
+    def test_slot_survives_for_pack_object_kind(self):
+        """FIX M slot-lane consistency (reviewer P2): _clean_slots' subject/
+        object lane gates against the SAME widened object vocabulary as
+        execute_embed's entity gate — a slot referencing an emitted
+        dev:apiSpec entity keeps its kind and resolves (previously it was
+        repaired to core:other and dropped, silently losing the relation
+        for exactly the synthesized kinds FIX M preserves)."""
+        embed = {"entities": [
+            {"name": "the api spec", "kind": "dev:apiSpec",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the api spec is v2",
+                         "pointKind": "statement",
+                         "about_entities": ["the api spec"],
+                         "slots": {"subject": [
+                             {"name": "the api spec",
+                              "kind": "dev:apiSpec",
+                              "confidence": 0.9}]}}]}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        pt = res["payload"]["points"][0]
+        assert pt["slots"]["subject"][0]["kind"] == "dev:apiSpec", \
+            "the slot kind survives _clean_slots + _resolve_slot_refs"
+        assert not any("minted slot kind" in w for w in res["warnings"]), \
+            res["warnings"]
+
+    def test_fold_never_drops_different_non_sentinel_kind(self):
+        """A same-name duplicate carrying a DIFFERENT non-sentinel kind is
+        a distinct (name, kind) :Object (Layer-1) — the name-collision
+        fold must NOT delete it AND the S2 re-stamp must NOT clobber it
+        (only sentinel/missing/identical duplicates fold; only LOST kinds
+        re-stamp; cycle-3 P2)."""
+        def ent(name, kind):
+            return {"name": name, "kind": kind, "lifecycle": "created",
+                    "supersedes": None, "note": None}
+
+        merged = {"entities": [ent("plan", "core:plan"),
+                                ent("plan", "core:goal")],
+                  "events": [], "points": [], "operators": [],
+                  "chain_notes": [], "link_before_create": []}
+        warnings: list[str] = []
+        n = v2._restamp_s2_kinds(merged, {"entities:plan": "core:plan"},
+                                 warnings)
+        assert len(merged["entities"]) == 2, \
+            "the different-kind duplicate must survive the fold"
+        kinds = {e["kind"] for e in merged["entities"]}
+        assert kinds == {"core:plan", "core:goal"}, \
+            "the S2-registered copy keeps core:plan; the re-typed survivor " \
+            "keeps its original kind (core:goal)"
+        assert not any("folded into the S2" in w for w in warnings)
+        assert any("preserved as distinct" in w for w in warnings), \
+            "the preserved re-typed :Object is announced (observable census)"
+        assert n == 0, "a valid non-sentinel kind is never re-stamped"
+
+    def test_clean_slots_sentinel_no_minted_warning(self):
+        """FIX G: a participant slot kind 'unclassified' (the classify-later
+        sentinel) is carried WITHOUT the spurious 'minted slot kind'
+        repair warning — the sentinel is a terminal, not a minted kind
+        (as _rekey_slots already treats it)."""
+        warnings: list[str] = []
+        master = v2.build_master_list()
+        slots = v2._clean_slots(
+            {"subject": [{"name": "x", "kind": "unclassified",
+                            "confidence": 0.9}]},
+            warnings, "ctx", master)
+        assert not any("minted slot kind" in w for w in warnings), warnings
+        assert slots == {"subject": [
+            {"name": "x", "kind": "unclassified", "confidence": 0.9}]}
+        # a genuinely minted slot kind still warns + repairs (not gutted)
+        warnings2: list[str] = []
+        slots2 = v2._clean_slots(
+            {"subject": [{"name": "x", "kind": "worktree",
+                            "confidence": 0.9}]},
+            warnings2, "ctx", master)
+        assert any("minted slot kind" in w for w in warnings2)
+        assert slots2["subject"][0]["kind"] == "core:other"
+
+    def test_no_slot_kind_ever_carries_sentinel(self):
+        """FIX O: after _clean_slots + _resolve_slot_refs, NO payload slot
+        ever carries 'unclassified' — subject/object sentinel slots fail
+        closed at _resolve_slot_refs (no emitted entity resolves them),
+        and an EVENT-role sentinel slot (which passes through untouched)
+        is repaired to core:occurrence SILENTLY (the sentinel is only
+        advertised for top-level fields; 'sentinel never written' holds for
+        slot kinds too)."""
+        warnings: list[str] = []
+        master = v2.build_master_list()
+        slots = v2._clean_slots(
+            {"subject": [{"name": "s", "kind": "unclassified",
+                            "confidence": 0.8}],
+             "object": [{"name": "o", "kind": "unclassified",
+                          "confidence": 0.8}],
+             "event": [{"name": "e", "kind": "unclassified",
+                         "confidence": 0.8}]},
+            warnings, "ctx", master)
+        assert not any("minted slot kind" in w for w in warnings), warnings
+        resolved = v2._resolve_slot_refs(slots, set(), warnings, "ctx")
+        assert resolved is not None and "event" in resolved
+        # the event slot survives but with the fallback kind — never the
+        # sentinel
+        assert resolved["event"][0]["kind"] == "core:occurrence"
+        assert "subject" not in resolved and "object" not in resolved, \
+            "sentinel subject/object slots fail closed downstream"
+        # sweeping assertion: no slot kind across any role is the sentinel
+        for refs in resolved.values():
+            for r in refs:
+                assert r["kind"] != "unclassified"
+
+    def test_rekey_slots_skips_sentinel_entity_kind(self):
+        """An entity still carrying the 'unclassified' sentinel must not
+        copy it into slot kinds (_clean_slots would otherwise emit a
+        spurious 'minted slot kind' warning for the sentinel)."""
+        embed = {"entities": [
+            {"name": "xyzzy", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the claim", "pointKind": "statement",
+                         "about_entities": ["xyzzy"],
+                         "slots": {"subject": [
+                             {"name": "xyzzy", "kind": "core:other",
+                              "confidence": 0.9}]}}]}
+        n = v2._rekey_slots(embed)
+        assert n == 0, "the sentinel is never copied into a slot kind"
+        slot = embed["points"][0]["slots"]["subject"][0]
+        assert slot["kind"] == "core:other"
+
+    def test_slot_rekey_follows_classified_kind(self):
+        """Participant slot kinds follow the classified entity kind."""
+        embed = {"entities": [
+            {"name": "the ticket fix", "kind": "dev:issue",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the claim", "pointKind": "statement",
+                         "about_entities": ["the ticket fix"],
+                         "slots": {"subject": [
+                             {"name": "the ticket fix",
+                              "kind": "core:other", "confidence": 0.9}]}}]}
+        n = v2._rekey_slots(embed)
+        assert n == 1
+        slot = embed["points"][0]["slots"]["subject"][0]
+        assert slot["kind"] == "dev:issue"
+
+    def test_flag_on_via_env_toggle_only(self, monkeypatch):
+        """The env toggle alone (no injected classifier) enables the
+        classify-later pipeline — the single choke point. The default
+        classifier builder is monkeypatched so the test never waits on a
+        real index build (bge cold load / TF-IDF degrade)."""
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "1")
+        monkeypatch.setattr(v2, "_default_kind_classifier",
+                            lambda model: _stub_classifier())
+        s2 = {"entities": [
+            {"name": "the ticket fix", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2)  # no injected classifier
+        assert out["classify_later"]["enabled"] is True
+        assert out["payload"]["entities"][0]["kind"] == "dev:issue"
+
+    def test_env_toggle_case_insensitive(self, monkeypatch):
+        """FIX B: TORTOISE_CLASSIFY_LATER matches case-insensitively —
+        True/TRUE/ON/yes all enable; only unset/0/off disable."""
+        for val in ("1", "true", "TRUE", "True", "yes", "on", "ON"):
+            monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", val)
+            assert v2._classify_later_enabled() is True, val
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "0")
+        assert v2._classify_later_enabled() is False
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "off")
+        assert v2._classify_later_enabled() is False
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER")
+        assert v2._classify_later_enabled() is False
+
+    def test_label_order_toggle_case_insensitive(self, monkeypatch):
+        """FIX B: TORTOISE_LABEL_ORDER=shuffle matches case-insensitively
+        (SHUFFLE/Shuffle enable the A′ label-order hook)."""
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER", raising=False)
+        assert v2._label_order_rng("s") is None
+        for val in ("shuffle", "SHUFFLE", "Shuffle"):
+            monkeypatch.setenv("TORTOISE_LABEL_ORDER", val)
+            assert v2._label_order_rng("s") is not None, val
+
+    def test_numeric_name_survives_union_classify(self, monkeypatch):
+        """FIX C: a numeric (non-str) entity name must not raise
+        AttributeError in the union-classify block (_identity_key /
+        _restamp_s2_kinds / _rekey_slots coerce via str())."""
+        s2 = {"entities": [
+            {"name": 42, "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        assert out["errors"] == [], "no AttributeError through the union pass"
+        assert out["payload"]["entities"][0]["name"] == "42"
+
+    def test_norm_coerces_non_str(self):
+        """FIX C: _norm coerces non-str input instead of raising (the
+        falsy-or semantics mirror _collect_classify_items' defensive str():
+        a falsy value coerces to '')."""
+        assert v2._norm(42) == "42"
+        assert v2._norm(None) == ""
+        assert v2._norm(0) == ""  # falsy-or: 0 or "" → ""
+        assert v2._norm("  Mixed CASE ") == "mixed case"
 
 
 # ── S3 integration with the real backend (skip-if-unavailable) ─────────────
