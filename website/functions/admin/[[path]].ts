@@ -4,7 +4,10 @@
 //
 // - Reads the session access token from the Authorization header or the
 //   sb-tortoise-auth-token cookie (Supabase PKCE, parent-domain cookie).
-// - Verifies the JWT server-side (HS256, SUPABASE_JWT_SECRET) with Web Crypto.
+// - Validates the token by asking SUPABASE AUTH ITSELF (GET /auth/v1/user) —
+//   no local JWT verification, no SUPABASE_JWT_SECRET required (the secret is
+//   dashboard-only in modern Supabase). Supabase verifies the token server-side
+//   (handles key rotation; invalid/expired → 401).
 // - Checks is_admin() via Supabase REST (service_role): membership in
 //   blog_admins.
 // - Valid admin → serves the SPA shell (website/apps/blog-admin/dist/index.html
@@ -23,51 +26,6 @@ import { type Env, HSTS } from "../blog/_lib.ts";
 const AUTH_URL = "https://tortoise.premiselabs.co/auth";
 const HSTS_REDIRECT = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
-function base64UrlDecode(s: string): Uint8Array {
-  const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
-  const pad = b64.length % 4 === 0 ? "" : "=".repeat(4 - (b64.length % 4));
-  const bin = atob(b64 + pad);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  return bytes;
-}
-
-function jsonFromBytes(bytes: Uint8Array): unknown {
-  return JSON.parse(new TextDecoder().decode(bytes));
-}
-
-interface JwtPayload {
-  sub?: string;
-  exp?: number;
-  [k: string]: unknown;
-}
-
-async function verifyJwt(token: string, secret: string): Promise<JwtPayload | null> {
-  const parts = token.split(".");
-  if (parts.length !== 3) return null;
-  try {
-    const key = await crypto.subtle.importKey(
-      "raw",
-      new TextEncoder().encode(secret),
-      { name: "HMAC", hash: "SHA-256" },
-      false,
-      ["verify"],
-    );
-    const sigInput = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
-    const sig = base64UrlDecode(parts[2]);
-    const valid = await crypto.subtle.verify("HMAC", key, sig, sigInput);
-    if (!valid) return null;
-
-    const payload = jsonFromBytes(base64UrlDecode(parts[1])) as JwtPayload;
-    // Expiry REQUIRED (epoch seconds) + sub REQUIRED — strict verification
-    if (typeof payload.exp !== "number" || payload.exp * 1000 < Date.now()) return null;
-    if (typeof payload.sub !== "string") return null;
-    return payload;
-  } catch {
-    return null;
-  }
-}
-
 function getAccessToken(request: Request): string | null {
   const auth = request.headers.get("Authorization");
   if (auth && auth.startsWith("Bearer ")) return auth.slice(7);
@@ -85,6 +43,27 @@ function getAccessToken(request: Request): string | null {
     }
   }
   return null;
+}
+
+// Validate the session token with Supabase Auth itself — returns the user id
+// on success, null otherwise. No local JWT parsing; Supabase does the
+// verification (invalid/expired tokens → 401).
+async function verifySession(env: Env, token: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${env.SUPABASE_URL ?? ""}/auth/v1/user`, {
+      headers: {
+        apikey: env.SUPABASE_ANON_KEY ?? "",
+        Authorization: `Bearer ${token}`,
+        Accept: "application/json",
+      },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return null;
+    const user = (await res.json()) as { id?: string };
+    return typeof user.id === "string" ? user.id : null;
+  } catch {
+    return null; // upstream unreachable → not authorized → redirect (fail-closed)
+  }
 }
 
 async function isAdmin(env: Env, userId: string): Promise<boolean> {
@@ -146,7 +125,7 @@ function redirectToAuth(): Response {
 }
 
 export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
-  if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY || !env.SUPABASE_JWT_SECRET) {
+  if (!env.SUPABASE_URL || !env.SUPABASE_ANON_KEY || !env.SUPABASE_SERVICE_ROLE_KEY) {
     // Not configured → fail closed (never serve admin without verification)
     return redirectToAuth();
   }
@@ -154,10 +133,10 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   const token = getAccessToken(request);
   if (!token) return redirectToAuth();
 
-  const payload = await verifyJwt(token, env.SUPABASE_JWT_SECRET);
-  if (!payload || !payload.sub) return redirectToAuth();
+  const userId = await verifySession(env, token);
+  if (!userId) return redirectToAuth();
 
-  const admin = await isAdmin(env, payload.sub);
+  const admin = await isAdmin(env, userId);
   if (!admin) return redirectToAuth();
 
   return serveShell(env, request);

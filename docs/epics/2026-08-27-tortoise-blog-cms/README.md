@@ -57,7 +57,7 @@ Blog + CMS for tortoise.premiselabs.co — agent-publish → human-review, SSR p
    - `SUPABASE_URL` (https://ybetwichurajbfswfeqa.supabase.co)
    - `SUPABASE_ANON_KEY` (public anon key)
    - `SUPABASE_SERVICE_ROLE_KEY` (server-side secret — agent API + admin gate)
-   - `SUPABASE_JWT_SECRET` (Supabase project JWT secret — admin gate)
+   (NO `SUPABASE_JWT_SECRET` needed — the admin gate validates sessions via Supabase's /auth/v1/user endpoint)
 2. **Repo secrets** (for the deploy build step): `SUPABASE_URL`, `SUPABASE_ANON_KEY` (GitHub → Settings → Secrets).
 3. **Supabase migration** applied: `20260827000001_blog_cms.sql` (supabase-deploy CI applies it; verify `blog_posts` exists).
 4. **Agent keys seeded**: `blog_agent_keys` INSERT (sha256 of the plaintext key, printed once) — the ops seed script.
