@@ -35,6 +35,12 @@ from tests.test_supabase_control import (
     FREE_TEAM, TEAM_TIER_TEAM, TOKEN, _key_row, _membership_row,
 )
 
+# #1719 (Task 3): real UUIDs — JWT subjects + team_memberships.user_id are
+# uuid in prod; non-UUID literals would 22P02 (the fake now enforces it).
+_USER1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_USER2 = "9f2c1a40-0000-4a00-8000-000000000002"
+_USER9 = "9f2c1a40-0000-4a00-8000-000000000009"
+
 # Supabase mode token (deterministic via conftest pepper)
 
 
@@ -159,13 +165,13 @@ class TestSessionKeyRoundTrip:
 
     @pytest.fixture
     def authed_user(self):
-        app.dependency_overrides[get_current_user] = lambda: {"user_id": "user-1"}
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": _USER1}
         yield
         app.dependency_overrides.pop(get_current_user, None)
 
     def test_mint_resolves_then_revoked_rejected(self, rest_client, authed_user):
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(team_id="team-free-001")])
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
         fake.tables["api_keys"] = []  # ensure clean
 
         # bootstrap mint → api_keys row with created_via + expires_at
@@ -179,7 +185,7 @@ class TestSessionKeyRoundTrip:
         rows = fake.tables["api_keys"]
         assert len(rows) == 1
         assert rows[0]["created_via"] == "bootstrap"
-        assert rows[0]["created_by"] == "user-1"
+        assert rows[0]["created_by"] == _USER1
         assert rows[0]["expires_at"] is not None  # 24h
         assert rows[0]["lookup_hash"] == lookup_hash(key)
         assert rows[0]["key_prefix"] == key[:10]
@@ -195,7 +201,7 @@ class TestSessionKeyRoundTrip:
 
     def test_recovery_mint_persistent_no_expiry(self, rest_client, authed_user):
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(team_id="team-free-001")])
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
         r = tc.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None
@@ -203,10 +209,10 @@ class TestSessionKeyRoundTrip:
 
     def test_bootstrap_cap_three_active(self, rest_client, authed_user):
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(team_id="team-free-001")])
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
         for i in range(3):
             fake.seed("api_keys", [_key_row(
-                id=f"boot-{i}", created_via="bootstrap", created_by="user-1",
+                id=f"boot-{i}", created_via="bootstrap", created_by=_USER1,
                 lookup_hash=f"hash-{i}")])
         r = tc.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 429
@@ -215,11 +221,11 @@ class TestSessionKeyRoundTrip:
         """Free tier max_api_keys=2: minting a 3rd recovery key auto-revokes
         the oldest OTHER user's key (#750.10 — never the user's own)."""
         tc, fake = rest_client
-        fake.seed("team_memberships", [_membership_row(team_id="team-free-001")])
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
         fake.seed("api_keys", [
-            _key_row(id="other-old", created_via="recovery", created_by="user-2",
+            _key_row(id="other-old", created_via="recovery", created_by=_USER2,
                      lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
-            _key_row(id="other-new", created_via="recovery", created_by="user-2",
+            _key_row(id="other-new", created_via="recovery", created_by=_USER2,
                      lookup_hash="h2", created_at="2026-08-02T00:00:00Z"),
         ])
         r = tc.post("/v1/session/key", json={"purpose": "recovery"})
@@ -265,7 +271,7 @@ class TestInvitesEndpointFlip:
         tc, fake = rest_client
         fake.tables["teams"] = [dict(TEAM_TIER_TEAM)]
         fake.seed("team_memberships", [{
-            "user_id": "user-1", "team_id": "team-team-001",
+            "user_id": _USER1, "team_id": "team-team-001",
             "role": "owner", "status": "active"}])
         return tc, fake
 
@@ -273,7 +279,7 @@ class TestInvitesEndpointFlip:
         """E2E-3 happy path: mint → lookup_hash row → accept → membership
         with the INVITED role; consumed invite cannot be re-accepted."""
         tc, fake = team_tier
-        as_user("user-1")
+        as_user(_USER1)
 
         r = tc.post("/v1/invites", json={
             "team_id": "team-team-001", "email": "bob@example.com",
@@ -293,13 +299,13 @@ class TestInvitesEndpointFlip:
         assert rows[0]["status"] == "pending"
 
         # accept as the invitee (JWT email must match)
-        as_user("user-2", "bob@example.com")
+        as_user(_USER2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 200, r.text
         assert r.json() == {"team_id": "team-team-001", "role": "admin"}
 
         mem = [m for m in fake.tables["team_memberships"]
-               if m["user_id"] == "user-2"]
+               if m["user_id"] == _USER2]
         assert len(mem) == 1
         assert mem[0]["role"] == "admin"  # invited role preserved (O/I/T)
         assert mem[0]["status"] == "active"
@@ -313,7 +319,7 @@ class TestInvitesEndpointFlip:
 
     def test_mint_dedup_409(self, team_tier, as_user):
         tc, fake = team_tier
-        as_user("user-1")
+        as_user(_USER1)
         payload = {"team_id": "team-team-001", "email": "bob@example.com",
                    "role": "member"}
         assert tc.post("/v1/invites", json=payload).status_code == 200
@@ -325,9 +331,9 @@ class TestInvitesEndpointFlip:
         """Free tier → 402 (invites are a Team-tier feature, D7 #574)."""
         tc, fake = rest_client
         fake.seed("team_memberships", [{
-            "user_id": "user-1", "team_id": "team-free-001",
+            "user_id": _USER1, "team_id": "team-free-001",
             "role": "owner", "status": "active"}])
-        as_user("user-1")
+        as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "team_id": "team-free-001", "email": "bob@example.com",
             "role": "member"})
@@ -336,9 +342,9 @@ class TestInvitesEndpointFlip:
     def test_mint_requires_owner_admin(self, team_tier, as_user):
         tc, fake = team_tier
         fake.seed("team_memberships", [{
-            "user_id": "user-9", "team_id": "team-team-001",
+            "user_id": _USER9, "team_id": "team-team-001",
             "role": "member", "status": "active"}])
-        as_user("user-9")
+        as_user(_USER9)
         r = tc.post("/v1/invites", json={
             "team_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
@@ -346,7 +352,7 @@ class TestInvitesEndpointFlip:
 
     def test_expired_invite_rejected(self, team_tier, as_user):
         tc, fake = team_tier
-        as_user("user-1")
+        as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "team_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
@@ -354,7 +360,7 @@ class TestInvitesEndpointFlip:
         from datetime import datetime, timedelta, timezone
         past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()  # noqa: UP017
         fake.tables["invitations"][0]["expires_at"] = past
-        as_user("user-2", "bob@example.com")
+        as_user(_USER2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 400
         assert "expired" in r.json()["detail"]
@@ -362,7 +368,7 @@ class TestInvitesEndpointFlip:
     def test_revoked_invite_rejected_after_rescind(self, team_tier, as_user):
         """E2E-3: rescind → revoked; a revoked invite cannot be accepted."""
         tc, fake = team_tier
-        as_user("user-1")
+        as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "team_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
@@ -374,32 +380,32 @@ class TestInvitesEndpointFlip:
         assert r.json()["revoked"] is True
         assert fake.tables["invitations"][0]["status"] == "revoked"
 
-        as_user("user-2", "bob@example.com")
+        as_user(_USER2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 400
         assert "revoked" in r.json()["detail"]
         # no membership created for the invitee (user-1's row is the owner)
-        assert all(m["user_id"] != "user-2"
+        assert all(m["user_id"] != _USER2
                    for m in fake.tables["team_memberships"])
 
     def test_rescind_requires_owner_admin(self, team_tier, as_user):
         tc, fake = team_tier
-        as_user("user-1")
+        as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "team_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})
         invite_id = r.json()["invite_id"]
         fake.seed("team_memberships", [{
-            "user_id": "user-9", "team_id": "team-team-001",
+            "user_id": _USER9, "team_id": "team-team-001",
             "role": "member", "status": "active"}])
-        as_user("user-9")
+        as_user(_USER9)
         r = tc.delete(f"/v1/invites/{invite_id}?team_id=team-team-001")
         assert r.status_code == 403
         assert fake.tables["invitations"][0]["status"] == "pending"
 
     def test_list_pending_invites(self, team_tier, as_user):
         tc, fake = team_tier
-        as_user("user-1")
+        as_user(_USER1)
         tokens = {}
         for email in ("bob@example.com", "carol@example.com", "dave@example.com"):
             r = tc.post("/v1/invites", json={
@@ -408,10 +414,10 @@ class TestInvitesEndpointFlip:
             assert r.status_code == 200, r.text
             tokens[email] = r.json()["token"]
         # consume one (accepted), rescind another → only one stays pending
-        as_user("user-2", "bob@example.com")
+        as_user(_USER2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": tokens["bob@example.com"]})
         assert r.status_code == 200, r.text
-        as_user("user-1")
+        as_user(_USER1)
         r = tc.delete(f"/v1/invites/{fake.tables['invitations'][2]['id']}?team_id=team-team-001")
         assert r.status_code == 200, r.text
 
@@ -427,7 +433,7 @@ class TestInvitesEndpointFlip:
         import tortoise.supabase_control as sc
         monkeypatch.setattr(sc, "get_control_plane", lambda: ErrorControlPlane())
         tc, _ = team_tier
-        as_user("user-1")
+        as_user(_USER1)
         r = tc.post("/v1/invites", json={
             "team_id": "team-team-001", "email": "bob@example.com",
             "role": "member"})

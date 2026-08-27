@@ -59,6 +59,7 @@ from __future__ import annotations
 
 import logging
 import os
+import uuid as _uuid
 from datetime import datetime, timezone
 
 _logger = logging.getLogger(__name__)
@@ -681,6 +682,24 @@ def membership_for_user_team(cp, user_id: str, team_id: str) -> dict | None:
     return {"team_id": team_id, "role": rows[0]["role"]}
 
 
+def _is_uuid(value: object) -> bool:
+    """True when *value* is a UUID-shaped string, matching PostgreSQL's uuid
+    parser acceptance (hyphenated, 32-hex without hyphens, braced, case-
+    insensitive). A strict hyphenated regex would reject 32-hex/braced forms
+    that Postgres accepts and that can therefore be real mint targets
+    (solution-verify P2-B). Returns False for None/non-strings so callers can
+    gate before building a ``user_id eq`` filter on a uuid column (a non-UUID
+    literal would 22P02 → PostgREST 400 — the #1719 500 class).
+    """
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        _uuid.UUID(value)
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 def mint_target_user_for_key(cp, key_created_by, team_id: str) -> str | None:
     """#1511: the user a key's session-exchange should mint for.
 
@@ -692,8 +711,15 @@ def mint_target_user_for_key(cp, key_created_by, team_id: str) -> str | None:
     "api"/NULL/unknown shape → KEY_NOT_USER_MINTED. Control-plane fact only
     (FakeControlPlane-testable); the GoTrue admin fetch + mint live in
     hosted_api.py.
+
+    Shape-gate (#1719): a non-UUID creator ("api"/"anon-*"/"reg-*", NULL,
+    junk) returns None WITHOUT querying — ``team_memberships.user_id`` is a
+    uuid column, so a non-UUID literal would raise PostgREST 22P02 (HTTP 400)
+    and surface as an unmapped 500. The endpoint's shape tree classifies
+    these (ANON_TEAM_NO_OWNER / KEY_NOT_USER_MINTED). UUID-shaped values
+    query normally (active member → the UUID; non-member → None).
     """
-    if not key_created_by:
+    if not key_created_by or not _is_uuid(key_created_by):
         return None
     mem = membership_for_user_team(cp, key_created_by, team_id)
     return key_created_by if mem is not None else None
@@ -1752,8 +1778,18 @@ def team_members(cp, team_id: str) -> list[dict]:
 def membership_role(cp, team_id: str, user_id: str) -> str | None:
     """Role of a member matched by user_id OR identity (agents), any status
     (mirrors the registry remove/role-change lookup which does not filter
-    status). None when no row matches."""
-    for col in ("user_id", "identity"):
+    status). None when no row matches.
+
+    #1719 (codebase-review P1-1): ``team_memberships.user_id`` is a uuid
+    column — the two-column loop ran the ``user_id eq`` filter FIRST, so an
+    identity anchor ("anon-abc") 22P02'd before the identity fallback ever
+    matched → live 500 at remove_member/change_member_role. Branch on value
+    shape: UUID values keep the lossless two-column loop (a duplicate
+    identity-anchored row holding a UUID string still matches via identity);
+    non-UUID values query identity only (they can never match a uuid column).
+    """
+    cols = ("user_id", "identity") if _is_uuid(user_id) else ("identity",)
+    for col in cols:
         rows = cp.query(
             "team_memberships",
             select=["role"],
@@ -1766,8 +1802,11 @@ def membership_role(cp, team_id: str, user_id: str) -> str | None:
 
 def set_membership(cp, team_id: str, user_id: str, **updates: object) -> None:
     """PATCH a membership row matched by user_id OR identity (remove =
-    status 'removed'; role change = role). Raises on failure (fail-closed)."""
-    for col in ("user_id", "identity"):
+    status 'removed'; role change = role). Raises on failure (fail-closed).
+    Same #1719 shape-branch as membership_role — non-UUID anchors must never
+    hit the uuid-typed ``user_id eq`` filter."""
+    cols = ("user_id", "identity") if _is_uuid(user_id) else ("identity",)
+    for col in cols:
         cp.query(
             "team_memberships",
             method="PATCH",

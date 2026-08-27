@@ -44,6 +44,13 @@ TEAM = "team-abuse-1"
 TOKEN_A = "tt_abuse_aaaa1111"
 TOKEN_B = "tt_abuse_bbbb2222"
 
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs, so non-UUID user_id literals are prod-impossible
+# (FakeControlPlane's fidelity check raises HTTP 400 on them). Identity /
+# api_keys.created_by stay TEXT and remain non-UUID.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U_STRANGER = "9f2c1a40-0000-4a00-8000-00000000000a"
+
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
 
@@ -463,11 +470,11 @@ class TestMintGateAndAlerts:
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
         fake.seed("team_memberships", [{
-            "user_id": "user-1", "team_id": TEAM, "role": "owner",
+            "user_id": _U1, "team_id": TEAM, "role": "owner",
             "status": "active", "team_name": "abuse-team"}])
         fake.rpc("abuse_suspend", {"p_team_id": TEAM})
         env["app"].dependency_overrides[get_current_user] = \
-            lambda: {"user_id": "user-1"}
+            lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
@@ -484,7 +491,7 @@ class TestMintGateAndAlerts:
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
         fake.seed("team_memberships", [{
-            "user_id": "user-1", "team_id": TEAM, "role": "owner",
+            "user_id": _U1, "team_id": TEAM, "role": "owner",
             "status": "active", "team_name": "abuse-team"}])
         # env fixture pre-seeds 2 provisioned keys at the free-tier cap
         # (max_api_keys=2). The DRIFT-phase mint has the suspension gate
@@ -496,7 +503,7 @@ class TestMintGateAndAlerts:
         fake.rpc("abuse_suspend", {"p_team_id": TEAM})
         fake.missing_columns = {"teams": {"suspended_at", "flagged_at"}}
         env["app"].dependency_overrides[get_current_user] = \
-            lambda: {"user_id": "user-1"}
+            lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.post("/v1/session/key",
@@ -517,13 +524,13 @@ class TestMintGateAndAlerts:
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
         fake.seed("team_memberships", [{
-            "user_id": "user-1", "team_id": TEAM, "role": "owner",
+            "user_id": _U1, "team_id": TEAM, "role": "owner",
             "status": "active", "team_name": "abuse-team"}])
         store = SupabaseAbuseStore(fake)
         store.flag_team(TEAM, "point_create", {"count": 6})
         store.record_event(TEAM, "auth_ip", country="US")
         env["app"].dependency_overrides[get_current_user] = \
-            lambda: {"user_id": "user-1"}
+            lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.get(f"/v1/team/alerts?team_id={TEAM}")
@@ -539,12 +546,12 @@ class TestMintGateAndAlerts:
         from tortoise.hosted_api import get_current_user
         fake = env["fake"]
         fake.seed("team_memberships", [{
-            "user_id": "user-1", "team_id": TEAM, "role": "owner",
+            "user_id": _U1, "team_id": TEAM, "role": "owner",
             "status": "active", "team_name": "abuse-team"}])
         SupabaseAbuseStore(fake).flag_team(TEAM, "point_create", {"count": 6})
         fake.rpc("abuse_suspend", {"p_team_id": TEAM})
         env["app"].dependency_overrides[get_current_user] = \
-            lambda: {"user_id": "user-1"}
+            lambda: {"user_id": _U1}
         try:
             with TestClient(env["app"]) as tc:
                 r = tc.get(f"/v1/team/alerts?team_id={TEAM}")
@@ -556,7 +563,7 @@ class TestMintGateAndAlerts:
     def test_alerts_require_membership(self, env):
         from tortoise.hosted_api import get_current_user
         env["app"].dependency_overrides[get_current_user] = \
-            lambda: {"user_id": "stranger"}
+            lambda: {"user_id": _U_STRANGER}
         try:
             with TestClient(env["app"]) as tc:
                 assert tc.get(f"/v1/team/alerts?team_id={TEAM}").status_code == 403

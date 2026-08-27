@@ -257,9 +257,10 @@ def test_in_flight_single_flight_reuses(provisioned, mock_github, monkeypatch):
     (guard-check FIRST), and the reused POST spawns NO second run — two
     concurrent POSTs produce EXACTLY ONE _run_indexing execution (P1-1:
     single-flight dedupes the RUN, not just the entry)."""
-    team_id = provisioned.team_id
+    _team_id = provisioned.team_id
     calls = []
     import asyncio as _asyncio
+
     import tortoise.hosted_api as ha
     orig_run = ha._run_indexing
 

@@ -117,6 +117,9 @@ class TestOnboardingStateFlip:
             "demo_created": False, "session_recording": False,
             "team_created": False, "prompt_pasted": False,
             "onboarding_complete": False,
+            # #1725 (Slice 0): registered in _ONBOARDING_DEFAULT_STATE.
+            "github_index_cursor": None,
+            "github_legacy_backfill_done": False,
         }
 
     def test_patch_lands_on_teams_jsonb_and_reads_back(self, supabase_client):

@@ -31,6 +31,11 @@ from tortoise.sdk import TortoiseSDK
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible.
+# api_keys.created_by stays TEXT and remains non-UUID.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+
 
 def _catalog() -> dict:
     """The shared catalog as pack_state resolves it (read-at-call-time)."""
@@ -491,7 +496,7 @@ class TestProvisioningHooks:
         from tortoise.hosted_api import app, get_current_user
         tc, fake, db_path = supabase_client
         app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-1", "email": "user-1@example.com"}
+            "user_id": _U1, "email": "user-1@example.com"}
         r = tc.post("/v1/teams", json={"name": "acme"})
         assert r.status_code == 200, r.text
         team_id = r.json()["team_id"]

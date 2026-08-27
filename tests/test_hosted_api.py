@@ -34,7 +34,15 @@ from tortoise.sdk import TortoiseSDK
 
 # ── Test constants ───────────────────────────────────────────────────────────
 
-TEST_TEAM_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
+TEST_TEAM_ID = "team-001"
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible
+# (FakeControlPlane fidelity raises HTTP 400 on them).
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
+_U9 = "9f2c1a40-0000-4a00-8000-000000000009"
+_U_INTRUDER = "9f2c1a40-0000-4a00-8000-00000000000d"
+  # epic #1647 (T7): a TEAM id, not a test namespace — a "test-" prefix would trip the SDK's hyphenated test-* normalization (sdk.py) and map the team graph to test_team_001_tortoise while team_graph_name resolves team_team-001 (backup dump divergence)
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
@@ -793,19 +801,19 @@ class TestKeysRename:
         # Stub the session JWT (registry mode skips JWT verification) and
         # seed an owner Membership so _require_owner_admin passes.
         app.dependency_overrides[get_current_user] = \
-            lambda: {"user_id": "user-1", "email": "owner@example.com"}
+            lambda: {"user_id": _U1, "email": "owner@example.com"}
         import tortoise.hosted_api as ha
         sdk = ha._make_sdk(namespace="registry")
         sdk._get_registry().query(
             "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
             "SET m.role='owner'",
-            params={"uid": "user-1", "tid": TEST_TEAM_ID},
+            params={"uid": _U1, "tid": TEST_TEAM_ID},
         )
 
     def _override_non_owner(self):
         # Session user with NO membership — _require_owner_admin must 403.
         app.dependency_overrides[get_current_user] = \
-            lambda: {"user_id": "intruder-9", "email": "intruder@example.com"}
+            lambda: {"user_id": _U_INTRUDER, "email": "intruder@example.com"}
 
     def test_rename_key_updates_label(self, client):
         self._override_session_user()
@@ -2758,7 +2766,7 @@ class TestInviteEndpointsRegistry:
         reg.query(
             "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
             "role: 'owner', status: 'active'})",
-            params={"uid": "user-1", "tid": "team-inv-001"},
+            params={"uid": _U1, "tid": "team-inv-001"},
         )
         return client, sdk
 
@@ -2779,7 +2787,7 @@ class TestInviteEndpointsRegistry:
         """E2E-3 registry path: mint → accept → membership with the invited
         role; a used invite cannot be re-accepted."""
         tc, sdk = registry_env
-        session_user("user-1")
+        session_user(_U1)
         r = tc.post("/v1/invites", json={
             "team_id": "team-inv-001", "email": "bob@example.com",
             "role": "admin"})
@@ -2789,7 +2797,7 @@ class TestInviteEndpointsRegistry:
         assert body["role"] == "admin"
         token = body["token"]
 
-        session_user("user-2", "bob@example.com")
+        session_user(_U2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 200, r.text
         assert r.json() == {"team_id": "team-inv-001", "role": "admin"}
@@ -2797,7 +2805,7 @@ class TestInviteEndpointsRegistry:
         rows = sdk._get_registry().query(
             "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) "
             "RETURN m.role",
-            params={"tid": "team-inv-001", "uid": "user-2"},
+            params={"tid": "team-inv-001", "uid": _U2},
         ).result_set
         assert rows and rows[0][0] == "admin"  # invited role preserved
 
@@ -2811,9 +2819,9 @@ class TestInviteEndpointsRegistry:
         sdk._get_registry().query(
             "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
             "role: 'member', status: 'active'})",
-            params={"uid": "user-9", "tid": "team-inv-001"},
+            params={"uid": _U9, "tid": "team-inv-001"},
         )
-        session_user("user-9")
+        session_user(_U9)
         r = tc.post("/v1/invites", json={
             "team_id": "team-inv-001", "email": "bob@example.com",
             "role": "member"})
@@ -2822,7 +2830,7 @@ class TestInviteEndpointsRegistry:
     def test_mint_dedup_409_and_free_tier_402(self, registry_env,
                                               session_user):
         tc, sdk = registry_env
-        session_user("user-1")
+        session_user(_U1)
         payload = {"team_id": "team-inv-001", "email": "bob@example.com",
                    "role": "member"}
         assert tc.post("/v1/invites", json=payload).status_code == 200
@@ -2836,7 +2844,7 @@ class TestInviteEndpointsRegistry:
         sdk._get_registry().query(
             "CREATE (m:Membership {user_id: $uid, team_id: $tid, "
             "role: 'owner', status: 'active'})",
-            params={"uid": "user-1", "tid": "team-free-002"},
+            params={"uid": _U1, "tid": "team-free-002"},
         )
         r = tc.post("/v1/invites", json={
             "team_id": "team-free-002", "email": "x@example.com",
@@ -2845,7 +2853,7 @@ class TestInviteEndpointsRegistry:
 
     def test_list_and_rescind_registry_path(self, registry_env, session_user):
         tc, sdk = registry_env  # noqa: RUF059
-        session_user("user-1")
+        session_user(_U1)
         r = tc.post("/v1/invites", json={
             "team_id": "team-inv-001", "email": "bob@example.com",
             "role": "member"})
@@ -2865,7 +2873,7 @@ class TestInviteEndpointsRegistry:
         assert r.json() == []  # revoked no longer pending
 
         # revoked invite cannot be accepted (E2E-3)
-        session_user("user-2", "bob@example.com")
+        session_user(_U2, "bob@example.com")
         r = tc.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 400
 

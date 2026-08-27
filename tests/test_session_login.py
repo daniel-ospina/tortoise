@@ -383,3 +383,121 @@ class TestCreateApiKeySessionAttribution:
         assert rows, "no api_keys row written"
         assert rows[0]["created_by"] == _OWNER, \
             f"session mint must record the user UUID, got {rows[0]['created_by']!r}"
+
+
+class TestMintPathOutage503:
+    """#1719 Task 4: a control-plane failure on the mint-path reads must
+    degrade to 503 control_plane_unavailable — never the global-handler 500
+    body the client rendered as 'Invalid API key.'."""
+
+    def test_mint_path_membership_outage_503(self, client, fake, monkeypatch):
+        """membership_for_user_team raises (outage/schema-cache) on the
+        mint path → 503 with the error_code, not a raw 500."""
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        def _boom(cp, user_id, team_id):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(team_memberships): HTTP 400")
+
+        monkeypatch.setattr(sc, "membership_for_user_team", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
+        assert "temporarily unavailable" in body["detail"]["message"].lower()
+
+    def test_mint_path_is_anon_team_outage_503(self, client, fake, monkeypatch):
+        """is_anon_team raises on the anon branch → 503, never a 500."""
+        _seed_team(fake, created_by="anon-abc-identity")  # identity creator
+        key = _mint_key(fake, created_by="anon-abc-identity")
+
+        def _boom(cp, team_id):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(team_memberships): HTTP 500")
+
+        monkeypatch.setattr(sc, "is_anon_team", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
+
+
+class TestRateLimitChargePoints:
+    """#1719 Task 5: server faults must not consume the 5/hr login bucket —
+    charge only on terminal 200/401/403 (server decisions), never on 5xx."""
+
+    def _limiter_on(self, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+
+    def test_503_does_not_consume_bucket(self, client, fake, monkeypatch):
+        """A mint-path 503 must NOT burn a bucket slot — a valid login
+        still succeeds after it."""
+        self._limiter_on(monkeypatch)
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+        orig = sc.membership_for_user_team
+
+        def _boom(cp, user_id, team_id):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(team_memberships): HTTP 400")
+
+        monkeypatch.setattr(sc, "membership_for_user_team", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text  # bucket NOT charged
+
+        # Narrow undo: restore ONLY the _boom patch (not the _env fixture's
+        # control-plane/GoTrue patches).
+        monkeypatch.setattr(sc, "membership_for_user_team", orig)
+        _patch_gotrue(monkeypatch)
+        r = _exchange(client, key)
+        assert r.status_code == 200, r.text
+
+    def test_invalid_key_401_consumes_bucket(self, client, fake, monkeypatch):
+        """Junk-key 401s charge — brute-force protection preserved:
+        5× 401 → 6th attempt (even valid) 429."""
+        self._limiter_on(monkeypatch)
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+        for _ in range(5):
+            r = _exchange(client, "tt_does-not-exist")
+            assert r.status_code == 401, r.text
+        r = _exchange(client, key)
+        assert r.status_code == 429
+
+    def test_legacy_key_403_does_not_bypass_bucket(self, client, fake, monkeypatch):
+        """403s (server decisions — ANON_TEAM_NO_OWNER / KEY_NOT_USER_MINTED)
+        charge: 5× 403 → 6th attempt 429. A leaked legacy key can't be
+        enumerated beyond 5/hr."""
+        self._limiter_on(monkeypatch)
+        _seed_team(fake, created_by="anon-abc-identity")
+        key = _mint_key(fake, created_by="anon-abc-identity")
+        for _ in range(5):
+            r = _exchange(client, key)
+            assert r.status_code == 403, r.text  # claim funnel, no 500
+        r = _exchange(client, key)
+        assert r.status_code == 429
+
+
+class TestChargeBucketResilience:
+    """#1719 code-review P2: _charge_ip_bucket must never raise — a charge
+    is telemetry, and a KeyError on a pruned bucket would replace a
+    terminal 401/403/200 with a 500."""
+
+    def test_charge_after_prune_does_not_raise(self, client, fake, monkeypatch):
+        self._limiter_on(monkeypatch)
+        from tortoise import hosted_api as ha
+        # Simulate the deferred-check-then-charge race: the bucket existed at
+        # check time (pruned to empty), then a concurrent max_entries sweep
+        # deleted it before the charge. setdefault must recreate it, not KeyError.
+        ip = "203.0.113.7"
+        ha._SESSION_BUCKETS[ip] = []  # created by the deferred check
+        del ha._SESSION_BUCKETS[ip]   # concurrent prune removed it
+        # The charge must not raise (it recreates the bucket).
+        import asyncio
+        asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
+            ha._charge_ip_bucket(ha._SESSION_BUCKETS, ha._SESSION_LOGIN_LOCK,
+                                 ip, window_s=ha._SESSION_LOGIN_WINDOW_S))
+        assert ha._SESSION_BUCKETS[ip], "bucket must be recreated and charged"
+
+    def _limiter_on(self, monkeypatch):
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)

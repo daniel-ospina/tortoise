@@ -469,7 +469,7 @@ class TestCmdTokenRevoke:
         for answer in ("Y", "YES", " y ", "yEs"):
             token = "st_" + "ab" * 32
             self._stored_cfg(tmp_path, signup_token=token)
-            with mock.patch("sys.stdin.isatty", return_value=True):
+            with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
                 with mock.patch("builtins.input", return_value=answer):
                     with mock.patch("urllib.request.urlopen",
                                     return_value=_ok_json(
@@ -488,7 +488,7 @@ class TestCmdTokenRevoke:
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
         token = "st_" + "cd" * 32
         self._stored_cfg(tmp_path, signup_token=token)
-        with mock.patch("sys.stdin.isatty", return_value=True):
+        with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
             with mock.patch("builtins.input", side_effect=EOFError):
                 with mock.patch("urllib.request.urlopen") as urlopen:
                     rc = main._cmd_token_revoke(mock.Mock(token=token, force=False))

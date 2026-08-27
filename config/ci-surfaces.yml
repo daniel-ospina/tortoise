@@ -45,6 +45,7 @@ surfaces:
   - test_export_delete.py
   - test_export_cli.py
   - test_failure_contract.py
+  - test_fake_control_plane.py
   - test_fallback_snapshot.py
   - test_hosted_api.py
   - test_hosted_auth.py

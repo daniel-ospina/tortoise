@@ -41,6 +41,10 @@ from tortoise.oauth import (  # noqa: E402, RUF100
 
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
 
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+
 TEST_BASE = "http://testserver"  # TestClient's request.base_url
 
 REDIRECT = "http://127.0.0.1:8765/callback"  # RFC 8252 loopback redirect
@@ -93,7 +97,7 @@ def _pkce() -> tuple[str, str]:
     return verifier, challenge
 
 
-def _auth_code_flow(tc, cp, *, user_id: str = "user-1",
+def _auth_code_flow(tc, cp, *, user_id: str = _U1,
                     resource: str | None = None,
                     client_id: str | None = None) -> dict:
     """Register → consent → return the auth code + client_id (P2 path).
@@ -157,7 +161,7 @@ def supabase_cp(monkeypatch) -> FakeControlPlane:
     """Supabase mode on + fake control plane seeded with two teams."""
     cp = FakeControlPlane({
         "teams": [dict(TEAM_FREE), dict(TEAM_TEAM)],
-        "team_memberships": [_member("user-1", "team-free-001")],
+        "team_memberships": [_member(_U1, "team-free-001")],
         "api_keys": [],
     })
     _enable_supabase(monkeypatch, cp)
@@ -184,7 +188,7 @@ def session_user(api_client, monkeypatch):
     """Stub the browser-session JWT verification (JWKS path exercised by the
     session_auth suite; here the user identity is the test's concern)."""
 
-    def _set(user_id: str = "user-1", email: str = "u@example.com"):
+    def _set(user_id: str = _U1, email: str = "u@example.com"):
         async def _fake(request):
             return {"user_id": user_id, "email": email}
 
@@ -462,7 +466,7 @@ class TestAuthorizePage:
 class TestConsentPreview:
     def test_preview_resolves_default_team(self, api_client, session_user):
         tc, _ = api_client
-        session_user("user-1")
+        session_user(_U1)
         r = tc.get("/oauth/consent/preview", params={"resource": ""},
                    headers={"Authorization": "Bearer fake"})
         assert r.status_code == 200
@@ -471,7 +475,7 @@ class TestConsentPreview:
 
     def test_preview_resolves_team_scoped_resource(self, api_client, session_user):
         tc, _ = api_client
-        session_user("user-1")
+        session_user(_U1)
         r = tc.get("/oauth/consent/preview",
                    params={"resource": team_resource_url(TEST_BASE, "team-free-001")},
                    headers={"Authorization": "Bearer fake"})
@@ -480,7 +484,7 @@ class TestConsentPreview:
 
     def test_preview_non_member_403(self, api_client, session_user):
         tc, _ = api_client
-        session_user("user-1")
+        session_user(_U1)
         r = tc.get("/oauth/consent/preview",
                    params={"resource": team_resource_url(TEST_BASE, "team-team-001")},
                    headers={"Authorization": "Bearer fake"})
@@ -496,7 +500,7 @@ class TestCodeExchange:
         """register → consent → token exchange → oat_ token bound to the
         user's sole team (RFC 8707 default mapping)."""
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
@@ -509,7 +513,7 @@ class TestCodeExchange:
         # token rows persist with the bound team (P4)
         acc = cp.tables["oauth_access_tokens"][0]
         assert acc["team_id"] == "team-free-001"
-        assert acc["user_id"] == "user-1"
+        assert acc["user_id"] == _U1
         assert acc["token_hash"] == hashlib.sha256(
             body["access_token"].encode()).hexdigest()
         ref = cp.tables["oauth_refresh_tokens"][0]
@@ -517,7 +521,7 @@ class TestCodeExchange:
 
     def test_wrong_verifier_rejected(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier="v" * 60)
@@ -526,7 +530,7 @@ class TestCodeExchange:
 
     def test_code_is_single_use(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r1 = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                        verifier=flow["verifier"])
@@ -541,7 +545,7 @@ class TestCodeExchange:
         UPDATE — a second (concurrent) exchange sees no claimable row and
         must never double-issue a token pair."""
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r1 = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                        verifier=flow["verifier"])
@@ -565,7 +569,7 @@ class TestCodeExchange:
         when called directly (no HTTP layer involved)."""
         from tortoise.oauth import OAuthError, _consume_code
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         row = _consume_code(cp, flow["code"])
         assert row["code_hash"] == hashlib.sha256(
@@ -579,7 +583,7 @@ class TestCodeExchange:
 
     def test_redirect_uri_mismatch_rejected(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"],
@@ -589,7 +593,7 @@ class TestCodeExchange:
 
     def test_client_mismatch_rejected(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         other = _register_client(tc, client_name="other")
         r = _exchange(tc, client_id=other["client_id"], code=flow["code"],
@@ -599,7 +603,7 @@ class TestCodeExchange:
 
     def test_expired_code_rejected(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         cp.tables["oauth_codes"][0]["expires_at"] = "2020-01-01T00:00:00+00:00"
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
@@ -609,7 +613,7 @@ class TestCodeExchange:
 
     def test_unknown_client_401(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id="ct_bogus", code=flow["code"],
                       verifier=flow["verifier"])
@@ -618,7 +622,7 @@ class TestCodeExchange:
 
     def test_confidential_client_secret_required(self, api_client, session_user):
         tc, cp = api_client  # noqa: RUF059
-        session_user("user-1")
+        session_user(_U1)
         reg = _register_client(tc, token_endpoint_auth_method="client_secret_post")
         verifier, challenge = _pkce()
         tc.post("/oauth/consent", json={
@@ -637,7 +641,7 @@ class TestCodeExchange:
     def test_confidential_client_exchange_success(self, api_client, session_user):
         """client_secret_post: the correct secret completes the exchange."""
         tc, cp = api_client  # noqa: RUF059
-        session_user("user-1")
+        session_user(_U1)
         reg = _register_client(tc, token_endpoint_auth_method="client_secret_post")
         verifier, challenge = _pkce()
         r = tc.post("/oauth/consent", json={
@@ -672,10 +676,10 @@ class TestCodeExchange:
 class TestRfc8707Mapping:
     def test_team_scoped_resource_binds_that_team(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         # user-1 joins the second team
         cp.tables["team_memberships"].append(
-            _member("user-1", "team-team-001", "member"))
+            _member(_U1, "team-team-001", "member"))
         resource = team_resource_url(TEST_BASE, "team-team-001")
         flow = _auth_code_flow(tc, cp, resource=resource)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
@@ -687,9 +691,9 @@ class TestRfc8707Mapping:
     def test_multi_team_default_requires_declaration(self, api_client, session_user):
         """D4 (no picker UI): a multi-team user MUST declare the resource."""
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         cp.tables["team_memberships"].append(
-            _member("user-1", "team-team-001", "member"))
+            _member(_U1, "team-team-001", "member"))
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -701,7 +705,7 @@ class TestRfc8707Mapping:
 
     def test_resource_for_non_member_team_rejected(self, api_client, session_user):
         tc, cp = api_client  # noqa: RUF059
-        session_user("user-1")
+        session_user(_U1)
         resource = team_resource_url(TEST_BASE, "team-team-001")  # not a member
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
@@ -716,7 +720,7 @@ class TestRfc8707Mapping:
         """RFC 8707: the token request's resource must match the authorized
         team (token exfiltration guard)."""
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)  # bound to team-free-001
         other = team_resource_url(TEST_BASE, "team-team-001")
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
@@ -726,7 +730,7 @@ class TestRfc8707Mapping:
 
     def test_unknown_resource_rejected(self, api_client, session_user):
         tc, cp = api_client  # noqa: RUF059
-        session_user("user-1")
+        session_user(_U1)
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
             "redirect_uri": REDIRECT, "response_type": "code",
@@ -738,7 +742,7 @@ class TestRfc8707Mapping:
 
     def test_zero_team_user_rejected(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         cp.tables["team_memberships"] = []
         r = tc.post("/oauth/consent", json={
             "client_id": _register_client(tc)["client_id"],
@@ -756,7 +760,7 @@ class TestRfc8707Mapping:
 class TestRefreshRotation:
     def test_refresh_rotates_pair(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
@@ -804,7 +808,7 @@ class TestRefreshRotation:
         is revoked exactly once."""
         from tortoise.oauth import OAuthError, _issue_tokens
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
@@ -813,7 +817,7 @@ class TestRefreshRotation:
                 if t["revoked_at"] is None][0]
         prev_access = [t for t in cp.tables["oauth_access_tokens"]  # noqa: RUF015
                        if t["revoked_at"] is None][0]
-        args = dict(client_id=flow["client_id"], user_id="user-1",
+        args = dict(client_id=flow["client_id"], user_id=_U1,
                     team_id="team-free-001", scope="mcp", resource=None)
         # worker A wins the atomic claim
         out_a = _issue_tokens(cp, prev_refresh=prev,
@@ -842,7 +846,7 @@ class TestRefreshRotation:
 
     def test_refresh_rejects_wrong_client(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
@@ -857,7 +861,7 @@ class TestRefreshRotation:
 
     def test_refresh_rejects_expired(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
@@ -885,7 +889,7 @@ class TestSuspensionRevocation:
         """D5: team suspension revokes the whole (user, team) refresh family
         and rejects the refresh."""
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         tokens = self._granted(tc, cp)
         # suspend the team (durable suspended_at — the #308 authority)
         cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
@@ -903,7 +907,7 @@ class TestSuspensionRevocation:
 
     def test_suspended_team_rejects_code_exchange(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         cp.tables["teams"][0]["suspended_at"] = "2026-08-15T00:00:00Z"
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
@@ -913,7 +917,7 @@ class TestSuspensionRevocation:
 
     def test_lapsed_membership_revokes_refresh(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         tokens = self._granted(tc, cp)
         cp.tables["team_memberships"] = []  # seat removed
         r = tc.post("/oauth/token", data={
@@ -927,7 +931,7 @@ class TestSuspensionRevocation:
 
     def test_explicit_revocation(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         tokens = self._granted(tc, cp)
         r = tc.post("/oauth/revoke", data={
             "token": tokens["refresh_token"],
@@ -962,7 +966,7 @@ class TestMcpBoundary:
         """Full flow → oat_ access token authenticates the MCP endpoint
         (D6: introspected at the boundary; no tt_ key minting)."""
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
@@ -978,7 +982,7 @@ class TestMcpBoundary:
 
     def test_oauth_token_suspended_team_403(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])
@@ -994,7 +998,7 @@ class TestMcpBoundary:
 
     def test_revoked_oauth_token_401(self, api_client, session_user):
         tc, cp = api_client
-        session_user("user-1")
+        session_user(_U1)
         flow = _auth_code_flow(tc, cp)
         r = _exchange(tc, client_id=flow["client_id"], code=flow["code"],
                       verifier=flow["verifier"])

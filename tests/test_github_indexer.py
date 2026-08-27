@@ -20,6 +20,8 @@ import os
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
+from datetime import UTC
+
 import httpx
 import pytest
 
@@ -455,8 +457,8 @@ def test_drain_mode_drains_backlog_across_runs(sdk):
     the drain refetched from the top and re-processed items counted toward
     the cap, so a >2×cap backlog oscillated between two boundary seconds
     forever and the tail was never indexed."""
-    from datetime import datetime, timedelta, timezone
-    base = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+    from datetime import datetime, timedelta
+    base = datetime(2026, 7, 19, 12, 0, 0, tzinfo=UTC)
     issues = []
     for i in range(600):
         second = base - timedelta(seconds=i // 50)  # 12 distinct seconds

@@ -29,12 +29,20 @@ from datetime import datetime, timedelta, timezone
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
-import pytest  # noqa: I001
+import pytest
 from fastapi.testclient import TestClient
 
 from tortoise.auth import hash_api_key, verify_api_key  # noqa: F401
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
+
+# #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
+# subjects are UUIDs; non-UUID user_id literals are prod-impossible.
+# Session-key api_keys.created_by mirrors the minting user's UUID (the
+# cap/backstop logic compares it to the JWT subject); anon/reg identity
+# values would stay TEXT, but none appear here.
+_U1 = "9f2c1a40-0000-4a00-8000-000000000001"
+_U2 = "9f2c1a40-0000-4a00-8000-000000000002"
 
 
 # ── Fixtures ─────────────────────────────────────────────────────────────────
@@ -77,7 +85,7 @@ def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_user] = lambda: {
-            "user_id": "user-1",
+            "user_id": _U1,
             "email": "owner@example.com",
         }
         _orig_init = _patch_tortoise_sdk_init(db_path)
@@ -176,7 +184,7 @@ class TestBootstrapMint:
 
     def test_happy_path_returns_key_and_stores_hash(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200, r.text
         body = r.json()
@@ -196,11 +204,11 @@ class TestBootstrapMint:
         assert verify_api_key(body["key"], stored_hash)
         assert prefix == body["key"][:10]
         assert created_via == "bootstrap"
-        assert created_by == "user-1"
+        assert created_by == _U1
 
     def test_bootstrap_expiry_is_24h(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200
         expires = datetime.fromisoformat(r.json()["expires_at"])
@@ -210,7 +218,7 @@ class TestBootstrapMint:
 
     def test_default_purpose_is_bootstrap(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={})
         assert r.status_code == 200, r.text
         assert r.json()["purpose"] == "bootstrap"
@@ -219,9 +227,9 @@ class TestBootstrapMint:
     def test_three_active_bootstrap_429(self, client, reg):
         """3-active backstop: the 4th bootstrap mint is rejected."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         for i in range(3):
-            _seed_api_key(reg, "team-a", f"boot-{i}", created_by="user-1",
+            _seed_api_key(reg, "team-a", f"boot-{i}", created_by=_U1,
                           created_via="bootstrap",
                           created_at=_hours_ago(1), expires_at=_hours_ahead(1))
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
@@ -232,9 +240,9 @@ class TestBootstrapMint:
         """#742: expired bootstrap keys neither authenticate nor count
         against the 3-active backstop."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         for i in range(3):
-            _seed_api_key(reg, "team-a", f"boot-exp-{i}", created_by="user-1",
+            _seed_api_key(reg, "team-a", f"boot-exp-{i}", created_by=_U1,
                           created_via="bootstrap",
                           created_at=_hours_ago(48), expires_at=_hours_ago(1))
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
@@ -244,9 +252,9 @@ class TestBootstrapMint:
         """R13: bootstrap keys do NOT count against max_api_keys — a recovery
         mint still succeeds with 2 active bootstrap keys on free tier."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         for i in range(2):  # free tier max_api_keys == 2
-            _seed_api_key(reg, "team-a", f"boot-{i}", created_by="user-1",
+            _seed_api_key(reg, "team-a", f"boot-{i}", created_by=_U1,
                           created_via="bootstrap",
                           created_at=_hours_ago(1), expires_at=_hours_ahead(1))
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
@@ -259,7 +267,7 @@ class TestRecoveryMint:
 
     def test_recovery_key_is_persistent(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None
@@ -272,10 +280,10 @@ class TestRecoveryMint:
         """Free tier max_api_keys=2: minting a 3rd recovery key revokes the
         OLDEST OTHER user's key (#750.10 — never the caller's own)."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_api_key(reg, "team-a", "other-old", created_by="user-2",
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_api_key(reg, "team-a", "other-old", created_by=_U2,
                       created_via="recovery", created_at=_hours_ago(10))
-        _seed_api_key(reg, "team-a", "other-new", created_by="user-2",
+        _seed_api_key(reg, "team-a", "other-new", created_by=_U2,
                       created_via="recovery", created_at=_hours_ago(1))
         assert _count_active_keys(reg, "team-a") == 2
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
@@ -294,10 +302,10 @@ class TestRecoveryMint:
         """#750.10: recovery never dead-ends by killing the user's own key —
         when ALL active keys are the caller's, the mint 402s."""
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_api_key(reg, "team-a", "own-1", created_by="user-1",
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_api_key(reg, "team-a", "own-1", created_by=_U1,
                       created_via="recovery", created_at=_hours_ago(10))
-        _seed_api_key(reg, "team-a", "own-2", created_by="user-1",
+        _seed_api_key(reg, "team-a", "own-2", created_by=_U1,
                       created_via="recovery", created_at=_hours_ago(1))
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 402
@@ -322,8 +330,8 @@ class TestMintGuards:
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
         _seed_team(reg, "team-x")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_membership(reg, "team-b", "user-1", "member")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key",
                         json={"purpose": "bootstrap", "team_id": "team-x"})
         assert r.status_code == 403
@@ -332,8 +340,8 @@ class TestMintGuards:
     def test_multi_team_requires_team_id_400(self, client, reg):
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_membership(reg, "team-b", "user-1", "member")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 400
         assert "team_id required" in r.json()["detail"]
@@ -341,8 +349,8 @@ class TestMintGuards:
     def test_multi_team_with_team_id_ok(self, client, reg):
         _seed_team(reg, "team-a")
         _seed_team(reg, "team-b")
-        _seed_membership(reg, "team-a", "user-1", "owner")
-        _seed_membership(reg, "team-b", "user-1", "member")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        _seed_membership(reg, "team-b", _U1, "member")
         r = client.post("/v1/session/key",
                         json={"purpose": "bootstrap", "team_id": "team-b"})
         assert r.status_code == 200, r.text
@@ -350,7 +358,7 @@ class TestMintGuards:
 
     def test_bad_purpose_422(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "enterprise"})
         assert r.status_code == 422
         assert "purpose" in r.json()["detail"]
@@ -361,7 +369,7 @@ class TestMintedKeyRoundTrip:
 
     def test_minted_bootstrap_key_authenticates_rest(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 200
         key = r.json()["key"]
@@ -374,7 +382,7 @@ class TestMintedKeyRoundTrip:
 
     def test_minted_recovery_key_revoked_rejects(self, client, reg):
         _seed_team(reg, "team-a")
-        _seed_membership(reg, "team-a", "user-1", "owner")
+        _seed_membership(reg, "team-a", _U1, "owner")
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200
         key = r.json()["key"]
