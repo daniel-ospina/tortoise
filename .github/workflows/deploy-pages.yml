@@ -291,8 +291,9 @@ jobs:
   # ── Post-deploy blog E2E (warn-only — #1800) ─────────────────────────
   # Runs the blog verification suite against production after deploy.
   # REQUIRES the Pages Function env bindings on the premise-labs project:
-  #   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_JWT_SECRET
-  # (ops step documented in docs/epics/2026-08-27-tortoise-blog-cms/README.md).
+  #   SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+  # (no SUPABASE_JWT_SECRET — the admin gate validates sessions via
+  # Supabase /auth/v1/user; ops step documented in the epic README).
   # continue-on-error: warn-only — the deploy is already live.
   verify-blog:
     runs-on: ubuntu-latest
