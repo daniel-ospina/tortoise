@@ -674,3 +674,75 @@ class TestClaimStatusOutage503:
         )
         assert r.status_code == 503, r.text
         assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
+
+
+class TestClaimRpcOutage503:
+    """#1737: the claim endpoints' residual outage paths must degrade to 503
+    control_plane_unavailable — claim_email's admin-create transport failure
+    and the claim_membership RPC's non-ClaimError RuntimeError both escape
+    to a raw 500 today.
+    """
+
+    def test_claim_email_create_user_transport_outage_503(self, client, fake,
+                                                          monkeypatch):
+        """_supabase_admin_create_user raises (GoTrue transport) → 503
+        control_plane_unavailable, not a raw 500."""
+        key, _ = _provision_anon(client, fake)
+
+        def _boom(email, password):
+            raise RuntimeError("auth-service transport failure")
+
+        monkeypatch.setattr(ha_mod, "_supabase_admin_create_user", _boom)
+        r = client.post("/v1/claim/email", json={
+            "api_key": key,
+            "email": "new@example.com",
+            "password": "password123",
+        })
+        assert r.status_code == 503, r.text
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
+
+    def test_claim_team_claim_membership_rpc_outage_503(self, client, fake,
+                                                        monkeypatch):
+        """claim_membership raises a non-ClaimError RuntimeError (RPC
+        outage) on POST /v1/claim → 503, not a raw 500."""
+        key, _ = _provision_anon(client, fake)
+        _patch_verify(monkeypatch, _jwt(_U_A, email="a@example.com",
+                                        providers=["github"]))
+
+        def _boom(cp, **kwargs):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(claim_membership): HTTP 500")
+
+        monkeypatch.setattr(sc, "claim_membership", _boom)
+        r = client.post(
+            "/v1/claim",
+            headers={"Authorization": "Bearer abc.def.ghi"},
+            json={"api_key": key},
+        )
+        assert r.status_code == 503, r.text
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
+
+    def test_claim_email_claim_membership_rpc_outage_503(self, client, fake,
+                                                         monkeypatch):
+        """claim_membership raises a non-ClaimError RuntimeError (RPC
+        outage) on POST /v1/claim/email → 503, not a raw 500."""
+        key, _ = _provision_anon(client, fake)
+
+        def _fake_admin_create(email, password):
+            return 201, {"id": f"auth-{uuid.uuid4().hex[:8]}", "email": email}
+
+        monkeypatch.setattr(ha_mod, "_supabase_admin_create_user",
+                            _fake_admin_create)
+
+        def _boom(cp, **kwargs):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(claim_membership): HTTP 500")
+
+        monkeypatch.setattr(sc, "claim_membership", _boom)
+        r = client.post("/v1/claim/email", json={
+            "api_key": key,
+            "email": "new@example.com",
+            "password": "password123",
+        })
+        assert r.status_code == 503, r.text
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"

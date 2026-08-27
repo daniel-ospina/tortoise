@@ -422,6 +422,32 @@ class TestMintPathOutage503:
         assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
 
 
+class TestResolveLegOutage503:
+    """#1737: the resolve-leg (api_keys read) shares the control-plane
+    outage class — a RuntimeError escaping the resolve must degrade to 503
+    control_plane_unavailable, never the raw 500 "Auth error" (the mint-path
+    map landed in #1719; this closes the resolve-leg gap on the SAME
+    endpoint, which previously 500'd depending on which query failed first).
+    """
+
+    def test_resolve_leg_outage_503(self, client, fake, monkeypatch):
+        """_get_current_team_supabase raises (outage/schema-cache on the
+        api_keys read) → 503 with the error_code, not 500 'Auth error'."""
+        _seed_team(fake, created_by=_OWNER)
+        key = _mint_key(fake, created_by=_OWNER)
+
+        async def _boom(request, token):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(api_keys): HTTP 400")
+
+        monkeypatch.setattr(ha_mod, "_get_current_team_supabase", _boom)
+        r = _exchange(client, key)
+        assert r.status_code == 503, r.text
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
+        assert "temporarily unavailable" in body["detail"]["message"].lower()
+
+
 class TestRateLimitChargePoints:
     """#1719 Task 5: server faults must not consume the 5/hr login bucket —
     charge only on terminal 200/401/403 (server decisions), never on 5xx."""

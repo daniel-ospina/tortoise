@@ -2923,7 +2923,15 @@ async def _session_login_exchange(
         raise HTTPException(status_code=401, detail="Invalid API key")
 
     # Key parity + suspension (the #767 resolution path; raises 401/403).
-    team = await _get_current_team_supabase(request, token)
+    try:
+        team = await _get_current_team_supabase(request, token)
+    except RuntimeError:
+        # #1737: the resolve-leg (api_keys read) shares the control-plane
+        # outage class — uniform 503 control_plane_unavailable with the
+        # mint-path map (#1719), never the 500 "Auth error" the client
+        # rendered as a generic failure. Call-site scoped: the shared
+        # _get_current_team_supabase keeps its own fail-closed contract.
+        raise _control_plane_unavailable() from None
     # Key parity + suspension (the #767 resolution path; raises 401/403).
 
     # FORCED dashboard-login gate.
@@ -3360,23 +3368,27 @@ def _supabase_admin_create_user(email: str, password: str) -> tuple[int, dict]:
     production signup blocker). Atomic: GoTrue either creates the user or
     returns an error — no partial state to roll back.
 
-    Returns (status_code, json_body) of the GoTrue response. Raises on
-    transport errors (the caller maps those to 502).
+    Returns (status_code, json_body) of the GoTrue response. Raises
+    RuntimeError on transport errors (the callers map those — #801 signup
+    → 502; #1737 claim_email → 503 control_plane_unavailable).
     """
     import httpx
     url = os.environ.get("SUPABASE_URL", "").rstrip("/")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or os.environ.get("SUPABASE_SERVICE_KEY")
     email_confirm = _signup_email_confirm()
-    resp = httpx.post(
-        f"{url}/auth/v1/admin/users",
-        json={"email": email, "password": password, "email_confirm": email_confirm},
-        headers={
-            "Authorization": f"Bearer {key}",
-            "apikey": key,
-            "Content-Type": "application/json",
-        },
-        timeout=15.0,
-    )
+    try:
+        resp = httpx.post(
+            f"{url}/auth/v1/admin/users",
+            json={"email": email, "password": password, "email_confirm": email_confirm},
+            headers={
+                "Authorization": f"Bearer {key}",
+                "apikey": key,
+                "Content-Type": "application/json",
+            },
+            timeout=15.0,
+        )
+    except (httpx.HTTPError, httpx.TimeoutException):
+        raise RuntimeError("auth-service transport failure")  # noqa: B904
     try:
         body = resp.json()
     except ValueError:
@@ -7870,7 +7882,13 @@ async def claim_team(request: Request):
 
     # 4. resolve the pasted key through the SAME auth path (revocation,
     #    expiry, suspension, abuse hooks) — 401 on invalid/revoked keys.
-    team = await _get_current_team_supabase(request, api_key)
+    try:
+        team = await _get_current_team_supabase(request, api_key)
+    except RuntimeError:
+        # #1737: the claim funnel's resolve-leg shares the control-plane
+        # outage class — uniform 503 control_plane_unavailable, never a
+        # raw 500.
+        raise _control_plane_unavailable() from None
     team_id = team["team_id"]
 
     # 5. fail-closed: the resolved team must still be anon (an unclaimed
@@ -7903,6 +7921,11 @@ async def claim_team(request: Request):
                          user_id=user_id, email=email)
     except ClaimError as e:
         raise HTTPException(status_code=e.status, detail=e.message)  # noqa: B904
+    except RuntimeError:
+        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+        # plane outage) must degrade to 503 control_plane_unavailable,
+        # never a raw 500.
+        raise _control_plane_unavailable() from None
 
     # 7. audit team_claim — provider/email/user_id in detail (0002 has no
     #    provider/email columns; 20260813000004 added detail JSONB).
@@ -7977,7 +8000,12 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
         raise HTTPException(status_code=409, detail="This team already has a verified identity")
 
     # 2. create the Supabase auth user (admin API, #801)
-    status, user_body = _supabase_admin_create_user(email, password)
+    try:
+        status, user_body = _supabase_admin_create_user(email, password)
+    except RuntimeError:
+        # #1737: GoTrue transport failure (control-plane outage) → uniform
+        # 503 control_plane_unavailable, never a raw 500.
+        raise _control_plane_unavailable() from None
     if status != 200 and status != 201:
         # already_registered → the email exists; surface plainly
         msg = (user_body or {}).get("msg") or (user_body or {}).get("message") or "Could not create account"
@@ -7997,6 +8025,11 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
         # The RPC's already_claimed guard may fire if a concurrent OAuth
         # claim won first — surface as a plain conflict.
         raise HTTPException(status_code=e.status, detail=e.message)  # noqa: B904
+    except RuntimeError:
+        # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
+        # plane outage) must degrade to 503 control_plane_unavailable,
+        # never a raw 500.
+        raise _control_plane_unavailable() from None
 
     # audit
     await _async_audit(request, team_id, "team_claim", resource_type="team",
