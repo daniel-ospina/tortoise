@@ -2340,7 +2340,7 @@ def _cmd_sessions_import(args) -> int:
     zero new nodes). pi REUSES the codex parser (named reuse — pi session
     JSONL is tree-structured JSONL like codex's, plan P2 Task 15).
     """
-    import hashlib, json as _json, os, sys as _sys  # noqa: E401, I001
+    import hashlib, json as _json, os, sys as _sys, time  # noqa: E401, I001
     from pathlib import Path
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
@@ -2410,10 +2410,15 @@ def _cmd_sessions_import(args) -> int:
         print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
         return 1
 
-    if result.get("extraction_mode") in ("error", "empty") or result.get("errors"):
-        print(f"import failed: {result.get('errors') or result.get('extraction_mode')}",
-              file=_sys.stderr)
-        return 1
+    # Any 2xx is a success — the server stored the Session and wrote its
+    # per-harness receipt state key. A degraded extraction (error/empty) or
+    # server-side errors/warnings still imported the session; surface them as
+    # warnings, not failures (403/402/503 ⇒ fail above via HTTPError).
+    if result.get("errors") or result.get("warnings") or \
+            result.get("extraction_mode") in ("error", "empty"):
+        print("import warnings: " + str(
+            result.get("errors") or result.get("warnings")
+            or result.get("extraction_mode")), file=_sys.stderr)
 
     # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
     # state key; this LOCAL marker makes re-import a cheap no-op).

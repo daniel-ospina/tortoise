@@ -1980,8 +1980,11 @@ class TortoiseSDK:
         # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
         # NEVER erases a stored value) — the conditional clause keeps the
         # query valid in both embedded and Docker lanes (no unused binding).
-        _merge_sets = ["s.created_at=$now", "s.turn_count=$tc",
-                       "s.is_episodic=true"]
+        # Review PR #1827 (parity with hosted_api.py): created_at uses
+        # coalesce so an idempotent re-POST preserves the ORIGINAL capture
+        # time.
+        _merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
+                       "s.turn_count=$tc", "s.is_episodic=true"]
         _merge_params = {"sid": session_id, "now": now,
                          "tc": len(conversation)}
         if harness:

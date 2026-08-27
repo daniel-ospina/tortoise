@@ -1873,7 +1873,8 @@ class BackupRestoreRequest(BaseModel):
 
 # #1727 (Slice 2, Task 11): DEFAULT_ONBOARDING_STATE (the LIVE provisioning
 # default, written at team creation — hosted_api.py:3132) carries the SAME
-# key set as _ONBOARDING_DEFAULT_STATE (the read-time merge default). Every
+# CAPTURE-SURFACE key set as _ONBOARDING_DEFAULT_STATE (the read-time merge
+# default) — NOT the full key set (the two still diverge on legacy keys). Every
 # capture-surface key must be registered in BOTH dicts + the PATCH model or
 # the allowlist filter silently drops it (STATE-KEY REGISTRATION TABLE).
 DEFAULT_ONBOARDING_STATE = {
@@ -4377,7 +4378,27 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         return await _capture_session_impl(body, request, team)
     except HTTPException as e:
         if e.status_code >= 400:
-            _record_capture_last_error(team["team_id"], body.harness, e.detail)
+            # Review PR #1827: a last-error state-write failure must never
+            # mask the intended 403/402/503 with a 500.
+            try:
+                _record_capture_last_error(team["team_id"], body.harness, e.detail)
+            except Exception:
+                logging.getLogger("tortoise.api").exception(
+                    "capture last-error state write failed (non-fatal)")
+        raise
+    except Exception:
+        # Review PR #1827: an unexpected 500 inside the impl must not leave a
+        # STALE last-error on the dashboard — record a generic detail, then
+        # re-raise (never swallow).
+        logging.getLogger("tortoise.api").exception(
+            "session capture failed (unexpected error)")
+        try:
+            _record_capture_last_error(
+                team["team_id"], body.harness,
+                "internal capture error — see server logs")
+        except Exception:
+            logging.getLogger("tortoise.api").exception(
+                "capture last-error state write failed (non-fatal)")
         raise
 
 
@@ -4453,6 +4474,27 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             detail="conversation has no extractable content (empty or blank)",
         )
 
+    # #1727 (review PR #1827): resolve the idempotency key + probe EARLY so
+    # session_existed runs BEFORE the quota estimate — a re-POST of an
+    # existing session_id writes ZERO non-episodic points (the replay path
+    # below skips extraction) and must never be 402-blocked by an as-if-fresh
+    # estimate. The consent 403 above stays FIRST in the gate stack; the
+    # sessions-limit gate below still counts Session nodes.
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
+    now = datetime.now(UTC).isoformat()
+    # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
+    # FRESH session_id can both observe session_existed=False and mint a
+    # sessionCaptured Event (narrow race) — sequential retries converge
+    # correctly (the second POST sees the Session and replays, 0 new nodes).
+    # Follow-up: a deterministic Event id (derived from session_id) would
+    # make even the concurrent race idempotent. Do NOT reimplement here.
+    session_existed = bool(proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN count(s)",
+        params={"sid": session_id},
+    ).result_set[0][0])
+
     # Extraction-aware estimate (pre-write, fail-closed count) — review P2,
     # PR #976: the points quota counts NON-episodic Points only, and turn
     # Points/Session/Event are episodic — the estimate is the EXTRACTED set
@@ -4465,24 +4507,26 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (the sentence cap is the M2 point ceiling — one point per utterance;
     # operators are clamped ≤ points in LLMExtractor.run, #1194, so the ×2 is
     # a true ceiling; ×3 keeps the v2 gate fail-closed over-count).
-    est = _session_extraction_estimate(windowed)
-    from tortoise.quota import count_team_usage
-    sdk_team = _make_sdk(namespace=team["team_id"])
-    try:
-        count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
-    except QuotaCheckError as e:
-        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
-    max_points = team.get("max_points") or 1000
-    if count + est > max_points:
-        raise HTTPException(
-            status_code=402,
-            detail=f"Team points limit reached: {count} in use + {est} estimated "
-                   f"for this capture exceeds {max_points}. Upgrade your plan.",
-        )
+    # #1727 (review PR #1827): the points-estimate 402 gate is SKIPPED on a
+    # replay — session_existed writes no non-episodic points, so an
+    # as-if-fresh estimate must not 402-block a zero-node re-POST.
+    if not session_existed:
+        est = _session_extraction_estimate(windowed)
+        from tortoise.quota import count_team_usage
+        sdk_team = _make_sdk(namespace=team["team_id"])
+        try:
+            count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
+        except QuotaCheckError as e:
+            raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
+        max_points = team.get("max_points") or 1000
+        if count + est > max_points:
+            raise HTTPException(
+                status_code=402,
+                detail=f"Team points limit reached: {count} in use + {est} estimated "
+                       f"for this capture exceeds {max_points}. Upgrade your plan.",
+            )
 
     _check_team_limit(team, "sessions")
-    sdk = _make_sdk(namespace=team["team_id"])
-    proj = sdk._get_proj()
     # Optional frontmatter-metadata validation (#1362) — warn-only, gated by
     # TORTOISE_VALIDATE_FRONTMATTER=1 (default OFF). The SessionRequest is a
     # payload (no frontmatter block), so the shape validator runs over a
@@ -4495,16 +4539,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         kind="capture",
         context="capture_session",
     )
-    session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
-    now = datetime.now(UTC).isoformat()
 
     # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
     # NEVER erases a stored value — a legacy no-harness re-capture must not
     # wipe a harness that a previous capture stored). The conditional clause
     # also keeps the parametrized query valid in both embedded and Docker
-    # lanes (no unused param binding).
-    _merge_sets = ["s.created_at=$now", "s.turn_count=$tc",
-                   "s.is_episodic=true"]
+    # lanes (no unused param binding). Review PR #1827: created_at uses
+    # coalesce so an idempotent re-POST preserves the ORIGINAL capture time
+    # (mirrors the turn-loop coalesce).
+    _merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
+                   "s.turn_count=$tc", "s.is_episodic=true"]
     _merge_params = {"sid": session_id, "now": now,
                      "tc": len(body.conversation)}
     if body.harness:
@@ -4518,10 +4562,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # and the LLM extraction is SKIPPED (M2/v2-minted points are not
     # deterministically keyed — not in scope). The receipt still lands on the
     # 2xx (converges to one Session, one receipt — T1-P3/T1-P12).
-    session_existed = bool(proj.g.query(
-        "MATCH (s:Session {id:$sid}) RETURN count(s)",
-        params={"sid": session_id},
-    ).result_set[0][0])
+    # (session_existed was probed above, before the quota gates.)
     proj.g.query(
         f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
         params=_merge_params,
@@ -4694,13 +4735,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         import logging
         logging.getLogger("tortoise.api").exception(
             "session capture audit write failed (non-fatal)")
-    # Metering (#681): best-effort write-op count for overage billing.
-    _record_write_op(team)
-    # #308 (R1, delta 8): capture_session creates one Point per turn plus the
-    # extracted decision/statement Points — weight by the actual count.
-    # Conservative over-count when turns dedupe is accepted (the dedup check
-    # runs inside the SDK write; recounting here would cost a second query).
-    await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
+    # Metering (#681): best-effort write-op count for overage billing. A
+    # replay (session_existed) writes ZERO nodes — an idempotent re-POST must
+    # not inflate metering/abuse with phantom writes (review PR #1827).
+    if not session_existed:
+        _record_write_op(team)
+        # #308 (R1, delta 8): capture_session creates one Point per turn plus
+        # the extracted decision/statement Points — weight by the actual
+        # count. Conservative over-count when turns dedupe is accepted (the
+        # dedup check runs inside the SDK write; recounting here would cost a
+        # second query).
+        await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
     # #1727 Slice 2 (Task 12, T1-P15): entity-linking pass — Session +
     # extracted episodic Points link to subject/project entities via
@@ -5365,6 +5410,11 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
     500 fail-closed, redacted.
     """
+    # #1727 follow-up (review PR #1827): commit_session is a session-content
+    # write surface not yet consent-gated — the derived-commit receiver
+    # materializes session-derived content WITHOUT the session_recording
+    # consent check. PRE-EXISTING endpoint (epic #909) outside this PR's
+    # diff — track the gate in the epic #909 slice that owns the commit path.
     from tortoise.commit_idempotency import CommitRecordStore
     from tortoise.commit_schema import (
         plan_commit,
@@ -8770,6 +8820,10 @@ def _write_onboarding_state(team_id: str, state: dict) -> None:
 
 def _update_onboarding_state(team_id: str, **fields) -> dict:
     """Merge fields into onboarding state and persist. Returns new state."""
+    # #1727 follow-up (review PR #1827): this read-modify-write of the full
+    # state is NOT atomic — concurrent writers can lose keys. Assumes
+    # single-process writers (pre-existing infra). Follow-up: atomic jsonb
+    # merge. Do NOT reimplement here.
     state = _get_onboarding_state(team_id)
     for k, v in fields.items():
         if k in _ALLOWED_STATE_KEYS:

@@ -2007,8 +2007,8 @@ def test_session_links_repo_num_and_bare_num_forms(consent_client):
     from tortoise.session_link import extract_refs
     _opt_in()
     proj = _graph()
-    _object(proj, "github-issue/acme/tortoise-12", "acme/tortoise#12")
-    _object(proj, "github-issue/acme/other-7", "acme/other#7")
+    _object(proj, "github-issue-acme/tortoise-12", "acme/tortoise#12")
+    _object(proj, "github-issue-acme/other-7", "acme/other#7")
     conv = [{"role": "assistant",
              "content": "tortoise#12 is the blocker; other#7 too"}]
     r = consent_client.post("/v1/sessions",
@@ -2016,7 +2016,7 @@ def test_session_links_repo_num_and_bare_num_forms(consent_client):
                                   "session_id": "s-link-repo"})
     assert r.status_code == 200, r.text
     assert _link_edges(proj, "Session", "s-link-repo") == {
-        "github-issue/acme/tortoise-12", "github-issue/acme/other-7"}
+        "github-issue-acme/tortoise-12", "github-issue-acme/other-7"}
     # Guard: the bare-#n false-positive guard rejects #n preceded by alnum
     # or slash — `docs/#42` never matches, and inside `C#42` the bare form
     # does NOT fire (only the {repo}#{n} form, which is legitimately
@@ -2029,6 +2029,25 @@ def test_session_links_repo_num_and_bare_num_forms(consent_client):
     # Guarded bare #n (whitespace/start-of-line preceded) matches.
     refs = extract_refs("fix #42 now")
     assert any(r["form"] == "bare_num" and r["num"] == "42" for r in refs)
+
+
+def test_session_links_cross_org_ambiguous_no_link(consent_client):
+    """Review PR #1827: an org-ambiguous ref (#n / {repo}#{n}) links ONLY
+    when EXACTLY ONE Object matches — the same bare #42 or tortoise#12 can
+    exist in every org, so multiple matches are an honest no-match (never a
+    fabricated aboutObject edge)."""
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue-acme/tortoise-12", "acme/tortoise#12")
+    _object(proj, "github-issue-other/tortoise-12", "other/tortoise#12")
+    conv = [{"role": "user",
+             "content": "tortoise#12 is in two orgs — see also #12"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-ambig"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-ambig") == set(), \
+        "ambiguous suffix must not fabricate aboutObject edges"
 
 
 def test_session_links_first_match_per_point_all_for_session(consent_client):
