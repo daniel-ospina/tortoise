@@ -4702,7 +4702,38 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # runs inside the SDK write; recounting here would cost a second query).
     await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
-
+    # #1727 Slice 2 (Task 12, T1-P15): entity-linking pass — Session +
+    # extracted episodic Points link to subject/project entities via
+    # aboutObject (regex trigger; first-match per point, all-matches for the
+    # Session; no-match ⇒ no link, honest). Re-run on index completion is
+    # owned by _run_indexing's completion hook (entities may materialize
+    # after the capture). Tracked on the Session node.
+    try:
+        from .session_link import link_session_entities
+        # The same stored-window text the turn loop wrote (byte-identical
+        # content) drives the link trigger — link what is actually stored.
+        link_texts = []
+        for i, turn in enumerate(windowed):
+            role = _normalize_turn_role(turn.get("role"))
+            raw_content = turn.get("content", "")
+            content = raw_content if isinstance(raw_content, str) else (
+                "" if raw_content is None else str(raw_content))
+            link_texts.append(f"[{role}] {content[:5000]}")
+        link_result = link_session_entities(
+            proj, session_id, link_texts,
+            turn_ids=[f"{session_id}_t{i}"
+                      for i in range(len(link_texts))])
+        if link_result["attempted"]:
+            proj.g.query(
+                "MATCH (s:Session {id:$sid}) SET "
+                "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                params={"sid": session_id, "a": link_result["attempted"],
+                        "c": link_result["created"]},
+            )
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "session entity-linking failed (non-fatal)")
 
     # #1727 Slice 2 (Task 11): the per-harness RECEIPT is set ONLY on a 2xx
     # (the data is durable at this point — T1-P12 receipt↔Session invariant),
@@ -9473,7 +9504,12 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
              quota_hit=totals["quota_hit"],
              errors=totals["errors"],
              error=None)
-
+        # #1727 Slice 2 (Task 12, T1-P15): re-run the entity-linking pass
+        # on index COMPLETION — sessions captured before their entities
+        # materialized now resolve (the capture-time links were honest
+        # no-matches then). Owned by the completion hook, never a separate
+        # endpoint.
+        _relink_sessions_after_index(team_id)
     except GitHubFetchError as e:
         # Mid-walk 401/429 / unresolved org (T1-P13 + P2): honest "failed"
         # status with a readable error; the cursor was NOT advanced past
@@ -9505,7 +9541,37 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
                      _INDEX_JOB_OWNERS.pop(job_id, None)))
 
 
+def _relink_sessions_after_index(team_id: str) -> None:
+    """#1727 Slice 2 (Task 12, T1-P15): re-run the entity-linking pass for
+    the team's captured sessions after an index completes.
 
+    Sessions captured BEFORE their entities materialized carried honest
+    no-match links; once the index lands (entities minted), the pass resolves
+    them. Best-effort: a failure is logged, never fatal to the job status.
+    """
+    try:
+        from .session_link import link_session_entities
+        proj = _make_sdk(namespace=team_id)._get_proj()
+        rows = proj.g.query(
+            "MATCH (s:Session)-[:CONTAINS]->(t:Point) "
+            "WHERE t.pointKind='event' "
+            "RETURN s.id, t.id, t.content").result_set
+        by_session: dict[str, tuple[list[str], list[str]]] = {}
+        for sid, tid, content in rows:
+            by_session.setdefault(sid, ([], []))
+            by_session[sid][0].append(str(content or ""))
+            by_session[sid][1].append(tid)
+        for sid, (texts, tids) in by_session.items():
+            result = link_session_entities(proj, sid, texts, turn_ids=tids)
+            if result["attempted"]:
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}) SET "
+                    "s.entity_links_attempted=$a, s.entity_links_created=$c",
+                    params={"sid": sid, "a": result["attempted"],
+                            "c": result["created"]})
+    except Exception:
+        _logger.exception(
+            "session re-linking after index failed (team=%s)", team_id)
 
 
 @app.post("/v1/index/github")

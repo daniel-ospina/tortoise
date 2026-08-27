@@ -1960,3 +1960,139 @@ def test_legacy_true_grandfathered_200(consent_client):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# #1727 Slice 2 (Task 12) — session → entity linking (aboutObject).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _object(proj, oid: str, name: str):
+    proj.apply({"type": "ObjectRegistered", "id": oid, "name": name,
+                "object_kind": "pm:issue", "title": name})
+
+
+def _link_edges(proj, label: str, sid: str) -> set:
+    rows = proj.g.query(
+        f"MATCH (s:{label} {{id:$sid}})-[:aboutObject]->(o:Object) "
+        "RETURN o.id", params={"sid": sid}).result_set
+    return {r[0] for r in rows}
+
+
+def test_session_links_full_url_form(consent_client):
+    """Task 12: github.com/{org}/{repo}/issues/{n} in the conversation links
+    the Session + the matching turn Point via aboutObject; counters tracked."""
+    from tortoise.session_link import extract_refs
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue-test/repo-42", "test/repo#42")
+    conv = [{"role": "user",
+             "content": "we should fix github.com/test/repo/issues/42 first"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-url"})
+    assert r.status_code == 200, r.text
+    # Session: all-matches (1 target). The turn Point that mentioned it
+    # carries the first-match link.
+    assert _link_edges(proj, "Session", "s-link-url") == {"github-issue-test/repo-42"}
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'s-link-url'}) "
+        "RETURN s.entity_links_attempted, s.entity_links_created").result_set
+    assert rows[0][0] >= 1, f"attempted not tracked: {rows}"
+    assert rows[0][1] >= 1, f"created not tracked: {rows}"
+    # The trigger regex itself is pinned (unit-level).
+    refs = extract_refs("see github.com/acme/web/issues/7 now")
+    assert refs == [{"org": "acme", "repo": "web", "num": "7", "form": "url"}]
+
+
+def test_session_links_repo_num_and_bare_num_forms(consent_client):
+    """Task 12: {repo}#{n} (name-suffix) and bare #n (guarded) forms link;
+    the bare-#n false-positive guard rejects C#42 / v#42 / dir/42."""
+    from tortoise.session_link import extract_refs
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue/acme/tortoise-12", "acme/tortoise#12")
+    _object(proj, "github-issue/acme/other-7", "acme/other#7")
+    conv = [{"role": "assistant",
+             "content": "tortoise#12 is the blocker; other#7 too"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-repo"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-repo") == {
+        "github-issue/acme/tortoise-12", "github-issue/acme/other-7"}
+    # Guard: the bare-#n false-positive guard rejects #n preceded by alnum
+    # or slash — `docs/#42` never matches, and inside `C#42` the bare form
+    # does NOT fire (only the {repo}#{n} form, which is legitimately
+    # ambiguous for single-letter repos — resolution still no-ops without a
+    # matching Object).
+    assert extract_refs("docs/#42") == []
+    assert all(r["form"] != "bare_num" for r in extract_refs("C#42"))
+    assert extract_refs("C#42 is a language") == [
+        {"repo": "C", "num": "42", "form": "repo_num"}]
+    # Guarded bare #n (whitespace/start-of-line preceded) matches.
+    refs = extract_refs("fix #42 now")
+    assert any(r["form"] == "bare_num" and r["num"] == "42" for r in refs)
+
+
+def test_session_links_first_match_per_point_all_for_session(consent_client):
+    """Task 12: the SESSION links all matches; each turn POINT links only its
+    FIRST match (pinned trigger rule)."""
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue/test/repo-1", "test/repo#1")
+    _object(proj, "github-issue/test/repo-2", "test/repo#2")
+    conv = [{"role": "user",
+             "content": "test/repo#1 and test/repo#2 are both in flight"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-first"})
+    assert r.status_code == 200, r.text
+    sid = r.json()["session_id"]
+    assert _link_edges(proj, "Session", sid) == {
+        "github-issue/test/repo-1", "github-issue/test/repo-2"}
+    # The single turn point links only the FIRST ref (#1).
+    turn_edges = _link_edges(proj, "Point", f"{sid}_t0")
+    assert turn_edges == {"github-issue/test/repo-1"}, turn_edges
+
+
+def test_session_links_no_match_honest(consent_client):
+    """Task 12: no references in the conversation ⇒ no links, no counters,
+    no error — honest no-match (nothing fabricated)."""
+    _opt_in()
+    proj = _graph()
+    conv = [{"role": "user", "content": "plain chit-chat with no refs"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-none"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-none") == set()
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'s-link-none'}) "
+        "RETURN s.entity_links_attempted, s.entity_links_created").result_set
+    assert rows[0][0] is None and rows[0][1] is None, \
+        f"counters must stay unset on no-match: {rows}"
+
+
+def test_session_links_resolve_after_index(consent_client):
+    """Task 12 (T1-P15): a session captured BEFORE the entity existed carries
+    no link; the index-completion re-link pass resolves it (resolve-to-current
+    by stable Object id)."""
+    _opt_in()
+    proj = _graph()
+    conv = [{"role": "user",
+             "content": "ship github.com/test/repo/issues/99 this week"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-late"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-late") == set(), \
+        "no entity yet — honest no-match at capture time"
+    # Index lands → entity materializes → re-link resolves.
+    _object(proj, "github-issue/test/repo-99", "test/repo#99")
+    _ha._relink_sessions_after_index(_CONSENT_TEAM["team_id"])
+    assert _link_edges(proj, "Session", "s-link-late") == \
+        {"github-issue/test/repo-99"}, "re-link on index completion must resolve"
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'s-link-late'}) "
+        "RETURN s.entity_links_attempted, s.entity_links_created").result_set
+    assert rows[0][1] >= 1, f"counters updated after re-link: {rows}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
