@@ -431,18 +431,26 @@ class TestResolveLegOutage503:
     """
 
     def test_resolve_leg_outage_503(self, client, fake, monkeypatch):
-        """_get_current_team_supabase raises (outage/schema-cache on the
-        api_keys read) → 503 with the error_code, not 500 'Auth error'."""
+        """The REAL failure class: resolve_api_key (inside the shared
+        _get_current_team_supabase) raises RuntimeError on a control-plane
+        outage; the function converts it to HTTPException(500, 'Auth error')
+        internally, and the call-site map must turn that into 503
+        control_plane_unavailable — not the raw 500 'Auth error'."""
         _seed_team(fake, created_by=_OWNER)
         key = _mint_key(fake, created_by=_OWNER)
 
-        async def _boom(request, token):
+        # Patch the inner resolve seam (what _get_current_team_supabase
+        # calls) so the REAL conversion path (RuntimeError → 500
+        # "Auth error") is exercised, then the call-site 500→503 map fires.
+        def _boom_resolve(cp, token):
             raise RuntimeError("Supabase control-plane query failed "
                                "(api_keys): HTTP 400")
 
-        monkeypatch.setattr(ha_mod, "_get_current_team_supabase", _boom)
+        monkeypatch.setattr(sc, "resolve_api_key", _boom_resolve)
         r = _exchange(client, key)
         assert r.status_code == 503, r.text
+        body = r.json()
+        assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
         body = r.json()
         assert body.get("detail", {}).get("error_code") == "control_plane_unavailable"
         assert "temporarily unavailable" in body["detail"]["message"].lower()

@@ -2925,13 +2925,18 @@ async def _session_login_exchange(
     # Key parity + suspension (the #767 resolution path; raises 401/403).
     try:
         team = await _get_current_team_supabase(request, token)
-    except RuntimeError:
+    except HTTPException as e:
         # #1737: the resolve-leg (api_keys read) shares the control-plane
-        # outage class — uniform 503 control_plane_unavailable with the
-        # mint-path map (#1719), never the 500 "Auth error" the client
-        # rendered as a generic failure. Call-site scoped: the shared
-        # _get_current_team_supabase keeps its own fail-closed contract.
-        raise _control_plane_unavailable() from None
+        # outage class. _get_current_team_supabase converts its own
+        # control-plane RuntimeErrors to HTTPException(500, "Auth error")
+        # internally (its fail-closed contract) — the ONLY 500 it raises is
+        # that catch-all, so a 500 here is unambiguously an outage. Uniform
+        # 503 control_plane_unavailable with the mint-path map (#1719),
+        # never the 500 "Auth error". Call-site scoped: the shared function
+        # keeps its own contract; 401/403 pass through untouched.
+        if e.status_code == 500:
+            raise _control_plane_unavailable() from None
+        raise
     # Key parity + suspension (the #767 resolution path; raises 401/403).
 
     # FORCED dashboard-login gate.
@@ -7884,11 +7889,14 @@ async def claim_team(request: Request):
     #    expiry, suspension, abuse hooks) — 401 on invalid/revoked keys.
     try:
         team = await _get_current_team_supabase(request, api_key)
-    except RuntimeError:
+    except HTTPException as e:
         # #1737: the claim funnel's resolve-leg shares the control-plane
-        # outage class — uniform 503 control_plane_unavailable, never a
-        # raw 500.
-        raise _control_plane_unavailable() from None
+        # outage class — the ONLY 500 _get_current_team_supabase raises is
+        # its catch-all "Auth error" (control-plane outage), so map it to
+        # the uniform 503; 401/403 pass through.
+        if e.status_code == 500:
+            raise _control_plane_unavailable() from None
+        raise
     team_id = team["team_id"]
 
     # 5. fail-closed: the resolved team must still be anon (an unclaimed
@@ -7987,7 +7995,12 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
 
     # 1. key → team; must be an anon (unclaimed) team
     cp = get_control_plane()
-    team = resolve_api_key(cp, api_key)
+    try:
+        team = resolve_api_key(cp, api_key)
+    except RuntimeError:
+        # #1737: claim_email's direct resolve shares the control-plane
+        # outage class — uniform 503, never a raw 500.
+        raise _control_plane_unavailable() from None
     if team is None:
         raise HTTPException(status_code=401, detail="Invalid API key")
     team_id = team["team_id"]

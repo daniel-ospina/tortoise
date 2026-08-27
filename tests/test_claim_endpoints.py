@@ -746,3 +746,24 @@ class TestClaimRpcOutage503:
         })
         assert r.status_code == 503, r.text
         assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
+
+
+class TestClaimEmailResolveOutage503:
+    """#1737: claim_email's direct resolve_api_key call shares the
+    control-plane outage class — RuntimeError → 503, never a raw 500."""
+
+    def test_claim_email_resolve_outage_503(self, client, fake, monkeypatch):
+        from tortoise import supabase_control as sc
+
+        def _boom(cp, token):
+            raise RuntimeError("Supabase control-plane query failed "
+                               "(api_keys): HTTP 400")
+
+        monkeypatch.setattr(sc, "resolve_api_key", _boom)
+        r = client.post("/v1/claim/email",
+                        json={"api_key": "tt_does-not-exist",
+                              "email": "a@example.com",
+                              "password": "password123"},
+                        headers={"Authorization": "Bearer abc.def.ghi"})
+        assert r.status_code == 503, r.text
+        assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
