@@ -60,9 +60,11 @@ services:
       # (appendonly yes already on) and the loader prefers AOF. The
       # `--auto-aof-rewrite-min-size 1gb` bump prevents BGREWRITEAOF (also
       # a fork) from firing on small growth mid-run (live aof_current_size
-      # ~167 MB). The plan's preflight persistence gate (Task 3, in
-      # preflight.py — a separate owner's surface) refuses a ZERO-
-      # persistence server (aof off + save empty) before an eval run.
+      # ~167 MB). ⚠️ Task 3's preflight persistence gate (preflight.py — a
+      # separate owner's surface) does NOT exist yet: until it lands and is
+      # verified against the LIVE server, a drifted server (aof off + save
+      # empty) has NO tripwire in the repo — do not apply this config to a
+      # container carrying eval data without first landing that gate.
       REDIS_ARGS: "--requirepass falkordb --appendonly yes --save \"\" --auto-aof-rewrite-min-size 1gb"
     volumes:
       - falkordb-data:/var/lib/falkordb/data

@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -526,3 +527,132 @@ def test_upsert_failure_replaces_never_appends(tmp_path):
     saved = json.loads(cp.read_text(encoding="utf-8"))
     assert len(saved["failures"]) == 1  # replaced, never appended
     assert saved["failures"][0]["attempts"] == 2
+
+
+def test_upsert_failure_fresh_file_writes_full_shape(tmp_path):
+    """code-review F6: the fresh-file branch (no checkpoint exists yet) must
+    emit the FULL checkpoint key set (format/run_key/surface/retriever/
+    model/prompt/fingerprint) so a kill -9 before the trailing save cannot
+    leave a markerless file the next resume refuses wholesale."""
+    cp = tmp_path / "cp.json"
+    fp = _resume_fingerprint()
+    entry = runner._upsert_failure(
+        str(cp), "mini_ie_user_001",
+        lambda _prior: _transient_entry(),
+        fingerprint=fp, run_key="embedded__hybrid__default__default",
+        surface="embedded", retriever="hybrid", model="default",
+        prompt="default")
+    assert entry["question_id"] == "mini_ie_user_001"
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    assert saved["format"] == runner.CHECKPOINT_FORMAT
+    assert saved["run_key"] == "embedded__hybrid__default__default"
+    assert saved["fingerprint"] == fp
+    assert saved["failures"][0]["question_id"] == "mini_ie_user_001"
+    # the full shape passes the loader (no "predates the fingerprint" refuse)
+    _done, failures = runner._load_checkpoint(str(cp))
+    assert [f["question_id"] for f in failures] == ["mini_ie_user_001"]
+
+
+# ── code-review F1/F2: resume limiter + TTL-aware advisory fast path ────────
+
+
+class _TrackingLimiter:
+    """Wraps a real BoundedSemaphore(2) with concurrency counters so a test
+    can assert the resume re-attempt path actually acquires AND that the cap
+    holds (≤ 2 in-flight at any sampled instant)."""
+
+    def __init__(self, n: int = 2):
+        self._sem = threading.BoundedSemaphore(n)
+        self._lock = threading.Lock()
+        self.held = 0
+        self.max_held = 0
+        self.acquire_count = 0
+        self.release_count = 0
+
+    def acquire(self):
+        self._sem.acquire()
+        with self._lock:
+            self.held += 1
+            self.max_held = max(self.max_held, self.held)
+            self.acquire_count += 1
+
+    def release(self):
+        with self._lock:
+            self.held -= 1
+            self.release_count += 1
+        self._sem.release()
+
+
+def test_resume_reattempt_limiter_caps_inflight(tmp_path, monkeypatch):
+    """Task 2 Step 7 / P2-1: a multi-entry failures list + --retry-failed
+    dispatches through the shared _REINGEST_LIMITER — the semaphore-wait
+    counter test pins (a) each re-attempt ACQUIRES the limiter and (b) ≤ 2
+    re-attempts are in-flight at any sampled instant (the retry-amplification
+    bound, AWS REL05-BP03)."""
+    entries = [
+        _transient_entry(qid="mini_ie_user_001"),
+        _transient_entry(qid="mini_msr_002"),
+        _transient_entry(qid="mini_tr_003"),
+        _transient_entry(qid="mini_ku_004"),
+    ]
+    cp = tmp_path / "cp.json"
+    _write_checkpoint(cp, failures=entries)
+
+    tracking = _TrackingLimiter()
+    monkeypatch.setattr(runner, "_REINGEST_LIMITER", tracking)
+    monkeypatch.setattr(runner.random, "uniform", lambda a, b: 0.0)
+    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+
+    # make each re-attempt overlap: a small REAL delay (threading.Event.wait,
+    # unaffected by the run's time.sleep no-op patch) inside the pipeline so
+    # 4 workers contend on the limiter rather than serializing.
+    real_make = runner._make_question_sdk
+
+    def _slow_make(*a, **k):
+        threading.Event().wait(0.05)
+        return real_make(*a, **k)
+
+    monkeypatch.setattr(runner, "_make_question_sdk", _slow_make)
+
+    reader = MockReader()
+    judge = MockJudge()
+    outcomes, report = runner.run_evaluation(
+        _mini()[:4], reader=reader, judge=judge, ks=(5,), top_k=5,
+        split="s", work_dir=str(tmp_path), checkpoint=str(cp),
+        ingest_mode="v2", extractor_model=None, retry_failed=True,
+        max_retries=0, workers=4)
+    assert len(outcomes) == 4  # all four re-attempts completed
+    assert report["n_failed"] == 0
+    assert tracking.acquire_count == 4  # each re-attempt acquired at claim
+    assert tracking.release_count == 4  # each released on completion
+    assert tracking.max_held <= 2  # the cap holds at any sampled instant
+    assert tracking.max_held >= 1  # the limiter was actually exercised
+
+
+def test_retry_failed_skip_reason_ttl_aware_stamp(monkeypatch):
+    """code-review F2: the advisory fast path must NOT veto a claim the TTL
+    age branch admits — a dead-pid stamp and a >90-min hung-live stamp both
+    pass (eligible → None), while a live below-TTL stamp is skipped."""
+    now = datetime(2026, 8, 27, 2, 0, 0, tzinfo=UTC)
+    monkeypatch.setattr(runner, "_utc_now", lambda: now)
+
+    # live pid (this process) aged PAST the TTL → claimable → NOT skipped
+    old_live = _transient_entry(in_progress={
+        "in_progress_utc": (now - timedelta(minutes=91)).isoformat(),
+        "pid": os.getpid(),
+    })
+    assert runner._retry_failed_skip_reason(old_live) is None
+
+    # a DEAD pid → claimable immediately (PID-liveness primary) → NOT skipped
+    dead = _transient_entry(in_progress={
+        "in_progress_utc": (now - timedelta(minutes=1)).isoformat(),
+        "pid": 42424242,
+    })
+    assert runner._retry_failed_skip_reason(dead) is None
+
+    # a LIVE pid below the TTL → NOT claimable → skipped
+    live_recent = _transient_entry(in_progress={
+        "in_progress_utc": (now - timedelta(minutes=1)).isoformat(),
+        "pid": os.getpid(),
+    })
+    assert runner._retry_failed_skip_reason(live_recent) is not None

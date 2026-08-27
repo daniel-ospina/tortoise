@@ -134,7 +134,9 @@ ERROR_REPR_CAP = 2000
 #: the initial attempt + ``--retry-failed`` resume re-attempts). The tiers
 #: never contend (R2 runs in the initial attempt's process; resumes run in
 #: later processes), but the retry-amplification bound is enforced across
-#: the recovery surface.
+#: the recovery surface WITHIN each process — a ``BoundedSemaphore`` is
+#: process-local, so cross-process concurrency is bounded by the flocked
+#: claim CAS (Task 2 Step 7), never by this limiter.
 _REINGEST_LIMITER = threading.BoundedSemaphore(2)
 
 #: #1349 HNSW spot-check artifact dir — gate_1349.py's "HNSW artifact
@@ -629,7 +631,7 @@ def _read_checkpoint_or_quarantine(p: Path) -> dict:
     merge-into-{} and overwrite on-disk state). Caller MUST hold the flock."""
     try:
         return json.loads(p.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
         qpath = _quarantine_corrupt(p)
         raise CheckpointStaleError(
             f"checkpoint {p} is corrupt ({e!r}) — quarantined to {qpath}; "
@@ -743,10 +745,15 @@ def _retry_failed_skip_reason(entry: dict, *,
                 f"— entry retained; free disk / wait out the outage, then "
                 f"raise the cap (fingerprint-refusing — rotate the "
                 f"checkpoint) or hand-remove the retained entry")
-    # Advisory fast path (P1-3): a LIVE in_progress stamp means another
-    # process is mid-re-attempt — the flocked CAS re-verifies this under
-    # the flock (this check is an unlocked read, advisory only).
-    if check_stamp and _stamp_live(entry.get("in_progress")):
+    # Advisory fast path (P1-3/P2-3): a stamp that is NOT claimable (a
+    # LIVE pid below the TTL) means another process is mid-re-attempt — the
+    # flocked CAS re-verifies this under the flock (this check is an
+    # unlocked read, advisory only). TTL-aware: a dead-pid stamp or a
+    # >90-min hung-live stamp IS claimable, so it must pass this fast path
+    # and reach the flocked CAS (which re-verifies authoritatively) — the
+    # old age-AGNOSTIC ``_stamp_live`` check here hard-vetoed exactly the
+    # claims the TTL is designed to admit.
+    if check_stamp and not _stamp_claimable(entry.get("in_progress")):
         return "currently claimed by another process (live in_progress stamp)"
     return None
 
@@ -850,14 +857,26 @@ def _claim_reattempt(checkpoint: str | None, qid: str, cap: int, *,
 
 
 def _upsert_failure(checkpoint: str | None, qid: str,
-                    build: Callable[[dict | None], dict]) -> dict:
+                    build: Callable[[dict | None], dict], *,
+                    fingerprint: dict | None = None,
+                    run_key: str | None = None, surface: str | None = None,
+                    retriever: str | None = None, model: str | None = None,
+                    prompt: str | None = None) -> dict:
     """Task 2 Step 4 append-site: ONE flocked write — re-read the on-disk
     base, REPLACE any prior entry for ``qid`` with ``build(prior)`` (never
     append a duplicate — ``n_failed = len(failures)`` must never
     double-count a qid), write the full file inline. The replacement is
     built from the ON-DISK prior (never the stale in-memory copy), so a
     capped qid cannot be re-admitted and a recovery-tier entry written by
-    another process cannot be missed. Returns the final persisted entry."""
+    another process cannot be missed. Returns the final persisted entry.
+
+    #1786 (code-review F6): the FRESH-file branch (no checkpoint exists yet)
+    emits the FULL checkpoint key set (``format``/``run_key``/``surface``/
+    ``retriever``/``model``/``prompt``/``fingerprint``) via
+    ``_write_checkpoint_locked`` — a kill -9 between this write and the
+    trailing ``_save_checkpoint`` used to leave a PARTIAL-shape file
+    (``{failures, outcomes}`` with no markers) that the next resume REFUSED
+    in entirety ("predates the fingerprint contract")."""
     if not checkpoint:
         return build(None)
     p = Path(checkpoint)
@@ -878,7 +897,16 @@ def _upsert_failure(checkpoint: str | None, qid: str,
         if not any(isinstance(f, dict) and f.get("question_id") == qid
                    for f in data["failures"]):
             data["failures"].append(entry)
-        _write_json_atomic(p, data)
+        if p.is_file():
+            _write_json_atomic(p, data)
+        else:
+            # Fresh-file branch: write the FULL checkpoint shape so a
+            # kill -9 in the window before the trailing save cannot leave
+            # a markerless file the loader refuses wholesale.
+            _write_checkpoint_locked(
+                p, data.get("outcomes", []), data["failures"], fingerprint,
+                run_key=run_key, surface=surface, retriever=retriever,
+                model=model, prompt=prompt)
         return entry
 
 
@@ -1615,12 +1643,13 @@ def _load_checkpoint(path: str | None,
               f"concurrent writer; ignoring for now — every question "
               f"re-encodes", file=sys.stderr)
         return {}, []
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError) as e:
         # #1786 (P2-12): refuse-and-quarantine — the file is renamed under
         # the SAME exclusive flock as _save_checkpoint (guarded rename),
         # and the loader refuses instead of silently fresh-starting (the
         # old contract discarded the failures list + claim stamps and
-        # bypassed the fingerprint gate).
+        # bypassed the fingerprint gate). RecursionError (a deeply nested
+        # crafted JSON) quarantines + refuses identically to JSONDecodeError.
         with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
             qpath = _quarantine_corrupt(p)
         raise CheckpointStaleError(
@@ -1809,6 +1838,15 @@ def _validate_failures_schema(failures_raw: Any, *, checkpoint: Path) -> list[di
             raise CheckpointStaleError(
                 f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
                 f"attempts must be int, got {attempts!r} — refusing load")
+        # #1786 (code-review F7): the gate's only budget check is
+        # ``attempts >= cap`` (False for negatives), so a crafted negative
+        # attempts would otherwise be re-attempted N+2 times across resumes.
+        # Clamp the range (a sane upper bound refuses pathological crafted
+        # values too — the cap is small, so anything far past it is corrupt).
+        if attempts is not None and (attempts < 0 or attempts > 1_000_000):
+            raise CheckpointStaleError(
+                f"checkpoint {checkpoint} failure {f.get('question_id')!r} "
+                f"attempts out of range, got {attempts!r} — refusing load")
         retryable = f.get("retryable")
         if retryable is not None and not isinstance(retryable, bool):
             raise CheckpointStaleError(
@@ -2220,6 +2258,7 @@ def run_evaluation(
         prior_failure = next((f for f in failures
                               if f.get("question_id") == qid), None)
         resume_reattempt = False
+        resume_semaphore_held = False
         if prior_failure is not None:
             if not retry_failed or _retry_failed_skip_reason(
                     prior_failure, cap=resume_attempts_cap) is not None:
@@ -2230,6 +2269,14 @@ def run_evaluation(
                 print(f"  [resume] {qid} re-attempt claimed by another "
                       f"process — skipping", file=sys.stderr)
                 return
+            # #1786 (P2-1): a resume re-attempt acquires the SHARED
+            # resume-tier limiter at claim (released on completion/failure
+            # in the outer finally, parallel to the R2 semaphore flag) — a
+            # resume run with N eligible entries + workers=N must not
+            # launch N concurrent ~25-min re-ingests (retry-amplification,
+            # AWS REL05-BP03).
+            _REINGEST_LIMITER.acquire()
+            resume_semaphore_held = True
             resume_reattempt = True
             print(f"  [resume] {qid} re-attempting transient failure "
                   f"(--retry-failed)", file=sys.stderr)
@@ -2252,6 +2299,14 @@ def run_evaluation(
         r2_retained: BaseException | None = None
         r2_attempted = 0
         r2_semaphore_held = False
+        # #1786 (code-review F3): the success/breaker paths fall through to
+        # the SAME trailing save as the failure path (under ``_lock``) —
+        # this flag carries their ``remove_failures`` tombstone so a
+        # --retry-failed re-attempt's remove-on-success stays ONE flocked
+        # write without saving inside the per-question try (the old
+        # in-try save snapshotted ``done`` OUTSIDE the lock → a concurrent
+        # ``done`` mutation raised RuntimeError → bogus failure entry).
+        _save_remove_failures: list[str] | None = None
         try:
             while True:
                 try:
@@ -2486,12 +2541,16 @@ def run_evaluation(
                             # remove_failures tombstone.
                             failures[:] = [f for f in failures
                                            if f.get("question_id") != qid]
-                    _save_checkpoint(
-                        checkpoint, list(done.values()), failures, fingerprint,
-                        run_key=run_key, surface=surface, retriever=retriever,
-                        model=model, prompt=query_prompt,
-                        remove_failures=[qid] if resume_reattempt else None)
-                    return
+                    # #1786 (code-review F3): the save is NOT done here — it
+                    # falls through to the SAME trailing ``with _lock:
+                    # _save_checkpoint(...)`` as the failure path so the
+                    # snapshot of ``done``/``failures`` happens UNDER the lock
+                    # (the old in-try save iterated ``done`` unlocked → a
+                    # concurrent worker's append raised RuntimeError → the
+                    # generic handler fabricated a bogus failure entry for an
+                    # already-succeeded qid).
+                    _save_remove_failures = [qid] if resume_reattempt else None
+                    break
                 except VectorBreakerOpenError:
                     # #1349: vector-arm breaker drops are NOT failures — the
                     # question is marked breaker_open and excluded from the
@@ -2522,12 +2581,13 @@ def run_evaluation(
                             # tombstone in ONE flocked write.
                             failures[:] = [f for f in failures
                                            if f.get("question_id") != qid]
-                    _save_checkpoint(
-                        checkpoint, list(done.values()), failures, fingerprint,
-                        run_key=run_key, surface=surface, retriever=retriever,
-                        model=model, prompt=query_prompt,
-                        remove_failures=[qid] if resume_reattempt else None)
-                    return
+                    # #1786 (code-review F3): same fall-through as the
+                    # success path — the trailing save snapshots under
+                    # ``_lock``; a save-time CheckpointStaleError (corrupt
+                    # base quarantine) must abort loudly, never become a
+                    # per-question failure entry.
+                    _save_remove_failures = [qid] if resume_reattempt else None
+                    break
                 except ModelEncodeFailedError:
                     # #1349: the graph has ZERO embedding-bearing points — empty
                     # recall is indistinguishable from a legit no-hit. ABORT the
@@ -2612,7 +2672,10 @@ def run_evaluation(
                             partial(_build_failure_entry, qid,
                                     question.get("question_type", ""),
                                     tier_exc, entry_stage, r2_attempted,
-                                    resume_reattempt))
+                                    resume_reattempt),
+                            fingerprint=fingerprint, run_key=run_key,
+                            surface=surface, retriever=retriever,
+                            model=model, prompt=query_prompt)
                         failures[:] = (
                             [f for f in failures
                              if f.get("question_id") != qid] + [entry])
@@ -2620,11 +2683,14 @@ def run_evaluation(
         finally:
             if r2_semaphore_held:
                 _REINGEST_LIMITER.release()
+            if resume_semaphore_held:
+                _REINGEST_LIMITER.release()
         with _lock:
             _save_checkpoint(
                 checkpoint, list(done.values()), failures, fingerprint,
                 run_key=run_key, surface=surface, retriever=retriever,
-                model=model, prompt=query_prompt)
+                model=model, prompt=query_prompt,
+                remove_failures=_save_remove_failures)
 
     # ── dispatch: sequential (workers=1) or a thread pool ──
     if workers <= 1:

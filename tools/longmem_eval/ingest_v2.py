@@ -242,9 +242,30 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
                        or session_date)
             if started:
                 event_props["startedAt"] = str(started)
+            event_name = content[:80]
+            event_kind = str(ev.get("eventKind", "core:occurrence")).rsplit(":", 1)[-1]
+            # #1786 (code-review F5): event idempotency — ``create_event``
+            # mints a FRESH ``self.ulid()`` per call with NO existence guard
+            # (unlike points [E7 probe] / entities [deterministic MERGE] /
+            # operators [dup-edge probe] / supersessions [terminal-status
+            # probe]), so a mid-payload retry left N+1 Event nodes for an
+            # N-event payload (the TR retrieval pool is the point+event
+            # union — duplicate events inflate recall denominators). Probe
+            # for an existing Event with the same (name, eventKind, session)
+            # and skip the create when present — mirroring the entity-dedup
+            # posture. (Events have no deterministic id, so this content-
+            # based probe is the only in-lane guard.)
+            dup = proj.g.query(
+                "MATCH (e:Event {name:$name, eventKind:$kind, "
+                "lme_session_index:$si}) RETURN count(*) LIMIT 1",
+                params={"name": event_name, "kind": event_kind, "si": si},
+            ).result_set
+            if dup and dup[0][0]:
+                logger.info("v2 ingest event %r already present — skipping",
+                            event_name)
+                continue
             sdk.create_event(
-                content[:80], str(ev.get("eventKind", "core:occurrence"))
-                .rsplit(":", 1)[-1],
+                event_name, event_kind,
                 sessionId=sid, lme_question_id=qid, lme_session_index=si,
                 is_episodic=True, **event_props,
             )
@@ -859,6 +880,17 @@ def _bump_retry(counter: dict[str, int], _exc: BaseException) -> None:
     counter["n"] += 1
 
 
+def _collect_attempt(results: list, fn: Callable[[], Any]) -> Any:
+    """#1786 (code-review F4): run ``fn`` and append its return value to
+    ``results`` so a retried attempt's delta is accumulated (the final
+    attempt's delta alone under-counts a partial write from a failed earlier
+    attempt). Module-level (B023-clean) — callers bind loop variables via
+    ``functools.partial`` rather than a closure."""
+    r = fn()
+    results.append(r)
+    return r
+
+
 def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
                        model: Any, *, chunk_turns: int = 2,
                        session_workers: int = 1,
@@ -947,17 +979,26 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         # failure). The helper returns per-attempt deltas so a retried
         # attempt cannot double-count the stats. ──
         _retries_a: dict[str, int] = {"n": 0}
-        _phase_a = call_with_predicate(
-            partial(_write_v2_phase_a, sdk, qid=qid, si=si, sid=sid,
-                    s_node=s_node, session=session, session_date=session_date,
-                    point_created_at=point_created_at, chunk_turns=chunk_turns),
+        # #1786 (code-review F4): accumulate EACH attempt's delta across ALL
+        # attempts — call_with_predicate returns only the FINAL attempt's
+        # delta, so a partial write from a failed earlier attempt (points/
+        # chunks now in the graph but skipped by the retry's E7 re-probe)
+        # would otherwise be UNDER-counted (stats != graph contents).
+        _phase_a_deltas: list[dict] = []
+        _phase_a_fn = partial(
+            _write_v2_phase_a, sdk, qid=qid, si=si, sid=sid, s_node=s_node,
+            session=session, session_date=session_date,
+            point_created_at=point_created_at, chunk_turns=chunk_turns)
+        call_with_predicate(
+            partial(_collect_attempt, _phase_a_deltas, _phase_a_fn),
             predicate=retryable_transient,
             retries=ingest_write_retries,
             what=f"session raw-leg write for {qid} s{si}",
             marker_armed=write_marker_armed,
             on_retry=partial(_bump_retry, _retries_a))
-        stats["sessions"] += _phase_a["sessions"]
-        stats["chunks"] += _phase_a["chunks"]
+        for _d in _phase_a_deltas:
+            stats["sessions"] += _d["sessions"]
+            stats["chunks"] += _d["chunks"]
         stats["ingest_retries"] += _retries_a["n"]
 
         # ── The v2 extraction (production pipeline, embedded-safe S3) ──
@@ -1013,30 +1054,37 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         # mid-consolidation (noop/deletion/supersession write) is absorbed
         # here instead of falling straight to the ~25-min R2 re-burn.
         _retries_c: dict[str, int] = {"n": 0}
-        written, noops_applied, deletions_applied = call_with_predicate(
-            partial(_write_v2_phase_c, sdk, qid=qid, si=si, sid=sid,
-                    s_node=s_node, session_date=session_date or None,
-                    all_evidence_turns=all_evidence_turns, turns=turns,
-                    payload=payload, out=out, ev_sessions=ev_sessions,
-                    evidence_turns=evidence_turns,
-                    gold_answer=gold_answer),
+        # #1786 (code-review F4): accumulate EACH attempt's deltas — the
+        # final attempt's delta alone under-counts a partial write from a
+        # failed earlier attempt (stats must equal the graph).
+        _phase_c_results: list[tuple[dict, int, int]] = []
+        _phase_c_fn = partial(
+            _write_v2_phase_c, sdk, qid=qid, si=si, sid=sid, s_node=s_node,
+            session_date=session_date or None,
+            all_evidence_turns=all_evidence_turns, turns=turns,
+            payload=payload, out=out, ev_sessions=ev_sessions,
+            evidence_turns=evidence_turns, gold_answer=gold_answer)
+        call_with_predicate(
+            partial(_collect_attempt, _phase_c_results, _phase_c_fn),
             predicate=retryable_transient,
             retries=ingest_write_retries,
             what=f"payload write for {qid} s{si}",
             marker_armed=write_marker_armed,
             on_retry=partial(_bump_retry, _retries_c))
         stats["ingest_retries"] += _retries_c["n"]
-        for k in ("points", "events", "entities", "operators",
-                  "evidence_points"):
-            stats[k] += written.get(k, 0)
-        stats["supersessions_written"] += written.get("supersessions_written", 0)
-        for mk in ("source_session", "verbatim", "raw_chunk",
-                   "answer_string"):
-            stats["evidence_marks"][mk] = (
-                stats["evidence_marks"].get(mk, 0)
-                + written.get("evidence_marks", {}).get(mk, 0))
-        stats["noops_applied"] += noops_applied
-        stats["deletions_applied"] += deletions_applied
+        for _written, _noops, _deletions in _phase_c_results:
+            for k in ("points", "events", "entities", "operators",
+                      "evidence_points"):
+                stats[k] += _written.get(k, 0)
+            stats["supersessions_written"] += _written.get(
+                "supersessions_written", 0)
+            for mk in ("source_session", "verbatim", "raw_chunk",
+                       "answer_string"):
+                stats["evidence_marks"][mk] = (
+                    stats["evidence_marks"].get(mk, 0)
+                    + _written.get("evidence_marks", {}).get(mk, 0))
+            stats["noops_applied"] += _noops
+            stats["deletions_applied"] += _deletions
     return stats
 
 
