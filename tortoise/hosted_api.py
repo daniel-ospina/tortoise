@@ -1888,6 +1888,8 @@ DEFAULT_ONBOARDING_STATE = {
     "github_connected_at": None,
     "github_indexed": False,
     "github_index_job_id": None,
+    "github_index_cursor": None,          # #1725: per-repo composite (updated_at, number) diff cursor
+    "github_legacy_backfill_done": False,  # #1725: one-time legacy `-closed` backfill marker
     "session_recording": False,
     "demo_created": False,
     "team_created": False,
@@ -8194,6 +8196,11 @@ _ONBOARDING_DEFAULT_STATE = {
     "team_created": False,
     "prompt_pasted": False,
     "onboarding_complete": False,
+    # #1725 (Slice 0): registered in BOTH default-state dicts + the PATCH
+    # model, else the _update_onboarding_state allowlist filter silently
+    # drops them (the plan's STATE-KEY REGISTRATION TABLE, cycle-3 P1-2).
+    "github_index_cursor": None,           # per-repo composite (updated_at, number)
+    "github_legacy_backfill_done": False,  # one-time legacy `-closed` backfill marker
 }
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
@@ -8296,6 +8303,11 @@ class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
     team_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None
+    # #1725 (Slice 0): registered state keys (see the registration table) —
+    # the cursor is server-written; the fields exist so the keys round-trip
+    # through the PATCH surface like every other registered key.
+    github_index_cursor: dict | None = None
+    github_legacy_backfill_done: bool | None = None
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
@@ -8779,6 +8791,17 @@ async def github_callback(code: str | None = None, state: str | None = None,
             params={"id": team_id, "tok": encrypted, "org": st["org"]},
         )
     _update_onboarding_state(team_id, github_connected=True)
+    # Auto-index after connect (Task 5, amend 11): quota-gated background
+    # first-run (ONE repo — bounded, P2-4). The job is created under the
+    # team's single-flight guard; a quota-cap failure surfaces honestly via
+    # the job poll, never the redirect (the user lands on welcome.html
+    # either way). P1-1 (PR #1792): spawn the run ONLY when the job was
+    # freshly minted — a reused in-flight job is already being walked.
+    job_id, is_new = _start_index_job(team_id)
+    if is_new:
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team_id, st["org"], None))
     _track_analytics_event(team_id, "question_answered",
                            {"question_id": "github_connect", "answer": "yes"})
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
@@ -8802,7 +8825,66 @@ async def github_status(team: dict = Depends(get_current_team)):  # noqa: B008
 
 # ── GitHub indexing endpoints (#499 Task 5) ─────────────────────
 
-_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at}
+_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at, started_at, team_id}
+# Owner/generation token per job (P2, PR #1792): a TTL-evicted entry
+# (presumed-dead, replaced by a newer run) must not let the stale run keep
+# writing status / resurrect a live walk. Kept OUT of the job dict so the
+# poll response can never leak it.
+_INDEX_JOB_OWNERS: dict[str, str] = {}
+
+# Per-team single-flight TTL (T2-P2 + cycle-3 P1-3): a `started` entry
+# older than this is presumed dead (Fly restart / hung run) — evicted so a
+# hung run never bricks the team; the just-reused in-flight entry is never
+# evicted. Single-process assumption recorded: per-event-loop atomic; a
+# DB-backed job lock is the documented path only if Fly scales horizontally.
+_INDEX_JOB_TTL_S = 30 * 60
+# Post-terminal eviction (T1-P14): the job stays pollable for an hour, then
+# vanishes — the UI renders an eviction-expired poll as "status expired".
+_INDEX_JOB_EVICT_S = 3600
+
+
+def _start_index_job(team_id: str) -> tuple[str, bool]:
+    """Per-team single-flight job creation (T2-P2, ordered algorithm).
+
+    Returns ``(job_id, is_new)``: ``is_new=False`` means an in-flight
+    `started` job for the team was REUSED — the caller MUST NOT spawn a
+    second ``_run_indexing`` task (P1-1, PR #1792: single-flight dedupes
+    the RUN, not just the entry; spawning on every POST ran two concurrent
+    walks → duplicate statement ids + version inflation + job-status
+    races).
+
+    1. Guard-check FIRST: a `started` entry for the team is REUSED (return
+       its job_id with is_new=False) — kills the TOCTOU probe→create
+       duplicate.
+    2. Only then evict terminal entries or `started` older than the 30-min
+       TTL (presumed-dead); the just-reused in-flight entry is never
+       evicted.
+    3. Otherwise mint a fresh job entry (is_new=True) stamped with a
+       generation/owner token.
+    """
+    import secrets
+    now = time.time()
+    for jid, job in list(_INDEX_JOBS.items()):
+        if job.get("team_id") != team_id:
+            continue
+        if job.get("status") == "started":
+            started = job.get("started_at") or job.get("created_at") or now
+            if now - started < _INDEX_JOB_TTL_S:
+                return jid, False  # guard-check FIRST — reuse the in-flight job
+            # presumed-dead (TTL exceeded) — evict, then fall through
+            _INDEX_JOBS.pop(jid, None)
+            _INDEX_JOB_OWNERS.pop(jid, None)
+            continue
+        # terminal → evict (T1-P14: clear stale entries on enqueue)
+        _INDEX_JOBS.pop(jid, None)
+        _INDEX_JOB_OWNERS.pop(jid, None)
+    job_id = secrets.token_hex(8)
+    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
+                           "points_created": 0, "error": None,
+                           "team_id": team_id, "created_at": now,
+                           "started_at": now}
+    _INDEX_JOB_OWNERS[job_id] = secrets.token_hex(8)
+    return job_id, True
 
 
 class GitHubIndexRequest(BaseModel):
@@ -8811,49 +8893,189 @@ class GitHubIndexRequest(BaseModel):
 
 
 async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
-    """Background indexing job: fetch GitHub issues/PRs → Points."""
-    from tortoise.indexer.github_indexer import GitHubIndexer
+    """Background indexing job: GitHub issues/PRs → entities/events/statements.
+
+    #1725 Slice 0 rework: quota-preflighted + per-batch re-checked (the old
+    job had ZERO quota calls), cursor-correct (composite (updated_at, number)
+    per-repo cursors persisted to onboarding jsonb), ONE-repo bounded first
+    run, one-time legacy `-closed` backfill (marker-gated), honest status
+    ("N issues beyond window", quota_hit, errors, partial completion).
+
+    P1-1 / P2 (PR #1792): every caller spawns this task ONLY when
+    `_start_index_job` reports is_new; as a belt-and-suspenders guard this
+    function ALSO aborts when it no longer owns the job entry (TTL-evicted
+    / replaced by a newer run) — a stale run must never keep writing
+    status or resurrect a live walk.
+    """
+    from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+    # P2: generation/owner token stamped at mint. A TTL-evicted entry
+    # (presumed-dead, replaced by a newer run) must not let THIS run keep
+    # writing status — it aborts silently at the next status-write or
+    # repo boundary.
+    owner = _INDEX_JOB_OWNERS.get(job_id)
+
+    def _job(**fields) -> None:
+        """Update the job entry ONLY while this run still owns it."""
+        if _INDEX_JOB_OWNERS.get(job_id) != owner:
+            return  # entry evicted/replaced — abort silently
+        job = _INDEX_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
     try:
         encrypted = _github_token_enc(team_id)
     except Exception:
         # Fail-closed: a control-plane outage must not leave the job stuck at
         # "started" — mark it failed so the poller reports a real error.
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": "Control plane unavailable"})
+        _job(status="failed", error="Control plane unavailable")
         return
     if not encrypted:
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": "GitHub not connected"})
+        _job(status="failed", error="GitHub not connected")
         return
     from tortoise.crypto import decrypt_token
     try:
         token = decrypt_token(encrypted)
     except ValueError:
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": "Token undecryptable"})
+        _job(status="failed", error="Token undecryptable")
         return
+    # State + cursors loaded BEFORE the walk try: the finally persists them
+    # back, so a pre-walk failure (quota preflight, resolve_repos 404) must
+    # never WIPE previously-persisted cursors (P2, PR #1792).
+    state = _get_onboarding_state(team_id)
+    cursors: dict[str, dict] = state.get("github_index_cursor") or {}
+    totals = {"points_created": 0, "statements_superseded": 0,
+              "events_minted": 0, "issues_beyond_window": 0,
+              "repos_processed": 0, "errors": [], "quota_hit": False,
+              "backfill_minted": 0}
     try:
         team_sdk = _make_sdk(namespace=team_id)
+
+        # ── Quota preflight (Task 4): the index job gates like sessions do.
+        # Resolved BEFORE the first write; a team at/over cap fails honestly
+        # (402-equivalent "failed" status with the quota message), never
+        # silently overshooting max_points. ──
+        from tortoise.quota import (  # noqa: I001
+            QuotaCheckError, QuotaExceededError, enforce_team_limit,
+            resolve_team_limits,
+        )
+        limits = resolve_team_limits(team_id)
+        try:
+            enforce_team_limit(limits, "points", sdk=team_sdk)
+        except QuotaExceededError as e:
+            _job(status="failed", error=str(e))
+            return
+        except QuotaCheckError as e:
+            _job(status="failed", error=f"Quota check failed: {e}")
+            return
+
         indexer = GitHubIndexer(token)
-        result = await indexer.index_issues(team_sdk, org, repo)
-        _INDEX_JOBS[job_id].update({
-            "status": "completed",
-            "progress": 100,
-            "points_created": result["points_created"],
-            "repos_processed": result["repos_processed"],
-            "error": None,
-        })
-        _update_onboarding_state(team_id, github_indexed=True)
+
+        # ── One-time legacy `-closed` backfill (T1-P1 + T2-P3). Gated on the
+        # persisted marker; scans PRE-EXISTING events ONLY (before the walk
+        # mints fresh ones) so fresh first-runs never double-mint; normal diff
+        # never mints `-closed` for closed-without-`-closed` on re-runs. The
+        # marker is set ONLY on success — a transient failure must not skip
+        # the one-time migration forever (P2, PR #1792). ──
+        if not state.get("github_legacy_backfill_done"):
+            try:
+                totals["backfill_minted"] = indexer.backfill_legacy_closed(
+                    team_sdk._get_proj())
+            except Exception as e:
+                _logger.warning(
+                    "legacy -closed backfill failed (team=%s): %s", team_id, e)
+            else:
+                _update_onboarding_state(
+                    team_id, github_legacy_backfill_done=True)
+
+        # ── Cursor + repo scope (Tasks 2/4). First-run scope = ONE repo
+        # regardless of org size (P2-4 pre-decided fallback) with the honest
+        # "index more" affordance (re-poll re-runs with the cursor). ──
+        first_run = not bool(state.get("github_indexed"))
+        if repo:
+            repos = [f"{org}/{repo}"]
+        else:
+            repos = await indexer.resolve_repos(org)
+            if first_run:
+                repos = repos[:1]
+
+        def _quota_check() -> None:
+            enforce_team_limit(limits, "points", sdk=team_sdk)
+
+        for repo_name in repos:
+            if _INDEX_JOB_OWNERS.get(job_id) != owner:
+                break  # lost ownership (entry evicted/replaced) — abort
+            try:
+                _quota_check()  # per-batch re-check (before each repo)
+            except QuotaExceededError as e:
+                totals["quota_hit"] = True
+                totals["errors"].append(str(e))
+                break
+            result = await indexer.index_repo(
+                team_sdk, repo_name, cursor=cursors.get(repo_name) or None,
+                quota_check=_quota_check)
+            totals["points_created"] += result["points_created"]
+            totals["statements_superseded"] += result["statements_superseded"]
+            totals["events_minted"] += result["events_minted"]
+            totals["issues_beyond_window"] += result["issues_beyond_window"]
+            totals["errors"].extend(result["errors"])
+            if result.get("cursor"):
+                cursors[repo_name] = result["cursor"]
+            if result.get("quota_hit"):
+                totals["quota_hit"] = True
+                break
+            totals["repos_processed"] += 1
+
+        _job(status="completed", progress=100,
+             points_created=totals["points_created"],
+             statements_superseded=totals["statements_superseded"],
+             events_minted=totals["events_minted"],
+             repos_processed=totals["repos_processed"],
+             repos_total=len(repos),
+             issues_beyond_window=totals["issues_beyond_window"],
+             backfill_minted=totals["backfill_minted"],
+             quota_hit=totals["quota_hit"],
+             errors=totals["errors"],
+             error=None)
+    except GitHubFetchError as e:
+        # Mid-walk 401/429 / unresolved org (T1-P13 + P2): honest "failed"
+        # status with a readable error; the cursor was NOT advanced past
+        # unprocessed items (the indexer only returns it for processed
+        # items) — a re-run resumes without gaps/dupes (idempotent writes
+        # make overlap harmless).
+        _job(status="failed", error=str(e))
     except Exception as e:
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": str(e)})
+        _job(status="failed", error=str(e))
     finally:
-        # Evict after 1 hour
+        # P2: persist per-repo cursors + github_indexed in a finally so
+        # PARTIAL runs (mid-walk raise, quota-interrupted) leave a
+        # resumable state — previously the accumulated cursors were lost on
+        # a mid-walk raise and the next run re-walked from the old cursor.
+        # github_indexed flips True ONLY on real progress (>=1 repo
+        # processed): a 0-repo failure (quota preflight, resolve_repos
+        # 404) leaves it untouched so the next run keeps the ONE-repo
+        # bounded first-run pacing (P2, PR #1792).
+        updates: dict = {"github_index_cursor": cursors}
+        if totals["repos_processed"] > 0:
+            updates["github_indexed"] = True
+        _update_onboarding_state(team_id, **updates)
+        # Evict after an hour (T1-P14: eviction-expired polls render
+        # honestly).
         import asyncio as _asyncio
         _asyncio.get_running_loop().call_later(
-            3600, lambda: _INDEX_JOBS.pop(job_id, None))
+            _INDEX_JOB_EVICT_S,
+            lambda: (_INDEX_JOBS.pop(job_id, None),
+                     _INDEX_JOB_OWNERS.pop(job_id, None)))
 
 
 @app.post("/v1/index/github")
 async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):  # noqa: B008
-    """Start a background GitHub indexing job (Q2). Returns job_id for polling."""
-    import secrets
+    """Start a background GitHub indexing job (Q2). Returns job_id for polling.
+
+    Per-team single-flight (T2-P2 + P1-1): an in-flight `started` job for
+    the team is REUSED (its job_id returned) and the run is spawned ONLY
+    for a freshly-minted job — concurrent POSTs can never run two walks
+    (duplicate statement ids, version inflation, job-status races).
+    """
     org = (body.org or "").strip()
     if not org:
         raise HTTPException(status_code=400, detail="org is required")
@@ -8862,13 +9084,33 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
     encrypted = _github_token_enc(team["team_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
-    job_id = secrets.token_hex(8)
-    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
-                           "points_created": 0, "error": None,
-                           "team_id": team["team_id"], "created_at": time.time()}
-    import asyncio as _asyncio
-    _asyncio.get_event_loop().create_task(
-        _run_indexing(job_id, team["team_id"], org, body.repo))
+    job_id, is_new = _start_index_job(team["team_id"])
+    if is_new:
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team["team_id"], org, body.repo))
+    return {"job_id": job_id, "status": "started"}
+
+
+@app.post("/v1/index/github/re-poll")
+async def github_reindex(team: dict = Depends(get_current_team)):  # noqa: B008
+    """Re-run the GitHub diff (diff-on-poll, amend 6) for the connected org.
+
+    The ONLY route shape (T1-P2) — no query-param alternative. Reuses the
+    persisted per-repo composite cursors, so a re-poll is an incremental
+    diff, not a re-ingest. Declared BEFORE /v1/index/github/{job_id} so the
+    literal path wins over the job_id path param.
+    """
+    encrypted, org = _github_credentials(team["team_id"])
+    if not encrypted:
+        raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
+    if not org:
+        raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
+    job_id, is_new = _start_index_job(team["team_id"])
+    if is_new:
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team["team_id"], org, None))
     return {"job_id": job_id, "status": "started"}
 
 

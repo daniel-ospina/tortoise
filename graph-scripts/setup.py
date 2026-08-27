@@ -929,8 +929,8 @@ def step11e() -> None:
             "entity_kinds": {
                 "issue_object": "pm:issue",
                 "pr_object": "pm:card",
-                "created_event": "pm:cardCreated",
-                "completed_event": "pm:cardCompleted",
+                "created_event": "github.issue.open",
+                "completed_event": "github.issue.closed",
             },
             "connector": {
                 "module": "tortoise.connectors.github",
