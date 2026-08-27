@@ -155,14 +155,39 @@ def test_direct_route_sends_nonreasoning_model_id(monkeypatch):
 def test_deepseek_direct_json_mode_default_on(monkeypatch):
     """#1746 (D6): JSON-mode parity on the direct path — the request body
     carries ``response_format`` under the default TORTOISE_JSON_MODE=1
-    (mirrors OpenRouterModel; the pilot's direct route ran WITHOUT it — H1)."""
+    WHEN the prompt requests JSON (the S2/S4 extractor prompts say
+    "JSON object" — #1782 gates on this: DeepSeek 400s otherwise)."""
     log, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
     model = build_extractor_model("deepseek/deepseek-v4-flash")
-    model.complete(system="s", user="u")
+    model.complete(system="Return a JSON object per the contract", user="u")
     assert log[0][1]["response_format"] == {"type": "json_object"}
+
+
+def test_json_mode_omitted_for_non_json_prompt(monkeypatch):
+    """#1782: json_object mode is NOT sent when the prompt lacks the literal
+    word "json" — DeepSeek returns HTTP 400 for that combination (the
+    preflight billing probe / ping prompts have no "json"). The mode must be
+    prompt-gated, not unconditional under TORTOISE_JSON_MODE=1."""
+    log, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
+    model = build_extractor_model("deepseek/deepseek-v4-flash")
+    model.complete(system="You are a story summarizer.", user="Tell me a story.")
+    assert "response_format" not in log[0][1]
+
+
+def test_json_mode_gate_case_insensitive(monkeypatch):
+    """#1782: the gate is case-insensitive — the S2/S4 prompts say
+    "JSON object" (uppercase); the probe prompts omit it entirely."""
+    from tortoise.model_adapters import _prompt_requests_json
+    assert _prompt_requests_json("Return a JSON object", "u") is True
+    assert _prompt_requests_json("json output expected", "u") is True
+    assert _prompt_requests_json("You are a summarizer.", "Tell a story.") is False
+    assert _prompt_requests_json(None, None) is False
 
 
 def test_deepseek_direct_json_mode_disabled(monkeypatch):
