@@ -156,6 +156,13 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
     ? `<div class="cover-img" style="background-image:url('${escapeHtml(post.cover_image_url)}')"></div>`
     : "";
 
+  const config = `<script id="blog-config" type="application/json">${JSON.stringify({
+    slug: post.slug,
+    url,
+    title: post.title,
+  }).replace(/</g, "\\u003c")}</script>
+<script src="/blog/blog.js" defer></script>`;
+
   const body = `${navHtml("blog")}
 <div class="art">
   <div class="crumb"><a href="/blog">Blog</a><span class="sep">/</span><span>${escapeHtml(post.title)}</span></div>
@@ -171,7 +178,7 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
   <div class="end-note"><strong>More from the blog →</strong> Follow Tortoise updates via <a href="/blog/feed.xml">RSS</a>.</div>
 </div>`;
 
-  return ok(htmlPage({ head, body, extraHead: analyticsHead() }), noCache);
+  return ok(htmlPage({ head, body, extraHead: analyticsHead() + config }), noCache);
 }
 
 function isRecentlyEdited(updatedAtIso: string): boolean {
