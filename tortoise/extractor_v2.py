@@ -54,6 +54,7 @@ import json
 import os
 import random
 import re
+import threading
 import time
 import warnings
 import weakref
@@ -3402,7 +3403,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # the additive keys feed the harness's per-question integrity (M4).
     # #1746 (D1/D7): the recovery counters roll per-stage (the ladder's
     # sanitize/repair events — never error strings, never census entries).
-    llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0}
+    llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0,
+                      "deadline_aborts": 0}  # #1787 P2-L: deadline-kill counter
     recovery_stats: dict[str, int] = {}
     error_census: dict[str, int] = {}
     # #1695 Task 5: the classify-later choke point — the env toggle read
@@ -3742,13 +3744,25 @@ _COMPLETE_RETRIES = 2          # transient retries beyond the first (3 total)
 _BACKOFF_BASE_S = 2.0
 _BACKOFF_CAP_S = 30.0
 
+# #1787 Task 5 Step 0 (P2-L): lock-guarded deadline-abort counter — the
+# increment happens at the ``_call_once`` deadline-kill raise (the one seam
+# distinct from a network-transport TimeoutError); the guard makes the
+# counter safe even when a SHARED stats dict is written from multiple
+# worker threads (LOAD/INPLACE_ADD/STORE loses updates without it).
+_DEADLINE_ABORTS_LOCK = threading.Lock()
+
 # Bounded generations (D2): stage caps — S1 narrative is small (1500); the
-# S2/S4 embed JSON must clear the 4000-token truncation floor (8000). The
-# single env override TORTOISE_EXTRACTOR_MAX_TOKENS (int, read at call time)
-# raises BOTH stages without a code change — the retry-then-fix protocol's
-# mechanical lever (D6: ``transient_timeout`` spike → raise the cap).
+# S2/S4 embed JSON must clear the 4000-token truncation floor. #1787: the
+# 8000 default was set in M3 (#1524) against the V3-era 8K model ceiling;
+# deepseek-v4 models allow 384K max output, and 15/6720 reval calls hit
+# the old cap (silent tail-entity loss via partial-accept) — raise the
+# default to 16000 (still ≪ 384K ceiling; env override remains the
+# mechanical lever). The single env override TORTOISE_EXTRACTOR_MAX_TOKENS
+# (int, read at call time) raises BOTH stages without a code change — the
+# retry-then-fix protocol's mechanical lever (D6: ``transient_timeout``
+# spike → raise the cap).
 _S1_MAX_TOKENS = 1500
-_S2_S4_MAX_TOKENS = 8000
+_S2_S4_MAX_TOKENS = 16000
 
 
 def _stage_cap(default: int) -> int:
@@ -3941,10 +3955,14 @@ def _bump_classify_census(error_census: dict[str, int], stats: dict) -> None:
 
 def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
     """Roll one stage's per-call stats into the per-session LLM roll-up
-    (D3: stats['llm'] = calls / retries / truncated across S1/S2/S4)."""
+    (D3: stats['llm'] = calls / retries / truncated across S1/S2/S4; #1787
+    Task 5 Step 0 P2-L: ``deadline_aborts`` — deadline-killed generations
+    are billed but never counted by any token accumulator, so the harness
+    bounds the loss via this counter)."""
     llm_stats["calls"] += stage_stats.get("attempts", 0)
     llm_stats["retries"] += stage_stats.get("retries", 0)
     llm_stats["truncated"] += int(bool(stage_stats.get("truncated")))
+    llm_stats["deadline_aborts"] += stage_stats.get("deadline_aborts", 0)
 
 
 def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
@@ -3998,13 +4016,36 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
                 close()
             except Exception:
                 pass
+        # #1787 Task 5 Step 0 (P2-L/P1-E): count the deadline kill — the
+        # abandoned daemon thread keeps running and the provider keeps
+        # billing, and the spend is invisible to any token accumulator. The
+        # counter lives on the per-call stats dict (rolled into the session
+        # llm roll-up by _rollup_llm) and is lock-guarded so even a SHARED
+        # stats dict across worker threads never loses an increment.
+        if stats is not None:
+            with _DEADLINE_ABORTS_LOCK:
+                stats["deadline_aborts"] = stats.get("deadline_aborts", 0) + 1
         raise TimeoutError(f"model call exceeded {deadline_s}s")
     if "exc" in box:
         raise box["exc"]
     return (box.get("resp"), box.get("finish_reason"))
 
 
-def _complete(model, system: str, user: str, *, deadline_s: int = 600,
+def _scaled_deadline(base: int, max_tokens: int | None) -> int:
+    """Scale a base deadline with the generation budget (#1787 Task 2 Step 6).
+
+    A worst-case 16K emission at the conservative 20-25 tok/s floor needs
+    ~640-800s — beyond the historical 600s default (8K ≈ 320s cleared it).
+    The multiplier is **0.05 s/token** (cycle-4 P2-K decision: the old 0.04
+    multiplier put the scaled deadline EXACTLY at the 25 tok/s emission
+    point — zero margin, killing ~20-24 tok/s stragglers the old 8K/600s
+    would have completed; 0.05 → 800s at 16K restores a 25% margin at
+    25 tok/s and covers down to ~20 tok/s). The ``(max_tokens or 0)`` guard
+    is REQUIRED — callers pass ``max_tokens=None`` when no cap applies."""
+    return max(base, int(0.05 * (max_tokens or 0)))
+
+
+def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
               max_tokens: int | None = None, retries: int | None = None,
               backoff_base: float | None = None,
               backoff_cap: float | None = None,
@@ -4020,9 +4061,14 @@ def _complete(model, system: str, user: str, *, deadline_s: int = 600,
     tightens the class, not the code).
 
     ``max_tokens`` bounds the generation (None = caller-applied stage cap;
-    0 = documented uncapped escape hatch). ``stats`` (optional) records
-    attempts / retries / truncated / last_class per call for the per-session
-    LLM roll-up (D3).
+    0 = documented uncapped escape hatch). ``deadline_s`` defaults to None →
+    the scaled default ``_scaled_deadline(600, max_tokens)`` (#1787 Task 2
+    Step 6: a worst-case 16K emission needs 800s, beyond the old fixed 600s;
+    the None sentinel keeps explicit-deadline callers unchanged — an
+    explicit ``deadline_s`` always wins, never ``max()``-ed). ``stats``
+    (optional) records attempts / retries / truncated / last_class per call
+    for the per-session LLM roll-up (D3), plus ``deadline_aborts`` (#1787
+    P2-L) on a deadline kill.
 
     ``retries``/``backoff_*`` default to None → the module constants
     (``_COMPLETE_RETRIES`` / ``_BACKOFF_BASE_S`` / ``_BACKOFF_CAP_S``) are
@@ -4031,13 +4077,16 @@ def _complete(model, system: str, user: str, *, deadline_s: int = 600,
 
     Total worst-case wall clock = attempts × deadline_s (documented — the
     abandoned daemon thread after a deadline keeps running and the provider
-    keeps billing; accepted, bounded per attempt)."""
+    keeps billing; accepted, bounded per attempt and counted via
+    ``deadline_aborts``)."""
     if retries is None:
         retries = _COMPLETE_RETRIES
     if backoff_base is None:
         backoff_base = _BACKOFF_BASE_S
     if backoff_cap is None:
         backoff_cap = _BACKOFF_CAP_S
+    if deadline_s is None:
+        deadline_s = _scaled_deadline(600, max_tokens)
     for attempt in range(1, retries + 2):
         try:
             resp, finish_reason = _call_once(model, system, user,

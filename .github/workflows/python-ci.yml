@@ -438,7 +438,7 @@ jobs:
         # pytest step's 55m watchdog budget — the collect-only wall can
         # never ride the run). The manifest keys off the SAME space-joined
         # $FILES the run step builds (identical construction below) x the
-        # same `-m 'not track_b'` filter (plan-review P1-7: never a
+        # same `-m 'not track_b and not live'` filter (plan-review P1-7: never a
         # re-derived matrix list), so the expected set is exactly what
         # pytest will run; the skip-guard step reconciles it against the
         # junitxml (Task 3) — a vanished nodeid (deselected, file dropped
@@ -458,7 +458,7 @@ jobs:
           fi
           # Reuse contract: the skip-guard step's empty-file check reads this.
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Canary producer (epic #1647 Task 9 Step 6, half b, post-merge)
         # The D-3=A instrumented streak's producer half: the fast-matrix job
         # runs PER-LEG, so exactly ONE leg must write the producer marker or
@@ -532,7 +532,7 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -883,7 +883,7 @@ jobs:
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
         # pytest step (off the 75m watchdog), using each leg's committed
-        # ${{ matrix.files }} x --collect-only -m 'not track_b' (the same
+        # ${{ matrix.files }} x --collect-only -m 'not track_b and not live' (the same
         # construction the run step builds) -> /tmp/expected-nodeids.txt.
         run: |
           FILES=""
@@ -893,7 +893,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Run slow test suite — leg ${{ matrix.half }} (known-slow files, #647)
         # Same guaranteed-summary treatment as the fast job (#798).
         # Per-test --timeout=300: these files have tests/setups that
@@ -935,7 +935,7 @@ jobs:
           # -r flags, and a trailing -rfE would suppress the skip summary the
           # guard depends on; pinned by
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
-          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1342,7 +1342,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
         # The 17-file embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,
@@ -1366,7 +1366,7 @@ jobs:
               echo "HEARTBEAT: carve-out pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true

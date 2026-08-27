@@ -2890,3 +2890,217 @@ def test_parse_json_handles_markdown_fences():
         raise AssertionError("expected ValueError")
     except ValueError:
         pass
+
+
+# ── #1787 Task 2: S2/S4 cap raise 8000→16000 — dense-list completeness ──────
+
+def test_s2_s4_cap_raised_to_16k_completes_dense_list(monkeypatch):
+    """#1787 — a dense-session embed list that overflows the old 8000 cap
+    must complete in full at the 16000 default: no partial_parse, no tail
+    loss, and every emitted point lands in the payload. The mock is
+    cap-aware: <=8000 → truncated JSON (finish=length), >8000 → full list."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    dense_points = [
+        {"content": f"durable claim number {i} with a verbatim quote "
+                    f"\"{'word ' * 40}\" and search_keys [\"k{i}\", \"k{i}b\"]",
+         "pointKind": "statement", "about_entities": [f"entity-{i}"],
+         "quote": f"quote {i}: " + ("lorem ipsum dolor " * 25),
+         "search_keys": [f"k{i}", f"k{i}b"], "tier": "B",
+         "slots": {"subject": [{"name": f"entity-{i}", "kind": "core:thing",
+                                "confidence": 0.9}]}}
+        for i in range(45)
+    ]
+    full = json.dumps({"entities": [{"name": f"entity-{i}", "kind": "core:thing",
+                                     "lifecycle": "created", "supersedes": None}
+                                    for i in range(45)],
+                       "points": dense_points,
+                       "events": [], "operators": [], "chain_notes": [],
+                       "link_before_create": []})
+    # calibration asserts — the fixture must BOTH overflow 8K under real
+    # tokenization (or the test proves plumbing on a sub-8K fixture) AND FIT
+    # the 16000 default. 45 points = 47,577 bytes → ≥ 11.9K tokens at the
+    # pessimistic 4 chars/token bound (clears 8192) and ≤ 13.6K at 3.5
+    # chars/token (fits 16K) — inside [8K, 16K], the observed reval band:
+    assert len(full.encode("utf-8")) // 4 >= 8192, \
+        "fixture too small: the 45-point dense list must exceed 8K tokens " \
+        "(raise point count / quote length until the 4 chars/token bound clears)"
+    assert len(full.encode("utf-8")) // 3.5 <= 14000, \
+        "fixture too dense: the 45-point list must FIT the 16000 default " \
+        "(~3.5 chars/token packing; shrink point count / quote length until " \
+        "the upper bound clears — the observed reval lists are 8-16K, which " \
+        "is what 16K claims to cover)"
+    # the truncated form: cut GENUINELY mid-points-list, inside the points
+    # array at an item boundary after point k — leaving the array + outer
+    # object UNTERMINATED (rung-3 repair's `+ "}"` closers then cannot produce
+    # valid JSON, so rung 4 `_longest_valid_prefix` must recover the head).
+    k = 40
+    points_json = json.dumps(dense_points)
+    depth, closed = 0, 0
+    boundary = len(points_json)
+    for i, ch in enumerate(points_json):  # walk to the k-th point's close
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                closed += 1
+                if closed == k:
+                    boundary = i + 1
+                    break
+    truncated = full[:full.index('"points":') + len('"points":')] \
+        + points_json[:boundary]
+
+    class CapAwareModel:
+        def __init__(self):
+            self.captured = []
+            self.last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            self.captured.append(max_tokens)
+            self.last_finish_reason = "length" if max_tokens and max_tokens <= 8000 \
+                else "stop"
+            return truncated if max_tokens and max_tokens <= 8000 else full
+
+    m = CapAwareModel()
+    stats = {"llm": {}}
+    out = v2.run_s2(m, story="a very dense session story " * 200, stats=stats)
+    assert v2._S2_S4_MAX_TOKENS > 8000              # the raise happened
+    assert m.captured[-1] == v2._S2_S4_MAX_TOKENS   # the default cap is used
+    assert len(out["points"]) == 45                 # full list, no tail loss
+    # clean at 16K: run_s2 returns the RAW parsed embed dict — there is NO
+    # `error_census` key on it. The partial_parse census bump lives in the
+    # S2/S4 stage callers, keyed on stats["partial"] — assert the same
+    # signal the callers check:
+    assert stats.get("partial") is not True          # clean at 16K
+    # backstop proof: force the OLD cap through _complete_parsed directly —
+    # the ladder rung-4 partial-accept must recover the truncated head.
+    m2 = CapAwareModel()
+    stats2 = {"llm": {}}
+    out2 = v2._complete_parsed(m2, "sys", "usr", max_tokens=8000,
+                               stats=stats2)
+    assert len(out2["points"]) == k < 45   # exactly the first k points
+    assert stats2.get("partial") is True   # the partial-accept fired
+
+
+def test_s2_s4_census_clean_at_16k_through_session(monkeypatch):
+    """#1787 P2-12 — MANDATORY mirror of the extract_session_v2-level census
+    test at the NEW cap: a dense session through extract_session_v2 with a
+    cap-aware mock at the 16000 default must produce NO partial_parse bump
+    (error_census["partial_parse"] absent/0) — asserted where the bump
+    actually lives (the S2/S4 stage callers)."""
+    from tests.test_extractor_reliability import _conv
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+
+    class CapAwareSessionModel:
+        def __init__(self):
+            self.calls = 0
+            self.last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            self.last_finish_reason = ("length"
+                                       if max_tokens and max_tokens <= 8000
+                                       else "stop")
+            if "GAP REVIEWER" in system:
+                # S4: dense re-emit — full at 16000, truncated at <=8000
+                pts = [{"content": f"gap point {i} " + "word " * 40,
+                        "pointKind": "statement"} for i in range(40)]
+                if max_tokens and max_tokens <= 8000:
+                    # cut at the first point's closing brace (item boundary)
+                    # so rung 4 _longest_valid_prefix partial-accepts (a cut
+                    # with zero complete items falls through to _ParseError).
+                    pts_json = json.dumps(pts)
+                    boundary = pts_json.index('}') + 1
+                    return ('{"entities": [], "events": [], "operators": [], '
+                            '"points": ' + pts_json[:boundary])
+                return json.dumps({"entities": [], "events": [],
+                                   "operators": [], "points": pts,
+                                   "link_before_create": []})
+            if "STORY SUMMARIZER" in system:
+                return "A narrative."
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "s2 base", '
+                    '"pointKind": "statement"}]}')
+
+    out = v2.extract_session_v2(CapAwareSessionModel(), _conv())
+    assert out["error_census"].get("partial_parse", 0) == 0  # clean at 16K
+    # the old-cap path through the SAME callers still bumps the census —
+    # `_stage_cap` is read at call time by the S2/S4 callers, so
+    # monkeypatching it to 8000 exercises the genuine truncation →
+    # partial_parse path:
+    monkeypatch.setattr(v2, "_stage_cap", lambda default: 8000)
+    out_old = v2.extract_session_v2(CapAwareSessionModel(), _conv())
+    assert out_old["error_census"]["partial_parse"] >= 1  # backstop intact
+
+
+def test_s4_dense_emit_completes_at_16k(monkeypatch):
+    """#1787 P1-C (cycle 5) — the S4 re-emit surface (output ≈ 2× S2 — the
+    DOMINANT truncation source) must be exercised by a genuinely dense S4
+    output at the NEW cap: full list, no partial_parse — then force the OLD
+    cap on the SAME fixture to prove the S4 partial-accept backstop still
+    fires."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    dense_pts = [
+        {"content": f"s4 re-emit point {i} " + ("lorem ipsum dolor " * 30),
+         "pointKind": "statement", "about_entities": [f"entity-{i}"],
+         "quote": f"quote {i}: " + ("word " * 40),
+         "search_keys": [f"k{i}"], "tier": "B",
+         "slots": {"subject": [{"name": f"entity-{i}", "kind": "core:thing",
+                                "confidence": 0.9}]}}
+        for i in range(45)
+    ]
+    full = json.dumps({"entities": [{"name": f"entity-{i}", "kind": "core:thing",
+                                     "lifecycle": "created", "supersedes": None}
+                                    for i in range(45)],
+                       "points": dense_pts, "events": [], "operators": [],
+                       "chain_notes": [], "link_before_create": []})
+    # calibration asserts (same discipline as the S2 fixture): 45 points =
+    # 48,327 bytes → ≥ 12.1K tokens at 4 chars/token (clears 8192) and
+    # ≤ 13.8K at 3.5 (fits 16K):
+    assert len(full.encode("utf-8")) // 4 >= 8192, \
+        "S4 fixture too small: the 45-point dense re-emit list must exceed " \
+        "8K tokens (the S4 re-emit tax surface; raise point count / quote " \
+        "length until the 4 chars/token bound clears)"
+    assert len(full.encode("utf-8")) // 3.5 <= 14000, \
+        "S4 fixture too dense: must FIT the 16000 default (shrink until the " \
+        "upper bound clears)"
+
+    class S4CapAwareModel:
+        def __init__(self):
+            self.last_finish_reason = "stop"
+        def complete(self, *, system, user, max_tokens=None):
+            self.last_finish_reason = ("length" if max_tokens and max_tokens <= 8000
+                                       else "stop")
+            if max_tokens and max_tokens <= 8000:
+                # old-cap failure mode: cut mid-points-array (rung-4
+                # partial-accept recovers the head) — depth-walk to the
+                # 20th point's closing brace, leaving the array unterminated
+                # so rung-4 recovers the head with partial=True.
+                pts_json = json.dumps(dense_pts)
+                depth, closed, boundary = 0, 0, len(pts_json)
+                for i, ch in enumerate(pts_json):
+                    if ch == "{":
+                        depth += 1
+                    elif ch == "}":
+                        depth -= 1
+                        if depth == 0:
+                            closed += 1
+                            if closed == 20:
+                                boundary = i + 1
+                                break
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": ' + pts_json[:boundary])
+            return full
+
+    m = S4CapAwareModel()
+    stats = {"llm": {}}
+    # _complete_parsed is the seam the S4 caller uses — drive the dense S4
+    # emit at the 16000 default:
+    out = v2._complete_parsed(m, "sys", "usr", max_tokens=16000, stats=stats)
+    assert len(out["points"]) == 45           # full S4 list, no tail loss
+    assert stats.get("partial") is not True   # clean at 16K — no partial_parse
+    # Backstop proof on the SAME fixture: force the old 8000 cap → the S4
+    # partial-accept must still fire (truncated head recovered, partial=True).
+    m2 = S4CapAwareModel()
+    stats2 = {"llm": {}}
+    out2 = v2._complete_parsed(m2, "sys", "usr", max_tokens=8000, stats=stats2)
+    assert len(out2["points"]) < 45
+    assert stats2.get("partial") is True      # S4 backstop intact at old cap

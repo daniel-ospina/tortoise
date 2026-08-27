@@ -406,6 +406,12 @@ class KindClassifier:
                 usage["retries"] += (batch_stats.get("llm") or {}).get("retries", 0)
                 usage["truncated"] = usage["truncated"] or bool(
                     batch_stats.get("truncated"))
+                # #1787: forward the deadline-kill counter written at the
+                # top level of batch_stats by _complete_parsed — the session
+                # rollup reads .get("deadline_aborts", 0), so dropping it
+                # here would silently undercount deadline-killed spend.
+                usage["deadline_aborts"] = usage.get("deadline_aborts", 0) + \
+                    batch_stats.get("deadline_aborts", 0)
             if not isinstance(parsed, dict):
                 warnings.append("adjudication returned a non-object — kNN top-1 fallback")
                 stats["classify_errors"] += 1

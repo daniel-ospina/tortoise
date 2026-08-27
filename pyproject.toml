@@ -65,6 +65,7 @@ dev = [
     "pytest-playwright>=0.5",
     "ruff==0.16.4",  # #1685: pin ruff (CI lint-command + local `uv run ruff`
     # align — the unpinned agent-infra job install was the drift vector).
+    "tiktoken>=0.14.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -165,6 +166,7 @@ markers = [
     "slow: network/venv acceptance tests (wheel build + verify_client.sh gate, PR #1313) — excluded from the default fast suite",
     "v4_conditional: post-baseline follow-up run assertions (E6 #1538, ⛔ G3) — window-indexed restore + recall measurement, skipped in V3",
     "embedded_only: epic #1647 (D-2) — embedded-only behavior (EmbeddedStoreBusyError); skips visibly when TORTOISE_DB_URI is set",
+    "live: live-API probe tests (Task 1 #1787) — excluded from the deterministic suite with -m 'not live'",
 ]
 
 [build-system]

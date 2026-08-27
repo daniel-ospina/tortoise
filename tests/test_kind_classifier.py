@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -310,6 +311,48 @@ class TestAdjudication:
         assert out["stats"]["classify_errors"] == 1
         assert out["assignments"]["i0"]["mode"] == "knn"
         usage = out["stats"]["llm"]
+        assert usage["attempts"] == 1, "failed calls are still LLM spend"
+        assert usage["retries"] == 0
+
+    def test_deadline_kill_forwards_deadline_aborts(self, monkeypatch):
+        """#1787 (PR #1811): a deadline-killed adjudication call forwards
+        the extractor's deadline_aborts counter into the session llm rollup.
+        The model SLEEPS past the (scaled-down) per-attempt deadline, so the
+        _call_once deadline-kill seam is the ONLY reason the call fails — it
+        increments batch_stats["deadline_aborts"], the finally block forwards
+        it to usage, and classify_items lands usage in out["stats"]["llm"].
+        Fail-open kNN top-1 fallback + classify_error census still fire
+        (same shape as the BoomModel test).
+
+        Sleep (1.0s) is 20x the pinned 0.05s deadline — the kill provably
+        fires, so the assertion cannot be vacuous."""
+        import tortoise.extractor_v2 as v2
+
+        class SlowModel(MockModel):
+            def complete(self, *, system, user, max_tokens=None):
+                # outlast the 0.05s join-timeout — the seam only fires when
+                # the call is still alive at t.join(timeout=deadline_s).
+                time.sleep(1.0)
+                return json.dumps({"i0": "core:plan"})
+
+        # _complete reads these at call time — pin to zero/small so the
+        # deadline-killed attempt raises after ONE call, no backoff (same
+        # hook as the BoomModel test).
+        monkeypatch.setattr(v2, "_COMPLETE_RETRIES", 0)
+        monkeypatch.setattr(v2, "_BACKOFF_BASE_S", 0.01)
+        monkeypatch.setattr(v2, "_BACKOFF_CAP_S", 0.01)
+        # the classifier's _complete_parsed passes no explicit deadline →
+        # _complete computes _scaled_deadline(600, max_tokens); pin it to
+        # ~0.05s so the 1.0s sleep is a guaranteed kill, not a race.
+        monkeypatch.setattr(v2, "_scaled_deadline", lambda base, mt: 0.05)
+        clf = self._clf(SlowModel([]))
+        out = clf.classify_items(_items(("entity", "the plan workflow")))
+        assert out["stats"]["classify_errors"] == 1
+        assert out["assignments"]["i0"]["mode"] == "knn", \
+            "deadline kill is fail-open — kNN top-1 fallback, not a batch abort"
+        usage = out["stats"]["llm"]
+        assert usage["deadline_aborts"] >= 1, \
+            "the deadline-kill counter must reach the llm rollup (#1787 P2-L)"
         assert usage["attempts"] == 1, "failed calls are still LLM spend"
         assert usage["retries"] == 0
 
