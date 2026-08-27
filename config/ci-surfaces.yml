@@ -320,7 +320,9 @@ surfaces:
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
+  - test_github_index_lifecycle.py
   - test_github_issue.py
+  - test_github_map.py
   - test_harness_mcp_config.py
   - test_index_github_cli.py
   - test_invites.py

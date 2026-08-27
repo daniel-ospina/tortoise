@@ -2513,9 +2513,9 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
-    import secrets as _secrets  # noqa: I001
     import asyncio as _asyncio
-    from tortoise.hosted_api import _INDEX_JOBS, _github_token_enc, _run_indexing
+
+    from tortoise.hosted_api import _github_token_enc, _run_indexing, _start_index_job
     try:
         encrypted = _github_token_enc(team_id)
     except Exception:
@@ -2526,11 +2526,8 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         return {"error": f"{plane} unavailable"}
     if not encrypted:
         return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
-    job_id = _secrets.token_hex(8)
-    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
-                           "points_created": 0, "error": None,
-                           "team_id": team_id,
-                           "created_at": _asyncio.get_event_loop().time()}
+    # #1725: single-flight — an in-flight started job for the team is reused.
+    job_id = _start_index_job(team_id)
     try:
         _asyncio.get_event_loop().create_task(
             _run_indexing(job_id, team_id, org, repo))
