@@ -27,9 +27,13 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
     reg = PackRegistry(packs_dir)
     reg.load_all()
     ns_files = {}
-    # sorted glob — the namespace order must be deterministic across
-    # filesystems (the CI runner is Linux; macOS readdir order differs).
-    for mf in sorted(packs_dir.glob("*/manifest.yaml")):
+    # NOTE: glob order intentionally NOT sorted — the flag-off S2 prompt and
+    # verbose master render must stay byte-identical to main on the same
+    # platform, and the pack-manifest glob order (readdir-dependent) is the
+    # pre-existing behavior. Determinism across filesystems is provided only
+    # where the pipeline needs it (compile_kind_index_spec sorts its own
+    # namespace key set via _KIND_SPEC_CACHE).
+    for mf in packs_dir.glob("*/manifest.yaml"):
         d = yaml.safe_load(mf.read_text()) or {}
         if d.get("namespace"):
             ns_files[d["namespace"]] = mf

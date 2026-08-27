@@ -1916,6 +1916,121 @@ def _stub_classifier(model=None, encoder=None, llm_tail=False):
                           model=model, llm_tail=llm_tail)
 
 
+def _hand_built_master() -> dict:
+    """The core-only golden's source of truth: a HAND-BUILT master list with
+    FIXED dict order — zero dependency on installed packs or on the pack-
+    manifest glob order (build_master_list()'s memory_granularity order
+    follows the filesystem readdir order of packs/*/manifest.yaml, which
+    differs across platforms: macOS HFS/APFS vs Linux ext4). The byte-pinned
+    golden fixture is generated from THIS dict and nothing else, so the
+    golden test is platform-independent. pack_kinds and chains are retained
+    for build_master_list() shape parity — the core-only render omits them
+    (asserted in test_core_only_render_byte_pinned_golden)."""
+    return {
+        "objects": {
+            "core:Project": "A project",
+            "core:WorkItem": "A unit of work",
+            "core:document": "A document artifact",
+            "core:tag": "A tag",
+            "core:user": "A user",
+            "core:skill": "A skill",
+            "core:tool": "A tool, CLI, or utility",
+            "core:agent": "An agent",
+            "core:workflow": "A reusable procedural sequence",
+            "core:agreement": "An agreement",
+            "core:standard": "A standard, spec, or canonical reference",
+            "core:other": "No fitting kind - the explicit uncertain bucket",
+            "core:strategy": "A strategy state (commitment-state family)",
+            "core:plan": "A plan state (commitment-state family)",
+            "core:goal": "A goal state (commitment-state family)",
+            "core:target": "A target state (commitment-state family)",
+        },
+        "subjects": {
+            "core:organization": "An organization — a company, agency, or "
+                                 "other collective entity",
+            "core:team": "A team — a group of people working together toward "
+                         "shared goals",
+            "core:role": "A role — a defined function or position held by a "
+                         "person or a team",
+            "core:legalPerson": "A legal person — an entity with legal "
+                                "standing (company, foundation, org)",
+            "core:naturalPerson": "A natural person — an individual human "
+                                  "being",
+        },
+        "points": {
+            "statement": "A durable belief, claim, or proposition — the "
+                          "extraction write kind",
+        },
+        "events": {
+            "core:decision": "A commitment event — a choice made with "
+                              "reasons that resolves confidence",
+            "core:occurrence": "An occurrence — something that happened at a "
+                                "point in time",
+            "core:deployment": "A deployment event — a product or release "
+                               "shipped to an environment",
+            "core:review": "A review event — a review of work, code, plan, or "
+                           "content",
+            "core:meeting": "A meeting event — a gathering that changed or "
+                            "confirmed state",
+            "core:experiment": "An experiment event — a test or calibration "
+                               "run with measured results",
+            "core:friction": "A friction event — a discovered obstacle, pain "
+                             "point, or workflow failure",
+        },
+        "pack_kinds": {
+            # Representative only — the core-only render drops the whole
+            # section (pack vocabulary is typed by the classify-later stage).
+            "dev:issue": "A unit of tracked work",
+        },
+        "chains": {
+            "epicToCode": {"path": ["epic", "issue", "code"],
+                            "note": "Work decomposition"},
+        },
+        "user_personal_state": {
+            "personal_best": "A personal record/achievement VALUE — times, "
+                             "distances, scores, quantities ('my personal best "
+                             "5K time is 27:12'). The VALUE is the fact; "
+                             "retain it verbatim.",
+            "schedule": "A recurring commitment VALUE — regular times, days, "
+                         "frequencies ('gym at 6pm', 'standup at 9:30'). The "
+                         "TIME is the fact; retain it verbatim.",
+            "preference": "A stated preference/choice VALUE — likes, "
+                           "dislikes, defaults, chosen options ('prefers dark "
+                           "mode', 'coffee not tea'). The CHOICE is the fact; "
+                           "retain it verbatim.",
+        },
+        # FIXED order (dev, marketing, pm, product-strategy) — the golden
+        # pins THIS order; it is independent of the packs' readdir order.
+        "memory_granularity": {
+            "dev": "Durable: root-cause analysis, the chosen fix approach vs "
+                   "rejected alternatives, durable constraints (e.g. preserve "
+                   "production semantics), and environment beliefs that affect "
+                   "future work (e.g. subagents stall under load). Ephemeral: "
+                   "issue/PR numbers, CI status, test counts, commit hashes, "
+                   "tool workarounds.",
+            "marketing": "Durable: campaign strategy — which "
+                          "campaigns/channels/audiences are being pursued and "
+                          "why, the positioning decisions, the reasoning, the "
+                          "actual content pieces (they ARE the product), and "
+                          "the metric snapshots showing whether a strategy is "
+                          "working. Ephemeral: publishing mechanics, "
+                          "scheduling logistics.",
+            "pm": "Durable: plan/goal/target state — what was decided, what's "
+                   "committed, the reasoning, and milestone outcomes. "
+                   "Ephemeral: card/board status, sprint burndown, assignment "
+                   "logistics, issue triage.",
+            "product-strategy": "Durable: the productDelivery chain itself — "
+                                 "which JTBDs/use-cases/features are being "
+                                 "pursued, the chosen vs rejected options at "
+                                 "each step, and the reasoning (what supports, "
+                                 "undermines, tempers each choice). A customer "
+                                 "/ competitor / market fact is durable if it "
+                                 "changes a decision. Ephemeral: ticket status, "
+                                 "sprint mechanics, meeting logistics.",
+        },
+    }
+
+
 class TestClassifyStage:
     """The flag-on pipeline: stage order, kind-preservation re-stamp, slot
     re-key, sentinel terminal, census wiring; and the flag-off
@@ -2116,15 +2231,22 @@ class TestClassifyStage:
 
     def test_core_only_render_byte_pinned_golden(self):
         """Task 5's byte-pinned golden fixture: the core-only master render
-        equals the committed golden byte-for-byte (regenerate consciously
-        when the packs or the hint blocks change)."""
-        m = v2.build_master_list()
+        equals the committed golden byte-for-byte. The golden is rendered
+        from a HAND-BUILT master (fixed dict order — see _hand_built_master),
+        never from the installed packs, so the test is platform-independent
+        (build_master_list()'s memory-granularity order follows the pack-
+        manifest glob order, which differs between macOS and Linux). Also
+        pins determinism (render twice → equal) and the absence of the
+        PACK KINDS / CHAINS sections (the classify-later split)."""
+        m = _hand_built_master()
         r = v2._render_master_core_only(m)
+        assert r == v2._render_master_core_only(m)  # deterministic (no shuffle)
+        assert "PACK KINDS" not in r and "CHAINS" not in r
         golden = (Path(__file__).resolve().parent / "fixtures"
                   / "core_only_master.golden.txt")
         assert golden.read_text(encoding="utf-8") == r, \
             "core-only master render drifted from the golden fixture " \
-            "(regenerate tests/fixtures/core_only_master.golden.txt)"
+            "(regenerate via _hand_built_master: see the golden test docstring)"
 
     def test_core_only_ups_block_keeps_not_kinds_guard(self):
         """The core-only USER-PERSONAL-STATE block carries the E2 (#1534)
