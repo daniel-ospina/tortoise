@@ -1,8 +1,8 @@
 // PGlite harness — validate Supabase control-plane migrations + SQL assertion
 // suites WITHOUT Docker (issue #770). Supabase-local bootstrap (roles,
 // default privileges, auth schema with auth.uid()/auth.jwt() GUC shims),
-// applies migrations 0001-20260825214233 in order, then runs BOTH assertion suites
-// (0006–0009 from #769 and 0010 from #770) with ON_ERROR_STOP semantics.
+// applies migrations 0001-20260827000001 in order, then runs ALL assertion suites
+// (0006–0009 from #769, 0010 from #770, 2026 token suites, 0017 blog CMS) with ON_ERROR_STOP semantics.
 //
 // Run:   npm install   (once, in this directory)
 //        npm run validate
@@ -89,7 +89,7 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260825000001_api_key_names.sql',
                '20260825214233_provision_team_keyless.sql',
                '20260826000001_revoke_signup_token.sql',
-               '0017_blog_cms.sql'];
+               '20260827000001_blog_cms.sql'];  // appended last: is_admin() depends on 20260813000001 teams.deleted_at — lexical order
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {
@@ -112,7 +112,7 @@ const suites = [
   '20260813000004_claim_membership.sql',
   '20260814000001_agent_signup_tokens.sql',
   '20260826000001_revoke_signup_token.sql',
-  '0017_blog_cms.sql',
+  '20260827000001_blog_cms.sql',
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
