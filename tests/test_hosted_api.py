@@ -906,6 +906,20 @@ class TestKeysRename:
         assert keys[0]["expires_at"] is None            # durable key — no expiry
         app.dependency_overrides.clear()
 
+    def test_list_keys_create_api_key_registry_writes_props(self, client, monkeypatch):
+        """#1753: the registry-lane create_api_key mint writes created_via/
+        expires_at props too (parity with the agent_signup + Supabase lanes) —
+        without them the selfhost dashboard lists durable keys as
+        'ephemeral · session' and hides rename. Mint via POST /v1/team/keys
+        (TEST_TEAM), then the list round-trips the props."""
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        r = client.post("/v1/team/keys", json={"name": "ci"})
+        assert r.status_code == 200, r.text
+        kid = r.json()["id"]
+        listed = _listed_key(client, kid)
+        assert listed["created_via"] == "provisioned"  # #1753 registry parity
+        assert listed["expires_at"] is None            # durable key — no expiry
+
 
 class TestListApiKeysSupabase:
     """#1708 D7: Supabase lane — team_api_keys reads created_via/expires_at
@@ -1654,6 +1668,38 @@ def internal_client():
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
 
 
+def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
+    """#1686: /v1/register's team_* mint is journaled (registry branch —
+    the direct select_graph mint, not team_create) so the session sweep
+    drops it. Mirrors the billing_client embedded pattern: delenv URI +
+    TORTOISE_DB_PATH → the register handler constructs embedded; a temp
+    journal env makes the membership assertion exact. No docker needed."""
+    import os as _os
+
+    from fastapi.testclient import TestClient
+
+    from tests._embedded import _read_journal_file
+    from tortoise.hosted_api import app
+
+    db = _os.path.join(tmp_path, "register_api.db")
+    journal = tmp_path / "register.graphs.jsonl"
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+    monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+    monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+    with TestClient(app) as tc:
+        r = tc.post("/v1/register", json={
+            "email": "journal-owner@example.com",
+            "password": "supersecret1",
+        })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    gn = body["graph_name"]
+    assert gn.startswith("team_")
+    assert gn in _read_journal_file(str(journal)), \
+        "register_user mint must be journaled (#1686)"
+
+
 class TestInternalProvision:
     """POST /internal/provision — tenant provisioning."""
 
@@ -1672,6 +1718,28 @@ class TestInternalProvision:
         assert body["status"] == "provisioned"
         assert body["team_id"] == "provisioned-team-1"
         assert "graph_name" in body
+
+
+    def test_provision_journals_minted_graph(self, internal_client, monkeypatch, tmp_path):
+        """#1686: /internal/provision's team_* mint (tenant_provision) is
+        journaled via the product-side seam so the session sweep drops it."""
+        from tests._embedded import _read_journal_file
+
+        journal = tmp_path / "provision.graphs.jsonl"
+        monkeypatch.setenv("TORTOISE_TEST_JOURNAL_FILE", str(journal))
+        payload = {
+            "team_id": "provisioned-team-9",
+            "team_name": "Provisioned Team 9",
+            "api_key_hash": "abc123hash",
+            "created_by": "user-009",
+        }
+        r = internal_client.post("/internal/provision", json=payload,
+                                 headers=self.INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        gn = r.json()["graph_name"]
+        assert gn.startswith("team_")
+        assert gn in _read_journal_file(str(journal)), \
+            "tenant_provision mint must be journaled (#1686)"
 
     def test_provision_missing_fields_returns_400(self, internal_client):
         r = internal_client.post("/internal/provision", json={}, headers=self.INTERNAL_HEADERS)
@@ -2953,7 +3021,7 @@ def test_make_sdk_reuses_healthy_anchor(monkeypatch):
         with tempfile.TemporaryDirectory() as td:
             db = os.path.join(td, "test.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db)
-            sdk1 = ha._make_sdk(namespace=ns)
+            sdk1 = ha._make_sdk(namespace=ns)  # noqa: F841
             anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
             assert anchor1 is not None, "anchor not stored"
             assert anchor1._proj is not None, "anchor not connected"
@@ -2988,7 +3056,7 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
         with tempfile.TemporaryDirectory() as td1:
             db1 = os.path.join(td1, "a.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db1)
-            sdk1 = ha._make_sdk(namespace=ns)
+            sdk1 = ha._make_sdk(namespace=ns)  # noqa: F841
             anchor1 = ha._FALLBACK_KEEPALIVE.get(ns)
             assert anchor1 is not None, "anchor not stored"
             assert anchor1._proj is not None

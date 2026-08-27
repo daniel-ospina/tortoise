@@ -56,8 +56,12 @@ and continue offline (CI smoke stays runnable without the extra).
 | `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
-| `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — points first, chunks backfill (UX decision 3) | `8000` |
-| `TORTOISE_LME_MAX_CHUNKS_PER_SESSION` | per-session raw-chunk cap in the retrieval pool (E2E-1 session dedup) | `2` |
+| `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — rank-interleaved (C1 #1745: points + chunks in true RRF order, the R1 points-first tiering deliberately reversed) bounded by the item cap | `8000` |
+| `TORTOISE_LME_MAX_CHUNKS_PER_SESSION` | per-session raw-chunk cap in the retrieval pool (E2E-1 session dedup; C5 #1745 raised 2→3 so the evidence chunk is not capped out) | `3` |
+| `TORTOISE_LME_CONTEXT_ITEMS` | reader context ITEM cap (C1 #1745 — the token budget rarely binds at ~114 tok/item, so the item cap bounds reader flood; TR questions keep the pinned `--tr-top-k` item cap) | `40` |
+| `TORTOISE_LME_EVIDENCE_BOOST` | C2 evidence-mark rank boost gate (OFF by default in code — ON only for the re-validation run; only `1/true/yes/on` enables; explicit `--evidence-boost`/`--no-evidence-boost` beat it) | unset = OFF |
+| `TORTOISE_LME_EVIDENCE_BOOST_VERBATIM` | verbatim/raw-chunk mark rank-offset multiplier (C2 #1745) | `1.5` |
+| `TORTOISE_LME_EVIDENCE_BOOST_SOURCE` | source-session-only mark rank-offset multiplier (C2 #1745) | `1.15` |
 | `TORTOISE_LME_RERANK` | R6 rerank gate (fail-safe OFF — only `1/true/yes/on` enables; explicit `--rerank`/`--no-rerank` beat it) | unset = OFF |
 | `TORTOISE_LME_RERANK_MODEL` | cross-encoder model name (R6 #1545) | `cross-encoder/ms-marco-MiniLM-L6-v2` |
 | `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; applied pool = `max(pool, max(k))`; only read while rerank is on) | `40` |
@@ -71,13 +75,33 @@ CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--max-retries N` (per-question LLM-call retries with exponential backoff;
 questions that still fail are recorded in `report['failures']` and the run
 continues — one transient error never aborts the 500-Q run),
-`--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`
-(R1 #1540 knobs — env-first, CLI overrides, all validated ≥ 1),
-`--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527:
-override the `integrity.valid` gate — max allowed `invalid_rate`; the
-override is recorded with its justification and a *violated* override still
-yields `valid=false`; default 0.0 = any failed/ingest-error question marks
-the run invalid).
+`--chunk-turns N`, `--context-cap N`, `--max-chunks-per-session N`,
+`--context-items N` (C1 #1745), `--evidence-boost`/`--no-evidence-boost`
+`--evidence-boost-verbatim F` `--evidence-boost-source F` (C2 #1745)
+(R1/R1C knobs — env-first, CLI overrides, all validated ≥ 1; the C2 boost
+is OFF by default in code, ON only for the re-validation run),
+`--integrity-threshold F` / `--integrity-justification <text>` (M7 #1527 +
+#1747 census-class-aware: override the `integrity.valid` RATE criterion —
+max allowed `invalid_rate` over questions with recoverable-class signals
+(parse_error/truncated/truncated_parse_error/partial_parse/transient_*/s1_chunk_summary
+census classes, reader/judge/ingest:retries_exhausted eval failures); hard-failure
+questions (fatal_*/ingest/unknown census classes, non-census error strings
+with an empty census, permanent eval failures, malformed inputs — present
+non-bool `valid` / non-iterable or non-str `error_classes`) VETO at any
+threshold — no override admits them; the override is recorded with its
+justification, and a *violated* override still yields `valid=false`. NOTE:
+the CLI default stays 0.0 (strict), but the run-protocol step-5 500-Q
+baseline injects the justified default `JUSTIFIED_BASELINE_THRESHOLD`
+(0.02) — see `run_protocol.py`; an operator override suppresses the
+injected baseline justification (the recorded reason never claims the 0.02
+baseline for a non-baseline threshold). NOTE (#1747 round-17): the
+step-5 injection is SCOPED to step 5 — the step-8 (1k benchmark) and
+step-9 (R6/E6 follow-up, a full 500-Q run) build commands carry the
+strict 0.0 CLI default, so the owner must pass `--integrity-threshold F`
+with an `--integrity-justification` for those runs (the #1747 failure
+mode — `valid=true` unreachable at scale because any recoverable-class
+blip pushes `invalid_rate > 0` — would otherwise silently recur on the
+follow-up's ~24k session extractions; the step-5 pattern applies).
 
 **R6 rerank (issue #1545, epic #1509) — cross-encoder + MMR, OFF by default:**
 `--rerank` / `--no-rerank` (tri-state; `--no-rerank` beats a leaked env),
@@ -104,6 +128,73 @@ fingerprint (git_sha + python + dataset hash + config + prompt hashes) and a
 stale resume — different config, or a pre-fingerprint v1 checkpoint — is
 refused with the differing fields named; concurrent run processes sharing
 one checkpoint merge under an exclusive flock (no lost updates).
+
+## Parse-error robustness (#1746) — census, readout, probe, JSON-mode parity
+
+**Error census vocabulary (D1, extractor side — every class appends an
+`errors` string AND bumps `error_census[class]`, 1:1 enforced):**
+
+| Class | Meaning |
+|---|---|
+| `parse_error` | S2/S4 final parse failure, first parse-failing attempt `finish_reason != "length"` (sloppiness/contamination) |
+| `truncated_parse_error` | S2/S4 final parse failure, first parse-failing attempt `finish_reason == "length"` (truncation) |
+| `partial_parse` | schema-validated partial-accept applied (truncated tail dropped — the embed list is INCOMPLETE; `valid=false`) |
+| `empty_embed_list` | no embed list produced (S2/S4 empty) |
+| `s5_failed` | S5 (embed execution) exception |
+| `entity_resolution_failed` | entity-resolution exception |
+| `s1_chunk_summary` | the "N/M S1 chunks failed" summary line (one bump per summary event) |
+
+The invariant `len(errors) == sum(error_census.values())` holds structurally
+(criterion 2) — every `errors.append` site pairs exactly one census class.
+
+**Warning-only telemetry (D7 — NEVER error strings, NEVER in
+`error_census`, `valid` unaffected):** `llm_calls` / `llm_retries` /
+`llm_truncated` / `recovery` ride each outcome and the Layer-1 projection.
+The report's `integrity.truncated_valid_qids` lists every question with
+`llm_truncated > 0` AND no error classes — the silent-truncation success
+class is now RECORDED (criterion 3 structural: no UNRECORDED truncation
+with `valid=true`). `recovery` counts the parse-ladder's
+`sanitize` / `sanitize_insufficient` / `repair` events.
+
+**Recovery ladder (D4, extractor side):** S2/S4 output is parsed through a
+bounded ladder — canonical `_parse_json` → string-aware sanitize (raw C0
+control chars inside strings; H2) → bounded repair (≤8 closer appends +
+bounded missing-comma rules, schema-gated; H3/H2 intersection) →
+schema-validated partial-accept (longest valid prefix ≥ 1 non-empty embed
+section; H3) → error-informed re-prompt. A first parse-failing attempt with
+`finish_reason == "length"` SKIPS the deterministic same-prompt retry;
+stop-class failures get ONE error-informed re-prompt carrying the bounded
+parse-error block.
+
+**JSON-mode parity (D6):** `DeepSeekDirectModel.complete` now sends
+`response_format: {"type": "json_object"}` when `TORTOISE_JSON_MODE=1`
+(the default, read at call time) AND the prompt requests JSON ("json"
+present in the prompt text, case-insensitive — #1782) — mirroring
+`OpenRouterModel`; the pilot's direct route previously ran WITHOUT JSON mode
+(H1, the untested lever). DeepSeek returns HTTP 400 if the mode is set but
+the prompt lacks the text "json", so non-JSON calls (the preflight
+probe/ping) omit the mode. `TORTOISE_JSON_MODE=0` is the documented escape.
+JSON mode does NOT fix truncation (it breaks at `max_tokens`) — the
+recovery ladder is the truncation pairing; no cap raise in #1746.
+
+**Pre-flight probe (D6):** before trusting JSON mode in a run, test the
+provider for pennies:
+
+```bash
+python tools/longmem_eval/probe_json_mode.py --n 10 \
+  [--model deepseek/deepseek-v4-flash] [--out /tmp/probe.json] [--dry-run]
+```
+
+The verdict JSON (`verdict` ∈ {honored, ignored, rejected, inconclusive} +
+per-mode malformed-rate/finish_reason blocks + `mode_delta`) lands in the
+closing-run record (Task 5 of the #1746 plan). The closing-run record
+should also cross-tabulate `recovery["repair"]` with `llm_truncated > 0`
+per question, so truncation recovered as a content-complete repair is
+visible alongside the `truncated_valid_qids` list. `rejected` (any HTTP
+400/404) → abort the run pre-flight or re-run with `TORTOISE_JSON_MODE=0`;
+`inconclusive` → re-probe at `--n 20`; `honored`/`ignored` → proceed with
+the verdict noted. The probe exercises the PILOT's path (the same
+`build_extractor_model` resolution the eval run uses).
 
 ### #1349 embedder-selection flags
 
@@ -185,9 +276,10 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    automatically, Docker/HNSW uses the full stack). Candidates are fetched
    at `max(k)*3` depth (pool-depth headroom), the pool is deduped per-session
    to `max_chunks_per_session` raw chunks (E2E-1), and the reader's context
-   is **budget-capped and points-first** (UX decision 3): extracted points
-   render in rank order, raw chunks backfill the remaining
-   `context_token_cap` tokens. Reports session-level recall@k (fraction of
+   is **budget-capped and rank-interleaved** (C1 #1745, replacing R1's
+   points-first UX decision 3): extracted points and raw turn-granular
+   chunks render in true RRF rank order, bounded by the token budget
+   and the `context_item_cap`. Reports session-level recall@k (fraction of
    `answer_session_ids` in top-k), turn/evidence recall@k (extracted points
    only — the D5 denominator split), chunk-evidence recall@k (the raw-chunk
    containment view), and the exact context handed to the reader
@@ -247,12 +339,49 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
 
 The report is self-explanatory: every run prints and persists
 
-- **`integrity`** — `valid` (invalid_rate ≤ threshold), `n_attempted` /
-  `n_valid` / `n_invalid`, `invalid_rate` (invalid = failed question OR
-  completed question with ingest errors), `error_census` (site-prefixed
-  P2-aligned error classes: `reader:retries_exhausted`, `judge:fatal`, …),
-  `checks` (python guard, dataset audited, audit present, fingerprint
-  matched, census computed). Printed BEFORE the score.
+- **`integrity`** — `valid` (#1747 census-class-aware:
+  `valid = (n_hard_invalid == 0) AND (n_excluded_hard == 0) AND
+  (invalid_rate ≤ threshold) AND (outcome-derived attempted set non-
+  empty whenever any entry was excluded or dropped — a fully
+  excluded/dropped run never certifies; failures do not count as
+  attempts for this guard)` — fatal_*/ingest/unknown/non-census-error-string
+  (empty-census)/permanent-eval-failure questions, and malformed inputs
+  (present non-bool `valid`, non-iterable, non-str, or falsy-but-present
+  NON-CONTAINER `error_classes` — 0 / "" / False / a PRESENT null;
+  empty dict/list are the legitimate no-census shapes and grade clean)
+  fail closed to hard and veto at any threshold; an
+  EXCLUDED outcome (shape-broken dict, or a breaker_open vector-arm drop)
+  still vetoes when it carries a hard census class — malformed shapes
+  cannot launder a fatal class out of the gate (`n_excluded_hard`), and a
+  run whose entire outcome set was excluded OR dropped (e.g. a vector-arm
+  outage that breaker-tripped every question) never certifies valid (a
+  truly
+  empty report stays vacuously valid)),
+  `n_attempted` / `n_valid` / `n_invalid`, `invalid_rate` (invalid = a
+  failed question OR a completed question with error-class/extraction-error
+  signals; recoverable classes — parse_error/truncated/
+  truncated_parse_error/partial_parse/transient_*/s1_chunk_summary, plus
+  reader/judge/ingest:retries_exhausted eval failures — are rate-limited, not
+  vetoed), the #1747 breakdown `n_hard_invalid` /
+  `n_recoverable_invalid` / `recoverable_invalid_rate` /
+  `n_excluded_hard`,
+  `n_excluded` (entries dropped by the entry shape filter — malformed
+  checkpoint JSON in outcomes OR failures; the denominator shrink is
+  observable, never silent),
+  `error_census`
+  (site-prefixed P2-aligned error classes: `reader:retries_exhausted`,
+  `judge:fatal`, …), `error_census_malformed` (non-int counts recorded
+  verbatim per class; non-str legacy flat-list junk under the
+  `<legacy-list>` sentinel key; a PRESENT malformed top-level
+  `error_classes` shape under `<malformed-top-level>` — no malformed
+  evidence vanishes at any level), `criterion` (the applied gate rule,
+  human-readable), `checks`
+  (python guard, dataset audited, audit present, fingerprint matched,
+  census computed). The integrity block prints BEFORE the score; the
+  additive breakdown fields (`n_hard_invalid` / `n_excluded` / `criterion`
+  / …) ride the persisted report JSON. NOTE: a failure entry WITHOUT an
+  `error_class` (e.g. the full-context cell producer) grades hard —
+  fail-closed — until the #1746 lane wires site-prefixed classes.
 - **`leg_mix`** — per-leg `match_source` counts over the top_k context the
   reader saw (embedded → `tfidf`; real → `rrf`; never empty).
 - **`pool_size`** — live per-question graph point count (mean/p50/p95) =

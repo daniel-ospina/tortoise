@@ -626,7 +626,11 @@ class _EntityHandlers:
         # Both producer vocabularies map (#1155 divergence).
         _wk = (inner.get("eventKind") or "")
         _obj_name = inner.get("object")
-        if _obj_name and _wk in ("pm:cardCreated", "github.issue.open"):
+        # #1725: `github.issue.reopened` folds back to in_progress — a reopen
+        # is a lifecycle Event whose ONLY projection is Object.status (the
+        # indexer's decision table: lifecycle never mutates statement points).
+        if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
+                                 "github.issue.reopened"):
             self.g.query(
                 "MATCH (o:Object {name:$n}) SET o.status='in_progress'",
                 params={"n": _obj_name})

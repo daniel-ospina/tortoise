@@ -246,15 +246,16 @@ def _needs_gloss(kind: str, desc: str) -> bool:
     low = d.lower()
     if any(m in low for m in ("not", "uncertain", "≡", "link:", "never", "only")):
         return True
-    if len(d.split()) > 6:  # longer descriptions carry real semantics
+    if len(d.split()) > 6:  # longer descriptions carry real semantics  # noqa: SIM103
         return True
     return False
 
 
 def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     """Selective pack injection: only sections whose domain words appear in
-    the story (conservative — if nothing matches, return all so no needed
-    kind is ever dropped)."""
+    the story. Conservative fallback — if nothing matches, return all so no
+    needed kind is ever dropped (the flag-on path never calls this — the
+    pack vocabulary is owned by ``_render_master_core_only``)."""
     if not story:
         return dict(pack_kinds)
     low = story.lower()
@@ -267,32 +268,148 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     return selected or dict(pack_kinds)  # nothing matched → all (safe)
 
 
-def _render_master(master: dict, story: str | None = None) -> str:
+def _stable_hash(s: str) -> int:
+    """Deterministic 64-bit hash for the A′ label-order seed (Task 2,
+    #1695): same story → same seed → same shuffle order across paired
+    re-runs (the A′ diagnostic compares bit-level agreement)."""
+    import hashlib
+    return int(hashlib.sha256((s or "").encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _label_order_rng(story: str | None = None):
+    """A′ (#1695 Task 2): the kind-list shuffle RNG — the label-order
+    randomization mitigation (Fantastically Ordered Prompts) and the A′
+    diagnostic hook. OFF by default (``TORTOISE_LABEL_ORDER`` unset →
+    None → byte-identical renders). ``TORTOISE_LABEL_ORDER=shuffle`` enables
+    a deterministic per-call seeded shuffle: the seed is the env override
+    ``TORTOISE_LABEL_ORDER_SEED`` (int) or a hash of the story (same story
+    → same order, so a paired fresh canonical re-run compares the SAME
+    sessions under a different order)."""
     import os
+    import random
+    if os.environ.get("TORTOISE_LABEL_ORDER", "").strip().lower() != "shuffle":
+        return None
+    seed_raw = os.environ.get("TORTOISE_LABEL_ORDER_SEED", "").strip()
+    if seed_raw:
+        try:
+            return random.Random(int(seed_raw))
+        except ValueError:
+            import warnings
+            warnings.warn(
+                f"invalid TORTOISE_LABEL_ORDER_SEED={seed_raw!r} — falling "
+                "back to the story-derived seed", stacklevel=2)
+    return random.Random(_stable_hash(story))
+
+
+def _classify_later_enabled() -> bool:
+    """#1695 Task 5: the call-time classify-later toggle — read at the
+    single choke point (extract_session_v2 + the render dispatchers) so ALL
+    callers (sdk, hosted_api, ingest_v2, run_v2_pipeline) inherit it without
+    threading a param. Unset/0 → the legacy pipeline: the classify-later
+    machinery is entirely off-path and the flag-off renders are
+    byte-identical to main — scoped to the DEFAULT (verbose) render (the
+    compact-mode S2 story-threading is pre-existing and identical to main;
+    the chain enforcer runs unconditionally on every arm and its result key
+    reflects that run; only the additive ``classify_later`` result key is
+    an empty block when the flag is off — see ``extract_session_v2``).
+    Value matching is case-insensitive (True/TRUE/ON/yes all enable —
+    review FIX B)."""
+    import os
+    return os.environ.get("TORTOISE_CLASSIFY_LATER", "").strip().lower() in (
+        "1", "true", "yes", "on")
+
+
+def _default_kind_classifier(model):
+    """The default classify-later classifier (built lazily — index build is
+    the first-use cost; the EmbeddingModel singleton is shared, never
+    re-instantiated). The session's LLM adapter powers the adjudication
+    tail."""
+    from tortoise.kind_classifier import KindClassifier
+    return KindClassifier(model=model)
+
+
+def _render_master(master: dict, story: str | None = None, *,
+                   core_only: bool | None = None) -> str:
+    import os
+    if core_only is None:
+        core_only = _classify_later_enabled()
+    rng = _label_order_rng(story)
+    if core_only:
+        return _render_master_core_only(master, rng)
     if os.environ.get("TORTOISE_EXTRACTOR_PROMPT", "").strip() == "compact":
-        return _render_master_compact(master, story)
-    return _render_master_verbose(master)
+        return _render_master_compact(master, story, rng)
+    return _render_master_verbose(master, rng)
 
 
-def _render_master_compact(master: dict, story: str | None) -> str:
+def _render_master_core_only(master: dict, rng=None) -> str:
+    """#1695 Task 5: the flag-on S2/S4 master render — the verbose base
+    MINUS the PACK KINDS and CHAINS sections (the pack vocabulary and the
+    chain business logic leave the prompt; the kind classifier and the
+    chain enforcer own them post-extraction). The user-personal-state
+    vocabulary, memory-granularity, and the state-value carve-out are
+    RETAINED (the verbose base). Kind groups randomize under the A′ hook."""
+    lines = [
+        "MASTER LIST — the closed vocabulary (CORE ONLY). EVERY kind you "
+        "emit MUST come from this list (namespaced or bare form) or be "
+        "\"unclassified\" (pack-domain content is typed by a later stage). "
+        "Do NOT mint kinds: \"worktree\", \"test suite\", \"approach\" are "
+        "NOT kinds — re-map to the nearest listed kind or drop the item.",
+    ]
+
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
+        out = [f"\n{title}"]
+        out += [f"- {k} — {d[k]}" for k in keys]
+        return "\n".join(out)
+
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
+    # NO PACK KINDS and NO CHAINS — the classify-later/chain-enforcement
+    # layers own them (prompt shrinks ~2x; label-space research).
+    ups = master.get("user_personal_state") or {}
+    if ups:
+        lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
+                     "hint — the VALUE is the fact, retain verbatim; these are "
+                     "NOT kinds: do NOT emit them as entity/event/point kinds)")
+        lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
+    g = master.get("memory_granularity") or {}
+    if g:
+        lines.append("\nMEMORY GRANULARITY (what to keep, what to strip)")
+        lines += [f"- {k}: {v}" for k, v in g.items()]
+    lines.append("\n" + STATE_VALUE_CARVE_OUT)
+    return "\n".join(lines)
+
+
+def _render_master_compact(master: dict, story: str | None,
+                           rng=None) -> str:
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list. Do NOT mint kinds.",
     ]
 
-    def _group(title: str, d: dict) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
         out = [f"\n{title}"]
-        for k, v in d.items():
+        for k in keys:
+            v = d[k]
             out.append(f"- {k}" if not _needs_gloss(k, v) else f"- {k} — {v}")
         return "\n".join(out)
 
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
     selected = _select_pack_kinds(story, master["pack_kinds"])
-    lines.append(_group("PACK KINDS", selected))
-    # granularity: matched-domain subsections only (compact)
+    lines.append(_group("PACK KINDS", selected, shuffle=True))
+    # granularity: matched-domain subsections only (compact). Hint blocks
+    # (memory granularity, user-personal-state, carve-out) are EXCLUDED from
+    # the shuffle — only the kind vocabulary randomizes.
     g = master.get("memory_granularity") or {}
     if story:
         low = story.lower()
@@ -304,7 +421,7 @@ def _render_master_compact(master: dict, story: str | None) -> str:
     return "\n".join(lines)
 
 
-def _render_master_verbose(master: dict) -> str:
+def _render_master_verbose(master: dict, rng=None) -> str:
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list (namespaced or bare form). Do NOT mint kinds: "
@@ -312,16 +429,20 @@ def _render_master_verbose(master: dict) -> str:
         "to the nearest listed kind or drop the item.",
     ]
 
-    def _group(title: str, d: dict) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
         out = [f"\n{title}"]
-        out += [f"- {k} — {v}" for k, v in d.items()]
+        out += [f"- {k} — {d[k]}" for k in keys]
         return "\n".join(out)
 
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
-    lines.append(_group("PACK KINDS (from the installed packs)", master["pack_kinds"]))
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
+    lines.append(_group("PACK KINDS (from the installed packs)",
+                        master["pack_kinds"], shuffle=True))
 
     lines.append("\nCHAINS (the business logic of mapping)")
     for name, c in master["chains"].items():
@@ -341,51 +462,6 @@ def _render_master_verbose(master: dict) -> str:
         lines += [f"- {k}: {v}" for k, v in g.items()]
     lines.append("\n" + STATE_VALUE_CARVE_OUT)
     return "\n".join(lines)
-    lines = [
-        "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
-        "from this list (namespaced or bare form). Do NOT mint kinds: "
-        "\"worktree\", \"test suite\", \"approach\" are NOT kinds — re-map "
-        "to the nearest listed kind or drop the item.",
-    ]
-
-    def _group(title: str, d: dict) -> str:
-        out = [f"\n{title}"]
-        out += [f"- {k} — {v}" for k, v in d.items()]
-        return "\n".join(out)
-
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
-    lines.append(_group("PACK KINDS (from the installed packs)", master["pack_kinds"]))
-
-    lines.append("\nCHAINS (the business logic of mapping)")
-    for name, c in master["chains"].items():
-        lines.append(f"- {name}: {' → '.join(c['path'])}")
-        lines.append(f"    {c['note']}")
-
-    g = master["memory_granularity"]
-    if g:
-        lines.append("\nMEMORY GRANULARITY (what each domain considers DURABLE "
-                     "vs EPHEMERAL — the retention bar)")
-        lines += [f"- {ns}: {txt}" for ns, txt in g.items()]
-
-    # E2 (#1534): the user-personal-state vocabulary — the operative criterion
-    # for the Tier-A classification hint. Explicit hint-not-kind guard: the
-    # vocabulary is classification guidance, never entity/event/point kinds.
-    lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
-                 "hint — these are NOT kinds: do NOT emit them as "
-                 "entity/event/point kinds. A fact matching one is Tier-A → a "
-                 "statement Point with tier:\"A\", the verbatim value in "
-                 "content, and the verbatim source in quote):")
-    lines += [f"- {cat} — {desc}"
-              for cat, desc in master["user_personal_state"].items()]
-    if g:
-        lines.append("")
-        lines.append(STATE_VALUE_CARVE_OUT)
-    return "\n".join(lines)
-
-
 def _render_chains(master: dict) -> str:
     return "\n".join(
         f"- {name}: {' → '.join(c['path'])} — {c['note']}"
@@ -612,6 +688,26 @@ OUTPUT_CONTRACT = """{
 }"""
 
 
+# #1695 Task 5: the flag-on OUTPUT_CONTRACT — the base contract plus the
+# ``unclassified`` sentinel (pack-domain content is typed by the classify-
+# later stage). Kept as a SEPARATE constant so the flag-off contract stays
+# byte-identical (the sentinel is only legal when the pack vocabulary is
+# out of the prompt).
+OUTPUT_CONTRACT_CORE_ONLY = (
+    OUTPUT_CONTRACT
+    # The full entities anchor — the three PARTICIPANT-SLOT kind fields
+    # ("name": str, "kind": str, "confidence") share the bare
+    # '"kind": str,' fragment and must NOT advertise the sentinel (the
+    # write path would silently undo it). Only the top-level fields widen.
+    .replace('"name": str, "kind": str, "lifecycle"',
+             '"name": str, "kind": str|"unclassified", "lifecycle"')
+    .replace('"eventKind": str,', '"eventKind": str|"unclassified",')
+    .replace('"pointKind": "statement",',
+             '"pointKind": "statement"|"unclassified",')
+)
+
+
+
 # E3 (issue #1535): the SOURCE TRANSCRIPT block cap (chars) — protects the
 # S2/S4 input token budget (D3). Over cap the block is omitted; the
 # deterministic quote→turn resolver still anchors from `quote` alone.
@@ -767,6 +863,32 @@ Empty arrays are valid — extract-nothing is valid. Print ONLY the JSON object
 (no markdown fences, no commentary)."""
 
 
+# #1695 Task 5: the flag-on S2 template — the base template with the pack
+# vocabulary/chain-reasoning removed and the emit-untyped instruction added
+# (pack-domain content → "unclassified", typed by the classify-later stage).
+# Derived so the flag-off S2_TMPL stays byte-identical.
+S2_TMPL_CORE_ONLY = S2_TMPL.replace(
+    "- CHAINS — mapping must respect the chain positions (WARN, then TRY TO REPAIR):\n"
+    "{chains_text}\n"
+    "  If a mapping would connect across a chain in a way that violates it, WARN in\n"
+    "  chain_notes and TRY TO REPAIR by re-mapping toward the nearest valid chain\n"
+    "  position. NEVER invent entities to satisfy a chain.",
+    "CHAIN ENFORCEMENT IS DETERMINISTIC: pack-chain positions are enforced by a\n"
+    "post-extraction graph pass (the chain_notes field stays for your flags only).\n"
+    "Do NOT reason about chain paths here — emit the untyped items and the\n"
+    "enforcer rewires them. NEVER invent entities to satisfy a chain.",
+).replace(
+    "MASTER LIST\n{master_list}\n\nCONDENSED SEMANTIC CORE",
+    "MASTER LIST (CORE ONLY — the pack vocabulary is NOT here)\n{master_list}\n\n"
+    "PACK-DOMAIN CONTENT → UNCLASSIFIED: content whose kind would be a PACK kind\n"
+    "({pack_namespaces}) is NOT in the\n"
+    "vocabulary above. For such content emit kind/eventKind/pointKind: \"unclassified\"\n"
+    "— a later deterministic stage assigns the pack kind. Core kinds are in-context:\n"
+    "emit them directly. NEVER mint a pack kind name you cannot see in the list.\n\n"
+    "CONDENSED SEMANTIC CORE",
+)
+
+
 def _render_source_transcript(edus: list[dict] | None) -> str:
     """E3 (D3): turn-indexed SOURCE TRANSCRIPT block for S2/S4 — lets the
     model cite `source_turn_id` from the {index}: markers instead of
@@ -785,15 +907,33 @@ def _render_source_transcript(edus: list[dict] | None) -> str:
 def render_s2_prompt(master: dict | None = None, *,
                      session_date: str | None = None,
                      edus: list[dict] | None = None,
-                     story: str | None = None) -> str:
+                     story: str | None = None,
+                     core_only: bool | None = None) -> str:
+    """The S2 prompt. ``core_only`` (None = env fallback) selects the
+    #1695 Task 5 core-only variant (pack vocabulary + chains out of the
+    prompt, the "unclassified" sentinel in the contract); the flag-off
+    default renders byte-identically to today."""
     master = master or build_master_list()
+    if core_only is None:
+        core_only = _classify_later_enabled()
     transcript = _render_source_transcript(edus)
-    return (S2_TMPL
-            .replace("{master_list}", _render_master(master, story))
-            .replace("{chains_text}", _render_chains(master))
+    tmpl = S2_TMPL_CORE_ONLY if core_only else S2_TMPL
+    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    chains = "" if core_only else _render_chains(master)
+    # The pack-namespace list is DYNAMIC — derived from the INSTALLED packs
+    # (master["pack_kinds"] keys), never hardcoded (epistemic-team is not
+    # installed; a future pack must route to unclassified too).
+    pack_ns = "/".join(sorted(
+        {k.rsplit(":", 1)[0] + ":" for k in (master.get("pack_kinds") or {})}
+    )) if core_only else ""
+    return (tmpl
+            .replace("{master_list}", _render_master(
+                master, story, core_only=core_only))
+            .replace("{pack_namespaces}", pack_ns)
+            .replace("{chains_text}", chains)
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
-            .replace("{output_contract}", OUTPUT_CONTRACT)
+            .replace("{output_contract}", contract)
             + (("\n\n" + transcript) if transcript else ""))
 
 
@@ -801,44 +941,134 @@ _PARSE_RETRIES = 1  # re-prompt once on unparseable S2/S4 output (pilot #1549 fi
 # parse_error dominated the pilot census 18-31/qid — LLM sloppiness, self-corrects)
 
 
+def _error_excerpt(response: str, err: BaseException) -> str:
+    """Bounded error region for the error-informed re-prompt (D3, #1746):
+    the region around the JSONDecodeError position (±150 chars) when the
+    error exposes one, else the last 400 chars of the response; the excerpt
+    is bounded at 500 chars total. ``None`` responses are tolerated
+    (``_parse_json`` already treats them as empty)."""
+    resp = response or ""
+    pos = getattr(err, "pos", None)
+    if isinstance(pos, int) and 0 <= pos < len(resp):
+        excerpt = resp[max(0, pos - 150):pos + 150]
+    else:
+        excerpt = resp[-400:]
+    return excerpt[:500]
+
+
 def _complete_parsed(model, system: str, user: str, *,
                      max_tokens: int | None, stats: dict | None) -> dict:
-    """``_complete`` + ``_parse_json`` with one re-prompt on parse failure.
+    """``_complete`` + the parse-recovery ladder with one error-informed
+    re-prompt on parse failure (pilot #1549 + #1746 D3/D4).
 
     Transient/fatal classification lives in the ``_complete`` retry loop
     (M3); this layer adds the parse-retry the pilot census demanded: a
     parse_error is usually LLM sloppiness and the model self-corrects on
-    the same prompt. Retries are counted in ``stats["llm"]["retries"]``
-    (D3) and the census still records the final failure as ``parse_error``."""
+    an ERROR-INFORMED re-prompt. Retries are counted in
+    ``stats["llm"]["retries"]`` (D3) and the census records the final
+    failure as ``parse_error`` / ``truncated_parse_error`` (#1746 D2: the
+    FIRST parse-failing attempt's ``finish_reason`` decides the class —
+    ``length`` → the truncation hypothesis, else sloppiness/contamination).
+
+    Retry policy (#1746 D3): a first parse-failing attempt with
+    ``finish_reason == "length"`` SKIPS the retry — same prompt + same cap
+    is deterministic failure (the ladder's rung-4 partial-accept already
+    ran in-process on attempt 1); a ``stop``/``None`` failure re-prompts
+    with the bounded parse-error block (``_error_informed_reprompt``)."""
     attempts = 0
     last: Exception | None = None
+    first_truncated = False
+    # D7 (#1746): the stage-level truncated flag ORs over ALL calls of the
+    # stage (``_complete`` overwrites ``stats["truncated"]`` per attempt) —
+    # a truncated first attempt whose retry recovers must still record the
+    # truncation (criterion 3: no UNRECORDED truncation with valid=true).
+    stage_truncated = False
+    user_msg = user
     while attempts <= _PARSE_RETRIES:
         attempts += 1
+        response = _complete(model, system, user_msg,
+                             max_tokens=max_tokens, stats=stats)
+        # D2 (#1746) + F4 (#1780): the finish reason is captured race-free
+        # in the calling thread by ``_complete`` and recorded into stats —
+        # reading the shared adapter attribute here would be a cross-thread
+        # race under ``--workers > 1`` (extract_session_v2 always passes
+        # stage_stats). The no-stats public-API path (run_s2/run_s4 default)
+        # falls back to the adapter attribute — preserving the pre-F4 D3
+        # retry-skip for truncated responses. Hold the FIRST parse-failing
+        # attempt's value — the class-decision signal for
+        # ``_ParseError.truncated``.
+        finish = stats.get("finish_reason") if stats is not None else (
+            getattr(model, "last_finish_reason", None))
+        stage_truncated = stage_truncated or finish == "length"
+        if stats is not None:
+            stats["truncated"] = stage_truncated
         try:
-            return _parse_json(_complete(model, system, user,
-                                         max_tokens=max_tokens, stats=stats))
+            return _parse_json_robust(response, stats=stats)
         except ValueError as e:
+            # _ParseError IS a ValueError subclass — the only exception the
+            # ladder raises; ``_complete`` sits OUTSIDE this try, so a raw
+            # adapter ValueError propagates to the stage except and is
+            # classed by ``_classify_error`` (no parse-retry).
             last = e
-            if stats is not None:
-                stats.setdefault("llm", {}).setdefault("retries", 0)
-                stats["llm"]["retries"] += 1
-    raise _ParseError(str(last)) from last
+            if attempts == 1:
+                # D2 (#1746): the FIRST parse-failing attempt's finish
+                # reason decides the class (a raw adapter ValueError has no
+                # truncated attr — getattr-safe for the final raise).
+                first_truncated = finish == "length"
+            if finish == "length":
+                # D3 (#1746): deterministic failure — same prompt + same cap
+                # re-fails identically; the ladder's partial-accept already
+                # recovered what it could in-process.
+                break
+            if attempts <= _PARSE_RETRIES:
+                if stats is not None:
+                    stats.setdefault("llm", {}).setdefault("retries", 0)
+                    stats["llm"]["retries"] += 1
+                user_msg = _error_informed_reprompt(user, response, e)
+    raise _ParseError(str(last), truncated=first_truncated,
+                      attempt=attempts,
+                      excerpt=(getattr(last, "excerpt", None)
+                               or _error_excerpt(response, last))) from last
+
+
+def _error_informed_reprompt(user: str, response: str,
+                             err: _ParseError) -> str:
+    """D3 (#1746): the attempt-2 user message — the original prompt plus the
+    bounded parse-error block (message ≤ 300 chars + excerpt ≤ 500)."""
+    msg = str(err.args[0] if err.args else err)[:300]
+    excerpt = getattr(err, "excerpt", None) or _error_excerpt(response, err)
+    return (user + "\n\nYour previous response did not parse as the required "
+            "JSON.\nParse error: " + msg +
+            "\nOffending region: " + excerpt +
+            "\nRespond with ONLY the JSON object, no explanation.")
 
 
 def run_s2(model, story: str, master: dict | None = None, *,
            session_date: str | None = None,
            edus: list[dict] | None = None,
-           stats: dict | None = None) -> dict:
+           stats: dict | None = None,
+           core_only: bool | None = None) -> dict:
     """S2: story → embed list (draft prompt v1, owner-in-the-loop pending).
 
     Output is bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); a truncated
     or unparseable response raises ``_ParseError`` → census ``parse_error``
     (the tail-cut tolerance of ``_parse_json`` still recovers truncated
     JSON; the census records the truncation for the fix loop). S2 retries
-    once on parse failure (``_complete_parsed`` — pilot #1549 fix)."""
+    once on parse failure (``_complete_parsed`` — pilot #1549 fix).
+
+    ``story`` threads into the render (A′ #1695 Task 2): the label-order
+    shuffle seed derives from the story, so a paired canonical re-run under
+    a different order reproduces the SAME session. NOTE (flag-off
+    byte-identity scope): under ``TORTOISE_EXTRACTOR_PROMPT=compact`` the
+    story ALSO story-filters the pack-kind injection — aligning S2 with
+    S4's selection (origin ran S2 with story=None → full set). The DEFAULT
+    verbose path is unaffected (story only feeds the seed, which is a
+    no-op when the shuffle is unset), so the flag-off byte-identity claim
+    holds for the default render mode."""
     return _complete_parsed(model,
                             render_s2_prompt(master, session_date=session_date,
-                                             edus=edus),
+                                             edus=edus, story=story,
+                                             core_only=core_only),
                             "S1 STORY:\n" + story,
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
                             stats=stats)
@@ -1164,21 +1394,66 @@ Rules:
 Empty arrays are valid. Print ONLY the JSON object."""
 
 
+# #1695 Task 5: the flag-on S4 template — the base template with the S4
+# re-emit clause (S2 items keep the classifier's kinds VERBATIM; the
+# MUST-come-from-list rule applies to NEW items only) and the chains block
+# replaced by the deterministic-enforcement note. Derived so the flag-off
+# S4_TMPL stays byte-identical.
+S4_TMPL_CORE_ONLY = S4_TMPL.replace(
+    "MASTER LIST (same closed vocabulary as S2 — no minted kinds)\n{master_list}\n\n"
+    "CHAINS\n{chains_text}\n\nS1 STORY",
+    "MASTER LIST (CORE ONLY — the pack vocabulary is NOT here)\n{master_list}\n\n"
+    "CHAIN ENFORCEMENT IS DETERMINISTIC (post-extraction graph pass).\n\n"
+    "S1 STORY",
+).replace(
+    "- Re-emit the S2 items you keep, corrected where the search results show they\n"
+    "  already exist (lifecycle changed/unchanged + supersedes = the existing id).",
+    "- Re-emit the S2 items you keep, corrected where the search results show they\n"
+    "  already exist (lifecycle changed/unchanged + supersedes = the existing id).\n"
+    "- S2 ITEMS ARE TYPED (#1695): the S2 items in the input carry kinds assigned\n"
+    "  by the classifier — including PACK kinds NOT in your MASTER LIST and the\n"
+    "  \"unclassified\" sentinel. Re-emit them VERBATIM with their kinds UNCHANGED:\n"
+    "  do NOT re-type an S2 item, do NOT replace a pack kind with a core kind, do\n"
+    "  NOT resolve an \"unclassified\" you cannot see in the list. The\n"
+    "  MUST-come-from-list rule applies to NEW items only.",
+).replace(
+    # FIX D (cycle 3): the base's advisory "TRY TO REPAIR" bullet contradicts
+    # the deterministic-enforcement contract — swap it in the core-only
+    # derivation (the base template stays byte-identical). The fragment is
+    # asserted to exist exactly once in S4_TMPL (anchor pin).
+    "- chain_notes: flag violations, TRY TO REPAIR toward the nearest valid chain\n"
+    "  position, never invent entities.",
+    "- chain_notes: flag violations for the deterministic post-extraction\n"
+    "  enforcer — do NOT attempt repairs yourself (the enforcer rewires\n"
+    "  deterministically). NEVER invent entities.",
+)
+
+
 def render_s4_prompt(story: str, search: dict, embed_list: dict,
                      master: dict | None = None, *,
                      session_date: str | None = None,
-                     edus: list[dict] | None = None) -> str:
+                     edus: list[dict] | None = None,
+                     core_only: bool | None = None) -> str:
+    """The S4 prompt. ``core_only`` (None = env fallback) selects the
+    #1695 Task 5 core-only variant (pack vocabulary + chains out, the S4
+    re-emit clause in); the flag-off default renders byte-identically."""
     master = master or build_master_list()
+    if core_only is None:
+        core_only = _classify_later_enabled()
     transcript = _render_source_transcript(edus)
-    return (S4_TMPL
-            .replace("{master_list}", _render_master(master, story))
-            .replace("{chains_text}", _render_chains(master))
+    tmpl = S4_TMPL_CORE_ONLY if core_only else S4_TMPL
+    contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
+    chains = "" if core_only else _render_chains(master)
+    return (tmpl
+            .replace("{master_list}", _render_master(
+                master, story, core_only=core_only))
+            .replace("{chains_text}", chains)
             .replace("{story}", story)
             .replace("{search_results}", _render_search_results(search))
             .replace("{embed_list_json}", json.dumps(embed_list, indent=1))
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
-            .replace("{output_contract}", OUTPUT_CONTRACT)
+            .replace("{output_contract}", contract)
             + (("\n\n" + transcript) if transcript else ""))
 
 
@@ -1186,14 +1461,16 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
            master: dict | None = None, *,
            session_date: str | None = None,
            edus: list[dict] | None = None,
-           stats: dict | None = None) -> dict:
+           stats: dict | None = None,
+           core_only: bool | None = None) -> dict:
     """S4: complete the embed list (S2 + gaps). Draft prompt v1.
 
     Output bounded at ``_S2_S4_MAX_TOKENS`` (M3 #1524, D2); unparseable
     output → ``_ParseError`` → census ``parse_error`` (see ``run_s2``)."""
     return _complete_parsed(model,
                             render_s4_prompt(story, search, embed_list, master,
-                                             session_date=session_date, edus=edus),
+                                             session_date=session_date, edus=edus,
+                                             core_only=core_only),
                             "Complete the embed list.",
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
                             stats=stats)
@@ -1286,7 +1563,12 @@ def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
 # ── S5: EMBED — deterministic execution → Layer-1 payload ──────────────────
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
+    """Normalize a classification key for identity comparisons. Defensive
+    str() coercion (review FIX C): LLM-emitted items may carry numeric/
+    non-str names/content — a raw .strip() would raise AttributeError on
+    them and abort the whole union-classify block.
+    """
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
 def _norm_kind(k: str) -> str:
@@ -1362,7 +1644,7 @@ def _fact_value_contradiction(content: str, about_entities: list[str] | None,
     old_when = str(existing.get("when") or existing.get("createdAt") or "").strip()
     if when and old_when:
         try:
-            if _valid_iso_date(when) and _valid_iso_date(old_when):
+            if _valid_iso_date(when) and _valid_iso_date(old_when):  # noqa: SIM102
                 if when[:10] < old_when[:10]:
                     return False
         except (TypeError, ValueError):
@@ -1419,8 +1701,10 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
     kinds gate against the entity vocabulary, event kinds against the event
     vocabulary), confidence coerced to float and clamped to [0,1]
     (non-numeric → 0.0), unknown role keys and non-list role values dropped
-    with a warning. Returns None when no role survived (the payload entry
-    gets no slots).
+    with a warning. The classify-later ``unclassified`` sentinel is carried
+    WITHOUT the minted-kind repair warning (FIX G — it is a terminal, not a
+    minted kind; unresolved refs are dropped downstream). Returns None when
+    no role survived (the payload entry gets no slots).
     """
     if raw is None:
         return None
@@ -1428,7 +1712,12 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
         warnings.append(f"{ctx}: slots must be an object — dropped")
         return None
     master = master or {}
-    entity_forms = master_kind_forms(master) if master else None
+    # FIX M slot-lane consistency: the subject/object lane gates against the
+    # SAME widened object vocabulary as execute_embed's entity gate
+    # (_object_kind_forms — master + pack object/document kinds) — a slot
+    # referencing an emitted pack-kind entity (e.g. dev:apiSpec) must keep
+    # its kind and resolve, not be repaired to core:other and dropped.
+    entity_forms = _object_kind_forms(master) if master else None
     event_forms = {k.lower() for k in master.get("events", {})}
     event_forms_bare = {k.lower().rsplit(":", 1)[-1]
                         for k in master.get("events", {})}
@@ -1449,13 +1738,28 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
             kind = str(r.get("kind", "")).strip()
             if not name or not kind:
                 continue
+            # FIX G: the classify-later sentinel is a terminal, never a
+            # minted kind — skip the minted-kind branch explicitly (as
+            # _rekey_slots does) so it's carried without a spurious
+            # "minted slot kind" warning (resolved at write, like the
+            # entity/event sentinels).
+            sentinel = kind.lower() == UNCLASSIFIED
             if role == "event":
-                if kind.lower() not in event_forms and \
+                if sentinel:
+                    # FIX O: the sentinel is only advertised for top-level
+                    # fields — an EVENT-role slot passes through to the
+                    # payload untouched (_resolve_slot_refs drops only
+                    # subject/object strays, fail-closed), so carrying it
+                    # would write kind="unclassified" into a slot. Repair
+                    # to the event fallback SILENTLY (a terminal, not a
+                    # minted kind — FIX G's no-noise intent).
+                    kind = _EVENT_FALLBACK["kind"]
+                elif kind.lower() not in event_forms and \
                         kind.lower().rsplit(":", 1)[-1] not in event_forms_bare:
                     warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
                                     f") → repaired to {_EVENT_FALLBACK['kind']}")
                     kind = _EVENT_FALLBACK["kind"]
-            elif entity_forms and \
+            elif entity_forms and not sentinel and \
                     kind.lower() not in entity_forms and \
                     kind.lower().rsplit(":", 1)[-1] not in {
                         f.lower().rsplit(":", 1)[-1] for f in entity_forms}:
@@ -2054,30 +2358,55 @@ def validate_chains(embed_list: dict, master: dict | None = None) -> list[dict]:
 
 
 def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[str]:
-    """Every kind used in entities/events/points that is NOT in the master
-    list (indicator: 0 minted kinds)."""
+    """Every kind used in entities/events/points that is NOT writable by
+    the matching write gate (indicator: 0 minted kinds). Each lane uses the
+    SAME vocabulary as its execute_embed gate: entities → the EXTENDED
+    object vocabulary (master + pack object/document kinds — FIX M),
+    events → the EXTENDED event vocabulary (FIX A), points → the master's
+    "points" section ONLY (FIX P — pack point kinds are never writable)."""
     master = master or build_master_list()
-    forms = master_kind_forms(master)
-    full = {k.lower() for k in forms if ":" in k}
-    bare = {k.lower().rsplit(":", 1)[-1] for k in forms}
+    obj_forms = _object_kind_forms(master)
+    full = {k.lower() for k in obj_forms if ":" in k}
+    bare = {k.lower().rsplit(":", 1)[-1] for k in obj_forms}
+    point_full = {k.lower() for k in master["points"]}
+    point_bare = {k.lower().rsplit(":", 1)[-1] for k in master["points"]}
     minted: list[str] = []
     for e in embed_list.get("entities", []) or []:
         if not isinstance(e, dict):
             continue
         k = str(e.get("kind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        # The unclassified sentinel is a reserved terminal, not a minted
+        # kind — below-floor items on the flag-on path carry it through
+        # to the report and must NOT be flagged (the write path resolves
+        # it with its own census).
+        # entities: the EXTENDED object vocabulary (master + pack declared
+        # object/document kinds — FIX M: a classifier-assigned synthesized
+        # object kind is writable at execute_embed, so it is NOT minted;
+        # the report must agree with the write gate).
+        if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
     for ev in embed_list.get("events", []) or []:
         if not isinstance(ev, dict):
             continue
         k = str(ev.get("eventKind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        # events: the EXTENDED event vocabulary (core + pack declared event
+        # kinds — FIX A: a classifier-assigned pack event kind is writable at
+        # execute_embed, so it is NOT minted; the report must agree with the
+        # write gate).
+        if k and k.lower() != UNCLASSIFIED and \
+                k.lower() not in _event_kind_forms(master):
             minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             continue
         k = str(p.get("pointKind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        # points: the master's "points" section ONLY (full + bare forms) —
+        # the point write gate repairs EVERYTHING else to statement, so the
+        # report must flag pack point kinds WITH kindDefs (dev:requirement,
+        # product-strategy:useCase/...) that master_kind_forms would
+        # otherwise accept (FIX P — the report agrees with the gate).
+        if k and k.lower() != UNCLASSIFIED and \
+                k.lower() not in point_full and k.lower() not in point_bare:
             minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
     return minted
 
@@ -2286,6 +2615,84 @@ _ENTITY_FALLBACK = {"kind": "core:other"}
 _EVENT_FALLBACK = {"kind": "core:occurrence"}
 _POINT_FALLBACK = {"kind": "statement"}
 
+#: The pack-DECLARED event kinds (eventKinds) — including the kindDefs-less
+#: ones: the classifier can assign them via the kind index's "events"
+#: section (FIX L synthesis), so the write gate must accept them (FIX A
+#: candidate/write-gate alignment). Full + bare forms, case-folded.
+#: Derived once per process from the default packs (packs are static per
+#: process — mirrors the other vocab caches).
+_PACK_EVENT_FORMS: set[str] | None = None
+
+
+def _event_kind_forms(master: dict) -> set[str]:
+    """The writable event-kind vocabulary (FIX A candidate/write-gate
+    alignment): the master's event forms (core EVENTS + pack kindDefs —
+    the entity-gate mirror, ``master_kind_forms``) PLUS the namespaced
+    pack DECLARED event kinds (eventKinds — including kindDefs-less ones
+    the classifier can assign). Full + bare forms, case-folded. The gate
+    must never raise: a pack-registry failure degrades to the
+    master-forms-only set."""
+    global _PACK_EVENT_FORMS
+    forms = master_kind_forms(master)
+    if _PACK_EVENT_FORMS is None:
+        _PACK_EVENT_FORMS = set()
+        try:
+            from pathlib import Path  # noqa: I001 — lazy (module has no
+            # module-level pathlib import)
+            from tortoise.pack_registry import PackRegistry
+            packs_dir = Path(__file__).resolve().parent.parent / "packs"
+            reg = PackRegistry(packs_dir)
+            reg.load_all()
+            for ns, pack in reg.packs.items():
+                for k in (pack.event_kinds or []):
+                    _PACK_EVENT_FORMS.add(f"{ns}:{k}".lower())
+                    _PACK_EVENT_FORMS.add(k.lower())
+        except Exception:  # noqa: BLE001, RUF100 — never let the write
+            # gate raise (fail-open to the master-forms-only gate)
+            _PACK_EVENT_FORMS = set()
+    return forms | _PACK_EVENT_FORMS
+
+
+#: The pack-DECLARED object/document kinds (objectKinds + documentKinds) —
+#: including the kindDefs-less ones: the classifier can assign them via the
+#: kind index's "objects" section (FIX L synthesis), so the entity write
+#: gate must accept them (FIX M candidate/write-gate alignment — the events
+#: lane's FIX A mirror). Full + bare forms, case-folded. Derived once per
+#: process from the default packs (packs are static per process — mirrors
+#: _PACK_EVENT_FORMS).
+_PACK_OBJECT_FORMS: set[str] | None = None
+
+
+def _object_kind_forms(master: dict) -> set[str]:
+    """The writable entity-kind vocabulary (FIX M candidate/write-gate
+    alignment): the master's object/subject/point/event forms
+    (``master_kind_forms``) PLUS the namespaced pack DECLARED object and
+    document kinds (objectKinds + documentKinds — including kindDefs-less
+    ones the classifier can assign, e.g. dev:apiSpec, pm:milestone,
+    marketing:keyword). Full + bare forms, case-folded. The gate must never
+    raise: a pack-registry failure degrades to the master-forms-only set
+    (mirrors _event_kind_forms)."""
+    global _PACK_OBJECT_FORMS
+    forms = master_kind_forms(master)
+    if _PACK_OBJECT_FORMS is None:
+        _PACK_OBJECT_FORMS = set()
+        try:
+            from pathlib import Path  # noqa: I001 — lazy (module has no
+            # module-level pathlib import)
+            from tortoise.pack_registry import PackRegistry
+            packs_dir = Path(__file__).resolve().parent.parent / "packs"
+            reg = PackRegistry(packs_dir)
+            reg.load_all()
+            for ns, pack in reg.packs.items():
+                for k in (pack.object_kinds or []) + \
+                        (pack.document_kinds or []):
+                    _PACK_OBJECT_FORMS.add(f"{ns}:{k}".lower())
+                    _PACK_OBJECT_FORMS.add(k.lower())
+        except Exception:  # noqa: BLE001, RUF100 — never let the write
+            # gate raise (fail-open to the master-forms-only gate)
+            _PACK_OBJECT_FORMS = set()
+    return forms | _PACK_OBJECT_FORMS
+
 
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
@@ -2327,8 +2734,20 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not name:
             continue
         kind = str(e.get("kind", "")).strip() or "core:other"
-        forms = master_kind_forms(master)
-        if kind.lower() not in forms and \
+        # FIX M candidate/write-gate alignment: the entity gate uses the
+        # EXTENDED object vocabulary (master + pack object/document kinds —
+        # the classifier's synthesized object kinds, e.g. dev:apiSpec,
+        # pm:milestone, marketing:keyword, must survive un-repaired).
+        forms = _object_kind_forms(master)
+        if kind.lower() == UNCLASSIFIED:
+            # #1695 Task 5: the classify-later sentinel is NEVER written to
+            # the graph — best core kind + warning (the orchestrator's
+            # census already counted the terminal).
+            warnings.append(f"entity '{name[:60]}' kind 'unclassified' → "
+                            f"repaired to {_ENTITY_FALLBACK['kind']} "
+                            "(reserved sentinel)")
+            kind = _ENTITY_FALLBACK["kind"]
+        elif kind.lower() not in forms and \
                 kind.lower().rsplit(":", 1)[-1] not in {f.lower().rsplit(":", 1)[-1]
                                                         for f in forms}:
             warnings.append(f"minted entity kind {kind!r} ('{name[:60]}') "
@@ -2388,9 +2807,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not content:
             continue
         ekind = str(ev.get("eventKind", "")).strip() or "core:occurrence"
-        if ekind.lower() not in {k.lower() for k in master["events"]} and \
-                ekind.lower().rsplit(":", 1)[-1] not in {k.lower().rsplit(":", 1)[-1]
-                                                         for k in master["events"]}:
+        if ekind.lower() == UNCLASSIFIED:
+            warnings.append(f"event '{content[:60]}' kind 'unclassified' → "
+                            f"repaired to {_EVENT_FALLBACK['kind']} "
+                            "(reserved sentinel)")
+            ekind = _EVENT_FALLBACK["kind"]
+        elif ekind.lower() not in _event_kind_forms(master):
             warnings.append(f"minted event kind {ekind!r} ('{content[:60]}') "
                             f"→ repaired to {_EVENT_FALLBACK['kind']}")
             ekind = _EVENT_FALLBACK["kind"]
@@ -2453,7 +2875,12 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if not content:
             continue
         pkind = str(p.get("pointKind", "")).strip() or "statement"
-        if pkind.lower() not in {k.lower() for k in master["points"]}:
+        if pkind.lower() == UNCLASSIFIED:
+            warnings.append(f"point '{content[:60]}' kind 'unclassified' → "
+                            f"repaired to {_POINT_FALLBACK['kind']} "
+                            "(reserved sentinel)")
+            pkind = _POINT_FALLBACK["kind"]
+        elif pkind.lower() not in {k.lower() for k in master["points"]}:
             warnings.append(f"minted point kind {pkind!r} ('{content[:60]}') "
                             f"→ repaired to {_POINT_FALLBACK['kind']}")
             pkind = _POINT_FALLBACK["kind"]
@@ -2720,6 +3147,198 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     }
 
 
+# ── #1695 Task 5: classify-later stage helpers ────────────────────────────
+# (pure embed-list transforms — no LLM here; the classifier owns the LLM)
+
+#: The unclassified sentinel — shared with tortoise.kind_classifier (kept
+#: local so extractor_v2 never imports the classifier at module level).
+UNCLASSIFIED = "unclassified"
+
+_CLASSIFY_SECTIONS = (
+    ("entities", "kind", "entity"),
+    ("events", "eventKind", "event"),
+    ("points", "pointKind", "point"),
+)
+
+
+def _classify_item_id(section: str, item: dict) -> str:
+    """Stable per-item key across classify passes: section + normalized
+    name/content (index-independent — the merged list reorders)."""
+    key = str(item.get("name") or item.get("content") or "")
+    return f"{section}:{_norm(key)}"
+
+def _collect_classify_items(embed_list: dict) -> list[dict]:
+    """Items needing classification: entities/events/points whose kind is
+    missing or the ``unclassified`` sentinel (core kinds assigned
+    in-context stay). The classification surface is the name (entities) or
+    content (events/points)."""
+    items: list[dict] = []
+    for section, kind_field, item_type in _CLASSIFY_SECTIONS:
+        for i, item in enumerate(embed_list.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            kind = str(item.get(kind_field) or "").strip()
+            if kind and kind.lower() != UNCLASSIFIED:
+                continue
+            text = str(item.get("name") or item.get("content") or "").strip()
+            if not text:
+                continue
+            items.append({"id": f"{_classify_item_id(section, item)}#{i}",
+                          "type": item_type,
+                          "text": text,
+                          "section": section,
+                          "kind": kind,
+                          "_idx": i})
+    return items
+
+
+def _apply_classify_kinds(embed_list: dict, assignments: dict) -> dict:
+    """Write the classifier assignments back into the embed list. The
+    ``unclassified`` sentinel stays (the write path resolves it); every
+    other assigned kind lands on the item's kind field."""
+    for section, kind_field, _item_type in _CLASSIFY_SECTIONS:
+        for i, item in enumerate(embed_list.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            a = assignments.get(f"{_classify_item_id(section, item)}#{i}")
+            if not a:
+                continue
+            kind = str(a.get("kind") or "")
+            if not kind or kind == UNCLASSIFIED:
+                continue
+            item[kind_field] = kind
+    return embed_list
+
+
+def _s2_kind_register(s2_list: dict, s2_assignments: dict) -> dict:
+    """{section-identity: classifier kind} for S2 items — the kind-
+    preservation register the post-merge re-stamp consults (entities keyed
+    by name, events/points by content — the section-aware freeze: freezing
+    ``objects:plan`` never freezes ``subjects:plan``)."""
+    register: dict[str, str] = {}
+    for section, _kind_field, _item_type in _CLASSIFY_SECTIONS:
+        for i, item in enumerate(s2_list.get(section) or []):
+            if not isinstance(item, dict):
+                continue
+            a = s2_assignments.get(f"{_classify_item_id(section, item)}#{i}")
+            if not a:
+                continue
+            kind = str(a.get("kind") or "")
+            if not kind or kind == UNCLASSIFIED:
+                continue
+            register[f"{section}:{_identity_key(section, item)}"] = kind
+    return register
+
+
+def _identity_key(section: str, item: dict) -> str:
+    """The section-aware kind-freeze identity (E4 merge-key semantics minus
+    the kind, so a re-typed S4 duplicate is caught). Coerces via str() —
+    a numeric/non-str name or content must not raise (review FIX C)."""
+    if section == "entities":
+        return _norm(str(item.get("name") or ""))
+    return _norm(str(item.get("content") or ""))
+
+
+def _restamp_s2_kinds(merged: dict, register: dict,
+                      warnings: list[str]) -> int:
+    """Kind preservation (post-E4): S2 classifier kinds survive S4
+    re-emission. Every merged item whose section-aware identity matches a
+    registered S2 item but whose kind was lost (missing/unclassified) is
+    re-stamped with the S2 kind. The fold removes ONLY sentinel/missing/
+    identical duplicates — a same-name member carrying a DIFFERENT
+    non-sentinel kind is preserved as a distinct (name, kind) :Object and
+    is NEVER folded or re-stamped (the S2 re-stamp fills LOST kinds only;
+    cycle-3 P2). Returns the override count (observable via census)."""
+    overrides = 0
+    for section, kind_field, _item_type in _CLASSIFY_SECTIONS:
+        items = merged.get(section) or []
+        # entity name-collision fold: same identity, conflicting kinds →
+        # keep the one carrying a registered S2 kind, drop the duplicates
+        if section == "entities":
+            by_name: dict[str, list[dict]] = {}
+            for it in items:
+                if isinstance(it, dict):
+                    by_name.setdefault(_norm(str(it.get("name") or "")), []).append(it)
+            for name, group in by_name.items():
+                if len(group) <= 1:
+                    continue
+                s2_reg = register.get(f"entities:{name}")
+                if s2_reg is None:
+                    continue
+                keeper = next(
+                    (it for it in group
+                     if str(it.get(kind_field) or "").strip() == s2_reg), group[0])
+                for it in list(group):
+                    if it is keeper:
+                        continue
+                    # Fold ONLY sentinel / missing / identical duplicates —
+                    # a same-name member carrying a DIFFERENT non-sentinel
+                    # kind is a distinct (name, kind) :Object (Layer-1)
+                    # that the fold must never delete (final-review P2).
+                    cur = str(it.get(kind_field) or "").strip()
+                    if not cur or cur.lower() == UNCLASSIFIED or cur == s2_reg:
+                        warnings.append(
+                            f"entity '{str(it.get('name'))[:60]}' re-typed by S4 "
+                            f"(kind {it.get(kind_field)!r}) — folded into the S2 "
+                            f"classifier kind {s2_reg!r} (no duplicate :Object)")
+                        items[:] = [x for x in items if x is not it]
+                        overrides += 1
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            s2k = register.get(f"{section}:{_identity_key(section, it)}")
+            if not s2k:
+                continue
+            cur = str(it.get(kind_field) or "").strip()
+            # Re-stamp ONLY LOST kinds (missing / the sentinel). A
+            # register-matched item carrying a DIFFERENT valid non-sentinel
+            # kind is a preserved distinct (name, kind) :Object — the S2
+            # re-stamp must never clobber it (cycle-3 P2: the fold above
+            # preserves it, so the re-stamp must too).
+            if not cur or cur.lower() == UNCLASSIFIED:
+                it[kind_field] = s2k
+                overrides += 1
+            elif cur.lower() != s2k.lower():
+                ident = str(it.get("name") if section == "entities"
+                            else it.get("content"))[:60]
+                warnings.append(
+                    f"entity '{ident}' re-typed by S4 (kind {cur!r}) — "
+                    f"preserved as distinct (name, kind) :Object")
+    return overrides
+
+
+def _rekey_slots(embed_list: dict) -> int:
+    """Slot re-key: participant slot kinds follow the classified entity
+    kinds (matched by name) — a slot's kind field must agree with its
+    entity's final kind. Returns the number of re-keyed slots."""
+    kind_by_name: dict[str, str] = {}
+    for e in embed_list.get("entities") or []:
+        if isinstance(e, dict) and e.get("name") and e.get("kind"):
+            k = str(e["kind"])
+            if k.lower() == UNCLASSIFIED:
+                # the sentinel is a terminal, never copied into a slot
+                # kind; slots must reference real kinds (the write path
+                # resolves the terminal on the top-level field itself)
+                continue
+            kind_by_name[_norm(str(e["name"]) or "")] = k
+    rekeyed = 0
+    for section in ("points", "events"):
+        for it in embed_list.get(section) or []:
+            if not isinstance(it, dict):
+                continue
+            slots = it.get("slots")
+            if not isinstance(slots, dict):
+                continue
+            for role in ("subject", "object"):
+                for s in slots.get(role) or []:
+                    if isinstance(s, dict) and s.get("name"):
+                        k = kind_by_name.get(_norm(str(s["name"]) or ""))
+                        if k and str(s.get("kind")) != k:
+                            s["kind"] = k
+                            rekeyed += 1
+    return rekeyed
+
+
 # ── The orchestrator ───────────────────────────────────────────────────────
 
 def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
@@ -2731,9 +3350,32 @@ def _edus_from_conversation(conversation: list[dict]) -> list[dict]:
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
-                       session_date: str | None = None) -> dict:
+                       session_date: str | None = None,
+                       kind_classifier=None) -> dict:
     """The v2 production entry: conversation → S1 (chunked+compiled) → S2 →
     S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
+
+    ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
+    None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the
+    classify-later machinery (classifier passes, kind-preservation re-stamp,
+    slot re-key) is entirely off-path, and the flag-off renders are
+    byte-identical to main. Scope of that byte-identity guarantee: the
+    DEFAULT (verbose) render + the shared pipeline stages — NOT the whole
+    result dict. Documented non-regressions: (a) the chain enforcer (Task 1)
+    runs UNCONDITIONALLY on every arm (the A/B holds it constant) and may
+    deterministically rewire about_entities on the flag-off path — its
+    result key reflects that run (``items_checked`` >= 1 whenever
+    about_entities exist on any arm); (b) compact mode keeps its
+    pre-existing story-threaded pack selection (``_select_pack_kinds``,
+    identical in main) — the byte-identity guarantee is pinned to the
+    default verbose render; (c) two ADDITIVE result keys (``chain_enforcer``
+    / ``classify_later``) are always present — only ``classify_later`` is
+    an empty block when the flag is off.
+    When set (or the env toggle is on), the stage order becomes
+    S1 → S2 → classify(S2) → S3 → S4 → E4+re-stamp → classify(union,
+    kind-missing only) → slot re-key → resolve_entities → post-resolution
+    re-key → chain_enforcer → execute_embed, with core-only S2/S4 renders
+    (pack vocabulary + chains out of the prompt).
 
     ``session_date`` (E1, #1533) is the ISO date/datetime the conversation
     happened on: it anchors the S1/S2/S4 prompts (DATE ANCHOR block) and
@@ -2758,8 +3400,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # M3 (#1524, D3): per-session LLM roll-up + granular error census (class →
     # count across S1/S2/S4 failures). ``errors`` (strings) stays unchanged —
     # the additive keys feed the harness's per-question integrity (M4).
+    # #1746 (D1/D7): the recovery counters roll per-stage (the ladder's
+    # sanitize/repair events — never error strings, never census entries).
     llm_stats: dict = {"calls": 0, "retries": 0, "truncated": 0}
+    recovery_stats: dict[str, int] = {}
     error_census: dict[str, int] = {}
+    # #1695 Task 5: the classify-later choke point — the env toggle read
+    # HERE reaches every caller (sdk/hosted_api/ingest_v2/run_v2_pipeline all
+    # route through extract_session_v2); an injected classifier wins.
+    classify_later = kind_classifier is not None or _classify_later_enabled()
+    if classify_later and kind_classifier is None:
+        try:
+            kind_classifier = _default_kind_classifier(model)
+        except Exception as e:  # noqa: BLE001, RUF100 — never let the
+            # classifier construction block capture (fail-open: legacy path)
+            classify_later = False
+            errors.append(f"classify-later init failed: {type(e).__name__}: {e}")
+            _bump_census_class(error_census, "classify_later_init_failed")
     edus = _edus_from_conversation(conversation)
     if not edus:
         return {"session_id": session_id, "story_arc": "", "embed_list": {},
@@ -2768,8 +3425,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 "payload": None, "chain_notes": [], "link_before_create": [],
                 "supersessions": [],
                 "warnings": ["empty conversation — nothing extracted"],
-                "minted_kinds": [], "stats": {"llm": llm_stats},
-                "errors": errors, "error_census": error_census}
+                "minted_kinds": [], "stats": {"llm": llm_stats,
+                                                "recovery": recovery_stats},
+                "errors": errors, "error_census": error_census,
+                # #1695 Task 5: the evidence surfaces are always present
+                # (additive keys, empty when the flag is off)
+                "classify_later": {"enabled": classify_later,
+                                   "s2": {}, "union": {},
+                                   "restamp_overrides": 0,
+                                   "slot_rekeys": 0},
+                "chain_enforcer": {"notes": [], "stats": {
+                    "items_checked": 0, "violations": 0,
+                    "rewired": 0, "warned": 0}}}
 
     t0 = time.time()
     # ── S1: chunked story summary + compile ────────────────────────────────
@@ -2790,8 +3457,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
         _rollup_llm(llm_stats, stage_stats)
+        _rollup_recovery(recovery_stats, stage_stats)
     if failed_chunks:
         errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
+        # D1 (#1746): deterministic class for the summary line — one bump per
+        # summary event, fired under the SAME condition as the append, so a
+        # clean run has no stray bump.
+        _bump_census_class(error_census, "s1_chunk_summary")
     story = compile_stories(chunk_stories)
     story_arc = story
 
@@ -2802,11 +3474,47 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         try:
             embed_list = run_s2(model, story, master,
                                 session_date=session_date, edus=edus,
-                                stats=stage_stats)
+                                stats=stage_stats,
+                                core_only=classify_later)
         except Exception as e:
             errors.append(f"S2 failed: {type(e).__name__}: {e}")
             _bump_census(error_census, e)
+        # D4 (#1746): a schema-validated PARTIAL accept (truncated tail
+        # dropped) is a recorded ERROR — the embed list is incomplete
+        # (valid=false), never a clean outcome. The partial list IS used.
+        if stage_stats.get("partial"):
+            errors.append("S2 output partial — truncated tail dropped "
+                          "(embed list incomplete)")
+            _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats)
+        _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
+    # domain items the core-only S2 emitted as "unclassified" get their
+    # kinds BEFORE S3 so the graph search + S4 see final kinds (typed refs
+    # guaranteed pre-resolution). Fail-open: never blocks capture.
+    s2_classify_stats: dict = {}
+    s2_classify_warnings: list[str] = []
+    s2_assignments: dict = {}
+    if classify_later and embed_list:
+        try:
+            items = _collect_classify_items(embed_list)
+            if items:
+                out = kind_classifier.classify_items(items)
+                _apply_classify_kinds(embed_list, out["assignments"])
+                s2_classify_stats = out["stats"]
+                s2_classify_warnings = out["warnings"]
+                s2_assignments = out["assignments"]
+                _bump_classify_census(error_census, out["stats"])
+                # The adjudication tail's LLM spend (calls/retries/truncated)
+                # rolls into the per-session llm_stats — the A/B cost gate
+                # must see the flag-on arm's batched adjudication cost.
+                usage = out["stats"].get("llm")
+                if usage:
+                    _rollup_llm(llm_stats, usage)
+        except Exception as e:  # never block capture (P1)
+            errors.append(f"classify(S2) failed: {type(e).__name__}: {e}")
+            _bump_census_class(error_census, "classify_error")
 
     # ── S3: search the graph (real backend, graceful degradation) ──────────
     search = search_graph(sdk, embed_list, story)
@@ -2820,7 +3528,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         try:
             s4 = run_s4(model, story, search, embed_list, master,
                         session_date=session_date, edus=edus,
-                        stats=stage_stats)
+                        stats=stage_stats,
+                        core_only=classify_later)
             if s4 and (s4.get("entities") or s4.get("points") or
                        s4.get("events") or s4.get("operators")):
                 complete_list = merge_embed_lists(embed_list, s4)
@@ -2831,7 +3540,50 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         except Exception as e:
             errors.append(f"S4 failed: {type(e).__name__}: {e} — kept S2 output")
             _bump_census(error_census, e)
+        # D4 (#1746): a schema-validated PARTIAL S4 accept is a recorded
+        # ERROR (same contract as the S2 partial above) — the partial IS
+        # merged over the S2 base (merge_embed_lists preserves S2 intact).
+        if stage_stats.get("partial"):
+            errors.append("S4 output partial — truncated tail dropped "
+                          "(embed list incomplete)")
+            _bump_census_class(error_census, "partial_parse")
         _rollup_llm(llm_stats, stage_stats)
+        _rollup_recovery(recovery_stats, stage_stats)
+
+    # ── classify-later post-merge pass (#1695 Task 5): E4 + kind-preservation
+    # re-stamp → classify(union, kind-missing only) → slot re-key. The S2
+    # classifier kinds survive S4 re-emission (re-stamp + duplicate fold),
+    # the union's untyped gaps get kinds, and participant-slot kinds follow
+    # the final entity kinds (typed refs guaranteed pre-resolution).
+    s2_kind_register: dict = {}
+    union_classify_stats: dict = {}
+    union_classify_warnings: list[str] = []
+    restamp_overrides = 0
+    slot_rekeys = 0
+    if classify_later and complete_list:
+        s2_kind_register = _s2_kind_register(embed_list, s2_assignments)
+        try:
+            restamp_warnings: list[str] = []
+            restamp_overrides = _restamp_s2_kinds(complete_list,
+                                                  s2_kind_register,
+                                                  restamp_warnings)
+            if restamp_warnings:
+                s4_warnings.extend(restamp_warnings)
+            items = _collect_classify_items(complete_list)
+            if items:
+                out = kind_classifier.classify_items(items)
+                _apply_classify_kinds(complete_list, out["assignments"])
+                union_classify_stats = out["stats"]
+                union_classify_warnings = out["warnings"]
+                _bump_classify_census(error_census, out["stats"])
+                # roll the adjudication tail spend (same as the S2 pass).
+                usage = out["stats"].get("llm")
+                if usage:
+                    _rollup_llm(llm_stats, usage)
+            slot_rekeys = _rekey_slots(complete_list)
+        except Exception as e:  # never block capture (P1)
+            errors.append(f"classify(union) failed: {type(e).__name__}: {e}")
+            _bump_census_class(error_census, "classify_error")
 
     # ── entity resolution (D3): deterministic-first, bounded LLM fallback.
     # Runs BETWEEN S4 and S5; rewrites the embed list's entity names +
@@ -2854,24 +3606,96 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                         complete_list, res["map"])
                 resolution_records = res.get("records") or []
                 resolution_warnings = res.get("warnings") or []
+                # #1695 Task 5: post-resolution re-key — the resolution may
+                # rename entities; the participant-slot kinds are re-applied
+                # (idempotent — kinds don't change, names may) so the typed
+                # refs stay consistent with the canonical entities.
+                if classify_later:
+                    slot_rekeys += _rekey_slots(complete_list)
             except Exception as e:  # noqa: BLE001, RUF100 — resolve_entities is
                 # guarded internally, but the orchestrator never dies on
                 # resolution (P1: degrade to phase-1/ADD semantics)
                 errors.append(f"entity resolution failed: {type(e).__name__}: {e}")
+                # D1 (#1746): deterministic class for the previously-
+                # uncensused resolution failure path.
+                _bump_census_class(error_census, "entity_resolution_failed")
+
+    # ── chain enforcement (#1695 Task 1): DETERMINISTIC rewire between the
+    # resolution pass and S5 — the prompts' advisory "TRY TO REPAIR" becomes
+    # guaranteed. Never-invent / never-drop: reverse-chain about_entities
+    # pairs rewire through the nearest valid chain intermediate ONLY when
+    # unambiguous; else warn-and-keep. Runs on EVERY arm (independent of the
+    # classify-later flag — the A/B holds it constant). Never blocks capture.
+    chain_enforcer_notes: list[dict] = []
+    chain_enforcer_stats: dict = {}
+    try:
+        from tortoise.chain_enforcer import validate_and_rewire
+        complete_list, chain_enforcer_notes, chain_enforcer_stats = \
+            validate_and_rewire(complete_list, master)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        errors.append(f"chain enforcement failed: {type(e).__name__}: {e}")
+        # D1 (#1746): deterministic class for the previously-uncensused
+        # chain-enforcement failure path.
+        _bump_census_class(error_census, "chain_enforcement_failed")
 
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
+        # D1 (#1746): deterministic class for the previously-uncensused
+        # empty-embed-list path.
+        _bump_census_class(error_census, "empty_embed_list")
     try:
         result = execute_embed(complete_list, search, session_id=session_id,
                                story_arc=story_arc, master=master,
                                session_date=session_date, edus=edus)
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
         errors.append(f"S5 failed: {type(e).__name__}: {e}")
+        # D1 (#1746): deterministic class for the previously-uncensused S5
+        # failure path.
+        _bump_census_class(error_census, "s5_failed")
         result = {"payload": None, "chain_notes": [], "link_before_create": [],
                   "supersessions": [], "noops": [], "deletions": [],
                   "warnings": [f"S5 embed execution failed: {e}"],
                   "minted_kinds": [], "stats": {}}
+    result["chain_enforcer"] = {      # #1695 Task 1 evidence surface
+        "notes": chain_enforcer_notes,
+        "stats": chain_enforcer_stats,
+    }
+    # #1695 Task 5: the classify-later evidence surface (flag-off: the
+    # empty block — no telemetry growth, additive keys only).
+    result["classify_later"] = {
+        "enabled": classify_later,
+        "s2": s2_classify_stats,
+        "union": union_classify_stats,
+        "restamp_overrides": restamp_overrides,
+        "slot_rekeys": slot_rekeys,
+    }
+    if classify_later:
+        # the unclassified terminal is resolved at write (execute_embed's
+        # sentinel repair) — count it in the census. The UNION pass
+        # re-classifies the same below-floor S2 survivors (they are still
+        # kind-missing in the merged list), so its count is authoritative;
+        # fall back to the S2 count only when the union pass never ran.
+        # union_classify_stats is non-empty ONLY when the union pass ran
+        # (collected items) — gate the fallback on that, not on the count
+        union_u = union_classify_stats.get("unclassified") or 0
+        terminal = (union_u if union_classify_stats
+                    else (s2_classify_stats.get("unclassified") or 0))
+        if terminal:
+            error_census["unclassified_terminal"] = \
+                error_census.get("unclassified_terminal", 0) + terminal
+        for w in s2_classify_warnings + union_classify_warnings:
+            result.setdefault("warnings", []).append(w)
+    # The enforcer's notes are authoritative for every violation it examined
+    # (backstop note ⟹ enforcer note — both scan the same item/chain
+    # subsequences). When it ruled anything, its notes + the model's OWN
+    # chain_notes (from the embed list) replace the backstop's advisory
+    # notes, which would otherwise duplicate/contradict (a warned-and-kept
+    # pair gets re-flagged by validate_chains with its weaker recommendation).
+    if chain_enforcer_notes:
+        llm_chain_notes = [dict(c) for c in (complete_list.get("chain_notes") or [])
+                           if isinstance(c, dict)]
+        result["chain_notes"] = chain_enforcer_notes + llm_chain_notes
     result["session_id"] = session_id
     result["story_arc"] = story_arc
     result["embed_list"] = complete_list
@@ -2900,6 +3724,7 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # real value (previously always 0).
     result["error_census"] = error_census
     result["stats"]["llm"] = llm_stats
+    result["stats"]["recovery"] = recovery_stats  # #1746 (D7): ladder events
     if result.get("payload"):
         result["payload"]["telemetry"]["retry_count"] = llm_stats["retries"]
     return result
@@ -3050,16 +3875,68 @@ def _is_fatal_error(e: BaseException) -> bool:
 
 
 class _ParseError(ValueError):
-    """S2/S4 output that fails ``_parse_json`` — census class ``parse_error``
-    (a prompt/OUTPUT_CONTRACT regression, not a provider condition; the D6
-    triage treats a ``parse_error`` spike as a fix-the-prompt, not a
-    retry-harder)."""
+    """S2/S4 output that fails the parse-recovery ladder — census class
+    ``parse_error`` / ``truncated_parse_error`` (D2, #1746).
+
+    Carries the class-decision signal: ``truncated`` = the FIRST
+    parse-failing attempt's ``finish_reason`` was ``"length"`` (the
+    truncation hypothesis — H3) vs ``parse_error`` (contamination /
+    sloppiness — H2); ``attempt`` = which completion attempt failed;
+    ``excerpt`` = a bounded error region for the error-informed re-prompt
+    (D3)."""
+
+    def __init__(self, message: str, *, truncated: bool = False,
+                 attempt: int = 0, excerpt: str = ""):
+        super().__init__(message)
+        self.truncated = truncated
+        self.attempt = attempt
+        self.excerpt = excerpt
 
 
 def _bump_census(error_census: dict[str, int], e: BaseException) -> None:
-    """Record one stage-failure in the per-session census (D3)."""
-    cls = "parse_error" if isinstance(e, _ParseError) else _classify_error(e)
+    """Record one stage-failure in the per-session census (D3, #1746).
+
+    ``_ParseError`` is class-decided on its ``truncated`` flag (D2):
+    ``truncated_parse_error`` vs ``parse_error``; every other exception
+    keeps ``_classify_error`` (P2 delegation preserved)."""
+    if isinstance(e, _ParseError):
+        cls = "truncated_parse_error" if e.truncated else "parse_error"
+    else:
+        cls = _classify_error(e)
     error_census[cls] = error_census.get(cls, 0) + 1
+
+
+def _bump_census_class(error_census: dict[str, int], cls: str) -> None:
+    """Class-explicit census bump (D1, #1746) — the deterministic-append
+    rule: every ``errors.append`` site in ``extract_session_v2`` pairs
+    exactly ONE census class, so ``len(errors) == sum(error_census)`` holds
+    structurally for the raise-paired classes (criterion 2; the pilot's
+    16-vs-14 drift is gone).
+
+    #1695 Task 5 — DUAL-provenance classes (documented, flag-only):
+    ``classify_error`` is BOTH raise-paired (the classify(S2)/classify(union)
+    exception handlers append an ``errors`` entry AND bump this class) AND
+    additively counted per-item by ``_bump_classify_census`` (the
+    classifier's fail-open per-item counters — rerank/adjudication/retrieval
+    failures never raise, so no ``errors`` entry pairs THOSE bumps).
+    ``embedding_error`` / ``unclassified_terminal`` are ADDITIVE ONLY (no
+    ``errors`` entry pairs them). The structural len-equality holds on the
+    raise-paired classes; the flag-only classes are governed by their own
+    A/B thresholds (parse-census equality computes on the class
+    INTERSECTION, per the plan)."""
+    error_census[cls] = error_census.get(cls, 0) + 1
+
+
+def _bump_classify_census(error_census: dict[str, int], stats: dict) -> None:
+    """#1695 Task 5: wire the classifier's fail-open counters into the
+    per-session error census (``classify_error`` / ``embedding_error`` — the
+    flag-only classes, additive observability per the documented exception
+    in ``_bump_census_class``; never paired with an ``errors`` entry)."""
+    for cls, key in (("classify_error", "classify_errors"),
+                     ("embedding_error", "embedding_errors")):
+        n = stats.get(key) or 0
+        if n:
+            error_census[cls] = error_census.get(cls, 0) + n
 
 
 def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
@@ -3070,10 +3947,21 @@ def _rollup_llm(llm_stats: dict, stage_stats: dict) -> None:
     llm_stats["truncated"] += int(bool(stage_stats.get("truncated")))
 
 
+def _rollup_recovery(recovery_stats: dict, stage_stats: dict) -> None:
+    """Roll one stage's recovery counters into the per-session recovery
+    roll-up (#1746, D4/D7: the ladder's sanitize / sanitize_insufficient /
+    repair events — warning-only, never error strings, never census)."""
+    for k, v in (stage_stats.get("recovery") or {}).items():
+        recovery_stats[k] = recovery_stats.get(k, 0) + v
+
+
 def _call_once(model, system: str, user: str, *, deadline_s: int,
-               max_tokens: int | None, stats: dict | None) -> str:
+               max_tokens: int | None, stats: dict | None) -> tuple[str | None, object | None]:
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
+
+    Returns ``(resp, finish_reason)`` — the finish reason captured in the
+    calling thread right after ``complete()`` returns (F4 #1780).
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
@@ -3086,6 +3974,13 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         try:
             kwargs = _cap_kwargs(model, max_tokens, stats)
             box["resp"] = model.complete(system=system, user=user, **kwargs)
+            # F4 (#1780): capture the finish reason in the SAME thread as
+            # the call (happens-before via the join below). Reading
+            # ``model.last_finish_reason`` later from the caller thread is a
+            # cross-thread race under ``--workers > 1``: another thread's
+            # complete() can overwrite the shared attribute between the
+            # return and the read.
+            box["finish_reason"] = getattr(model, "last_finish_reason", None)
         except BaseException as e:  # noqa: BLE001, RUF100
             box["exc"] = e
 
@@ -3099,20 +3994,20 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         # trickle defeats the requests read timeout). close() is best-effort.
         close = getattr(model, "close", None)
         if close is not None:
-            try:
+            try:  # noqa: SIM105
                 close()
             except Exception:
                 pass
         raise TimeoutError(f"model call exceeded {deadline_s}s")
     if "exc" in box:
         raise box["exc"]
-    return box.get("resp")
+    return (box.get("resp"), box.get("finish_reason"))
 
 
 def _complete(model, system: str, user: str, *, deadline_s: int = 600,
-              max_tokens: int | None = None, retries: int = _COMPLETE_RETRIES,
-              backoff_base: float = _BACKOFF_BASE_S,
-              backoff_cap: float = _BACKOFF_CAP_S,
+              max_tokens: int | None = None, retries: int | None = None,
+              backoff_base: float | None = None,
+              backoff_cap: float | None = None,
               stats: dict | None = None) -> str:
     """Wall-clock-bounded completion with retry/backoff (M3 #1524, D1).
 
@@ -3129,17 +4024,31 @@ def _complete(model, system: str, user: str, *, deadline_s: int = 600,
     attempts / retries / truncated / last_class per call for the per-session
     LLM roll-up (D3).
 
+    ``retries``/``backoff_*`` default to None → the module constants
+    (``_COMPLETE_RETRIES`` / ``_BACKOFF_BASE_S`` / ``_BACKOFF_CAP_S``) are
+    read at CALL time (live constants — the test hook pins them to zero/small
+    values so the fail path never sleeps; cycle-3 P2 test hygiene).
+
     Total worst-case wall clock = attempts × deadline_s (documented — the
     abandoned daemon thread after a deadline keeps running and the provider
     keeps billing; accepted, bounded per attempt)."""
+    if retries is None:
+        retries = _COMPLETE_RETRIES
+    if backoff_base is None:
+        backoff_base = _BACKOFF_BASE_S
+    if backoff_cap is None:
+        backoff_cap = _BACKOFF_CAP_S
     for attempt in range(1, retries + 2):
         try:
-            resp = _call_once(model, system, user, deadline_s=deadline_s,
-                              max_tokens=max_tokens, stats=stats)
-            truncated = getattr(model, "last_finish_reason", None) == "length"
+            resp, finish_reason = _call_once(model, system, user,
+                                             deadline_s=deadline_s,
+                                             max_tokens=max_tokens,
+                                             stats=stats)
+            truncated = finish_reason == "length"
             if stats is not None:
                 stats.update(attempts=attempt, retries=attempt - 1,
-                             last_class=None, truncated=bool(truncated))
+                             last_class=None, truncated=bool(truncated),
+                             finish_reason=finish_reason)
             return resp
         except BaseException as e:  # noqa: BLE001, RUF100
             if not isinstance(e, Exception):  # never retry SystemExit/KeyboardInterrupt
@@ -3207,6 +4116,330 @@ def _parse_json(response: str) -> dict:
     raise ValueError("unparseable JSON")
 
 
+# ══ #1746 (D4/D5): the parse-boundary recovery ladder ════════════════════
+#
+# ``_parse_json_robust`` replaces the binary parse-or-fail at the S2/S4 seam:
+# rung 1 canonical → rung 2 sanitize (H2 control-char contamination) → rung 3
+# bounded repair → rung 4 schema-validated partial-accept (H3 truncation) →
+# rung 5 raise. Every recovery is a recorded event (``stats["recovery"]`` /
+# ``stats["partial"]``); failures keep their mechanism class via
+# ``_ParseError.truncated`` (D2).
+
+#: D5: the structural output-shape schema, hand-derived from OUTPUT_CONTRACT
+#: (kept adjacent — a contract edit → schema edit is a NEW coupling, tracked
+#: in the plan's Open questions). Each present section must be a LIST of
+#: dicts; each item must carry its required keys (primitive-typed); unknown
+#: keys and empty arrays ride through (valid).
+_OUTPUT_SCHEMA: dict[str, tuple[str, ...]] = {
+    "entities": ("name", "kind"),
+    "events": ("content", "eventKind"),
+    "points": ("content",),
+    "operators": ("src", "dst", "op_type"),
+    "chain_notes": ("chain", "finding", "action"),
+    "link_before_create": ("searched_for", "found"),
+    "retractions": ("content", "id"),  # content | id — either satisfies
+}
+
+#: D5: primitive types for the required keys (structural strictness only).
+_SCHEMA_PRIMITIVES: dict[str, tuple[type, ...]] = {
+    "name": (str,), "kind": (str,), "content": (str,),
+    "eventKind": (str,), "src": (str,), "dst": (str,),
+    "op_type": (str,), "chain": (str,), "finding": (str,),
+    "action": (str,), "searched_for": (str,), "found": (bool,),
+    "id": (str,),
+}
+
+
+def _is_primitive(v) -> bool:
+    return not isinstance(v, (dict, list, tuple)) and v is not None
+
+
+def _validate_output_shape(parsed) -> tuple[bool, list[str]]:
+    """D5 (#1746): structural-only output-shape validation — a schema gate
+    for the ladder's rungs 3-4 (a mis-tracked sanitize/repair scan can never
+    corrupt: junk output fails schema and falls through). Top-level must be
+    a dict; each PRESENT contract section must be a LIST of dicts; each item
+    must carry its required keys with primitive values; unknown keys and
+    empty arrays are VALID (fields ride through by reference — S5's
+    execution validation owns semantic repair). ``retractions`` items need
+    ``content`` OR ``id`` (the contract's ``content|id``)."""
+    issues: list[str] = []
+    if not isinstance(parsed, dict):
+        return False, [f"top-level output is {type(parsed).__name__}, not an object"]
+    for section, required in _OUTPUT_SCHEMA.items():
+        if section not in parsed:
+            continue
+        items = parsed[section]
+        if not isinstance(items, list):
+            issues.append(f"section {section!r} is {type(items).__name__}, not a list")
+            continue
+        for idx, item in enumerate(items):
+            if not isinstance(item, dict):
+                issues.append(f"{section}[{idx}] is {type(item).__name__}, not an object")
+                continue
+            if section == "retractions" and not (
+                    "content" in item or "id" in item):
+                issues.append(f"retractions[{idx}] needs content or id")
+            for key in required:
+                if key not in item:
+                    if section == "retractions":
+                        continue  # content | id — the disjunction is above
+                    issues.append(f"{section}[{idx}] missing required key {key!r}")
+                    continue
+                if not _is_primitive(item[key]):
+                    issues.append(
+                        f"{section}[{idx}].{key} is a non-primitive value")
+                    continue
+                expect = _SCHEMA_PRIMITIVES.get(key)
+                if expect and not isinstance(item[key], expect):
+                    issues.append(
+                        f"{section}[{idx}].{key} has the wrong type "
+                        f"(expected {expect[0].__name__})")
+    return (not issues), issues
+
+
+#: C0 control chars (0x00-0x1F) — escaped inside string literals by the
+#: sanitize rung (H2 output-side contamination, #1746 D4).
+_C0_CONTROL = frozenset(chr(c) for c in range(0x20))
+
+
+_SANITIZE_ESCAPES = {
+    "\n": "\\n", "\t": "\\t", "\r": "\\r",
+    "\b": "\\b", "\f": "\\f", "\"": "\\\"", "\\": "\\\\",
+}
+
+
+def _sanitize_control_chars(response: str) -> str:
+    """D4 rung 2 (#1746): string-aware scan — escape raw C0 control chars
+    (0x00-0x1F, incl. raw newlines/tabs) INSIDE string literals as their
+    JSON escapes; structural whitespace is untouched. Returns the original
+    string unchanged when nothing was altered (so callers can detect
+    whether the rung did work)."""
+    out: list[str] = []
+    in_str = False
+    esc = False
+    changed = False
+    for c in response:
+        if in_str:
+            if esc:
+                out.append(c)  # part of an escape sequence — leave as-is
+                esc = False
+                continue
+            if c == "\\":
+                out.append(c)
+                esc = True
+                continue
+            if c == '"':
+                in_str = False
+                out.append(c)
+                continue
+            if c in _C0_CONTROL:
+                out.append(_SANITIZE_ESCAPES.get(c, f"\\u{ord(c):04x}"))
+                changed = True
+                continue
+            out.append(c)
+            continue
+        if c == '"':
+            in_str = True
+        out.append(c)
+    return "".join(out) if changed else response
+
+
+#: D4 rung 3: bounded missing-comma repairs at boundary joins (first-valid-
+#: wins; the schema gate backstops a mis-targeted substitution).
+_REPAIR_RULES: tuple[tuple[str, str], ...] = (
+    ('}"{', '}", "{'),
+    (']"{"', ']", "{'),
+    ('}"[', '}", "['),
+    (']"["', ']", "['),
+    ('}{', '},{'),
+    ('][', '],['),
+    ('}"', '},"'),  # dict value object → next key (bounded, gated)
+)
+
+
+def _apply_repair_rule(working: str, find: str, repl: str) -> str | None:
+    """String-aware first-match application of one comma-insertion rule:
+    find the FIRST occurrence of ``find`` OUTSIDE any string literal
+    (in_str/esc tracker) and replace it; None when no outside-string
+    occurrence exists (a rule that only fires inside strings never
+    corrupts)."""
+    in_str = False
+    esc = False
+    n = len(find)
+    i = 0
+    while i <= len(working) - n:
+        c = working[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            i += 1
+            continue
+        if working.startswith(find, i):
+            return working[:i] + repl + working[i + n:]
+        i += 1
+    return None
+
+
+def _repair_candidates(working: str) -> list[str]:
+    """D4 rung 3 (#1746): bounded CONTENT-PRESERVING repair candidates on
+    the working text — (a) unterminated object → append up to 8 closers;
+    (b) the bounded missing-comma rule list, applied string-aware
+    (``_apply_repair_rule``: a rule that only fires inside a string value
+    is never applied — no silent in-string corruption). NO data-dropping
+    tail-cuts here (a truncation cut at an item boundary is a recorded
+    ERROR via rung 4's partial-accept — ``stats["partial"]``, never a
+    warning-only "repair"). First-valid-wins + schema gate keep it safe;
+    no free-form repair library, no unbounded heuristics."""
+    candidates: list[str] = []
+    for k in range(1, 9):
+        candidates.append(working + "}" * k)
+    for find, repl in _REPAIR_RULES:
+        r = _apply_repair_rule(working, find, repl)
+        if r is not None:
+            candidates.append(r)
+    return candidates
+
+
+_EMBED_SECTIONS = ("entities", "points", "events", "operators")
+
+
+def _close_balanced(text: str) -> str | None:
+    """D4 rung 4 helper (#1746): append the minimal closing brackets that
+    make a JSON prefix balanced (the truncation cut lands mid-structure, so
+    a strict ``json.loads(prefix)`` can never be valid — the recovered
+    prefix is CLOSED before parsing). Returns None when the prefix cannot
+    be closed safely (an unterminated string/escape at the cut, or a
+    mismatched close — a mis-tracked cut must never corrupt)."""
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for c in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif c == "\\":
+                esc = True
+            elif c == '"':
+                in_str = False
+            continue
+        if c == '"':
+            in_str = True
+        elif c in "[{":
+            stack.append("]" if c == "[" else "}")
+        elif c in "]}":
+            if not stack:
+                return None
+            if stack[-1] != ("]" if c == "]" else "}"):
+                return None
+            stack.pop()
+    if in_str or esc:
+        return None
+    return text + "".join(reversed(stack))
+
+
+def _longest_valid_prefix(text: str) -> dict | None:
+    """D4 rung 4 (#1746): schema-validated partial-accept — progressive
+    prefix cuts at item boundaries (``}``/``]`` positions from the tail,
+    bounded ≤ 200 candidates), each closed to balance (``_close_balanced``)
+    and parsed; the LONGEST prefix that parses AND passes the schema gate
+    with ≥ 1 non-empty embed section (entities/points/events/operators —
+    mirroring the S4 caller's merge condition, so a partial the caller
+    would discard can never be falsely classed ``partial_parse``) is
+    accepted. A truncated-to-empty prefix never counts; a prefix with only
+    chain_notes/link_before_create/retractions non-empty falls through
+    (returns None → the caller raises)."""
+    positions = sorted((i for i, c in enumerate(text) if c in "}]"),
+                       reverse=True)
+    for i in positions[:200]:
+        closed = _close_balanced(text[:i + 1])
+        if closed is None:
+            continue
+        try:
+            parsed = json.loads(closed)
+        except json.JSONDecodeError:
+            continue
+        ok, _ = _validate_output_shape(parsed)
+        if not ok:
+            continue
+        if not any(parsed.get(s) for s in _EMBED_SECTIONS):
+            continue
+        return parsed
+    return None
+
+
+def _parse_json_robust(response: str, *, stats: dict | None = None) -> dict:
+    """D4 (#1746): the parse-boundary recovery ladder — raises
+    ``_ParseError`` on final failure.
+
+    Rungs per attempt: 1 canonical ``_parse_json``; 2 string-aware sanitize
+    (raw C0 control chars inside string literals → JSON escapes; success →
+    ``stats["recovery"]["sanitize"] += 1``; altered-but-unparseable → the
+    sanitized text becomes the ``working`` input for rungs 3-4 +
+    ``sanitize_insufficient += 1``); 3 bounded repair on ``working``
+    (schema-gated, first-valid-wins; success → ``recovery["repair"] += 1``);
+    4 schema-validated partial-accept on ``working`` (success →
+    ``stats["partial"] = True`` — the caller appends the ``partial_parse``
+    error class); 5 raise. The D5 schema gate backstops a mis-tracked scan
+    before any rung-3/4 output is accepted — worst case it fails schema and
+    falls through, never corrupting."""
+    response = response or ""  # a None adapter response (null provider
+    # content) must not crash rung 2's ``_sanitize_control_chars`` scan
+    # (the ``_error_excerpt`` docstring already claims None tolerance).
+    last_err: ValueError | None = None
+    # rung 1 — canonical (fences, brace-balance, tail-cuts)
+    try:
+        return _parse_json(response)
+    except ValueError as e:
+        last_err = e
+    recovery = (stats.setdefault("recovery", {})
+                if stats is not None else None)
+    # rung 2 — sanitize (H2 output-side contamination)
+    sanitized = _sanitize_control_chars(response)
+    altered = sanitized != response
+    if altered:
+        try:
+            parsed = _parse_json(sanitized)
+            if recovery is not None:
+                recovery["sanitize"] = recovery.get("sanitize", 0) + 1
+            return parsed
+        except ValueError as e:
+            last_err = e
+            if recovery is not None:
+                recovery["sanitize_insufficient"] = (
+                    recovery.get("sanitize_insufficient", 0) + 1)
+    working = sanitized if altered else response
+    # rung 3 — bounded repair (schema-gated, first-valid-wins)
+    for candidate in _repair_candidates(working):
+        try:
+            parsed = _parse_json(candidate)
+        except ValueError as e:
+            last_err = e
+            continue
+        ok, _ = _validate_output_shape(parsed)
+        if ok:
+            if recovery is not None:
+                recovery["repair"] = recovery.get("repair", 0) + 1
+            return parsed
+    # rung 4 — schema-validated partial-accept (H3 truncation)
+    prefix = _longest_valid_prefix(working)
+    if prefix is not None:
+        if stats is not None:
+            stats["partial"] = True
+        return prefix
+    # rung 5 — raise (the deepest failure's message + bounded excerpt)
+    raise _ParseError(str(last_err or ValueError("unparseable JSON")),
+                      excerpt=_error_excerpt(response, last_err))
+
+
 __all__ = [  # noqa: RUF022
     "build_master_list", "master_kind_forms",
     "run_s1", "chunk_transcript", "compile_stories",
@@ -3218,5 +4451,7 @@ __all__ = [  # noqa: RUF022
     "classify_consolidation", "DecisionRecord", "resolve_entities",
     "extract_session_v2",
     "S1_TMPL", "S2_TMPL", "S4_TMPL", "OUTPUT_CONTRACT",
+    "S2_TMPL_CORE_ONLY", "S4_TMPL_CORE_ONLY", "OUTPUT_CONTRACT_CORE_ONLY",
     "SUBJECTS", "EVENTS", "CHAINS",
+    "UNCLASSIFIED",
 ]

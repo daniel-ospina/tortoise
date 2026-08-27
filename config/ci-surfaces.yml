@@ -240,6 +240,7 @@ surfaces:
   - test_pipeline_cli.py
   - test_postmerge_verdict.py
   - test_pre_migration_safety.py
+  - test_probe_json_mode.py
   - test_projection.py
   - test_projection_lifecycle.py
   - test_projection_version_gate.py
@@ -319,7 +320,9 @@ surfaces:
   - test_github_connect.py
   - test_github_connector.py
   - test_github_indexer.py
+  - test_github_index_lifecycle.py
   - test_github_issue.py
+  - test_github_map.py
   - test_harness_mcp_config.py
   - test_index_github_cli.py
   - test_invites.py
@@ -356,6 +359,16 @@ surfaces:
   - test_sdk_props_coercion.py
   - test_tortoise_client.py
   - test_version_vector.py
+  classify:
+  # Issue #1695 (extractor-v3 classify-later): the kind-classification and
+  # chain-enforcement surface. Pure-logic files (stub encoders, golden
+  # fixtures) are lane-agnostic — no carve-out, TEST_NO_REDIRECT_STEMS
+  # untouched; real-model smoke subsets skip without the cached bge-small
+  # embedder (pytest.importorskip + timeout markers).
+  - test_chain_enforcer.py
+  - test_kind_index.py
+  - test_kind_classifier.py
+  - test_kind_eval_set.py
   eval:
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py

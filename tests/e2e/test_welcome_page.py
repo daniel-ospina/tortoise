@@ -55,7 +55,7 @@ def test_welcome_page_no_session_redirects_to_auth(page: Page) -> None:
 
 def test_onboarding_prompt_serves_markdown(page: Page) -> None:
     """The canonical onboarding prompt (#540) must be fetchable as markdown —
-    this is the PROMPT_URL the welcome page's copyPrompt() uses."""
+    this is the onboarding-prompt URL."""
     resp = page.request.get(PROMPT_URL, timeout=15_000)
     assert resp.ok, f"prompt URL returned {resp.status}"
     assert "text/markdown" in (resp.headers.get("content-type") or "")

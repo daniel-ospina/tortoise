@@ -1,0 +1,51 @@
+MASTER LIST — the closed vocabulary (CORE ONLY). EVERY kind you emit MUST come from this list (namespaced or bare form) or be "unclassified" (pack-domain content is typed by a later stage). Do NOT mint kinds: "worktree", "test suite", "approach" are NOT kinds — re-map to the nearest listed kind or drop the item.
+
+OBJECTS (core)
+- core:Project — A project
+- core:WorkItem — A unit of work
+- core:document — A document artifact
+- core:tag — A tag
+- core:user — A user
+- core:skill — A skill
+- core:tool — A tool, CLI, or utility
+- core:agent — An agent
+- core:workflow — A reusable procedural sequence
+- core:agreement — An agreement
+- core:standard — A standard, spec, or canonical reference
+- core:other — No fitting kind - the explicit uncertain bucket
+- core:strategy — A strategy state (commitment-state family)
+- core:plan — A plan state (commitment-state family)
+- core:goal — A goal state (commitment-state family)
+- core:target — A target state (commitment-state family)
+
+SUBJECTS (core)
+- core:organization — An organization — a company, agency, or other collective entity
+- core:team — A team — a group of people working together toward shared goals
+- core:role — A role — a defined function or position held by a person or a team
+- core:legalPerson — A legal person — an entity with legal standing (company, foundation, org)
+- core:naturalPerson — A natural person — an individual human being
+
+POINTS
+- statement — A durable belief, claim, or proposition — the extraction write kind
+
+EVENTS
+- core:decision — A commitment event — a choice made with reasons that resolves confidence
+- core:occurrence — An occurrence — something that happened at a point in time
+- core:deployment — A deployment event — a product or release shipped to an environment
+- core:review — A review event — a review of work, code, plan, or content
+- core:meeting — A meeting event — a gathering that changed or confirmed state
+- core:experiment — An experiment event — a test or calibration run with measured results
+- core:friction — A friction event — a discovered obstacle, pain point, or workflow failure
+
+USER-PERSONAL-STATE VOCABULARY (Tier-A classification hint — the VALUE is the fact, retain verbatim; these are NOT kinds: do NOT emit them as entity/event/point kinds)
+- personal_best: A personal record/achievement VALUE — times, distances, scores, quantities ('my personal best 5K time is 27:12'). The VALUE is the fact; retain it verbatim.
+- schedule: A recurring commitment VALUE — regular times, days, frequencies ('gym at 6pm', 'standup at 9:30'). The TIME is the fact; retain it verbatim.
+- preference: A stated preference/choice VALUE — likes, dislikes, defaults, chosen options ('prefers dark mode', 'coffee not tea'). The CHOICE is the fact; retain it verbatim.
+
+MEMORY GRANULARITY (what to keep, what to strip)
+- dev: Durable: root-cause analysis, the chosen fix approach vs rejected alternatives, durable constraints (e.g. preserve production semantics), and environment beliefs that affect future work (e.g. subagents stall under load). Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds.
+- marketing: Durable: campaign strategy — which campaigns/channels/audiences are being pursued and why, the positioning decisions, the reasoning, the actual content pieces (they ARE the product), and the metric snapshots showing whether a strategy is working. Ephemeral: publishing mechanics, scheduling logistics.
+- pm: Durable: plan/goal/target state — what was decided, what's committed, the reasoning, and milestone outcomes. Ephemeral: card/board status, sprint burndown, assignment logistics, issue triage.
+- product-strategy: Durable: the productDelivery chain itself — which JTBDs/use-cases/features are being pursued, the chosen vs rejected options at each step, and the reasoning (what supports, undermines, tempers each choice). A customer / competitor / market fact is durable if it changes a decision. Ephemeral: ticket status, sprint mechanics, meeting logistics.
+
+STATE-VALUE CARVE-OUT (applies to every domain above): user-personal-state VALUES — personal bests, schedules, preferences — are DURABLE even where counts/logistics are ephemeral. Carry the VALUE verbatim ('my personal best 5K time is 27:12', not 'the user has a fast 5K'). The value is the fact; it is NOT a mechanics token.

@@ -27,23 +27,43 @@ Reported per question:
     #1540): containment-marked raw chunks surfaced / marked chunks total;
     granularity-aware by construction,
   * context tokens           — estimated LLM tokens of the budget-capped
-    points-first context handed to the reader (whitespace tokens + 10%
+    rank-interleaved context handed to the reader (whitespace tokens + 10%
     markup allowance; the estimator is recorded in report provenance),
   * retrieval latency ms.
 
 R1 #1540 (epic #1509): candidates are fetched at ``max(ks) * 3`` depth
 (pool-depth headroom so a monopolizing session's points cannot crowd other
 sessions out BEFORE dedup runs), the pool is deduped per-session
-(``max_chunks_per_session`` raw chunks per session, rank order — E2E-1),
-and ``_assemble_context`` builds the budget-capped, points-first context
-(UX decision 3): extracted points render in rank order, raw chunks
-backfill the remaining ``context_token_cap`` tokens. Recall@k is computed
-over the DEDUPED pool (``ret["hits"]`` == the pool — the retrieval
-contract), so the metrics reflect what the reader could actually see.
+(``max_chunks_per_session`` raw chunks per session, rank order — E2E-1).
+
+#1745 (epic #1509): ``_assemble_context`` builds the budget-capped,
+RANK-INTERLEAVED context (C1 — replaces R1's points-first UX decision 3,
+which starved raw chunks from the reader: all points preceded all chunks
+regardless of RRF rank, so any pool with >= top_k points dropped the
+chunk leg that retains ~2x the evidence). Pool items render in true RRF
+rank order (points and chunks interleaved) bounded by the token budget
+AND the ``context_item_cap`` (default 40, knob
+``TORTOISE_LME_CONTEXT_ITEMS``); TR questions keep the pinned
+``tr_top_k``=12 item cap (R5 flood control). Recall@k is computed over
+the DEDUPED pool (``ret["hits"]`` == the pool — the retrieval contract);
+since C1, the pool is an APPROXIMATE upper bound on what the reader
+could actually see (the budget walk's skip-not-starve lets a lower-ranked
+marked item enter the k-prefix, so ``reader_evidence@k`` can exceed it) —
+``reader_evidence@k`` (C4) is the independent reader-surface measure.
+
+C2 (#1745): the evidence-mark boost (``_apply_evidence_boost``) re-ranks
+marked hits up by a stable rank offset BEFORE ``_recall_metrics`` so the
+pool-based ``evidence_recall@k`` honestly measures the boosted pool;
+marks are recomputed at read time (``evidence.mark_for``) so verbatim/
+raw-chunk marks get the full boost while source-session-only marks get a
+reduced one. OFF by default in code (env ``TORTOISE_LME_EVIDENCE_BOOST``
+or the explicit ``evidence_boost`` flag enables it) — the plan's default
+decision: ON only for the re-validation run.
 """
 from __future__ import annotations
 
 import math
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -199,8 +219,26 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
 _TOKEN_ESTIMATOR = "whitespace-tokens + 10% markup allowance"
 
 #: R1 (#1540): per-session raw-chunk cap in the pool (E2E-1; the R6 MMR
-#: variant tunes it post-baseline).
-DEFAULT_MAX_CHUNKS_PER_SESSION = 2
+#: variant tunes it post-baseline). C5 (#1745): 2 -> 3 — the R1 cap was
+#: capping out the evidence chunk on ~18 questions (chunk_evidence_recall@20
+#: = 0 with evidence_recall@20 high); only 4/854 S-split sessions have >2
+#: marked chunks, so the budget cost is bounded.
+DEFAULT_MAX_CHUNKS_PER_SESSION = 3
+#: C1 (#1745): reader-context ITEM cap (default 40, knob
+#: ``TORTOISE_LME_CONTEXT_ITEMS``) — the measured ~114 tok/item means a
+#: 60-item pool (~6.8k tokens) may not bind the 8k token budget, so an
+#: unceilinged budget walk would flood the reader; the item cap bounds
+#: reader flood while the token budget selects within it (top-k saturation
+#: research, plan §3). TR questions ignore it — ``tr_top_k`` stays the
+#: pinned TR item cap (R5 #1544 flood control).
+DEFAULT_CONTEXT_ITEM_CAP = 40
+#: C2 (#1745): evidence-mark boost rank-offset multipliers — verbatim/
+#: raw-chunk marks (the precise ones) get the full boost, source-session-
+#: only points a reduced one (marks never influence RRF ranking — H2).
+#: Knobs: ``TORTOISE_LME_EVIDENCE_BOOST_VERBATIM`` /
+#: ``TORTOISE_LME_EVIDENCE_BOOST_SOURCE``.
+DEFAULT_EVIDENCE_BOOST_VERBATIM = 1.5
+DEFAULT_EVIDENCE_BOOST_SOURCE = 1.15
 #: R1 (#1540): reader context token budget (≈ the pre-v2 baseline context
 #: size — a 4.4x reduction from the measured 35k whole-session flood;
 #: LightMem: compact evidence wins under tight budgets).
@@ -444,6 +482,139 @@ def _dedup_pool(annotated: list[dict], *,
     return pool
 
 
+def _apply_evidence_boost(
+    pool: list[dict],
+    *,
+    question: dict | None = None,
+    evidence_sessions: set[str] | None = None,
+    answer_turn_contents: list[str] | None = None,
+    boost_verbatim: float = DEFAULT_EVIDENCE_BOOST_VERBATIM,
+    boost_source: float = DEFAULT_EVIDENCE_BOOST_SOURCE,
+) -> tuple[list[dict], dict[str, Any]]:
+    """C2 (#1745): evidence-mark rank boost over the deduped pool.
+
+    Marked hits (H2: marks never influence RRF ranking — the fused score is
+    content-similarity-only) move up by a stable rank offset so they can
+    surface into the pool top-20. The boost is a RANK re-scaling, NOT an
+    RRF-score multiplier (verifier P1-6: annotated hits drop
+    ``scores.rrf`` — there is no score to multiply): ``scaled_rank =
+    original_index / factor`` with factor 1.0 unmarked, ``boost_source``
+    for source-session-only marks, ``boost_verbatim`` for verbatim /
+    raw-chunk marks. Placement is position-ceiling promotion (Horn's
+    greedy, review F2): hits are processed in descending scaled-priority
+    order and each takes the LARGEST free position <= its ceiling, where
+    the ceiling is the ORIGINAL pool index for marked hits and
+    unconstrained for unmarked hits. Properties:
+      * position-ceiling — never demotes a marked hit below its original
+        pool index (a dense run of higher-factor marked hits cannot push
+        a lower-factor marked hit out of the top-k it occupied pre-boost),
+      * never reorders within a boost class (same factor -> monotonic)
+        and never reorders unmarked hits (relative order preserved),
+      * bounded — no negative ranks, every hit lands in [0, n).
+
+    The verbatim-vs-source split is recomputed at READ TIME via
+    ``evidence.mark_for`` (verifier P1-4: the OR'd ``has_answer`` prop
+    cannot express the split) — the annotated hits already carry
+    ``content``/``quote``/``session_id`` and the question carries
+    ``haystack_sessions``, so no graph change is needed. A stored
+    ``has_answer`` hit whose read-time recompute finds no mark is treated
+    as source-class (conservative — never a full boost on ambiguous
+    provenance).
+
+    Placement contract: the caller applies this BEFORE ``_recall_metrics``
+    so post-fix ``evidence_recall@k`` is honestly "evidence recall over the
+    boosted pool" (stated in the methodology); the pre-boost ranking rides
+    back in ``stats["pre_boost_ranked_ids"]`` for the C4 ablation.
+
+    Returns ``(boosted_pool, stats)``; ``stats`` carries the per-class
+    multiplier, the read-time mark census and the pre-boost id order.
+    """
+    from . import evidence as ev
+    # factor domain guard (review P1-2 + F9): a boost factor < 1.0 is a rank
+    # DIVISION — 0.0 is a ZeroDivisionError and a negative factor silently
+    # inverts the pool order. Non-finite values (NaN/Inf) are rejected the
+    # same way (a NaN passes the < 1.0 comparison and would poison every
+    # sort key; inf would zero every key and make the boost a silent
+    # no-op). Reject loudly at the function boundary (the
+    # env/CLI layers clamp >= 1.0 independently; this is the last line).
+    if not (math.isfinite(boost_verbatim) and boost_verbatim >= 1.0) \
+            or not (math.isfinite(boost_source) and boost_source >= 1.0):
+        raise ValueError(
+            "evidence-boost multipliers must be >= 1.0 and finite (a "
+            "rank-scaling division), got verbatim="
+            f"{boost_verbatim!r} source={boost_source!r}")
+    if evidence_sessions is None:
+        evidence_sessions = (ev.evidence_sessions(question)
+                             if question else set())
+    if answer_turn_contents is None:
+        answer_turn_contents = [
+            (t.get("content") or "")
+            for s in ((question or {}).get("haystack_sessions") or [])
+            for t in s if t.get("has_answer")
+        ]
+    census = {"source_session": 0, "verbatim": 0, "raw_chunk": 0}
+    scored: list[tuple[dict, float, int]] = []
+    marked_by_idx: dict[int, bool] = {}
+    for i, h in enumerate(pool):
+        marks = ev.mark_for(
+            h, session_id=h.get("session_id"),
+            evidence_sessions=evidence_sessions,
+            answer_turn_contents=answer_turn_contents)["marks"]
+        for mk in census:
+            if marks.get(mk):
+                census[mk] += 1
+        if marks.get("verbatim") or marks.get("raw_chunk"):
+            factor = boost_verbatim
+        elif marks.get("source_session") or h.get("has_answer"):
+            factor = boost_source
+        else:
+            factor = 1.0
+        scored.append((h, i / factor, i))
+        marked_by_idx[i] = factor > 1.0
+    # Position-ceiling promotion (review F2): the plain ascending sort let a
+    # dense run of higher-factor marked hits (verbatim chunks, x1.5) pass a
+    # lower-factor marked hit (source point, x1.15) and DEMOTE it below its
+    # original pool index — the reproduced counter-example moved the point
+    # 19 -> 22, out of top-20 (evidence_recall@20 dropped 1 -> 0 with the
+    # boost ON). Horn's greedy: process hits in DESCENDING scaled-priority
+    # order (for unmarked hits the scaled key IS the pool index, so they
+    # run in descending index order) and assign each hit the LARGEST free
+    # position <= its ceiling — original index for marked hits,
+    # unconstrained for unmarked. Properties (verified by brute force):
+    #   (a) marked hits never land below their original index;
+    #   (b) unmarked relative order preserved (descending processing +
+    #       largest-free assignment = strictly decreasing slots);
+    #   (c) order within a boost class preserved (same argument).
+    n = len(pool)
+    free = list(range(n))
+    placement: dict[int, tuple[dict, float, int]] = {}
+    for h, key, i in sorted(
+            scored, key=lambda x: (-x[1], -x[2])):
+        ceiling = i if marked_by_idx[i] else n  # +inf ~ n: always satisfiable
+        pos = max(p for p in free if p <= ceiling)
+        free.remove(pos)
+        placement[pos] = (h, key, i)
+    scored = [placement[p] for p in range(n)]
+    stats: dict[str, Any] = {
+        "applied": True,
+        "boost_verbatim": boost_verbatim,
+        "boost_source": boost_source,
+        "marks_census": census,
+        "pre_boost_ranked_ids": [h["id"] for h in pool],
+        "moved": sum(1 for _, _, i in scored
+                      if _rank_delta(scored, i)),
+    }
+    return [h for h, _, _ in scored], stats
+
+
+def _rank_delta(scored: list[tuple[dict, float, int]], orig_index: int) -> bool:
+    """True when the hit with original pool index ``orig_index`` moved to a
+    strictly earlier position after the boost (the ``moved`` counter)."""
+    new_pos = next(pos for pos, (_, _, i) in enumerate(scored)
+                   if i == orig_index)
+    return new_pos < orig_index
+
+
 def _recall_metrics(
     hits: list[dict],
     *,
@@ -596,11 +767,20 @@ def _render_block(h: dict) -> str:
 
 def _assemble_context(pool: list[dict], *, top_k: int,
                       max_context_tokens: int,
-                      question_date: str | None = None) -> list[dict]:
-    """Budget-capped, points-first context (UX decision 3 #1540): extracted
-    points render in rank order, then raw chunks backfill the remaining
-    token budget, over at most ``top_k`` pool items (top_k stays "the max
-    number of context items"; the token budget bounds it further).
+                      question_date: str | None = None,
+                      context_item_cap: int | None = None) -> list[dict]:
+    """Budget-capped, rank-interleaved reader context (C1 #1745).
+
+    Iterates the pool in TRUE RRF rank order — extracted points and raw
+    chunks interleaved, a chunk ranked above a point enters the context at
+    its rank, not after all points (replaces R1's points-first partition,
+    UX decision 3, which starved the chunk leg: any pool with >= top_k
+    points dropped chunks entirely regardless of rank). Bounded by BOTH
+    the token budget (``max_context_tokens``) and an explicit item cap
+    (``context_item_cap``; defaults to ``top_k`` for back-compat with
+    pure-function callers — the run path passes the resolved
+    ``context_item_cap`` / TR ``tr_top_k``). ``top_k`` stays "the max
+    number of context items" at the default cap.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
@@ -613,13 +793,17 @@ def _assemble_context(pool: list[dict], *, top_k: int,
     if max_context_tokens < 1:
         raise ValueError("max_context_tokens must be >= 1, got "
                          f"{max_context_tokens!r}")
-    points = [h for h in pool if not _is_raw_chunk(h)]
-    chunks = [h for h in pool if _is_raw_chunk(h)]
+    item_bound = context_item_cap if context_item_cap is not None else top_k
+    if item_bound < 1:
+        raise ValueError("context_item_cap must be >= 1, got "
+                         f"{item_bound!r}")
     header_words = (len(f"Current Date: {question_date}".split())
                     if question_date else 0)
     selected: list[dict] = []
     words = header_words
-    for h in (points + chunks)[:top_k]:
+    for h in pool:
+        if len(selected) >= item_bound:
+            break
         cost = len(_render_block(h).split())
         if int((words + cost) * 1.1) > max_context_tokens:
             continue  # skip this hit; keep later ones (no starvation)
@@ -837,17 +1021,48 @@ def retrieve_for_question(
     rerank_pool: int | None = None,
     per_session_cap: int | None = None,
     mmr_lambda: float | None = None,
+    # C1 (#1745): the reader-context ITEM cap — the run path passes the
+    # resolved knob (default 40, env ``TORTOISE_LME_CONTEXT_ITEMS``); TR
+    # questions IGNORE it and keep the pinned ``tr_top_k`` item cap (R5
+    # flood control is never silently undone). None = env default.
+    context_item_cap: int | None = None,
+    # C2 (#1745): evidence-mark boost — OFF by default in code (the plan's
+    # default decision: ON only for the re-validation run via
+    # ``TORTOISE_LME_EVIDENCE_BOOST`` or ``evidence_boost=True``).
+    # Tri-state: True/False explicit, None = env (only 1/true/yes/on
+    # enables). ``evidence_boost_verbatim`` / ``evidence_boost_source``
+    # override the per-class rank-offset multipliers (env fallbacks
+    # ``TORTOISE_LME_EVIDENCE_BOOST_VERBATIM`` /
+    # ``TORTOISE_LME_EVIDENCE_BOOST_SOURCE``).
+    evidence_boost: bool | None = None,
+    evidence_boost_verbatim: float | None = None,
+    evidence_boost_source: float | None = None,
 ) -> dict[str, Any]:
     """Run retrieval for one question and compute recall@k + context stats.
 
-    ``top_k`` is the max context size handed to the reader (default 20 —
-    the design-locked depth; recall is reported at every k in ``ks``).
+    ``top_k`` is the design-locked context depth (default 20 — recall is
+    reported at every k in ``ks``).
     R1 #1540: candidates are fetched at ``max(ks) * DEFAULT_POOL_MULTIPLIER``
     depth, the pool is deduped per-session (``max_chunks_per_session`` raw
     chunks per session), recall@k is computed over the DEDUPED pool
-    (``ret["hits"]`` == the pool — pinned contract), and the reader's
-    context is the budget-capped points-first ``_assemble_context`` output
-    (``context_points``, bounded by ``max_context_tokens``).
+    (``ret["hits"]`` == the pool — pinned contract).
+    C1 (#1745): the reader's context is the budget-capped RANK-INTERLEAVED
+    ``_assemble_context`` output (``context_points`` — points and chunks
+    interleaved in true RRF rank order, bounded by ``max_context_tokens``
+    AND ``context_item_cap`` (default 40, env
+    ``TORTOISE_LME_CONTEXT_ITEMS``); TR keeps the pinned ``tr_top_k`` item
+    cap). Since C1 the pool is an APPROXIMATE upper bound on what the
+    reader sees (skip-not-starve can admit a lower-ranked marked item
+    into the k-prefix) — ``reader_evidence@k`` (C4) is the independent
+    reader-surface measure.
+    C2 (#1745): ``evidence_boost`` (OFF by default in code — env
+    ``TORTOISE_LME_EVIDENCE_BOOST`` or the explicit flag enables it)
+    re-ranks marked hits by a stable rank offset BEFORE ``_recall_metrics``
+    via read-time ``mark_for`` recompute; ``evidence_boost_verbatim`` /
+    ``evidence_boost_source`` set the per-class multipliers. Task 0
+    (#1745): ``ranked_ids`` / ``evidence_turn_matches`` /
+    ``ranked_ids_pre_boost`` are populated so the context composition is
+    reconstructable.
 
     R5 (#1544) D4–D7 (TR questions only, ``question_type ==
     "temporal-reasoning"``): the pool is the point+event union
@@ -868,6 +1083,18 @@ def retrieve_for_question(
         return _vector_retrieve(sdk, question, qid, ks=ks, top_k=top_k)
     is_tr = question.get("question_type") == "temporal-reasoning"
     effective_top_k = tr_top_k if is_tr else top_k
+    # C1 (#1745): the resolved reader-context item cap — TR questions keep
+    # the pinned ``tr_top_k`` item cap (R5 flood control must never be
+    # silently undone by the budget walk); non-TR uses the explicit arg or
+    # the ``TORTOISE_LME_CONTEXT_ITEMS`` env default (40).
+    if is_tr:
+        eff_item_cap = tr_top_k
+    elif context_item_cap is not None:
+        eff_item_cap = context_item_cap
+    else:
+        from .rerank import _env_int
+        eff_item_cap = _env_int("TORTOISE_LME_CONTEXT_ITEMS",
+                                DEFAULT_CONTEXT_ITEM_CAP)
     answer_sessions = set(question.get("answer_session_ids") or [])
     dates: list[str] = question.get("haystack_dates") or []
     evidence_turn_ids = {
@@ -982,6 +1209,37 @@ def retrieve_for_question(
     n_chunks_retrieved = sum(1 for h in annotated if _is_raw_chunk(h))
     n_chunks_pool = sum(1 for h in pool if _is_raw_chunk(h))
 
+    # ── C2 (#1745): evidence-mark boost — applied to the DEDUPED pool
+    # BEFORE ``_recall_metrics`` (the only pool-metric mover: C1 cannot
+    # move the pool-based evidence@20 at all). OFF by default in code —
+    # enabled only by the explicit ``evidence_boost`` flag or the
+    # ``TORTOISE_LME_EVIDENCE_BOOST`` env (fail-safe OFF: only
+    # 1/true/yes/on enables — the plan's default decision: ON for the
+    # re-validation run). Stage order vs R6 rerank:
+    # boost-before-rerank (documented, P3). TR questions boost too — the
+    # window filter already ran; the boost only re-ranks within it. ──
+    if evidence_boost is not None:
+        boost_on = evidence_boost
+    else:
+        from .rerank import _TRUTHY
+        boost_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
+        boost_on = boost_env.strip().lower() in _TRUTHY
+    if boost_on:
+        from .rerank import _env_boost_float
+        bv = (evidence_boost_verbatim if evidence_boost_verbatim is not None
+              else _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                    DEFAULT_EVIDENCE_BOOST_VERBATIM))
+        bs = (evidence_boost_source if evidence_boost_source is not None
+              else _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+                                    DEFAULT_EVIDENCE_BOOST_SOURCE))
+        pool, evidence_boost_stats = _apply_evidence_boost(
+            pool, question=question, boost_verbatim=bv, boost_source=bs)
+    else:
+        evidence_boost_stats = {
+            "applied": False,
+            "pre_boost_ranked_ids": [h["id"] for h in pool],
+        }
+
     # ── evidence denominators (D5 split, #1540): turn/evidence recall count
     # extracted points ONLY (pointKind <> session-transcript); containment-
     # marked raw chunks contribute exclusively to chunk_evidence_recall@k
@@ -1065,7 +1323,11 @@ def retrieve_for_question(
     # ── recall@k over the DEDUPED pool (session + turn + evidence + chunk) ──
     # (on the applied path, ``pool`` is the rerank-selected list — recall
     # measures what the reader could actually see; ``rerank_pass["pool_recall@k"]``
-    # carries the pre-MMR pool recall for the selection-loss diagnostic.)
+    # carries the pre-MMR pool recall for the selection-loss diagnostic.
+    # C2 (#1745): when the evidence boost is on, ``pool`` here is the
+    # BOOSTED pool — ``evidence_recall@k`` is honestly "evidence recall
+    # over the boosted pool" (stated in the methodology); the pre-boost
+    # order rides in ``evidence_boost.pre_boost_ranked_ids``.)
     (session_recall, turn_recall, _evidence_recall,
      chunk_evidence_recall) = _recall_metrics(
         pool, ks=ks, answer_sessions=answer_sessions,
@@ -1073,17 +1335,19 @@ def retrieve_for_question(
         evidence_point_count=evidence_point_count,
         chunk_evidence_point_count=chunk_evidence_point_count)
 
-    # ── context handed to the reader (D4: budget-capped, points first) ──
+    # ── context handed to the reader (C1 #1745: budget-capped, rank-
+    # interleaved; TR keeps the pinned tr_top_k item cap) ──
     question_date = question.get("question_date", "") or None
     context_points = _assemble_context(
         pool, top_k=effective_top_k,
         max_context_tokens=max_context_tokens,
-        question_date=question_date)
+        question_date=question_date,
+        context_item_cap=eff_item_cap)
     # R5 (D6): TR context renders time-ascending — after truncation the
     # context list is stable-sorted by session_date (dated first, undated
     # last, stable within a date = retrieval order preserved). Recall
     # metrics keep retrieval order: only the READER's context list is
-    # reordered. Non-TR keeps RRF order (byte-identical to today).
+    # reordered. Non-TR keeps RRF order.
     if is_tr:
         context_points = sorted(
             context_points,
@@ -1094,6 +1358,28 @@ def retrieve_for_question(
     # header) — keep context_tokens aligned with what the reader saw.
     context_text = render_context(context_points, question_date=question_date)
     context_tokens = _estimate_tokens(context_text) if context_text else 0
+
+    # ── C4 (#1745): reader_evidence@k — the honest reader-surface measure.
+    # Fraction of evidence-marked hits actually present in
+    # context_points[:k] / marked total (the SAME D5 denominator as the
+    # pool-based evidence_recall@k). The pool-based evidence_recall@k is
+    # NOT a strict upper bound on it: the budget walk's skip-not-starve
+    # lets a lower-ranked marked item enter context_points[:k] (an
+    # oversized higher-ranked hit is skipped, not dropped), so
+    # reader_evidence@k is an INDEPENDENT reader-surface measure — pool
+    # recall is an APPROXIMATE upper bound up to budget-skip effects. For
+    # TR questions the k-prefix follows the R5 time-ascending render
+    # (session_date order, stable within a date = retrieval order) — the
+    # reader's READING order, not RRF rank. The C2 pre/post ablation rides
+    # ``evidence_boost.pre_boost_ranked_ids``. ──
+    reader_evidence: dict[str, float | None] = {}
+    for k in ks:
+        ctx_top = context_points[:k]
+        ctx_ev = {h["id"] for h in ctx_top
+                  if h["has_answer"] and not _is_raw_chunk(h)}
+        reader_evidence[str(k)] = (
+            len(ctx_ev) / evidence_point_count if evidence_point_count
+            else None)
 
     out = {
         "question_id": qid,
@@ -1118,6 +1404,31 @@ def retrieve_for_question(
         "context_points": context_points,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),
+        # C4 (#1745): the reader-surface evidence metric — fraction of
+        # evidence-marked hits present in context_points[:k] / marked total
+        # (the metric C1 actually moves; pool recall is an APPROXIMATE
+        # upper bound — skip-not-starve can admit a lower-ranked marked
+        # item into the k-prefix).
+        # N/A (None) on empty denominators, mirroring evidence_recall@k.
+        "reader_evidence@k": reader_evidence,
+        # Task 0 (#1745): ranked ids + evidence-turn matches populated for
+        # the hybrid arm (the pilot's context composition was
+        # unreconstructable — 0/50). ``ranked_ids`` is the effective pool
+        # order (post-boost when C2 is on); ``ranked_ids_pre_boost`` is the
+        # raw retrieval order for the C4 pre/post ablation (identical when
+        # both the boost and the R6 rerank stage are off; on the rerank
+        # path it is the pre-boost but PRE-RERANK order — the ablation
+        # compares rerank(boost(pool)) vs rerank(pool)).
+        "ranked_ids": [h["id"] for h in pool],
+        "ranked_ids_pre_boost": evidence_boost_stats.get(
+            "pre_boost_ranked_ids", [h["id"] for h in pool]),
+        "evidence_turn_matches": sorted(
+            {h["id"] for h in pool if h["has_answer"]}
+            | (evidence_turn_ids & {h["id"] for h in pool})),
+        # C2 (#1745): the boost block — applied flag + per-class
+        # multipliers + read-time mark census + pre-boost order. Always
+        # present (applied=False on the default off path).
+        "evidence_boost": evidence_boost_stats,
         # R5 (#1544): TR-constraint surface — the detected kind (TR only)
         # and whether the window filter fell back to the unfiltered pool
         # (never starve the reader into abstention).

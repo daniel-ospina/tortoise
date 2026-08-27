@@ -356,6 +356,421 @@ def test_cmd_run_requires_real_backend_env(tmp_path, monkeypatch):
         expected_direction=None))
 
 
+def test_cmd_run_records_resume_quality_scan(tmp_path, monkeypatch, capsys):
+    """#1764: the `run` path runs a pre-resume health check on the checkpoint
+    (when one exists) — outcomes the runner's resume-quality gate will reject
+    (dead FTS leg / zero session recall) are counted, surfaced loudly, and
+    recorded in the run state (population-purity note); a clean checkpoint
+    records a clean scan. The scan mirrors the runner's own gate signal
+    (run.resume_gate_reject_reason — single source of truth)."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    state = _fresh_state(tmp_path)
+    for n in range(1, 8):
+        state.pass_gate(n, f"step {n} done")
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    # run steps write their checkpoint under DEFAULT_RUN_DIR (module-level)
+    monkeypatch.setattr(rp, "DEFAULT_RUN_DIR", run_dir)
+
+    # a checkpoint with one dead-FTS outcome + one healthy outcome
+    cp = run_dir / "pilot.checkpoint.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "outcomes": [
+            {"question_id": "q-dead", "session_recall@k": {"20": 0.0},
+             "turn_recall@k": {"20": 0.0},
+             "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                        "reason": "empty_results", "count": 0}]},
+            {"question_id": "q-healthy", "session_recall@k": {"20": 1.0},
+             "turn_recall@k": {"20": 1.0},
+             "legs": [{"leg": "fts", "ran": True, "degraded": False,
+                        "reason": "ok", "count": 7}]},
+        ],
+    }), encoding="utf-8")
+
+    # dry-run surfaces the scan without executing or recording
+    rp.cmd_run(state, argparse_namespace(
+        step="3", owner_approve=None, dry_run=True, extra=[],
+        expected_direction=None))
+    err = capsys.readouterr().err
+    assert "q-dead" in err and "resume-quality gate" in err
+    assert "3" not in state.data["runs"]  # dry-run records nothing
+
+    # real run records the scan in the run state (no subprocess side effects)
+    monkeypatch.setattr(rp.subprocess, "run", lambda cmd, env: type(
+        "R", (), {"returncode": 0})())
+    rp.cmd_run(state, argparse_namespace(
+        step="3", owner_approve=None, dry_run=False, extra=[],
+        expected_direction=None))
+    run = state.data["runs"]["3"]
+    assert run["resume_quality"]["rejected"] == 1
+    assert run["resume_quality"]["fts_dead"] == 1
+    # per-signal PRESENCE: q-dead carries BOTH dead-FTS and all-zero
+    # session recall (the pilot's artifact shape) — counts in both fields
+    assert run["resume_quality"]["zero_session"] == 1
+    assert run["resume_quality"]["truncated"] == 0
+    assert run["resume_quality"]["qids"] == ["q-dead"]
+    assert run["resume_quality"]["checked"] == 2
+
+
+def test_checkpoint_resume_quality_guard_rails(tmp_path):
+    """#1764: the pre-resume scan returns None (nothing to scan) for empty,
+    null, or missing outcomes — never crashes and never prints a false
+    'clean' claim; a truncated outcome (missing required keys) is counted
+    separately — the runner re-encodes it via the truncated path, not the
+    gate; a breaker_open-only checkpoint has nothing gate-eligible."""
+    # empty outcomes list → None (nothing to scan)
+    cp = tmp_path / "empty.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2",
+                              "outcomes": []}), encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    # explicit null outcomes → None (no TypeError on iteration)
+    cp = tmp_path / "null.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2",
+                              "outcomes": None}), encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    # missing outcomes key → None
+    cp = tmp_path / "missing.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2"}),
+                  encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    # truncated outcome (missing hybrid required keys) → truncated count
+    cp = tmp_path / "truncated.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-trunc"}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1
+    assert scan["rejected"] == 0 and scan["checked"] == 0
+    # breaker_open-only checkpoint → no gate-eligible outcomes → None
+    cp = tmp_path / "breaker.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-drop", "breaker_open": True,
+                       "dropped_reason": "breaker_open",
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0}}],
+    }), encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    # vector checkpoint (run_key carries the retriever): the scan mirrors
+    # the runner's vector key set (run_evaluation forwards the retriever to
+    # _load_checkpoint) — an outcome missing vector-specific keys is
+    # truncated, not gate-checked
+    cp = tmp_path / "vector-trunc.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__vector__minilm__default",
+        "outcomes": [{"question_id": "q-vec",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
+
+
+def test_checkpoint_resume_quality_prefers_top_level_retriever(tmp_path):
+    """#1764/code-review: the scan derives the required-key retriever from
+    the checkpoint's first-class top-level ``retriever`` field (written by
+    run._save_checkpoint) when it names a known key set, falling back to the
+    run_key segment (``{surface}__{retriever}__...``) for older files — a
+    stale run_key segment must not override the authoritative field."""
+    # top-level retriever="vector" wins over a run_key whose segment says
+    # hybrid → hybrid-keys outcome is truncated (missing vector keys)
+    cp = tmp_path / "prefer.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "retriever": "vector",
+        "outcomes": [{"question_id": "q-vec",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
+
+    # unknown top-level retriever value → falls back to the run_key segment
+    cp = tmp_path / "fallback.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__vector__minilm__default",
+        "retriever": "bogus-retriever",
+        "outcomes": [{"question_id": "q-vec",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
+
+
+def test_checkpoint_resume_quality_int_question_ids(tmp_path, capsys):
+    """#1764/code-review: int question_ids (foreign/dataset shapes) must not
+    TypeError in the scan's sorted() or the print path's join() — qids are
+    string-coerced end to end."""
+    cp = tmp_path / "ints.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": 123,
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results", "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["rejected"] == 1
+    assert scan["qids"] == ["123"]  # coerced, sorted
+    rp._print_resume_quality(scan)  # the join must not raise
+    assert "123" in capsys.readouterr().err
+
+
+def test_checkpoint_resume_quality_corrupt_warns_loudly(tmp_path, capsys):
+    """#1764/code-review: an existing-but-corrupt checkpoint must NOT degrade
+    silently (the runner itself warns loudly on the same failure) — the scan
+    prints a loud stderr warning and returns None."""
+    cp = tmp_path / "corrupt.json"
+    cp.write_text("{not json!!", encoding="utf-8")
+    assert rp.checkpoint_resume_quality(cp) is None
+    err = capsys.readouterr().err
+    assert "corrupt" in err.lower() and str(cp) in err
+
+
+def test_checkpoint_resume_quality_lock_busy_warns_accurately(
+        tmp_path, monkeypatch, capsys):
+    """#1764/code-review: flock_exclusive raises TimeoutError (an OSError
+    subclass) when a concurrent writer holds the lock — the scan must NOT
+    swallow it in the corrupt-file clause and misreport a lock-busy as a
+    corrupt checkpoint. Catch it separately and print an accurate lock-busy
+    message (scan skipped — concurrent writer), still returning None."""
+    cp = tmp_path / "busy.json"
+    cp.write_text(json.dumps({"format": "lme-checkpoint-v2",
+                              "outcomes": []}), encoding="utf-8")
+    from tortoise.shared_state import concurrency as _cc
+
+    def _busy(*a, **k):
+        raise TimeoutError("flock timeout on state.json.lock")
+
+    monkeypatch.setattr(_cc, "flock_exclusive", _busy)
+    assert rp.checkpoint_resume_quality(cp) is None
+    err = capsys.readouterr().err
+    assert "lock busy" in err.lower()
+    assert "concurrent writer" in err.lower()
+    assert "corrupt" not in err.lower()  # never misreported as corrupt
+
+
+def test_checkpoint_resume_quality_zero_session_matches_gate(tmp_path):
+    """#1764/code-review: the scan's zero_session count derives from the
+    SAME type-strict predicate as the gate's session_zero signal
+    (run.session_recall_all_zero) — a corrupt bool-False session_recall@k
+    must NOT count as zero_session when the rejection was fts-only (the
+    old looser all(v == 0) predicate drifted from the gate and would
+    miscount it)."""
+    cp = tmp_path / "boolzero.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-dead",
+                       "session_recall@k": {"20": False},  # corrupt bool
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results", "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["rejected"] == 1
+    assert scan["fts_dead"] == 1       # the rejection was fts-only
+    assert scan["zero_session"] == 0   # bool False is NOT an all-zero signal
+
+
+def test_checkpoint_resume_quality_forwarded_retriever_wins(tmp_path):
+    """#1764/code-review: the scan's required-key retriever resolves via
+    the runner's own helper (run._retriever_from_checkpoint) with the
+    forwarded retriever FIRST — a top-level-present/run_key-absent file is
+    scanned per the forwarded retriever (cmd_run forwards the runner
+    command's --retriever, default "hybrid"), never per the top-level
+    field alone (the runner loads with the forwarded retriever's keys)."""
+    cp = tmp_path / "topfield.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "retriever": "vector",  # top-level field, NO run_key segment
+        "outcomes": [{"question_id": "q-hybrid",
+                       "session_recall@k": {"5": 1.0},
+                       "turn_recall@k": {"5": 1.0}}],
+    }), encoding="utf-8")
+    # forwarded hybrid (the runner's effective retriever) → hybrid keys →
+    # the hybrid-keys outcome is gate-eligible, not truncated
+    scan = rp.checkpoint_resume_quality(cp, forwarded="hybrid")
+    assert scan is not None
+    assert scan["checked"] == 1 and scan["truncated"] == 0
+    # no forwarded value (programmatic path) → top-level field wins →
+    # vector keys → the hybrid-keys outcome is truncated
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["truncated"] == 1 and scan["checked"] == 0
+
+
+def test_print_resume_quality_clean_verdict_softened(tmp_path, capsys):
+    """#1764/code-review: the clean-path verdict must not bless a file the
+    runner would refuse wholesale — the scan only re-checks per-outcome gate
+    decisions, never the whole-file load gates (format / run_key /
+    fingerprint mismatch), and the verdict says so. (And a drift-free scan
+    carries an empty ``unknown_reasons`` — no vocabulary event.)"""
+    rp._print_resume_quality({
+        "checked": 3, "rejected": 0, "fts_dead": 0, "zero_session": 0,
+        "truncated": 0, "qids": [], "unknown_reasons": {},
+    })
+    err = capsys.readouterr().err
+    assert "scan-clean" in err
+    assert "not re-checked" in err.lower() or "NOT re-checked" in err
+    assert "checkpoint clean" not in err
+
+
+def test_checkpoint_resume_quality_unknown_reasons_surfaced(tmp_path, capsys):
+    """#1764/code-review: an fts leg with count==0 and a reason OUTSIDE the
+    known vocabulary is NOT rejected (fail-open) — the scan carries the
+    vocabulary-drift event in the ``unknown_reasons`` field ({qid: [...]})
+    of the returned dict instead of printing a per-outcome warning (the
+    shared gate predicate is pure — single source of truth, no side
+    effects), and _print_resume_quality surfaces it loudly WITHOUT pairing
+    it with a 'scan-clean' verdict (a drift event must never carry a clean
+    claim)."""
+    cp = tmp_path / "unknown.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-unknown",
+                       "session_recall@k": {"20": 1.0},
+                       "turn_recall@k": {"20": 1.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": True,
+                                  "reason": "some_future_reason",
+                                  "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp)
+    assert scan is not None
+    assert scan["rejected"] == 0  # fail-open — not dead
+    assert scan["unknown_reasons"] == {"q-unknown": ["some_future_reason"]}
+    # the scan prints NO per-outcome warning (the pure predicate never
+    # prints; the run-state dict carries the event)
+    assert "unknown" not in capsys.readouterr().err.lower()
+    # the print path surfaces it loudly — and NEVER pairs it with scan-clean
+    rp._print_resume_quality(scan)
+    err = capsys.readouterr().err
+    assert "q-unknown" in err and "some_future_reason" in err
+    assert "vocabulary" in err
+    assert "scan-clean" not in err
+
+    # a rejected outcome (dead fts leg) with no unknown reason → empty map
+    cp2 = tmp_path / "dead.json"
+    cp2.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-dead",
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results",
+                                  "count": 0}]}],
+    }), encoding="utf-8")
+    scan = rp.checkpoint_resume_quality(cp2)
+    assert scan["rejected"] == 1
+    assert scan["unknown_reasons"] == {}
+
+
+def test_last_flag_value_helper():
+    """#1764/code-review: _last_flag_value resolves the LAST occurrence
+    (argparse last-wins), recognizes BOTH the space form (--flag value) and
+    the argparse-valid equals form (--flag=value) with last-wins ACROSS
+    forms, and returns None for absent flags or a flag with no value —
+    never an unhandled ValueError/IndexError."""
+    cmd = ["python", "-m", "tools.longmem_eval.run",
+           "--checkpoint", "a", "--output", "b", "--checkpoint", "c"]
+    assert rp._last_flag_value(cmd, "--checkpoint") == "c"
+    assert rp._last_flag_value(cmd, "--output") == "b"
+    assert rp._last_flag_value(["python", "-m", "x"], "--checkpoint") is None
+    # flag as the final token (no value) → None, not IndexError
+    assert rp._last_flag_value(["python", "--checkpoint"],
+                               "--checkpoint") is None
+    # equals form (argparse-valid): --retriever=vector == --retriever vector
+    assert rp._last_flag_value(["--retriever=vector", "--checkpoint",
+                                "s.json"], "--retriever") == "vector"
+    # last occurrence wins ACROSS forms (argparse treats both identically)
+    assert rp._last_flag_value(["--retriever", "hybrid",
+                                "--retriever=vector"], "--retriever") \
+        == "vector"
+    assert rp._last_flag_value(["--retriever=vector", "--retriever",
+                                "hybrid"], "--retriever") == "hybrid"
+    # space-form --checkpoint/--output behavior unchanged alongside equals
+    # forms of other flags
+    assert rp._last_flag_value(
+        ["--retriever=vector", "--checkpoint", "a", "--output", "b"],
+        "--checkpoint") == "a"
+    assert rp._last_flag_value(
+        ["--retriever=vector", "--checkpoint", "a", "--output", "b"],
+        "--output") == "b"
+
+
+
+def test_cmd_run_scan_uses_last_checkpoint_flag(tmp_path, monkeypatch):
+    """#1764: the pre-resume scan resolves the LAST --checkpoint occurrence —
+    build_command prepends the operator's extra flags and appends the
+    protocol's own --checkpoint after them, and the runner's argparse is
+    last-wins — so the scan and the recorded state describe the file the
+    runner actually uses."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:falkordb@localhost:6379")
+    state = _fresh_state(tmp_path)
+    for n in range(1, 8):
+        state.pass_gate(n, f"step {n} done")
+    run_dir = tmp_path / "runs"
+    run_dir.mkdir()
+    monkeypatch.setattr(rp, "DEFAULT_RUN_DIR", run_dir)
+    # the operator's extra --checkpoint points at a CLEAN file...
+    extra_cp = tmp_path / "extra.json"
+    extra_cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-clean",
+                       "session_recall@k": {"20": 1.0},
+                       "turn_recall@k": {"20": 1.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False, "reason": "ok",
+                                  "count": 7}]}],
+    }), encoding="utf-8")
+    # ...while the protocol-default checkpoint (what the runner will use,
+    # argparse last-wins) is dirty
+    cp = run_dir / "pilot.checkpoint.json"
+    cp.write_text(json.dumps({
+        "format": "lme-checkpoint-v2",
+        "run_key": "embedded__hybrid__default__default",
+        "outcomes": [{"question_id": "q-dead",
+                       "session_recall@k": {"20": 0.0},
+                       "turn_recall@k": {"20": 0.0},
+                       "legs": [{"leg": "fts", "ran": True,
+                                  "degraded": False,
+                                  "reason": "empty_results",
+                                  "count": 0}]}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(rp.subprocess, "run", lambda cmd, env: type(
+        "R", (), {"returncode": 0})())
+    rp.cmd_run(state, argparse_namespace(
+        step="3", owner_approve=None, dry_run=False,
+        extra=["--checkpoint", str(extra_cp)], expected_direction=None))
+    run = state.data["runs"]["3"]
+    assert run["checkpoint"] == str(cp)  # protocol-default, not the extra
+    assert run["resume_quality"]["qids"] == ["q-dead"]
+    assert run["resume_quality"]["rejected"] == 1
+
+
 def test_cmd_run_step7_requires_expected_direction(tmp_path, monkeypatch, capsys):
     """Step 7 via `run` needs the pre-stated expected-delta direction AND
     the recorded step-3/5 reports before building the confirmation set."""

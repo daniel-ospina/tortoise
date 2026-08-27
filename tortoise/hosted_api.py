@@ -9,6 +9,7 @@ See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5, §6.1
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json as _json
 import logging
 import math
@@ -17,42 +18,28 @@ import re
 import threading
 import time
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from collections.abc import Hashable
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
-from contextlib import asynccontextmanager
 
-from tortoise.audit_events import AuditLogger
-from tortoise.auth import hash_api_key
-from tortoise.security import redact_error  # billing webhook + checkout error logging
-from tortoise.session_auth import get_current_user, verify_session_jwt
-from tortoise.quota import DEFAULT_MAX_SESSIONS  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
+from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
     first_api_call,
     first_api_call_pending,
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
-import hmac
-from collections.abc import Hashable
-
-from tortoise.sdk import (
-    TortoiseSDK,
-    _capture_turn_window,      # #1532 D1: shared stored-window truncation
-    _content_hash,
-    _normalize_turn_role,      # #1532 D2: shared role normalization (None->unknown)
-    _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
-    _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
-)
-from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
-from tortoise.mcp_server import create_http_app
+from tortoise.audit_events import AuditLogger
+from tortoise.auth import hash_api_key
 from tortoise.hosted_backup import (
     MemoryStorage,
-    RestoreVerificationError,
     R2Storage,
+    RestoreVerificationError,
     _restore_into_temp_verify_swap,
     create_backup,
     decrypt_backup,
@@ -60,6 +47,23 @@ from tortoise.hosted_backup import (
     prune_backups,
     restore_backup,
 )
+from tortoise.mcp_server import create_http_app
+from tortoise.projection import (
+    _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
+)
+from tortoise.quota import (
+    DEFAULT_MAX_SESSIONS,  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
+)
+from tortoise.sdk import (
+    TortoiseSDK,
+    _capture_turn_window,  # #1532 D1: shared stored-window truncation
+    _content_hash,
+    _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
+    _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
+    _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
+)
+from tortoise.security import redact_error  # billing webhook + checkout error logging
+from tortoise.session_auth import get_current_user, verify_session_jwt
 
 _logger = logging.getLogger(__name__)
 
@@ -83,10 +87,10 @@ _logger = logging.getLogger(__name__)
 #
 # TODO(#176): one anchor per namespace, never evicted — bounded by provisioned
 # team count until a production FalkorDB replaces the embedded fallback.
-_FALLBACK_KEEPALIVE: dict[str, "TortoiseSDK"] = {}
+_FALLBACK_KEEPALIVE: dict[str, TortoiseSDK] = {}
 
 
-def _anchor_usable(anchor: "TortoiseSDK", db_path: str) -> bool:
+def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
     """True if the anchored SDK still holds the CURRENT embedded DB.
 
     The anchor's whole purpose is to HOLD the embedded redislite server
@@ -148,7 +152,7 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # or a daemon that crashed. The old code only self-healed when
         # `anchor._proj is None` — a stored-but-drifted projection was
         # served forever. Evict + recreate below instead.
-        try:
+        try:  # noqa: SIM105
             anchor.close()
         except Exception:
             pass
@@ -156,7 +160,7 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         anchor = None
     if anchor is None:
         anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
-        try:
+        try:  # noqa: SIM105
             anchor._get_proj()  # eager: hold the connection so the server survives
         except Exception:
             # Keepalive is best-effort — a transient connect failure must not
@@ -168,7 +172,7 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     return sdk
 
 
-def _registry_anchor() -> "TortoiseSDK":
+def _registry_anchor() -> TortoiseSDK:
     """Return the process-lifetime registry SDK (the _FALLBACK_KEEPALIVE
     anchor), creating it if absent. Unlike _make_sdk (which returns a FRESH
     SDK per call), the anchor's embedded server survives for the process —
@@ -191,13 +195,13 @@ def _registry_anchor() -> "TortoiseSDK":
     anchor = _FALLBACK_KEEPALIVE.get("registry")
     if anchor is None or not _anchor_usable(anchor, db_path):
         if anchor is not None:
-            try:
+            try:  # noqa: SIM105
                 anchor.close()
             except Exception:
                 pass
             _FALLBACK_KEEPALIVE.pop("registry", None)
         anchor = TortoiseSDK(db_path=db_path, namespace="registry")
-        try:
+        try:  # noqa: SIM105
             anchor._get_proj()
         except Exception:
             pass
@@ -238,7 +242,8 @@ def _iter_registered_teams() -> list[dict]:
     """
     try:
         from tortoise.supabase_control import (
-            get_control_plane, is_supabase_enabled,
+            get_control_plane,
+            is_supabase_enabled,
         )
         if is_supabase_enabled():
             rows = get_control_plane().query(
@@ -256,7 +261,7 @@ def _iter_registered_teams() -> list[dict]:
         # the default/shared graph.
         return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
                 for r in rows if r and r[0]]
-    except Exception:  # noqa: BLE001
+    except Exception:
         return []
 
 
@@ -329,11 +334,11 @@ async def _lifespan(app):
                         _logger.info(
                             "embeddings: background pre-warm deferred (retries on next call)",
                         )
-                except Exception as exc:  # noqa: BLE001 — never crash the app
+                except Exception as exc:
                     _logger.warning("embeddings: background pre-warm failed: %s", exc)
 
             threading.Thread(target=_prewarm_embeddings, name="embedding-prewarm", daemon=True).start()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("embeddings: could not start background pre-warm: %s", exc)
 
         # Backup watcher (driver-disabled leg, #596): a read-only staleness
@@ -344,7 +349,7 @@ async def _lifespan(app):
         global _WATCHER
         try:
             cfg = _backup_config_safe()
-            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":
+            if cfg and os.environ.get("BACKUP_WATCHER_DISABLED") != "1":  # noqa: F823
                 from tortoise.backup_sweep import read_team_state
                 from tortoise.backup_watcher import BackupWatcher, WatcherThread
 
@@ -355,7 +360,8 @@ async def _lifespan(app):
                 # (registry deleted) and file spurious staleness incidents
                 # (post-flip verification finding, #669).
                 from tortoise.supabase_control import (
-                    get_control_plane, is_supabase_enabled,
+                    get_control_plane,
+                    is_supabase_enabled,
                 )
                 if is_supabase_enabled():
                     team_source = get_control_plane()
@@ -368,7 +374,7 @@ async def _lifespan(app):
 
                     try:
                         return enumerate_teams(team_source)
-                    except Exception as exc:  # noqa: BLE001 — fail-closed, never crash
+                    except Exception as exc:
                         _logger.warning("watcher team enumeration failed: %s", exc)
                         return []
 
@@ -387,7 +393,7 @@ async def _lifespan(app):
                 _WATCHER.start()
                 if not is_supabase_enabled():
                     _boot_gc_drill_graphs(reg_sdk._get_proj().db)
-        except Exception as exc:  # noqa: BLE001 — never crash the app
+        except Exception as exc:
             _logger.warning("backup watcher could not start: %s", exc)
         # #432 Task 7: event retention — boot purge + interval task. Best-effort
         # and non-fatal (like the pre-warm): a purge failure never blocks bind.
@@ -409,9 +415,9 @@ async def _lifespan(app):
                             proj = sdk._get_proj()
                             purge_expired(proj, retention_days=days)
                             purge_overflow(proj, max_events=cap)
-                        except Exception:  # noqa: BLE001
+                        except Exception:
                             _logger.debug("event retention sweep skipped for %s", team.get("team_id"))
-                except Exception as exc:  # noqa: BLE001
+                except Exception as exc:
                     _logger.warning("event retention sweep failed: %s", exc)
 
             _sweep_events()  # boot sweep
@@ -427,7 +433,7 @@ async def _lifespan(app):
 
             _retention_task = asyncio.get_event_loop().create_task(_event_retention_loop())
             app.state._event_retention_task = _retention_task
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             _logger.warning("event retention loop not started: %s", exc)
         yield
 
@@ -570,11 +576,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     consume nor are consumed by the general per-key budget.
     """
 
-    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}
+    SKIP = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email"}  # noqa: RUF012
     # R-13: path → dedicated per-key limit. The commit endpoint's bucket is
     # keyed on ``<key>@<path>`` (see _bucket_key) — fully separate from the
     # general 100/min bucket.
-    PATH_LIMITS = {"/v1/sessions/commit": 300}
+    PATH_LIMITS = {"/v1/sessions/commit": 300}  # noqa: RUF012
 
     def __init__(self, app, max_per_minute=100, path_limits: dict | None = None):
         super().__init__(app)
@@ -907,7 +913,7 @@ async def provision_tenant(request: Request):
         raise HTTPException(status_code=400, detail="Invalid team_name format")
 
     sdk = _make_sdk(namespace="registry")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     graph_name = f"team_{team_id}"
 
     try:
@@ -958,6 +964,8 @@ async def provision_tenant(request: Request):
             "CREATE (:TeamMeta {name: $name, created: $now})",
             params={"name": team_name, "now": now},
         )
+        # #1686: journal the minted team_* graph (session sweep drops it).
+        _journal_append_product(graph_name)
 
         # Create Membership (creator is Owner)
         sdk._get_registry().query(
@@ -1018,7 +1026,7 @@ async def provision_tenant(request: Request):
             team_graph.delete()
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail="Tenant provisioning failed")
+        raise HTTPException(status_code=500, detail="Tenant provisioning failed")  # noqa: B904
 
 
 def _short_id() -> str:
@@ -1059,7 +1067,7 @@ def _probe_db() -> dict:
     from tortoise.monitoring import probe_db
     try:
         sdk = _make_sdk(namespace=None)
-    except Exception as exc:  # noqa: BLE001 — probe reports, never raises
+    except Exception as exc:
         return {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return probe_db(sdk)
 
@@ -1085,7 +1093,7 @@ async def health():
         # to_thread: a hung probe (firewall black-hole) must not stall the
         # event loop — probe_db is itself bounded, but stay off the loop.
         db = await asyncio.to_thread(_probe_db)
-    except Exception as exc:  # noqa: BLE001 — liveness never crashes
+    except Exception as exc:
         db = {"ok": False, "latency_ms": 0.0, "error": str(exc)[:200]}
     return {"status": "ok" if db["ok"] else "degraded", "db": db}
 
@@ -1122,7 +1130,7 @@ async def health_ready():
             # PostgREST path without depending on any tenant data.
             get_control_plane().query("teams", select=["id"], limit=1)
         except Exception:
-            raise HTTPException(status_code=503, detail="Control plane unreachable")
+            raise HTTPException(status_code=503, detail="Control plane unreachable")  # noqa: B904
         return {"status": "ok", "db": "connected", "control_plane": "connected"}
     return {"status": "ok", "db": "connected"}
 
@@ -1181,7 +1189,7 @@ async def _audit_auth_failure(request: Request, reason: str) -> None:
     Offloaded to a thread to avoid blocking the 401 response.
     """
     ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
-    try:
+    try:  # noqa: SIM105
         await asyncio.to_thread(
             _audit_logger.append,
             team_id="",
@@ -1218,8 +1226,8 @@ async def get_current_team(request: Request) -> dict:
         return await _get_current_team_supabase(request, token)
     try:
         sdk = _make_sdk(namespace="registry")
-        from datetime import datetime as _dt, timezone as _tz
-        now_iso = _dt.now(_tz.utc).isoformat()
+        from datetime import datetime as _dt
+        now_iso = _dt.now(UTC).isoformat()
         # API keys are stored as "salt:hash" (per-key random salt). hash_api_key()
         # generates a NEW random salt per call, so we CANNOT look up by exact
         # match. Instead fetch all non-revoked keys and verify each against the
@@ -1271,10 +1279,10 @@ async def get_current_team(request: Request) -> dict:
         # every successful auth. The registry graph is small (teams × keys) and
         # a single indexed SET on an already-fetched node adds negligible overhead.
         # Best-effort only: a telemetry write must never gate authentication.
-        try:
+        try:  # noqa: SIM105
             sdk._get_registry().query(
                 "MATCH (k:APIKey {id: $id}) SET k.last_used_at = $now",
-                params={"id": key_id, "now": datetime.now(timezone.utc).isoformat()},
+                params={"id": key_id, "now": datetime.now(UTC).isoformat()},
             )
         except Exception:
             pass
@@ -1329,6 +1337,12 @@ async def get_current_team(request: Request) -> dict:
                 "max_points": int(mp) if mp is not None else lim["max_graph_nodes"],
                 "max_api_keys": int(mak) if mak is not None else lim["max_api_keys"],
                 "max_sessions": int(ms) if ms is not None else DEFAULT_MAX_SESSIONS,
+                # #1748: key creator's user UUID rides the team dict (Supabase
+                # resolve_api_key parity) so session-user-owned endpoints can
+                # identify the owner from a key-auth request (onboarding
+                # sub-team provisioning). None for legacy keys that predate
+                # created_by.
+                "created_by": created_by,
                 # #308 additive: enforcement state + owner email
                 "suspended_at": t_suspended, "flagged_at": t_flagged,
                 "email": t_email,
@@ -1344,7 +1358,7 @@ async def get_current_team(request: Request) -> dict:
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(status_code=500, detail="Auth error")
+        raise HTTPException(status_code=500, detail="Auth error")  # noqa: B904
 
 
 async def _get_current_team_supabase(request: Request, token: str) -> dict:
@@ -1359,7 +1373,9 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
     200 with safe defaults (un-suspended/un-flagged), logged at WARNING.
     """
     from tortoise.supabase_control import (
-        get_control_plane, resolve_api_key, update_last_used,
+        get_control_plane,
+        resolve_api_key,
+        update_last_used,
     )
     try:
         team = resolve_api_key(get_control_plane(), token)
@@ -1400,7 +1416,7 @@ async def _get_current_team_supabase(request: Request, token: str) -> dict:
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(status_code=500, detail="Auth error")
+        raise HTTPException(status_code=500, detail="Auth error")  # noqa: B904
 
 
 async def _session_user_team(request: Request, user: dict) -> dict:
@@ -1414,7 +1430,9 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     — a session always passes the gate). Multi-team: honors ?team_id=, else
     the first membership."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, user_memberships,
+        get_control_plane,
+        is_supabase_enabled,
+        user_memberships,
     )
     if not is_supabase_enabled():
         raise HTTPException(status_code=401, detail="Session auth is hosted-mode only")
@@ -1525,12 +1543,11 @@ def _check_team_limit(team: dict, resource: str) -> None:
     team_id = team.get("team_id")
     if not team_id:
         return  # internal/no-team context — skip
-    from tortoise.quota import (QuotaCheckError, QuotaExceededError,
-                                enforce_team_limit)
+    from tortoise.quota import QuotaCheckError, QuotaExceededError, enforce_team_limit
     try:
         enforce_team_limit(team, resource)
     except QuotaExceededError as e:
-        raise HTTPException(status_code=402, detail=str(e))
+        raise HTTPException(status_code=402, detail=str(e))  # noqa: B904
     except QuotaCheckError as e:
         # quota._count_resource already logged at ERROR level (#686);
         # avoid double-logging — this site only records the HTTP context.
@@ -1538,7 +1555,7 @@ def _check_team_limit(team: dict, resource: str) -> None:
             "quota check failed (fail-closed): team=%s resource=%s error=%s",
             team_id, resource, str(e),
         )
-        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
 
 
 def _record_write_op(team: dict, nodes_written: int = 0) -> None:
@@ -1602,7 +1619,7 @@ def _abuse_record_points_sync(team: dict, n: int) -> None:
 
 
 async def _abuse_record_points(request: Request, team: dict, n: int) -> None:
-    try:
+    try:  # noqa: SIM105
         await asyncio.to_thread(_abuse_record_points_sync, team, n)
     except Exception:
         pass  # best-effort — never block the write path
@@ -1615,7 +1632,7 @@ def _abuse_evaluate_keys_sync(team_id: str) -> None:
 
 
 async def _abuse_evaluate_keys(team_id: str) -> None:
-    try:
+    try:  # noqa: SIM105
         await asyncio.to_thread(_abuse_evaluate_keys_sync, team_id)
     except Exception:
         pass
@@ -1672,7 +1689,7 @@ async def _check_turnstile(request: Request, body: dict) -> None:
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
 
 
 class CreatePointRequest(BaseModel):
@@ -1871,6 +1888,8 @@ DEFAULT_ONBOARDING_STATE = {
     "github_connected_at": None,
     "github_indexed": False,
     "github_index_job_id": None,
+    "github_index_cursor": None,          # #1725: per-repo composite (updated_at, number) diff cursor
+    "github_legacy_backfill_done": False,  # #1725: one-time legacy `-closed` backfill marker
     "session_recording": False,
     "demo_created": False,
     "team_created": False,
@@ -2377,7 +2396,7 @@ class CreateObjectRequest(BaseModel):
 
 @app.post("/v1/objects")
 async def create_object(body: CreateObjectRequest, request: Request,
-                        team: dict = Depends(get_current_team)):
+                        team: dict = Depends(get_current_team)):  # noqa: B008
     """#1643: create an Object in the team's graph (the STATE layer).
 
     Wraps sdk.create_object — deterministic id by name, idempotent (a repeat
@@ -2390,13 +2409,13 @@ async def create_object(body: CreateObjectRequest, request: Request,
         if body.status:
             props["status"] = body.status
         node = sdk.create_object(body.name, objectKind=body.objectKind, **props)
-    except Exception as e:
+    except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_object failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # #1643 (review P2-4): mirror the points handler's bookkeeping — object
     # writes must count toward metering + leave an audit trail.
-    try:
+    try:  # noqa: SIM105
         _record_write_op(team, nodes_written=1)
     except Exception:
         pass  # metering is best-effort — never fail the write
@@ -2413,7 +2432,7 @@ class CreateSubjectRequest(BaseModel):
 
 @app.post("/v1/subjects")
 async def create_subject(body: CreateSubjectRequest, request: Request,
-                         team: dict = Depends(get_current_team)):
+                         team: dict = Depends(get_current_team)):  # noqa: B008
     """#1660: create a Subject in the team's graph (the STATE layer).
 
     Mirrors /v1/objects for the Subject node type — deterministic id by
@@ -2428,8 +2447,8 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_subject failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
-    try:
+        raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
+    try:  # noqa: SIM105
         _record_write_op(team, nodes_written=1)
     except Exception:
         pass  # metering is best-effort — never fail the write
@@ -2440,7 +2459,7 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 
 
 @app.post("/v1/points", response_model=PointResponse)
-async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):
+async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
     """Create a Point in the team's graph."""
     _check_team_limit(team, "points")
     sdk = _make_sdk(namespace=team["team_id"])
@@ -2458,10 +2477,10 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
                 result["id"], body.about_object, "aboutObject")
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("create_point failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # Dreaming (#85): enqueue the new point's dirty roots for background EP
     # stabilization (non-blocking — fast path is never gated on the dream).
     _enqueue_dream(team["team_id"], list(sdk._dirty_roots))
@@ -2488,7 +2507,7 @@ async def events_poll(
     after: str | None = None,
     types: str | None = None,
     limit: int = Query(100, ge=1, le=1000),
-    team: dict = Depends(get_current_team),
+    team: dict = Depends(get_current_team),  # noqa: B008
 ):
     """Poll graph/claim events after an opaque cursor (at-least-once contract).
 
@@ -2503,15 +2522,15 @@ async def events_poll(
     except ValueError as e:
         msg = str(e)
         if "cursor expired" in msg:
-            raise HTTPException(
+            raise HTTPException(  # noqa: B904
                 status_code=410,
                 detail="cursor expired — replay from tail (after= omitted)",
             )
         if "invalid cursor" in msg:
-            raise HTTPException(status_code=400, detail="invalid cursor")
+            raise HTTPException(status_code=400, detail="invalid cursor")  # noqa: B904
         if "unknown event type" in msg:
-            raise HTTPException(status_code=400, detail=msg)
-        raise HTTPException(status_code=400, detail=str(e))
+            raise HTTPException(status_code=400, detail=msg)  # noqa: B904
+        raise HTTPException(status_code=400, detail=str(e))  # noqa: B904
     return result
 
 @app.get("/v1/points")
@@ -2519,7 +2538,7 @@ async def list_points(
     kind: str | None = None,
     tag: str | None = None,
     limit: int = Query(50, ge=1, le=1000),
-    team: dict = Depends(get_current_team),
+    team: dict = Depends(get_current_team),  # noqa: B008
 ):
     """Query Points in the team's graph. Optional kind and tag filters."""
     if kind:
@@ -2563,7 +2582,7 @@ async def list_points(
 
 
 @app.get("/v1/points/{point_id}")
-async def get_point(point_id: str, team: dict = Depends(get_current_team)):
+async def get_point(point_id: str, team: dict = Depends(get_current_team)):  # noqa: B008
     """Get a single Point by ID."""
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
@@ -2586,7 +2605,7 @@ async def dream(
     full: bool = False,
     mode: str | None = None,
     budget: int | None = None,
-    team: dict = Depends(get_current_team),
+    team: dict = Depends(get_current_team),  # noqa: B008
 ):
     """Trigger EP stabilization (dreaming, #85) for the team's graph.
 
@@ -2606,6 +2625,7 @@ async def dream(
     # NOT the bound (tenants can hold up to max_api_keys keys). Per-team hourly
     # budget MAX_DREAM_FULL_PER_HOUR for full=True; incremental is cheap.
     import time as _t
+
     from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
     # I1 precedence: an explicit mode wins; else full=True ⇒ full; else the
     # SDK auto-selects. The budget counts FULL passes only (incl. override).
@@ -2655,7 +2675,7 @@ async def dream(
 
 @app.get("/v1/dream/health")
 async def dream_health(
-    team: dict = Depends(get_current_team),
+    team: dict = Depends(get_current_team),  # noqa: B008
 ):
     """Dream observability (epic 903-C7, #1245): the I5 field set — last-pass
     ts, coverage %, failure rate, operator counts, per-mode counts, stale
@@ -2669,7 +2689,7 @@ async def dream_health(
 
 
 @app.get("/v1/search")
-async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):
+async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):  # noqa: B008
     """Hybrid search across Points (FTS + vector + structural, RRF-fused).
 
     Uses the SDK's tortoise_fts_query (search_engine) instead of raw
@@ -2691,7 +2711,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("search failed")
-        raise HTTPException(status_code=500, detail="Search failed")
+        raise HTTPException(status_code=500, detail="Search failed")  # noqa: B904
     finally:
         sdk.close()
     # Normalize to the public response shape (kind from pointKind).
@@ -2712,7 +2732,7 @@ async def topic_summary(
     max_seeds: int = Query(50, ge=1, le=200),
     max_hops: int = Query(1, ge=0, le=3),
     include_relationships: bool = Query(True),
-    team: dict = Depends(get_current_team),
+    team: dict = Depends(get_current_team),  # noqa: B008
 ):
     """Epistemic topic summarization — settled vs contested structure (#592).
 
@@ -2740,13 +2760,13 @@ async def topic_summary(
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("topic summary failed")
-        raise HTTPException(status_code=500, detail="Topic summary failed")
+        raise HTTPException(status_code=500, detail="Topic summary failed")  # noqa: B904
     finally:
         sdk.close()
 
 
 @app.get("/v1/team", response_model=TeamInfoResponse)
-async def team_info(team: dict = Depends(get_current_team)):
+async def team_info(team: dict = Depends(get_current_team)):  # noqa: B008
     """Get current team info: tier, usage, limits."""
     sdk = _make_sdk(namespace=team["team_id"])
     # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
@@ -2959,7 +2979,7 @@ async def _session_login_exchange(
     try:
         gotrue = _gotrue_admin_get_user(target)
     except RuntimeError:
-        raise HTTPException(status_code=502, detail="Auth service unavailable")
+        raise HTTPException(status_code=502, detail="Auth service unavailable")  # noqa: B904
     if gotrue is None:
         raise HTTPException(
             status_code=403,
@@ -2982,11 +3002,11 @@ async def _session_login_exchange(
     except RuntimeError as exc:
         msg = str(exc).lower()
         if "expired" in msg or "consumed" in msg:
-            raise HTTPException(status_code=503,
+            raise HTTPException(status_code=503,  # noqa: B904
                                 detail="Session login timed out — try again.")
-        raise HTTPException(status_code=502, detail="Auth service unavailable")
+        raise HTTPException(status_code=502, detail="Auth service unavailable")  # noqa: B904
     except Exception:
-        raise HTTPException(status_code=502, detail="Auth service unavailable")
+        raise HTTPException(status_code=502, detail="Auth service unavailable")  # noqa: B904
 
     # Session-identity backstop (security review): the minted session must
     # belong to the key's creator — a GoTrue anomaly (email reassignment race,
@@ -3017,7 +3037,7 @@ async def _session_login_exchange(
 
 
 @app.get("/v1/packs")
-async def list_packs(team: dict = Depends(get_current_team)):
+async def list_packs(team: dict = Depends(get_current_team)):  # noqa: B008
     """#318: read-only pack introspection — the tenant's ACTIVE packs.
 
     Shared pack catalog + per-tenant ``PackInstall`` activation records
@@ -3046,7 +3066,7 @@ async def list_packs(team: dict = Depends(get_current_team)):
         packs = await asyncio.to_thread(get_tenant_packs, sdk)
     except Exception:
         _logger.exception("pack introspection failed for team %s", team_id)
-        raise HTTPException(status_code=503, detail="Pack catalog unavailable")
+        raise HTTPException(status_code=503, detail="Pack catalog unavailable")  # noqa: B904
     return {"packs": packs}
 
 
@@ -3058,7 +3078,9 @@ def _team_is_anon(team_id: str) -> bool:
     Registry mode (selfhost): False — no claim path in v1.
     """
     from tortoise.supabase_control import (
-        get_control_plane, is_anon_team, is_supabase_enabled,
+        get_control_plane,
+        is_anon_team,
+        is_supabase_enabled,
     )
     if not is_supabase_enabled():
         return False
@@ -3071,7 +3093,7 @@ def _team_is_anon(team_id: str) -> bool:
 
 
 @app.get("/v1/team/alerts")
-async def team_alerts(team_id: str, user: dict = Depends(get_current_user)):
+async def team_alerts(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """#308 (R7) — suspicious-activity alert history for the dashboard.
 
     Session-authed (NOT API-key authed) by design: it must stay reachable
@@ -3113,7 +3135,7 @@ async def register_user(request: Request, response: Response):
     try:
         reg = RegisterRequest.model_validate(body)
     except Exception as e:
-        raise HTTPException(status_code=422, detail=str(e))
+        raise HTTPException(status_code=422, detail=str(e))  # noqa: B904
 
     email = reg.email
     password = reg.password  # noqa: F841 — validated, not stored (Supabase handles auth)
@@ -3121,7 +3143,9 @@ async def register_user(request: Request, response: Response):
     # Idempotency: check if email already registered (teams.email in
     # Supabase mode; Team node property in registry mode)
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, provision_team,
+        get_control_plane,
+        is_supabase_enabled,
+        provision_team,
         team_by_email,
     )
     if is_supabase_enabled():
@@ -3137,7 +3161,7 @@ async def register_user(request: Request, response: Response):
         except Exception:
             # Fail-closed: an idempotency-read error is a 500, never a
             # registry fallback and never a silent duplicate.
-            raise HTTPException(status_code=500, detail="Registration failed")
+            raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
     else:
         sdk_check = _make_sdk(namespace="registry")
         existing = sdk_check._get_registry().query(
@@ -3158,10 +3182,11 @@ async def register_user(request: Request, response: Response):
 
     # Generate API key
     import uuid
-    from tortoise.auth import hash_api_key, lookup_hash
+
+    from tortoise.auth import lookup_hash
     api_key = f"tt_{uuid.uuid4().hex}"
     key_hash = hash_api_key(api_key)
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     graph_name = f"team_{team_id}"
 
     if is_supabase_enabled():
@@ -3178,8 +3203,10 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 params={"name": team_name, "now": now},
             )
+            # #1686: journal the minted team_* graph (session sweep drops it).
+            _journal_append_product(graph_name)
         except Exception:
-            raise HTTPException(status_code=500, detail="Registration failed")
+            raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
         try:
             provision_team(cp, **{
                 "p_user_id": None,
@@ -3198,11 +3225,11 @@ async def register_user(request: Request, response: Response):
                 "p_key_prefix": team_id[:8],
             })
         except Exception:
-            try:
+            try:  # noqa: SIM105
                 _make_sdk(namespace=team_id)._get_proj().db.select_graph(graph_name).delete()
             except Exception:
                 pass
-            raise HTTPException(status_code=500, detail="Registration failed")
+            raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
     else:
         sdk = _make_sdk(namespace="registry")
         try:
@@ -3248,6 +3275,8 @@ async def register_user(request: Request, response: Response):
                 "CREATE (:TeamMeta {name: $name, created: $now})",
                 params={"name": team_name, "now": now},
             )
+            # #1686: journal the minted team_* graph (session sweep drops it).
+            _journal_append_product(graph_name)
 
             # #318 (multi-tenant pack isolation): activate the starter pack
             # set — registry-mode self-service path (the Supabase-mode path
@@ -3284,13 +3313,13 @@ async def register_user(request: Request, response: Response):
                 team_graph.delete()
             except Exception:
                 pass
-            raise HTTPException(status_code=500, detail="Registration failed")
+            raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
 
     if is_supabase_enabled():
         # Supabase path audit — BEST-EFFORT (review P2, PR #874): no
         # row-level rollback exists here, so a post-persist audit failure
         # must NOT 500 the client with a 409-on-retry lockout.
-        try:
+        try:  # noqa: SIM105
             await _async_audit(
                 request, team_id, "tenant_register",
                 resource_type="team", resource_id=team_id,
@@ -3372,7 +3401,7 @@ def _gotrue_admin_get_user(user_id: str) -> tuple[int, dict] | None:
             timeout=15.0,
         )
     except (httpx.HTTPError, httpx.TimeoutException):
-        raise RuntimeError("auth-service transport failure")
+        raise RuntimeError("auth-service transport failure")  # noqa: B904
     if resp.status_code == 404:
         return None
     try:
@@ -3409,13 +3438,13 @@ def _gotrue_admin_mint_session(email: str) -> dict:
             timeout=15.0,
         )
     except (httpx.HTTPError, httpx.TimeoutException):
-        raise RuntimeError("auth-service transport failure")
+        raise RuntimeError("auth-service transport failure")  # noqa: B904
     if link_resp.status_code >= 400:
         raise RuntimeError(f"session-link issuance failed (HTTP {link_resp.status_code})")
     try:
         link_body = link_resp.json()
     except ValueError:
-        raise RuntimeError("session-link issuance returned a non-JSON body")
+        raise RuntimeError("session-link issuance returned a non-JSON body")  # noqa: B904
     token_hash = link_body.get("hashed_token")
     if not token_hash:
         raise RuntimeError("session-link issuance returned no hashed_token")
@@ -3427,7 +3456,7 @@ def _gotrue_admin_mint_session(email: str) -> dict:
             timeout=15.0,
         )
     except (httpx.HTTPError, httpx.TimeoutException):
-        raise RuntimeError("auth-service transport failure")
+        raise RuntimeError("auth-service transport failure")  # noqa: B904
     if verify_resp.status_code >= 400:
         # Single-use token consumed by a concurrent/retried exchange — the
         # caller treats this as retryable (re-issue), NOT a fatal error.
@@ -3437,7 +3466,7 @@ def _gotrue_admin_mint_session(email: str) -> dict:
     try:
         session = verify_resp.json()
     except ValueError:
-        raise RuntimeError("session verification returned a non-JSON body")
+        raise RuntimeError("session verification returned a non-JSON body")  # noqa: B904
     # supabase-js sessions carry expires_at (epoch seconds); GoTrue's
     # AccessTokenResponse only ships expires_in, and the client stores this
     # JSON DIRECTLY in the parent-domain cookie (no supabase-js round trip to
@@ -3499,7 +3528,7 @@ async def email_signup(request: Request):
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(
+        raise HTTPException(  # noqa: B904
             status_code=422,
             detail="Invalid email or password. Check the email format and that the password is at least 6 characters.",
         )
@@ -3511,7 +3540,7 @@ async def email_signup(request: Request):
     except Exception:
         # #801 review P1: never echo str(ValidationError) — Pydantic v2 embeds
         # input_value (the raw password) in the message. Generic copy only.
-        raise HTTPException(
+        raise HTTPException(  # noqa: B904
             status_code=422,
             detail="Invalid email or password. Check the email format and that the password is at least 6 characters.",
         )
@@ -3528,7 +3557,7 @@ async def email_signup(request: Request):
     try:
         status, gb = _supabase_admin_create_user(req.email, req.password)
     except Exception:
-        raise HTTPException(
+        raise HTTPException(  # noqa: B904
             status_code=502,
             detail="Signup service temporarily unavailable — try again in a moment.",
         )
@@ -3610,7 +3639,7 @@ def _seed_demo_graph(team_id: str) -> dict:
     """Seed the 4-layer demo graph for a team. Idempotent (sentinel)."""
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     # Idempotency: sentinel written last — skip if already fully seeded
     existing = proj.g.query(
@@ -3792,7 +3821,7 @@ async def create_demo_graph(request: Request):
     return _seed_demo_graph(team_id)
 
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
-async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team_session)):
+async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Generate a new API key for the team.
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
@@ -3817,15 +3846,18 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     except Exception:
         name = None
     import uuid
-    from tortoise.auth import hash_api_key, lookup_hash
+
+    from tortoise.auth import lookup_hash
     from tortoise.supabase_control import (
-        get_control_plane, insert_api_key, is_supabase_enabled,
+        get_control_plane,
+        insert_api_key,
+        is_supabase_enabled,
     )
     api_key = f"tt_{uuid.uuid4().hex}"
     key_hash = hash_api_key(api_key)
     key_prefix = api_key[:10]
     kid = _short_id()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     if is_supabase_enabled():
         cp = get_control_plane()
         insert_api_key(cp, {
@@ -3867,8 +3899,13 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         )
     else:
         sdk = _make_sdk(namespace="registry")
+        # #1753: created_via/expires_at prop parity with agent_signup + the
+        # Supabase lane (like the #1709 mint at ~7365) — without them the
+        # selfhost dashboard lists durable keys as "ephemeral · session"
+        # and hides rename. expires_at:null = never (durable key).
         sdk._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, created_by:$cb, created_at:$now, name:$name})",
+            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
+            "created_by:$cb, created_via:'provisioned', created_at:$now, expires_at:null, name:$name})",
             params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now, "name": name},
         )
         # #528 analytics — actor user id from the team's Membership graph when
@@ -3909,26 +3946,28 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 
 
 @app.get("/v1/team/keys")
-async def list_api_keys(team: dict = Depends(get_current_team)):
+async def list_api_keys(team: dict = Depends(get_current_team)):  # noqa: B008
     """List API keys for the team (hashes only — no plaintext).
 
     #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
     with their revoked_at; registry parity). Registry path stays for
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
-    (registry lane is None-tolerant for the agent_signup/create_api_key
-    mints that omit the props until #1709; session_key mints already write
-    them)."""
+    (agent_signup #1709, create_api_key #1753 and session_key mints all
+    write them at mint time; the registry list stays None-tolerant for
+    LEGACY nodes minted before those fixes)."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, team_api_keys,
+        get_control_plane,
+        is_supabase_enabled,
+        team_api_keys,
     )
     if is_supabase_enabled():
         try:
             keys = team_api_keys(get_control_plane(), team["team_id"])
-        except Exception as e:
+        except Exception:
             import logging
             logging.getLogger("tortoise.api").exception("list_api_keys failed")
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
         return {
             "keys": [
                 {
@@ -3957,10 +3996,10 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
             "ORDER BY k.created_at DESC",
             params={"tid": team["team_id"]},
         )
-    except Exception as e:
+    except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("list_api_keys failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     return {
         "keys": [
             {
@@ -3971,9 +4010,10 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
                 "revoked_at": row[4],
                 # 20260825000001: optional user-facing label
                 "name": row[5],
-                # #1708 D7: None-tolerant — registry nodes minted by
-                # agent_signup/create_api_key lack the props until #1709
-                # writes them at mint time; JSON null is additive-safe.
+                # #1708 D7: None-tolerant — LEGACY registry nodes minted
+                # before #1709 (agent_signup) / #1753 (create_api_key) wrote
+                # the props at mint time lack them; JSON null is
+                # additive-safe.
                 "created_via": row[6],
                 "expires_at": row[7],
             }
@@ -3985,7 +4025,7 @@ async def list_api_keys(team: dict = Depends(get_current_team)):
 
 
 @app.delete("/v1/team/keys/{key_id}")
-async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get_current_team_session)):
+async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Revoke an API key (soft delete — sets revoked_at). Team-scoped.
 
     #765 (plan Task 8 writer inventory): Supabase mode PATCHes
@@ -3994,7 +4034,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     REST and MCP. The registry path (per #7873, on _get_registry()) stays
     for selfhost."""
     from tortoise.supabase_control import (
-        api_key_by_id, get_control_plane, is_supabase_enabled, revoke_api_key as _sb_revoke,
+        api_key_by_id,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        revoke_api_key as _sb_revoke,
     )
     if is_supabase_enabled():
         try:
@@ -4005,15 +4050,15 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
                 raise HTTPException(status_code=403, detail="Not your API key")
             if row.get("revoked_at") is not None:
                 return {"revoked": True, "already": True, "key_id": key_id}
-            from datetime import datetime, timedelta, timezone
-            now = datetime.now(timezone.utc).isoformat()
+            from datetime import datetime
+            now = datetime.now(UTC).isoformat()
             _sb_revoke(get_control_plane(), key_id, now)
         except HTTPException:
             raise
-        except Exception as e:
+        except Exception:
             import logging
             logging.getLogger("tortoise.api").exception("revoke_api_key failed")
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
         return {"revoked": True, "key_id": key_id, "revoked_at": now}
     sdk = _make_sdk(namespace="registry")
     try:
@@ -4027,18 +4072,18 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
             raise HTTPException(status_code=403, detail="Not your API key")
         if rows[0][1] is not None:
             return {"revoked": True, "already": True, "key_id": key_id}
-        from datetime import datetime, timedelta, timezone
-        now = datetime.now(timezone.utc).isoformat()
+        from datetime import datetime
+        now = datetime.now(UTC).isoformat()
         sdk._get_registry().query(
             "MATCH (k:APIKey {id: $id}) SET k.revoked_at = $now",
             params={"id": key_id, "now": now},
         )
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("revoke_api_key failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     return {"revoked": True, "key_id": key_id, "revoked_at": now}
 
 
@@ -4055,7 +4100,7 @@ class DashboardLoginToggle(BaseModel):
 async def toggle_dashboard_login(
     body: DashboardLoginToggle,
     request: Request,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),  # noqa: B008
 ):
     """#1148: enable/disable API-key login for the dashboard (management
     surface). Claimed owner/admin, session-authed. When disabled, key-auth
@@ -4066,10 +4111,12 @@ async def toggle_dashboard_login(
     # Resolve the team from the session's membership (single-team: the user's
     # team; multi-team: the id in the query).
     from tortoise.session_auth import verify_session_jwt as _verify
-    session = await _verify(request)
+    session = await _verify(request)  # noqa: F841
     team_id = request.query_params.get("team_id") or None
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, user_memberships,
+        get_control_plane,
+        is_supabase_enabled,
+        user_memberships,
     )
     if is_supabase_enabled():
         memberships = user_memberships(get_control_plane(), user["user_id"])
@@ -4111,15 +4158,21 @@ async def toggle_api_key_enabled(
     key_id: str,
     body: KeyEnabledToggle,
     request: Request,
-    user: dict = Depends(get_current_user),
+    user: dict = Depends(get_current_user),  # noqa: B008
 ):
     """#1148: enable/disable an API key (per-key toggle) and/or rename it
     (20260825000001, optional user-facing label). Disabled keys stop
     authenticating (resolve_api_key rejects enabled=false) but stay listed —
     re-enable anytime. Session-authed + owner/admin-only. Team-scoped."""
     from tortoise.supabase_control import (
-        api_key_by_id, get_control_plane, is_supabase_enabled,
+        api_key_by_id,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
         set_api_key_enabled as _sb_set_enabled,
+    )
+    from tortoise.supabase_control import (
         set_api_key_name as _sb_set_name,
     )
     if is_supabase_enabled():
@@ -4234,7 +4287,7 @@ def _llm_provider_available() -> bool:
 
 
 @app.post("/v1/sessions")
-async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):
+async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
     """Capture an agent session and extract turns as episodic Points.
 
     #822: extraction is LLM-default — the M2 two-stage LLMExtractor (epic
@@ -4250,10 +4303,11 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     as 200 + additive errors/warnings (the turn mutation already happened).
     """
     import uuid
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime
+
     from tortoise.quota import (
         MAX_SESSION_TURNS,
-        QuotaCheckError, QuotaExceededError, enforce_team_limit,
+        QuotaCheckError,
     )
 
     # #822: LLM extraction is the default (and only) capture extraction —
@@ -4314,7 +4368,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     try:
         count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
     except QuotaCheckError as e:
-        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
     max_points = team.get("max_points") or 1000
     if count + est > max_points:
         raise HTTPException(
@@ -4339,7 +4393,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         context="capture_session",
     )
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     proj.g.query(
         "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
@@ -4547,7 +4601,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
 # basename (+ contentHash), never the full path.
 
 
-def _session_source_basename(payload: "CommitPayload") -> str:
+def _session_source_basename(payload: CommitPayload) -> str:  # noqa: F821
     """The session Source identity = the FIRST provenance basename (privacy,
     W-7). Empty when the payload has no provenance_refs (valid empty commit)."""
     if not payload.provenance_refs:
@@ -4556,7 +4610,7 @@ def _session_source_basename(payload: "CommitPayload") -> str:
 
 
 def _commit_response(
-    payload: "CommitPayload",
+    payload: CommitPayload,  # noqa: F821
     *,
     duplicate: bool,
     nodes_created: int = 0,
@@ -4584,7 +4638,7 @@ def _commit_response(
     }
 
 
-def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
+def _load_commit_graph_state(sdk: TortoiseSDK, payload: CommitPayload):  # noqa: F821
     """L2 read surface (W-3 [3]) — same-session/global MERGE state the
     reconciliation needs, computed IN MEMORY (nothing written here).
 
@@ -4651,7 +4705,7 @@ def _load_commit_graph_state(sdk: TortoiseSDK, payload: "CommitPayload"):
     return state
 
 
-def _store_commit_telemetry(proj, client_commit_id: str, payload: "CommitPayload",
+def _store_commit_telemetry(proj, client_commit_id: str, payload: CommitPayload,  # noqa: F821
                             *, warn: bool = False, plan=None) -> None:
     """Content-free telemetry store (W-7): the payload telemetry block is
     stored on the :CommitRecord — the schema has NO text-bearing fields (#963
@@ -4687,14 +4741,14 @@ def _store_commit_telemetry(proj, client_commit_id: str, payload: "CommitPayload
     )
 
 
-def _point_content_by_id(payload: "CommitPayload", pid: str) -> str:
+def _point_content_by_id(payload: CommitPayload, pid: str) -> str:  # noqa: F821
     for pt in payload.points:
         if pt.id == pid:
             return pt.content
     return ""
 
 
-def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
+def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # noqa: F821
     """W-3 [5] — the graph write phase for an adjudicated (budget=ok) commit.
 
     Order matters: chain nodes first (Session counters → Event AgentSession →
@@ -4709,7 +4763,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
     from tortoise.ids import content_hash
 
     proj = sdk._get_proj()
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     session_id = payload.session_id
     reconcile = plan.reconcile
     event_id = content_hash(f"{session_id}:{payload.captured_at}")
@@ -4937,7 +4991,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
                 continue
             try:
                 sdk.supersede(ref, sr.supersedes_by)   # EXISTING canonical unified tool
-            except Exception as e:  # noqa: BLE001 — a supersession write must not fail the commit
+            except Exception as e:
                 _logger.warning("point supersede %r → %r failed: %s",
                                 ref, sr.supersedes_by, e)
             continue
@@ -4946,8 +5000,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             "RETURN o.id, o.name LIMIT 1",
             params={"ref": sr.superseded}).result_set
         if not rows:
-            logger.warning("supersession ref %r not found in the graph — "
-                           "skipped (fail-open)", sr.superseded)
+            _logger.warning("supersession ref %r not found in the graph — "
+                            "skipped (fail-open)", sr.superseded)
             continue
         obj_id, obj_name = rows[0]
         try:
@@ -4964,9 +5018,9 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
             sdk._get_proj()._fold_object_superseded({
                 "id": obj_id, "name": obj_name,
                 "supersedes_by": sr.supersedes_by})
-        except Exception as e:  # noqa: BLE001 — a supersession write must not
-            logger.warning("ObjectSuperseded emit failed for %r: %s",
-                           obj_name, e)
+        except Exception as e:
+            _logger.warning("ObjectSuperseded emit failed for %r: %s",
+                            obj_name, e)
 
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
@@ -4996,7 +5050,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: "CommitPayload", plan):
 
 
 @app.post("/v1/sessions/commit")
-async def commit_session(request: Request, team: dict = Depends(get_current_team)):
+async def commit_session(request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
     """Derived-commit receiver (epic #909 slice 5b — plan §6.1 + W-3).
 
     Flow: [1] Layer-1 via commit_schema (400 missing_required_fields /
@@ -5017,10 +5071,11 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
     500 fail-closed, redacted.
     """
-    from tortoise.commit_schema import (
-        validate_payload_dict, plan_commit,
-    )
     from tortoise.commit_idempotency import CommitRecordStore
+    from tortoise.commit_schema import (
+        plan_commit,
+        validate_payload_dict,
+    )
 
     # [1] Layer-1 (400 class = missing required fields; 422 class = shape +
     # semantic violations with field reasons). The derived payload has NO
@@ -5028,7 +5083,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     try:
         raw = await request.json()
     except Exception:
-        raise HTTPException(
+        raise HTTPException(  # noqa: B904
             status_code=400, detail="Request body must be a JSON object")
     result, payload = validate_payload_dict(raw)
     if result.code == "missing_required_fields":
@@ -5094,7 +5149,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
         # (re-submission 402s deterministically — DE2E-7 Session B/C).
         raise HTTPException(status_code=402, detail=plan.budget.reason)
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     if plan.budget.outcome == "held":
         # >25 (first adjudication only, PL3): items NOT written — the held
         # count lives on the Session counter (value_nodes_held, §4.1 — NOT on
@@ -5122,11 +5177,11 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
         _execute_commit_writes(sdk, payload, plan)
     except HTTPException:
         raise
-    except Exception as e:
+    except Exception:
         _logger.exception(
             "commit write failed (fail-closed 500): team=%s session=%s",
             team["team_id"], payload.session_id)
-        raise HTTPException(
+        raise HTTPException(  # noqa: B904
             status_code=500,
             detail="Commit write failed — the commit is replay-safe (retry "
                    "with the same client_commit_id; L1 idempotency). Details "
@@ -5162,7 +5217,7 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
 
 
 @app.get("/v1/sessions")
-async def list_sessions(team: dict = Depends(get_current_team)):
+async def list_sessions(team: dict = Depends(get_current_team)):  # noqa: B008
     """List captured sessions with turn and extracted point counts (#714).
 
     #1591: FAIL SOFT — a missing team graph (half-failed provisioning)
@@ -5191,7 +5246,7 @@ async def list_sessions(team: dict = Depends(get_current_team)):
 
 
 @app.get("/v1/sessions/{session_id}")
-async def get_session_detail(session_id: str, team: dict = Depends(get_current_team)):
+async def get_session_detail(session_id: str, team: dict = Depends(get_current_team)):  # noqa: B008
     """Get a single session with its conversation turns and extracted points (#714).
 
     Returns turns (episodic Point nodes with pointKind='event', ordered by
@@ -5290,7 +5345,11 @@ async def _user_memberships(user_id: str) -> list[dict]:
     #767 (plan Task 3): Supabase mode reads team_memberships
     (user_id = JWT sub); registry stays for selfhost."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, user_memberships as _sb_memberships,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        user_memberships as _sb_memberships,
     )
     if is_supabase_enabled():
         return _sb_memberships(get_control_plane(), user_id)
@@ -5306,7 +5365,10 @@ async def _user_memberships(user_id: str) -> list[dict]:
 async def _membership_team(user_id: str, team_id: str) -> dict | None:
     """Return the membership for (user, team) if active, else None."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
         membership_for_user_team as _sb_membership,
     )
     if is_supabase_enabled():
@@ -5329,7 +5391,11 @@ async def _team_node(team_id: str) -> dict | None:
     working for teams that only exist in Supabase (provision writes both
     stores today; post-flip the registry freezes)."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, team_by_id as _sb_team,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        team_by_id as _sb_team,
     )
     if is_supabase_enabled():
         return _sb_team(get_control_plane(), team_id)
@@ -5375,7 +5441,7 @@ def _team_limits_from_node(team_node: dict) -> dict:
 
 
 @app.get("/v1/teams")
-async def list_my_teams(user: dict = Depends(get_current_user)):
+async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
     """E6 — list my memberships (team switcher). Placeholder rows excluded.
 
     #765 (plan Task 8 reader inventory): graph_list resolves via the
@@ -5401,7 +5467,7 @@ async def list_my_teams(user: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/teams")
-async def create_team(body: dict, user: dict = Depends(get_current_user)):
+async def create_team(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E2 — create a team (zero-teams state). Tier defaults Free; team
     creation is rate-limited per user (abuse posture), not tier-capped —
     multi-team is a user capability (per-team billing).
@@ -5422,20 +5488,25 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
     if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
-    from datetime import datetime, timedelta as _td, timezone as _tz
-    from tortoise.auth import hash_api_key, lookup_hash
-    from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, membership_count_since,
-        provision_team, team_by_name,
-    )
     import uuid as _uuid
+    from datetime import datetime
+    from datetime import timedelta as _td
+
+    from tortoise.auth import lookup_hash
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        membership_count_since,
+        provision_team,
+        team_by_name,
+    )
 
     if is_supabase_enabled():
         cp = get_control_plane()
         # Per-user team-creation rate limit (abuse posture) — the Supabase
         # twin of the registry owner-membership count (#743(b) semantics:
         # role='owner' rows created within the last hour).
-        since = (datetime.now(_tz.utc) - _td(hours=1)).isoformat()
+        since = (datetime.now(UTC) - _td(hours=1)).isoformat()
         recent = membership_count_since(
             cp, cutoff=since, user_id=user["user_id"], role="owner")
         if recent >= 3:
@@ -5457,8 +5528,10 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
         proj = _make_sdk(namespace=team_id)._get_proj()
         proj.db.select_graph(graph_name).query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
-            params={"name": name, "now": datetime.now(_tz.utc).isoformat()},
+            params={"name": name, "now": datetime.now(UTC).isoformat()},
         )
+        # #1686: journal the minted team_* graph (session sweep drops it).
+        _journal_append_product(graph_name)
         try:
             provision_team(cp, **{
                 "p_user_id": user["user_id"],
@@ -5476,9 +5549,9 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
             # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
             # the registry path).
             if "HTTP 409" in str(e):
-                raise HTTPException(status_code=409,
+                raise HTTPException(status_code=409,  # noqa: B904
                                     detail="Team name already exists")
-            raise HTTPException(status_code=500, detail="Team creation failed")
+            raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
         return {"team_id": team_id, "graph_name": graph_name,
                 "tier": "free", "name": name}
 
@@ -5491,7 +5564,7 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
         "MATCH (m:Membership {user_id:$uid, role:'owner'}) "
         "WHERE m.created_at > $since RETURN count(m)",
         params={"uid": user["user_id"],
-                "since": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()},
+                "since": (datetime.now(UTC) - timedelta(hours=1)).isoformat()},
     ).result_set[0][0]
     if recent >= 3:
         raise HTTPException(status_code=429,
@@ -5502,11 +5575,11 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
     except Exception as e:
         from tortoise.exceptions import ControlPlaneError
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
-            raise HTTPException(status_code=409, detail="Team name already exists")
-        raise HTTPException(status_code=500, detail="Team creation failed")
+            raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
+        raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
 
     # Create the owner membership (registry) — the user owns this team
-    try:
+    try:  # noqa: SIM105
         sdk.membership_create(result["id"], user["user_id"], "owner")
     except Exception:
         pass  # membership_create may require a user node; registry best-effort
@@ -5516,7 +5589,7 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):
 
 
 @app.post("/v1/graphs")
-async def create_graph(body: dict, user: dict = Depends(get_current_user)):
+async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E5 — create a graph in a team (team↔graph 1:N). Free/Solo caps
     enforced here (402 soft-block → upgrade CTA, UX-D4)."""
     team_id = body.get("team_id")
@@ -5542,7 +5615,7 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):
 
 
 @app.get("/v1/graphs")
-async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
+async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """E7 — list graphs in a team (graph switcher)."""
     membership = await _membership_team(user["user_id"], team_id)
     if membership is None:
@@ -5565,7 +5638,10 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):
 async def _require_owner_admin(user_id: str, team_id: str) -> dict:
     """Return the membership if the user is owner/admin in the team, else 403."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
         membership_for_user_team as _sb_membership,
     )
     if is_supabase_enabled():
@@ -5603,7 +5679,8 @@ async def _require_owner(user_id: str, team_id: str, *,
     existence oracle).
     """
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
     )
     if is_supabase_enabled():
         rows = get_control_plane().query(
@@ -5632,8 +5709,8 @@ async def _require_owner(user_id: str, team_id: str, *,
 
 
 def _utc_now_iso() -> str:
-    from datetime import datetime, timezone as _tz
-    return datetime.now(_tz.utc).isoformat()
+    from datetime import datetime
+    return datetime.now(UTC).isoformat()
 
 
 def _set_invite_email_sent(cp, invitation_id: str) -> None:
@@ -5645,12 +5722,12 @@ def _set_invite_email_sent(cp, invitation_id: str) -> None:
             json_body={"email_sent_at": _utc_now_iso()},
             filters=[("id", "eq", invitation_id)],
         )
-    except Exception as _e:  # noqa: BLE001 — stamping must not raise into the email task
+    except Exception as _e:
         _logger.warning("invite: email_sent_at stamp failed for %s (%s)", invitation_id, _e)
 
 
 @app.post("/v1/invites")
-async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
+async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E3 — invite a user to the team (admin/member roles; Team tier)."""
     team_id = (body or {}).get("team_id")
     email = ((body or {}).get("email") or "").strip().lower()
@@ -5662,7 +5739,10 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
 
     # ── Supabase mode (plan Task 4): invitations table, lookup_hash verify ──
     from tortoise.supabase_control import (
-        InvitationError, get_control_plane, invitation_mint, is_supabase_enabled,
+        InvitationError,
+        get_control_plane,
+        invitation_mint,
+        is_supabase_enabled,
         team_by_id,
     )
     if is_supabase_enabled():
@@ -5685,19 +5765,19 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
                     on_sent=lambda mid: _set_invite_email_sent(
                         get_control_plane(), inv["id"]),
                 )
-            except Exception as _e:  # noqa: BLE001
+            except Exception as _e:
                 _logger.warning("invite: email schedule failed for %s (%s)", inv["id"], _e)
             return {"invite_id": inv["id"], "status": "invited",
                     "token": inv["token"], "expires_at": inv["expires_at"],
                     "role": role}
         except InvitationError as e:
-            raise HTTPException(status_code=e.status, detail=str(e))
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         except HTTPException:
             raise
         except Exception:
             # Fail-closed (#851): a control-plane error is a 500 — never a
             # fallback to the registry.
-            raise HTTPException(status_code=500,
+            raise HTTPException(status_code=500,  # noqa: B904
                                 detail="Invites unavailable (control plane error)")
 
     # ── selfhost / registry path (unchanged) ──
@@ -5721,7 +5801,8 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
 
     # Invitation node via SDK (token returned once); roles admin/member allowed here
     import uuid as _uuid
-    from datetime import datetime, timedelta, timezone as _tz, timedelta
+    from datetime import datetime, timedelta
+
     from tortoise.auth import hash_api_key as _hash
 
     dup = reg.query(
@@ -5735,8 +5816,8 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
     token = str(_uuid.uuid4())
     token_hash = _hash(token)
     iid = _short_id()
-    now = datetime.now(_tz.utc).isoformat()
-    expires_at = (datetime.now(_tz.utc) + timedelta(days=7)).isoformat()
+    now = datetime.now(UTC).isoformat()
+    expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
     reg.query(
         "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, "
         "token_hash:$th, created_by:$cb, inviter_email:$ie, created_at:$now, "
@@ -5762,7 +5843,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):
                 params={"id": iid, "now": now},
             ),
         )
-    except Exception as _e:  # noqa: BLE001 — email must never fail the mint
+    except Exception as _e:
         _logger.warning("invite: email schedule failed for %s (%s)", iid, _e)
     return {"invite_id": iid, "status": "invited", "token": token,
             "expires_at": expires_at, "role": role}
@@ -5777,7 +5858,7 @@ async def invite_info(token: str):
     accepts. No auth: the token itself is the capability (hash-only at rest).
     Unknown/consumed/expired tokens → 404 with identical copy (no oracle).
     """
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime
 
     if not token:
         raise HTTPException(status_code=422, detail="token required")
@@ -5791,7 +5872,7 @@ async def invite_info(token: str):
             "AND (i.status IS NULL OR i.status <> 'revoked') "
             "RETURN i.id, i.team_id, i.role, i.inviter_email, i.expires_at, i.token_hash",
         ).result_set
-        for iid, tid, role, ie, exp, th in rows:
+        for iid, tid, role, ie, exp, th in rows:  # noqa: B007
             if _verify(token, th):
                 return {"team_id": tid, "role": role,
                         "inviter_email": ie, "expires_at": exp}
@@ -5799,7 +5880,9 @@ async def invite_info(token: str):
 
     def _team_name(team_id: str) -> str | None:
         from tortoise.supabase_control import (
-            get_control_plane, is_supabase_enabled, team_by_id,
+            get_control_plane,
+            is_supabase_enabled,
+            team_by_id,
         )
         if is_supabase_enabled():
             t = team_by_id(get_control_plane(), team_id)
@@ -5814,21 +5897,23 @@ async def invite_info(token: str):
 
     try:
         from tortoise.supabase_control import (
-            get_control_plane, invitation_info_by_token, is_supabase_enabled,
+            get_control_plane,
+            invitation_info_by_token,
+            is_supabase_enabled,
         )
         inv = (invitation_info_by_token(get_control_plane(), token)
                if is_supabase_enabled() else _registry_invite())
     except HTTPException:
         raise
     except Exception:
-        raise HTTPException(status_code=500,
+        raise HTTPException(status_code=500,  # noqa: B904
                             detail="Invites unavailable (control plane error)")
 
     if not inv:
         raise HTTPException(status_code=404, detail="Invite not found or expired")
 
     exp = inv.get("expires_at")
-    if exp and exp < datetime.now(_tz.utc).isoformat():
+    if exp and exp < datetime.now(UTC).isoformat():
         raise HTTPException(status_code=404, detail="Invite not found or expired")
 
     team_name = _team_name(inv["team_id"])
@@ -5845,7 +5930,7 @@ async def invite_info(token: str):
 
 @app.post("/v1/invites/accept")
 async def accept_invite(body: dict, request: Request,
-                         user: dict = Depends(get_current_user)):
+                         user: dict = Depends(get_current_user)):  # noqa: B008
     """E4 — accept an invite by token (token-only in v1, decision 1e)."""
     token = (body or {}).get("token")
     if not isinstance(token, str):
@@ -5864,8 +5949,12 @@ async def accept_invite(body: dict, request: Request,
 
     # ── Supabase mode (plan Task 4): lookup_hash verify + role preserved ──
     from tortoise.supabase_control import (
-        InvitationError, get_control_plane, invitation_accept as _sb_accept,
+        InvitationError,
+        get_control_plane,
         is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        invitation_accept as _sb_accept,
     )
     if is_supabase_enabled():
         try:
@@ -5874,13 +5963,13 @@ async def accept_invite(body: dict, request: Request,
             _forget_invite_accept(request, token)
             return res
         except InvitationError as e:
-            raise HTTPException(status_code=e.status, detail=str(e))
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         except HTTPException:
             raise
         except Exception:
             # Fail-closed (#851): a control-plane error is a 500 — never a
             # fallback to the registry.
-            raise HTTPException(status_code=500,
+            raise HTTPException(status_code=500,  # noqa: B904
                                 detail="Invites unavailable (control plane error)")
 
     # ── selfhost / registry path (unchanged) ──
@@ -5899,7 +5988,7 @@ async def accept_invite(body: dict, request: Request,
             break
     if not invite:
         raise HTTPException(status_code=400, detail="Invalid or expired invite token")
-    if invite["expires_at"] and invite["expires_at"] < datetime.now(timezone.utc).isoformat():
+    if invite["expires_at"] and invite["expires_at"] < datetime.now(UTC).isoformat():
         raise HTTPException(status_code=400, detail="Invite token expired")
 
     # Email match guard (invitee must be the invitee's account)
@@ -5918,13 +6007,13 @@ async def accept_invite(body: dict, request: Request,
     # Token single-use: mark accepted
     reg.query(
         "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
-        params={"id": invite["id"], "now": datetime.now(timezone.utc).isoformat(), "uid": user["user_id"]},
+        params={"id": invite["id"], "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
     )
     # Create the active membership (route through membership_create for the max_users gate)
     try:
         sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
     except Exception as e:
-        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")
+        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
     _forget_invite_accept(request, token)
     return {"team_id": invite["team_id"], "role": invite["role"]}
 
@@ -5941,7 +6030,7 @@ def _forget_invite_accept(request: Request, token: str) -> None:
     ip = (getattr(request.state, "client_ip", None)
           or (request.client.host if request.client else None))
     ip = _normalize_mapped_ipv6(ip)
-    for buckets, lock, key in (
+    for buckets, lock, key in (  # noqa: B007
         (_INVITE_ACCEPT_TOKEN_BUCKETS, _INVITE_ACCEPT_TOKEN_LOCK,
          ("invite-accept", "token", token_key)),
         (_INVITE_ACCEPT_IP_BUCKETS, _INVITE_ACCEPT_IP_LOCK,
@@ -5955,7 +6044,7 @@ def _forget_invite_accept(request: Request, token: str) -> None:
 
 
 @app.get("/v1/invites")
-async def list_invites(team_id: str, user: dict = Depends(get_current_user)):
+async def list_invites(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """E3b — list PENDING invites for a team (owner/admin only).
 
     Dashboard surface (plan Task 4): the actionable set — consumed
@@ -5963,7 +6052,9 @@ async def list_invites(team_id: str, user: dict = Depends(get_current_user)):
     resulting memberships.
     """
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, pending_invitations,
+        get_control_plane,
+        is_supabase_enabled,
+        pending_invitations,
     )
     if is_supabase_enabled():
         try:
@@ -5974,7 +6065,7 @@ async def list_invites(team_id: str, user: dict = Depends(get_current_user)):
         except Exception:
             # Fail-closed (#851): a control-plane error is a 500 — never a
             # fallback to the registry.
-            raise HTTPException(status_code=500,
+            raise HTTPException(status_code=500,  # noqa: B904
                                 detail="Invites unavailable (control plane error)")
     await _require_owner_admin(user["user_id"], team_id)
     sdk = _make_sdk(namespace="registry")
@@ -5988,14 +6079,16 @@ async def list_invites(team_id: str, user: dict = Depends(get_current_user)):
 
 @app.delete("/v1/invites/{invitation_id}")
 async def rescind_invite(invitation_id: str, team_id: str,
-                         user: dict = Depends(get_current_user)):
+                         user: dict = Depends(get_current_user)):  # noqa: B008
     """E3c — rescind a pending invite (owner/admin only).
 
     Soft delete: status → 'revoked'. A revoked invite cannot be accepted
     (E2E-3). Team-scoped: an invitation from another team is a 404.
     """
     from tortoise.supabase_control import (
-        InvitationError, get_control_plane, invitation_rescind,
+        InvitationError,
+        get_control_plane,
+        invitation_rescind,
         is_supabase_enabled,
     )
     if is_supabase_enabled():
@@ -6003,13 +6096,13 @@ async def rescind_invite(invitation_id: str, team_id: str,
             return invitation_rescind(get_control_plane(), invitation_id,
                                       team_id, user["user_id"])
         except InvitationError as e:
-            raise HTTPException(status_code=e.status, detail=str(e))
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
         except HTTPException:
             raise
         except Exception:
             # Fail-closed (#851): a control-plane error is a 500 — never a
             # fallback to the registry.
-            raise HTTPException(status_code=500,
+            raise HTTPException(status_code=500,  # noqa: B904
                                 detail="Invites unavailable (control plane error)")
     await _require_owner_admin(user["user_id"], team_id)
     sdk = _make_sdk(namespace="registry")
@@ -6025,7 +6118,7 @@ async def rescind_invite(invitation_id: str, team_id: str,
 
 
 @app.get("/v1/teams/{team_id}/members")
-async def list_members(team_id: str, user: dict = Depends(get_current_user)):
+async def list_members(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """E8a — list team members.
 
     #765 (plan Task 8 reader inventory): Supabase mode reads team_memberships
@@ -6034,13 +6127,15 @@ async def list_members(team_id: str, user: dict = Depends(get_current_user)):
     registry path stays for selfhost."""
     await _require_owner_admin(user["user_id"], team_id)
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, team_members,
+        get_control_plane,
+        is_supabase_enabled,
+        team_members,
     )
     if is_supabase_enabled():
         try:
             return team_members(get_control_plane(), team_id)
         except Exception:
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {team_id:$tid}) WHERE m.status = 'active' OR m.status = 'invited' "
@@ -6052,16 +6147,18 @@ async def list_members(team_id: str, user: dict = Depends(get_current_user)):
 
 
 @app.delete("/v1/teams/{team_id}/members/{user_id}")
-async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_current_user)):
+async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
     """E8b — remove a member (owner cannot be removed).
 
     #765 (plan Task 8 writer inventory): Supabase mode PATCHes
     team_memberships status='removed' via the seam (matched by user_id OR
     identity so anon-agent members are removable like registry-mode rows).
     The registry path stays for selfhost."""
-    membership = await _require_owner_admin(user["user_id"], team_id)
+    membership = await _require_owner_admin(user["user_id"], team_id)  # noqa: F841
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, membership_role,
+        get_control_plane,
+        is_supabase_enabled,
+        membership_role,
         set_membership,
     )
     if is_supabase_enabled():
@@ -6075,7 +6172,7 @@ async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_cur
         except HTTPException:
             raise
         except Exception:
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
         return {"status": "removed"}
     sdk = _make_sdk(namespace="registry")
     target = sdk._get_registry().query(
@@ -6094,7 +6191,7 @@ async def remove_member(team_id: str, user_id: str, user: dict = Depends(get_cur
 
 
 @app.patch("/v1/teams/{team_id}/members/{user_id}")
-async def change_member_role(team_id: str, user_id: str, body: dict, user: dict = Depends(get_current_user)):
+async def change_member_role(team_id: str, user_id: str, body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E8c — change a member's role (admin/member; owner cannot be demoted).
 
     #765 (plan Task 8 writer inventory): Supabase mode PATCHes
@@ -6105,7 +6202,9 @@ async def change_member_role(team_id: str, user_id: str, body: dict, user: dict 
     if new_role not in ("admin", "member"):
         raise HTTPException(status_code=422, detail="role must be 'admin' or 'member'")
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, membership_role,
+        get_control_plane,
+        is_supabase_enabled,
+        membership_role,
         set_membership,
     )
     if is_supabase_enabled():
@@ -6119,7 +6218,7 @@ async def change_member_role(team_id: str, user_id: str, body: dict, user: dict 
         except HTTPException:
             raise
         except Exception:
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
         return {"user_id": user_id, "role": new_role}
     sdk = _make_sdk(namespace="registry")
     target = sdk._get_registry().query(
@@ -6156,7 +6255,7 @@ def _is_export_skip_node(labels: list[str], props: dict | None) -> bool:
     """True for an internal bookkeeping node the export/backup skips."""
     if _EXPORT_SKIP_LABELS & set(labels):
         return True
-    if "Meta" in labels and (props or {}).get("key") in _EXPORT_SKIP_META_KEYS:
+    if "Meta" in labels and (props or {}).get("key") in _EXPORT_SKIP_META_KEYS:  # noqa: SIM103
         return True
     return False
 
@@ -6232,9 +6331,9 @@ def _export_graph_snapshot(namespace: str):
             d = dict(props or {})
             payload = d.get("payload")
             if isinstance(payload, str):
-                try:
+                try:  # noqa: SIM105
                     d["payload"] = _json.loads(payload)
-                except Exception:  # noqa: BLE001 — keep raw on bad JSON
+                except Exception:
                     pass
             events.append(d)
             summary["events"] += 1
@@ -6257,7 +6356,7 @@ def _export_graph_snapshot(namespace: str):
 
 @app.get("/v1/teams/{team_id}/export")
 async def export_team(team_id: str, request: Request,
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only JSON export of the team graph + control plane.
 
     Full data surface: every Point (full properties incl. confidence
@@ -6287,7 +6386,7 @@ async def export_team(team_id: str, request: Request,
         )
     except Exception:
         logging.getLogger("tortoise.api").exception("team export failed")
-        raise HTTPException(status_code=500, detail="Export failed")
+        raise HTTPException(status_code=500, detail="Export failed")  # noqa: B904
 
     total_events = len(events)
     if total_events > _EXPORT_MAX_EVENTS:
@@ -6311,7 +6410,7 @@ async def export_team(team_id: str, request: Request,
     return {
         "schema_version": 1,
         "team_id": team_id,
-        "exported_at": datetime.now(timezone.utc).isoformat(),
+        "exported_at": datetime.now(UTC).isoformat(),
         "summary": summary,
         "points": points,
         "entities": entities,
@@ -6518,11 +6617,11 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
     try:
         plaintext = decrypt_backup(enc_blob, key=key)
     except ValueError as e:
-        raise _ImportVerifyError(f"decryption failed — {e}", enc_sha)
+        raise _ImportVerifyError(f"decryption failed — {e}", enc_sha)  # noqa: B904
     try:
         inner = _json.loads(plaintext)
     except Exception:
-        raise _ImportVerifyError("decrypted payload is not valid JSON", enc_sha)
+        raise _ImportVerifyError("decrypted payload is not valid JSON", enc_sha)  # noqa: B904
     if not isinstance(inner, dict) or inner.get("format") != _IMPORT_FORMAT:
         raise _ImportVerifyError(
             "decrypted payload is not a tortoise-export-v1 envelope", enc_sha
@@ -6634,7 +6733,7 @@ def _rebuild_import_indexes(sdk, graph_name: str) -> None:
 
 @app.post("/v1/teams/{team_id}/import")
 async def import_team(team_id: str, request: Request,
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(get_current_user)):  # noqa: B008
     """Ingest a ``tortoise-export-v1`` artifact into the team graph (#1230).
 
     Owner-only (a full-graph overwrite must not be writable by any member
@@ -6667,7 +6766,7 @@ async def import_team(team_id: str, request: Request,
         await _quarantine_import(
             request, team_id, user, sha256=e.sha256, reason=e.reason
         )
-        raise HTTPException(status_code=422, detail=f"Import rejected: {e.reason}")
+        raise HTTPException(status_code=422, detail=f"Import rejected: {e.reason}")  # noqa: B904
 
     sha = parsed["payload_sha256"]
     # Size cap vs the team's plan (graph_size_cap / max_points) — a legitimate
@@ -6699,7 +6798,8 @@ async def import_team(team_id: str, request: Request,
             return {"imported": False, "already": True, "id": sha}
 
         from tortoise.supabase_control import (
-            get_control_plane, is_supabase_enabled,
+            get_control_plane,
+            is_supabase_enabled,
         )
         sdk = _make_sdk(namespace=team_id)
         registry_sdk = None
@@ -6729,12 +6829,12 @@ async def import_team(team_id: str, request: Request,
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
-                raise HTTPException(status_code=422, detail=f"Import rejected: {e}")
+                raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             except (ValueError, KeyError) as e:
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
-                raise HTTPException(status_code=422, detail=f"Import rejected: {e}")
+                raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             except RuntimeError as e:
                 # Server-side swap failure — verified temp graph intact, live
                 # graph untouched or recoverable; still quarantined (a failed
@@ -6742,7 +6842,7 @@ async def import_team(team_id: str, request: Request,
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
-                raise HTTPException(status_code=503, detail=f"Import failed: {e}")
+                raise HTTPException(status_code=503, detail=f"Import failed: {e}")  # noqa: B904
 
             # Rebuild indexes on the swapped graph (best-effort — a rebuild
             # failure must not fail an already-durable import).
@@ -6812,7 +6912,7 @@ def _soft_delete_registry_team(team_id: str, now: str, grace_hours: float) -> No
 
 @app.delete("/v1/teams/{team_id}", status_code=202)
 async def delete_team(team_id: str, request: Request,
-                      user: dict = Depends(get_current_user)):
+                      user: dict = Depends(get_current_user)):  # noqa: B008
     """E2E-6-D — owner-only team deletion (soft delete → 24h grace → hard delete).
 
     Immediate cascade, access-kill first: all API keys revoked (tt_ auth
@@ -6849,13 +6949,13 @@ async def delete_team(team_id: str, request: Request,
         stored_grace = team_node.get("grace_hours")
         try:
             replay_grace = float(stored_grace) if stored_grace is not None else grace_hours
-        except Exception:  # noqa: BLE001
+        except Exception:
             replay_grace = grace_hours
         try:
             hard_delete_after = (
                 datetime.fromisoformat(deleted_at) + timedelta(hours=replay_grace)
             ).isoformat()
-        except Exception:  # noqa: BLE001 — non-ISO stamp (legacy/foreign)
+        except Exception:
             hard_delete_after = None
         return JSONResponse(
             status_code=200,
@@ -6866,11 +6966,14 @@ async def delete_team(team_id: str, request: Request,
             },
         )
 
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
-        remove_team_memberships, revoke_team_api_keys,
-        revoke_team_invitations, soft_delete_team,
+        get_control_plane,
+        is_supabase_enabled,
+        remove_team_memberships,
+        revoke_team_api_keys,
+        revoke_team_invitations,
+        soft_delete_team,
     )
     if is_supabase_enabled():
         cp = get_control_plane()
@@ -6895,7 +6998,7 @@ async def delete_team(team_id: str, request: Request,
         "status": "delete_scheduled", "team_id": team_id, "deleted_at": now,
         "grace_hours": grace_hours,
         "hard_delete_after": (
-            datetime.now(timezone.utc) + timedelta(hours=grace_hours)
+            datetime.now(UTC) + timedelta(hours=grace_hours)
         ).isoformat(),
         "note": "API keys revoked and memberships removed immediately; team "
                  "graph + control-plane rows are hard-deleted after the grace "
@@ -6916,7 +7019,7 @@ def _drop_team_graph(team_id: str, graph_name: str | None = None) -> None:
     """
     try:
         _drop_team_graph_impl(team_id, graph_name)
-    except Exception:  # noqa: BLE001
+    except Exception:
         _logger.debug("team graph drop skipped for %s", team_id)
 
 
@@ -6987,23 +7090,25 @@ def _purge_deleted_teams() -> None:
     """
     try:
         env_grace = float(os.environ.get("TORTOISE_TEAM_DELETE_GRACE_HOURS", "24"))
-        env_cutoff = (datetime.now(timezone.utc) - timedelta(hours=env_grace)).isoformat()
-        now_dt = datetime.now(timezone.utc)
+        env_cutoff = (datetime.now(UTC) - timedelta(hours=env_grace)).isoformat()
+        now_dt = datetime.now(UTC)
 
         def _past_grace(row_deleted_at, row_grace_hours) -> bool:
             """Stored grace (promised at schedule time) wins over env."""
             try:
                 deleted_dt = datetime.fromisoformat(row_deleted_at)
-            except Exception:  # noqa: BLE001
+            except Exception:
                 return True  # unparseable stamp → purge (defensive)
             try:
                 gh = float(row_grace_hours) if row_grace_hours is not None else env_grace
-            except Exception:  # noqa: BLE001
+            except Exception:
                 gh = env_grace
             return deleted_dt + timedelta(hours=gh) <= now_dt
 
         from tortoise.supabase_control import (
-            get_control_plane, is_supabase_enabled, purge_team_control_plane,
+            get_control_plane,
+            is_supabase_enabled,
+            purge_team_control_plane,
         )
         if is_supabase_enabled():
             cp = get_control_plane()
@@ -7039,7 +7144,7 @@ def _purge_deleted_teams() -> None:
                         team_id, None, "team_delete_purged",
                         resource_type="team", resource_id=team_id,
                     )
-                except Exception:  # noqa: BLE001
+                except Exception:
                     _logger.warning("team purge failed for %s", team_id,
                                     exc_info=True)
             return
@@ -7059,10 +7164,10 @@ def _purge_deleted_teams() -> None:
                     team_id, None, "team_delete_purged",
                     resource_type="team", resource_id=team_id,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 _logger.warning("team purge failed for %s", team_id,
                                 exc_info=True)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _logger.warning("deleted-team purge sweep failed: %s", exc)
 
 
@@ -7088,12 +7193,15 @@ async def reconcile(request: Request):
     selfhost.
     """
     _check_internal(request)
-    from datetime import datetime, timedelta, timezone as _tz
+    from datetime import datetime
+
     from tortoise.supabase_control import (
-        expired_bootstrap_keys, get_control_plane, is_supabase_enabled,
+        expired_bootstrap_keys,
+        get_control_plane,
+        is_supabase_enabled,
         revoke_api_key,
     )
-    now = datetime.now(_tz.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     result = {"reprovisioned": 0, "expired_keys_swept": 0, "notes": []}
 
     if is_supabase_enabled():
@@ -7387,17 +7495,19 @@ async def agent_signup(request: Request):
     import uuid as _uuid
     identity = f"anon-{_uuid.uuid4().hex[:12]}"
 
-    from datetime import datetime, timezone as _tz
-    from tortoise.auth import hash_api_key as _hash, lookup_hash as _lookup_hash
-    from tortoise.pricing import tier_limits
-    from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
-        provision_team_with_token,
-    )
-
     # #1709: a fresh 256-bit st_ token, minted ONLY on the no-token path.
     # Shown once (the recovery credential); hash-only at rest in both lanes.
     import secrets as _secrets
+    from datetime import datetime
+
+    from tortoise.auth import hash_api_key as _hash
+    from tortoise.auth import lookup_hash as _lookup_hash
+    from tortoise.pricing import tier_limits
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        provision_team_with_token,
+    )
     signup_token = f"st_{_secrets.token_hex(32)}"
     signup_token_hash = _lookup_hash(signup_token)  # SHA-256(PEPPER + st_...)
 
@@ -7411,7 +7521,7 @@ async def agent_signup(request: Request):
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
     lookup_hash = _lookup_hash(api_key)
-    now = datetime.now(_tz.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     graph_name = f"team_{team_id}"
     lim = tier_limits("free")
     # #750.8: .get() so a pricing.json key drift never 500s signup (pricing.py
@@ -7452,7 +7562,7 @@ async def agent_signup(request: Request):
                 "p_signup_token_hash": signup_token_hash,
             })
         except Exception:
-            raise HTTPException(status_code=500, detail="Agent signup failed")
+            raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
         await _async_audit(request, team_id, "agent_signup", resource_type="team", resource_id=team_id)
         # P3-D/P3-6: notify_abuse is sync httpx — fire-and-forget so ops email
         # latency never delays the cold-start mint (best-effort telemetry; #310)
@@ -7520,11 +7630,11 @@ async def agent_signup(request: Request):
         reg.query("MATCH (k:APIKey {team_id:$id}) DETACH DELETE k", params={"id": team_id})
         reg.query("MATCH (m:Membership {team_id:$id}) DETACH DELETE m", params={"id": team_id})
         reg.query("MATCH (s:SignupToken {team_id:$id}) DETACH DELETE s", params={"id": team_id})
-        try:
+        try:  # noqa: SIM105
             sdk._get_proj().db.select_graph(graph_name).delete()
         except Exception:
             pass
-        raise HTTPException(status_code=500, detail="Agent signup failed")
+        raise HTTPException(status_code=500, detail="Agent signup failed")  # noqa: B904
 
     return {"key": api_key, "team_id": team_id, "team_name": team_name, "graph_name": graph_name,
             "identity": identity, "tier": "free",
@@ -7560,7 +7670,7 @@ async def agent_recover(request: Request):
 
 
 @app.post("/v1/agent/token/revoke")
-async def agent_token_revoke(request: Request, team: dict = Depends(get_current_team_session)):
+async def agent_token_revoke(request: Request, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """User-facing signup-token revocation (#1715).
 
     Body {signup_token} (the plaintext st_ token) → the token's revoked_at
@@ -7601,8 +7711,11 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
     from tortoise.supabase_control import is_supabase_enabled
     if is_supabase_enabled():
         from tortoise.supabase_control import (
-            get_control_plane, revoke_signup_token as _sb_revoke,
+            get_control_plane,
             signup_token_row,
+        )
+        from tortoise.supabase_control import (
+            revoke_signup_token as _sb_revoke,
         )
         cp = get_control_plane()
         row = signup_token_row(cp, token_hash)
@@ -7619,7 +7732,7 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception("agent_token_revoke failed")
-            raise HTTPException(status_code=500, detail="Internal server error")
+            raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
         await _async_audit(request, team_id, "agent_signup_token_revoke",
                            resource_type="signup_token", resource_id=team_id,
                            actor_user_id=team.get("session_user_id"))
@@ -7632,7 +7745,7 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("agent_token_revoke failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     status = out.get("status")
     if status == "not_found":
         raise HTTPException(status_code=404, detail="Signup token not found")
@@ -7762,7 +7875,10 @@ async def claim_team(request: Request):
     #    key still resolves (the idempotent re-claim below is scoped to the
     #    SAME user — the RPC returns idempotent success then).
     from tortoise.supabase_control import (
-        ClaimError, claim_membership, get_control_plane, is_anon_team,
+        ClaimError,
+        claim_membership,
+        get_control_plane,
+        is_anon_team,
     )
     cp = get_control_plane()
     try:
@@ -7783,7 +7899,7 @@ async def claim_team(request: Request):
         claim_membership(cp, lookup_hash=_lookup_hash(api_key),
                          user_id=user_id, email=email)
     except ClaimError as e:
-        raise HTTPException(status_code=e.status, detail=e.message)
+        raise HTTPException(status_code=e.status, detail=e.message)  # noqa: B904
 
     # 7. audit team_claim — provider/email/user_id in detail (0002 has no
     #    provider/email columns; 20260813000004 added detail JSONB).
@@ -7826,8 +7942,12 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     await _check_claim_rate_limit(request)
     from tortoise.auth import lookup_hash as _lookup_hash
     from tortoise.supabase_control import (
-        ClaimError, claim_membership, get_control_plane, is_anon_team,
-        is_supabase_enabled, resolve_api_key,
+        ClaimError,
+        claim_membership,
+        get_control_plane,
+        is_anon_team,
+        is_supabase_enabled,
+        resolve_api_key,
     )
     if not is_supabase_enabled():
         raise HTTPException(status_code=400, detail="Claim is hosted-mode only")
@@ -7873,7 +7993,7 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     except ClaimError as e:
         # The RPC's already_claimed guard may fire if a concurrent OAuth
         # claim won first — surface as a plain conflict.
-        raise HTTPException(status_code=e.status, detail=e.message)
+        raise HTTPException(status_code=e.status, detail=e.message)  # noqa: B904
 
     # audit
     await _async_audit(request, team_id, "team_claim", resource_type="team",
@@ -7911,7 +8031,10 @@ async def claim_status(request: Request):
     if not api_key or not api_key.startswith("tt_"):
         return {"claimable": False, "need_key": True}
     from tortoise.supabase_control import (
-        get_control_plane, is_anon_team, is_supabase_enabled, resolve_api_key,
+        get_control_plane,
+        is_anon_team,
+        is_supabase_enabled,
+        resolve_api_key,
     )
     if not is_supabase_enabled():
         # Selfhost (registry mode): no claim path in v1 (requires Supabase
@@ -7948,7 +8071,7 @@ async def claim_status(request: Request):
 
 
 @app.post("/v1/session/key")
-async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):
+async def session_key(body: dict, request: Request, user: dict = Depends(get_current_user)):  # noqa: B008
     """E1 — session-scoped key mint (the #518 chicken-and-egg fix).
 
     A session-authenticated user with NO valid key can mint a tt_ key here —
@@ -7958,7 +8081,8 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
       at cap, auto-revokes the oldest orphaned key so recovery never dead-ends.
     """
     import uuid as _uuid
-    from datetime import datetime, timedelta, timezone as _tz, timedelta
+    from datetime import datetime, timedelta
+
     from tortoise.auth import hash_api_key as _hash
     from tortoise.pricing import tier_limits
 
@@ -8010,7 +8134,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     api_key = f"tt_{_uuid.uuid4().hex}"
     key_hash = _hash(api_key)
     kid = _short_id()
-    now = datetime.now(_tz.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     if purpose == "bootstrap":
         active_boot = reg.query(
@@ -8021,7 +8145,7 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
         ).result_set[0][0]
         if active_boot >= 3:
             raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
-        expires_at = (datetime.now(_tz.utc) + timedelta(hours=24)).isoformat()
+        expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         created_via = "bootstrap"
     else:
         lim = tier_limits(tier)
@@ -8080,7 +8204,8 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     lookup_hash index, and api_keys.revoked_at is the authoritative revoke.
     """
     import uuid as _uuid
-    from datetime import datetime, timedelta, timezone as _tz
+    from datetime import datetime, timedelta
+
     from tortoise.auth import lookup_hash
     from tortoise.pricing import tier_limits
     from tortoise.supabase_control import (
@@ -8118,13 +8243,13 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
 
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
-    now = datetime.now(_tz.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
 
     if purpose == "bootstrap":
         active_boot = active_api_keys(cp, tid, created_via="bootstrap", created_by=user_id)
         if len(active_boot) >= 3:
             raise HTTPException(status_code=429, detail="Too many active session keys — wait for expiry")
-        expires_at = (datetime.now(_tz.utc) + timedelta(hours=24)).isoformat()
+        expires_at = (datetime.now(UTC) + timedelta(hours=24)).isoformat()
         created_via = "bootstrap"
     else:
         lim = tier_limits(tier)
@@ -8166,7 +8291,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
 
 
 @app.get("/v1/context")
-async def session_context(team: dict = Depends(get_current_team)):
+async def session_context(team: dict = Depends(get_current_team)):  # noqa: B008
     """Memory digest for agent session-start hooks (tortoise context CLI).
 
     Mirrors TortoiseSDK.session_context() so hosted users get the same
@@ -8178,13 +8303,13 @@ async def session_context(team: dict = Depends(get_current_team)):
     except Exception:
         # #750.5: never leak internals to the client — log, return generic.
         logging.getLogger("tortoise.api").exception("session_context failed")
-        raise HTTPException(status_code=500, detail="Context unavailable")
+        raise HTTPException(status_code=500, detail="Context unavailable")  # noqa: B904
 
 
 @app.get("/v1/issue-insight")
 async def issue_insight(title: str, body: str | None = None,
                         repo: str | None = None, limit: int = Query(2, ge=1, le=20),
-                        team: dict = Depends(get_current_team)):
+                        team: dict = Depends(get_current_team)):  # noqa: B008
     """Graph insight for a would-be issue (#1196) — REST mirror of
     TortoiseSDK.issue_insight() for hosted tenants.
 
@@ -8197,7 +8322,7 @@ async def issue_insight(title: str, body: str | None = None,
         return sdk.issue_insight(title=title, body=body, repo=repo, limit=limit)
     except Exception:
         logging.getLogger("tortoise.api").exception("issue_insight failed")
-        raise HTTPException(status_code=500, detail="Insight unavailable")
+        raise HTTPException(status_code=500, detail="Insight unavailable")  # noqa: B904
 
 
 
@@ -8211,6 +8336,11 @@ _ONBOARDING_DEFAULT_STATE = {
     "team_created": False,
     "prompt_pasted": False,
     "onboarding_complete": False,
+    # #1725 (Slice 0): registered in BOTH default-state dicts + the PATCH
+    # model, else the _update_onboarding_state allowlist filter silently
+    # drops them (the plan's STATE-KEY REGISTRATION TABLE, cycle-3 P1-2).
+    "github_index_cursor": None,           # per-repo composite (updated_at, number)
+    "github_legacy_backfill_done": False,  # one-time legacy `-closed` backfill marker
 }
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
@@ -8234,7 +8364,10 @@ def _get_onboarding_state(team_id: str) -> dict:
     shape without writing (the first patch materializes the full state).
     """
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
         team_onboarding_state as _sb_state,
     )
     if is_supabase_enabled():
@@ -8266,7 +8399,10 @@ def _write_onboarding_state(team_id: str, state: dict) -> None:
     no string-wrapping, 0006) or the registry Team node (JSON string —
     #498 fix: FalkorDB node properties must be primitives, not dicts)."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
         update_onboarding_state as _sb_write,
     )
     if is_supabase_enabled():
@@ -8290,7 +8426,7 @@ def _update_onboarding_state(team_id: str, **fields) -> dict:
     return state
 
 
-class OnboardingStateResponse(BaseModel):
+class OnboardingStateResponse(BaseModel):  # noqa: F811
     onboarding: dict
     # E2E-5 (plan Task 6): the team email is read from the control plane
     # alongside onboarding state — additive, backward-compatible (None when
@@ -8299,7 +8435,7 @@ class OnboardingStateResponse(BaseModel):
     email: str | None = None
 
 
-class OnboardingStatePatchRequest(BaseModel):
+class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
     github_connected: bool | None = None
     github_indexed: bool | None = None
     demo_created: bool | None = None
@@ -8307,6 +8443,11 @@ class OnboardingStatePatchRequest(BaseModel):
     team_created: bool | None = None
     prompt_pasted: bool | None = None
     onboarding_complete: bool | None = None
+    # #1725 (Slice 0): registered state keys (see the registration table) —
+    # the cursor is server-written; the fields exist so the keys round-trip
+    # through the PATCH surface like every other registered key.
+    github_index_cursor: dict | None = None
+    github_legacy_backfill_done: bool | None = None
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
@@ -8318,7 +8459,7 @@ class OnboardingStatePatchRequest(BaseModel):
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
-async def get_onboarding_state(team: dict = Depends(get_current_team)):
+async def get_onboarding_state(team: dict = Depends(get_current_team)):  # noqa: B008
     """Return the team's onboarding progress + team email."""
     return {
         "onboarding": _get_onboarding_state(team["team_id"]),
@@ -8328,7 +8469,7 @@ async def get_onboarding_state(team: dict = Depends(get_current_team)):
 
 @app.patch("/v1/onboarding/state", response_model=OnboardingStateResponse)
 async def patch_onboarding_state(body: OnboardingStatePatchRequest,
-                                team: dict = Depends(get_current_team)):
+                                team: dict = Depends(get_current_team)):  # noqa: B008
     """Merge provided onboarding fields into the team's state."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     email = updates.pop("email", None)  # state keys only — email is a teams column
@@ -8351,7 +8492,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
-async def set_session_recording(body: dict, team: dict = Depends(get_current_team)):
+async def set_session_recording(body: dict, team: dict = Depends(get_current_team)):  # noqa: B008
     """Toggle automatic session recording (Q3)."""
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
@@ -8364,27 +8505,47 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
 
 
 @app.post("/v1/onboarding/team")
-async def create_onboarding_team(body: dict, team: dict = Depends(get_current_team)):
+async def create_onboarding_team(body: dict,
+                               team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Create a sub-team for the user (Q5 hosted equivalent of tortoise_team_create).
 
     #765 (plan Task 8 writer inventory: demo/onboarding): Supabase mode
-    routes the write through the atomic provision_team RPC with the
-    identity path — a tt_-key request has no JWT user to own the team, and
-    the registry path (sdk.team_create) never created an owner membership
-    either. #1716: the sub-team is provisioned KEYLESS in BOTH lanes — no
-    tt_ mint, no api_keys row (the old per-call mint was an unrecoverable
-    dead credential: plaintext never returned, hash-only at rest, counted
+    routes the write through the atomic provision_team RPC. #1716: the
+    sub-team is provisioned KEYLESS in BOTH lanes — no tt_ mint, no
+    api_keys row (the old per-call mint was an unrecoverable dead
+    credential: plaintext never returned, hash-only at rest, counted
     against max_api_keys, unclaimable #1082). The sub-team stays keyless
     until a session-key mint (POST /v1/session/key writes the row itself).
-    The registry path stays for selfhost."""
+    #1748: the sub-team is provisioned on the USER path — the session user
+    becomes the OWNER member (p_user_id=<session user>, p_identity=None;
+    registry lane: owner Membership for the same user). The old
+    anon-{uuid} identity was a permanent dead end: session-key mint
+    resolves memberships by the session user's user_id, which the
+    NULL-user identity row never matched — no key, no claim, no list, no
+    delete. The registry path stays for selfhost."""
     name = (body.get("name") or "").strip()
     if not name or len(name) > 64:
         raise HTTPException(status_code=400, detail="name is required (max 64 chars)")
     import re
     if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=400, detail="Invalid team name")
+    # #1748: the session user owns the sub-team. Session JWT →
+    # session_user_id (get_current_team_session); key-auth → created_by
+    # (the key creator's user UUID — session-minted bootstrap/recovery
+    # keys carry it; the dashboard onboarding wizard authenticates with
+    # exactly such a key). "api" / None → no real user → fail loudly
+    # rather than provision an owner-less orphan (the #1716 dead end).
+    owner_user_id = team.get("session_user_id") or team.get("created_by")
+    if not owner_user_id or owner_user_id == "api":
+        raise HTTPException(
+            status_code=403,
+            detail="A session user is required to create a sub-team — "
+                   "sign in or mint a session key first",
+        )
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, provision_team,
+        get_control_plane,
+        is_supabase_enabled,
+        provision_team,
     )
     if is_supabase_enabled():
         import uuid as _uuid
@@ -8393,10 +8554,12 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
             graph_name = f"team_{name}"  # sdk.team_create parity
             # #1716: keyless provisioning — all-NULL key params → the RPC
             # writes teams + membership but NO api_keys row (all-or-none
-            # guard, migration 20260825214233).
+            # guard, migration 20260825214233). #1748: USER path — the
+            # session user is the owner member (p_user_id, identity NULL),
+            # mirroring POST /v1/teams (create_team).
             provision_team(get_control_plane(), **{
-                "p_user_id": None,
-                "p_identity": f"anon-{_uuid.uuid4().hex[:12]}",
+                "p_user_id": owner_user_id,
+                "p_identity": None,
                 "p_team_id": team_id,
                 "p_team_name": name,
                 "p_api_key": None,
@@ -8412,18 +8575,29 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
             # ControlPlaneError → 400; 409 is the closer contract — review
             # P1, PR #874).
             if "HTTP 409" in str(e):
-                raise HTTPException(status_code=409,
+                raise HTTPException(status_code=409,  # noqa: B904
                                     detail="Team name already exists")
-            raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
+            raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
         _update_onboarding_state(team["team_id"], team_created=True)
         _track_onboarding_event(team, "question_answered",
                                 question_id="create_team", answer="yes")
         return {"team_id": team_id, "name": name, "graph_name": graph_name}
-    sdk = _make_sdk(namespace=team["team_id"])
+    # #1748: the registry-lane SDK must be the CANONICAL control plane
+    # (namespace="registry" → registry_control_plane). The old
+    # namespace=team_id built a {team_id}_control_plane graph that NO other
+    # registry path reads — the mint/list/delete/claim surfaces all read
+    # registry_control_plane, so the sub-team's Team + Membership nodes were
+    # invisible to them (orphan at the graph level, on top of the missing
+    # membership).
+    sdk = _make_sdk(namespace="registry")
     try:
-        result = sdk.team_create(name, mint_key=False)  # #1716 keyless parity
+        # #1716 keyless parity + #1748 owner Membership for the session
+        # user (team_create now creates it — without it the keyless
+        # sub-team is an unmintable orphan).
+        result = sdk.team_create(name, mint_key=False,
+                                 owner_user_id=owner_user_id)
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Team create failed: {e}")
+        raise HTTPException(status_code=400, detail=f"Team create failed: {e}")  # noqa: B904
     _update_onboarding_state(team["team_id"], team_created=True)
     _track_onboarding_event(team, "question_answered",
                             question_id="create_team", answer="yes")
@@ -8432,7 +8606,7 @@ async def create_onboarding_team(body: dict, team: dict = Depends(get_current_te
 
 
 @app.post("/v1/demo")
-async def public_demo(team: dict = Depends(get_current_team)):
+async def public_demo(team: dict = Depends(get_current_team)):  # noqa: B008
     """Public demo graph creation (Q4) — auth-gated, team-isolated.
 
     Reuses the same seeding logic as /internal/demo but requires a Bearer
@@ -8486,7 +8660,7 @@ def _track_analytics_event(team_id: str, event_name: str,
         "team_id": team_id,
         "event_name": event_name,
         "properties": props,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
     url = os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_KEY")
@@ -8520,7 +8694,7 @@ def _track_analytics_event(team_id: str, event_name: str,
 
 def _track_onboarding_event(team: dict, event_name: str, **props) -> None:
     """Convenience: track with the current team, swallowing errors."""
-    try:
+    try:  # noqa: SIM105
         _track_analytics_event(team["team_id"], event_name, props or None)
     except Exception:
         pass
@@ -8552,7 +8726,11 @@ def _github_credentials(team_id: str) -> tuple[str | None, str | None]:
     selfhost.
     """
     from tortoise.supabase_control import (
-        get_control_plane, github_credentials as _sb_creds, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        github_credentials as _sb_creds,
     )
     if is_supabase_enabled():
         row = _sb_creds(get_control_plane(), team_id)
@@ -8579,7 +8757,11 @@ def _team_email(team_id: str) -> str | None:
     the Team node (selfhost). None when unset/missing.
     """
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, team_email as _sb_email,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        team_email as _sb_email,
     )
     if is_supabase_enabled():
         return _sb_email(get_control_plane(), team_id)
@@ -8598,7 +8780,11 @@ def _write_team_email(team_id: str, email: str) -> None:
     mode: SET on the Team node. Raises on failure (fail-closed — a dropped
     email write must surface, not silently lose the value)."""
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, update_team_email as _sb_email,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        update_team_email as _sb_email,
     )
     if is_supabase_enabled():
         _sb_email(get_control_plane(), team_id, email)
@@ -8626,7 +8812,7 @@ async def _exchange_github_token(code: str) -> str:
             }, headers={"Accept": "application/json"})
             tok = r.json()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=f"GitHub token exchange failed: {e}")
+        raise HTTPException(status_code=502, detail=f"GitHub token exchange failed: {e}")  # noqa: B904
     access_token = tok.get("access_token")
     if not access_token:
         raise HTTPException(status_code=502, detail="GitHub token exchange failed")
@@ -8658,7 +8844,7 @@ def _github_repos_count(token: str) -> int | None:
 
 @app.post("/v1/onboarding/github/connect")
 async def github_connect(body: GitHubConnectRequest | None = None,
-                         team: dict = Depends(get_current_team)):
+                         team: dict = Depends(get_current_team)):  # noqa: B008
     """Initiate GitHub OAuth. Returns the authorize URL + CSRF state."""
     import secrets
     from urllib.parse import urlencode
@@ -8730,7 +8916,10 @@ async def github_callback(code: str | None = None, state: str | None = None,
     encrypted = encrypt_token(access_token)
     team_id = st["team_id"]
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
         store_github_credentials as _sb_store,
     )
     if is_supabase_enabled():
@@ -8742,13 +8931,24 @@ async def github_callback(code: str | None = None, state: str | None = None,
             params={"id": team_id, "tok": encrypted, "org": st["org"]},
         )
     _update_onboarding_state(team_id, github_connected=True)
+    # Auto-index after connect (Task 5, amend 11): quota-gated background
+    # first-run (ONE repo — bounded, P2-4). The job is created under the
+    # team's single-flight guard; a quota-cap failure surfaces honestly via
+    # the job poll, never the redirect (the user lands on welcome.html
+    # either way). P1-1 (PR #1792): spawn the run ONLY when the job was
+    # freshly minted — a reused in-flight job is already being walked.
+    job_id, is_new = _start_index_job(team_id)
+    if is_new:
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team_id, st["org"], None))
     _track_analytics_event(team_id, "question_answered",
                            {"question_id": "github_connect", "answer": "yes"})
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
 
 
 @app.get("/v1/onboarding/github/status")
-async def github_status(team: dict = Depends(get_current_team)):
+async def github_status(team: dict = Depends(get_current_team)):  # noqa: B008
     """Return GitHub connection status + repo count."""
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
@@ -8765,7 +8965,66 @@ async def github_status(team: dict = Depends(get_current_team)):
 
 # ── GitHub indexing endpoints (#499 Task 5) ─────────────────────
 
-_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at}
+_INDEX_JOBS: dict[str, dict] = {}  # job_id -> {status, progress, points_created, error, created_at, started_at, team_id}
+# Owner/generation token per job (P2, PR #1792): a TTL-evicted entry
+# (presumed-dead, replaced by a newer run) must not let the stale run keep
+# writing status / resurrect a live walk. Kept OUT of the job dict so the
+# poll response can never leak it.
+_INDEX_JOB_OWNERS: dict[str, str] = {}
+
+# Per-team single-flight TTL (T2-P2 + cycle-3 P1-3): a `started` entry
+# older than this is presumed dead (Fly restart / hung run) — evicted so a
+# hung run never bricks the team; the just-reused in-flight entry is never
+# evicted. Single-process assumption recorded: per-event-loop atomic; a
+# DB-backed job lock is the documented path only if Fly scales horizontally.
+_INDEX_JOB_TTL_S = 30 * 60
+# Post-terminal eviction (T1-P14): the job stays pollable for an hour, then
+# vanishes — the UI renders an eviction-expired poll as "status expired".
+_INDEX_JOB_EVICT_S = 3600
+
+
+def _start_index_job(team_id: str) -> tuple[str, bool]:
+    """Per-team single-flight job creation (T2-P2, ordered algorithm).
+
+    Returns ``(job_id, is_new)``: ``is_new=False`` means an in-flight
+    `started` job for the team was REUSED — the caller MUST NOT spawn a
+    second ``_run_indexing`` task (P1-1, PR #1792: single-flight dedupes
+    the RUN, not just the entry; spawning on every POST ran two concurrent
+    walks → duplicate statement ids + version inflation + job-status
+    races).
+
+    1. Guard-check FIRST: a `started` entry for the team is REUSED (return
+       its job_id with is_new=False) — kills the TOCTOU probe→create
+       duplicate.
+    2. Only then evict terminal entries or `started` older than the 30-min
+       TTL (presumed-dead); the just-reused in-flight entry is never
+       evicted.
+    3. Otherwise mint a fresh job entry (is_new=True) stamped with a
+       generation/owner token.
+    """
+    import secrets
+    now = time.time()
+    for jid, job in list(_INDEX_JOBS.items()):
+        if job.get("team_id") != team_id:
+            continue
+        if job.get("status") == "started":
+            started = job.get("started_at") or job.get("created_at") or now
+            if now - started < _INDEX_JOB_TTL_S:
+                return jid, False  # guard-check FIRST — reuse the in-flight job
+            # presumed-dead (TTL exceeded) — evict, then fall through
+            _INDEX_JOBS.pop(jid, None)
+            _INDEX_JOB_OWNERS.pop(jid, None)
+            continue
+        # terminal → evict (T1-P14: clear stale entries on enqueue)
+        _INDEX_JOBS.pop(jid, None)
+        _INDEX_JOB_OWNERS.pop(jid, None)
+    job_id = secrets.token_hex(8)
+    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
+                           "points_created": 0, "error": None,
+                           "team_id": team_id, "created_at": now,
+                           "started_at": now}
+    _INDEX_JOB_OWNERS[job_id] = secrets.token_hex(8)
+    return job_id, True
 
 
 class GitHubIndexRequest(BaseModel):
@@ -8774,49 +9033,189 @@ class GitHubIndexRequest(BaseModel):
 
 
 async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
-    """Background indexing job: fetch GitHub issues/PRs → Points."""
-    from tortoise.indexer.github_indexer import GitHubIndexer
+    """Background indexing job: GitHub issues/PRs → entities/events/statements.
+
+    #1725 Slice 0 rework: quota-preflighted + per-batch re-checked (the old
+    job had ZERO quota calls), cursor-correct (composite (updated_at, number)
+    per-repo cursors persisted to onboarding jsonb), ONE-repo bounded first
+    run, one-time legacy `-closed` backfill (marker-gated), honest status
+    ("N issues beyond window", quota_hit, errors, partial completion).
+
+    P1-1 / P2 (PR #1792): every caller spawns this task ONLY when
+    `_start_index_job` reports is_new; as a belt-and-suspenders guard this
+    function ALSO aborts when it no longer owns the job entry (TTL-evicted
+    / replaced by a newer run) — a stale run must never keep writing
+    status or resurrect a live walk.
+    """
+    from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+    # P2: generation/owner token stamped at mint. A TTL-evicted entry
+    # (presumed-dead, replaced by a newer run) must not let THIS run keep
+    # writing status — it aborts silently at the next status-write or
+    # repo boundary.
+    owner = _INDEX_JOB_OWNERS.get(job_id)
+
+    def _job(**fields) -> None:
+        """Update the job entry ONLY while this run still owns it."""
+        if _INDEX_JOB_OWNERS.get(job_id) != owner:
+            return  # entry evicted/replaced — abort silently
+        job = _INDEX_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
     try:
         encrypted = _github_token_enc(team_id)
     except Exception:
         # Fail-closed: a control-plane outage must not leave the job stuck at
         # "started" — mark it failed so the poller reports a real error.
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": "Control plane unavailable"})
+        _job(status="failed", error="Control plane unavailable")
         return
     if not encrypted:
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": "GitHub not connected"})
+        _job(status="failed", error="GitHub not connected")
         return
     from tortoise.crypto import decrypt_token
     try:
         token = decrypt_token(encrypted)
     except ValueError:
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": "Token undecryptable"})
+        _job(status="failed", error="Token undecryptable")
         return
+    # State + cursors loaded BEFORE the walk try: the finally persists them
+    # back, so a pre-walk failure (quota preflight, resolve_repos 404) must
+    # never WIPE previously-persisted cursors (P2, PR #1792).
+    state = _get_onboarding_state(team_id)
+    cursors: dict[str, dict] = state.get("github_index_cursor") or {}
+    totals = {"points_created": 0, "statements_superseded": 0,
+              "events_minted": 0, "issues_beyond_window": 0,
+              "repos_processed": 0, "errors": [], "quota_hit": False,
+              "backfill_minted": 0}
     try:
         team_sdk = _make_sdk(namespace=team_id)
+
+        # ── Quota preflight (Task 4): the index job gates like sessions do.
+        # Resolved BEFORE the first write; a team at/over cap fails honestly
+        # (402-equivalent "failed" status with the quota message), never
+        # silently overshooting max_points. ──
+        from tortoise.quota import (  # noqa: I001
+            QuotaCheckError, QuotaExceededError, enforce_team_limit,
+            resolve_team_limits,
+        )
+        limits = resolve_team_limits(team_id)
+        try:
+            enforce_team_limit(limits, "points", sdk=team_sdk)
+        except QuotaExceededError as e:
+            _job(status="failed", error=str(e))
+            return
+        except QuotaCheckError as e:
+            _job(status="failed", error=f"Quota check failed: {e}")
+            return
+
         indexer = GitHubIndexer(token)
-        result = await indexer.index_issues(team_sdk, org, repo)
-        _INDEX_JOBS[job_id].update({
-            "status": "completed",
-            "progress": 100,
-            "points_created": result["points_created"],
-            "repos_processed": result["repos_processed"],
-            "error": None,
-        })
-        _update_onboarding_state(team_id, github_indexed=True)
-    except Exception as e:  # noqa: BLE001
-        _INDEX_JOBS[job_id].update({"status": "failed", "error": str(e)})
+
+        # ── One-time legacy `-closed` backfill (T1-P1 + T2-P3). Gated on the
+        # persisted marker; scans PRE-EXISTING events ONLY (before the walk
+        # mints fresh ones) so fresh first-runs never double-mint; normal diff
+        # never mints `-closed` for closed-without-`-closed` on re-runs. The
+        # marker is set ONLY on success — a transient failure must not skip
+        # the one-time migration forever (P2, PR #1792). ──
+        if not state.get("github_legacy_backfill_done"):
+            try:
+                totals["backfill_minted"] = indexer.backfill_legacy_closed(
+                    team_sdk._get_proj())
+            except Exception as e:
+                _logger.warning(
+                    "legacy -closed backfill failed (team=%s): %s", team_id, e)
+            else:
+                _update_onboarding_state(
+                    team_id, github_legacy_backfill_done=True)
+
+        # ── Cursor + repo scope (Tasks 2/4). First-run scope = ONE repo
+        # regardless of org size (P2-4 pre-decided fallback) with the honest
+        # "index more" affordance (re-poll re-runs with the cursor). ──
+        first_run = not bool(state.get("github_indexed"))
+        if repo:
+            repos = [f"{org}/{repo}"]
+        else:
+            repos = await indexer.resolve_repos(org)
+            if first_run:
+                repos = repos[:1]
+
+        def _quota_check() -> None:
+            enforce_team_limit(limits, "points", sdk=team_sdk)
+
+        for repo_name in repos:
+            if _INDEX_JOB_OWNERS.get(job_id) != owner:
+                break  # lost ownership (entry evicted/replaced) — abort
+            try:
+                _quota_check()  # per-batch re-check (before each repo)
+            except QuotaExceededError as e:
+                totals["quota_hit"] = True
+                totals["errors"].append(str(e))
+                break
+            result = await indexer.index_repo(
+                team_sdk, repo_name, cursor=cursors.get(repo_name) or None,
+                quota_check=_quota_check)
+            totals["points_created"] += result["points_created"]
+            totals["statements_superseded"] += result["statements_superseded"]
+            totals["events_minted"] += result["events_minted"]
+            totals["issues_beyond_window"] += result["issues_beyond_window"]
+            totals["errors"].extend(result["errors"])
+            if result.get("cursor"):
+                cursors[repo_name] = result["cursor"]
+            if result.get("quota_hit"):
+                totals["quota_hit"] = True
+                break
+            totals["repos_processed"] += 1
+
+        _job(status="completed", progress=100,
+             points_created=totals["points_created"],
+             statements_superseded=totals["statements_superseded"],
+             events_minted=totals["events_minted"],
+             repos_processed=totals["repos_processed"],
+             repos_total=len(repos),
+             issues_beyond_window=totals["issues_beyond_window"],
+             backfill_minted=totals["backfill_minted"],
+             quota_hit=totals["quota_hit"],
+             errors=totals["errors"],
+             error=None)
+    except GitHubFetchError as e:
+        # Mid-walk 401/429 / unresolved org (T1-P13 + P2): honest "failed"
+        # status with a readable error; the cursor was NOT advanced past
+        # unprocessed items (the indexer only returns it for processed
+        # items) — a re-run resumes without gaps/dupes (idempotent writes
+        # make overlap harmless).
+        _job(status="failed", error=str(e))
+    except Exception as e:
+        _job(status="failed", error=str(e))
     finally:
-        # Evict after 1 hour
+        # P2: persist per-repo cursors + github_indexed in a finally so
+        # PARTIAL runs (mid-walk raise, quota-interrupted) leave a
+        # resumable state — previously the accumulated cursors were lost on
+        # a mid-walk raise and the next run re-walked from the old cursor.
+        # github_indexed flips True ONLY on real progress (>=1 repo
+        # processed): a 0-repo failure (quota preflight, resolve_repos
+        # 404) leaves it untouched so the next run keeps the ONE-repo
+        # bounded first-run pacing (P2, PR #1792).
+        updates: dict = {"github_index_cursor": cursors}
+        if totals["repos_processed"] > 0:
+            updates["github_indexed"] = True
+        _update_onboarding_state(team_id, **updates)
+        # Evict after an hour (T1-P14: eviction-expired polls render
+        # honestly).
         import asyncio as _asyncio
         _asyncio.get_running_loop().call_later(
-            3600, lambda: _INDEX_JOBS.pop(job_id, None))
+            _INDEX_JOB_EVICT_S,
+            lambda: (_INDEX_JOBS.pop(job_id, None),
+                     _INDEX_JOB_OWNERS.pop(job_id, None)))
 
 
 @app.post("/v1/index/github")
-async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):
-    """Start a background GitHub indexing job (Q2). Returns job_id for polling."""
-    import secrets
+async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):  # noqa: B008
+    """Start a background GitHub indexing job (Q2). Returns job_id for polling.
+
+    Per-team single-flight (T2-P2 + P1-1): an in-flight `started` job for
+    the team is REUSED (its job_id returned) and the run is spawned ONLY
+    for a freshly-minted job — concurrent POSTs can never run two walks
+    (duplicate statement ids, version inflation, job-status races).
+    """
     org = (body.org or "").strip()
     if not org:
         raise HTTPException(status_code=400, detail="org is required")
@@ -8825,18 +9224,38 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
     encrypted = _github_token_enc(team["team_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
-    job_id = secrets.token_hex(8)
-    _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
-                           "points_created": 0, "error": None,
-                           "team_id": team["team_id"], "created_at": time.time()}
-    import asyncio as _asyncio
-    _asyncio.get_event_loop().create_task(
-        _run_indexing(job_id, team["team_id"], org, body.repo))
+    job_id, is_new = _start_index_job(team["team_id"])
+    if is_new:
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team["team_id"], org, body.repo))
+    return {"job_id": job_id, "status": "started"}
+
+
+@app.post("/v1/index/github/re-poll")
+async def github_reindex(team: dict = Depends(get_current_team)):  # noqa: B008
+    """Re-run the GitHub diff (diff-on-poll, amend 6) for the connected org.
+
+    The ONLY route shape (T1-P2) — no query-param alternative. Reuses the
+    persisted per-repo composite cursors, so a re-poll is an incremental
+    diff, not a re-ingest. Declared BEFORE /v1/index/github/{job_id} so the
+    literal path wins over the job_id path param.
+    """
+    encrypted, org = _github_credentials(team["team_id"])
+    if not encrypted:
+        raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
+    if not org:
+        raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
+    job_id, is_new = _start_index_job(team["team_id"])
+    if is_new:
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(
+            _run_indexing(job_id, team["team_id"], org, None))
     return {"job_id": job_id, "status": "started"}
 
 
 @app.get("/v1/index/github/{job_id}")
-async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
+async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):  # noqa: B008
     """Poll an indexing job's progress."""
     job = _INDEX_JOBS.get(job_id)
     if not job:
@@ -8909,7 +9328,7 @@ def _require_backup_tier(team: dict) -> None:
 
 
 @app.get("/backups")
-async def backups_list(team: dict = Depends(get_current_team)):
+async def backups_list(team: dict = Depends(get_current_team)):  # noqa: B008
     """List this team's backups (newest first) with timestamps + node counts."""
     team_id = team.get("team_id")
     if not team_id:
@@ -8917,9 +9336,9 @@ async def backups_list(team: dict = Depends(get_current_team)):
     try:
         return {"backups": await asyncio.to_thread(list_backups, _backup_storage(), team_id)}
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"List rejected: {e}")
+        raise HTTPException(status_code=400, detail=f"List rejected: {e}")  # noqa: B904
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")
+        raise HTTPException(status_code=503, detail=f"Backup storage unavailable: {e}")  # noqa: B904
 
 
 def _registry_sdk() -> TortoiseSDK:
@@ -8937,13 +9356,14 @@ def _registry_sdk() -> TortoiseSDK:
     redis TimeoutError is NEVER retried (a hung DB stays hung).
     """
     from tortoise.monitoring import (
-        _is_transient_connect_error, PROBE_RETRY_DELAY,
+        PROBE_RETRY_DELAY,
+        _is_transient_connect_error,
     )
 
     sdk = _make_sdk(namespace="registry")
     try:
         sdk._get_proj()  # eager: surface the connect failure here, retried below
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         if not _is_transient_connect_error(exc):
             raise
         time.sleep(PROBE_RETRY_DELAY)
@@ -8965,7 +9385,7 @@ async def _team_restore_lock(team_id: str) -> asyncio.Lock:
 
 
 @app.post("/backups", status_code=201)
-async def backups_create(team: dict = Depends(get_current_team)):
+async def backups_create(team: dict = Depends(get_current_team)):  # noqa: B008
     """Trigger an on-demand backup of the team graph (Pro tier)."""
     team_id = team.get("team_id")
     if not team_id:
@@ -8979,7 +9399,8 @@ async def backups_create(team: dict = Depends(get_current_team)):
         # Supabase control plane in Supabase mode (the registry handle would
         # stamp the DELETED registry and auto-recreate the empty graph).
         from tortoise.supabase_control import (
-            get_control_plane, is_supabase_enabled,
+            get_control_plane,
+            is_supabase_enabled,
         )
         if is_supabase_enabled():
             registry_sdk = None
@@ -9002,6 +9423,7 @@ async def backups_create(team: dict = Depends(get_current_team)):
         # on the same name). from_uri reuses the configured connection with
         # graph_name override (#7886 multi-tenant isolation).
         import os as _os
+
         from tortoise.projection import FalkorProjection
         db_uri = _os.environ.get("TORTOISE_DB_URI")
         proj = sdk._get_proj()
@@ -9032,12 +9454,12 @@ async def backups_create(team: dict = Depends(get_current_team)):
         except Exception as e:
             _logger.warning("prune failed for team %s: %s", team_id, e)
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")
+        raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")  # noqa: B904
     except RuntimeError as e:
-        raise HTTPException(status_code=503, detail=f"Backup failed: {e}")
+        raise HTTPException(status_code=503, detail=f"Backup failed: {e}")  # noqa: B904
     except Exception as e:
         _logger.exception("backup failed for team %s", team_id)
-        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Backup failed: {e}")  # noqa: B904
     finally:
         if sdk is not None:
             sdk.close()
@@ -9047,7 +9469,7 @@ async def backups_create(team: dict = Depends(get_current_team)):
 
 
 @app.post("/backups/restore")
-async def backups_restore(body: BackupRestoreRequest, request: Request, team: dict = Depends(get_current_team_session)):
+async def backups_restore(body: BackupRestoreRequest, request: Request, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Restore the team graph from a backup (Pro tier; confirm=true required).
 
     Restores into a temp graph, verifies node/edge counts against the payload,
@@ -9068,7 +9490,8 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
     sdk = None
     registry_sdk = None
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled,
+        get_control_plane,
+        is_supabase_enabled,
     )
     async with lock:
         try:
@@ -9115,14 +9538,14 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
                     "index rebuild after restore failed for team %s: %s", team_id, e
                 )
         except RestoreVerificationError as e:
-            raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")
+            raise HTTPException(status_code=409, detail=f"Restore rejected: {e}")  # noqa: B904
         except (ValueError, KeyError) as e:
-            raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")
+            raise HTTPException(status_code=400, detail=f"Restore rejected: {e}")  # noqa: B904
         except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=f"Restore failed: {e}")
+            raise HTTPException(status_code=503, detail=f"Restore failed: {e}")  # noqa: B904
         except Exception as e:
             _logger.exception("restore failed for team %s", team_id)
-            raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+            raise HTTPException(status_code=500, detail=f"Restore failed: {e}")  # noqa: B904
         finally:
             if sdk is not None:
                 sdk.close()
@@ -9137,7 +9560,7 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
 # endpoint 503s when the sweep is disabled (config missing or BACKUP_SWEEP_ENABLED
 # not true).
 
-_WATCHER: "BackupWatcher | None" = None  # spawned in _lifespan (driver-disabled leg)
+_WATCHER: BackupWatcher | None = None  # spawned in _lifespan (driver-disabled leg)  # noqa: F821
 _DRIVER_HEARTBEAT_KEY = "ops/driver-heartbeat.json"
 _LAST_DRILL_AT: float = 0.0  # in-memory drill cooldown (single-instance, resets on restart)
 _DRILL_COOLDOWN_S = 3600
@@ -9146,7 +9569,7 @@ _SWEEP_LOCKS_GUARD = threading.Lock()
 _SWEEP_INFLIGHT = asyncio.Lock()
 
 
-def _backup_config_safe() -> "BackupConfig | None":
+def _backup_config_safe() -> BackupConfig | None:  # noqa: F821
     """Sweep config, or None when disabled (fail-closed)."""
     from tortoise.backup_config import ConfigError, load_config
 
@@ -9158,7 +9581,7 @@ def _backup_config_safe() -> "BackupConfig | None":
     return cfg if cfg.enabled else None
 
 
-def _alert_store_from(cfg) -> "AlertStore":
+def _alert_store_from(cfg) -> AlertStore:  # noqa: F821
     from tortoise import github_issue as gi
     from tortoise.alert_store import AlertStore
     from tortoise.telegram_push import send_message
@@ -9204,14 +9627,13 @@ def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
     """Sweep drill/restore scratch graphs left by a mid-drill crash. A crash
     mid-drill would otherwise leave a full team snapshot on the production
     instance under a scratch name (Task 7 acceptance; boot-time GC)."""
-    from datetime import timedelta as _td
 
     try:
         graphs = db.list_graphs()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _logger.warning("drill-graph GC: list failed: %s", exc)
         return
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # Review P1-1: only the drill endpoint's OWN scratch prefix is eligible —
     # substring patterns could match a legitimately-provisioned team id (e.g.
     # "team_drill_20240101...") and the GC would delete a LIVE graph. Team
@@ -9224,7 +9646,7 @@ def _boot_gc_drill_graphs(db, max_age_hours: float = 6.0) -> None:
         try:
             g = db.select_graph(name)
             ts_part = name.rsplit("_", 1)[-1]
-            created = datetime.strptime(ts_part, "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+            created = datetime.strptime(ts_part, "%Y%m%dT%H%M%S%fZ").replace(tzinfo=UTC)
             if (now - created).total_seconds() / 3600.0 > max_age_hours:
                 g.delete()
                 _logger.info("drill-graph GC removed %s", name)
@@ -9260,7 +9682,7 @@ async def backups_sweep(request: Request):
                 config=cfg, lock_for=lock_for,
             )
         except RuntimeError as e:
-            raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")
+            raise HTTPException(status_code=503, detail=f"Sweep failed: {e}")  # noqa: B904
 
         alerts = _alert_store_from(cfg)
         alerts_failed = []
@@ -9282,7 +9704,6 @@ async def backups_status(request: Request):
     """Operator/driver status — per-team tri-state, watcher + driver liveness."""
     _check_internal(request)
     from tortoise.backup_config import ConfigError, load_config
-    from tortoise.backup_sweep import read_ops_state
     from tortoise.backup_watcher import HEARTBEAT_KEY
 
     config_error = None
@@ -9294,10 +9715,10 @@ async def backups_status(request: Request):
     try:
         storage = _backup_storage()
     except RuntimeError as e:
-        return {"enabled": False, "app_time": datetime.now(timezone.utc).isoformat(),
+        return {"enabled": False, "app_time": datetime.now(UTC).isoformat(),
                 "storage_error": str(e), "per_team": {}, "no_teams": False}
     watcher = _WATCHER
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     watcher_status = watcher._watcher._last_status if watcher else {}
     hb = {}
     storage_error = None
@@ -9319,18 +9740,18 @@ async def backups_status(request: Request):
 
     watcher_age_min = None
     if hb.get("last_poll_at"):
-        try:
+        try:  # noqa: SIM105
             watcher_age_min = (now - datetime.fromisoformat(hb["last_poll_at"])).total_seconds() / 60.0
         except ValueError:
             pass
     driver_age_min = None
     if driver_hb.get("ran_at"):
-        try:
+        try:  # noqa: SIM105
             driver_age_min = (now - datetime.fromisoformat(driver_hb["ran_at"])).total_seconds() / 60.0
         except ValueError:
             pass
 
-    return {  # noqa: C901
+    return {
         "enabled": bool(cfg and cfg.enabled),
         "config_error": config_error,
         "storage_error": storage_error,
@@ -9355,7 +9776,7 @@ async def driver_heartbeat(request: Request, body: dict):
     storage = _backup_storage()
     storage.upload(
         _DRIVER_HEARTBEAT_KEY,
-        _json.dumps({"ran_at": datetime.now(timezone.utc).isoformat(), "body": body or {}}).encode(),
+        _json.dumps({"ran_at": datetime.now(UTC).isoformat(), "body": body or {}}).encode(),
         content_type="application/json",
     )
     return {"ok": True}
@@ -9371,7 +9792,7 @@ async def backups_simulate(request: Request):
     if cfg is None or not cfg.simulate_enabled:
         raise HTTPException(status_code=403, detail="simulate disabled (BACKUP_SIMULATE_ENABLED)")
     storage = _backup_storage()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if request.url.path.endswith("simulate-stale"):
         ts = now.strftime("%Y%m%dT%H%M%S%fZ")
         storage.upload(
@@ -9397,21 +9818,21 @@ async def backups_rebaseline(request: Request, body: dict):
     team_id = (body or {}).get("team_id", "")
     if not team_id:
         raise HTTPException(status_code=400, detail="team_id required")
-    from tortoise.backup_sweep import read_team_state, _write_json
+    from tortoise.backup_sweep import _write_json, read_team_state
 
     reg_sdk = _registry_sdk()
-    registry = reg_sdk._get_registry()
+    registry = reg_sdk._get_registry()  # noqa: F841
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
     try:
         g = db.select_graph(f"team_{team_id}")
         count = int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
     except Exception as e:
-        raise HTTPException(status_code=503, detail=f"team graph unavailable: {e}")
+        raise HTTPException(status_code=503, detail=f"team graph unavailable: {e}")  # noqa: B904
     state = read_team_state(storage, team_id)
     _write_json(
         storage, f"ops/teams/{team_id}/state.json",
-        {**state, "node_count": count, "updated_at": datetime.now(timezone.utc).isoformat()},
+        {**state, "node_count": count, "updated_at": datetime.now(UTC).isoformat()},
     )
     alerts = _alert_store_from(_backup_config_safe())
     alerts.resolve_incident("DATA_LOSS_CANDIDATE", team_id)
@@ -9446,7 +9867,7 @@ async def backups_drill(request: Request, body: dict):
     registry = reg_sdk._get_registry()
     db = reg_sdk._get_proj().db
     storage = _backup_storage()
-    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    ts = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     target_graph = f"_drill_{ts}"
     try:
         result = await asyncio.to_thread(
@@ -9455,9 +9876,9 @@ async def backups_drill(request: Request, body: dict):
             key=cfg.backup_key, target_graph=target_graph, drill=True,
         )
     except (ValueError, RuntimeError) as e:
-        raise HTTPException(status_code=409, detail=f"Drill failed: {e}")
+        raise HTTPException(status_code=409, detail=f"Drill failed: {e}")  # noqa: B904
     # Cleanup the scratch graph (best-effort; boot GC is the backstop).
-    try:
+    try:  # noqa: SIM105
         db.select_graph(target_graph).delete()
     except Exception:
         pass
@@ -9570,11 +9991,11 @@ def _billing_checkout_sync(team: dict, price_id: str) -> dict:
     email = _billing_customer_email(sdk, team)
     try:
         client = StripeClient()
-        if stored_customer_id:
+        if stored_customer_id:  # noqa: SIM108
             customer_id = stored_customer_id  # create-or-fetch: reuse the Stripe customer
         else:
             customer_id = client.create_customer(email)
-    except Exception as e:  # noqa: BLE001 — _billing_error_to_http maps by type
+    except Exception as e:
         raise _billing_error_to_http(e) from e
 
     # Sync-persist the customer binding BEFORE the session (survives a missed first event).
@@ -9586,7 +10007,7 @@ def _billing_checkout_sync(team: dict, price_id: str) -> dict:
     # Layer 2 guard: stale-mirror race — Stripe is the authority for money.
     try:
         subs = client.list_subscriptions(customer_id)
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise _billing_error_to_http(e) from e
     for sub in subs:
         if sub.get("status") in _BILLING_ACTIVE_STATUSES:
@@ -9598,22 +10019,22 @@ def _billing_checkout_sync(team: dict, price_id: str) -> dict:
             os.environ.get("BILLING_SUCCESS_URL", _billing_default_success_url()),
             os.environ.get("BILLING_CANCEL_URL", _billing_default_cancel_url()),
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise _billing_error_to_http(e) from e
     return {"checkout_url": url}
 
 
 @app.post("/v1/billing/checkout", response_model=CheckoutResponse)
-async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team_session)):
+async def billing_checkout(body: CheckoutRequest, request: Request, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Start a Stripe Checkout session for a validated price (team auth)."""
     from tortoise.billing import BillingConfigError, BillingError, PriceCatalog
     try:
         # Price validation against the catalog — unknown price_id → 400.
         PriceCatalog().tier_for_price(body.price_id)
     except BillingConfigError as e:
-        raise HTTPException(status_code=503, detail=str(e))
+        raise HTTPException(status_code=503, detail=str(e))  # noqa: B904
     except BillingError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e))  # noqa: B904
     return await asyncio.to_thread(_billing_checkout_sync, team, body.price_id)
 
 
@@ -9634,13 +10055,13 @@ def _billing_portal_sync(team: dict) -> dict:
             customer_id,
             os.environ.get("BILLING_PORTAL_RETURN_URL", _billing_default_portal_return()),
         )
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         raise _billing_error_to_http(e) from e
     return {"portal_url": url}
 
 
 @app.post("/v1/billing/portal", response_model=PortalResponse)
-async def billing_portal(request: Request, team: dict = Depends(get_current_team_session)):
+async def billing_portal(request: Request, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Customer portal for existing subscribers (team auth)."""
     return await asyncio.to_thread(_billing_portal_sync, team)
 
@@ -9682,8 +10103,8 @@ def _checkout_price_ids() -> dict[str, str]:
 # ── Stripe webhook (#310 Task 7) ────────────────────────────────────────────
 
 def _now_iso() -> str:
-    from datetime import datetime, timezone
-    return datetime.now(timezone.utc).isoformat()
+    from datetime import datetime
+    return datetime.now(UTC).isoformat()
 
 
 def _team_id_for_stripe_customer(customer_id: str) -> str | None:
@@ -9696,12 +10117,14 @@ def _team_id_for_stripe_customer(customer_id: str) -> str | None:
     Team node lookup (selfhost).
     """
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, team_id_for_stripe_customer,
+        get_control_plane,
+        is_supabase_enabled,
+        team_id_for_stripe_customer,
     )
     if is_supabase_enabled():
         try:
             return team_id_for_stripe_customer(get_control_plane(), customer_id)
-        except Exception:  # noqa: BLE001 — registry twin returns None on error
+        except Exception:
             return None
     try:
         sdk = _make_sdk(namespace="registry")
@@ -9710,7 +10133,7 @@ def _team_id_for_stripe_customer(customer_id: str) -> str | None:
             params={"cid": customer_id},
         ).result_set
         return rows[0][0] if rows else None
-    except Exception:  # noqa: BLE001
+    except Exception:
         return None
 
 
@@ -9731,9 +10154,12 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
     fields; only the store differs.
     """
     import json as _json
+
     from tortoise.billing import PriceCatalog, StripeClient, apply_limits
     from tortoise.supabase_control import (
-        get_control_plane, is_supabase_enabled, update_team_billing,
+        get_control_plane,
+        is_supabase_enabled,
+        update_team_billing,
     )
 
     supabase_mode = is_supabase_enabled()
@@ -9765,7 +10191,7 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
             return None
         try:
             return PriceCatalog().tier_for_price(price_id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             _logger.error(
                 "webhook: unknown price %s for team %s (%s)",
                 price_id, team_id, redact_error(e))
@@ -9790,20 +10216,20 @@ def _webhook_apply_event(sdk, team_id: str, event: dict) -> str | None:
                     apply_limits(sdk, team_id, tier)
                     _set({"tier": tier})
                     notify_kind = "billing_upgrade"
-            except Exception as e:  # noqa: BLE001 — Stripe fetch failure; .updated confirms later
+            except Exception as e:
                 _logger.warning("webhook: subscription fetch failed: %s", redact_error(e))
         return notify_kind
 
     if etype == "invoice.payment_failed":
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
         period_end = None
         try:
             period_end = (data.get("lines") or {}).get("data", [{}])[0] \
                 .get("period", {}).get("end")
-        except Exception:  # noqa: BLE001
+        except Exception:
             period_end = None
-        now = datetime.now(timezone.utc)
-        grace = (datetime.fromtimestamp(period_end, tz=timezone.utc) + timedelta(hours=72)
+        now = datetime.now(UTC)
+        grace = (datetime.fromtimestamp(period_end, tz=UTC) + timedelta(hours=72)
                  if period_end else now + timedelta(hours=72))
         _set({"subscription_status": "past_due", "grace_until": grace.isoformat()})
         return "billing_payment_failed"
@@ -9853,7 +10279,7 @@ async def webhooks_stripe(request: Request):
     notify/audit/analytics to FIRST processing only (scoping P1-1 retry-drop
     race: the SET happens regardless, so a retry can never drop an upgrade).
     """
-    from tortoise.billing import BillingError, BillingConfigError, StripeClient, _scrub_secrets
+    from tortoise.billing import BillingConfigError, BillingError, StripeClient, _scrub_secrets
     from tortoise.notify import notify_billing_event
 
 
@@ -9904,7 +10330,9 @@ async def webhooks_stripe(request: Request):
         # registry graph (re-review P1, PR #878). Registry mode: WebhookEvent
         # node, as before.
         from tortoise.supabase_control import (
-            get_control_plane, is_supabase_enabled, team_tier,
+            get_control_plane,
+            is_supabase_enabled,
+            team_tier,
             webhook_event_marker,
         )
         if is_supabase_enabled():
@@ -9940,7 +10368,7 @@ async def webhooks_stripe(request: Request):
                 {"subscription_status": etype},
             )
         return JSONResponse(status_code=200, content={"detail": "processed"})
-    except Exception as e:  # noqa: BLE001 — 500 → Stripe retries (live up to 3 days)
+    except Exception as e:
         _logger.error("webhook: processing failed (%s)", _safe_log(e))
         return JSONResponse(status_code=500, content={"detail": "processing failed"})
 
@@ -9976,7 +10404,7 @@ def _oauth_base(request: Request) -> str:
     return str(request.base_url).rstrip("/")
 
 
-def _oauth_error_response(exc: "OAuthError") -> JSONResponse:
+def _oauth_error_response(exc: OAuthError) -> JSONResponse:  # noqa: F821
     return JSONResponse(status_code=exc.status, content=exc.body())
 
 
@@ -10008,7 +10436,9 @@ async def oauth_authorize(request: Request):
     the session JWT to /oauth/consent which mints the auth code.
     """
     from tortoise.oauth import (
-        OAuthError, consent_page_html, validate_authorize_params,
+        OAuthError,
+        consent_page_html,
+        validate_authorize_params,
     )
     cp, enabled = _oauth_control_plane()
     if not enabled or cp is None:
@@ -10097,7 +10527,9 @@ async def oauth_consent(request: Request):
     PKCE-bound authorization code, returns {code, state} for the redirect.
     """
     from tortoise.oauth import (
-        OAuthError, issue_auth_code, validate_authorize_params,
+        OAuthError,
+        issue_auth_code,
+        validate_authorize_params,
     )
     cp, enabled = _oauth_control_plane()
     if not enabled or cp is None:
@@ -10105,7 +10537,7 @@ async def oauth_consent(request: Request):
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+        raise HTTPException(status_code=400, detail="Invalid JSON body")  # noqa: B904
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Invalid JSON body")
     try:
@@ -10144,7 +10576,9 @@ async def oauth_token(request: Request):
     Form-encoded body per OAuth; errors are RFC 6749 §5.2 JSON.
     """
     from tortoise.oauth import (
-        OAuthError, exchange_auth_code, refresh_grant,
+        OAuthError,
+        exchange_auth_code,
+        refresh_grant,
     )
     cp, enabled = _oauth_control_plane()
     if not enabled or cp is None:
@@ -10154,7 +10588,7 @@ async def oauth_token(request: Request):
         raw = await request.body()
         body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid form body")
+        raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     grant = body.get("grant_type")
     try:
         if grant == "authorization_code":
@@ -10181,7 +10615,7 @@ async def oauth_revoke(request: Request):
         raw = await request.body()
         body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid form body")
+        raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     try:
         revoke_token(cp, body)
     except OAuthError as exc:
@@ -10209,7 +10643,7 @@ async def oauth_dcr_register(request: Request):
     try:
         body = await request.json()
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON body")
+        raise HTTPException(status_code=400, detail="Invalid JSON body")  # noqa: B904
     try:
         reg = register_client(cp, body)
     except OAuthError as exc:

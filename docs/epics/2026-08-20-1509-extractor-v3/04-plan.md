@@ -151,6 +151,27 @@ The 11 high-level E2Es from scope, fleshed to runnable form (setup + assertions)
 
 Negative cases per test: see the ownership table in 05-detailed-e2e.md (12 negatives, each owned by a test with a concrete assertion). E2E-9/E2E-10 carry V4-conditional markers (restore via supersession-chain walk in V3; window/cross-encoder assertions only in the post-baseline follow-up run).
 
+## 7.5 Run-protocol notes (#1746 — advisory)
+
+The 50-Q pilot / 500-Q run protocol (steps 3/5) now consumes the #1746
+deliverables (plan: `docs/plans/2026-08-26-1746-parse-error-robustness.md`,
+landing in the same wave):
+
+- **Pre-flight probe (D6):** run `tools/longmem_eval/probe_json_mode.py
+  --n 10` BEFORE the closing 50-Q — the verdict JSON (honored / ignored /
+  rejected / inconclusive) + the EFFECTIVE `TORTOISE_JSON_MODE` land in the
+  closing-run record so criterion 1 is interpreted against the actual
+  configuration. `rejected` → abort pre-flight or re-run with
+  `TORTOISE_JSON_MODE=0`; `inconclusive` → re-probe at `--n 20`.
+- **Parse-family census (D10):** the closing criterion-1 readout is the
+  PER-QUESTION qid set over `{parse_error, truncated_parse_error,
+  partial_parse}` (a question with S2+S4 errors counts ONCE) — not the
+  class-count total. The run record enumerates every error-class qid,
+  grouped by class, so a #1747 justification is auditable.
+- **Integrity readouts:** `integrity.truncated_valid_qids` (warning-only,
+  D7) + census equality (`n_ingest_errors == sum(error_classes)`;
+  `integrity.error_census == Σ per-question classes`, D9).
+
 ## 8. Coherence Review + Risk Analysis
 
 **Cross-substep consistency checkpoints:** Journeys↔E2E (J1–J5 ↔ E2E-1..11 all covered); Data Model↔E5/E7 (no new kinds — verified); Architecture↔Surface map (28 surfaces each own a component or explicit deferral); Interfaces↔UX decisions (reader context format implements UX 1–3); E2E↔scope (11 high-level tests all detailed).

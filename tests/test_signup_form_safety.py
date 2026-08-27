@@ -190,8 +190,8 @@ def test_recovery_flow_present() -> None:
     assert "PASSWORD_RECOVERY" in WELCOME
     assert "updateUser" in WELCOME
     assert "resetInFlight" in WELCOME
-    # recovery mode must short-circuit provisioning (no team mint mid-reset)
-    assert "waitForProvisioning" in WELCOME
+    # recovery mode must short-circuit the session bridge (no team mint mid-reset)
+    assert "runSessionBridge" in WELCOME
     assert "recoveryMode" in WELCOME
     assert "This reset link has expired or is invalid. Request a new one." in WELCOME
 
@@ -252,10 +252,11 @@ def test_confirmation_state_hides_provider_buttons() -> None:
 
 def test_docs_promise_intact() -> None:
     """The docs must still promise the exact journey this issue protects:
-    sign up → welcome page → API key shown once."""
+    sign up → in-app welcome card → API key shown once (#1566 moved the key
+    reveal in-app; welcome.html is a pure bridge since #1730)."""
     docs = (WEBSITE / "docs.html").read_text()
     assert "Sign up at" in docs and "/auth" in docs
-    assert "API key on the welcome page" in docs
+    assert "API key in the in-app welcome card" in docs
     assert "shown once" in docs
 
 

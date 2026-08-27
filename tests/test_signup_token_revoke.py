@@ -221,6 +221,26 @@ class TestSupabaseLane:
         assert ev["team_id"] == data["team_id"]
         assert ev["resource_id"] == data["team_id"]
 
+    def test_fake_recover_mint_writes_iso_created_at(self, client):
+        """#1754 (c): the fake recover_team_key mint writes a REAL ISO
+        created_at (the real RPC defaults to now()) — a None would sort as
+        the OLDEST key in the cap-revoke targeting (min by created_at) and
+        become the cap-revoke target, masking revoke-oldest regressions in
+        the Supabase lane."""
+        data = _mint(client)
+        r = client.post("/v1/agent/recover",
+                        json={"signup_token": data["signup_token"]})
+        assert r.status_code == 200, r.text
+        recovery_keys = [k for k in self.fake.tables.get("api_keys", [])
+                         if k.get("team_id") == data["team_id"]
+                         and k.get("created_via") == "recovery"]
+        assert recovery_keys, "recover should have minted an api_keys row"
+        from datetime import datetime
+        for k in recovery_keys:
+            assert k.get("created_at") is not None, \
+                "recovery mint must write a real timestamp, not None"
+            datetime.fromisoformat(k["created_at"])  # ISO-8601 parseable
+
 
 class TestRegistryLane:
     """Revoke against the REAL FalkorDB registry (docker lane). The mint +
@@ -295,6 +315,67 @@ class TestRegistryLane:
                          headers={"Authorization": f"Bearer {a['key']}"})
         assert r5.status_code == 200 and r5.json()["already"] is True
 
+    def test_registry_revoke_pbkdf2_only_node(self, client):
+        """#1754 (b): a SignupToken node carrying only token_hash (no
+        lookup_key — legacy mint) is recoverable via the PBKDF2 fallback AND
+        must be REVOCABLE too (it was: recoverable but unrevocable — the
+        lookup_key-only MATCH could never find it)."""
+        data = _mint(client)
+        token, team_id = data["signup_token"], data["team_id"]
+        sdk = ha_mod._make_sdk(namespace="registry")
+        reg = sdk._get_registry()
+        # simulate a legacy hash-only node: strip the deterministic
+        # lookup_key, leaving only the salted token_hash
+        reg.query(
+            "MATCH (n:SignupToken {team_id:$tid}) REMOVE n.lookup_key",
+            params={"tid": team_id},
+        )
+        # recover still resolves the hash-only node (PBKDF2 fallback in
+        # signup_token_lookup — the pre-existing recoverable half)
+        r = client.post("/v1/agent/recover", json={"signup_token": token})
+        assert r.status_code == 200, r.text
+        assert r.json()["team_id"] == team_id
+        # revoke now works on the hash-only node too
+        r2 = client.post("/v1/agent/token/revoke",
+                         json={"signup_token": token},
+                         headers={"Authorization": f"Bearer {data['key']}"})
+        assert r2.status_code == 200, r2.text
+        assert r2.json() == {"revoked": True, "already": False,
+                             "team_id": team_id}
+        # the node flipped
+        rows = reg.query(
+            "MATCH (n:SignupToken {team_id:$tid}) RETURN n.revoked_at",
+            params={"tid": team_id},
+        ).result_set
+        assert rows and rows[0][0] is not None
+        # revoked hash-only token → uniform 422 on recover (no backdoor)
+        r3 = client.post("/v1/agent/recover", json={"signup_token": token})
+        assert r3.status_code == 422, r3.text
+        assert r3.json()["detail"]["error_code"] == "invalid_signup_token"
+
+    def test_registry_revoke_never_touches_wrong_team_node(self, client):
+        """#1754 (a): a token node with a matching lookup_key but a DIFFERENT
+        team is never revoked — the SDK refuses (not_owned) and the foreign
+        node stays live. The revoke write itself is team-scoped (parity with
+        the SQL lane's AND team_id), so no race can cross teams."""
+        a, b = _mint(client), _mint(client)
+        sdk = ha_mod._make_sdk(namespace="registry")
+        # A attempts to revoke B's token through the same SDK call the
+        # endpoint makes after auth — refused, B's node untouched
+        out = sdk.signup_token_revoke(b["signup_token"], a["team_id"])
+        assert out == {"team_id": a["team_id"], "status": "not_owned"}
+        rows = sdk._get_registry().query(
+            "MATCH (n:SignupToken {team_id:$tid}) RETURN n.revoked_at",
+            params={"tid": b["team_id"]},
+        ).result_set
+        assert rows and rows[0][0] is None
+        # B's token still recovers — the attempted cross-team kill changed
+        # nothing
+        r = client.post("/v1/agent/recover",
+                        json={"signup_token": b["signup_token"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["team_id"] == b["team_id"]
+
 
 class TestCmdTokenRevoke:
     """tortoise token-revoke — CLI UX (stored token or --token, #1708
@@ -319,7 +400,7 @@ class TestCmdTokenRevoke:
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
                              "team_id": "team-9"})) as urlopen:
-            rc = main._cmd_token_revoke(mock.Mock(token=None))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 0
         out = capsys.readouterr().out
         assert "revoked" in out.lower()
@@ -330,6 +411,131 @@ class TestCmdTokenRevoke:
         assert req.headers.get("Authorization") == "Bearer tt_revoker"
         assert req.headers.get("Content-type") == "application/json"
         assert json.loads(req.data) == {"signup_token": token}
+
+    # ── #1755: revoke is PERMANENT — [y/N] gate (mirrors team keys revoke) ──
+    def test_token_revoke_no_confirm_n_aborts_token_live(
+            self, monkeypatch, tmp_path, capsys):
+        """Interactive run answering 'n' → aborted, rc 1, NO revoke request
+        sent — the token stays live (a stray keystroke can't kill the team's
+        only keyless-recovery path)."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        token = "st_" + "12" * 32
+        self._stored_cfg(tmp_path, signup_token=token)
+        with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
+            with mock.patch("builtins.input", return_value="n"):
+                with mock.patch("urllib.request.urlopen") as urlopen:
+                    rc = main._cmd_token_revoke(
+                        mock.Mock(force=False, token=None))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "PERMANENT" in err
+        assert "use --force" in err
+        urlopen.assert_not_called()  # token untouched — no revoke sent
+
+    def test_token_revoke_confirm_yes_revokes(self, monkeypatch, tmp_path,
+                                              capsys):
+        """Explicit 'y' at the [y/N] prompt → the revoke request IS sent
+        (the only path that revokes without --force)."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        token = "st_" + "34" * 32
+        self._stored_cfg(tmp_path, signup_token=token)
+        with mock.patch("sys.stdin.isatty", return_value=True):  # noqa: SIM117
+            with mock.patch("builtins.input", return_value="y"):
+                with mock.patch("urllib.request.urlopen",
+                                return_value=_ok_json(
+                                    {"revoked": True, "already": False,
+                                     "team_id": "team-9"})) as urlopen:
+                    rc = main._cmd_token_revoke(
+                        mock.Mock(force=False, token=None))
+        assert rc == 0
+        urlopen.assert_called_once()
+        assert json.loads(urlopen.call_args.args[0].data) == {
+            "signup_token": token}
+
+
+    def test_token_revoke_confirm_case_variants(self, monkeypatch, tmp_path):
+        """#1755 review P2: case-insensitive y/yes (with whitespace) all
+        proceed — the prompt accepts any affirmative spelling."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        for answer in ("Y", "YES", " y ", "yEs"):
+            token = "st_" + "ab" * 32
+            self._stored_cfg(tmp_path, signup_token=token)
+            with mock.patch("sys.stdin.isatty", return_value=True):
+                with mock.patch("builtins.input", return_value=answer):
+                    with mock.patch("urllib.request.urlopen",
+                                    return_value=_ok_json(
+                                        {"revoked": True, "already": False,
+                                         "team_id": "team-9"})) as urlopen:
+                        rc = main._cmd_token_revoke(mock.Mock(token=token, force=False))
+            assert rc == 0, f"answer {answer!r} should revoke"
+            assert urlopen.called, f"answer {answer!r} should send the request"
+
+    def test_token_revoke_confirm_eof_fails_closed(self, monkeypatch, tmp_path, capsys):
+        """#1755 review P2: stdin EOF at the prompt (isatty True but no
+        input) is treated as 'n' — abort, no revoke, no network."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        token = "st_" + "cd" * 32
+        self._stored_cfg(tmp_path, signup_token=token)
+        with mock.patch("sys.stdin.isatty", return_value=True):
+            with mock.patch("builtins.input", side_effect=EOFError):
+                with mock.patch("urllib.request.urlopen") as urlopen:
+                    rc = main._cmd_token_revoke(mock.Mock(token=token, force=False))
+        assert rc == 1
+        urlopen.assert_not_called()
+        assert "Revoke aborted" in capsys.readouterr().err
+
+    def test_token_revoke_force_skips_prompt(self, monkeypatch, tmp_path,
+                                             capsys):
+        """--force → revoked WITHOUT any prompt (input never called) — the
+        scripted/CI path."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        self._stored_cfg(tmp_path)
+        with mock.patch("sys.stdin.isatty", return_value=False):  # noqa: SIM117
+            with mock.patch("builtins.input") as input_mock:
+                with mock.patch("urllib.request.urlopen",
+                                return_value=_ok_json(
+                                    {"revoked": True, "already": False,
+                                     "team_id": "team-9"})) as urlopen:
+                    rc = main._cmd_token_revoke(
+                        mock.Mock(force=True, token="st_" + "56" * 32))
+        assert rc == 0
+        input_mock.assert_not_called()  # no prompt under --force
+        urlopen.assert_called_once()
+
+    def test_token_revoke_non_tty_fails_closed(self, monkeypatch, tmp_path,
+                                               capsys):
+        """Non-interactive run (no TTY) without --force → fail CLOSED: rc 1,
+        abort message naming --force, NO revoke request sent."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        self._stored_cfg(tmp_path)
+        with mock.patch("sys.stdin.isatty", return_value=False):  # noqa: SIM117
+            with mock.patch("urllib.request.urlopen") as urlopen:
+                rc = main._cmd_token_revoke(
+                    mock.Mock(force=False, token="st_" + "78" * 32))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Revoke aborted — no changes made." in err
+        assert "PERMANENT once revoked (no undo)" in err
+        assert "use --force to revoke anyway" in err
+        urlopen.assert_not_called()  # fail-closed — token stays live
 
     def test_token_revoke_explicit_token_arg(self, monkeypatch, tmp_path, capsys):
         import tortoise.__main__ as main
@@ -342,7 +548,7 @@ class TestCmdTokenRevoke:
                         return_value=_ok_json(
                             {"revoked": True, "already": False,
                              "team_id": "team-9"})) as urlopen:
-            rc = main._cmd_token_revoke(mock.Mock(token=token))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token=token))
         assert rc == 0
         assert json.loads(urlopen.call_args.args[0].data) == {
             "signup_token": token}
@@ -353,7 +559,7 @@ class TestCmdTokenRevoke:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
         self._stored_cfg(tmp_path)  # key present, no signup_token
-        rc = main._cmd_token_revoke(mock.Mock(token=None))
+        rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 1
         assert "No recovery token found" in capsys.readouterr().err
 
@@ -362,7 +568,7 @@ class TestCmdTokenRevoke:
         monkeypatch.chdir(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
-        rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
+        rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 1
         assert "No stored API key" in capsys.readouterr().err
 
@@ -375,7 +581,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         side_effect=_http_error(422, json.dumps({
                             "detail": {"error_code": "invalid_signup_token"}}))):
-            rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 1
         assert "invalid signup token" in capsys.readouterr().err
 
@@ -388,7 +594,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         side_effect=_http_error(404, json.dumps(
                             {"detail": "Signup token not found"}))):
-            rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 1
         assert "not found" in capsys.readouterr().err
 
@@ -403,7 +609,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         side_effect=_http_error(401, json.dumps(
                             {"detail": "unauthorized"}))):
-            rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 1
         assert "rejected" in capsys.readouterr().err
 
@@ -417,7 +623,7 @@ class TestCmdTokenRevoke:
         self._stored_cfg(tmp_path)
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json(["ok"])):
-            rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 1
         err = capsys.readouterr().err
         assert "malformed" in err
@@ -437,7 +643,7 @@ class TestCmdTokenRevoke:
         with mock.patch("urllib.request.urlopen",
                         return_value=_ok_json({"revoked": True, "already": False,
                                                "team_id": "team-9"})) as urlopen:
-            rc = main._cmd_token_revoke(mock.Mock(token=None))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
         assert rc == 0
         req = urlopen.call_args.args[0]
         assert req.headers.get("Authorization") == "Bearer tt_legacy"
@@ -453,7 +659,7 @@ class TestCmdTokenRevoke:
                         lambda req, timeout=None: _ok_json(
                             {"revoked": True, "already": True,
                              "team_id": "team-9"})):
-            rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 0
         out = capsys.readouterr().out
         assert "already revoked" in out
@@ -466,6 +672,114 @@ class TestCmdTokenRevoke:
         self._stored_cfg(tmp_path)
         with mock.patch("urllib.request.urlopen",
                         side_effect=URLError("boom")):
-            rc = main._cmd_token_revoke(mock.Mock(token="st_" + "ab" * 32))
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token="st_" + "ab" * 32))
         assert rc == 1
         assert "Cannot reach API" in capsys.readouterr().err
+
+    # ── #1752: token source must MATCH the auth key source ────────────────
+    def test_token_revoke_env_key_divergent_token_warns(self, monkeypatch,
+                                                        tmp_path, capsys):
+        """#1752: TORTOISE_API_KEY (team A, env — no token lives there) +
+        a stored token for a DIFFERENT team (team B) — the token is read
+        from the store with a divergence warning naming the shadow source
+        (no more silent 403 'Not your signup token' dead-end)."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env_team_a")
+        token_b = "st_" + "bb" * 32
+        self._stored_cfg(tmp_path, signup_token=token_b)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-b"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.headers.get("Authorization") == "Bearer tt_env_team_a"
+        assert json.loads(req.data) == {"signup_token": token_b}  # correct token
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert "TORTOISE_API_KEY (env)" in err          # the KEY source named
+        assert "different teams" in err                 # hedged phrasing (#1752)
+        assert str(tmp_path / ".tortoise" / "credentials.json") in err  # token source named
+
+    def test_token_revoke_same_config_no_divergence_warning(
+            self, monkeypatch, tmp_path, capsys):
+        """#1752: key AND token live in the SAME config — the token is
+        read from there and NO divergence warning is printed."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        token = "st_" + "cc" * 32
+        self._stored_cfg(tmp_path, signup_token=token)
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-9"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
+        assert rc == 0
+        assert json.loads(urlopen.call_args.args[0].data) == {
+            "signup_token": token}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" not in err
+        assert "note:" not in err  # no divergence warning at all
+
+    def test_token_revoke_explicit_token_env_key_silent(
+            self, monkeypatch, tmp_path, capsys):
+        """#1752: an explicit --token is the user's own choice — it is used
+        as-is with NO divergence warning even when the env key points at a
+        different source (the warning is for the stored-token fallback)."""
+        import tortoise.__main__ as main
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env_team_a")
+        explicit = "st_" + "ff" * 32
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-b"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token=explicit))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.headers.get("Authorization") == "Bearer tt_env_team_a"
+        assert json.loads(req.data) == {"signup_token": explicit}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" not in err
+        assert "note:" not in err
+
+    def test_token_revoke_cwd_global_divergence_warns(self, monkeypatch,
+                                                      tmp_path, capsys):
+        """#1752: key in a cwd/.tortoise config WITHOUT a token + the token
+        in the global store — the fallback warns naming BOTH file sources
+        (cwd key wins per #1708 precedence)."""
+        import tortoise.__main__ as main
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        (proj / ".tortoise").write_text(json.dumps({  # legacy cwd FILE shape
+            "api_key": "tt_cwd_team_a",
+            "api_url": "https://api.premiselabs.co"}))  # no signup_token
+        token_b = "st_" + "ee" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_global_team_b",
+            "api_url": "https://api.premiselabs.co",
+            "signup_token": token_b}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_json(
+                            {"revoked": True, "already": False,
+                             "team_id": "team-b"})) as urlopen:
+            rc = main._cmd_token_revoke(mock.Mock(force=True, token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.headers.get("Authorization") == "Bearer tt_cwd_team_a"
+        assert json.loads(req.data) == {"signup_token": token_b}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert str(proj / ".tortoise") in err
+        assert str(d / "credentials.json") in err

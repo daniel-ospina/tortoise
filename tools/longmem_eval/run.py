@@ -74,6 +74,7 @@ from .judge import build_judge, is_abstention
 from .preflight import FatalProviderError, PreflightError, run_preflight
 from .reader import build_reader, reader_prompt_constants
 from .report import (
+    _outcome_grade,
     build_report,
     compare_reports,
     default_report_path,
@@ -81,9 +82,12 @@ from .report import (
     print_comparison,
     save_report,
 )
-from .rerank import RERANK_MODEL_DEFAULT, rerank_enabled
+from .rerank import _TRUTHY, RERANK_MODEL_DEFAULT, _env_int, rerank_enabled
 from .retrieve import (
+    DEFAULT_CONTEXT_ITEM_CAP,
     DEFAULT_CONTEXT_TOKEN_CAP,
+    DEFAULT_EVIDENCE_BOOST_SOURCE,
+    DEFAULT_EVIDENCE_BOOST_VERBATIM,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
     DEFAULT_TR_TOP_K,
     MODEL_ENCODE_FAILED_EXIT,
@@ -253,6 +257,34 @@ def _resolve_int_knob(env_name: str, default: int, cli_value: int | None) -> int
             raise SystemExit(f"{env_name} must be >= 1, got {value}")
         return value
     return default
+
+
+def _resolve_boost_float(env_name: str, default: float,
+                         cli_value: float | None) -> float:
+    """C2 (#1745) run-level boost-multiplier resolution (CLI > env >
+    default): a value < 1.0 fails loudly (SystemExit) — the multiplier is
+    a rank-scaling DIVISION, so 0.0 would ZeroDivide and a negative would
+    silently invert the pool order (review P1-2). Non-finite values
+    (NaN/Inf) fail the same way (review F9 — a NaN passes the < 1.0
+    comparison and would poison every sort key; inf would zero every key
+    and make the boost a silent no-op while methodology records it).
+    Mirrors
+    ``_resolve_rerank_env_int``'s fail-fast lo-validation; the
+    retrieve-layer clamp (rerank._env_boost_float) is the per-question
+    safety net."""
+    if cli_value is not None:
+        value = cli_value
+    else:
+        raw = os.environ.get(env_name)
+        if raw is None or not raw.strip():
+            return default
+        try:
+            value = float(raw.strip())
+        except ValueError:
+            return default
+    if not (math.isfinite(value) and value >= 1.0):
+        raise SystemExit(f"{env_name} must be >= 1.0, got {value!r}")
+    return value
 
 
 # ── R6 (#1545): effective rerank config resolution ──────────────────────
@@ -786,7 +818,12 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        ks: tuple[int, ...], top_k: int, split: str,
                        ingest_mode: str, extractor_model: Any,
                        max_retries: int, dataset_fingerprint: str,
-                       rerank_config: dict) -> dict:
+                       rerank_config: dict,
+                       context_item_cap: int | None = None,
+                       evidence_boost: bool | None = None,
+                       evidence_boost_verbatim: float | None = None,
+                       evidence_boost_source: float | None = None,
+                       max_chunks_per_session: int | None = None) -> dict:
     """The effective-run-config fingerprint (M7 #1527, D7 schema).
 
     ``workers`` is deliberately EXCLUDED (per-question isolation makes
@@ -849,6 +886,23 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
         "reader_prompt_hash": _sha16(reader_prompt_source()),
         "judge_rubric_id_hash": _sha16(JUDGE_RUBRIC_ID),
         "rerank": rerank_config,
+    } | {
+        # C1/C2/C5 (#1745): the effective reader-context + evidence-boost
+        # knobs ride the fingerprint (present only when the caller passes
+        # them — defaults keep the fingerprint byte-identical for existing
+        # callers/tests). A config-mismatched resume (e.g. an unboosted
+        # checkpoint resumed with TORTOISE_LME_EVIDENCE_BOOST=1, or a
+        # context-item-cap change) is refused by the existing fingerprint
+        # gate. ``_fingerprint_diffs`` key-unions, so a None value here vs
+        # an absent key in the checkpoint would mismatch — hence the
+        # conditional presence.
+        **({k: v for k, v in (
+            ("context_item_cap", context_item_cap),
+            ("evidence_boost", evidence_boost),
+            ("evidence_boost_verbatim", evidence_boost_verbatim),
+            ("evidence_boost_source", evidence_boost_source),
+            ("max_chunks_per_session", max_chunks_per_session),
+        ) if v is not None}),
     }
 
 
@@ -871,6 +925,276 @@ def _dataset_fingerprint(path: Path) -> str:
         return "unknown"
 
 
+def _legit_sessionless(outcome: dict) -> bool:
+    """Outcome whose question has no answer session / evidence turns to
+    recall (M6 #1526 N/A-not-0.0): ``turn_recall@k`` records None — never a
+    forced 0.0 — because ``evidence_turn_ids`` (dataset-derived) is empty.
+    Such outcomes are legitimately all-zero on session recall (abstention
+    questions — the answer IS "not mentioned") and must NOT be treated as
+    retrieval-dead, or they would re-encode on every resume forever.
+
+    Known limitation: the vector arm (#1349) records ``turn_recall@k`` as a
+    forced 0.0 for empty evidence (an M6 divergence from the hybrid path),
+    so a vector-mode abstention is not recognized as sessionless here and
+    is re-encoded per resume. The M6 fix belongs in retrieve.py (vector
+    arm); not yet tracked — #1745 is the point-level evidence-recall gap
+    (evidence@20 vs chunk-level), which does NOT cover this forced-0.0-vs-
+    None divergence.
+    """
+    tr = outcome.get("turn_recall@k")
+    return isinstance(tr, dict) and bool(tr) and all(
+        v is None for v in tr.values())
+
+
+# ── R3 (#1542) D4 leg-reason vocabulary (tortoise/search_engine.py) ────────
+#: Per-leg trace entries are {"leg", "ran", "degraded", "reason", "count"};
+#: the engine emits ``reason`` from a closed vocabulary. Classification for
+#: the #1764 resume-quality gate:
+#:   DEAD at count==0 (genuinely retrieval-dead):
+#:     ``empty_results`` — FTS ran clean and found nothing (the pilot
+#:         artifact);
+#:     ``query_failed`` — a real driver failure;
+#:     ``timeout`` — the strategy deadline expired (as_completed merge,
+#:         R3 #1542 D4): the query never completed, results discarded;
+#:   BENIGN (environmental/structural — never retrieval-dead):
+#:     ``ok`` — live retrieval;
+#:     ``index_missing`` — embedded FalkorDBLite, no FTS index; degrades
+#:         quietly, never trips the breaker;
+#:     ``no_embeddings`` — vector arm: zero embedded points;
+#:     ``breaker_open`` — the breaker skipped the strategy.
+#: Tuples (not sets) so a corrupt non-string reason (hand-edited files)
+#: compares by equality instead of TypeErroring the gate on hashing.
+DEAD_LEG_REASONS: tuple[str, ...] = (
+    "empty_results", "query_failed", "timeout")
+BENIGN_LEG_REASONS: tuple[str, ...] = (
+    "ok", "index_missing", "no_embeddings", "breaker_open")
+KNOWN_LEG_REASONS: tuple[str, ...] = tuple(
+    sorted(set(DEAD_LEG_REASONS) | set(BENIGN_LEG_REASONS)))
+
+
+def session_recall_all_zero(sr) -> bool:
+    """Type-strict all-zero predicate for a ``session_recall@k`` dict:
+    bool False is an int subclass but is NOT a recorded recall value, so
+    only real int/float zeros count (mirrors session_healthy's bool
+    exclusion). Shared by the resume-quality gate (run.py) and the
+    protocol's pre-resume scan (run_protocol.py) so the predicate can
+    never drift between them."""
+    return (isinstance(sr, dict) and bool(sr)
+            and all(isinstance(v, (int, float))
+                    and not isinstance(v, bool) and v == 0
+                    for v in sr.values()))
+
+
+def _retriever_from_checkpoint(data: dict,
+                               forwarded: str | None = None
+                               ) -> tuple[str, str | None]:
+    """Resolve the retriever whose required-key set applies to a
+    checkpoint — single source for the runner (``_load_checkpoint``) and
+    the protocol's pre-resume scan (run_protocol.checkpoint_resume_quality)
+    so the two can never report per different retrievers.
+
+    Resolution order (first hit wins):
+      - ``forwarded`` — an explicit caller retriever (the runner always
+        forwards run_evaluation's retriever, default "hybrid");
+      - the checkpoint's first-class top-level ``retriever`` field
+        (written by ``_save_checkpoint``), validated against
+        REQUIRED_OUTCOME_KEYS;
+      - the ``run_key`` segment ``{surface}__{retriever}__{model}__
+        {prompt}`` (older files), validated likewise;
+      - "hybrid" (the runner's default).
+
+    Returns (effective retriever, source) with source ∈ {"forwarded",
+    "top-level", "run_key", "default"}."""
+    if forwarded is not None:
+        return forwarded, "forwarded"
+    field = data.get("retriever")
+    if isinstance(field, str) and field in REQUIRED_OUTCOME_KEYS:
+        return field, "top-level"
+    saved_key = data.get("run_key")
+    if isinstance(saved_key, str):
+        parts = saved_key.split("__")
+        if len(parts) >= 2 and parts[1] in REQUIRED_OUTCOME_KEYS:
+            return parts[1], "run_key"
+    return "hybrid", "default"
+
+
+def resume_gate_reject_reason(outcome: dict) -> str | None:
+    """#1764 resume-quality gate: why a checkpointed outcome is NOT
+    resumable, or None when it passes.
+
+    The pilot's 0.74 baseline was a two-population blend: 20 outcomes
+    resumed byte-identical from a pre-crash run (accuracy 0.55; 13/20 ran
+    with a dead FTS retrieval leg — fts.count=0, ``empty_results``) + 30
+    fresh (0.867). FTS-empty predicts failure almost perfectly within the
+    resumed set (0.31 vs 1.00). Two recorded signals mark an outcome as
+    retrieval-dead:
+
+      - the ``legs`` trace (R3 #1542 D4: {"leg", "ran", "degraded",
+        "reason", "count"}) shows the FTS leg dead — a genuinely-dead
+        reason with ``count == 0`` and no live fts entry (TR questions
+        trace one entry per entity type, so a live point leg rescues a
+        legitimately-empty event leg) AND recall data does not positively
+        show the session surfaced. The full R3 (#1542) leg-reason
+        vocabulary (tortoise/search_engine.py — see DEAD_LEG_REASONS /
+        BENIGN_LEG_REASONS) classifies: DEAD at count==0 —
+        ``empty_results`` (the pilot artifact: FTS ran clean and found
+        nothing), ``query_failed`` (a real driver failure), ``timeout``
+        (the strategy deadline expired — query never completed, results
+        discarded); BENIGN — ``ok`` (live retrieval), ``index_missing``
+        (environmental: expected in embedded FalkorDBLite with no FTS
+        index; degrades quietly, never trips the breaker),
+        ``no_embeddings`` (vector arm: zero embedded points),
+        ``breaker_open`` (the breaker skipped the strategy). Benign
+        reasons are NOT dead legs — treating them as dead would reject
+        every embedded outcome on every resume (livelock). A healthy
+        (non-zero) vector-rescued session (FTS empty but recall > 0) is
+        NOT retrieval-dead — rejecting it would livelock, since the
+        re-encode reproduces the same FTS-empty shape on the next resume;
+      - every ``session_recall@k`` value is 0.0 (the session never
+        surfaced at any depth).
+
+    Signals fire ONLY on positive recorded evidence: an outcome with no
+    ``legs`` trace (pre-R3 checkpoint, vector arm) or no fts entry is NOT
+    refused BY THE DEAD-FTS SIGNAL (the session-zero signal still applies
+    when ``session_recall@k`` is recorded all-zero) — absent data ≠ dead
+    leg, and an fts entry recording ``index_missing`` (embedded
+    FalkorDBLite — no FTS index) or ``breaker_open`` is benign, not dead.
+    An fts entry with ``count == 0`` and a reason OUTSIDE the known
+    vocabulary (future vocabulary, hand-edited files, reason=None) is NOT
+    treated as dead either (fail-open — the index_missing livelock
+    lesson); the vocabulary-drift event is surfaced by the CALLERS that
+    own the load decision (see ``unknown_leg_reasons``) — this predicate
+    is PURE, no side effects: it is the shared single source of truth for
+    both the runner's ``_load_checkpoint`` and the protocol's pre-resume
+    scan, and a print here would double-fire in a real ``cmd_run`` flow
+    and fire in ``--dry-run`` contexts where no load decision happens.
+    Legitimately session-less outcomes
+    (abstention questions — ``turn_recall@k`` all None per the M6
+    N/A-not-0.0 contract) are exempt: their all-zero session recall and
+    legitimately empty FTS are the question's shape, not a dead backend.
+    The session-zero signal is an INDEPENDENT rejection trigger per issue
+    #1764 (Indicator 1 requires flagging ``session_recall@k`` all-zero on
+    its own) — it is NOT only a dead-leg detector. A deterministic miss
+    (live retrieval that surfaced the wrong sessions) or a vector-mode
+    miss (no ``legs`` trace at all) with all-zero recall is rejected and
+    re-encodes on every resume until retrieval improves — the checkpoint
+    self-heals only on a successful re-encode. That fail-closed posture is
+    INTENDED (re-verifying beats trusting a session that never surfaced)
+    and is distinct from the abstention exemption above: an abstention is
+    the question's shape (``turn_recall@k`` all None), while an all-zero
+    session signal with real turn evidence means the retriever never
+    surfaced the session.
+    breaker_open outcomes are excluded by the caller (kept — a legitimately
+    dropped question must never re-run).
+    """
+    if not isinstance(outcome, dict):
+        return None
+    if _legit_sessionless(outcome):
+        return None  # N/A — no answer session to recall, never a dead leg
+    legs = outcome.get("legs")
+    sr = outcome.get("session_recall@k")
+    # a recall dict with any positive numeric value proves the session
+    # surfaced (a live leg produced it) — corrupt values (strings/None)
+    # do NOT count as surfaced, so a dead FTS leg is still rejected on
+    # corrupt recall data instead of being silently resumed.
+    session_healthy = (isinstance(sr, dict) and bool(sr)
+                       and any(isinstance(v, (int, float))
+                               and not isinstance(v, bool)
+                               and math.isfinite(v) and v > 0
+                               for v in sr.values()))
+    # type-strict zero: bool False is an int subclass but is NOT a recorded
+    # recall value — a corrupt boolean must not count as "all zeros" (and
+    # sibling session_healthy already excludes bools). Shared predicate
+    # (session_recall_all_zero) — the protocol scan derives its advisory
+    # zero_session count from the same source so it can never drift.
+    session_zero = session_recall_all_zero(sr)
+    if isinstance(legs, list):
+        # TR questions trace one fts entry PER entity type (point + event
+        # share the leg_trace) — the leg is dead only when no fts entry
+        # shows live retrieval (a live point leg rescues a legitimately-
+        # empty event leg).
+        fts_entries = [leg for leg in legs
+                       if isinstance(leg, dict) and leg.get("leg") == "fts"]
+        # R3 (#1542) leg-reason vocabulary: only genuinely-dead reasons
+        # mark the leg dead — ``empty_results`` (the pilot artifact: FTS
+        # ran clean and found nothing), ``query_failed`` (a real driver
+        # failure) and ``timeout`` (the strategy deadline expired — query
+        # never completed, results discarded). ``index_missing`` is
+        # environmental/benign (expected in embedded FalkorDBLite — no FTS
+        # index; degrades quietly, does not trip the breaker),
+        # ``no_embeddings`` (vector arm: zero embedded points) and
+        # ``breaker_open`` (the breaker skipping the strategy) are not
+        # retrieval-dead, or every embedded outcome would be rejected on
+        # every resume (livelock). Tuple membership — a corrupt non-string
+        # reason must compare, not TypeError the gate.
+        dead_fts = [leg for leg in fts_entries
+                    if leg.get("reason") in DEAD_LEG_REASONS
+                    and leg.get("count") == 0]
+        # #1764/code-review: an fts entry with count==0 and a reason
+        # OUTSIDE the known vocabulary (future vocabulary, hand-edited
+        # files, reason=None) is NOT dead — the ``dead_fts`` filter above
+        # only matches DEAD_LEG_REASONS (fail-open; the index_missing
+        # livelock lesson). The predicate is PURE (no side effects — it is
+        # the shared single source of truth for the runner and the
+        # protocol scan), so the vocabulary-drift event is surfaced by the
+        # callers via ``unknown_leg_reasons`` — never printed here.
+        live_fts = any(leg.get("reason") == "ok"
+                       and leg.get("count", 0) > 0 for leg in fts_entries)
+        # The dead-FTS signal fires only when the session did NOT
+        # positively surface: a healthy vector leg that rescued the session
+        # (session_recall > 0) is NOT retrieval-dead — rejecting it would
+        # livelock, since the re-encode reproduces the same FTS-empty shape
+        # on the next resume.
+        if dead_fts and not live_fts and not session_healthy:
+            return "fts.count=0 (dead FTS retrieval leg)"
+    # #1764: the session-zero signal is an INDEPENDENT rejection trigger,
+    # not merely a dead-leg detector — a deterministic miss (live
+    # retrieval surfaced the wrong sessions) or a vector-mode miss (no
+    # legs trace) with all-zero recall is rejected and re-encodes on every
+    # resume until retrieval improves (the checkpoint self-heals only on a
+    # successful re-encode). Intended fail-closed posture — distinct from
+    # the abstention exemption (a legit sessionless outcome has
+    # turn_recall all-None; here real turn evidence exists but the session
+    # never surfaced).
+    if session_zero:
+        return "session_recall@k all zeros (session never surfaced)"
+    return None
+
+
+def unknown_leg_reasons(outcome: dict) -> list:
+    """#1764/code-review: the fts-leg reason strings OUTSIDE the known
+    vocabulary with ``count == 0`` (future vocabulary, hand-edited files,
+    reason=None) — the classification data behind the gate's fail-open
+    unknown-reason handling (see ``resume_gate_reject_reason``). PURE
+    helper, no side effects: ``resume_gate_reject_reason`` is the shared
+    single source of truth called by BOTH the runner (``_load_checkpoint``)
+    and the protocol scan (run_protocol.checkpoint_resume_quality), so
+    vocabulary-drift surfacing belongs to the callers that own the load
+    decision — this helper just answers "which unknown reasons does this
+    outcome carry?".
+
+    Returns the raw reason values in first-seen order, deduplicated
+    (normally ``str``; ``None``/other corrupt values pass through raw so a
+    caller's repr matches the recorded value). An unknown reason does NOT
+    make the leg dead — it is fail-open (the index_missing livelock
+    lesson) — it only marks vocabulary drift the callers surface loudly.
+    """
+    if not isinstance(outcome, dict):
+        return []
+    legs = outcome.get("legs")
+    if not isinstance(legs, list):
+        return []
+    seen: list = []
+    for leg in legs:
+        if (isinstance(leg, dict) and leg.get("leg") == "fts"
+                and leg.get("count") == 0
+                and leg.get("reason") not in KNOWN_LEG_REASONS):
+            reason = leg.get("reason")
+            if reason not in seen:
+                seen.append(reason)
+    return seen
+
+
 def _load_checkpoint(path: str | None,
                      expected_fingerprint: dict | None = None,
                      *, run_key: str | None = None,
@@ -886,6 +1210,17 @@ def _load_checkpoint(path: str | None,
     {prompt}``) — a cross-surface (embedded↔hnsw) or cross-model resume is
     impossible by construction. The read happens under an exclusive flock
     (D8) so a reader never sees a mid-merge file.
+
+    #1764: the resume-quality gate runs per outcome — a completed record
+    whose recorded retrieval shows a dead FTS leg (``fts.count=0``) or zero
+    session recall is REJECTED (dropped from the completed set so the
+    question re-encodes, mirroring the truncated-outcome path) instead of
+    silently contaminating the baseline with a stale outcome. breaker_open
+    outcomes are exempt (legitimately dropped — never re-run). The
+    checkpoint self-heals only when the re-encode succeeds: a still-dead
+    backend (or a failed re-encode) keeps the outcome rejected on every
+    resume — surfaced via the run log / protocol resume-quality note so
+    the dead backend is seen, never silently converged.
     """
     if not path:
         return {}, []
@@ -895,6 +1230,14 @@ def _load_checkpoint(path: str | None,
     try:
         with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
             data = json.loads(p.read_text(encoding="utf-8"))
+    except TimeoutError as e:
+        # D8 flock timeout — a concurrent writer holds the lock. Accurate
+        # message: NOT a corrupt file (TimeoutError subclasses OSError, so
+        # it must be caught BEFORE the corrupt clause or it is misreported).
+        print(f"[longmem_eval] WARNING: checkpoint {p} lock busy ({e!r}) — "
+              f"concurrent writer; ignoring for now — every question "
+              f"re-encodes", file=sys.stderr)
+        return {}, []
     except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
         print(f"[longmem_eval] WARNING: checkpoint {p} is corrupt ({e!r}) — "
               f"ignoring; every question re-encodes", file=sys.stderr)
@@ -926,6 +1269,20 @@ def _load_checkpoint(path: str | None,
               f"refusing cross-config resume (per-model checkpoint keying); "
               f"every question re-encodes", file=sys.stderr)
         return {}, []
+    # #1764/code-review: cross-check the FILE-DERIVED retriever (top-level
+    # ``retriever`` field → run_key segment — _retriever_from_checkpoint
+    # with no forwarded value) against the FORWARDED retriever — a
+    # disagreement means the caller's required-key set is derived from a
+    # different retriever than the checkpoint's own claim (top-level field
+    # OR run_key segment). Warn only; load behavior is unchanged (the
+    # required-key set comes from the forwarded retriever, per
+    # run_evaluation's call).
+    file_retriever, file_source = _retriever_from_checkpoint(data, None)
+    if file_retriever != retriever and file_source != "default":
+        print(f"[longmem_eval] WARNING: checkpoint {p} retriever "
+              f"{file_retriever!r} (from {file_source}) != forwarded "
+              f"retriever {retriever!r} — required-key set derived from "
+              f"{retriever!r}", file=sys.stderr)
     if expected_fingerprint is not None:
         fp = data.get("fingerprint")
         # #1349 merge: a checkpoint written by the vector-arm path carries
@@ -942,8 +1299,19 @@ def _load_checkpoint(path: str | None,
                 f"checkpoint {p} is stale: effective run config differs on "
                 f"{sorted(diffs)} ({detail}) — refusing resume (delete the "
                 f"file to re-run the questions)")
-    required = REQUIRED_OUTCOME_KEYS.get(retriever, ("question_id",))
+    # The required-key set derives from the SAME retriever resolution the
+    # protocol scan uses (run_protocol.checkpoint_resume_quality —
+    # _retriever_from_checkpoint, single source) so the two can never
+    # drift apart. The runner always forwards (run_evaluation passes
+    # retriever=retriever, default "hybrid"), so the forwarded value wins
+    # here; the file branches serve callers without a forwarded retriever
+    # (the scan's programmatic path).
+    effective_retriever, _retriever_source = _retriever_from_checkpoint(
+        data, retriever)
+    required = REQUIRED_OUTCOME_KEYS.get(effective_retriever,
+                                         ("question_id",))
     outcomes: dict[str, dict] = {}
+    gate_rejected = 0
     for o in data.get("outcomes", []):
         if not isinstance(o, dict) or not o.get("question_id"):
             continue
@@ -957,11 +1325,40 @@ def _load_checkpoint(path: str | None,
                   f"{missing}) — re-encoding just this question",
                   file=sys.stderr)
             continue
+        # #1764: refuse resume of retrieval-dead outcomes — drop from the
+        # completed set so the question re-encodes (single-population
+        # discipline: no stale dead-leg outcomes in baselines).
+        reason = resume_gate_reject_reason(o)
+        # #1764/code-review: the gate predicate is PURE (no side effects —
+        # it is the shared single source of truth called by both this
+        # loader and the protocol's pre-resume scan; the old in-predicate
+        # print double-fired in a real cmd_run flow and fired in --dry-run
+        # contexts where no load decision happens), so the unknown-reason
+        # vocabulary-drift warning is surfaced HERE — once per gate-
+        # eligible outcome, naming qid + the unknown reason(s), same loud
+        # wording as before (fail-open — NOT dead).
+        unknown = unknown_leg_reasons(o)
+        if unknown:
+            print(f"[longmem_eval] WARNING: outcome "
+                  f"{o.get('question_id')!r} fts leg has unknown "
+                  f"reason(s) {', '.join(repr(r) for r in unknown)} with "
+                  f"count=0 — NOT treated as dead (fail-open on unknown "
+                  f"vocabulary); known reasons: {KNOWN_LEG_REASONS}",
+                  file=sys.stderr)
+        if reason is not None:
+            gate_rejected += 1
+            print(f"[longmem_eval] WARNING: checkpoint outcome "
+                  f"{o.get('question_id')!r} rejected by the resume-quality "
+                  f"gate ({reason}) — re-encoding just this question",
+                  file=sys.stderr)
+            continue
         outcomes[o["question_id"]] = o
     failures = [f for f in data.get("failures", [])
                 if isinstance(f, dict) and f.get("question_id")]
     print(f"[longmem_eval] resumed checkpoint {p}: {len(outcomes)} completed, "
-          f"{len(failures)} failed (skipping both)", file=sys.stderr)
+          f"{len(failures)} failed (skipping both)"
+          + (f"; {gate_rejected} rejected by the resume-quality gate "
+             f"(re-encoding)" if gate_rejected else ""), file=sys.stderr)
     return outcomes, failures
 
 
@@ -1052,6 +1449,15 @@ def run_evaluation(
     chunk_turns: int = DEFAULT_CHUNK_TURNS,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
+    # C1 (#1745): reader-context item cap (default 40; env
+    # TORTOISE_LME_CONTEXT_ITEMS). TR questions ignore it — tr_top_k is the
+    # pinned TR item cap.
+    context_item_cap: int | None = None,
+    # C2 (#1745): evidence-mark boost — OFF by default in code (the plan's
+    # default decision; ON for the re-validation run via env or flag).
+    evidence_boost: bool | None = None,
+    evidence_boost_verbatim: float | None = None,
+    evidence_boost_source: float | None = None,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency date weight, the TR-constraint window
     # filter, time-ascending rendering, and the tighter tr_top_k cap
@@ -1119,6 +1525,48 @@ def run_evaluation(
     # E2E-3 Precondition 2: the audit is computed from the loaded instances
     # BEFORE anything else — no report can be produced without it.
     dataset_semantics_audit = audit_dataset(instances)
+    # C2 (#1745): resolve the evidence-boost tri-state ONCE, before the
+    # loop — a None with the TORTOISE_LME_EVIDENCE_BOOST env set must not
+    # record `false` in the methodology while the per-question retrieval
+    # boosted (the plan's Task-3 contract: methodology records the knobs
+    # truthfully). Mirrors the retrieve-layer gate (fail-safe OFF: only
+    # 1/true/yes/on enables).
+    if evidence_boost is None:
+        eb_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
+        evidence_boost = eb_env.strip().lower() in _TRUTHY
+    # C1/C2 (#1745): resolve the remaining boost knobs ONCE, before the
+    # loop — the methodology and the fingerprint must record EXACTLY what
+    # the per-question retrieval serves (CLI > env > default, mirroring
+    # the evidence_boost tri-state above). retrieve_for_question's own env
+    # fallback only fires for DIRECT callers now — the run path always
+    # passes the resolved values, so methodology == actual on every path.
+    # C2 off-path hygiene (review P2-2): the multiplier env vars are
+    # resolved/validated ONLY when the boost is actually ON — a boost-off
+    # run must be completely unaffected by a stray TORTOISE_LME_EVIDENCE_BOOST_VERBATIM/_SOURCE
+    # (mirrors the R6 "_resolve_rerank" precedent in this file: a baseline
+    # run never reads the R6 env vars). When off, the multipliers stay
+    # None — the fingerprint's conditional key union drops them (inert
+    # knobs never gate the checkpoint fingerprint) and the methodology
+    # records the default constants.
+    if context_item_cap is None:
+        context_item_cap = _env_int(
+            "TORTOISE_LME_CONTEXT_ITEMS", DEFAULT_CONTEXT_ITEM_CAP)
+    if evidence_boost:
+        evidence_boost_verbatim = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+            DEFAULT_EVIDENCE_BOOST_VERBATIM, evidence_boost_verbatim)
+        evidence_boost_source = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+            DEFAULT_EVIDENCE_BOOST_SOURCE, evidence_boost_source)
+    else:
+        # Off-path: never record/fingerprint inert multipliers — an
+        # explicitly-passed programmatic value is dropped (the CLI layer
+        # is the user-facing validation surface; here the knob has no
+        # effect on the run, so it must not gate the checkpoint or the
+        # methodology). The fingerprint's conditional key union drops
+        # None, and the methodology falls back to the default constants.
+        evidence_boost_verbatim = None
+        evidence_boost_source = None
     # M7 #1739 / #1742: the session-parallel worker factory must serve
     # EXACTLY the fingerprinted config — a programmatic caller passing a
     # spec'd extractor_model with session_workers > 1 but forgetting the
@@ -1178,9 +1626,17 @@ def run_evaluation(
         extractor_model=extractor_model, max_retries=max_retries,
         dataset_fingerprint=dataset_fingerprint,
         rerank_config=rr["config"],
+        # C1/C2/C5 (#1745): the RESOLVED knob values ride the fingerprint
+        # (F4 resolved them above — methodology == actual == fingerprint).
+        context_item_cap=context_item_cap,
+        evidence_boost=bool(evidence_boost),
+        evidence_boost_verbatim=evidence_boost_verbatim,
+        evidence_boost_source=evidence_boost_source,
+        max_chunks_per_session=max_chunks_per_session,
     )
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
-                                            run_key=run_key)
+                                            run_key=run_key,
+                                            retriever=retriever)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
     import threading
@@ -1273,7 +1729,14 @@ def run_evaluation(
                     rerank_model=rr["model"],
                     rerank_pool=rr["rerank_pool"],
                     per_session_cap=rr["per_session_cap"],
-                    mmr_lambda=rr["mmr_lambda"])
+                    mmr_lambda=rr["mmr_lambda"],
+                    # C1/C2 (#1745): reader-context item cap + evidence-
+                    # mark boost (OFF by default; the re-validation run
+                    # enables it via env/flag).
+                    context_item_cap=context_item_cap,
+                    evidence_boost=evidence_boost,
+                    evidence_boost_verbatim=evidence_boost_verbatim,
+                    evidence_boost_source=evidence_boost_source)
 
                 # #1349 retrieval-only: reader/judge never invoked — the
                 # outcome carries retrieval + breaker accounting only.
@@ -1293,7 +1756,7 @@ def run_evaluation(
                     hypothesis = _call_with_backoff(
                         lambda: reader.answer(
                             # R1 (#1540) D6: the reader consumes EXACTLY the
-                            # budget-capped points-first context the token
+                            # budget-capped rank-interleaved context the token
                             # metric reports (was the full uncapped pool).
                             context_hits=ret["context_points"],
                             question=question["question"],
@@ -1336,6 +1799,13 @@ def run_evaluation(
                 "ingest": ingest_stats,
                 "n_ingest_errors": len(ingest_errors),
                 "ingest_error_text": (ingest_errors or [None])[0],
+                # #1746 (D7): the per-question LLM telemetry + recovery
+                # counters — the report's warning-only truncation readout
+                # (criterion 3: no UNRECORDED truncation with valid=true).
+                "llm_calls": (ingest_stats.get("llm") or {}).get("calls", 0),
+                "llm_retries": (ingest_stats.get("llm") or {}).get("retries", 0),
+                "llm_truncated": (ingest_stats.get("llm") or {}).get("truncated", 0),
+                "recovery": ingest_stats.get("recovery", {}),
                 "session_recall@k": ret["session_recall@k"],
                 "turn_recall@k": ret["turn_recall@k"],
                 "evidence_recall@k": ret.get("evidence_recall@k"),
@@ -1375,6 +1845,19 @@ def run_evaluation(
                 # back to the unfiltered pool (never starve the reader).
                 "tr_constraint": ret.get("tr_constraint"),
                 "tr_window_fallback": ret.get("tr_window_fallback", False),
+                # C4 (#1745): the reader-surface evidence metric
+                # (context-level; the metric C1 actually moves).
+                "reader_evidence@k": ret.get("reader_evidence@k"),
+                # Task 0 (#1745): ranked ids + evidence-turn matches
+                # populated for BOTH arms (the pilot's context composition
+                # was unreconstructable — 0/50); ranked_ids_pre_boost is
+                # the C2 ablation surface (identical when the boost is
+                # off). The #1349 vector-arm gate metrics (ndcg@10/p@10/
+                # p@5) stay conditional on the vector arm's keys.
+                "ranked_ids": ret.get("ranked_ids"),
+                "ranked_ids_pre_boost": ret.get("ranked_ids_pre_boost"),
+                "evidence_turn_matches": ret.get("evidence_turn_matches"),
+                "evidence_boost": ret.get("evidence_boost"),
                 # R6 (#1545): the rerank pass + latency ride the outcome —
                 # they stay ABSENT on baseline outcomes (the projection in
                 # outcomes_to_report adds them conditionally).
@@ -1382,9 +1865,7 @@ def run_evaluation(
                     "rerank_latency_ms": ret.get("rerank_latency_ms", 0.0)}
                    if "rerank_pass" in ret else {}),
                 # #1349 vector arm: gate metrics + breaker-open dropped marker.
-                **({"ranked_ids": ret["ranked_ids"],
-                    "evidence_turn_matches": ret["evidence_turn_matches"],
-                    "ndcg@10": ret["ndcg@10"],
+                **({"ndcg@10": ret["ndcg@10"],
                     "p@10": ret["p@10"],
                     "p@5": ret["p@5"]}
                    if "ndcg@10" in ret else {}),
@@ -1480,11 +1961,25 @@ def run_evaluation(
         preflight=preflight,
         embedder_status=embedder_status,
         # R1 (#1540) D7: knob values recorded verbatim in the methodology
-        # (the run protocol step-2 gate consumes them).
+        # (the run protocol step-2 gate consumes them). C1/C2 (#1745): the
+        # reader-context item cap + evidence-boost knobs ride the same
+        # dict so published numbers carry their methodology.
         r1_knobs={
             "chunk_turns": chunk_turns,
             "context_token_cap": max_context_tokens,
             "max_chunks_per_session": max_chunks_per_session,
+            "context_item_cap": (context_item_cap
+                                 if context_item_cap is not None
+                                 else DEFAULT_CONTEXT_ITEM_CAP),
+            "evidence_boost": bool(evidence_boost),
+            "evidence_boost_verbatim": (
+                evidence_boost_verbatim
+                if evidence_boost_verbatim is not None
+                else DEFAULT_EVIDENCE_BOOST_VERBATIM),
+            "evidence_boost_source": (
+                evidence_boost_source
+                if evidence_boost_source is not None
+                else DEFAULT_EVIDENCE_BOOST_SOURCE),
         },
         # R5 (#1544) D7: TR knob values recorded verbatim in the
         # methodology (the run protocol step-2/6 knob sweeps consume them;
@@ -1573,13 +2068,24 @@ def outcomes_to_report(
                 "hypothesis", "session_recall@k", "turn_recall@k",
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
-                "n_ingest_errors", "context_tokens",
+                "n_ingest_errors", "ingest_error_text",
+                # #1746 (D7): llm telemetry + recovery ride the Layer-1
+                # projection — the truncated_valid readout consumes them.
+                "llm_calls", "llm_retries", "llm_truncated", "recovery",
+                "context_tokens",
                 # #1349 vector arm: the gate's per-question metrics ride the
                 # Layer-1 projection (extract_report in gate_1349.py reads
                 # them from the report's outcomes) + the breaker-open dropped
                 # markers (dropped-question accounting, never recall 0).
                 "ndcg@10", "p@10", "p@5", "ranked_ids",
                 "evidence_turn_matches", "breaker_open", "dropped_reason",
+                # C4 (#1745): the reader-surface evidence metric + the C2
+                # pre/post ablation + the boost block ride the projection
+                # (read via o.get so a pre-#1745 checkpoint resumes without
+                # KeyError — the keys stay absent until the outcome carries
+                # them).
+                "reader_evidence@k", "ranked_ids_pre_boost",
+                "evidence_boost",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",
@@ -1609,7 +2115,33 @@ def outcomes_to_report(
                   # condition and read via .get() so they can't KeyError).
                   **({"rerank_pass": o["rerank_pass"],
                       "rerank_latency_ms": o.get("rerank_latency_ms", 0.0)}
-                     if o.get("rerank_pass") is not None else {})}
+                     if o.get("rerank_pass") is not None else {}),
+                  # #1747 (round-17 code review): breaker_open outcomes are
+                  # published with the SAME no-error-signal shape the grader
+                  # consumed — the runner's raw dropped outcome (run.py
+                  # breaker construction) carries NO valid/error_classes
+                  # keys, so build_report grades it clean (n_excluded_hard
+                  # == 0, valid True), but this selector materialized them
+                  # as null, and a PRESENT-null error_classes re-grades HARD
+                  # (round-10 fail-closed shape) — every persisted
+                  # vector-arm report with a breaker drop self-contradicted
+                  # its own verdict. Emit the shape the GRADER actually
+                  # consumed for the breaker outcome: when the raw grade is
+                  # CLEAN, publish valid/error_classes exactly as graded
+                  # (missing → the clean defaults True/{}); when the raw
+                  # grade is hard/recoverable (a TAMPERED breaker outcome
+                  # carrying a hard census, a present non-bool/falsy valid
+                  # flag, or a recoverable-only census), the selector's
+                  # materialization stands — the published record re-grades
+                  # identically to what the verdict read (round-17 review-
+                  # fix: the earlier key-presence-only override stomped a
+                  # present valid: False to True, and left one-key-present
+                  # hybrid shapes (valid present / error_classes absent and
+                  # vice versa) publishing a clean-shape contradiction).
+                  **({"valid": o.get("valid", True),
+                      "error_classes": o.get("error_classes", {})}
+                     if o.get("breaker_open") and _outcome_grade(o) == "clean"
+                     else {})}
             for o in outcomes
         ]
     }
@@ -1677,18 +2209,20 @@ def reader_prompt_source() -> str:
     longmem_eval reader prompt; must be kept in sync with
     battery.parity.runner (the unchanged-check compares both sides).
 
-    R1 (#1540) D6/D7: the reader consumes the budget-capped points-first
-    context (UX decision 3) — the parity hash changes; the #1144 baseline
-    record is refreshed at the next parity run (a run-time action — no
-    committed baseline exists).
+    R1 (#1540) D6/D7 + C1 (#1745): the reader consumes the budget-capped
+    RANK-INTERLEAVED context (points + raw chunks in true RRF rank order,
+    bounded by the token budget AND the context item cap) — the parity
+    hash changes; the #1144 baseline record is refreshed at the next
+    parity run (a run-time action — no committed baseline exists).
     """
     return (
         "Current Date: {question_date} header + per-session date annotation "
         "on every retrieved chunk (question_date + haystack_dates surfaced — "
-        "temporal-reasoning questions are answerable); points-first "
-        "budget-capped context (UX-3 #1540): extracted points render in "
-        "rank order, raw turn-granular chunks backfill the remaining "
-        "context_token_cap tokens; type-fragments: temporal (date math), "
+        "temporal-reasoning questions are answerable); rank-interleaved "
+        "budget-capped context (C1 #1745, replaces R1's points-first "
+        "UX-3 #1540): extracted points AND raw turn-granular chunks render "
+        "in true RRF rank order bounded by the token budget and the "
+        "context_item_cap; type-fragments: temporal (date math), "
         "preference (option commitment), knowledge-update (answer-from-newer, "
         "date-conditional: current-value → newest/superseding point, "
         "point-in-time → chain-walk by session date — E5 CORRECTS markers + "
@@ -1708,6 +2242,27 @@ def _print_summary(report: dict[str, Any]) -> None:
           f"{integ.get('n_valid')}, n_invalid {integ.get('n_invalid')}, "
           f"n_failed {integ.get('n_failed')}, "
           f"invalid_rate {integ.get('invalid_rate')})")
+    # #1747 (round-17 code-review P2): valid=false is commonly decided by
+    # terms NOT in the line above (the hard veto, the excluded-outcome
+    # veto, or the vacuity guard — an operator can see valid: false with
+    # invalid_rate 0.0 where the only printed numbers did NOT decide the
+    # verdict). Surface the deciding terms when the verdict is false —
+    # including the vacuity evidence (n_attempted + dropped + n_excluded:
+    # when the rate and veto terms all pass, a false verdict means the
+    # outcome-derived attempted set was empty — round-17 review-fix: the
+    # line used to omit those, reading "decided by 0/0/0" for an all-
+    # dropped run).
+    if integ.get("valid") is False:
+        print(f"  invalidity decided by: n_hard_invalid "
+              f"{integ.get('n_hard_invalid')}, n_excluded_hard "
+              f"{integ.get('n_excluded_hard')}, n_excluded "
+              f"{integ.get('n_excluded')}, n_attempted "
+              f"{integ.get('n_attempted')} (invalid_rate "
+              f"{integ.get('invalid_rate')} vs threshold "
+              f"{integ.get('threshold')}; dropped "
+              f"{report.get('n_dropped', 0)}; vacuity = all "
+              "non-veto/rate terms pass with an empty outcome-derived "
+              "attempted set)")
     if integ.get("justified"):
         print(f"  justified override: "
               f"{integ.get('threshold_violation_justification')}")
@@ -1847,11 +2402,46 @@ def _build_parser() -> argparse.ArgumentParser:
                         "the value for the pilot + 500-Q run, R1 #1540)")
     p.add_argument("--context-cap", type=_positive_int, default=None,
                    help="reader context token budget (env TORTOISE_LME_CONTEXT_CAP; "
-                        "default 8000 — points first, chunks backfill, R1 #1540)")
+                        "default 8000 — rank-interleaved, C1 #1745: points + chunks "
+                        "in true RRF order bounded by the token budget and the "
+                        "context item cap)")
     p.add_argument("--max-chunks-per-session", type=_positive_int, default=None,
                    help="per-session raw-chunk cap in the retrieval pool "
-                        "(env TORTOISE_LME_MAX_CHUNKS_PER_SESSION; default 2 — "
-                        "E2E-1 session-dedup, R1 #1540)")
+                        "(env TORTOISE_LME_MAX_CHUNKS_PER_SESSION; default 3 — "
+                        "E2E-1 session-dedup, R1 #1540; C5 #1745 raised the "
+                        "cap 2->3 so the evidence chunk is not capped out)")
+    # C1 (#1745): the reader-context item cap (env first, CLI overrides;
+    # the token budget --context-cap selects within it; TR questions keep
+    # the pinned --tr-top-k item cap).
+    p.add_argument("--context-items", type=_positive_int, default=None,
+                   help="reader context ITEM cap (env TORTOISE_LME_CONTEXT_ITEMS; "
+                        "default 40 — the 8k token budget rarely binds at ~114 "
+                        "tok/item, so the item cap bounds reader flood, C1 #1745)")
+    # C2 (#1745): the evidence-mark boost — tri-state --evidence-boost /
+    # --no-evidence-boost (None default so the TORTOISE_LME_EVIDENCE_BOOST
+    # env still applies; OFF by default in code — ON only for the
+    # re-validation run).
+    eb = p.add_mutually_exclusive_group()
+    eb.add_argument("--evidence-boost", dest="evidence_boost",
+                    action="store_true", default=None,
+                    help="enable the C2 evidence-mark rank boost (marked "
+                         "hits move up by a stable rank offset before "
+                         "evidence_recall@k; default: env "
+                         "TORTOISE_LME_EVIDENCE_BOOST — OFF by default in "
+                         "code, ON for the re-validation run, #1745)")
+    eb.add_argument("--no-evidence-boost", dest="evidence_boost",
+                    action="store_false", default=None,
+                    help="disable the C2 evidence-mark boost even when "
+                         "TORTOISE_LME_EVIDENCE_BOOST is set "
+                         "(tri-state: explicit flags beat the env)")
+    p.add_argument("--evidence-boost-verbatim", type=float, default=None,
+                   help="verbatim/raw-chunk mark rank-offset multiplier "
+                        "(env TORTOISE_LME_EVIDENCE_BOOST_VERBATIM; default "
+                        f"{DEFAULT_EVIDENCE_BOOST_VERBATIM})")
+    p.add_argument("--evidence-boost-source", type=float, default=None,
+                   help="source-session-only mark rank-offset multiplier "
+                        "(env TORTOISE_LME_EVIDENCE_BOOST_SOURCE; default "
+                        f"{DEFAULT_EVIDENCE_BOOST_SOURCE})")
     p.add_argument("--mock", action="store_true",
                    help="offline mode: MockReader + MockJudge, no API keys (CI)")
     p.add_argument("--skip-preflight", action="store_true",
@@ -2206,6 +2796,55 @@ def _run_main(parser: argparse.ArgumentParser, args,
     max_chunks_per_session = _resolve_int_knob(
         "TORTOISE_LME_MAX_CHUNKS_PER_SESSION",
         DEFAULT_MAX_CHUNKS_PER_SESSION, args.max_chunks_per_session)
+    # C1 (#1745): reader-context item cap (env first, CLI overrides;
+    # >= 1 validated). TR questions ignore it — tr_top_k is the pinned TR
+    # item cap.
+    context_item_cap = _resolve_int_knob(
+        "TORTOISE_LME_CONTEXT_ITEMS", DEFAULT_CONTEXT_ITEM_CAP,
+        args.context_items)
+    # C2 (#1745): evidence-mark boost — tri-state (None default so the
+    # TORTOISE_LME_EVIDENCE_BOOST env still applies; OFF by default in
+    # code — fail-safe: only 1/true/yes/on enables, mirroring the R6
+    # rerank gate). Per-class multipliers default to the retrieve.py
+    # constants (env overrides; CLI beats env; < 1.0 fails loudly —
+    # resolved ONLY when the boost is on, so a stray multiplier env never
+    # aborts a boost-off run, review P2-2).
+    if args.evidence_boost is not None:
+        evidence_boost = args.evidence_boost
+    else:
+        eb_env = (os.environ.get("TORTOISE_LME_EVIDENCE_BOOST") or "")
+        evidence_boost = eb_env.strip().lower() in _TRUTHY
+    evidence_boost_verbatim = args.evidence_boost_verbatim
+    evidence_boost_source = args.evidence_boost_source
+    if evidence_boost:
+        evidence_boost_verbatim = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+            DEFAULT_EVIDENCE_BOOST_VERBATIM, args.evidence_boost_verbatim)
+        evidence_boost_source = _resolve_boost_float(
+            "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+            DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
+    else:
+        # Off-path hygiene (review P2-2, mirrors the R6 precedent in this
+        # file): the ambient TORTOISE_LME_EVIDENCE_BOOST_VERBATIM/_SOURCE
+        # env vars are NOT read when the boost is off — a stray/stale
+        # value must never abort a baseline run (or gate its fingerprint).
+        # EXPLICIT CLI args are still validated even on the off path — a
+        # user typo (--evidence-boost-verbatim 0.5 / nan) fails loudly
+        # (test_knob_cli_validation contract). After validation the values
+        # are DROPPED (set to None) so the inert knobs never ride the
+        # fingerprint or the methodology on a boost-off run (review
+        # re-check: a checkpoint must not become sensitive to a knob that
+        # never affected the results).
+        if args.evidence_boost_verbatim is not None:
+            _resolve_boost_float(
+                "TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                DEFAULT_EVIDENCE_BOOST_VERBATIM, args.evidence_boost_verbatim)
+        if args.evidence_boost_source is not None:
+            _resolve_boost_float(
+                "TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
+                DEFAULT_EVIDENCE_BOOST_SOURCE, args.evidence_boost_source)
+        evidence_boost_verbatim = None
+        evidence_boost_source = None
     # R5 (#1544) TR knobs: argparse defaults (12 / 0.5 / events-on),
     # recorded verbatim in the report methodology (D7).
     tr_top_k = args.tr_top_k
@@ -2372,6 +3011,13 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 embedder_status=embedder_status,
                 chunk_turns=chunk_turns, max_context_tokens=context_cap,
                 max_chunks_per_session=max_chunks_per_session,
+                # C1/C2 (#1745): reader-context item cap + evidence-mark
+                # boost (OFF by default in code — the re-validation run
+                # enables via env/flag; knobs recorded in the methodology).
+                context_item_cap=context_item_cap,
+                evidence_boost=evidence_boost,
+                evidence_boost_verbatim=evidence_boost_verbatim,
+                evidence_boost_source=evidence_boost_source,
                 tr_top_k=tr_top_k, tr_date_weight=tr_date_weight,
                 tr_events=tr_events,
                 rerank=rr["rerank_on"], rerank_model=rr["model"],

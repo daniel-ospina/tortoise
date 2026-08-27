@@ -69,6 +69,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},
+    "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
     "test_pack_state.py": {
         "tenant-a": "team-identity", "tenant-b": "team-identity",

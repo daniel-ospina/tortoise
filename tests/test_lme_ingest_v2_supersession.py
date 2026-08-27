@@ -15,7 +15,6 @@ Runnable with:
 from __future__ import annotations
 
 import json
-import os
 import sys
 from pathlib import Path
 
@@ -23,7 +22,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.ids import content_hash  # noqa: E402
+from tortoise.ids import content_hash
 
 
 def _pid(content: str) -> str:

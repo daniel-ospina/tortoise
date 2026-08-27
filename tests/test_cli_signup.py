@@ -145,6 +145,31 @@ class TestGlobalWrite:
         assert "could NOT be saved" in err
         assert "tt_mint_" in err  # the minted key is echoed so it isn't lost
 
+    def test_mint_write_failure_echoes_recovery_token(self, monkeypatch, tmp_path, capsys):
+        """#1750: the orphan path (mint OK, save fails) must echo the recovery
+        token like the key — previously it was silently destroyed, and the
+        'fix perms and re-run' guidance minted a SECOND team, permanently
+        orphaning the first (whose token was never shown)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        orphan_token = "st_" + "de" * 32
+        body = {"key": "tt_orphan_000000000000000000000000000000000000000000",
+                "team_id": "team-orphan", "team_name": "agent-orphan",
+                "graph_name": "team_team-orphan", "identity": "anon-orphan",
+                "tier": "free", "signup_token": orphan_token}
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint(body)), \
+             mock.patch("os.replace", side_effect=OSError("read-only fs")):
+            rc = main._cmd_signup(mock.Mock())
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "could NOT be saved" in err
+        assert orphan_token in err  # the recovery token is echoed, not destroyed
+        assert "Recovery token" in err
+        # guidance warns against a blind re-run (it would mint a NEW team and
+        # the first team's key+token above are the only access to it)
+        assert "do NOT re-run blindly" in err
+        assert "NEW team" in err
+
     def test_mint_mkdir_failure_exits_1(self, monkeypatch, tmp_path, capsys):
         """The mkdir/chmod legs of the write-failure handler (not just os.replace)."""
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -443,19 +468,47 @@ class TestReuse:
             # NB: urlopen(req, timeout=15) passes a kwarg — the side_effect
             # must accept it (plan-verbatim `_self/_args` signature would
             # TypeError; intent unchanged).
-            barrier.wait()  # both writers hit the write block concurrently
+            # The barrier wait has a timeout (5s) so a missed partner fails
+            # FAST (BrokenBarrierError) instead of hanging the thread inside
+            # the patched block — a hung thread NEVER exits its `with
+            # mock.patch(...)`, leaking the urlopen mock process-wide and
+            # deadlocking every later urlopen (observed on the tier-2 (b)
+            # leg: the selfhost health check + slack webhook tests blocked
+            # on the stale barrier for 300s each).
+            barrier.wait(timeout=5)  # both writers hit the write block concurrently
             return _ok_mint()
 
-        def _run():
-            with mock.patch("urllib.request.urlopen", side_effect=_mint):
-                results.append(main._cmd_signup(mock.Mock()))
+        def _reuse_or_mint(*_args, **_kwargs):
+            # The reuse-GET must NOT return 200: a 200 short-circuits
+            # _cmd_signup into the reuse path with NO mint POST — the other
+            # thread's POST then waits on the barrier alone forever (the
+            # same leak above). 401 on the GET forces BOTH threads onto the
+            # mint POST deterministically (the file's established pattern:
+            # HTTPError(401) then _ok_mint()).
+            try:
+                if _args and "v1/team" in _args[0].full_url:
+                    return _http_error(401)
+            except Exception:
+                pass
+            return _mint(*_args, **_kwargs)
 
-        t1 = threading.Thread(target=_run)
-        t2 = threading.Thread(target=_run)
-        t1.start()
-        t2.start()
-        t1.join()
-        t2.join()
+        # ONE shared patch around both writers (a per-thread `with
+        # mock.patch(...)` double-patches the same attribute: the second
+        # thread's patcher saves the first thread's MagicMock as its
+        # "original", and whoever exits LAST restores the OTHER's Mock —
+        # urlopen then leaks as a MagicMock process-wide and every later
+        # urlopen (selfhost /health, slack webhook) fires the stale _mint
+        # side_effect → barrier (observed on the tier-2 (b) leg).
+        def _run():
+            results.append(main._cmd_signup(mock.Mock()))
+
+        with mock.patch("urllib.request.urlopen", side_effect=_reuse_or_mint):
+            t1 = threading.Thread(target=_run)
+            t2 = threading.Thread(target=_run)
+            t1.start()
+            t2.start()
+            t1.join()
+            t2.join()
         cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
         assert cfg["api_key"].startswith("tt_mint_")
         assert len(list((tmp_path / ".tortoise").glob("credentials.json.tmp-*"))) <= 1
@@ -745,7 +798,7 @@ class TestSignupTokenPersistence:
         body = json.loads(requests[1].data)
         assert body["signup_token"] == "st_" + "cd" * 32  # re-presented
 
-    def test_recovery_response_keeps_stored_token(self, monkeypatch, tmp_path):
+    def test_recovery_response_keeps_stored_token(self, monkeypatch, tmp_path, capsys):
         """A token-present re-signup that RECOVERS (no signup_token in the
         response) must keep the stored token — rotation is rejected server-
         side, so without persistence recovery would be one-shot-only."""
@@ -772,6 +825,35 @@ class TestSignupTokenPersistence:
         cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
         assert cfg["signup_token"] == stored  # kept
         assert cfg["api_key"].startswith("tt_recovered")
+        # #1751: the branch keys off whether a token was PRESENTED, not whether
+        # the response carried one — this recovery still says 'Key recovered'
+        cap = capsys.readouterr()
+        assert "Key recovered on existing team" in cap.out
+        assert "Free team created" not in cap.out
+
+    def test_fresh_mint_missing_signup_token_warns(self, monkeypatch, tmp_path, capsys):
+        """#1751: a fresh mint whose response lacks signup_token (server
+        version skew / a field-stripping proxy) must NOT print the false
+        'Key recovered on existing team' — say 'Free team created' and warn
+        the recovery backdoor was not issued (`tortoise recover` won't work)."""
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        body = {"key": "tt_notok_000000000000000000000000000000000000000000",
+                "team_id": "team-notok", "team_name": "agent-notok",
+                "graph_name": "team_team-notok", "identity": "anon-notok",
+                "tier": "free"}  # NO signup_token field
+        with mock.patch("urllib.request.urlopen", return_value=_ok_mint(body)):
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 0
+        cap = capsys.readouterr()
+        assert "Free team created" in cap.out
+        assert "Key recovered" not in cap.out  # the false message must not appear
+        assert "Recovery backdoor NOT created" in cap.err  # #1751 warning
+        assert "signup token" in cap.err.lower()
+        assert "tortoise recover" in cap.err  # user is told recovery won't work
+        cfg = json.loads((tmp_path / ".tortoise" / "credentials.json").read_text())
+        assert "signup_token" not in cfg  # nothing silently persisted
 
     def test_recovery_response_injected_token_ignored(self, monkeypatch, tmp_path):
         """#1709 fixer P2.5: on the RECOVERY branch (a token was presented)
@@ -942,6 +1024,92 @@ class TestSignup403Suspended:
         assert "appeal" in err
 
 
+class TestSignupRecoverHint:
+    """#1756: a config that parses with a signup_token but NO api_key is the
+    exact state `tortoise recover` exists for — signup must point there, not
+    brand the config 'corrupt — delete it' (destructive: deleting destroys
+    the recovery token) or suggest --force (mints a NEW team, orphaning the
+    old one). No mint may happen on this shape: exit 1 without network."""
+
+    def test_token_only_global_config_prints_recover_hint_no_mint(
+            self, monkeypatch, tmp_path, capsys):
+        """Global store with a signup_token but no api_key: the resolver's
+        api_key invariant trips _ConfigError — signup must print the recover
+        hint naming the file and exit 1 WITHOUT minting (urlopen never
+        called)."""
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "signup_token": "st_" + "ef" * 32}))  # no api_key
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "tortoise recover" in err
+        assert str(gdir / "credentials.json") in err
+        assert "Do NOT delete this file" in err
+        assert "do NOT use --force" in err
+        assert "corrupt or unreadable" not in err
+        assert "fix or delete" not in err
+        urlopen.assert_not_called()  # no mint, no reuse GET — exit before network
+
+    def test_token_only_cwd_config_prints_recover_hint(self, monkeypatch, tmp_path, capsys):
+        """Legacy cwd/.tortoise token-only shape — the candidate scan (cwd
+        first, then global) must find it and point at recover."""
+        (tmp_path / ".tortoise").write_text(json.dumps({
+            "api_url": "http://localhost:8010",
+            "signup_token": "st_" + "ef" * 32}))  # no api_key
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "tortoise recover" in err
+        assert str(tmp_path / ".tortoise") in err
+        urlopen.assert_not_called()
+
+    def test_corrupt_config_keeps_corrupt_message(self, monkeypatch, tmp_path, capsys):
+        """Genuinely corrupt config (invalid JSON / invalid UTF-8) must keep
+        the existing corrupt-config guidance — the recover hint is only for
+        the token-only shape, not for unparseable files."""
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_bytes(b"\xff\xfe\x00{not json")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        err = capsys.readouterr().err
+        assert rc == 1
+        assert "corrupt or unreadable" in err
+        assert "tortoise recover" not in err
+        urlopen.assert_not_called()
+
+
+    def test_token_only_cwd_shadows_global_key_not_lost(self, monkeypatch, tmp_path, capsys):
+        """Review P2 (#1756): a legacy cwd token-only file SHADOWING a healthy
+        global key — the key is NOT lost; the message must say so (recover
+        would write the global store and leave the shadow in place)."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+        # a subdir as cwd so the two candidates differ:
+        #   cwd/.tortoise = token-only shadow, ~/.tortoise/credentials.json = usable key
+        work = tmp_path / "proj"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        (work / ".tortoise").write_text(json.dumps({
+            "signup_token": "st_" + "dd" * 32}))
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_good_global", "api_url": "https://api.premiselabs.co",
+            "team_id": "t-global", "signup_token": "st_" + "ee" * 32}))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            rc = main._cmd_signup(mock.Mock(force=False))
+        assert rc == 1
+        err = capsys.readouterr().err
+        assert "Your key is NOT lost" in err
+        assert "usable API key exists" in err
+        assert "recover" in err
+        urlopen.assert_not_called()
+
 class TestCmdRecover:
     """tortoise recover --token st_... → POST /v1/agent/recover → config
     rewritten; the token is PERSISTED back (recovery must not be one-shot)."""
@@ -991,4 +1159,142 @@ class TestCmdRecover:
         assert rc == 1
         err = capsys.readouterr().err
         assert "malformed" in err
+
+    # ── #1752: recover token source must MATCH the auth key source ────────
+    def test_recover_stored_token_same_config_no_warning(
+            self, monkeypatch, tmp_path, capsys):
+        """#1752: recover with NO --token reads the stored token from the
+        SAME config that holds the key — used silently, no divergence
+        warning (mirrors revoke's (b) contract)."""
+        token = "st_" + "dd" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_team_d", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-d", "signup_token": token}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_mint({
+                            "key": "tt_rec_dd0000000000000000000000000000000000000000",
+                            "team_id": "team-d", "team_name": "agent-d",
+                            "graph_name": "team_team-d", "tier": "free"})) as urlopen:
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert json.loads(req.data) == {"signup_token": token}  # stored token
+        err = capsys.readouterr().err
+        assert "recovery token comes from" not in err
+        assert "note:" not in err  # no divergence warning at all
+
+    def test_recover_env_key_divergent_token_warns(self, monkeypatch,
+                                                   tmp_path, capsys):
+        """#1752 mirror of revoke (a): env key (team A, no token) + stored
+        token for a DIFFERENT team (team B) — the recover attempt uses the
+        stored token and prints the divergence warning naming the shadow
+        source instead of silently mixing teams."""
+        monkeypatch.setenv("TORTOISE_API_KEY", "tt_env_team_a")
+        token_b = "st_" + "bb" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_team_b", "api_url": "https://api.premiselabs.co",
+            "team_id": "team-b", "signup_token": token_b}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_mint({
+                            "key": "tt_rec_bb0000000000000000000000000000000000000000",
+                            "team_id": "team-b", "team_name": "agent-b",
+                            "graph_name": "team_team-b", "tier": "free"})) as urlopen:
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert json.loads(req.data) == {"signup_token": token_b}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert "TORTOISE_API_KEY (env)" in err  # the KEY source named
+        assert str(d / "credentials.json") in err  # the TOKEN source named
+
+    def test_recover_cwd_global_divergence_warns(self, monkeypatch,
+                                                 tmp_path, capsys):
+        """#1752 mirror of revoke (c): key in a cwd/.tortoise config WITHOUT
+        a token + the token in the global store — the fallback warns naming
+        BOTH file sources."""
+        proj = tmp_path / "proj"
+        proj.mkdir()
+        monkeypatch.chdir(proj)
+        (proj / ".tortoise").write_text(json.dumps({  # legacy cwd FILE shape
+            "api_key": "tt_cwd_team_a",
+            "api_url": "https://api.premiselabs.co"}))  # no signup_token
+        token_b = "st_" + "ee" * 32
+        d = tmp_path / ".tortoise"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_global_team_b",
+            "api_url": "https://api.premiselabs.co",
+            "signup_token": token_b}))
+        with mock.patch("urllib.request.urlopen",
+                        return_value=_ok_mint({
+                            "key": "tt_rec_ee0000000000000000000000000000000000000000",
+                            "team_id": "team-b", "team_name": "agent-b",
+                            "graph_name": "team_team-b", "tier": "free"})) as urlopen:
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert json.loads(req.data) == {"signup_token": token_b}
+        err = capsys.readouterr().err
+        assert "recovery token comes from" in err
+        assert str(proj / ".tortoise") in err
+        assert str(d / "credentials.json") in err
         assert "Traceback" not in err
+
+    def test_recover_uses_config_api_url(self, monkeypatch, tmp_path):
+        """#1749: the recover POST URL must come from the stored config's
+        api_url (resolver chain), NOT the env-only default host — with a
+        config api_url on a non-default host, recovery used to POST to prod
+        and 422'd "invalid signup token" with misleading guidance."""
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "api_key": "tt_key", "api_url": "http://localhost:8010",
+            "team_id": "team-9", "signup_token": "st_" + "ef" * 32}))
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = lambda req, timeout=None: _ok_json({
+                "key": "tt_rec_000000000000000000000000000000000000000000",
+                "team_id": "team-9", "team_name": "agent-9"})
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.full_url.startswith("http://localhost:8010/v1/agent/recover")
+
+    def test_recover_token_only_config_uses_api_url(self, monkeypatch, tmp_path):
+        """#1749 nuance: a config that parses but has NO api_key trips the
+        resolver's _ConfigError invariant — recover authenticates with the
+        signup token (no key needed), so it must still honor the stored
+        api_url instead of failing on the recover surface."""
+        monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+        gdir = tmp_path / ".tortoise"
+        gdir.mkdir(parents=True, exist_ok=True)
+        (gdir / "credentials.json").write_text(json.dumps({
+            "api_url": "http://localhost:8010",
+            "signup_token": "st_" + "ef" * 32}))  # no api_key
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = lambda req, timeout=None: _ok_json({
+                "key": "tt_rec_000000000000000000000000000000000000000000",
+                "team_id": "team-9", "team_name": "agent-9"})
+            rc = main._cmd_recover(mock.Mock(token=None))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.full_url.startswith("http://localhost:8010/v1/agent/recover")
+
+    def test_recover_env_fallback_when_no_config(self, monkeypatch, tmp_path):
+        """#1749: with no config anywhere the resolver returns None —
+        TORTOISE_API_URL must still be honored (env fallback, pre-fix
+        behavior preserved)."""
+        monkeypatch.setenv("TORTOISE_API_URL", "http://env-host:9999")
+        with mock.patch("urllib.request.urlopen") as urlopen:
+            urlopen.side_effect = lambda req, timeout=None: _ok_json({
+                "key": "tt_rec_000000000000000000000000000000000000000000",
+                "team_id": "team-9", "team_name": "agent-9"})
+            rc = main._cmd_recover(mock.Mock(token="st_" + "ef" * 32))
+        assert rc == 0
+        req = urlopen.call_args.args[0]
+        assert req.full_url.startswith("http://env-host:9999/v1/agent/recover")

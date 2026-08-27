@@ -7,6 +7,7 @@ provider keys (never exercised in CI).
 """
 from __future__ import annotations
 
+import itertools
 import json
 import sys
 from pathlib import Path
@@ -30,15 +31,16 @@ from tools.longmem_eval.judge import (  # noqa: E402, RUF100
 )
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
-    _annotate_hits, _assemble_context, _dedup_pool, _estimate_tokens,
-    _is_raw_chunk, hybrid_search, render_context, retrieve_for_question,
+    _annotate_hits, _apply_evidence_boost, _assemble_context, _dedup_pool,
+    _estimate_tokens, _is_raw_chunk, hybrid_search, render_context,
+    retrieve_for_question,
 )
 from tools.longmem_eval.run import (
     CheckpointStaleError, _assert_python_version, _print_summary,
     outcomes_to_report, run_evaluation, run_main,
 )
 from tools.longmem_eval.report import (
-    compare_reports, mcnemar_exact, wilson_ci,
+    _outcome_grade, compare_reports, mcnemar_exact, wilson_ci,
 )
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
@@ -106,10 +108,12 @@ def _no_embedder(monkeypatch) -> None:
 # ── Pipeline end-to-end (mocked reader + judge, embedded DB) ───────────────
 
 def test_mini_pipeline_end_to_end_mock(tmp_path, monkeypatch):
-    """Env-hermeticity (R6 #1545): a leaked TORTOISE_LME_RERANK must never
-    flip this baseline regression into a rerank-on run (the R6 gate default
-    is fail-safe OFF, but the guard pins it)."""
+    """Env-hermeticity (R6 #1545 + C2 #1745): a leaked TORTOISE_LME_RERANK
+    must never flip this baseline regression into a rerank-on run (the R6
+    gate default is fail-safe OFF, but the guard pins it); the same for
+    TORTOISE_LME_EVIDENCE_BOOST (#1745)."""
     monkeypatch.delenv("TORTOISE_LME_RERANK", raising=False)
+    monkeypatch.delenv("TORTOISE_LME_EVIDENCE_BOOST", raising=False)
     # #1626: the mock pipeline still runs write-time embeddings (dense leg) —
     # without the embedder, retrieval degrades and IE accuracy drops to 0.
     # Skip gracefully where the embedder is unavailable (CI without the HF
@@ -142,6 +146,23 @@ def test_mini_pipeline_end_to_end_mock(tmp_path, monkeypatch):
     assert ret["session_recall@k"]["10"] >= 0.6
     assert ret["context_tokens_mean"] > 0
     assert ret["context_point_count_mean"] > 0
+    # C4 (#1745): the reader-surface evidence metric is reported and the
+    # pool->context drop is small on the mini fixture (evidence in pool
+    # also reaches the reader context).
+    assert "reader_evidence@k" in ret
+
+    # Task 0 (#1745): ranked ids + evidence-turn matches populated for
+    # every outcome (the pilot's context composition was 0/50
+    # reconstructable); the evidence-boost block rides the outcome (OFF by
+    # default — hermeticity: the boost env is delenv'd so a leaked
+    # TORTOISE_LME_EVIDENCE_BOOST cannot flip this baseline).
+    all_outcomes = report["outcomes"]
+    assert all_outcomes
+    for o in all_outcomes:
+        assert o.get("ranked_ids")
+        assert isinstance(o.get("evidence_turn_matches"), list)
+        assert (o.get("evidence_boost") or {}).get("applied") is not True
+        assert "reader_evidence@k" in o
 
     # Full methodology provenance (design-locked axis 2).
     m = report["methodology"]
@@ -187,6 +208,13 @@ def test_outcomes_to_report_golden_shape():
         "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
         "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "n_ingest_errors": 0,
+        "ingest_error_text": None,
+        # #1746 (D7): llm telemetry + recovery ride the outcome (the
+        # truncated_valid readout's source).
+        "llm_calls": 3,
+        "llm_retries": 1,
+        "llm_truncated": 0,
+        "recovery": {"sanitize": 0, "repair": 0},
         "context_tokens": 120,
         "context_point_count": 3,
         "retrieval_latency_ms": 11.0,
@@ -223,11 +251,13 @@ def test_outcomes_to_report_golden_shape():
     # The regression made this None — a real dict is the whole point (E2E-2).
     assert isinstance(report, dict)
     # Top-level key set is the published report contract (M7 adds the
-    # self-explanatory-report keys).
+    # self-explanatory-report keys; #1747 adds n_excluded so the shape-
+    # filter denominator shrink is observable at top level).
     assert set(report) == {
-        "benchmark", "dataset", "split", "n_questions", "accuracy",
-        "retrieval", "latency_ms", "methodology", "failures", "n_failed",
-        "outcomes", "integrity", "leg_mix", "pool_size", "evidence",
+        "benchmark", "dataset", "split", "n_questions", "n_excluded",
+        "accuracy", "retrieval", "latency_ms", "methodology", "failures",
+        "n_failed", "outcomes", "integrity", "leg_mix", "pool_size",
+        "evidence",
     }
     assert report["benchmark"] == "LongMemEval"
     assert report["dataset"] == "xiaowu0162/longmemeval-cleaned"
@@ -325,6 +355,11 @@ def test_outcomes_to_report_golden_shape():
         "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
         "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "n_ingest_errors": 0,
+        "ingest_error_text": None,
+        "llm_calls": 3,
+        "llm_retries": 1,
+        "llm_truncated": 0,
+        "recovery": {"sanitize": 0, "repair": 0},
         "context_tokens": 120,
         # M8 (#1528, D6): the projection now carries the live graph point
         # count (was present per-outcome but stripped) — the compare
@@ -362,11 +397,283 @@ def test_outcomes_to_report_golden_shape():
         "p@5": None,
         "ranked_ids": None,
         "evidence_turn_matches": None,
+        # C4 (#1745): the reader-surface evidence metric + the C2 pre/post
+        # ablation + the boost block ride the projection (None on golden
+        # outcomes — read via o.get so pre-#1745 checkpoints render,
+        # never KeyError).
+        "reader_evidence@k": None,
+        "ranked_ids_pre_boost": None,
+        "evidence_boost": None,
         "breaker_open": None,
         "dropped_reason": None,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
+
+
+def test_report_truncation_readout_warning_only():
+    """#1746 (D7): a truncated-but-clean question is LISTED in
+    ``integrity.truncated_valid_qids`` (warning-only — ``valid`` stays true,
+    never an ``error_census`` entry); a truncated question WITH an error
+    class is NOT listed (it is already recorded via the census)."""
+    ok = {
+        "question_id": "q-trunc-valid", "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0,
+        "ingest_error_text": None,
+        "llm_calls": 3, "llm_retries": 0, "llm_truncated": 1,
+        "recovery": {},
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    invalid = dict(ok)
+    invalid["question_id"] = "q-trunc-invalid"
+    invalid["n_ingest_errors"] = 1
+    invalid["valid"] = False
+    invalid["error_classes"] = {"truncated_parse_error": 1}
+    report = outcomes_to_report(
+        [ok, invalid], reader_model="r", judge_model="j", ks=(5,),
+        top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    integ = report["integrity"]
+    # the truncated-CLEAN question is listed warning-only; the truncated-
+    # INVALID one is recorded via its census class, not the list.
+    assert integ["truncated_valid_qids"] == ["q-trunc-valid"]
+    assert integ["n_truncated_valid"] == 1
+    # the invalid question's truncation IS in the census (recorded, not
+    # silently lost) — the readout only lists the CLEAN truncated ones.
+    assert integ["error_census"].get("truncated_parse_error") == 1
+    assert integ["valid"] is True  # recoverable, within threshold 1.0
+    assert integ["n_valid"] == 1
+    # the truncated-valid outcome's llm fields ride the Layer-1 projection.
+    pub = next(o for o in report["outcomes"]
+               if o.get("question_id") == "q-trunc-valid")
+    assert pub["llm_truncated"] == 1
+    assert pub["valid"] is True
+    # a clean question WITHOUT truncation is never listed.
+    report2 = outcomes_to_report(
+        [ok], reader_model="r", judge_model="j", ks=(5,), top_k=5,
+        split="s", dataset_semantics_audit=_trusted_audit(),
+        integrity_threshold=0.0)
+    assert report2["integrity"]["truncated_valid_qids"] == ["q-trunc-valid"]
+    report3 = outcomes_to_report(
+        [dict(ok, llm_truncated=0)], reader_model="r", judge_model="j",
+        ks=(5,), top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=0.0)
+    assert report3["integrity"]["truncated_valid_qids"] == []
+
+
+def test_census_s1_chunk_summary_recoverable_grade():
+    """#1780 (F1): the ``s1_chunk_summary`` census class co-occurs with the
+    per-chunk exception-class bumps (``transient_*`` → recoverable;
+    ``fatal_*`` → still hard) — a question whose S1 chunk failed
+    TRANSIENTLY must grade recoverable (rate-limited), never hard.
+    ``s1_chunk_summary`` is pinned in RECOVERABLE_CENSUS_CLASSES."""
+    base = {
+        "question_id": "q-s1-transient",
+        "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 1,
+        "ingest_error_text": "S1: transient chunk failure",
+        "llm_calls": 3, "llm_retries": 0, "llm_truncated": 0,
+        "recovery": {},
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": False,
+        "error_classes": {"transient_unknown": 1, "s1_chunk_summary": 1},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    # the raw outcome grades recoverable — s1_chunk_summary must NOT flip
+    # a transient chunk failure to hard.
+    assert _outcome_grade(base) == "recoverable"
+    # rate-limited at threshold 1.0: the run stays valid (not vetoed) ...
+    report = outcomes_to_report(
+        [base], reader_model="r", judge_model="j", ks=(5,), top_k=5,
+        split="s", dataset_semantics_audit=_trusted_audit(),
+        integrity_threshold=1.0)
+    assert report["integrity"]["valid"] is True
+    # ... and vetoed at the strict 0.0 threshold (the question IS invalid).
+    report2 = outcomes_to_report(
+        [base], reader_model="r", judge_model="j", ks=(5,), top_k=5,
+        split="s", dataset_semantics_audit=_trusted_audit(),
+        integrity_threshold=0.0)
+    assert report2["integrity"]["valid"] is False
+
+
+def test_census_equality_integration_mixed_outcomes():
+    """#1746 (D9, criterion 2): on a synthetic mixed-error outcome set —
+    per-question ``n_ingest_errors == sum(error_classes.values())`` and the
+    report-level ``integrity.error_census`` is the exact Σ of the per-
+    question error classes; ``valid`` is false exactly on questions with
+    error classes."""
+    base = {
+        "question_id": "q", "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0,
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    q1 = dict(base, question_id="q1")
+    q2 = dict(base, question_id="q2", n_ingest_errors=2, valid=False,
+              error_classes={"parse_error": 1, "s1_chunk_summary": 1},
+              ingest_error_text="S2 failed: _ParseError: x")
+    q3 = dict(base, question_id="q3", n_ingest_errors=1, valid=False,
+              error_classes={"truncated_parse_error": 1},
+              ingest_error_text="S4 failed: _ParseError: y")
+    report = outcomes_to_report(
+        [q1, q2, q3], reader_model="r", judge_model="j", ks=(5,),
+        top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=0.0)
+    for o in report["outcomes"]:
+        ec = o.get("error_classes") or {}
+        assert o.get("n_ingest_errors") == sum(ec.values())
+        assert o.get("valid") == (sum(ec.values()) == 0)
+    assert report["integrity"]["error_census"] == {
+        "parse_error": 1, "s1_chunk_summary": 1,
+        "truncated_parse_error": 1}
+    assert report["integrity"]["n_valid"] == 1
+    assert report["integrity"]["n_invalid"] == 2
+
+
+def test_breaker_drop_published_outcomes_grade_clean():
+    """#1747 (round-17 code review P2): the runner's published Layer-1
+    projection must match what the integrity grader consumed for
+    breaker_open outcomes. The raw dropped outcome (run.py breaker
+    construction) carries NO valid/error_classes keys — build_report
+    grades it clean (n_excluded_hard == 0, valid True) — but the
+    projection's key selector materialized them as null, and a PRESENT-null
+    error_classes re-grades HARD (round-10 fail-closed shape): every
+    persisted vector-arm report with a breaker drop self-contradicted its
+    own verdict. The projection now emits the honest clean shape
+    (valid: True, error_classes: {}) for breaker_open outcomes without an
+    error_classes key; a TAMPERED breaker outcome that DOES carry a hard
+    census is NOT laundered — it stays in the published record and still
+    vetoes via n_excluded_hard."""
+    dropped = {
+        "question_id": "q-drop", "question_type": "single-session-user",
+        "breaker_open": True, "dropped_reason": "breaker_open",
+        "label": None, "hypothesis": None,
+        "session_recall@k": {"5": 0.0}, "turn_recall@k": {"5": 0.0},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+    ok = {
+        "question_id": "q-ok", "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0, "context_tokens": 100,
+        "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+    }
+    report = outcomes_to_report(
+        [dropped, ok], reader_model="golden-reader", judge_model="golden-judge",
+        ks=(5,), top_k=5, split="s", retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    integ = report["integrity"]
+    assert integ["valid"] is True
+    assert integ["n_excluded_hard"] == 0
+    # the PUBLISHED outcomes re-grade clean — consistent with the verdict.
+    for o in report["outcomes"]:
+        assert _outcome_grade(o) == "clean"
+    dropped_pub = next(o for o in report["outcomes"]
+                       if o.get("breaker_open"))
+    assert dropped_pub["valid"] is True
+    assert dropped_pub["error_classes"] == {}
+    # a TAMPERED breaker outcome carrying a hard census is NOT laundered:
+    # it stays in the published record and still vetoes (n_excluded_hard).
+    tampered = dict(ok)
+    tampered["question_id"] = "q-tamper"
+    tampered["breaker_open"] = True
+    tampered["dropped_reason"] = "breaker_open"
+    tampered["error_classes"] = {"fatal_402_billing": 1}
+    report2 = outcomes_to_report(
+        [tampered, ok], reader_model="golden-reader",
+        judge_model="golden-judge", ks=(5,), top_k=5, split="s",
+        retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    assert report2["integrity"]["valid"] is False
+    assert report2["integrity"]["n_excluded_hard"] == 1
+    tampered_pub = next(o for o in report2["outcomes"]
+                        if o.get("breaker_open"))
+    assert tampered_pub["error_classes"] == {"fatal_402_billing": 1}
+    assert _outcome_grade(tampered_pub) == "hard"
+    # round-17 review-fix: a tampered breaker outcome carrying a PRESENT
+    # valid flag (valid: False, no error_classes — an empty-census hard
+    # grade) is NOT laundered to valid: True either — the clean-shape
+    # override requires NEITHER key present on the raw outcome.
+    tampered_v = dict(ok)
+    tampered_v["question_id"] = "q-tamper-v"
+    del tampered_v["error_classes"]
+    tampered_v["valid"] = False
+    tampered_v["breaker_open"] = True
+    tampered_v["dropped_reason"] = "breaker_open"
+    report3 = outcomes_to_report(
+        [tampered_v, ok], reader_model="golden-reader",
+        judge_model="golden-judge", ks=(5,), top_k=5, split="s",
+        retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    assert report3["integrity"]["valid"] is False
+    assert report3["integrity"]["n_excluded_hard"] == 1
+    tampered_v_pub = next(o for o in report3["outcomes"]
+                          if o.get("breaker_open"))
+    assert tampered_v_pub["valid"] is False
+    assert _outcome_grade(tampered_v_pub) == "hard"  # published == graded
+    # round-17 review-fix (P3 hybrids): one-key-present breaker shapes whose
+    # RAW grade is clean are published clean too — the override keys off the
+    # raw grade (published == graded, exactly), never a stale key-presence
+    # rule. (valid present, error_classes absent; and error_classes
+    # present, valid absent.)
+    hybrid_a = dict(ok)
+    hybrid_a["question_id"] = "q-hybrid-a"
+    del hybrid_a["error_classes"]
+    hybrid_a["valid"] = True
+    hybrid_a["breaker_open"] = True
+    hybrid_a["dropped_reason"] = "breaker_open"
+    hybrid_b = dict(ok)
+    hybrid_b["question_id"] = "q-hybrid-b"
+    del hybrid_b["valid"]
+    hybrid_b["breaker_open"] = True
+    hybrid_b["dropped_reason"] = "breaker_open"
+    report4 = outcomes_to_report(
+        [hybrid_a, hybrid_b, ok], reader_model="golden-reader",
+        judge_model="golden-judge", ks=(5,), top_k=5, split="s",
+        retriever="vector", retrieval_only=True,
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    assert report4["integrity"]["valid"] is True
+    assert report4["integrity"]["n_excluded_hard"] == 0
+    for o in report4["outcomes"]:
+        if o.get("breaker_open"):
+            assert o["valid"] is True
+            assert o["error_classes"] == {}
+            assert _outcome_grade(o) == "clean"
 
 
 def test_cli_smoke(tmp_path):
@@ -723,6 +1030,62 @@ def test_tr_context_renders_time_ascending(tmp_path):
                      if h["session_date"]]
         assert ctx_dates == sorted(ctx_dates)
         assert ctx_dates  # both dated sessions present in context
+    finally:
+        sdk.close()
+
+
+def test_tr_context_keeps_item_cap(tmp_path):
+    """S28 (C1 #1745): TR questions keep the pinned ``tr_top_k``=12 item
+    cap even with a generous ``context_item_cap`` + budget walk — R5's
+    transcript-flood control is never silently undone by the C1 interleave."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _tr_question(two_sessions=True)
+        q["haystack_sessions"] = [
+            [{"role": "user",
+              "content": f"planning detail {i} about the upcoming trip",
+              "has_answer": i == 5} for i in range(10)],
+            [{"role": "user", "content": f"work meeting note {i}",
+              "has_answer": False} for i in range(10)],
+        ]
+        ingest_haystack(sdk, q, chunk_turns=1)  # 10 chunks/session
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20,
+                                    tr_top_k=12, context_item_cap=40)
+        assert ret["context_point_count"] <= 12          # TR cap (12)
+        assert ret["context_point_count"] > 0
+        assert ret["context_tokens"] > 0
+        # the pool is NOT capped at 12 (only the reader context is)
+        assert len(ret["hits"]) >= 12
+    finally:
+        sdk.close()
+
+
+def test_tr_window_and_ceiling_combined(tmp_path):
+    """S28 (C1 #1745): the TR time-window filter + the tr_top_k item
+    ceiling coexist with the C1 budget walk — an out-of-window session is
+    filtered before truncation and the reader context stays <= tr_top_k."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _tr_question(two_sessions=True)
+        q["question"] = "What did Ava do 10 days ago?"
+        q["haystack_dates"] = ["2025-06-10", "2025-06-01"]
+        q["haystack_sessions"] = [
+            [{"role": "user",
+              "content": f"in-window planning detail {i}",
+              "has_answer": i == 5} for i in range(10)],
+            [{"role": "user", "content": f"old note {i}",
+              "has_answer": False} for i in range(10)],
+        ]
+        ingest_haystack(sdk, q, chunk_turns=1)
+        ret = retrieve_for_question(sdk, q, ks=(5,), top_k=20,
+                                    tr_top_k=12, context_item_cap=40)
+        assert ret["tr_constraint"] == "recency"
+        assert ret["tr_window_fallback"] is False
+        assert ret["context_point_count"] <= 12
+        # only the in-window session (2025-06-10) survives the filter
+        pool_dates = {h["session_date"] for h in ret["hits"]
+                      if h["session_date"]}
+        assert pool_dates == {"2025-06-10"}
     finally:
         sdk.close()
 
@@ -1448,6 +1811,39 @@ def test_checkpoint_resume_skips_completed_questions(tmp_path):
         checkpoint=str(tmp_path / "lme-fail.json"), max_retries=0)
     assert outcomes4 == []
     assert report4["n_failed"] == 2
+
+
+def test_checkpoint_resume_gate_rejects_dead_fts_leg(tmp_path, capsys):
+    """#1764, M7-path end-to-end: a checkpoint whose completed outcomes ran
+    with a dead FTS leg (fts.count=0 — the pilot's crash artifact) is
+    rejected at resume and every question re-encodes; the checkpoint
+    self-heals (fresh healthy outcomes overwrite the stale records)."""
+    cp = tmp_path / "lme-state.json"
+    kwargs = dict(reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+                  split="s", work_dir=str(tmp_path), checkpoint=str(cp))
+    run_evaluation(_mini()[:2], **kwargs)
+    # simulate the pre-crash artifact: a dead FTS leg AND zero session
+    # recall on every outcome (the pilot's stale shape — the session never
+    # surfaced, so no recall could be recorded)
+    saved = json.loads(cp.read_text(encoding="utf-8"))
+    for o in saved["outcomes"]:
+        o["legs"] = [{"leg": "fts", "ran": True, "degraded": False,
+                       "reason": "empty_results", "count": 0}]
+        o["session_recall@k"] = {k: 0.0 for k in o.get("session_recall@k", {})}
+        o["turn_recall@k"] = {k: 0.0 for k in o.get("turn_recall@k", {})}
+    Path(cp).write_text(json.dumps(saved), encoding="utf-8")
+
+    outcomes, _report = run_evaluation(_mini()[:2], **kwargs)
+    assert len(outcomes) == 2
+    # both re-encoded fresh — live mini retrieval has a healthy FTS leg
+    assert all(any(leg.get("leg") == "fts" and leg.get("count", 0) > 0
+                   for leg in (o.get("legs") or [])) for o in outcomes)
+    assert "resume-quality gate" in capsys.readouterr().err.lower()
+    # the checkpoint self-heals: on-disk outcomes carry healthy fts legs now
+    healed = json.loads(cp.read_text(encoding="utf-8"))
+    assert all(any(leg.get("leg") == "fts" and leg.get("count", 0) > 0
+                   for leg in (o.get("legs") or []))
+               for o in healed["outcomes"])
 
 
 # ── Dataset download atomicity (P2: corrupt cache) ─────────────────────────
@@ -2270,9 +2666,11 @@ def test_recall_on_deduped_pool(tmp_path, monkeypatch):
         sdk.close()
 
 
-def test_context_points_first_chunks_backfill():
-    """UX-3 (R1 #1540): all non-session-transcript hits order before raw
-    chunks (rank order within each tier), bounded by top_k then budget."""
+def test_context_interleaves_points_and_chunks_by_rank():
+    """C1 (#1745): rank-interleaved assembly — a chunk ranked above a
+    point in the pool appears BEFORE that point in the context (the R1
+    points-first partition is deliberately reversed: it starved the chunk
+    leg whenever the pool had >= top_k points)."""
     pool = [
         {"id": "chunk1", "content": "chunk number one here",
          "point_kind": "session-transcript", "lme_session_index": 0,
@@ -2286,15 +2684,36 @@ def test_context_points_first_chunks_backfill():
          "lme_session_index": 1},
     ]
     ctx = _assemble_context(pool, top_k=20, max_context_tokens=10**6)
-    assert [h["id"] for h in ctx] == ["pt1", "pt2", "chunk1", "chunk2"]
-    # top_k bounds the points-first reordered list
+    assert [h["id"] for h in ctx] == ["chunk1", "pt1", "chunk2", "pt2"]
+    # top_k bounds the rank-interleaved list
     ctx2 = _assemble_context(pool, top_k=2, max_context_tokens=10**6)
-    assert [h["id"] for h in ctx2] == ["pt1", "pt2"]
+    assert [h["id"] for h in ctx2] == ["chunk1", "pt1"]
+
+
+def test_context_item_cap_and_token_budget():
+    """C1 (#1745): with a 60-item pool the context fills to
+    min(context_item_cap, budget-selected) — the item cap binds FIRST when
+    the pool is under the token budget; a tight budget shows the token
+    budget binding within the cap."""
+    pool = [{"id": f"p{i}", "content": f"point number {i} details",
+             "point_kind": "statement", "lme_session_index": i % 3}
+            for i in range(60)]
+    # item cap binds: budget never binds (10**6), 60-item pool → exactly 40
+    ctx = _assemble_context(pool, top_k=20, max_context_tokens=10**6,
+                            context_item_cap=40)
+    assert len(ctx) == 40
+    assert [h["id"] for h in ctx] == [f"p{i}" for i in range(40)]
+    # token budget binds within the cap: fewer than 40 items, tokens <= cap
+    ctx2 = _assemble_context(pool, top_k=20, max_context_tokens=50,
+                             context_item_cap=40)
+    assert 0 < len(ctx2) < 40
+    assert _estimate_tokens(render_context(ctx2)) <= 50
 
 
 def test_context_token_budget_enforced():
     """Cap below the full pool → context_tokens ≤ cap; the truncated tail
-    is chunks, not points (points-first backfill)."""
+    follows rank order (interleaved — a chunk can survive while a later
+    point is dropped, C1 #1745)."""
     pool = [
         {"id": "chunk1", "content": "chunk number one here",
          "point_kind": "session-transcript", "lme_session_index": 0,
@@ -2307,10 +2726,16 @@ def test_context_token_budget_enforced():
         {"id": "pt2", "content": "point two", "point_kind": "statement",
          "lme_session_index": 1},
     ]
-    ctx = _assemble_context(pool, top_k=20, max_context_tokens=9)
-    assert _estimate_tokens(render_context(ctx)) <= 9
-    assert [h["id"] for h in ctx] == ["pt1", "pt2"]  # chunks truncated
-    assert all(not _is_raw_chunk(h) for h in ctx)
+    # budget 12: chunk1 ([session 0] + 4 words) + pt1 fit; the later tail
+    # is truncated by the budget in rank order
+    ctx = _assemble_context(pool, top_k=20, max_context_tokens=12)
+    assert _estimate_tokens(render_context(ctx)) <= 12
+    assert [h["id"] for h in ctx] == ["chunk1", "pt1"]
+    # tight budget 5: the leading chunk is oversized for the budget and
+    # SKIPPED (skip-not-starve); the next-ranked point fits
+    ctx2 = _assemble_context(pool, top_k=20, max_context_tokens=5)
+    assert _estimate_tokens(render_context(ctx2)) <= 5
+    assert [h["id"] for h in ctx2] == ["pt1"]
 
 
 def test_context_points_reader_alignment(tmp_path):
@@ -2350,6 +2775,456 @@ def test_context_oversized_hit_skips_not_starves():
     assert len(ctx) == 2
 
 
+# ── C2 (#1745): evidence-mark boost (rank offset, read-time recompute) ──
+
+
+def _boost_question() -> dict:
+    """A question whose evidence lives in session ``b-s1`` (the answer turn
+    "I painted the wall a light gray"); ``b-s0`` is a filler session."""
+    return {
+        "question_id": "boost_q", "question_type": "single-session-user",
+        "question": "What color did Ava paint the wall?",
+        "answer": "light gray", "question_date": "2025-06-15",
+        "haystack_session_ids": ["b-s0", "b-s1"],
+        "haystack_dates": ["2025-06-10", "2025-06-14"],
+        "answer_session_ids": ["b-s1"],
+        "haystack_sessions": [
+            [{"role": "user", "content": f"unrelated filler chat {i}",
+              "has_answer": False} for i in range(6)],
+            [{"role": "user",
+              "content": "I painted the wall a light gray",
+              "has_answer": True}],
+        ],
+    }
+
+
+def _boost_pool(n_fillers: int = 24, *, verbatim: bool = True) -> list[dict]:
+    """A synthetic annotated pool: ``n_fillers`` unmarked b-s0 hits + ONE
+    marked b-s1 hit at rank ``n_fillers + 1`` (real annotated-hit shapes —
+    the same fields ``_annotate_hits`` produces)."""
+    pool = [
+        {"id": f"fill{i}", "content": f"unrelated filler chat {i}",
+         "session_id": "b-s0", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10",
+         "quote": "", "has_answer": False}
+        for i in range(n_fillers)
+    ]
+    pool.append({
+        "id": "evidence-pt",
+        "content": "I painted the wall a light gray",
+        "session_id": "b-s1", "point_kind": "statement",
+        "lme_session_index": 1, "session_date": "2025-06-14",
+        # verbatim: the quote carries the answer turn (D3-anchored);
+        # source-only: no quote -> mark (a) only
+        "quote": ("I painted the wall a light gray" if verbatim else ""),
+        "has_answer": True,
+    })
+    return pool
+
+
+def test_evidence_boost_promotes_marked_hits():
+    """C2 (#1745): a marked point at pool rank 25 surfaces into the top-20
+    context AFTER the boost; unmarked hits at the same rank do not. The
+    boost is a stable rank offset, not an RRF-score multiplier (scores are
+    dropped in ``_annotate_hits``)."""
+    pool = _boost_pool(24)  # evidence-pt at rank 25 (index 24)
+    assert pool[24]["id"] == "evidence-pt"
+    # pre-boost: the marked point is outside top-20
+    pre = _assemble_context(pool, top_k=20, max_context_tokens=10**6)
+    assert "evidence-pt" not in [h["id"] for h in pre]
+    # post-boost: read-time verbatim recompute -> full boost -> top-20
+    boosted, stats = _apply_evidence_boost(pool, question=_boost_question())
+    assert stats["applied"] is True
+    assert stats["marks_census"]["verbatim"] == 1
+    assert stats["marks_census"]["source_session"] == 1
+    assert stats["pre_boost_ranked_ids"] == [h["id"] for h in pool]
+    assert "evidence-pt" in [h["id"] for h in boosted[:20]]
+    post = _assemble_context(boosted, top_k=20, max_context_tokens=10**6)
+    assert "evidence-pt" in [h["id"] for h in post]
+    # unmarked relative order preserved: the fillers keep their order
+    fill_ids = [h["id"] for h in boosted if h["id"].startswith("fill")]
+    assert fill_ids == [f"fill{i}" for i in range(24)]
+
+
+def test_evidence_boost_precision_guard_recomputed():
+    """C2 (#1745): the verbatim-vs-source split is recomputed at READ TIME
+    via ``evidence.mark_for`` on real annotated-hit shapes (the OR'd
+    ``has_answer`` prop cannot express it) — verbatim marks get the full
+    boost, source-session-only points the reduced one."""
+    question = _boost_question()
+    pool = [
+        {"id": f"fill{i}", "content": f"unrelated filler chat {i}",
+         "session_id": "b-s0", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10",
+         "quote": "", "has_answer": False}
+        for i in range(23)
+    ]
+    # source-only at rank 24 (index 23): same evidence session, NO quote
+    pool.append({"id": "source-pt",
+                 "content": "The wall painting took all day",
+                 "session_id": "b-s1", "point_kind": "statement",
+                 "lme_session_index": 1, "session_date": "2025-06-14",
+                 "quote": "", "has_answer": True})
+    # verbatim at rank 25 (index 24): quote carries the answer turn
+    pool.append({"id": "verbatim-pt",
+                 "content": "I painted the wall a light gray",
+                 "session_id": "b-s1", "point_kind": "statement",
+                 "lme_session_index": 1, "session_date": "2025-06-14",
+                 "quote": "I painted the wall a light gray",
+                 "has_answer": True})
+    boosted, stats = _apply_evidence_boost(pool, question=question)
+    assert stats["marks_census"]["verbatim"] == 1
+    assert stats["marks_census"]["source_session"] == 2  # both marked
+    ids = [h["id"] for h in boosted]
+    v_pos, s_pos = ids.index("verbatim-pt"), ids.index("source-pt")
+    # verbatim outranks source despite being one rank BELOW pre-boost
+    assert v_pos < s_pos
+    # both moved up from their pre-boost ranks (24 and 23)
+    assert v_pos < 24 and s_pos < 23
+    # full > reduced: the verbatim hit jumps farther than the source-only
+    assert (24 - v_pos) > (23 - s_pos) >= 1
+
+
+def test_evidence_boost_no_marked_point_displacement():
+    """P1-1c (C2 #1745): boosted CHUNKS do not push marked POINTS out of
+    top-20 — the boost is additive to evidence, not a redistribution
+    between evidence classes. The real displacement scenario: verbatim-
+    marked chunks (full boost) ranked just below source-only marked points
+    (reduced boost) must not crowd the points out."""
+    question = _boost_question()
+    pool = []
+    # 15 source-only marked points at ranks 0..14 (reduced boost 1.15 —
+    # content does NOT contain the answer turn, no quote)
+    for i in range(15):
+        pool.append({"id": f"mark-pt{i}",
+                     "content": f"wall painting note {i} about the decor",
+                     "session_id": "b-s1", "point_kind": "statement",
+                     "lme_session_index": 1, "session_date": "2025-06-14",
+                     "quote": "", "has_answer": True})
+    # 10 verbatim-marked chunks at ranks 15..24 (full boost 1.5 — content
+    # contains the answer turn verbatim)
+    for i in range(10):
+        pool.append({"id": f"ev-chunk{i}",
+                     "content": "I painted the wall a light gray",
+                     "session_id": "b-s1",
+                     "point_kind": "session-transcript",
+                     "lme_session_index": 1, "session_date": "2025-06-14",
+                     "quote": "I painted the wall a light gray",
+                     "has_answer": True})
+    boosted, stats = _apply_evidence_boost(pool, question=question)
+    # read-time census: 15 source-only points + 10 verbatim/raw chunks
+    assert stats["marks_census"]["source_session"] == 25
+    assert stats["marks_census"]["verbatim"] == 10
+    assert stats["marks_census"]["raw_chunk"] == 10
+    top20 = {h["id"] for h in boosted[:20]}
+    # every marked POINT stays in top-20 (the boosted chunks cannot
+    # redistribute evidence out of the reader's reach)
+    assert all(f"mark-pt{i}" in top20 for i in range(15))
+    # the verbatim chunks DID move up (the boost is not a no-op)
+    assert "ev-chunk0" in top20
+
+
+def test_evidence_boost_boundary_point_not_displaced():
+    """Review F2 (C2 #1745) boundary fixture: the reproduced cross-class
+    displacement — 19 unmarked fillers + a source-marked point at index 19
+    (in top-20 pre-boost) + 5 verbatim chunks at indices 20-24 (higher
+    factor). The OLD plain ascending sort demoted the point 19 -> 22 (out
+    of top-20, evidence_recall@20 dropped 1 -> 0 with the boost ON); the
+    position-ceiling promotion must keep the point at a position <= 19
+    while STILL surfacing at least one verbatim chunk into top-20 (the
+    boost is not a no-op)."""
+    question = _boost_question()
+    pool = [
+        {"id": f"fill{i}", "content": f"unrelated filler chat {i}",
+         "session_id": "b-s0", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10",
+         "quote": "", "has_answer": False}
+        for i in range(19)
+    ]
+    # source-marked point at index 19 (evidence session, no quote)
+    pool.append({"id": "source-pt",
+                 "content": "The wall painting took all day",
+                 "session_id": "b-s1", "point_kind": "statement",
+                 "lme_session_index": 1, "session_date": "2025-06-14",
+                 "quote": "", "has_answer": True})
+    # 5 verbatim-marked chunks at indices 20-24 (full boost)
+    for i in range(5):
+        pool.append({"id": f"chunk{20 + i}",
+                     "content": "I painted the wall a light gray",
+                     "session_id": "b-s1",
+                     "point_kind": "session-transcript",
+                     "lme_session_index": 1, "session_date": "2025-06-14",
+                     "quote": "I painted the wall a light gray",
+                     "has_answer": True})
+    # pre-boost: the source point IS in top-20 (index 19)
+    assert pool[19]["id"] == "source-pt"
+    boosted, stats = _apply_evidence_boost(pool, question=question)
+    assert stats["marks_census"]["verbatim"] == 5
+    assert stats["marks_census"]["source_session"] == 6
+    ids = [h["id"] for h in boosted]
+    pos = ids.index("source-pt")
+    # (a) the point is never demoted below its original pool index
+    assert pos <= 19
+    assert "source-pt" in ids[:20]
+    # (b) the boost is not a no-op: at least one chunk entered top-20
+    assert any(f"chunk{20 + i}" in ids[:20] for i in range(5))
+
+
+def test_evidence_boost_stored_mark_fallback_source_class():
+    """Review F11 (C2 #1745): a hit with a STORED ``has_answer=True`` but
+    NO read-time marks (content/quote don't match any answer turn AND its
+    session is not an evidence session at read time — ``mark_for`` returns
+    all-False) falls back to the SOURCE-class factor — never verbatim
+    (no full boost on ambiguous provenance), never unboosted (the stored
+    mark is still evidence the extractor wrote). The stored-mark hit must
+    move up past an identical unmarked control hit below it that does not
+    move."""
+    question = _boost_question()
+    pool = [
+        {"id": f"fill{i}", "content": f"unrelated filler chat {i}",
+         "session_id": "b-s0", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10",
+         "quote": "", "has_answer": False}
+        for i in range(20)
+    ]
+    # stored-mark hit at index 20: b-s0 (NOT an evidence session), no
+    # quote, content does not contain the answer turn — all-False marks
+    # at read time, but the STORED has_answer=True survives.
+    pool.append({"id": "stored-pt",
+                 "content": "unrelated filler chat stored",
+                 "session_id": "b-s0", "point_kind": "statement",
+                 "lme_session_index": 0, "session_date": "2025-06-10",
+                 "quote": "", "has_answer": True})
+    # identical unmarked control hit BELOW it (index 21)
+    pool.append({"id": "control-pt",
+                 "content": "unrelated filler chat control",
+                 "session_id": "b-s0", "point_kind": "statement",
+                 "lme_session_index": 0, "session_date": "2025-06-10",
+                 "quote": "", "has_answer": False})
+    boosted, stats = _apply_evidence_boost(pool, question=question)
+    # read-time recompute found NOTHING (b-s0 is not an evidence session;
+    # no quote; content does not contain the answer turn)
+    assert stats["marks_census"] == {"source_session": 0, "verbatim": 0,
+                                      "raw_chunk": 0}
+    ids = [h["id"] for h in boosted]
+    stored_pos, control_pos = ids.index("stored-pt"), ids.index("control-pt")
+    # source-class fallback: the stored-mark hit moved UP by the source
+    # factor (never demoted below its original pool index — the
+    # position-ceiling property), and outranks the identical unmarked
+    # control that started BELOW it and does not move.
+    assert stored_pos <= 20
+    assert stored_pos < 20  # moved up, not just held
+    assert control_pos == 21  # unmarked control did not move
+    assert stored_pos < control_pos
+
+
+def test_boost_before_recall_metrics(tmp_path, monkeypatch):
+    """C2 (#1745): with the boost enabled, ``evidence_recall@k`` is
+    reported over the BOOSTED pool (the marked point surfaces into
+    pool[:20]) while the pre-boost ranking is preserved in
+    ``ranked_ids_pre_boost`` (the C4 ablation surface). OFF by default: the
+    same question reports 0.0 without the flag/env."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _boost_question()
+        sdk.create_point("statement", "I painted the wall a light gray",
+                         id="evidence-pt", session_id="b-s1",
+                         lme_question_id="boost_q", lme_session_index=1,
+                         is_episodic=True, has_answer=True, status="draft",
+                         quote="I painted the wall a light gray")
+        for i in range(24):
+            sdk.create_point("statement", f"unrelated filler chat {i}",
+                             id=f"fill{i}", session_id="b-s0",
+                             lme_question_id="boost_q", lme_session_index=0,
+                             is_episodic=True, status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            hits = [{"id": f"fill{i}",
+                     "content": f"unrelated filler chat {i}",
+                     "match_source": "tfidf"} for i in range(24)]
+            hits.append({"id": "evidence-pt",
+                         "content": "I painted the wall a light gray",
+                         "match_source": "tfidf"})
+            return hits
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        # default OFF: marked point at pool rank 25 -> evidence@20 = 0.0
+        ret_off = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        assert ret_off["evidence_recall@k"]["20"] == 0.0
+        assert ret_off["evidence_boost"]["applied"] is False
+        assert ret_off["ranked_ids_pre_boost"] == ret_off["ranked_ids"]
+        # ON: the boost surfaces it into pool[:20] -> evidence@20 = 1.0
+        ret_on = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20,
+                                       evidence_boost=True)
+        assert ret_on["evidence_boost"]["applied"] is True
+        assert ret_on["evidence_recall@k"]["20"] == 1.0
+        assert "evidence-pt" in ret_on["ranked_ids"][:20]
+        # pre-boost ranking preserved for the ablation (identical to OFF)
+        assert ret_on["ranked_ids_pre_boost"] == ret_off["ranked_ids"]
+        # env-enabled (the re-validation path: TORTOISE_LME_EVIDENCE_BOOST=1)
+        monkeypatch.setenv("TORTOISE_LME_EVIDENCE_BOOST", "1")
+        ret_env = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        assert ret_env["evidence_recall@k"]["20"] == 1.0
+        # fail-safe gate (review P2-1): only 1/true/yes/on enables — a
+        # garbage value must NOT flip the metric semantics
+        monkeypatch.setenv("TORTOISE_LME_EVIDENCE_BOOST", "garbage")
+        ret_garbage = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        assert ret_garbage["evidence_boost"]["applied"] is False
+        monkeypatch.delenv("TORTOISE_LME_EVIDENCE_BOOST")
+    finally:
+        sdk.close()
+
+
+def test_evidence_boost_rejects_invalid_multipliers():
+    """C2 (review P1-2 + F9): a boost factor < 1.0 or NON-FINITE is
+    rejected at the function boundary — 0.0 would ZeroDivide the rank
+    scaling, a negative factor would silently invert the pool order, and
+    NaN/Inf would poison every sort key (NaN passes the < 1.0 comparison;
+    inf zeroes every key) — review F9 pins the isfinite guard."""
+    pool = _boost_pool(5)
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_verbatim=0.0)
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_source=-1.0)
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_verbatim=float("nan"))
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_source=float("inf"))
+    # env multipliers outside [0,1] are honored (the rerank._env_float
+    # MMR-lambda clamp must NOT swallow the 1.5/1.15 defaults)
+    import os as _os
+    _os.environ["TORTOISE_LME_EVIDENCE_BOOST_VERBATIM"] = "1.2"
+    try:
+        from tools.longmem_eval.rerank import _env_boost_float
+        assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                1.5) == 1.2
+        assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                1.5) == 1.2  # no [0,1] clamp
+        _os.environ["TORTOISE_LME_EVIDENCE_BOOST_VERBATIM"] = "0.5"
+        assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                1.5) == 1.5  # < 1.0 -> default
+        # review F9: NaN/Inf fall back to the default (never poisoned keys)
+        _os.environ["TORTOISE_LME_EVIDENCE_BOOST_VERBATIM"] = "nan"
+        assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                1.5) == 1.5
+        _os.environ["TORTOISE_LME_EVIDENCE_BOOST_VERBATIM"] = "inf"
+        assert _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
+                                1.5) == 1.5
+    finally:
+        _os.environ.pop("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM", None)
+
+
+# ── Task 0 (#1745): ranked ids + evidence-turn matches ──────────────────────
+
+
+def test_ranked_ids_populated(tmp_path, monkeypatch):
+    """Task 0 (#1745): ``retrieve_for_question`` fills ``ranked_ids`` /
+    ``evidence_turn_matches`` on the hybrid arm (the pilot's context
+    composition was unreconstructable — 0/50 populated)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini()
+                 if x["question_id"] == "mini_ie_user_001")
+        _no_embedder(monkeypatch)
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        assert ret["ranked_ids"] == [h["id"] for h in ret["hits"]]
+        assert ret["ranked_ids"]
+        assert ret["ranked_ids_pre_boost"] == ret["ranked_ids"]
+        assert isinstance(ret["evidence_turn_matches"], list)
+        # the deterministic evidence-turn ids that surface in the pool
+        # appear in the matches (turn recall@5 == 1.0 on this question)
+        ev_ids = {
+            f"lme:mini_ie_user_001:s{si}:t{ti}"
+            for si, session in enumerate(q["haystack_sessions"])
+            for ti, turn in enumerate(session)
+            if turn.get("has_answer")
+        }
+        assert ev_ids & set(ret["ranked_ids"])
+        assert (ev_ids & set(ret["ranked_ids"])
+                <= set(ret["evidence_turn_matches"]))
+    finally:
+        sdk.close()
+
+
+# ── C5 (#1745): max_chunks_per_session 2 -> 3 ───────────────────────────────
+
+
+def test_max_chunks_per_session_three(tmp_path, monkeypatch):
+    """C5 (#1745): the DEFAULT per-session chunk cap is 3 — pool + context
+    respect the 3/session cap and session recall stays stable (H4
+    regression: the evidence chunk is not capped out at 2)."""
+    from tools.longmem_eval import retrieve as rtr
+
+    assert rtr.DEFAULT_MAX_CHUNKS_PER_SESSION == 3
+    q = {
+        "question_id": "cap3_q", "question_type": "single-session-user",
+        "question": "What is the name of the cat?", "answer": "Whiskers",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["cap-s0", "cap-s1"],
+        "haystack_dates": ["2025-06-10", "2025-06-12"],
+        "answer_session_ids": ["cap-s1"],
+        "haystack_sessions": [
+            [{"role": "user", "content": f"filler topic {i} details",
+              "has_answer": False} for i in range(8)],
+            [{"role": "user", "content": "the cat is named Whiskers",
+              "has_answer": True}],
+        ],
+    }
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        # 4 raw chunks from the filler session (all rank above the evidence
+        # chunk) + the containment-marked evidence chunk from the answer
+        # session — a pool where the 2-cap would starve the evidence chunk
+        for ci in range(4):
+            sdk.create_point("session-transcript", f"filler chunk {ci}",
+                             id=f"c{ci}", session_id="cap-s0",
+                             lme_question_id="cap3_q", lme_session_index=0,
+                             is_episodic=True, has_answer=False,
+                             status="draft")
+        sdk.create_point("session-transcript", "the cat is named Whiskers",
+                         id="ev-chunk", session_id="cap-s1",
+                         lme_question_id="cap3_q", lme_session_index=1,
+                         is_episodic=True, has_answer=True, status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            hits = [{"id": f"c{ci}", "content": f"filler chunk {ci}",
+                     "match_source": "tfidf"} for ci in range(4)]
+            hits.append({"id": "ev-chunk",
+                         "content": "the cat is named Whiskers",
+                         "match_source": "tfidf"})
+            return hits
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        per_session: dict[str, int] = {}
+        for h in ret["hits"]:
+            if _is_raw_chunk(h):
+                per_session[h["session_id"]] = (
+                    per_session.get(h["session_id"], 0) + 1)
+        assert all(v <= 3 for v in per_session.values())
+        # 3 of s0's 4 chunks survive the cap (2 was capping the evidence)
+        assert per_session.get("cap-s0", 0) == 3
+        assert ret["dedup_stats"]["chunks_capped"] == 1
+        assert ret["session_recall@k"]["20"] == 1.0
+        # the reader context respects the same cap
+        ctx_chunks = [h for h in ret["context_points"]
+                      if _is_raw_chunk(h) and h["session_id"] == "cap-s0"]
+        assert len(ctx_chunks) <= 3
+    finally:
+        sdk.close()
+
+
 def test_evidence_denominator_points_only(tmp_path, monkeypatch):
     """D5 (R1 #1540): a question with containment-marked chunks but no
     marked extracted points → evidence_recall@k is N/A (None) while
@@ -2382,6 +3257,77 @@ def test_evidence_denominator_points_only(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_reader_context_contains_chunk_evidence(tmp_path, monkeypatch):
+    """H1 regression guard (C1 #1745): when the evidence lives in a raw
+    chunk ranked BELOW 20 points, the rank-interleaved assembly still puts
+    it in the reader context (points-first starved it entirely)."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _boost_question()
+        q["question_id"] = "chunk-ev-q"
+        # 25 unmarked extracted points + ONE containment-marked evidence
+        # chunk (session b-s1, chunk_turns=1 transcript)
+        for i in range(25):
+            sdk.create_point("statement", f"unrelated filler chat {i}",
+                             id=f"fill{i}", session_id="b-s0",
+                             lme_question_id="chunk-ev-q",
+                             lme_session_index=0, is_episodic=True,
+                             status="draft")
+        sdk.create_point("session-transcript",
+                         "I painted the wall a light gray",
+                         id="evidence-chunk", session_id="b-s1",
+                         lme_question_id="chunk-ev-q", lme_session_index=1,
+                         is_episodic=True, has_answer=True, status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            hits = [{"id": f"fill{i}",
+                     "content": f"unrelated filler chat {i}",
+                     "match_source": "tfidf"} for i in range(25)]
+            hits.append({"id": "evidence-chunk",
+                         "content": "I painted the wall a light gray",
+                         "match_source": "tfidf"})
+            return hits
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        ret = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        # 26-item pool; the chunk ranks at 26 — points-first would drop it
+        # (20 points precede), rank-interleave includes it (cap 40)
+        assert "evidence-chunk" in [h["id"] for h in ret["context_points"]]
+        assert ret["context_point_count"] == 26
+        # the POOL metric is the upper bound: the chunk ranks outside
+        # pool[:20] (chunk_evidence_recall@20 = 0.0 is honest — C1's
+        # reader_evidence surface is what moved)
+        assert ret["chunk_evidence_recall@k"]["20"] == 0.0
+        assert ret["reader_evidence@k"]["20"] is None  # no marked points
+    finally:
+        sdk.close()
+
+
+def test_reader_evidence_recall_diagnostic(tmp_path, monkeypatch):
+    """C4 (#1745): ``reader_evidence@k`` ≈ ``evidence@k`` on the mini
+    fixture — the pool->context drop is ~0 after C1 (evidence in the pool
+    reaches the reader context)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = next(x for x in _mini() if x["question_id"] == "mini_ie_user_001")
+        _no_embedder(monkeypatch)
+        ingest_haystack(sdk, q)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        for k in (5, 10, 20):
+            ev = ret["evidence_recall@k"][str(k)]
+            rre = ret["reader_evidence@k"][str(k)]
+            if ev is not None:
+                assert rre == ev  # no pool->context drop on the mini
+        # the honest reader-surface keys exist and are populated
+        assert ret["reader_evidence@k"]["20"] == 1.0
+    finally:
+        sdk.close()
+
+
 def test_degenerate_knobs_raise():
     """R6 (R1 #1540): degenerate knob values raise at the function
     boundary — never a silent run (a 0 chunk cap deletes the raw leg; a 0
@@ -2407,9 +3353,9 @@ class _RecordingReader(MockReader):
 
 
 def test_reader_receives_capped_context(tmp_path):
-    """D6 (R1 #1540): the reader consumes EXACTLY the budget-capped
-    points-first context (ret["context_points"]), not the full pool — and
-    the rendered token estimate stays under the cap."""
+    """D6 (R1 #1540) + C1 (#1745): the reader consumes EXACTLY the
+    budget-capped, rank-interleaved context (ret["context_points"]), not
+    the full pool — and the rendered token estimate stays under the cap."""
     reader = _RecordingReader()
     q = _mini()[0]
     run_evaluation(
@@ -2421,11 +3367,9 @@ def test_reader_receives_capped_context(tmp_path):
     assert context_hits  # evidence reaches the reader
     text = render_context(context_hits, question_date=q.get("question_date") or None)
     assert _estimate_tokens(text) <= 3000
-    # points-first: no raw chunk precedes an extracted point
-    first_chunk = next(
-        (i for i, h in enumerate(context_hits) if _is_raw_chunk(h)),
-        len(context_hits))
-    assert all(not _is_raw_chunk(h) for h in context_hits[:first_chunk])
+    # rank-interleaved: the reader context is a rank-order prefix of the
+    # pool (no points-first tiering — chunks interleave at their rank)
+    assert len(context_hits) <= 20
     # an identical fresh ingest reproduces the retrieval contract (the
     # pipeline is deterministic: embedded TF-IDF + mocked reader/judge)
     sdk = _fresh_sdk(tmp_path)
@@ -2493,6 +3437,20 @@ def test_knob_cli_validation():
             cwd=str(Path(__file__).parent.parent))
         assert r.returncode != 0, f"{flag} {bad} must be rejected"
         assert flag in r.stderr, f"{flag} {bad}: missing clear message"
+    # C2 (review F9): boost multipliers < 1.0 OR non-finite (NaN/Inf) are
+    # rejected at the run layer (SystemExit) — 0.0 would ZeroDivide the
+    # rank scaling, a negative would invert the pool, NaN/Inf poison keys.
+    # The fail-loud message names the ENV knob (the run-layer resolver's
+    # contract); the CLI flag itself is argparse-typed float.
+    for flag, bad in (("--evidence-boost-verbatim", "0.5"),
+                      ("--evidence-boost-verbatim", "nan"),
+                      ("--evidence-boost-source", "inf")):
+        r = subprocess.run(
+            [*base, flag, bad], capture_output=True, text=True,
+            cwd=str(Path(__file__).parent.parent))
+        assert r.returncode != 0, f"{flag} {bad} must be rejected"
+        assert "EVIDENCE_BOOST" in r.stderr, \
+            f"{flag} {bad}: missing clear message"
 
 
 def test_report_methodology_records_r1_knobs():
@@ -2530,7 +3488,13 @@ def test_report_methodology_records_r1_knobs():
     assert "turn-granular raw chunks" in m["retrieval"]
     assert "DEDUPED" in m["recall_definition"]
     assert "chunk_evidence_recall@k" in m["recall_definition"]
-    assert "points-first" in m["reader_context_format"]
+    # C1 (#1745): the reader-context format string records the
+    # rank-interleaved assembly (points-first deliberately reversed)
+    assert "rank-interleaved" in m["reader_context_format"]
+    assert "points-first" not in m["reader_context_format"]
+    # C2 (#1745): the recall definition records the boosted-pool semantics
+    assert "boosted pool" in m["recall_definition"]
+    assert "reader_evidence@k" in m["recall_definition"]
     assert "chunk_turns" in m["extraction_approach"]
 
 
@@ -2663,10 +3627,11 @@ def test_e2e1_dedup_cap_assertion(tmp_path):
 
 
 def test_e2e10_budget_capped_context_v3_part(tmp_path):
-    """E2E-10 V3 part (R1 #1540): many near-duplicate raw chunks from one
-    session cannot blow the reader's context budget — the context stays ≤
-    cap, points render before chunks, and context_tokens is honest.
-    (Cross-encoder/MMR assertions remain V4-conditional — not asserted.)"""
+    """E2E-10 V3 part (R1 #1540 + C1 #1745): many near-duplicate raw
+    chunks from one session cannot blow the reader's context budget — the
+    context stays <= cap, ordering follows RANK (points and chunks
+    interleaved — the R1 points-first partition is deliberately reversed),
+    and context_tokens is honest."""
     filler = [{"role": "user", "content": f"planning detail number {i} "
                "about the upcoming trip itinerary", "has_answer": False}
               for i in range(9)] + [
@@ -2689,20 +3654,22 @@ def test_e2e10_budget_capped_context_v3_part(tmp_path):
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
                                     max_context_tokens=2000)
         assert ret["context_tokens"] <= 2000
-        # points-first ordering
-        first_chunk = next(
-            (i for i, h in enumerate(ret["context_points"]) if _is_raw_chunk(h)),
-            len(ret["context_points"]))
-        assert all(not _is_raw_chunk(h)
-                   for h in ret["context_points"][:first_chunk])
+        # rank-interleaved ordering: the context is a RANK-ORDER prefix of
+        # the pool (chunks interleave at their RRF rank — no points-first
+        # tiering)
+        pool_ids = [h["id"] for h in ret["hits"]]
+        ctx_ids = [h["id"] for h in ret["context_points"]]
+        pool_rank = {pid: i for i, pid in enumerate(pool_ids)}
+        assert all(pool_rank[a] < pool_rank[b]
+                   for a, b in itertools.pairwise(ctx_ids))
         # honest token accounting
         assert ret["context_tokens"] == _estimate_tokens(
             render_context(ret["context_points"],
                            question_date=q.get("question_date") or None))
         # per-session dedup holds even with 5 near-duplicate chunks
         dupe_chunks = [h for h in ret["hits"] if _is_raw_chunk(h)]
-        assert len(dupe_chunks) <= 2
-        assert ret["dedup_stats"]["chunks_capped"] >= 3
+        assert len(dupe_chunks) <= 3
+        assert ret["dedup_stats"]["chunks_capped"] >= 2
     finally:
         sdk.close()
 
@@ -2795,10 +3762,12 @@ def test_ingest_over_mixed_blob_chunk_graph(tmp_path):
         assert rows[0][0] == 1  # stale blob untouched (defensive)
         ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
         # the stale blob is deduped WITH the fresh chunks (same session —
-        # kind-based detection, no double representation beyond the cap)
+        # kind-based detection, no double representation beyond the cap).
+        # C5 (#1745): the default per-session cap is 3 (was 2) — the
+        # assertion tracks the DEFAULT, not a hardcoded legacy value.
         s0_chunks = [h for h in ret["hits"]
                      if _is_raw_chunk(h) and h["session_id"] == "mini-s0"]
-        assert len(s0_chunks) <= 2
+        assert len(s0_chunks) <= 3
     finally:
         sdk.close()
 
@@ -3991,6 +4960,94 @@ def test_compare_reports_stripped_outcomes_graceful():
     f = next(iter(cmp["flip_lists"].values()))[0]
     assert f["sr20_a"] is None and f["zero_point_a"] is None
     assert f["context_tokens_b"] is None and f["error_count_b"] is None
+
+
+def test_compare_reports_malformed_shapes_never_crash():
+    """#1747 (round-10 review): compare_reports must not crash on the
+    malformed-but-publishable shapes build_report now tolerates — a non-str
+    question_type (list — unhashable in the per_type set / category lookup),
+    mixed-type question_ids (int 1 vs str "1" stay DISTINCT — the join uses
+    the same collision-proof key discipline as the grading map), and failure
+    entries without question_id (per-object unknown questions)."""
+    from tools.longmem_eval.report import _qid_key
+    assert _qid_key({"question_id": 1}) != _qid_key({"question_id": "1"})
+    # non-str question_type outcome in BOTH reports → no crash, no merge
+    a = _cmp_report([
+        {"question_id": 1, "question_type": "multi-session",
+         "label": True, "context_tokens": 100},
+        {"question_id": "1", "question_type": ["a", "b"],
+         "label": False, "context_tokens": 100},
+    ], [], "mix-a")
+    b = _cmp_report([
+        {"question_id": 1, "question_type": "multi-session",
+         "label": False, "context_tokens": 100},
+        {"question_id": "1", "question_type": "multi-session",
+         "label": True, "context_tokens": 100},
+    ], [], "mix-b")
+    cmp = compare_reports(a, b)
+    # int 1 and str "1" are TWO distinct questions: qid 1 flips a→b
+    # (True→False), qid "1" flips b→a (False→True) → 1 b-win, 1 a-win.
+    ov = cmp["overall"]
+    assert ov["shared_n"] == 2
+    assert ov["decomposition"]["b_wins"] == 1
+    assert ov["decomposition"]["a_wins"] == 1
+    assert cmp["header"]["per_type_n"] != {}
+    # failure entries without question_id → no KeyError (skipped from the
+    # restored/lost sets; they can never join an outcome qid).
+    a2 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}],
+                     [{"error": "reader:retries_exhausted",
+                       "failed_at_utc": "x"}], "noqid-a")
+    b2 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "noqid-b")
+    cmp2 = compare_reports(a2, b2)
+    assert cmp2["overall"]["shared_n"] == 1
+    assert cmp2["overall"]["decomposition"]["reliability_restored"]["count"] == 0
+    # round-11: breaker_open drops and label-less outcomes (excluded from the
+    # report's own aggregates) are SKIPPED from the comparison — never graded
+    # as wrong, never crashing; the skip is surfaced in the header.
+    bo = {"question_id": "dropped1", "question_type": "multi-session",
+          "label": None, "breaker_open": True, "dropped_reason": "breaker_open"}
+    nolab = {"question_id": "nolabel", "question_type": "multi-session"}
+    a3 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, bo, nolab], [], "skip-a")
+    b3 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "skip-b")
+    cmp3 = compare_reports(a3, b3)
+    assert cmp3["header"]["skipped_excluded"] == {"a": 2, "b": 0}
+    assert cmp3["overall"]["shared_n"] == 1      # q1 only — no crash, no wrong-grade
+    # round-12: the runner's Layer-1 projection materializes a missing label
+    # as `label: None` (key PRESENT) — that projected entry must be SKIPPED
+    # too (never graded as an incorrect answer, never in skipped_excluded=0).
+    proj_nolab = {"question_id": "proj", "question_type": "multi-session",
+                  "label": None, "context_tokens": 100}
+    a4 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, proj_nolab], [], "proj-a")
+    b4 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "proj-b")
+    cmp4 = compare_reports(a4, b4)
+    assert cmp4["header"]["skipped_excluded"] == {"a": 1, "b": 0}
+    assert cmp4["overall"]["shared_n"] == 1
+    # round-13: a tampered NON-BOOL label (0 / "" / "true" / 1) is excluded
+    # from the report's aggregates (real-bool policy) — the comparison must
+    # skip it too, never grade it as correct/wrong.
+    badlab = {"question_id": "badlab", "question_type": "multi-session",
+              "label": "true", "context_tokens": 100}
+    a5 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}, badlab], [], "badlab-a")
+    b5 = _cmp_report([{"question_id": "q1",
+                       "question_type": "single-session-user",
+                       "label": True}], [], "badlab-b")
+    cmp5 = compare_reports(a5, b5)
+    assert cmp5["header"]["skipped_excluded"] == {"a": 1, "b": 0}
+    assert cmp5["overall"]["shared_n"] == 1
 
 
 def test_compare_reports_comparability_warnings():
