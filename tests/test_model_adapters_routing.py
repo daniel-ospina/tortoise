@@ -155,25 +155,67 @@ def test_direct_route_sends_nonreasoning_model_id(monkeypatch):
 def test_deepseek_direct_json_mode_default_on(monkeypatch):
     """#1746 (D6): JSON-mode parity on the direct path — the request body
     carries ``response_format`` under the default TORTOISE_JSON_MODE=1
-    (mirrors OpenRouterModel; the pilot's direct route ran WITHOUT it — H1)."""
+    WHEN the prompt requests JSON (the S2/S4 extractor prompts say
+    "JSON object" — #1782 gates on this: DeepSeek 400s otherwise)."""
     log, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
     model = build_extractor_model("deepseek/deepseek-v4-flash")
-    model.complete(system="s", user="u")
+    model.complete(system="Return a JSON object per the contract", user="u")
     assert log[0][1]["response_format"] == {"type": "json_object"}
+
+
+def test_json_mode_omitted_for_non_json_prompt(monkeypatch):
+    """#1782: json_object mode is NOT sent when the prompt doesn't contain
+    the text "json" — DeepSeek returns HTTP 400 for that combination (the
+    preflight billing probe / ping prompts have no "json"). The mode must be
+    prompt-gated, not unconditional under TORTOISE_JSON_MODE=1."""
+    log, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
+    model = build_extractor_model("deepseek/deepseek-v4-flash")
+    model.complete(system="You are a story summarizer.", user="Tell me a story.")
+    assert "response_format" not in log[0][1]
+
+
+def test_json_mode_gate_case_insensitive(monkeypatch):
+    """#1782: the gate is case-insensitive — the S2/S4 prompts say
+    "JSON object" (uppercase); the probe prompts omit it entirely."""
+    from tortoise.model_adapters import _prompt_requests_json
+    assert _prompt_requests_json("Return a JSON object", "u") is True
+    assert _prompt_requests_json("json output expected", "u") is True
+    assert _prompt_requests_json("You are a summarizer.", "Tell a story.") is False
+    assert _prompt_requests_json(None, None) is False
+
+
+def test_should_send_json_mode_env_gate(monkeypatch):
+    """#1782: pin the env branch of the 2x2 gate matrix directly on
+    ``_should_send_json_mode`` — prompt-requests-JSON x env-flag.
+    env=0 alone must suppress the mode even when the prompt asks for
+    JSON; env unset/1 must enable it; a non-JSON prompt never sends it."""
+    from tortoise.model_adapters import _should_send_json_mode
+    monkeypatch.setenv("TORTOISE_JSON_MODE", "0")
+    assert _should_send_json_mode("Return a JSON object", "u") is False
+    monkeypatch.setenv("TORTOISE_JSON_MODE", "1")
+    assert _should_send_json_mode("Return a JSON object", "u") is True
+    monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
+    assert _should_send_json_mode("Return a JSON object", "u") is True
+    assert _should_send_json_mode("You are a summarizer.", "Tell a story.") is False
 
 
 def test_deepseek_direct_json_mode_disabled(monkeypatch):
     """#1746 (D6): TORTOISE_JSON_MODE=0 omits ``response_format`` entirely
-    (the documented escape hatch)."""
+    (the documented escape hatch). The prompt REQUESTS JSON so the absence
+    is attributable to the env toggle alone, not the prompt gate — mirrors
+    test_deepseek_direct_json_mode_default_on (env is the only delta)."""
     log, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("TORTOISE_JSON_MODE", "0")
     model = build_extractor_model("deepseek/deepseek-v4-flash")
-    model.complete(system="s", user="u")
+    model.complete(system="Return a JSON object per the contract", user="u")
     assert "response_format" not in log[0][1]
 
 
@@ -199,6 +241,37 @@ def test_no_key_lenient_build_defaults_to_openrouter(monkeypatch):
     assert model.fallback is None
     model.complete(system="s", user="u")
     assert log[0][0] == "https://openrouter.ai/api/v1/chat/completions"
+
+
+def test_openrouter_json_mode_default_on(monkeypatch):
+    """#1782: the OpenRouter path carries ``response_format`` under the
+    default TORTOISE_JSON_MODE=1 WHEN the prompt requests JSON — pins the
+    gate on OpenRouterModel.complete itself (the DeepSeek-only tests would
+    stay green if the OpenRouter gate were missing, and the RoutingModel
+    preflight-probe failover would silently carry json_object on non-JSON
+    prompts — the exact drift class #1782 repairs)."""
+    log, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")  # no DEEPSEEK key → OpenRouter primary
+    monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
+    model = build_extractor_model("deepseek/deepseek-v4-flash")
+    model.complete(system="Return a JSON object per the contract", user="u")
+    assert log[0][0] == "https://openrouter.ai/api/v1/chat/completions"
+    assert log[0][1]["response_format"] == {"type": "json_object"}
+
+
+def test_openrouter_json_mode_omitted_for_non_json_prompt(monkeypatch):
+    """#1782: the OpenRouter path omits ``response_format`` on probe-shaped
+    non-JSON prompts (the preflight probe / ping) — json_object must not
+    leak through the OpenRouter fallback lane either."""
+    log, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.delenv("TORTOISE_JSON_MODE", raising=False)
+    model = build_extractor_model("deepseek/deepseek-v4-flash")
+    model.complete(system="You are a story summarizer.", user="Tell me a story.")
+    assert log[0][0] == "https://openrouter.ai/api/v1/chat/completions"
+    assert "response_format" not in log[0][1]
 
 
 def test_default_model_id_from_env(monkeypatch):
