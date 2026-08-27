@@ -118,13 +118,16 @@ function str(v: unknown): string | null {
 
 function validateCreate(input: PostInput): { ok: true; value: CreateValues } | { ok: false; errors: Record<string, string> } {
   const errors: Record<string, string> = {};
+  if (input.status !== undefined && input.status !== null && typeof input.status !== "string") {
+    errors.status = "must be a string";
+  }
   const status = str(input.status);
   const title = str(input.title) ?? "";
   if (!title || title.length > TITLE_MAX) errors.title = `title required, max ${TITLE_MAX} chars`;
 
   const body = str(input.body) ?? "";
   if (body.length > BODY_MAX) errors.body_422 = `body max ${BODY_MAX} chars`;
-  if (body && !balancedFences(body)) errors.body_422 = "malformed markdown: unbalanced code fence";
+  else if (body && !balancedFences(body)) errors.body_422 = "malformed markdown: unbalanced code fence";
   if (body.trim() === "" && status === "published") errors.body = "body required when status=published";
 
   const slug = str(input.slug) ?? "";
@@ -368,7 +371,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (res.status === 409) {
     return err(409, "slug_conflict", "slug already exists — use PATCH to update your own post, or a new slug");
   }
-  if (!res.ok) return err(503, "upstream", `supabase ${res.status}`);
+  if (!res.ok) {
+    if (res.status >= 400 && res.status < 500) return err(res.status, "upstream_4xx", `supabase ${res.status}`);
+    return err(503, "upstream", `supabase ${res.status}`);
+  }
 
   const created = (await res.json()) as Array<{ id: string; slug: string }>;
   const post = created[0];
@@ -420,9 +426,10 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
   if (post.status === "archived") return err(409, "archived", "archived is terminal");
   if (post.created_by !== agent.agentName) return err(403, "forbidden", "you can only edit posts you created");
 
-  // Empty-body-at-publish guard: resulting body must be non-empty
+  // Empty-body-at-publish guard: RESULTING body + RESULTING status must be valid
   const resultingBody = v.value.body ?? post.body;
-  if (v.value.status === "published" && resultingBody.trim() === "") {
+  const resultStatus = v.value.status ?? post.status;
+  if (resultStatus === "published" && resultingBody.trim() === "") {
     return err(400, "validation", "body required when status=published");
   }
 
@@ -432,6 +439,7 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
   if (v.value.status === "published") {
     patch.published_by = agent.agentName;
     patch.published_at = now;
+    patch.hold_for_review = false; // explicit publish clears hold — no invisible limbo
   }
 
   // status=not.eq.archived guards the TOCTOU window (post archived between GET and PATCH)
@@ -448,7 +456,13 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
   } catch {
     return err(503, "upstream", "supabase unreachable");
   }
-  if (!res.ok) return err(503, "upstream", `supabase ${res.status}`);
+  if (!res.ok) {
+    if (res.status >= 400 && res.status < 500) return err(res.status, "upstream_4xx", `supabase ${res.status}`);
+    return err(503, "upstream", `supabase ${res.status}`);
+  }
+  // TOCTOU: post archived between GET and PATCH → PostgREST returns 200 + [] rows
+  const updated = (await res.json()) as Array<{ id: string; slug: string }>;
+  if (updated.length === 0) return err(409, "archived", "post was archived concurrently");
 
   return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
 };
