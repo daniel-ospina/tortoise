@@ -2076,6 +2076,42 @@ class TestClassifyStage:
         assert not out["minted_kinds"]
         assert out["errors"] == []
 
+    def test_pack_event_kind_survives_execute_embed(self):
+        """FIX A candidate/write-gate alignment: a classifier-assigned pack
+        event kind (pm eventKinds — declared but kindDefs-less) is writable
+        at execute_embed — it survives unwritten-repaired (and is not flagged
+        minted), while a genuinely minted kind still repairs + flags."""
+        embed = {"entities": [], "events": [
+            {"content": "a card was created",
+             "eventKind": "pm:cardCreated", "about_entities": []},
+            {"content": "totally minted",
+             "eventKind": "totally:madeup", "about_entities": []},
+        ], "points": [], "operators": [], "chain_notes": [],
+            "link_before_create": []}
+        res = v2.execute_embed(embed, {}, session_id="s1")
+        kinds = {e["content"]: e["eventKind"] for e in res["payload"]["events"]}
+        assert kinds["a card was created"] == "cardCreated", \
+            "pack event kind survives execute_embed unwritten-repaired"
+        assert kinds["totally minted"] == "occurrence"
+        assert not any("pm:cardCreated" in m for m in res["minted_kinds"]), \
+            "the writable pack event kind is not flagged minted"
+        assert any("totally:madeup" in m for m in res["minted_kinds"])
+
+    def test_point_item_never_assigned_pack_point_kind(self, monkeypatch):
+        """FIX A: a point item is never assigned a pack point kind — the
+        index's "points" section contains ONLY "statement", so the point
+        classification is trivial (design doc) and the write gate never
+        sees a pack point kind on a point."""
+        from tortoise.value_extractor import _clear_kind_spec_cache, \
+            compile_kind_index_spec
+        _clear_kind_spec_cache()
+        spec = compile_kind_index_spec()
+        points = {k for k, md in spec.items()
+                  if md.get("section") == "points"}
+        assert points == {"statement"}
+        assert "dev:requirement" not in spec
+        assert "dev:bug" not in spec
+
     def test_flag_off_byte_identical_no_telemetry_growth(self, monkeypatch):
         """kind_classifier=None + env unset → the pipeline is byte-
         identical: fixed session_id, canonical payload equality across runs,
@@ -2237,7 +2273,13 @@ class TestClassifyStage:
         (build_master_list()'s memory-granularity order follows the pack-
         manifest glob order, which differs between macOS and Linux). Also
         pins determinism (render twice → equal) and the absence of the
-        PACK KINDS / CHAINS sections (the classify-later split)."""
+        PACK KINDS / CHAINS sections (the classify-later split).
+
+        FIX K (cycle 3): production coverage — the byte-pin never saw
+        build_master_list()'s readdir-order memory_granularity. Render BOTH
+        the fixture and the production master; assert byte-equality of every
+        section EXCEPT MEMORY GRANULARITY, whose entries must be
+        SET-EQUAL (order-independent) to the golden's."""
         m = _hand_built_master()
         r = v2._render_master_core_only(m)
         assert r == v2._render_master_core_only(m)  # deterministic (no shuffle)
@@ -2247,6 +2289,30 @@ class TestClassifyStage:
         assert golden.read_text(encoding="utf-8") == r, \
             "core-only master render drifted from the golden fixture " \
             "(regenerate via _hand_built_master: see the golden test docstring)"
+
+        # FIX K: production-render coverage — the granularity block is the
+        # ONLY readdir-order-dependent section; everything else must be
+        # byte-identical to the golden, and the granularity entries must be
+        # set-equal (same entries, any order).
+        marker = "MEMORY GRANULARITY (what to keep, what to strip)"
+        carve = "\nSTATE-VALUE CARVE-OUT"
+
+        def _split(render: str):
+            head, sep, tail = render.partition(marker)
+            assert sep, "granularity section present in the render"
+            g_lines, _, rest = tail.partition(carve)
+            return head, sorted(g_lines.split("\n")), carve + rest
+
+        prod = v2._render_master_core_only(v2.build_master_list())
+        p_head, p_g, p_rest = _split(prod)
+        g_head, g_g, g_rest = _split(r)
+        assert p_head == g_head, "production render (pre-granularity) must " \
+            "match the golden byte-for-byte"
+        assert p_rest == g_rest, "production render (post-granularity) must " \
+            "match the golden byte-for-byte"
+        assert p_g == g_g, "production granularity entries must be set-equal " \
+            "to the golden (readdir order differs across platforms)"
+        assert len(p_g) >= 4, "production render carries the installed packs"
 
     def test_core_only_ups_block_keeps_not_kinds_guard(self):
         """The core-only USER-PERSONAL-STATE block carries the E2 (#1534)
@@ -2313,6 +2379,18 @@ class TestClassifyStage:
         assert '"name": str, "kind": str, "lifecycle"' in v2.OUTPUT_CONTRACT
         assert '"eventKind": str,' in v2.OUTPUT_CONTRACT
         assert '"pointKind": "statement",' in v2.OUTPUT_CONTRACT
+        # FIX D (cycle 3): the base's advisory "TRY TO REPAIR" chain_notes
+        # bullet exists EXACTLY ONCE in S4_TMPL, and the core-only
+        # derivation swaps it for the deterministic-enforcement wording
+        # ("CHAIN ENFORCEMENT IS DETERMINISTIC" must not be contradicted).
+        assert v2.S4_TMPL.count(
+            "- chain_notes: flag violations, TRY TO REPAIR toward the nearest "
+            "valid chain\n  position, never invent entities.") == 1
+        assert "deterministic post-extraction" in v2.S4_TMPL_CORE_ONLY
+        assert "do NOT attempt repairs yourself" in v2.S4_TMPL_CORE_ONLY
+        assert "TRY TO REPAIR toward the nearest valid chain" not in \
+            v2.S4_TMPL_CORE_ONLY
+        assert "TRY TO REPAIR toward the nearest valid chain" in v2.S4_TMPL
 
     def test_unclassified_constant_shared_with_classifier(self):
         """The sentinel constant must not drift between modules (a mismatch
@@ -2367,6 +2445,29 @@ class TestClassifyStage:
             "the preserved re-typed :Object is announced (observable census)"
         assert n == 0, "a valid non-sentinel kind is never re-stamped"
 
+    def test_clean_slots_sentinel_no_minted_warning(self):
+        """FIX G: a participant slot kind 'unclassified' (the classify-later
+        sentinel) is carried WITHOUT the spurious 'minted slot kind'
+        repair warning — the sentinel is a terminal, not a minted kind
+        (as _rekey_slots already treats it)."""
+        warnings: list[str] = []
+        master = v2.build_master_list()
+        slots = v2._clean_slots(
+            {"subject": [{"name": "x", "kind": "unclassified",
+                            "confidence": 0.9}]},
+            warnings, "ctx", master)
+        assert not any("minted slot kind" in w for w in warnings), warnings
+        assert slots == {"subject": [
+            {"name": "x", "kind": "unclassified", "confidence": 0.9}]}
+        # a genuinely minted slot kind still warns + repairs (not gutted)
+        warnings2: list[str] = []
+        slots2 = v2._clean_slots(
+            {"subject": [{"name": "x", "kind": "worktree",
+                            "confidence": 0.9}]},
+            warnings2, "ctx", master)
+        assert any("minted slot kind" in w for w in warnings2)
+        assert slots2["subject"][0]["kind"] == "core:other"
+
     def test_rekey_slots_skips_sentinel_entity_kind(self):
         """An entity still carrying the 'unclassified' sentinel must not
         copy it into slot kinds (_clean_slots would otherwise emit a
@@ -2419,6 +2520,50 @@ class TestClassifyStage:
         out = self._run(monkeypatch, s2)  # no injected classifier
         assert out["classify_later"]["enabled"] is True
         assert out["payload"]["entities"][0]["kind"] == "dev:issue"
+
+    def test_env_toggle_case_insensitive(self, monkeypatch):
+        """FIX B: TORTOISE_CLASSIFY_LATER matches case-insensitively —
+        True/TRUE/ON/yes all enable; only unset/0/off disable."""
+        for val in ("1", "true", "TRUE", "True", "yes", "on", "ON"):
+            monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", val)
+            assert v2._classify_later_enabled() is True, val
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "0")
+        assert v2._classify_later_enabled() is False
+        monkeypatch.setenv("TORTOISE_CLASSIFY_LATER", "off")
+        assert v2._classify_later_enabled() is False
+        monkeypatch.delenv("TORTOISE_CLASSIFY_LATER")
+        assert v2._classify_later_enabled() is False
+
+    def test_label_order_toggle_case_insensitive(self, monkeypatch):
+        """FIX B: TORTOISE_LABEL_ORDER=shuffle matches case-insensitively
+        (SHUFFLE/Shuffle enable the A′ label-order hook)."""
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER", raising=False)
+        assert v2._label_order_rng("s") is None
+        for val in ("shuffle", "SHUFFLE", "Shuffle"):
+            monkeypatch.setenv("TORTOISE_LABEL_ORDER", val)
+            assert v2._label_order_rng("s") is not None, val
+
+    def test_numeric_name_survives_union_classify(self, monkeypatch):
+        """FIX C: a numeric (non-str) entity name must not raise
+        AttributeError in the union-classify block (_identity_key /
+        _restamp_s2_kinds / _rekey_slots coerce via str())."""
+        s2 = {"entities": [
+            {"name": 42, "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [], "points": []}
+        out = self._run(monkeypatch, s2, kind_classifier=_stub_classifier())
+        assert out["errors"] == [], "no AttributeError through the union pass"
+        assert out["payload"]["entities"][0]["name"] == "42"
+
+    def test_norm_coerces_non_str(self):
+        """FIX C: _norm coerces non-str input instead of raising (the
+        falsy-or semantics mirror _collect_classify_items' defensive str():
+        a falsy value coerces to '')."""
+        assert v2._norm(42) == "42"
+        assert v2._norm(None) == ""
+        assert v2._norm(0) == ""  # falsy-or: 0 or "" → ""
+        assert v2._norm("  Mixed CASE ") == "mixed case"
 
 
 # ── S3 integration with the real backend (skip-if-unavailable) ─────────────

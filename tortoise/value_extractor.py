@@ -95,6 +95,15 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
     embeds; the metadata fields feed the classifier's nearMiss rerank and
     the eval's confusability analysis.
 
+    Candidate/write-gate alignment (review cycle 3): pack pointKinds are
+    NOT classifiable (point classification is trivial — "statement" only),
+    so point-only kinds are excluded from the spec and the "points"
+    section holds ONLY "statement"; and declared-but-kindDefs-less pack
+    kinds (eventKinds/objectKinds/documentKinds without a kindDef — e.g.
+    ALL 8 pm eventKinds, dev:apiSpec, marketing:keyword) get synthesized
+    name-only entries so the classifier can assign them and nearMisses refs
+    to them resolve.
+
     Lazy imports keep the module importable without the pack machinery
     (``extractor_v2`` imports this module's ``compile_value_brief``).
 
@@ -141,19 +150,32 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
                    "nearMisses": []}
     # packs: the kindDefs FULL key set (compile_value_brief drops
     # synonyms/examples — read the manifests directly); the section is
-    # derived from the pack's kind declarations (pointKinds → points,
-    # eventKinds → events, documentKinds/objectKinds → objects) so Task 4's
-    # per-type candidate restriction is correct.
+    # derived from the pack's kind declarations (eventKinds → events,
+    # documentKinds/objectKinds → objects) so Task 4's per-type candidate
+    # restriction is correct. Pack pointKinds are NOT classifiable — the
+    # design doc locks point classification to "statement" (FIX A: the
+    # index's "points" section must contain ONLY "statement"), so point-
+    # only kinds are SKIPPED from the spec entirely.
     from tortoise.pack_registry import PackRegistry
     reg = PackRegistry(packs_dir)
     reg.load_all()
     for ns, pack in reg.packs.items():
-        declared = {k: "points" for k in (pack.point_kinds or [])}
-        declared.update({k: "events" for k in (pack.event_kinds or [])})
+        # Section mapping for DECLARED kinds: eventKinds → events,
+        # object/documentKinds → objects (setdefault so a kind declared in
+        # BOTH keeps the first non-point section; pointKinds are excluded
+        # per FIX A — a point+document kind like marketing:contentBrief
+        # lands in objects via its document declaration).
+        declared: dict[str, str] = {}
+        for k in (pack.event_kinds or []):
+            declared.setdefault(k, "events")
         for k in (pack.object_kinds or []) + (pack.document_kinds or []):
             declared.setdefault(k, "objects")
         for kind, kd in (pack.kind_defs or {}).items():
             k = f"{ns}:{kind}"
+            # FIX A: a point-only kind (declared in pointKinds, no object/
+            # document/event declaration) is never classifiable — skip it.
+            if kind in (pack.point_kinds or []) and kind not in declared:
+                continue
             desc = str(kd.get("description", brief.get(k, "")) or "")
             syns = [str(s) for s in (kd.get("synonyms") or [])]
             exs = [str(e) for e in (kd.get("examples") or [])]
@@ -163,6 +185,20 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
                        "description": desc,
                        "synonyms": syns, "examples": exs,
                        "nearMisses": nms}
+        # FIX L: declared-but-kindDefs-less pack kinds (dev:apiSpec,
+        # marketing:keyword, pm:milestone, ALL 8 pm eventKinds, ...) are
+        # never in the index → the classifier can't assign them and
+        # nearMisses refs to them resolve to ∅. Synthesize name-only spec
+        # entries (section derived from the declaration; pointKinds already
+        # excluded above per FIX A). An existing kindDefs entry is never
+        # clobbered.
+        for kind, section in declared.items():
+            k = f"{ns}:{kind}"
+            if k in spec:
+                continue  # a kindDefs entry already rode through
+            spec[k] = {"text": k, "section": section,
+                       "description": "", "synonyms": [], "examples": [],
+                       "nearMisses": []}
     _KIND_SPEC_CACHE[str(packs_dir)] = spec
     return copy.deepcopy(spec)
 

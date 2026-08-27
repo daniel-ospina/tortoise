@@ -80,15 +80,59 @@ class TestKindIndexBuild:
         assert "synonyms:" in txt2 and "ticket" in txt2
 
     def test_section_derived_from_pack_declarations(self, spec):
-        """The per-type candidate restriction needs correct sections: pack
-        pointKinds land in "points", eventKinds in "events", object/
-        document kinds in "objects" — never a blanket "objects"."""
-        assert spec["product-strategy:jobToBeDone"]["section"] == "points"
-        assert spec["product-strategy:useCase"]["section"] == "points"
-        assert spec["dev:requirement"]["section"] == "points"
+        """The per-type candidate restriction needs correct sections:
+        eventKinds land in "events", object/document kinds in "objects";
+        pack pointKinds are NOT classifiable (points = statement only,
+        FIX A) — point-only kinds never appear in the spec."""
         assert spec["product-strategy:architecture"]["section"] == "objects"
         assert spec["core:Project"]["section"] == "objects"
         assert spec["core:decision"]["section"] == "events"
+        # synthesized declared kinds (FIX L): event/doc kinds without a
+        # kindDef ride through with the derived section
+        assert spec["pm:cardCreated"]["section"] == "events"
+        assert spec["dev:apiSpec"]["section"] == "objects"
+        # point-only kinds are absent (never classifiable)
+        assert "dev:requirement" not in spec
+        assert "product-strategy:jobToBeDone" not in spec
+
+    def test_points_section_contains_only_statement(self, spec):
+        """FIX A candidate/write-gate alignment: the index's "points"
+        section must contain ONLY "statement" — pack pointKinds are NOT
+        classifiable (point classification is trivial per the design doc),
+        so a point item can never be assigned a pack point kind."""
+        points = {k: md for k, md in spec.items()
+                  if md.get("section") == "points"}
+        assert set(points) == {"statement"}
+        assert "dev:bug" not in spec
+        assert "dev:technicalDebt" not in spec
+        assert "pm:estimate" not in spec
+
+    def test_declared_kinds_without_kinddefs_synthesized(self, spec):
+        """FIX L: declared-but-kindDefs-less pack kinds (dev:apiSpec,
+        marketing:keyword, pm:milestone, ALL 8 pm eventKinds, ...) are in
+        the candidate set — the classifier can't assign a kind that isn't
+        in the index, and nearMisses refs to it would resolve to ∅.
+        Synthesized entries are name-only; an existing kindDefs entry is
+        never clobbered."""
+        assert spec["dev:apiSpec"]["section"] == "objects"
+        assert spec["dev:deployment"]["section"] == "objects"
+        assert spec["dev:api"] is not None
+        assert spec["marketing:keyword"]["section"] == "objects"
+        assert spec["marketing:contentCalendar"]["section"] == "objects"
+        assert spec["pm:milestone"]["section"] == "objects"
+        assert spec["pm:kanbanBoard"]["section"] == "objects"
+        for ek in ("cardCreated", "cardMoved", "sprintStarted",
+                   "sprintCompleted", "stepStarted", "stepCompleted",
+                   "gatePassed", "gateBlocked"):
+            assert spec[f"pm:{ek}"]["section"] == "events", ek
+            assert spec[f"pm:{ek}"]["description"] == "", ek
+            assert spec[f"pm:{ek}"]["synonyms"] == [], ek
+        # multi-declared kind: marketing:contentBrief is in pointKinds AND
+        # documentKinds → objects (document first; FIX A skips point-only)
+        assert spec["marketing:contentBrief"]["section"] == "objects"
+        # a kindDefs entry is never clobbered by the synthesis
+        assert spec["dev:issue"]["description"]
+        assert spec["dev:issue"]["text"] != "dev:issue"
 
 
 class TestPersistLoad:

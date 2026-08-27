@@ -242,7 +242,21 @@ class KindClassifier:
                 assignments[iid] = {"kind": top1[0], "margin": top1_sim, "mode": "knn"}
                 continue
             # low margin → nearMiss rerank (tie-break only) → LLM tail
-            reranked = self._near_miss_rerank(top)
+            try:
+                reranked = self._near_miss_rerank(top)
+            except Exception as e:  # fail-open: a raising rerank must not
+                # abort the whole batch (review FIX J) — per-item kNN top-1
+                # fallback + classify_error census, like the other fail-open
+                # paths.
+                warnings.append(
+                    f"{iid}: near-miss rerank failed ({type(e).__name__}: {e}) — "
+                    "kNN top-1 fallback"
+                )
+                stats["classify_errors"] += 1
+                stats["assigned_knn"] += 1
+                assignments[iid] = {"kind": top[0][0], "margin": top[0][1],
+                                    "mode": "knn"}
+                continue
             if reranked is not None:
                 stats["assigned_rerank"] += 1
                 rerank_sim = next(s for k, s in top if k == reranked)
@@ -328,12 +342,22 @@ class KindClassifier:
             batch_stats: dict = {}
             try:
                 payload = {}
-                for iid, item, top in batch:
-                    candidates = [{"kind": k, "similarity": round(s, 4)} for k, s in top]
-                    payload[iid] = {
+                # FIX I (review cycle 3): compact batch-position keys
+                # ("i0", "i1", ...) instead of raw item ids — real LLMs
+                # normalize spaces/colons/hashes in ids like
+                # "entities:the ticket fix#0", which would closed-vocab-
+                # reject and silently burn the kNN fallback. The response
+                # lookup uses the same keys, mapped back to the real ids.
+                keys: list[tuple[str, str, list]] = []
+                for pos, (iid, item, top) in enumerate(batch):
+                    candidates = [{"kind": k, "similarity": round(s, 4)}
+                                  for k, s in top]
+                    key = f"i{pos}"
+                    payload[key] = {
                         "content": str(item.get("text", ""))[:400],
                         "candidates": candidates,
                     }
+                    keys.append((key, iid, top))
                 system = (
                     "You are the KIND ADJUDICATOR for the Tortoise epistemic "
                     "memory. Each item lists its top candidate kinds with "
@@ -345,7 +369,8 @@ class KindClassifier:
                 user = (
                     "ADJUDICATE:\n"
                     + json.dumps(payload, indent=1)
-                    + '\n\nReturn {"item_key": "chosen-kind"} for every item.'
+                    + "\n\nReturn {\"i0\": \"chosen-kind\", \"i1\": ...} — "
+                      "one entry per item key (i0, i1, ...)."
                 )
                 parsed = _complete_parsed(
                     self.model, system, user, max_tokens=ADJUDICATION_MAX_TOKENS,
@@ -378,8 +403,8 @@ class KindClassifier:
                     stats["assigned_knn"] += 1
                     assignments[iid] = {"kind": top[0][0], "margin": top[0][1], "mode": "knn"}
                 continue
-            for iid, _item, top in batch:
-                chosen = parsed.get(iid)
+            for key, iid, top in keys:
+                chosen = parsed.get(key)
                 if not isinstance(chosen, str):
                     chosen = ""
                 cand_low = {c[0].lower(): c[0] for c in top}
@@ -427,7 +452,11 @@ def evaluate_bits(gold: list[dict], arm: str = "compact", *, model=None, encoder
     """D0-3 bit-level metrics: deterministic precision (kNN/rerank path —
     no LLM in the eval so the numbers are reproducible), top-5 hit,
     adjudication-tail rate, nearMiss demotion count, sentinel rate, and a
-    no-pack-stratum row. ``gold`` = validated bits from tools.kind_eval."""
+    no-pack-stratum row. ``precision`` counts FULL case-folded kind
+    equality only — a same-bare-different-namespace match (dev:issue vs
+    pm:issue) is a confusion tracked separately as ``bare_confusions``
+    (review FIX H — it must not inflate precision). ``gold`` = validated
+    bits from tools.kind_eval."""
     clf = KindClassifier(model=model, encoder=encoder, llm_tail=False)
     items = [{"id": b["id"], "type": b["type"], "text": b["content"]} for b in gold]
     out = clf.classify_items(items)
@@ -438,14 +467,22 @@ def evaluate_bits(gold: list[dict], arm: str = "compact", *, model=None, encoder
     sentinel = 0
     pack_misses = 0
     pack_total = 0
+    bare_confusions = 0
     for b in gold:
         a = assignments.get(b["id"], {})
         kind = str(a.get("kind", ""))
         gold_kind = str(b["gold_kind"])
         gold_bare = gold_kind.rsplit(":", 1)[-1].lower()
         kind_bare = kind.rsplit(":", 1)[-1].lower()
-        if kind.lower() == gold_kind.lower() or kind_bare == gold_bare:
+        # FIX H (review cycle 3): `exact` counts ONLY full case-folded kind
+        # equality — a bare-name match across namespaces (dev:issue vs
+        # pm:issue) is a CONFUSION, not a hit (it would inflate precision
+        # when the classifier picks the right bare kind in the wrong
+        # namespace); those are tracked separately as bare_confusions.
+        if kind.lower() == gold_kind.lower():
             exact += 1
+        elif kind_bare == gold_bare and kind:
+            bare_confusions += 1
         if a.get("mode") == "rerank":
             near_miss_demoted += 1
         if kind == UNCLASSIFIED:
@@ -479,6 +516,7 @@ def evaluate_bits(gold: list[dict], arm: str = "compact", *, model=None, encoder
         "classify_errors": out["stats"]["classify_errors"],
         "embedding_errors": out["stats"]["embedding_errors"],
         "closed_vocab_rejects": out["stats"]["closed_vocab_rejects"],
+        "bare_confusions": bare_confusions,
         "pack_stratum": {"bits": pack_total, "misses": pack_misses},
         "mode_breakdown": {
             k: out["stats"].get(k, 0)

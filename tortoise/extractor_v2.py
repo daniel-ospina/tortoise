@@ -287,7 +287,7 @@ def _label_order_rng(story: str | None = None):
     sessions under a different order)."""
     import os
     import random
-    if os.environ.get("TORTOISE_LABEL_ORDER", "").strip() != "shuffle":
+    if os.environ.get("TORTOISE_LABEL_ORDER", "").strip().lower() != "shuffle":
         return None
     seed_raw = os.environ.get("TORTOISE_LABEL_ORDER_SEED", "").strip()
     if seed_raw:
@@ -305,10 +305,17 @@ def _classify_later_enabled() -> bool:
     """#1695 Task 5: the call-time classify-later toggle — read at the
     single choke point (extract_session_v2 + the render dispatchers) so ALL
     callers (sdk, hosted_api, ingest_v2, run_v2_pipeline) inherit it without
-    threading a param. Unset/0 → the legacy pipeline byte-identical."""
+    threading a param. Unset/0 → the legacy pipeline: the classify-later
+    machinery is entirely off-path and the flag-off renders are
+    byte-identical to main — scoped to the DEFAULT (verbose) render (the
+    compact-mode S2 story-threading is a documented drift, and the chain
+    enforcer runs unconditionally on every arm; the two additive result
+    keys ``chain_enforcer`` / ``classify_later`` are always present as
+    empty blocks — see ``extract_session_v2``). Value matching is
+    case-insensitive (True/TRUE/ON/yes all enable — review FIX B)."""
     import os
-    return os.environ.get("TORTOISE_CLASSIFY_LATER", "").strip() in (
-        "1", "true", "TRUE", "yes", "on")
+    return os.environ.get("TORTOISE_CLASSIFY_LATER", "").strip().lower() in (
+        "1", "true", "yes", "on")
 
 
 def _default_kind_classifier(model):
@@ -1408,6 +1415,16 @@ S4_TMPL_CORE_ONLY = S4_TMPL.replace(
     "  do NOT re-type an S2 item, do NOT replace a pack kind with a core kind, do\n"
     "  NOT resolve an \"unclassified\" you cannot see in the list. The\n"
     "  MUST-come-from-list rule applies to NEW items only.",
+).replace(
+    # FIX D (cycle 3): the base's advisory "TRY TO REPAIR" bullet contradicts
+    # the deterministic-enforcement contract — swap it in the core-only
+    # derivation (the base template stays byte-identical). The fragment is
+    # asserted to exist exactly once in S4_TMPL (anchor pin).
+    "- chain_notes: flag violations, TRY TO REPAIR toward the nearest valid chain\n"
+    "  position, never invent entities.",
+    "- chain_notes: flag violations for the deterministic post-extraction\n"
+    "  enforcer — do NOT attempt repairs yourself (the enforcer rewires\n"
+    "  deterministically). NEVER invent entities.",
 )
 
 
@@ -1545,7 +1562,12 @@ def _s4_merge_stats(s2: dict, s4: dict, merged: dict) -> dict:
 # ── S5: EMBED — deterministic execution → Layer-1 payload ──────────────────
 
 def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "").strip().lower())
+    """Normalize a classification key for identity comparisons. Defensive
+    str() coercion (review FIX C): LLM-emitted items may carry numeric/
+    non-str names/content — a raw .strip() would raise AttributeError on
+    them and abort the whole union-classify block.``
+    """
+    return re.sub(r"\s+", " ", str(s or "").strip().lower())
 
 
 def _norm_kind(k: str) -> str:
@@ -1678,8 +1700,10 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
     kinds gate against the entity vocabulary, event kinds against the event
     vocabulary), confidence coerced to float and clamped to [0,1]
     (non-numeric → 0.0), unknown role keys and non-list role values dropped
-    with a warning. Returns None when no role survived (the payload entry
-    gets no slots).
+    with a warning. The classify-later ``unclassified`` sentinel is carried
+    WITHOUT the minted-kind repair warning (FIX G — it is a terminal, not a
+    minted kind; unresolved refs are dropped downstream). Returns None when
+    no role survived (the payload entry gets no slots).
     """
     if raw is None:
         return None
@@ -1708,13 +1732,19 @@ def _clean_slots(raw, warnings: list[str], ctx: str,
             kind = str(r.get("kind", "")).strip()
             if not name or not kind:
                 continue
+            # FIX G: the classify-later sentinel is a terminal, never a
+            # minted kind — skip the minted-kind branch explicitly (as
+            # _rekey_slots does) so it's carried without a spurious
+            # "minted slot kind" warning (resolved at write, like the
+            # entity/event sentinels).
+            sentinel = kind.lower() == UNCLASSIFIED
             if role == "event":
-                if kind.lower() not in event_forms and \
+                if not sentinel and kind.lower() not in event_forms and \
                         kind.lower().rsplit(":", 1)[-1] not in event_forms_bare:
                     warnings.append(f"minted slot kind {kind!r} ('{name[:60]}'"
                                     f") → repaired to {_EVENT_FALLBACK['kind']}")
                     kind = _EVENT_FALLBACK["kind"]
-            elif entity_forms and \
+            elif entity_forms and not sentinel and \
                     kind.lower() not in entity_forms and \
                     kind.lower().rsplit(":", 1)[-1] not in {
                         f.lower().rsplit(":", 1)[-1] for f in entity_forms}:
@@ -2334,7 +2364,12 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         if not isinstance(ev, dict):
             continue
         k = str(ev.get("eventKind", ""))
-        if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
+        # events: the EXTENDED event vocabulary (core + pack declared event
+        # kinds — FIX A: a classifier-assigned pack event kind is writable at
+        # execute_embed, so it is NOT minted; the report must agree with the
+        # write gate).
+        if k and k.lower() != UNCLASSIFIED and \
+                k.lower() not in _event_kind_forms(master):
             minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
@@ -2549,6 +2584,43 @@ _ENTITY_FALLBACK = {"kind": "core:other"}
 _EVENT_FALLBACK = {"kind": "core:occurrence"}
 _POINT_FALLBACK = {"kind": "statement"}
 
+#: The pack-DECLARED event kinds (eventKinds) — including the kindDefs-less
+#: ones: the classifier can assign them via the kind index's "events"
+#: section (FIX L synthesis), so the write gate must accept them (FIX A
+#: candidate/write-gate alignment). Full + bare forms, case-folded.
+#: Derived once per process from the default packs (packs are static per
+#: process — mirrors the other vocab caches).
+_PACK_EVENT_FORMS: set[str] | None = None
+
+
+def _event_kind_forms(master: dict) -> set[str]:
+    """The writable event-kind vocabulary (FIX A candidate/write-gate
+    alignment): the master's event forms (core EVENTS + pack kindDefs —
+    the entity-gate mirror, ``master_kind_forms``) PLUS the namespaced
+    pack DECLARED event kinds (eventKinds — including kindDefs-less ones
+    the classifier can assign). Full + bare forms, case-folded. The gate
+    must never raise: a pack-registry failure degrades to the
+    master-forms-only set."""
+    global _PACK_EVENT_FORMS
+    forms = master_kind_forms(master)
+    if _PACK_EVENT_FORMS is None:
+        _PACK_EVENT_FORMS = set()
+        try:
+            from pathlib import Path  # noqa: I001 — lazy (module has no
+            # module-level pathlib import)
+            from tortoise.pack_registry import PackRegistry
+            packs_dir = Path(__file__).resolve().parent.parent / "packs"
+            reg = PackRegistry(packs_dir)
+            reg.load_all()
+            for ns, pack in reg.packs.items():
+                for k in (pack.event_kinds or []):
+                    _PACK_EVENT_FORMS.add(f"{ns}:{k}".lower())
+                    _PACK_EVENT_FORMS.add(k.lower())
+        except Exception:  # noqa: BLE001, RUF100 — never let the write
+            # gate raise (fail-open to the master-forms-only gate)
+            _PACK_EVENT_FORMS = set()
+    return forms | _PACK_EVENT_FORMS
+
 
 def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   story_arc: str = "", summary: str = "",
@@ -2664,9 +2736,7 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                             f"repaired to {_EVENT_FALLBACK['kind']} "
                             "(reserved sentinel)")
             ekind = _EVENT_FALLBACK["kind"]
-        elif ekind.lower() not in {k.lower() for k in master["events"]} and \
-                ekind.lower().rsplit(":", 1)[-1] not in {k.lower().rsplit(":", 1)[-1]
-                                                         for k in master["events"]}:
+        elif ekind.lower() not in _event_kind_forms(master):
             warnings.append(f"minted event kind {ekind!r} ('{content[:60]}') "
                             f"→ repaired to {_EVENT_FALLBACK['kind']}")
             ekind = _EVENT_FALLBACK["kind"]
@@ -3086,10 +3156,11 @@ def _s2_kind_register(s2_list: dict, s2_assignments: dict) -> dict:
 
 def _identity_key(section: str, item: dict) -> str:
     """The section-aware kind-freeze identity (E4 merge-key semantics minus
-    the kind, so a re-typed S4 duplicate is caught)."""
+    the kind, so a re-typed S4 duplicate is caught). Coerces via str() —
+    a numeric/non-str name or content must not raise (review FIX C)."""
     if section == "entities":
-        return _norm(item.get("name"))
-    return _norm(item.get("content"))
+        return _norm(str(item.get("name") or ""))
+    return _norm(str(item.get("content") or ""))
 
 
 def _restamp_s2_kinds(merged: dict, register: dict,
@@ -3111,7 +3182,7 @@ def _restamp_s2_kinds(merged: dict, register: dict,
             by_name: dict[str, list[dict]] = {}
             for it in items:
                 if isinstance(it, dict):
-                    by_name.setdefault(_norm(it.get("name")), []).append(it)
+                    by_name.setdefault(_norm(str(it.get("name") or "")), []).append(it)
             for name, group in by_name.items():
                 if len(group) <= 1:
                     continue
@@ -3172,7 +3243,7 @@ def _rekey_slots(embed_list: dict) -> int:
                 # never copy the sentinel into a slot kind — _clean_slots
                 # would emit a spurious "minted slot kind" warning for it
                 continue
-            kind_by_name[_norm(e["name"])] = k
+            kind_by_name[_norm(str(e["name"]) or "")] = k
     rekeyed = 0
     for section in ("points", "events"):
         for it in embed_list.get(section) or []:
@@ -3184,7 +3255,7 @@ def _rekey_slots(embed_list: dict) -> int:
             for role in ("subject", "object"):
                 for s in slots.get(role) or []:
                     if isinstance(s, dict) and s.get("name"):
-                        k = kind_by_name.get(_norm(s["name"]))
+                        k = kind_by_name.get(_norm(str(s["name"]) or ""))
                         if k and str(s.get("kind")) != k:
                             s["kind"] = k
                             rekeyed += 1
@@ -3208,8 +3279,18 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     S3 (real-backend search) → S4 (gap review) → S5 (embed execution).
 
     ``kind_classifier`` (#1695 Task 5) is the injected classify-later seam:
-    None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline,
-    byte-identical (the only new code on the off-path is the branch check).
+    None + ``TORTOISE_CLASSIFY_LATER`` unset → the LEGACY pipeline — the
+    classify-later machinery (classifier passes, kind-preservation re-stamp,
+    slot re-key) is entirely off-path, and the flag-off renders are
+    byte-identical to main. Scope of that byte-identity guarantee: the
+    DEFAULT (verbose) render + the shared pipeline stages — NOT the whole
+    result dict. Documented drifts, not regressions: (a) the chain enforcer
+    (Task 1) runs UNCONDITIONALLY on every arm (the A/B holds it constant)
+    and may deterministically rewire about_entities on the flag-off path;
+    (b) compact-mode S2 story-threading (``_select_pack_kinds``) is a
+    documented compact-only drift; (c) two ADDITIVE result keys
+    (``chain_enforcer`` / ``classify_later``) are always present — empty
+    blocks when the flag is off.
     When set (or the env toggle is on), the stage order becomes
     S1 → S2 → classify(S2) → S3 → S4 → E4+re-stamp → classify(union,
     kind-missing only) → slot re-key → resolve_entities → post-resolution
@@ -3749,15 +3830,20 @@ def _bump_census_class(error_census: dict[str, int], cls: str) -> None:
     """Class-explicit census bump (D1, #1746) — the deterministic-append
     rule: every ``errors.append`` site in ``extract_session_v2`` pairs
     exactly ONE census class, so ``len(errors) == sum(error_census)`` holds
-    structurally (criterion 2; the pilot's 16-vs-14 drift is gone).
+    structurally for the raise-paired classes (criterion 2; the pilot's
+    16-vs-14 drift is gone).
 
-    #1695 Task 5 EXCEPTION (documented, flag-only): the classify-later
-    classes (``classify_error`` / ``embedding_error`` /
-    ``unclassified_terminal``) are ADDITIVE observability — the classifier
-    is fail-open (never raises), so no ``errors`` entry pairs them. The
-    structural rule applies to the legacy classes; the flag-only classes
-    are governed by their own A/B thresholds (parse-census equality
-    computes on the class INTERSECTION, per the plan)."""
+    #1695 Task 5 — DUAL-provenance classes (documented, flag-only):
+    ``classify_error`` is BOTH raise-paired (the classify(S2)/classify(union)
+    exception handlers append an ``errors`` entry AND bump this class) AND
+    additively counted per-item by ``_bump_classify_census`` (the
+    classifier's fail-open per-item counters — rerank/adjudication/retrieval
+    failures never raise, so no ``errors`` entry pairs THOSE bumps).
+    ``embedding_error`` / ``unclassified_terminal`` are ADDITIVE ONLY (no
+    ``errors`` entry pairs them). The structural len-equality holds on the
+    raise-paired classes; the flag-only classes are governed by their own
+    A/B thresholds (parse-census equality computes on the class
+    INTERSECTION, per the plan)."""
     error_census[cls] = error_census.get(cls, 0) + 1
 
 

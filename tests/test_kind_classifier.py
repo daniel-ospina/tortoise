@@ -180,6 +180,20 @@ class TestKnnCore:
 
 
 class TestNearMissRerank:
+    def test_rerank_failure_fail_open(self, monkeypatch, classifier):
+        """A raising near-miss rerank must not abort the whole batch —
+        per-item kNN top-1 fallback + classify_error census (FIX J)."""
+        def boom(kind):
+            raise RuntimeError("nearMisses table corrupt")
+
+        monkeypatch.setattr(classifier.index, "near_misses", boom)
+        out = classifier.classify_items(_items(("entity", "the ticket code")))
+        assert out["stats"]["classify_errors"] == 1
+        a = out["assignments"]["i0"]
+        assert a["mode"] == "knn", "kNN top-1 fallback, not a batch abort"
+        assert a["kind"] == "dev:code"  # raw kNN top-1 (the rerank never ran)
+        assert any("rerank failed" in w for w in out["warnings"])
+
     def test_one_sided_near_miss_tie_breaks_to_primary(self, classifier):
         """ticket+code tie; dev:issue declares dev:code a nearMiss (one-
         sided) → the rerank prefers dev:issue (the non-decoy), mode=rerank,
@@ -243,6 +257,36 @@ class TestAdjudication:
         assert out["assignments"]["i0"]["kind"] == "core:plan"
         assert out["assignments"]["i0"]["mode"] == "llm"
         assert out["assignments"]["i1"]["kind"] == "core:workflow"
+
+    def test_adjudication_compact_keys_map_back(self):
+        """FIX I: the adjudication payload uses COMPACT batch-position keys
+        (i0, i1, ...) — raw ids like 'entities:the ticket fix#0' get
+        normalized by real LLMs (spaces/colons/hashes) and would be
+        closed-vocab-rejected, silently burning the kNN fallback. The
+        response lookup maps the compact keys back to the real ids."""
+
+        def resp(system, user):
+            assert '"i0"' in user and '"i1"' in user
+            assert "entities:the ticket fix#0" not in user, \
+                "raw ids must not reach the payload"
+            return json.dumps({"i0": "core:plan", "i1": "core:workflow"})
+
+        clf = self._clf(MockModel(resp))
+        items = [
+            {"id": "entities:the ticket fix#0", "type": "entity",
+             "text": "the plan workflow"},
+            {"id": "events:went live#0", "type": "entity",
+             "text": "the workflow plan"},
+        ]
+        out = clf.classify_items(items)
+        assert out["stats"]["assigned_llm"] == 2
+        assert out["stats"]["closed_vocab_rejects"] == 0
+        assert out["assignments"]["entities:the ticket fix#0"]["kind"] == \
+            "core:plan"
+        assert out["assignments"]["entities:the ticket fix#0"]["mode"] == \
+            "llm"
+        assert out["assignments"]["events:went live#0"]["kind"] == \
+            "core:workflow"
 
     def test_adjudication_failure_falls_back(self, monkeypatch):
         """BoomModel → fail-open kNN top-1 fallback AND the failed batch's
@@ -414,6 +458,28 @@ class TestEvalBits:
         assert "adjudication_tail_rate" in result
         assert result["pack_stratum"] == {"bits": 1, "misses": 0}
         assert result["sentinel_rate"] == 0.0
+        assert result["bare_confusions"] == 0
+
+    def test_evaluate_bits_bare_name_confusion_not_exact(self):
+        """FIX H: a same-bare-different-namespace match (dev:issue vs
+        pm:issue) is a CONFUSION, not a hit — counting it in `exact` would
+        inflate precision when the classifier picks the right bare kind in
+        the wrong namespace."""
+        gold = [
+            {
+                "id": "b1",
+                "content": "the ticket fix",
+                "type": "entity",
+                "gold_kind": "pm:issue",  # classifier assigns dev:issue
+                "split": "calibrate",
+                "provenance": {"source": "t", "author": "a"},
+            },
+        ]
+        result = evaluate_bits(gold, arm="compact", encoder=KeywordEncoder())
+        assert result["bare_confusions"] == 1
+        assert result["precision"] == 0.0, \
+            "a bare-only match must not count as exact"
+        assert result["pack_stratum"]["misses"] == 0  # bare still matches
 
 
 # ── Real-model smoke subset (bge-small cached; skips otherwise) ────────────
