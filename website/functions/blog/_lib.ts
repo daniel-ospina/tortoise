@@ -1,13 +1,13 @@
 // Shared blog rendering helpers — used by functions/blog/[[path]].ts.
-// Not routed (underscore-prefixed helper file).
+// Not routed (underscore-prefixed helper file). ZERO-DEPENDENCY: a compact,
+// safety-first markdown renderer (escape everything; emit only allowlisted
+// tags) — keeps the site's deploy pipeline dependency-free (no functions
+// node_modules, no wrangler bundling, no nanoid/esbuild issues).
 //
 // Env bindings required (Pages Function environment variables):
 //   SUPABASE_URL       e.g. https://ybetwichurajbfswfeqa.supabase.co
 //   SUPABASE_ANON_KEY  public anon key (client-safe — public reads only)
 // Local dev: wrangler pages dev reads .env / .dev.vars
-
-import { marked } from "marked";
-import sanitizeHtml from "sanitize-html";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 export interface BlogPost {
@@ -32,89 +32,218 @@ export interface Env {
 }
 
 export const SITE_URL = "https://tortoise.premiselabs.co";
+export const SLUG_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/; // shared with the agent API (#1795)
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 
-// ── Supabase REST (anon — published-only reads are RLS-gated) ──────────────
-export function supabaseRql(env: Env, table: string): string {
-  const base = env.SUPABASE_URL ?? "https://ybetwichurajbfswfeqa.supabase.co";
-  return `${base}/rest/v1/${table}`;
+export function escapeHtml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
+// https/http absolute URLs only — blocks javascript:, data:, protocol-relative.
+export function validUrl(u: string): boolean {
+  try {
+    const p = new URL(u);
+    return p.protocol === "https:" || p.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+// ── Supabase REST (anon — published-only reads are RLS-gated) ──────────────
+function supabaseBase(env: Env): string {
+  if (!env.SUPABASE_URL) throw new Error("SUPABASE_URL not configured");
+  return `${env.SUPABASE_URL}/rest/v1`;
+}
+
+function rqlHeaders(env: Env): Record<string, string> {
+  const key = env.SUPABASE_ANON_KEY ?? "";
+  return { apikey: key, Authorization: `Bearer ${key}`, Accept: "application/json" };
+}
+
+const POST_COLS =
+  "id,slug,title,body,excerpt,cover_image_url,tags,author,meta_title,meta_description,published_at,updated_at";
+
 export async function fetchPublishedPosts(env: Env): Promise<BlogPost[]> {
-  const url = supabaseRql(env, "blog_posts");
-  const res = await fetch(
-    `${url}?select=id,slug,title,body,excerpt,cover_image_url,tags,author,meta_title,meta_description,published_at,updated_at` +
-      `&status=eq.published&hold_for_review=eq.false&order=published_at.desc`,
-    {
-      headers: {
-        apikey: env.SUPABASE_ANON_KEY ?? "",
-        Authorization: `Bearer ${env.SUPABASE_ANON_KEY ?? ""}`,
-        Accept: "application/json",
-      },
-    },
-  );
+  // Index does NOT need body — omit it (no N+1, no 100KB/post over-fetch).
+  const cols = POST_COLS.replace(",body", "");
+  const url = `${supabaseBase(env)}/blog_posts?select=${encodeURIComponent(cols)}` +
+    `&status=eq.published&hold_for_review=eq.false&order=published_at.desc`;
+  const res = await fetch(url, { headers: rqlHeaders(env) });
   if (!res.ok) throw new Error(`supabase ${res.status}`);
   const rows = (await res.json()) as BlogPost[];
   return rows.map((r) => ({ ...r, tags: r.tags ?? [] }));
 }
 
 export async function fetchPostBySlug(env: Env, slug: string): Promise<BlogPost | null> {
-  const url = supabaseRql(env, "blog_posts");
-  const res = await fetch(
-    `${url}?select=id,slug,title,body,excerpt,cover_image_url,tags,author,meta_title,meta_description,published_at,updated_at` +
-      `&slug=eq.${encodeURIComponent(slug)}&status=eq.published&hold_for_review=eq.false&limit=1`,
-    {
-      headers: {
-        apikey: env.SUPABASE_ANON_KEY ?? "",
-        Authorization: `Bearer ${env.SUPABASE_ANON_KEY ?? ""}`,
-        Accept: "application/json",
-      },
-    },
-  );
+  const url = `${supabaseBase(env)}/blog_posts?select=${encodeURIComponent(POST_COLS)}` +
+    `&slug=eq.${encodeURIComponent(slug)}&status=eq.published&hold_for_review=eq.false&limit=1`;
+  const res = await fetch(url, { headers: rqlHeaders(env) });
   if (!res.ok) throw new Error(`supabase ${res.status}`);
   const rows = (await res.json()) as BlogPost[];
   return rows[0] ?? null;
 }
 
-// ── Markdown → sanitized HTML (plan §6 markdown contract) ──────────────────
-marked.setOptions({ gfm: true, breaks: false });
+// ── Markdown → HTML (zero-dep, escape-first — plan §6 markdown contract) ───
+// Supported subset: h2/h3/h4, p, ul/ol/li, blockquote, pre/code, inline
+// strong/em/code, links, images, tables, hr. ALL text content is escaped;
+// only allowlisted tags are emitted; href/src validated https/http.
 
-const ALLOWED_TAGS = [
-  "p", "h2", "h3", "h4", "ul", "ol", "li", "a", "img", "blockquote",
-  "code", "pre", "strong", "em", "table", "thead", "tbody", "tr", "th", "td",
-];
-
-export function renderMarkdown(markdown: string): string {
-  const raw = marked.parse(markdown, { async: false }) as string;
-  return sanitizeHtml(raw, {
-    allowedTags: ALLOWED_TAGS,
-    allowedAttributes: {
-      a: ["href", "target", "rel"],
-      img: ["src", "alt"],
-      th: ["align"],
-      td: ["align"],
-    },
-    allowedSchemes: ["https", "http"],
-    // Never allow javascript:/data: URLs
-    allowProtocolRelative: false,
-    transformTags: {
-      a: (tagName: string, attribs: Record<string, string>): { tagName: string; attribs: Record<string, string> } => {
-        const href = attribs.href ?? "";
-        if (!/^https?:\/\//i.test(href)) return { tagName: "a", attribs: { href: "#" } };
-        return { tagName, attribs: { ...attribs, target: "_blank", rel: "noopener" } };
-      },
-      img: (tagName: string, attribs: Record<string, string>): { tagName: string; attribs: Record<string, string> } => {
-        const src = attribs.src ?? "";
-        if (!/^https?:\/\//i.test(src)) return { tagName: "img", attribs: { src: "", alt: attribs.alt ?? "" } };
-        return { tagName, attribs };
-      },
-    },
-  });
+function inline(text: string): string {
+  const re = /(`[^`]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(!\[([^\]]*)\]\(([^)\s]+)\))|(\[([^\]]*)\]\(([^)\s]+)\))/g;
+  let out = "";
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    out += escapeHtml(text.slice(last, m.index));
+    if (m[1] !== undefined) {
+      out += `<code>${escapeHtml(m[1].slice(1, -1))}</code>`;
+    } else if (m[2] !== undefined) {
+      out += `<strong>${escapeHtml(m[2].slice(2, -2))}</strong>`;
+    } else if (m[3] !== undefined) {
+      out += `<em>${escapeHtml(m[3].slice(1, -1))}</em>`;
+    } else if (m[4] !== undefined) {
+      const src = m[6] ?? "";
+      const safeSrc = validUrl(src) ? escapeHtml(src) : "";
+      out += `<img src="${safeSrc}" alt="${escapeHtml(m[5] ?? "")}">`;
+    } else if (m[7] !== undefined) {
+      const href = m[9] ?? "";
+      const safeHref = validUrl(href) ? escapeHtml(href) : "#";
+      out += `<a href="${safeHref}" target="_blank" rel="noopener">${escapeHtml(m[8] ?? "")}</a>`;
+    }
+    last = re.lastIndex;
+  }
+  out += escapeHtml(text.slice(last));
+  return out;
 }
 
+export function renderMarkdown(markdown: string): string {
+  const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+  const out: string[] = [];
+  let i = 0;
+
+  const flushPara = (buf: string[]): void => {
+    if (buf.length) out.push(`<p>${inline(buf.join("\n"))}</p>`);
+    buf.length = 0;
+  };
+
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // Fenced code block
+    if (/^```/.test(line)) {
+      const lang = line.slice(3).trim();
+      const buf: string[] = [];
+      i++;
+      while (i < lines.length && !/^```/.test(lines[i])) {
+        buf.push(lines[i]);
+        i++;
+      }
+      i++; // skip closing fence
+      out.push(`<pre><code${lang ? ` class="language-${escapeHtml(lang)}"` : ""}>${escapeHtml(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+
+    // Heading
+    const h = /^(#{2,4})\s+(.*)$/.exec(line);
+    if (h) {
+      flushPara(paragraphBuf);
+      const level = h[1].length;
+      out.push(`<h${level}>${inline(h[2])}</h${level}>`);
+      i++;
+      continue;
+    }
+
+    // Blockquote
+    if (/^>\s?/.test(line)) {
+      flushPara(paragraphBuf);
+      const buf: string[] = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) {
+        buf.push(lines[i].replace(/^>\s?/, ""));
+        i++;
+      }
+      out.push(`<blockquote>${inline(buf.join(" "))}</blockquote>`);
+      continue;
+    }
+
+    // Unordered list
+    if (/^[-*]\s+/.test(line)) {
+      flushPara(paragraphBuf);
+      const items: string[] = [];
+      while (i < lines.length && /^[-*]\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^[-*]\s+/, ""));
+        i++;
+      }
+      out.push(`<ul>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ul>`);
+      continue;
+    }
+
+    // Ordered list
+    if (/^\d+\.\s+/.test(line)) {
+      flushPara(paragraphBuf);
+      const items: string[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(lines[i].replace(/^\d+\.\s+/, ""));
+        i++;
+      }
+      out.push(`<ol>${items.map((it) => `<li>${inline(it)}</li>`).join("")}</ol>`);
+      continue;
+    }
+
+    // Table (consecutive | rows; second row = separator)
+    if (line.trim().startsWith("|") && i + 1 < lines.length && /^\|[\s:|-]+\|?$/.test(lines[i + 1].trim())) {
+      flushPara(paragraphBuf);
+      const headerCells = line.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim());
+      i += 2;
+      const bodyRows: string[][] = [];
+      while (i < lines.length && lines[i].trim().startsWith("|")) {
+        bodyRows.push(lines[i].trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim()));
+        i++;
+      }
+      out.push(
+        `<table><thead><tr>${headerCells.map((c) => `<th>${inline(c)}</th>`).join("")}</tr></thead>` +
+        `<tbody>${bodyRows.map((r) => `<tr>${r.map((c) => `<td>${inline(c)}</td>`).join("")}</tr>`).join("")}</tbody></table>`,
+      );
+      continue;
+    }
+
+    // Horizontal rule
+    if (/^\s*(---|\*\*\*)\s*$/.test(line)) {
+      flushPara(paragraphBuf);
+      out.push("<hr>");
+      i++;
+      continue;
+    }
+
+    // Paragraph line (accumulate until a structural line or blank)
+    if (line.trim() === "") {
+      flushPara(paragraphBuf);
+      i++;
+      continue;
+    }
+    paragraphBuf.push(line);
+    i++;
+  }
+  flushPara(paragraphBuf);
+
+  return out.join("\n");
+}
+
+// paragraph accumulation buffer (declared after use in closures above)
+const paragraphBuf: string[] = [];
+
 // ── HTML shell ─────────────────────────────────────────────────────────────
+// JSON-LD must never break out of the <script> block (stored XSS): escape < >.
 export function jsonLd(obj: unknown): string {
-  return `<script type="application/ld+json">${JSON.stringify(obj)}</script>`;
+  const json = JSON.stringify(obj)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026");
+  return `<script type="application/ld+json">${json}</script>`;
 }
 
 export function headHtml(opts: {
@@ -127,7 +256,8 @@ export function headHtml(opts: {
   noindex?: boolean;
 }): string {
   const { title, description, url, image = null, type = "website", jsonLd: schemas = [], noindex = false } = opts;
-  const imageTag = image ? `<meta property="og:image" content="${image}">` : "";
+  const safeImage = image && validUrl(image) ? escapeHtml(image) : "";
+  const imageTag = safeImage ? `<meta property="og:image" content="${safeImage}">` : "";
   const noindexTag = noindex ? `<meta name="robots" content="noindex,nofollow">` : "";
   const schemaTags = schemas.map(jsonLd).join("\n");
   return `
@@ -147,18 +277,6 @@ ${imageTag}
 ${noindexTag}
 ${schemaTags}`;
 }
-
-export function escapeHtml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#39;");
-}
-
-// consent.js + PostHog snippet — statically included by the render Function
-// head (#1794 owns the head; #1799 wires client-side events only).
 
 export function htmlPage(opts: { head: string; body: string; extraHead?: string }): string {
   return `<!DOCTYPE html>
@@ -215,6 +333,7 @@ h1.art-title{font-family:var(--serif);font-size:40px;line-height:1.2;color:#fff;
 .art-body table{border-collapse:collapse;margin:16px 0;width:100%}
 .art-body th,.art-body td{border:1px solid var(--border);padding:8px 12px;text-align:left}
 .art-body img{max-width:100%;border-radius:8px;border:1px solid var(--border);margin:20px 0}
+.art-body hr{border:0;border-top:1px solid var(--border);margin:24px 0}
 .end-note{margin-top:40px;padding:20px;border:1px solid var(--border);border-radius:10px;background:var(--bg-soft);color:var(--text-dim);font-size:13px}
 .end-note strong{color:var(--accent)}
 .mobile-share{display:none}
@@ -254,7 +373,6 @@ export function formatDate(iso: string | null): string {
 }
 
 export function shareBarHtml(url: string, title: string): string {
-  const encoded = encodeURIComponent(url);
   const text = encodeURIComponent(title);
   const utm = (n: string) => `${url}?utm_source=${n}&utm_medium=share`;
   return `<div class="share-bar">
@@ -273,7 +391,7 @@ export function shareBarHtml(url: string, title: string): string {
 </div>`;
 }
 
-// Shared-response helpers
+// ── Shared-response helpers ─────────────────────────────────────────────────
 export function ok(html: string, cache: string): Response {
   return new Response(html, {
     status: 200,

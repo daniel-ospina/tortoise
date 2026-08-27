@@ -10,8 +10,8 @@
 
 import {
   type Env, fetchPublishedPosts, fetchPostBySlug, renderMarkdown,
-  headHtml, htmlPage, navHtml, formatDate, shareBarHtml,
-  ok, notFound, upstreamError, SITE_URL, escapeHtml,
+  headHtml, htmlPage, navHtml, formatDate, shareBarHtml, validUrl,
+  ok, notFound, upstreamError, SITE_URL, escapeHtml, SLUG_RE,
 } from "./_lib.ts";
 
 export const onRequestGet: PagesFunction<Env> = async (context) => {
@@ -50,11 +50,10 @@ async function renderIndex(env: Env, url: URL): Promise<Response> {
   const tags = [...new Set(posts.flatMap((p) => p.tags))].sort();
 
   const cards = filtered.map((p) => {
-    const cover = p.cover_image_url
-      ? `style="background-image:url('${escapeHtml(p.cover_image_url)}')"`
-      : "";
+    const coverUrl = p.cover_image_url && validUrl(p.cover_image_url) ? p.cover_image_url : null;
+    const cover = coverUrl ? `style="background-image:url('${escapeHtml(coverUrl)}')"` : "";
     const excerpt = p.excerpt ? `<p>${escapeHtml(p.excerpt)}</p>` : "";
-    return `<a class="card" href="/blog/${p.slug}">
+    return `<a class="card" href="/blog/${escapeHtml(p.slug)}">
   <div class="cover" ${cover}></div>
   <div class="body">
     <h3>${escapeHtml(p.title)}</h3>
@@ -71,7 +70,9 @@ ${tags.map((t) => `<a class="tag ${tag === t ? "on" : ""}" href="/blog?tag=${enc
 
   const listHtml = filtered.length
     ? `<div class="grid">${cards}</div>`
-    : `<div class="empty">No posts yet — the first one is being written by an agent right now.</div>`;
+    : posts.length
+      ? `<div class="empty">No posts tagged “${escapeHtml(tag ?? "")}” yet.</div>`
+      : `<div class="empty">No posts yet — the first one is being written by an agent right now.</div>`;
 
   const indexUrl = tag ? `${SITE_URL}/blog?tag=${encodeURIComponent(tag)}` : `${SITE_URL}/blog`;
   const head = headHtml({
@@ -108,7 +109,7 @@ ${tags.map((t) => `<a class="tag ${tag === t ? "on" : ""}" href="/blog?tag=${enc
 
 // ── /blog/:slug article ────────────────────────────────────────────────────
 async function renderArticle(env: Env, slug: string): Promise<Response> {
-  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug)) return notFound();
+  if (!SLUG_RE.test(slug)) return notFound();
 
   const post = await fetchPostBySlug(env, slug);
   if (!post) return notFound();
@@ -151,7 +152,7 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
   });
 
   const tags = post.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join(" ");
-  const cover = post.cover_image_url
+  const cover = post.cover_image_url && validUrl(post.cover_image_url)
     ? `<div class="cover-img" style="background-image:url('${escapeHtml(post.cover_image_url)}')"></div>`
     : "";
 
