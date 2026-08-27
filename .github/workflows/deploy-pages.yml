@@ -66,6 +66,19 @@ jobs:
           else
             echo "CNAME already correct"
           fi
+      - name: Build blog admin SPA (vite) → stage into website/admin/ (#1800)
+        # The admin gate Function serves /admin/index.html from ASSETS; the
+        # built app must land at website/admin/ before the Pages deploy. Env
+        # comes from repo secrets (VITE_* are public-safe — anon key).
+        run: |
+          cd website/apps/blog-admin
+          npm ci
+          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+            npm run build
+          mkdir -p ../../admin
+          cp -r dist/* ../../admin/
+          test -s ../../admin/index.html
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
