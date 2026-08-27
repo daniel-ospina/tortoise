@@ -101,19 +101,24 @@ class KindIndex:
         """Build (and optionally persist) the index for the given spec.
 
         ``encoder`` is the injectable seam (default: the production
-        ``EmbeddingModel`` singleton + TF-IDF degrade). Memoized per cache
-        key — repeated builds with the same spec return the cached index
-        (a memo-hit with a NEW persist target still writes there).
+        ``EmbeddingModel`` singleton + TF-IDF degrade). The load-once memo
+        applies to DEFAULT-encoder builds only — an injected stub encoder
+        changes the vector space, so its builds are never memoized (a
+        stub build must never shadow a production index under the same
+        spec key, and vice versa). A memo-hit with a NEW persist target
+        still writes there.
         """
         key = cache_key_for(spec)
-        with _INDEX_LOCK:
-            cached = _INDEX_CACHE.get(key)
-            if cached is not None:
-                if persist:
-                    target = KindIndex._path_for(key, cache_dir)
-                    if not target.exists():
-                        cached.persist(cache_dir=cache_dir)
-                return cached
+        memoize = encoder is None
+        if memoize:
+            with _INDEX_LOCK:
+                cached = _INDEX_CACHE.get(key)
+                if cached is not None:
+                    if persist:
+                        target = KindIndex._path_for(key, cache_dir)
+                        if not target.exists():
+                            cached.persist(cache_dir=cache_dir)
+                    return cached
         enc = encoder or _DefaultEncoder()
         kind_names = sorted(spec)
         texts = [spec[k]["text"] for k in kind_names]
@@ -121,8 +126,9 @@ class KindIndex:
         idx = cls(kind_names, vectors, {k: dict(spec[k]) for k in kind_names}, degraded=degraded)
         if persist:
             idx.persist(cache_dir=cache_dir)
-        with _INDEX_LOCK:
-            _INDEX_CACHE[key] = idx
+        if memoize:
+            with _INDEX_LOCK:
+                _INDEX_CACHE[key] = idx
         return idx
 
     @classmethod
@@ -193,7 +199,7 @@ class KindIndex:
         nv = v / (np.linalg.norm(v) or 1.0)
         sims = self._norm @ nv.T
         sims = sims[:, 0]
-        order = np.argsort(-sims)
+        order = np.argsort(-sims, kind="stable")  # stable: equal ties keep index order
         out: list[tuple[str, float]] = []
         restrict_set = {r.lower() for r in restrict} if restrict else None
         for j in order:

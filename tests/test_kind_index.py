@@ -148,11 +148,30 @@ class TestNearest:
 
 
 class TestMemoizationAndLazy:
-    def test_build_memoized_per_spec(self, spec):
+    def test_stub_builds_never_memoized(self, spec):
+        """An injected stub encoder changes the vector space — its builds
+        must never be memoized (a stub build must not shadow a production
+        index under the same spec key, or vice versa)."""
         enc = StubEncoder()
         KindIndex.build(spec, encoder=enc, persist=False)
         KindIndex.build(spec, encoder=enc, persist=False)
-        assert enc.calls == 1  # second build hits the memo
+        assert enc.calls == 2  # fresh build each time (no memo for stubs)
+
+    def test_default_encoder_build_memoized(self, spec, monkeypatch):
+        """The PRODUCTION (default-encoder) build is load-once memoized."""
+        import tortoise.kind_index as ki
+        calls = {"n": 0}
+
+        class FakeDefault:
+            def encode(self, texts):
+                calls["n"] += 1
+                rng = np.random.default_rng(1)
+                return rng.standard_normal((len(texts), 4)), False
+
+        monkeypatch.setattr(ki, "_DefaultEncoder", FakeDefault)
+        KindIndex.build(spec, persist=False)
+        KindIndex.build(spec, persist=False)
+        assert calls["n"] == 1  # second default build hits the memo
 
     def test_import_has_no_torch(self):
         """Lazy-import guard: importing tortoise.kind_index must not pull
