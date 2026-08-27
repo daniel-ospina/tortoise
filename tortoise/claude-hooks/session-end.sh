@@ -27,12 +27,18 @@ set -euo pipefail
 
 # Claude Code passes SessionEnd hook metadata as JSON on stdin:
 # {"session_id": "...", "transcript_path": "...", "cwd": "..."}
-TRANSCRIPT_PATH="$(python3 -c 'import json,sys
+# #1727 (Task 14, T1-P11): the REAL session_id is forwarded as the capture
+# idempotency key (re-POSTs of the same session_id converge to one Session);
+# harness='claude' is passed for per-harness receipts.
+META="$(python3 -c 'import json,sys
 try:
     d = json.load(sys.stdin)
     print(d.get("transcript_path") or "")
+    print(d.get("session_id") or "")
 except Exception:
-    print("")' 2>/dev/null || true)"
+    print(""); print("")' 2>/dev/null || true)"
+TRANSCRIPT_PATH="$(printf '%s\n' "$META" | sed -n '1p')"
+SESSION_ID="$(printf '%s\n' "$META" | sed -n '2p')"
 
 [ -n "$TRANSCRIPT_PATH" ] || exit 0
 [ -f "$TRANSCRIPT_PATH" ] || exit 0
@@ -116,11 +122,18 @@ from tortoise.__main__ import main
 os.environ.setdefault('TORTOISE_INDEX_CHILD_STDERR', '')
 raise SystemExit(main(['index', 'directory', '$SWEEP_CORPUS', '--metadata']))
 " >/dev/null 2>&1 &
+  # #1727 (Task 14): harness + the real session_id (idempotency key) pass
+  # through to the capture payload — via env (the session id is untrusted
+  # shell input; never interpolated into the -c string).
+  TORTOISE_HOOK_SESSION_ID="$SESSION_ID" \
   "$PYTHON_BIN" -c "
-import sys
+import sys, os
 sys.path.insert(0, '$TORTOISE_MODULE')
 from tortoise.__main__ import main
-raise SystemExit(main(['session', 'capture', '--file', '$TMP']))
+argv = ['session', 'capture', '--file', '$TMP', '--harness', 'claude']
+if os.environ.get('TORTOISE_HOOK_SESSION_ID'):
+    argv += ['--session-id', os.environ['TORTOISE_HOOK_SESSION_ID']]
+raise SystemExit(main(argv))
 " 2>/dev/null || exit 0
 else
   # Round-10 P3: sweep first (capture failure must not disable reindexing).
@@ -143,5 +156,9 @@ print(session_corpus_dir())" 2>/dev/null || true)"
     TORTOISE_INDEX_CHILD_STDERR="$TORTOISE_INDEX_CHILD_STDERR" \
       nohup "$TORTOISE_BIN" index directory "$SWEEP_CORPUS" --metadata >/dev/null 2>&1 &
   fi
-  tortoise session capture --file "$TMP" 2>/dev/null || exit 0
+  # #1727 (Task 14, T1-P11): capture with harness + the real session_id
+  # (idempotency key — re-POST converges to one Session, one receipt).
+  CAPTURE_ARGS=(--file "$TMP" --harness claude)
+  [ -n "$SESSION_ID" ] && CAPTURE_ARGS+=(--session-id "$SESSION_ID")
+  tortoise session capture "${CAPTURE_ARGS[@]}" 2>/dev/null || exit 0
 fi

@@ -549,6 +549,27 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         rest_spec=RestSpec(method="GET", path="/v1/context"),
     ),
     ToolDefinition(
+        name="tortoise_session_capture",
+        description="File an agent session into the graph (epic #909 capture path): "
+                    "turns become episodic Points, the conversation is LLM-extracted into "
+                    "epistemic Points, and the Session links to subject/project entities. "
+                    "#1727 Slice 2: server-enforced consent — returns 403 when the team has "
+                    "not enabled session capture; 402 at quota; 503 without an LLM provider; "
+                    "422 for an invalid harness. session_id is the idempotency key (re-filing "
+                    "the same id mints zero new nodes). Only call this when the team has "
+                    "enabled session capture (the dashboard 'Memory sources > Agent sessions' "
+                    "toggle); if the call fails, tell the user it wasn't filed and do NOT "
+                    "retry. Requires hosted mode — stdio/self-hosted returns an honest error "
+                    "(no local fallback that bypasses the consent gate).",
+        annotations=_rw(),
+        http_policy=True,
+        # Custom handler in mcp_server.py — the REST /v1/sessions route stays
+        # hand-written in hosted_api.py (raw-Cypher op, Gate 3 pre-step
+        # decision); no rest_spec here so the router adapter never double-
+        # registers the hand-written route.
+        sdk_method="",
+    ),
+    ToolDefinition(
         name="tortoise_issue_insight",
         description="Return a compact 'there's more in the graph' insight for a would-be "
                     "issue — call BEFORE filing. Surfaces cross-session decisions / EP-tagged "
@@ -1128,6 +1149,10 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_list_graphs": "sessions", "tortoise_list_namespaces": "sessions",
     "tortoise_packs_list": "admin",
     "tortoise_events_poll": "sessions",  # #432 CDC/subscription — not a memory tool
+    # #1727 (Task 13): the session-capture filing tool groups under
+    # "sessions" (else it falls to the "memory" default and is filtered out
+    # of sessions-group surfaces — pinned by test_session_tool_grouped_sessions).
+    "tortoise_session_capture": "sessions",
     # journal
     "tortoise_checkpoint": "journal", "tortoise_diary_write": "journal",
     "tortoise_diary_read": "journal", "tortoise_file_decision": "journal",

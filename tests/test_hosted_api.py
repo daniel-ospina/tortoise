@@ -140,6 +140,10 @@ def client():
 
     All /v1/* endpoints receive TEST_TEAM as the authenticated team.
     All TortoiseSDK instances use the same temp embedded DB.
+    #1727 (Slice 2, Task 11): the team's onboarding state is seeded with
+    session_recording=True — the server-enforced consent gate 403s un-opted
+    teams FIRST, so the session-capture tests must opt the team in (the
+    consent-negative tests seed their own state).
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
@@ -149,6 +153,15 @@ def client():
 
         # Patch SDK to use temp DB file
         _orig_init = _patch_tortoise_sdk_init(db_path)
+        import tortoise.hosted_api as ha_mod
+        # #1727 (Slice 2, Task 11): provision the Team node first (the state
+        # writer is MATCH...SET — a silent no-op without it), then opt the
+        # team in so the session-capture tests pass the consent gate.
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (t:Team {id:$id, onboarding_state:$st})",
+            params={"id": TEST_TEAM_ID, "st": "{}"},
+        )
+        ha_mod._update_onboarding_state(TEST_TEAM_ID, session_recording=True)
 
         try:
             with TestClient(app) as tc:
@@ -1103,10 +1116,12 @@ class TestSessionCapture:
 
     def test_capture_session_no_content_dedup_across_captures(self, client, monkeypatch):
         monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
-        """#490/#822: re-capturing the SAME session MERGEs turn Points but the
-        M2 LLM extraction writes fresh Points per capture — content-hash
-        dedup is a later pipeline stage (epic #909 W-2 #784), not part of
-        capture."""
+        """#490/#822 + #1727 (Task 11, T2-P2c): re-capturing the SAME
+        session_id is idempotent — the turn Points MERGE (1 total) and the
+        M2 LLM extraction is SKIPPED on the re-POST (session already existed),
+        so exactly ONE LLM point exists for the capture (the pre-1727
+        behavior minted fresh LLM points per capture; the plan pins the
+        idempotency scope = Session + turn Points, extraction skipped)."""
         conv = [
             {"role": "user", "content": "Let's use PostgreSQL for the backend."},
         ]
@@ -1115,16 +1130,19 @@ class TestSessionCapture:
         assert r1.status_code == 200, r1.text
         r2 = client.post("/v1/sessions", json=payload)
         assert r2.status_code == 200, r2.text
+        assert r2.json()["extraction_mode"] == "replayed", r2.json()
+        assert r2.json()["extracted"] == 0, r2.json()
 
         # Turn Point MERGEs across captures (idempotent): 1 turn point
-        # containing PostgreSQL + 2 LLM points (one per capture, no dedup).
+        # containing PostgreSQL + 1 LLM point (extraction ran once — the
+        # re-POST skipped it).
         import tortoise.hosted_api as ha_mod
         sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
         proj = sdk._get_proj()
         r = proj.g.query(
             "MATCH (p:Point) WHERE p.content CONTAINS 'PostgreSQL' RETURN count(p)"
         ).result_set
-        assert r[0][0] == 3, f"expected 3 (1 turn + 2 LLM points), got {r[0][0]}"
+        assert r[0][0] == 2, f"expected 2 (1 turn + 1 LLM), got {r[0][0]}"
 
     def test_capture_session_llm_points_are_fresh_ulids(self, client, monkeypatch):
         monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")  # M2-mock-specific
@@ -1363,6 +1381,12 @@ class TestSessionCapture:
         monkeypatch.setattr(_raw, "query", _boom_stamp)
         monkeypatch.setattr("tortoise.sdk.TortoiseSDK._get_proj",
                             lambda self: proj)
+        # #1727 (Task 11): the _get_proj patch also redirects the consent
+        # gate's REGISTRY read into the team projection (a namespace-shifted
+        # registry graph the fixture seed can't reach) — patch the gate read
+        # directly so this stamping-behavior test reaches the stamping block.
+        monkeypatch.setattr(ha_mod, "_get_onboarding_state",
+                            lambda team_id: {"session_recording": True})
         r = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r.status_code == 200, r.text

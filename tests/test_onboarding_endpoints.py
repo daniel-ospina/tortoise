@@ -259,3 +259,162 @@ class TestRegister:
     def test_register_missing_fields(self, client):
         r = client.post("/v1/register", json={})
         assert r.status_code < 500
+
+
+# ── #1727 Slice 2 (Task 11): STATE-KEY REGISTRATION TABLE ────────────
+# Every capture-surface key must be registered in BOTH live default-state
+# dicts + _ALLOWED_STATE_KEYS + the PATCH model — an unregistered key is
+# silently dropped by the _update_onboarding_state allowlist filter. The
+# parametrized test below makes the registration self-verifying.
+
+# The plan's registration table: capture receipts (bare + per-harness),
+# per-harness last-attempt failures, the re-ask flags, and the install
+# probes. PATCH model fields use underscores (pydantic field names cannot
+# carry hyphens) — the mapping table drives both the registration check and
+# the PATCH round-trip.
+_STATE_KEY_TABLE: dict[str, str] = {
+    "capture_revised": "capture_revised",
+    "capture_ask_shown": "capture_ask_shown",
+    "session_capture_receipt": "session_capture_receipt",
+    "session_capture_receipt_claude": "session_capture_receipt_claude",
+    "session_capture_receipt_claude-desktop": "session_capture_receipt_claude_desktop",
+    "session_capture_receipt_claude-web": "session_capture_receipt_claude_web",
+    "session_capture_receipt_codex": "session_capture_receipt_codex",
+    "session_capture_receipt_cursor": "session_capture_receipt_cursor",
+    "session_capture_receipt_pi": "session_capture_receipt_pi",
+    "session_capture_last_error_claude": "session_capture_last_error_claude",
+    "session_capture_last_error_claude-desktop": "session_capture_last_error_claude_desktop",
+    "session_capture_last_error_claude-web": "session_capture_last_error_claude_web",
+    "session_capture_last_error_codex": "session_capture_last_error_codex",
+    "session_capture_last_error_cursor": "session_capture_last_error_cursor",
+    "session_capture_last_error_pi": "session_capture_last_error_pi",
+    "install_probe_claude": "install_probe_claude",
+    "install_probe_pi": "install_probe_pi",
+}
+
+
+def test_state_keys_registered_parametrized(client):
+    """Task 11 (cycle-3 P1-2 fix, self-verifying): every capture-surface key
+    round-trips through BOTH live default-state dicts, the allowlist, and the
+    PATCH model — a key added to the table without registering it anywhere
+    fails here (the allowlist filter would silently drop it in production)."""
+    from tortoise.hosted_api import (
+        DEFAULT_ONBOARDING_STATE,
+        OnboardingStatePatchRequest,
+        _ALLOWED_STATE_KEYS,
+        _ONBOARDING_DEFAULT_STATE,
+    )
+    for state_key, patch_field in _STATE_KEY_TABLE.items():
+        assert state_key in _ONBOARDING_DEFAULT_STATE, \
+            f"{state_key} missing from _ONBOARDING_DEFAULT_STATE"
+        assert state_key in DEFAULT_ONBOARDING_STATE, \
+            f"{state_key} missing from DEFAULT_ONBOARDING_STATE (provision default)"
+        assert state_key in _ALLOWED_STATE_KEYS, \
+            f"{state_key} missing from _ALLOWED_STATE_KEYS"
+        assert patch_field in OnboardingStatePatchRequest.model_fields, \
+            f"{state_key} missing from the live PATCH model (field {patch_field})"
+        # PATCH round-trip: a type-appropriate value must survive the merge
+        # and read back (bool fields take True; timestamp keys take an ISO
+        # string).
+        patch_value = (True if state_key in ("capture_revised", "capture_ask_shown")
+                       else "2026-08-25T00:00:00Z")
+        r = client.patch("/v1/onboarding/state",
+                         json={patch_field: patch_value})
+        assert r.status_code == 200, r.text
+        assert r.json()["onboarding"][state_key] == patch_value, \
+            f"{state_key} did not round-trip through PATCH"
+
+
+def test_capture_surface_keys_shared_across_defaults():
+    """Task 11: the two live default-state dicts expose the SAME capture
+    surface — a key registered in one but not the other would diverge
+    depending on whether the team was provisioned pre/post-registration."""
+    from tortoise.hosted_api import (
+        DEFAULT_ONBOARDING_STATE,
+        _ONBOARDING_DEFAULT_STATE,
+    )
+    capture_keys = {k for k in _STATE_KEY_TABLE}
+    assert capture_keys <= set(_ONBOARDING_DEFAULT_STATE)
+    assert capture_keys <= set(DEFAULT_ONBOARDING_STATE)
+
+
+# ── #1727 Slice 2 (Task 14, T2-P1): install-probe round-trip ────────────
+
+
+def test_install_probe_round_trip(client):
+    """Task 14 (T2-P1): POST /v1/sessions/install-probe records the
+    install_probe_{harness} REGISTERED state key (harness + server timestamp
+    only — no content) and reads back. The probe is NOT consent-gated (it's
+    install telemetry, so the dashboard can show install status before
+    consent), but it IS get_current_team-gated (auth required — probes are
+    per-team state)."""
+    from tortoise.hosted_api import _get_onboarding_state
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
+    # Provision the Team node so state writes persist (the state writer is
+    # MATCH...SET — a silent no-op without the node).
+    from tortoise.hosted_api import _make_sdk
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.post("/v1/sessions/install-probe",
+                    json={"harness": "claude"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["harness"] == "claude", body
+    assert body["probe_at"], "server must stamp the probe time"
+    state = _get_onboarding_state("test-team-1")
+    assert state.get("install_probe_claude") == body["probe_at"], \
+        "install_probe_claude must be recorded verbatim (server-stamped)"
+    # pi probe lands on its own registered key (per-harness isolation).
+    r2 = client.post("/v1/sessions/install-probe",
+                     json={"harness": "pi"})
+    assert r2.status_code == 200, r2.text
+    state2 = _get_onboarding_state("test-team-1")
+    assert state2.get("install_probe_pi") == r2.json()["probe_at"]
+
+
+def test_install_probe_unregistered_harness_422(client):
+    """Task 14: a harness with no REGISTERED install_probe_ key (codex /
+    claude-desktop / claude-web / cursor — backfill-only or pending-spike
+    harnesses) → 422 at the model boundary, never a silent drop (an
+    unregistered key would be discarded by the allowlist filter and look
+    like a recorded probe)."""
+    from tortoise.hosted_api import _make_sdk
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.post("/v1/sessions/install-probe",
+                    json={"harness": "codex"})
+    assert r.status_code == 422, r.text
+
+
+def test_install_probe_requires_auth(unauth_client):
+    """Task 14: the probe is get_current_team-gated — no auth, no probe."""
+    r = unauth_client.post("/v1/sessions/install-probe",
+                           json={"harness": "claude"})
+    assert r.status_code == 401, r.text
+
+
+def test_install_probe_not_consent_gated(client):
+    """Task 14: an UN-OPTED team (session_recording=False) still records the
+    probe — the probe is unconditional install telemetry (harness + timestamp
+    only), deliberately NOT consent-gated so the dashboard can show install
+    status before consent. The capture POST itself remains 403-gated."""
+    from tortoise.hosted_api import _get_onboarding_state, _make_sdk
+    from tortoise.hosted_api import _update_onboarding_state
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    _update_onboarding_state("test-team-1", session_recording=False)
+    r = client.post("/v1/sessions/install-probe",
+                    json={"harness": "claude"})
+    assert r.status_code == 200, r.text
+    assert _get_onboarding_state("test-team-1").get("install_probe_claude")
+    # the consent gate is untouched: an un-opted capture POST is still 403.
+    r2 = client.post("/v1/sessions",
+                     json={"conversation": [
+                         {"role": "user", "content": "hello"}]})
+    assert r2.status_code == 403, r2.text

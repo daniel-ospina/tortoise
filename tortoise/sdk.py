@@ -1896,6 +1896,7 @@ class TortoiseSDK:
         session_id: str | None = None,
         *,
         max_turns: int = MAX_SESSION_TURNS,
+        harness: str | None = None,
     ) -> dict:
         """Capture an agent session into the graph (#312 delta 4, #822).
 
@@ -1976,10 +1977,22 @@ class TortoiseSDK:
                 "warnings": [],
             }
 
+        # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
+        # NEVER erases a stored value) — the conditional clause keeps the
+        # query valid in both embedded and Docker lanes (no unused binding).
+        # Review PR #1827 (parity with hosted_api.py): created_at uses
+        # coalesce so an idempotent re-POST preserves the ORIGINAL capture
+        # time.
+        _merge_sets = ["s.created_at=coalesce(s.created_at, $now)",
+                       "s.turn_count=$tc", "s.is_episodic=true"]
+        _merge_params = {"sid": session_id, "now": now,
+                         "tc": len(conversation)}
+        if harness:
+            _merge_sets.append("s.harness=$harness")
+            _merge_params["harness"] = harness
         proj.g.query(
-            "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
-            "    s.is_episodic=true",
-            params={"sid": session_id, "now": now, "tc": len(conversation)},
+            f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
+            params=_merge_params,
         )
 
         # NOTE: this per-turn loop (episodic turn Points) is duplicated from
