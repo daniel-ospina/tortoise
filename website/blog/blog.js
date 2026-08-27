@@ -1,8 +1,10 @@
 // Blog client JS — issue #1799.
-// Wires share-bar events (copy-link, native share) + consent-gated PostHog
-// events (share_click, article_read). The consent.js + PostHog snippet are
-// statically included in the SSR head (#1794) — this file does NOT add a
-// second snippet; it only fires events when posthog exists (consent granted).
+// Wires share-bar events (copy-link, native share on mobile) + consent-gated
+// PostHog events (share_click, article_read). The consent.js + PostHog
+// snippet are statically included in the SSR head (#1794) — consent.js owns
+// PostHog init (opted-out by default; opt-in on granted). This file does NOT
+// add a second snippet; it only fires events when window.posthog exists
+// (it always does; SDK-level gating decides whether events flow).
 //
 // Included on article pages via <script src="/blog/blog.js" defer>.
 
@@ -35,6 +37,31 @@
     setTimeout(function () { el.remove(); }, 1600);
   }
 
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text);
+    }
+    // Fallback: hidden textarea + execCommand (non-secure contexts, older Safari)
+    var ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    var ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch (e) {
+      ok = false;
+    }
+    ta.remove();
+    return ok ? Promise.resolve() : Promise.reject(new Error("copy failed"));
+  }
+
+  function isMobile() {
+    return typeof window.matchMedia === "function" && window.matchMedia("(max-width: 720px)").matches;
+  }
+
   function wireShareBar() {
     var buttons = document.querySelectorAll("[data-share]");
     Array.prototype.forEach.call(buttons, function (el) {
@@ -43,8 +70,7 @@
 
         if (network === "copy") {
           ev.preventDefault();
-          navigator.clipboard
-            .writeText(post.url)
+          copyText(post.url)
             .then(function () {
               toast("Link copied");
               track("share_click", { network: "copy" });
@@ -55,46 +81,59 @@
           return;
         }
 
+        // Mobile native share replaces the primary (X) share button — ONE
+        // share_click per physical click, correctly attributed.
+        var useNative =
+          network === "twitter" &&
+          typeof navigator !== "undefined" &&
+          typeof navigator.share === "function" &&
+          isMobile();
+        if (useNative) {
+          ev.preventDefault();
+          navigator
+            .share({ title: post.title, url: post.url })
+            .then(function () { track("share_click", { network: "native" }); })
+            .catch(function () { /* user cancelled — no-op */ });
+          return;
+        }
+
         // Non-copy share buttons: track the click (the anchor navigates).
         track("share_click", { network: network || "unknown" });
       });
     });
   }
 
-  function wireNativeShare() {
-    // If navigator.share is available (mobile), a long-press style native
-    // share replaces the anchor default on the primary share button.
-    if (typeof navigator !== "undefined" && navigator.share) {
-      var primary = document.querySelector('[data-share="twitter"]');
-      if (primary) {
-        primary.addEventListener("click", function (ev) {
-          ev.preventDefault();
-          navigator
-            .share({ title: post.title, url: post.url })
-            .then(function () { track("share_click", { network: "native" }); })
-            .catch(function () { /* user cancelled — no-op */ });
-        });
-      }
+  var readFired = false;
+  function measureThreshold() {
+    // Recompute on load/resize — images have no reserved height, so
+    // scrollHeight grows when they load late (stale-threshold fix).
+    return Math.max(document.documentElement.scrollHeight - window.innerHeight - 200, 0);
+  }
+
+  function fireReadIfComplete() {
+    if (readFired) return;
+    var threshold = measureThreshold();
+    var scrolled = window.scrollY;
+    if (scrolled >= threshold * 0.8 || threshold <= 0) {
+      // ≥80% scroll depth OR article shorter than ~viewport → read signal.
+      // Fires once; deep-link/restored-scroll sessions also emit (initial check).
+      readFired = true;
+      var depth = threshold > 0 ? Math.round((scrolled / threshold) * 100) : 100;
+      track("article_read", { depth_pct: depth });
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("load", fireReadIfComplete);
     }
   }
 
-  var readFired = false;
+  function onScroll() {
+    fireReadIfComplete();
+  }
+
   function wireReadSignal() {
-    var threshold = Math.max(document.documentElement.scrollHeight - window.innerHeight - 200, 0);
-    function onScroll() {
-      if (readFired) return;
-      if (window.scrollY >= threshold * 0.8 || window.scrollY >= threshold) {
-        readFired = true;
-        track("article_read", { depth_pct: Math.round((window.scrollY / Math.max(threshold, 1)) * 100) });
-        window.removeEventListener("scroll", onScroll);
-      }
-    }
     window.addEventListener("scroll", onScroll, { passive: true });
-    // Also fire if the article is shorter than the viewport
-    if (threshold <= 0) {
-      readFired = true;
-      track("article_read", { depth_pct: 100 });
-    }
+    window.addEventListener("load", fireReadIfComplete);
+    window.addEventListener("resize", fireReadIfComplete);
+    fireReadIfComplete(); // initial position (deep-link / restored scroll)
   }
 
   function init() {
@@ -103,7 +142,6 @@
       return;
     }
     wireShareBar();
-    wireNativeShare();
     wireReadSignal();
   }
   init();
