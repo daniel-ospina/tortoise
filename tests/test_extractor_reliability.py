@@ -588,3 +588,175 @@ def test_extract_census_empty_on_clean_run(monkeypatch):
     assert out["stats"]["llm"]["retries"] == 0
     assert out["stats"]["llm"]["truncated"] == 0
     assert out["stats"]["llm"]["calls"] == 3  # S1 + S2 + S4
+
+
+# ── #1787 Task 1: live-API probes — max_tokens=16000 acceptance ─────────────
+# Both probes carry @pytest.mark.live (registered in pyproject.toml markers) so
+# the deterministic regression never re-executes them (-m "not live"); the
+# guard test below pins the marker.
+
+def _probe_filler(repeat: int = 6000):
+    """#1787 Task 1 — build + CALIBRATE the echo filler. ``"word `` is
+    plausibly ONE BPE token (~5-7 chars), so a fixed char count is
+    UNCALIBRATED. MEASURED (plan cycle 4): repeat=4700 → 32,915 chars → 9,406
+    tokens (cl100k) — only ~14.8% above 8192, INSIDE the ±15% cl100k error
+    band. The floor: calibrate to land at ~12K cl100k tokens (repeat=6000 →
+    ~12K) so the worst-case real echo (0.85 × 12K ≈ 10.2K under the ±15%
+    cl100k-vs-served-tokenizer family-drift band) clears 8192 with ~24%
+    margin. Fallback when NO tokenizer is installed: the filler alone at a
+    PESSIMISTIC 2 chars/token (~36K chars ≈ 18K tokens) still clears 8192 —
+    the calibration never hard-fails and the live `tokens > 8192` assert
+    carries the verdict."""
+    import json
+    filler = '"word ' * repeat            # ~42K chars at repeat=6000
+    payload = json.dumps({"items": [filler]})   # well-formed JSON (P1-3)
+    # calibration — count tokens of the assembled prompt BEFORE the live call
+    tokenizer_name = None
+    try:
+        import tiktoken  # PRIMARY: no HF-hub MODEL download; BPE ranks fetched once on first use, cached
+        tok = tiktoken.get_encoding("cl100k_base")  # approx, ±15%
+        tokenizer_name = f"tiktoken/{tok.name}"
+    except Exception:  # noqa: BLE001 — optional precision paths
+        try:
+            from transformers import AutoTokenizer  # OPTIONAL precision check
+            tok = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-V3")  # REQUIRES NETWORK (HF hub)
+            tokenizer_name = "transformers/DeepSeek-V3"
+        except Exception:  # noqa: BLE001
+            tok = None  # no tokenizer — pessimistic char-bound fallback
+    if tok is not None:
+        n = len(tok.encode(payload))
+        # assert the echo budget's LOWER bound against the ±15% calibration
+        # error band — 0.85 × 10500 ≈ 8,925 > 8,192, so the worst-case real
+        # echo always clears the proof threshold.
+        assert n >= 10500, \
+            f"filler uncalibrated: {repeat} repeats → {n} tokens (need ≥ 10,500 — " \
+            f"worst-case real echo ≥ 8,925 > 8,192 at the ±15% band)"
+    else:
+        # no tokenizer — size so a pessimistic ~2 chars/token bound clears
+        # 8192 and let the live tokens>8192 assert carry the verdict.
+        chars = len(payload)
+        n = chars // 2
+        assert n >= 8192, f"filler too small even at 2 chars/token: {chars} chars → ~{n} tokens"
+        tokenizer_name = "pessimistic-2-chars-per-token (NO tokenizer installed)"
+    return payload, n, tokenizer_name
+
+
+@pytest.mark.live
+def test_probe_max_tokens_above_8k():
+    """#1787 Task 1 — the V4 ceiling is 384K; the legacy alias must accept
+    max_tokens=16000 without a 400 or a server-side clamp to 8192. The probe
+    forces a LONG generation (calibrated JSON echo, ~12K tokens) and asserts
+    the adapter recorded >8192 completion tokens; finish_reason is read per
+    P1-1 — clamp-vs-exhaust is distinguishable by completion_tokens alone:
+    clamp-at-8192 → length at ~8K; exhaust-at-16K → length at ~16K. The echo
+    is ALSO fidelity-checked (P1-B): a well-formed-but-short echo
+    (elided/shortened) must not be misread as a clamp signal. Runs through
+    _complete's deadline machinery (deadline_s=800 = 0.05 × 16000, the scaled
+    default's math) so a stalled chunked response is bounded and classifiable.
+    #1787 Task 2 Step 6 owns the deadline_s=800 → None edit once the scaled
+    sentinel lands (inherits the same 800s)."""
+    import os
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        pytest.skip("no DEEPSEEK_API_KEY")
+    from tortoise import extractor_v2 as v2
+    from tortoise.model_adapters import DeepSeekDirectModel
+    m = DeepSeekDirectModel("deepseek-chat", max_tokens=None, temperature=0.0)
+    payload, est_tokens, tokenizer_name = _probe_filler()
+    print(f"probe calibrator: {tokenizer_name} — {est_tokens} tokens "
+          f"(floor ≥ 10,500; worst-case real echo ≥ 8,925 > 8,192)")
+    import json
+    json.loads(payload)  # P1-3: well-formed-JSON guarantee before the call
+    resp = v2._complete(
+        m, system="Emit the exact JSON object from the user message, unchanged.",
+        user=payload, max_tokens=16000, deadline_s=800)
+    assert isinstance(resp, str) and resp
+    tokens = m.last_completion_tokens or 0
+    if m.last_finish_reason == "length":
+        # length: either clamp (tokens ≈ 8192 — FAIL) or exhaust (tokens ≈
+        # 16000 — PASS; the echo is mid-string-truncated and UNPARSEABLE by
+        # construction — that is the PASS signal, not a failure).
+        assert tokens > 8192, \
+            f"server clamped output at {tokens} tokens (finish=length)"
+        print(f"probe: finish=length with {tokens} tokens — exhaust, "
+              f"NOT a clamp (echo mid-string-truncated by design); PASS")
+    else:
+        # finish=stop: the echo is COMPLETE — run the fidelity checks. The
+        # clamp assert is gated on finish=length; stop + tokens ≤ 8192 falls
+        # through to the fidelity check and is classified as an
+        # authoring/sizing signal, NOT a clamp.
+        assert tokens > 8192, \
+            f"echo too short: {tokens} tokens (finish=stop — the served " \
+            f"tokenizer is ≥1.6× sparser than cl100k or the model elided " \
+            f"the echo; re-run with repeat adjustment — NOT a clamp signal)"
+        json.loads(resp)                   # round-trip parse — payload is JSON
+        assert len(resp) >= 0.9 * len(payload), \
+            f"echo fidelity: response {len(resp)} chars < 0.9 × payload " \
+            f"{len(payload)} chars (model elided/shortened the echo — " \
+            f"finish={m.last_finish_reason!r}; re-run with repeat adjustment " \
+            f"/ investigate the served model's output preference — NOT a " \
+            f"clamp)"
+
+
+@pytest.mark.live
+def test_probe_v4_flash_non_thinking():
+    """#1787 Task 1 Step 3 — probe deepseek-v4-flash + non-thinking (the
+    migration-safe variant). Expected per the adapter docstring (pilot
+    #1549): api.deepseek.com's deepseek-v4-flash reasons by default and
+    collapses to empty output (all tokens spent reasoning, finish=length,
+    ZERO content) — that is exactly why the direct lane wires
+    `deepseek-chat`. This probe documents the collapse as a baseline; a
+    400/unknown-model on this wire id is itself DOCUMENTED (xfail), not a
+    hard failure. Routed through _complete's deadline machinery
+    (deadline_s=800) like the alias probe."""
+    import os
+    if not os.environ.get("DEEPSEEK_API_KEY"):
+        pytest.skip("no DEEPSEEK_API_KEY")
+    from tortoise.model_adapters import DeepSeekDirectModel
+    from tortoise import extractor_v2 as v2
+    m = DeepSeekDirectModel("deepseek-v4-flash", max_tokens=None, temperature=0.0)
+    try:
+        resp = v2._complete(m, system="Reply ok.",
+                            user="JSON: {\"ok\": true}", max_tokens=16000,
+                            deadline_s=800)
+    except Exception as e:  # noqa: BLE001 — P2-G: 400/unknown-model is documented, not fatal
+        status = getattr(e, 'response', None) and getattr(e.response, 'status_code', None)
+        if status == 400 or 'model' in str(e).lower() and 'unknown' in str(e).lower():
+            pytest.xfail("direct API does not serve deepseek-v4-flash (400 "
+                         "unknown-model on this wire id) — recorded on #1787 "
+                         "(P2-G); re-enable after the companion adapter "
+                         "migration (#1790) or when the direct API serves it")
+        raise  # genuine unexpected error — hard FAIL
+    if resp == "":
+        # documented collapse — assert the SIGNATURE (finish=length: all
+        # tokens spent reasoning, zero content), not just emptiness.
+        assert m.last_finish_reason == "length", (
+            f"v4-flash returned empty WITHOUT finish=length "
+            f"({m.last_finish_reason!r}) — not the documented collapse; "
+            f"update after adapter migration")
+        pytest.xfail("v4-flash reasons by default (pilot #1549) — pending "
+                     "companion adapter-migration (thinking toggle)")
+    # non-empty path — assert the response is real JSON (the user prompt
+    # demanded a JSON value), not any truthy string.
+    import json
+    assert isinstance(resp, str) and resp
+    json.loads(resp)  # must parse — a non-JSON/partial blob FAILS the probe
+
+
+def test_live_probe_markers_pinned():
+    """#1787 Task 1 guard — both live probes MUST carry @pytest.mark.live
+    (registered in pyproject.toml markers) so the deterministic regression
+    (-m "not live") never re-executes live API calls. A dropped marker on
+    either probe fails here."""
+    import inspect
+    from tests.test_extractor_reliability import (  # noqa: F401 — module access
+        test_probe_max_tokens_above_8k as alias_probe)
+    from tests.test_extractor_reliability import (
+        test_probe_v4_flash_non_thinking as v4_probe)
+    for name, fn in (("test_probe_max_tokens_above_8k", alias_probe),
+                     ("test_probe_v4_flash_non_thinking", v4_probe)):
+        marker = getattr(fn, "pytestmark", None)
+        assert marker and any(getattr(m, "name", None) == "live" for m in marker), \
+            f"{name} must carry @pytest.mark.live"
+        # sanity: the test body calls the live API (not a stub)
+        src = inspect.getsource(fn)
+        assert "DEEPSEEK_API_KEY" in src and "DeepSeekDirectModel" in src
