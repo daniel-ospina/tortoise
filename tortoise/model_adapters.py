@@ -112,10 +112,10 @@ class OpenRouterModel:
         #
         # #1782: json_object mode is ONLY sent when the prompt actually
         # requests JSON — DeepSeek returns HTTP 400 if the mode is set but the
-        # prompt lacks the literal word "json". Non-JSON calls (the preflight
-        # billing probe, ping, reader/judge prompts) must NOT carry the mode.
-        if (os.environ.get("TORTOISE_JSON_MODE", "1") == "1"
-                and _prompt_requests_json(system, user)):
+        # prompt doesn't contain the text "json" (case-insensitive substring).
+        # Non-JSON calls (the preflight billing probe, ping, reader/judge
+        # prompts) must NOT carry the mode.
+        if _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
         # Enable thinking for reasoning models
         if self.thinking_budget > 0:
@@ -198,10 +198,9 @@ class DeepSeekDirectModel(OpenRouterModel):
         # is the truncation pairing; no cap raise in #1746.
         #
         # #1782: gate on the prompt actually requesting JSON — DeepSeek 400s
-        # when json_object mode is set without the literal word "json" in the
-        # prompt (the preflight probe / ping prompts lack it).
-        if (os.environ.get("TORTOISE_JSON_MODE", "1") == "1"
-                and _prompt_requests_json(system, user)):
+        # when json_object mode is set without the text "json" in the prompt
+        # (the preflight probe / ping prompts lack it).
+        if _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
         r = self._session.post(
             self.base_url,
@@ -509,16 +508,30 @@ def _prompt_requests_json(system: str | None, user: str | None) -> bool:
     """True when a prompt asks for JSON output (the S2/S4 extractor prompts
     say "JSON object" + the OUTPUT_CONTRACT example).
 
-    #1782: DeepSeek returns HTTP 400 when "response_format":
-    {"type": "json_object"} is sent but the prompt lacks the literal
-    word "json" (case-insensitive). Non-JSON calls — the preflight billing
-    probe, ping, reader/judge prompts — must NOT carry the mode. This is the
+    A bare substring match — "json" appearing anywhere in the combined
+    system+user text, case-insensitive (matches "JSON", "non-json",
+    "JSONL", "jsonify", ...). #1782: DeepSeek returns HTTP 400 when
+    "response_format": {"type": "json_object"} is sent but the prompt
+    lacks the text "json". Non-JSON calls — the preflight billing probe,
+    ping, reader/judge prompts — must NOT carry the mode. This is the
     documented DeepSeek contract, not a heuristic: json_object mode requires
     the model to see "json" in the prompt to know the expected output
     shape.
     """
     hay = f"{system or ''} {user or ''}".lower()
     return "json" in hay
+
+
+def _should_send_json_mode(system: str | None, user: str | None) -> bool:
+    """Single-source gate for ``response_format: {"type": "json_object"}``
+    (#1782) — shared by OpenRouterModel.complete and
+    DeepSeekDirectModel.complete so the two bodies can never drift.
+
+    True only when TORTOISE_JSON_MODE is enabled (default "1", read per
+    call — the toggle can flip mid-run) AND the prompt requests JSON
+    (delegated to ``_prompt_requests_json``)."""
+    return (os.environ.get("TORTOISE_JSON_MODE", "1") == "1"
+            and _prompt_requests_json(system, user))
 
 
 def _strip_family_prefix(model_id: str) -> str:

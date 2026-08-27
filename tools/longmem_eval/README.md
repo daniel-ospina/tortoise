@@ -168,11 +168,14 @@ parse-error block.
 
 **JSON-mode parity (D6):** `DeepSeekDirectModel.complete` now sends
 `response_format: {"type": "json_object"}` when `TORTOISE_JSON_MODE=1`
-(the default, read at call time) — mirroring `OpenRouterModel`; the pilot's
-direct route previously ran WITHOUT JSON mode (H1, the untested lever).
-`TORTOISE_JSON_MODE=0` is the documented escape. JSON mode does NOT fix
-truncation (it breaks at `max_tokens`) — the recovery ladder is the
-truncation pairing; no cap raise in #1746.
+(the default, read at call time) AND the prompt requests JSON ("json"
+present in the prompt text, case-insensitive — #1782) — mirroring
+`OpenRouterModel`; the pilot's direct route previously ran WITHOUT JSON mode
+(H1, the untested lever). DeepSeek returns HTTP 400 if the mode is set but
+the prompt lacks the text "json", so non-JSON calls (the preflight
+probe/ping) omit the mode. `TORTOISE_JSON_MODE=0` is the documented escape.
+JSON mode does NOT fix truncation (it breaks at `max_tokens`) — the
+recovery ladder is the truncation pairing; no cap raise in #1746.
 
 **Pre-flight probe (D6):** before trusting JSON mode in a run, test the
 provider for pennies:
