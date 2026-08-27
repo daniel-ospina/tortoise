@@ -44,9 +44,21 @@ align ✅ · research ✅ · scope ✅ · plan ✅ (consolidated coherence + 3-r
 
 ## Final Decision
 
-**PROCEED to implementation.** Issues #1793–#1801 are dependency-ordered, MECE-verified, and carry per-surface verification checklists. Capstone #1801 is the terminal gate — the epic is not complete until its clickthrough passes.
+**PROCEED to implementation.** Issues #1793–#1801 are dependency-ordered, MECE-verified, and carry per-surface verification checklists. Capstone #1801 is the terminal gate.
 
-## Next steps
+## Implementation outcome — 2026-08-27
 
-1. Commit planning docs to the repo (commit-workflow skill).
-2. Implement in dependency order (issue-workflow per issue): #1793 data → #1794/#1795/#1796/#1797 (parallel) → #1798 admin app, #1799 share/analytics → #1800 deploy + E2E → #1801 capstone.
+**All 8 implementation issues MERGED (PRs #1805, #1807, #1809, #1812, #1814, #1818, #1815, #1819), each through the commit-workflow review gates:**
+
+| Issue | PR | Notes |
+|---|---|---|
+| #1793 data layer | #1805 | migration `20260827000001_blog_cms.sql` + PGlite suite (49 SQL assertions); blog_admins allowlist (security P1 fix); applied to prod by supabase-deploy CI ✅ |
+| #1794 SSR render | #1807 | zero-dep markdown renderer (ReDoS-bounded, XSS-verified); 3 review rounds |
+| #1795 agent API | #1809 | POST (queue-default + direct) + PATCH own posts; 17 runtime behaviors verified; 4 review rounds |
+| #1796 SEO wiring | #1812 | middleware /blog prefix (live-verified 301 ✅), sitemap + RSS, robots |
+| #1797 admin gate | #1814 | HS256 JWT verify + is_admin allowlist; fail-closed (live-verified 302 ✅) |
+| #1798 admin app | #1818 | ElDato editor port (TipTap + shadcn/ui), 49 tests, 4 review rounds |
+| #1799 share/analytics | #1815 | share_click single attribution, article_read, consent-gated |
+| #1800 deploy + E2E | #1819 | blog-admin build → website/admin/, verify-blog E2E job |
+
+**Live verification:** migration applied ✅ · company-host /blog 301 ✅ · admin gate redirect ✅. **Pending (deployment ops, owner):** Pages Function env bindings (SUPABASE_URL / SERVICE_ROLE_KEY / JWT_SECRET) + agent-key/owner seeding — documented in the epic README ops checklist. Capstone #1801 tracks the live clickthrough, which is blocked on that ops step (requires the Cloudflare dashboard/token).
