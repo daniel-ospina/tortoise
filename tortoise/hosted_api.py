@@ -1887,10 +1887,6 @@ class EmailSignupResponse(BaseModel):
     message: str | None = None  # "user_created" | "already_registered"
 
 
-class OnboardingStateResponse(BaseModel):
-    onboarding: dict
-
-
 # ── Backups: Pydantic Models (#305) ──────────────────────────────
 
 class BackupRestoreRequest(BaseModel):
@@ -9106,11 +9102,20 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
 async def set_session_recording(body: dict, team: dict = Depends(get_current_team)):  # noqa: B008
-    """Toggle automatic session recording (Q3)."""
+    """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
+
+    #1728 Slice 3 (single consent source): writes the SAME consent keys as
+    the wizard's sessions toggle — the enforced ``session_recording`` flag
+    (the data-plane consent) + ``capture_revised`` (a user-initiated enable/
+    disable is an explicit decision, so it resolves the exactly-once re-ask;
+    fresh opt-ins never see the re-ask pane; a declined user can re-enable
+    here regardless of ``capture_revised``)."""
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
-    state = _update_onboarding_state(team["team_id"], session_recording=enabled)
+    state = _update_onboarding_state(team["team_id"],
+                                     session_recording=enabled,
+                                     capture_revised=True)
     _track_onboarding_event(team, "question_answered",
                             question_id="session_recording",
                             answer="yes" if enabled else "no")
