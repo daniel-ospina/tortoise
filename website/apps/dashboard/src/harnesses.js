@@ -168,6 +168,50 @@ export const HARNESS_CONTINUE_LABEL = {
   'claude-web': "I've pasted it — Continue →",
 }
 
+// #1728 Slice 3 (Task 16): the session-CAPTURE install steps shown INLINE in
+// the Memory-sources rows when a harness is install-pending (extracted from
+// HARNESS_INSTALL so the row shows only the capture step, not the full MCP
+// setup). claude = in-repo hooks install; pi = extension copy-install.
+export const HARNESS_CAPTURE_INSTALL = {
+  claude: `# Session capture (#1727 T1): the hooks file every session to Tortoise
+# Cloud (only when your team has enabled it — the server enforces a 403
+# otherwise). Install from your Tortoise checkout:
+mkdir -p .claude/hooks
+cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
+cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
+chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
+# then merge into .claude/settings.json:
+# { "hooks": { "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-start.sh" }] }], "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": ".claude/hooks/session-end.sh" }] }] } }`,
+  pi: `5. Session capture (#1727 T1): enable session capture in the Pi extension
+settings. The extension fires an install-probe on load (harness + timestamp
+only, no content) and files sessions to Tortoise Cloud when capture is
+enabled. Backfill past sessions with:
+tortoise sessions import --harness pi --file <session.jsonl>
+(local receipt written only on a 2xx).`,
+}
+
+// #1728 Slice 3 (Task 16/17): per-harness disabled-with-reason copy for the
+// sessions rows — pinned in the plan (web = "session capture for web is in
+// progress — not available yet" until the Task 13 spike verdict flips
+// HARNESS_CAPTURE_SUPPORT; codex/claude-desktop = backfill import only until
+// an install path exists; cursor = spike verdict). Never hidden rows —
+// disabled with an honest reason.
+export const HARNESS_CAPTURE_REASON = {
+  'claude-desktop': 'backfill import only — no live install path yet',
+  'claude-web': 'session capture for web is in progress — not available yet',
+  codex: 'backfill import only — no live install path yet',
+  cursor: 'unsupported for session capture',
+}
+
+// #1728 (Task 17): receipt/probe labels for the 4-state capture status
+// (shared by the wizard step-1 and the dashboard panel).
+export const HARNESS_CAPTURE_STATUS_LABEL = {
+  off: 'off',
+  'install-pending': 'not installed yet',
+  waiting: 'installed — waiting for first capture',
+  active: 'active',
+}
+
 // #1710: bare command with a comment lead-in — paste-safe in a terminal.
 export const HARNESS_PERSIST = (key) =>
   `# Persist the key for future sessions — add this line to your shell profile (~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`

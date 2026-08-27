@@ -75,18 +75,42 @@ background — you'll see results in your next session."
 
 ### Q3 — Record sessions?
 
-**Ask:** "Record your agent sessions automatically? Every conversation will be
-filed as memory so your agent remembers what you've discussed."
+**Ask:** "Record your agent sessions as memory? Here's what this actually
+means:
+- **What's recorded:** session turns are extracted into memory (Session +
+turn points) and filed to your team's graph.
+- **When it actually happens:** capture only runs when (a) your team has this
+  enabled, (b) the tool's capture mechanism is installed (Claude Code hooks
+  / the Pi extension), and (c) the server accepts the file (a 2xx receipt) —
+  "enabled" means CONSENTED, not necessarily "active yet".
+- **Install beacon:** on session start the hook sends a tiny probe (tool +
+  timestamp only — no content) so your dashboard shows per-tool capture
+  status honestly (installed / waiting / active).
+- **Opt-out:** already-captured sessions stay; new capture is blocked."
 
 **If yes:**
-1. Call `tortoise_onboarding_session_recording(enabled=true)`.
-2. Show: "✅ Session recording enabled. Your conversations will be saved as
-   memory."
-3. If the tool errors (stdio mode): fall back to `tortoise_diary_write(
-   agent_name="system", entry="Session recording enabled — agent sessions will
-   be filed as memory.", topic="onboarding")`.
+1. Call `tortoise_onboarding_session_recording(enabled=true)` — writes the
+   SAME consent keys as the wizard's sessions toggle (the enforced
+   `session_recording` flag + `capture_revised`). If `capture_revised` is
+   already set (you answered this before), SKIP the ask — but NEVER skip the
+   write: a user-initiated enable always re-sets consent, even after a prior
+   decline.
+2. Show: "✅ Session recording consented. Capture turns on per-tool once the
+   mechanism is installed and the server confirms a file — see your
+   dashboard's Memory sources panel for live per-tool status."
+3. If the tool errors (stdio/local mode — "No team context (HTTP mode
+   required)"): "Session capture is hosted-only — it needs Tortoise Cloud to
+   receive session files. Your consent is recorded in the dashboard's Memory
+   sources panel instead. I'll skip ahead." (No local fallback: a stdio
+   agent must not silently bypass the consent/capture gates.)
 
-**If no:** "Skipping session recording. You can enable it later."
+**If no:**
+1. Call `tortoise_onboarding_session_recording(enabled=false)` — clears the
+   enforced consent flag AND sets `capture_revised` (the same keys the
+   wizard/panel decline writes — one consent source).
+2. Show: "Skipping session recording — new sessions won't be captured.
+   Already-captured sessions stay. You can re-enable anytime from the
+   dashboard (Memory sources > Agent sessions) or by re-answering yes here."
 
 ### Q4 — Demo graph?
 
@@ -224,9 +248,9 @@ If a tool fails at runtime:
 - **Q1/Q2 (GitHub tools):** "GitHub connect/index isn't available in this
   mode. Visit your dashboard at https://app.premiselabs.co to connect GitHub.
   I'll skip ahead."
-- **Q3 (Session recording):** Uses `tortoise_onboarding_session_recording` (or
-  `tortoise_diary_write` fallback). If it fails: "Couldn't enable session
-  recording right now. You can enable it later."
+- **Q3 (Session recording):** Uses `tortoise_onboarding_session_recording`
+  (hosted-only — no stdio fallback). If it fails: "Couldn't enable session
+  recording right now. You can enable it later from your dashboard."
 - **Q4 (Demo graph):** Uses `tortoise_onboarding_demo_create` (or
   `tortoise_create_point` ×5 fallback). If it fails: "Couldn't create the demo
   graph right now. You can try again later."
@@ -264,7 +288,7 @@ specification with execution paths, state tracking, and error handling.
 | Q1 (GitHub connect) | `tortoise_onboarding_github_connect` | ✅ Live (HTTP) | unavailable (dashboard) |
 | Q1 (GitHub status) | `tortoise_onboarding_github_status` | ✅ Live (HTTP) | unavailable (dashboard) |
 | Q2 (GitHub index) | `tortoise_onboarding_github_index` | ✅ Live (HTTP) | unavailable (dashboard) |
-| Q3 (Session recording) | `tortoise_onboarding_session_recording` | ✅ Live (HTTP) | `tortoise_diary_write` |
+| Q3 (Session recording) | `tortoise_onboarding_session_recording` | ✅ Live (HTTP) — consent only; capture is mechanism-gated per tool | unavailable (hosted-only — no stdio fallback) |
 | Q4 (Demo graph) | `tortoise_onboarding_demo_create` | ✅ Live (HTTP) | `tortoise_create_point` ×5 |
 | Q5 (Docs ingestion) | `tortoise_ingest_corpus` | ⚠️ Stdio-only | `tortoise serve` locally |
 | Q5b (Transcript mining) | `tortoise_mine_conversations` | ⚠️ Stdio-only (#1090 fs-walk) | `tortoise mine-conversation` CLI + `tests/sample_transcript.txt` |
@@ -274,3 +298,15 @@ specification with execution paths, state tracking, and error handling.
 section above. GitHub tools require hosted (HTTP) mode — in stdio/local mode
 they return "No team context (HTTP mode required)" and the agent skips ahead
 to the dashboard. Everything else works in both modes.
+
+**Parity table** (#1714 — what a hosted team gets vs a self-hosted/stdio
+setup, named honestly so no surface over-promises):
+
+| Capability | Hosted (HTTP) | Self-hosted stdio |
+|------------|---------------|-------------------|
+| GitHub issues indexing | ✅ dashboard + `tortoise_onboarding_github_index` | ✅ same (needs its own GitHub token) |
+| GitHub remote docs (`/v1/index/docs`) | ✅ dashboard "Index docs" action (server-owned sandbox) | ❌ not available over stdio — clone locally + `tortoise_ingest_corpus` (see Q5) |
+| Session capture | ✅ consent (Q3/dashboard) + per-tool mechanism (Claude hooks / Pi extension) + server receipt | ❌ hosted-only (stdio agent must not bypass the capture gate) |
+| Webhook transitions (`-closed` / `-reopened` ids) | ⚠️ webhook-only gap — no webhook consumer ships; poll-path eventIds are `-created`/byte-identical (deleted/transferred are not observed) | ⚠️ same gap |
+| `tortoise_ingest_corpus` (local dir) | ❌ hosted-only unavailable | ✅ same |
+| `tortoise_mine_conversations` | ❌ hosted-only unavailable (#1090 fs-walk) | ✅ same |

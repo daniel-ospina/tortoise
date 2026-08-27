@@ -3,7 +3,11 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS } from './harnesses.js'
+import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS } from './harnesses.js'
+// #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
+// (off → install-pending → waiting → active, probe-driven) + the re-ask gate
+// predicate — pure, node --test unit-tested (captureStatus.test.js).
+import { captureStatusForHarness, lastErrorForHarness, shouldShowReAsk } from './captureStatus.js'
 // #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
 // unit-tested); imported under an alias to avoid an ESM redeclaration collision
 // with the local isSessionKey wrapper below.
@@ -192,8 +196,39 @@ function claimIntentInFlight() {
   const setWizardStep = React.useCallback((n) => { setWizardStepRaw(n); setWizardCopied((c) => (c === 'harness' ? '' : c)) }, [])
   const [wizardHarness, setWizardHarness] = React.useState('claude')
   const [wizardCopied, setWizardCopied] = React.useState('')
-  const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false })
+  const [wizardGithub, setWizardGithub] = React.useState({ connected: false, repos: null, busy: false, org: null })
   const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
+  // #1728 Slice 3: the Memory-sources surface (wizard step-1 + Overview
+  // panel share ONE implementation). Full onboarding state drives the three
+  // opt-in toggles (issues / docs / sessions) + the misled-user re-ask.
+  const [onboarding, setOnboarding] = React.useState(null)
+  const [onboardingLoading, setOnboardingLoading] = React.useState(true)
+  const [issuesWantOn, setIssuesWantOn] = React.useState(false)  // on-but-not-connected (inline Connect shown)
+  const [docsWantOn, setDocsWantOn] = React.useState(false)      // docs toggle-on reveals the Index-docs action
+  const [indexJob, setIndexJob] = React.useState(null)           // github re-poll job status (bounded poll)
+  const [docsJob, setDocsJob] = React.useState(null)             // docs job status (bounded poll)
+  const [indexBusy, setIndexBusy] = React.useState(false)
+  const [docsBusy, setDocsBusy] = React.useState(false)
+  const [memoryBusy, setMemoryBusy] = React.useState('')          // 'issues' | 'docs' | 'sessions' | ''
+  const [memoryErrors, setMemoryErrors] = React.useState({})      // per-ROW errors (role=alert) — never the global banner
+  const indexPollRef = React.useRef(null)
+  const docsPollRef = React.useRef(null)
+  // #1728 (Task 17): the misled-user re-ask — exactly once per visit until
+  // resolved. `capture_ask_shown` is set on ANSWER only; dismissal NEVER
+  // consumes the ask (re-shown next visit). One flag for BOTH surfaces
+  // (wizard step-1 + the Overview panel) — the first surface the user sees
+  // this visit renders the pane.
+  const [reaskOpen, setReaskOpen] = React.useState(false)
+  const reaskShownVisitRef = React.useRef(false)
+  const [reaskBusy, setReaskBusy] = React.useState(false)
+  const [reaskError, setReaskError] = React.useState('')
+  const reaskGate = shouldShowReAsk(onboarding)
+  React.useEffect(() => {
+    if (reaskGate && !reaskShownVisitRef.current) {
+      reaskShownVisitRef.current = true
+      setReaskOpen(true)
+    }
+  }, [reaskGate])
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
   const [wizardDone, setWizardDone] = React.useState(false)
@@ -207,7 +242,7 @@ function claimIntentInFlight() {
     setTimeout(() => setCopiedStep(''), 1600)
   }
   const [wizardProject, setWizardProject] = React.useState('')
-  React.useEffect(() => () => { stopGithubPoll && stopGithubPoll() }, [])  // unmount cleanup
+  React.useEffect(() => () => { stopGithubPoll && stopGithubPoll(); stopBoundedPoll(indexPollRef); stopBoundedPoll(docsPollRef) }, [])  // unmount cleanup
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
   // real limit ('Team api_keys limit reached (N). Upgrade your plan to
@@ -503,17 +538,25 @@ function claimIntentInFlight() {
   // degrading to the API-key screen.
   // #1643 (review P2-1): read the onboarding state on mount so completed
   // users never see the re-entry card again (the completion marker is
-  // persisted server-side).
-  React.useEffect(() => {
-    let cancelled = false
-    api('/v1/onboarding/state', { useSession: true })
-      .then((st) => { if (!cancelled && st && st.onboarding && st.onboarding.onboarding_complete) setOnboardingComplete(true) })
-      .catch(() => { /* best-effort */ })
-    return () => { cancelled = true }
-  }, [])
+  // persisted server-side). #1728 Slice 3: the same read now feeds the full
+  // Memory-sources surface (three toggles + the re-ask gate).
+  async function refreshOnboarding() {
+    try {
+      const st = await api('/v1/onboarding/state', { useSession: true })
+      if (st && st.onboarding) {
+        setOnboarding(st.onboarding)
+        if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
+      }
+      setOnboardingLoading(false)
+      setMemoryErrors((e) => ({ ...e, __load: '' }))
+    } catch {
+      setOnboardingLoading(false)  // best-effort — the surface renders its error state
+    }
+  }
+  React.useEffect(() => { refreshOnboarding() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── #1643 wizard actions ────────────────────────────────────────────────
-  const wizardSteps = ['Connect your tool', 'Integrations', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
+  const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
 
   function wizardCopy(text, label) {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
@@ -533,8 +576,171 @@ function claimIntentInFlight() {
     if (wizardGithubPollRef.current) { clearInterval(wizardGithubPollRef.current); wizardGithubPollRef.current = null }
   }
 
+  // ── #1728 Slice 3 (Task 16): bounded poll pattern ──
+  // tries + terminal-status short-circuit; the handle lives in a ref
+  // (cleared on success + unmount); per-team staleness guard. Deliberately
+  // does NOT copy the old github connect poll's dangling-timer anti-pattern.
+  function startBoundedPoll(ref, { url, interval = 3000, maxTries = 40, isTerminal, onStatus, onDone }) {
+    if (ref.current) { clearInterval(ref.current); ref.current = null }
+    const teamAtStart = teamIdRef.current
+    let tries = 0
+    const tick = async () => {
+      tries += 1
+      if (teamIdRef.current !== teamAtStart) { stopBoundedPoll(ref); return }  // per-team staleness guard
+      try {
+        const job = await api(url, { useSession: true })
+        if (onStatus) onStatus(job)
+        if (job && isTerminal(job)) { stopBoundedPoll(ref); if (onDone) onDone(job); return }
+      } catch (e) {
+        // 404 = the in-memory job was evicted (1h TTL) — a TERMINAL state
+        // the UI renders honestly ("status expired — re-check"), not a retry loop.
+        if (e && e.status === 404) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'expired', error: e.message }); return }
+      }
+      if (tries >= maxTries) { stopBoundedPoll(ref); if (onDone) onDone({ status: 'timeout' }) }
+    }
+    ref.current = setInterval(tick, interval)
+  }
+  function stopBoundedPoll(ref) {
+    if (ref.current) { clearInterval(ref.current); ref.current = null }
+  }
+
+  // ── #1728 Slice 3 (Task 16/17): Memory-sources handlers ──
+  function setRowError(row, msg) { setMemoryErrors((e) => ({ ...e, [row]: msg })) }
+
+  async function toggleSessionRecording(next) {
+    if (memoryBusy) return
+    setMemoryBusy('sessions')
+    setRowError('sessions', '')
+    try {
+      // #1728 (T1-P8): toggle-on PATCH also sets capture_revised — a fresh
+      // opt-in resolves the exactly-once re-ask (never sees the pane). PATCH
+      // MERGE: no read-modify-write, no stale reads.
+      await api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+        body: JSON.stringify({ session_recording: next, capture_revised: true }) })
+      await refreshOnboarding()
+    } catch (e) {
+      setRowError('sessions', (e && e.message) || 'Could not update session capture — try again.')
+    } finally {
+      setMemoryBusy('')
+    }
+  }
+
+  async function toggleIssues(next) {
+    if (memoryBusy) return
+    if (!next) {
+      // off: PATCH the display flag (no server-side disconnect exists —
+      // re-enabling re-runs the OAuth connect).
+      setMemoryBusy('issues')
+      setRowError('issues', '')
+      setIssuesWantOn(false)
+      try {
+        await api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+          body: JSON.stringify({ github_connected: false }) })
+        await refreshOnboarding()
+      } catch (e) {
+        setRowError('issues', (e && e.message) || 'Could not update GitHub issues — try again.')
+      } finally {
+        setMemoryBusy('')
+      }
+    } else if (onboarding && onboarding.github_connected) {
+      // already connected → re-poll the diff (in-flight single-flight reuse)
+      reindexGithub()
+    } else {
+      // on-but-not-connected: the row renders the inline Connect CTA
+      setIssuesWantOn(true)
+    }
+  }
+
+  async function toggleDocs(next) {
+    if (memoryBusy) return
+    setDocsWantOn(next)
+    setRowError('docs', '')
+    if (next && onboarding && onboarding.github_connected && !(onboarding.github_docs_indexed)) {
+      // toggle-on reveals the explicit Index-docs action (T1-P7) — the user
+      // presses it to run the job (auto-running would surprise); the row
+      // already shows the action button when docsWantOn.
+    }
+  }
+
+  async function reindexGithub() {
+    if (indexBusy) return
+    setIndexBusy(true)
+    setRowError('issues', '')
+    setIndexJob({ status: 'starting' })
+    try {
+      const res = await api('/v1/index/github/re-poll', { method: 'POST', useSession: true })
+      const jobId = res && res.job_id
+      if (!jobId) throw new Error('index job did not return a job id')
+      setIndexJob({ status: 'started', job_id: jobId })
+      startBoundedPoll(indexPollRef, {
+        url: `/v1/index/github/${jobId}`,
+        isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        onStatus: setIndexJob,
+        onDone: setIndexJob,
+      })
+    } catch (e) {
+      setRowError('issues', (e && e.message) || 'Could not start GitHub indexing — try again.')
+      setIndexJob(null)
+    } finally {
+      setIndexBusy(false)
+    }
+  }
+
+  async function indexDocs() {
+    if (docsBusy) return
+    setDocsBusy(true)
+    setRowError('docs', '')
+    setDocsJob({ status: 'starting' })
+    try {
+      let org
+      try {
+        const gs = await api('/v1/onboarding/github/status', { useSession: true })
+        org = gs && gs.org
+      } catch { /* server defaults the org to the team id */ }
+      const res = await api('/v1/index/docs', { method: 'POST', useSession: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(org ? { org } : {}) })
+      const jobId = res && res.job_id
+      if (!jobId) throw new Error('docs job did not return a job id')
+      setDocsJob({ status: 'started', job_id: jobId })
+      startBoundedPoll(docsPollRef, {
+        url: `/v1/index/docs/${jobId}`,
+        isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
+        onStatus: setDocsJob,
+        onDone: setDocsJob,
+      })
+    } catch (e) {
+      setRowError('docs', (e && e.message) || 'Could not start docs indexing — try again.')
+      setDocsJob(null)
+    } finally {
+      setDocsBusy(false)
+    }
+  }
+
+  // ── #1728 (Task 17): the misled-user re-ask answer (YES / NO). The
+  // answer PATCH writes the SAME consent keys as the wizard/panel toggles —
+  // session_recording (the enforced flag) + capture_revised + the
+  // ANSWER-only capture_ask_shown. Decline NEVER clears probes or receipts
+  // (re-enable resolves receipt-authoritative).
+  async function answerReask(yes) {
+    if (reaskBusy) return
+    setReaskBusy(true)
+    setReaskError('')
+    try {
+      await api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+        body: JSON.stringify({ session_recording: yes, capture_revised: true, capture_ask_shown: true }) })
+      setReaskOpen(false)
+      await refreshOnboarding()
+    } catch (e) {
+      setReaskError((e && e.message) || 'Could not save your answer — try again.')
+    } finally {
+      setReaskBusy(false)
+    }
+  }
+
   async function wizardConnectGithub() {
     setWizardGithub((g) => ({ ...g, busy: true }))
+    setRowError('issues', '')
     try {
       const res = await api('/v1/onboarding/github/connect', { method: 'POST', useSession: true })
       const authUrl = (res && (res.auth_url || res.authorize_url)) || null
@@ -543,28 +749,41 @@ function claimIntentInFlight() {
       if (!win) {
         // Popup blocked — no poll to run; reset immediately (review P1).
         setWizardGithub((g) => ({ ...g, busy: false }))
-        setError('Popup blocked — allow popups for app.premiselabs.co and try again.')
+        setRowError('issues', 'Popup blocked — allow popups for app.premiselabs.co and try again.')
         return
       }
       // Poll status until the OAuth round trip completes (the callback
-      // redirects to welcome.html, not here). Bounded; the handle is a ref
-      // so Cancel/unmount can stop it (no stacked intervals).
-      stopGithubPoll()
-      wizardGithubPollRef.current = setInterval(async () => {
-        try {
-          const st = await api('/v1/onboarding/github/status', { useSession: true })
+      // redirects to welcome.html, not here). Bounded (tries + terminal
+      // short-circuit, handle in a ref, per-team guard) — the old 120s
+      // dangling setTimeout is gone.
+      startBoundedPoll(wizardGithubPollRef, {
+        url: '/v1/onboarding/github/status',
+        isTerminal: (st) => st && st.connected,
+        onStatus: (st) => {
           if (st && st.connected) {
-            stopGithubPoll()
-            setWizardGithub({ connected: true, repos: st.repos_count, busy: false })
-            api('/v1/onboarding/state', { method: 'PATCH', useSession: true, body: JSON.stringify({ github_connected: true }) }).catch(() => {})
+            setWizardGithub({ connected: true, repos: st.repos_count, busy: false, org: st.org })
           }
-        } catch { /* transient */ }
-      }, 3000)
-      setTimeout(() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }, 120000)
+        },
+        onDone: (st) => {
+          setWizardGithub((g) => ({ ...g, busy: false }))
+          if (st && st.connected) {
+            setIssuesWantOn(true)
+            api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+              body: JSON.stringify({ github_connected: true }) }).catch(() => {})
+            refreshOnboarding().catch(() => {})
+            // connected+indexing: the OAuth callback auto-enqueues the
+            // first run — surface it via the re-poll (single-flight reuse
+            // returns the in-flight job).
+            reindexGithub()
+          } else {
+            setRowError('issues', "GitHub connect didn't finish — check that you authorized the app, then try again.")
+          }
+        },
+      })
     } catch (e) {
       stopGithubPoll()
       setWizardGithub((g) => ({ ...g, busy: false }))
-      setError((e && e.message) || 'Could not start GitHub connect.')
+      setRowError('issues', (e && e.message) || 'Could not start GitHub connect.')
     }
   }
 
@@ -2477,7 +2696,7 @@ function claimIntentInFlight() {
                   <p className="wizard-title">{wizardSteps[wizardStep]}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
                     {wizardStep === 0 ? 'Pick your tool — the setup command connects the MCP server and installs the skills in one copy.'
-                      : wizardStep === 1 ? 'Connect your data sources — GitHub issues come in as Events (optional, do it now or later).'
+                      : wizardStep === 1 ? 'Choose what Tortoise should remember — all off by default; you can change this any time.'
                       : wizardStep === 2 ? 'These are the three skills your setup command installs — what they do, and when your agent uses them.'
                       : wizardStep === 3 ? 'Add yourself and your project as the first objects on your graph.'
                       : 'Welcome to Tortoise — your graph is live.'}
@@ -2567,26 +2786,39 @@ function claimIntentInFlight() {
                   )}
 
                   {wizardStep === 1 && (
-                    <div className="github-connect">
-                      {wizardGithub.connected ? (
-                        <p className="dim">GitHub connected — {wizardGithub.repos ?? ''} repos available to index (issues → Events).</p>
-                      ) : (
-                        <p className="dim">Connect GitHub to bring your issues in as Events on the graph. Uses your own token — stored encrypted, never shared.</p>
-                      )}
+                    <div className="memory-sources">
+                      <MemorySources
+                        state={onboarding}
+                        loading={onboardingLoading}
+                        wizardHarness={wizardHarness}
+                        github={wizardGithub}
+                        issuesWantOn={issuesWantOn}
+                        docsWantOn={docsWantOn}
+                        indexJob={indexJob}
+                        docsJob={docsJob}
+                        memoryBusy={memoryBusy}
+                        memoryErrors={memoryErrors}
+                        reask={{
+                          open: reaskOpen,
+                          busy: reaskBusy,
+                          error: reaskError,
+                          onAnswer: answerReask,
+                          onDismiss: () => { setReaskOpen(false); setReaskError('') },
+                        }}
+                        onToggleIssues={toggleIssues}
+                        onToggleDocs={toggleDocs}
+                        onToggleSessions={toggleSessionRecording}
+                        onConnectGithub={wizardConnectGithub}
+                        onIndexDocs={indexDocs}
+                        onReindexGithub={reindexGithub}
+                      />
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
                         <div className="wizard-nav-actions">
                           {!wizardGithub.connected && wizardGithub.busy && (
                             <button type="button" className="ghost" onClick={() => { stopGithubPoll(); setWizardGithub((g) => ({ ...g, busy: false })) }}>Cancel</button>
                           )}
-                          {!wizardGithub.connected && (
-                            <button type="button" className="btn-primary" onClick={wizardConnectGithub} disabled={wizardGithub.busy}>
-                              {wizardGithub.busy ? 'Connecting…' : 'Connect GitHub'}
-                            </button>
-                          )}
-                          <button type="button" className="ghost" onClick={() => setWizardStep(2)}>
-                            {wizardGithub.connected ? 'Next' : 'Skip →'}
-                          </button>
+                          <button type="button" className="ghost" onClick={() => setWizardStep(2)}>Skip →</button>
                         </div>
                       </div>
                     </div>
@@ -2921,6 +3153,34 @@ function claimIntentInFlight() {
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>
+            {/* #1728 Slice 3 (Task 17): the later-opt-in "Memory sources"
+                panel — ONE implementation shared with the wizard step-1
+                (the re-ask variant renders when the misled gate fires). */}
+            <MemorySources
+              state={onboarding}
+              loading={onboardingLoading}
+              wizardHarness="claude"
+              github={wizardGithub}
+              issuesWantOn={issuesWantOn}
+              docsWantOn={docsWantOn}
+              indexJob={indexJob}
+              docsJob={docsJob}
+              memoryBusy={memoryBusy}
+              memoryErrors={memoryErrors}
+              reask={{
+                open: reaskOpen,
+                busy: reaskBusy,
+                error: reaskError,
+                onAnswer: answerReask,
+                onDismiss: () => { setReaskOpen(false); setReaskError('') },
+              }}
+              onToggleIssues={toggleIssues}
+              onToggleDocs={toggleDocs}
+              onToggleSessions={toggleSessionRecording}
+              onConnectGithub={wizardConnectGithub}
+              onIndexDocs={indexDocs}
+              onReindexGithub={reindexGithub}
+            />
             {/* #1148-ux review: Team ID / Limits / billing-actions / quickstart
                 removed — noise (the quickstart lives on the empty state; limits
                 are not actionable here). */}
@@ -3279,6 +3539,243 @@ function claimIntentInFlight() {
               </main>
     </div>
   )
+}
+
+// #1728 Slice 3 (Tasks 16-17): the ONE shared Memory-sources surface — rendered
+// on the wizard step-1 AND the dashboard Overview panel (same component, same
+// toggle set + state machine). Three opt-in toggles (issues / docs / sessions)
+// reuse role="switch"/aria-checked; row failures render under the row with
+// role="alert" (never the global 402-upgrade banner); status regions carry
+// aria-live="polite". The misled-user re-ask pane (role="alertdialog", initial
+// focus on the yes/no buttons) renders when reask.open — the parent enforces
+// the exactly-once gate (session_recording && !capture_revised &&
+// !capture_ask_shown); ANSWER sets capture_ask_shown (T2-P2f), dismissal never
+// consumes the ask.
+function MemorySources(props) {
+  const {
+    state, loading, wizardHarness, github,
+    issuesWantOn, docsWantOn,
+    indexJob, docsJob,
+    memoryBusy, memoryErrors,
+    reask,
+    onToggleIssues, onToggleDocs, onToggleSessions,
+    onConnectGithub, onIndexDocs, onReindexGithub,
+  } = props
+
+  // Re-ask pane initial focus (P2: role="alertdialog" + focus the yes/no
+  // buttons on open).
+  const reaskYesRef = React.useRef(null)
+  React.useEffect(() => {
+    if (reask && reask.open && reaskYesRef.current) reaskYesRef.current.focus()
+  }, [reask && reask.open])
+
+  if (loading) {
+    return <div className="memory-sources"><p className="dim">Loading memory sources…</p></div>
+  }
+  if (!state) {
+    return (
+      <div className="memory-sources">
+        <p className="error" role="alert">Couldn't load memory sources — refresh to try again.</p>
+      </div>
+    )
+  }
+
+  const githubConnected = !!state.github_connected
+  const sessionsOn = !!state.session_recording
+  const docsIndexed = !!state.github_docs_indexed
+  // issues state machine: off → on-but-not-connected (inline Connect CTA) →
+  // connected+indexing. The switch reads connected OR the user's intent.
+  const issuesOn = githubConnected || issuesWantOn
+  const docsOn = docsWantOn || docsIndexed
+
+  const status = (h) => captureStatusForHarness(state, h)
+  const lastError = (h) => lastErrorForHarness(state, h)
+
+  return (
+    <div className="memory-sources">
+      {reask && reask.open && (
+        <div className="reask-pane" role="alertdialog" aria-modal="true" aria-label="Session recording needs your decision">
+          <h4>Session recording needs your decision</h4>
+          <p>
+            You previously enabled this — before this fix, recording never ran;
+            nothing was captured.
+          </p>
+          <p className="dim small">
+            Keep it on and new sessions will be captured per-harness once a
+            tool's capture mechanism is installed — or turn it off. Already-
+            captured sessions stay.
+          </p>
+          {reask.error && <p className="error" role="alert">{reask.error}</p>}
+          <div className="wizard-nav-actions">
+            <button type="button" ref={reaskYesRef} className="btn-primary" onClick={() => reask.onAnswer(true)} disabled={reask.busy}>Yes, keep recording</button>
+            <button type="button" className="ghost" onClick={() => reask.onAnswer(false)} disabled={reask.busy}>No, turn it off</button>
+            <button type="button" className="ghost" onClick={reask.onDismiss} disabled={reask.busy}>Not now</button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Issues toggle ── */}
+      <div className="toggle-row">
+        <button
+          type="button"
+          className="switch"
+          role="switch"
+          aria-checked={issuesOn}
+          data-on={issuesOn ? 'true' : 'false'}
+          aria-label="GitHub issues as a memory source"
+          onClick={() => onToggleIssues(!issuesOn)}
+          disabled={memoryBusy === 'issues'}
+        />
+        <div className="toggle-body">
+          <h4>GitHub issues</h4>
+          <p>Issues become work items with a lifecycle record, plus claims extracted from their content.</p>
+          {githubConnected ? (
+            <p className="dim small" aria-live="polite">
+              Connected — {github.repos ?? 'N/A'} repos available.{' '}
+              <button type="button" className="small" onClick={onReindexGithub} disabled={memoryBusy === 'issues' || (indexJob && indexJob.status === 'started')}>
+                {indexJob && indexJob.status === 'started' ? 'Indexing…' : 'Re-index'}
+              </button>
+            </p>
+          ) : issuesWantOn ? (
+            <p className="dim small">
+              <button type="button" className="small" onClick={onConnectGithub} disabled={github.busy}>
+                {github.busy ? 'Connecting…' : 'Connect GitHub'}
+              </button>{' '}
+              to bring issues in as memory sources.
+            </p>
+          ) : null}
+          {indexJob && <GithubIndexStatus job={indexJob} />}
+          {memoryErrors.issues && <p className="error" role="alert">{memoryErrors.issues}</p>}
+        </div>
+      </div>
+
+      {/* ── Docs toggle ── */}
+      <div className="toggle-row">
+        <button
+          type="button"
+          className="switch"
+          role="switch"
+          aria-checked={docsOn}
+          data-on={docsOn ? 'true' : 'false'}
+          aria-label="GitHub docs as a memory source"
+          onClick={() => onToggleDocs(!docsOn)}
+          disabled={!githubConnected || memoryBusy === 'docs'}
+        />
+        <div className="toggle-body">
+          <h4>GitHub docs</h4>
+          <p>Your repos' docs/ folders are fetched server-side and indexed as Sources.</p>
+          {!githubConnected && <p className="dim small">Connect GitHub first to index docs.</p>}
+          {githubConnected && docsWantOn && !docsJob && (
+            <p className="dim small">
+              <button type="button" className="small" onClick={onIndexDocs} disabled={memoryBusy === 'docs'}>
+                {memoryBusy === 'docs' ? 'Indexing…' : docsIndexed ? 'Re-index docs' : 'Index docs'}
+              </button>{' '}
+              to bring your repo docs in as memory sources.
+            </p>
+          )}
+          {docsJob && <DocsIndexStatus job={docsJob} />}
+          {memoryErrors.docs && <p className="error" role="alert">{memoryErrors.docs}</p>}
+        </div>
+      </div>
+
+      {/* ── Sessions toggle (ONE team-level consent; per-harness status) ── */}
+      <div className="toggle-row">
+        <button
+          type="button"
+          className="switch"
+          role="switch"
+          aria-checked={sessionsOn}
+          data-on={sessionsOn ? 'true' : 'false'}
+          aria-label="Agent session recording"
+          onClick={() => onToggleSessions(!sessionsOn)}
+          disabled={memoryBusy === 'sessions'}
+        />
+        <div className="toggle-body">
+          <h4>Agent session recording</h4>
+          <p>When on, sessions from tools with capture installed are filed to your graph as memory.</p>
+          {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
+          <div className="harness-statuses" aria-live="polite">
+            {HARNESS_ORDER.map((h) => {
+              const st = status(h)
+              const supported = !!HARNESS_CAPTURE_SUPPORT[h]
+              return (
+                <div key={h} className={`harness-status status-${st}${h === wizardHarness ? ' current' : ''}`}>
+                  <div className="harness-status-head">
+                    <strong>{HARNESS_NAMES[h]}</strong>
+                    <span className="capture-state">{HARNESS_CAPTURE_STATUS_LABEL[st]}</span>
+                  </div>
+                  {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
+                  {supported && st === 'install-pending' && sessionsOn && (
+                    <pre className="snippet">{HARNESS_CAPTURE_INSTALL[h]}</pre>
+                  )}
+                  {lastError(h) && <p className="error small" role="alert">Last attempt: {lastError(h)}</p>}
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// #1728 (Task 16/17): github index-job status line — terminal states pinned:
+// "indexing complete (N issues)" success + "indexing failed — retry"
+// (exhausted); eviction-expired = "status expired — re-check" (never a retry
+// loop); aria-live on the region.
+function GithubIndexStatus({ job }) {
+  if (!job) return null
+  if (job.status === 'started') {
+    return <p className="dim small" aria-live="polite">Indexing in progress…</p>
+  }
+  if (job.status === 'completed') {
+    const repos = job.repos_processed != null ? ` across ${job.repos_processed} repos` : ''
+    const beyond = job.issues_beyond_window ? `; ${job.issues_beyond_window} issues beyond window` : ''
+    const quota = job.quota_hit ? ' (plan quota reached — index more later)' : ''
+    return <p className="dim small" aria-live="polite">Indexing complete — {job.points_created ?? 0} data points{repos}{beyond}{quota}.</p>
+  }
+  if (job.status === 'failed') {
+    return <p className="error small" role="alert">Indexing failed — {job.error || 'retry'}</p>
+  }
+  if (job.status === 'expired') {
+    return <p className="dim small" aria-live="polite">Status expired — re-check</p>
+  }
+  if (job.status === 'timeout') {
+    return <p className="dim small" aria-live="polite">Still running — check back in a moment</p>
+  }
+  return null
+}
+
+// #1728 (Task 16/17): docs-job status line — terminal states distinct: "N
+// documents indexed" success / failed-with-reason (in-flight | base-unset |
+// exhausted — distinct copy, never a retry loop) / "status expired — re-check".
+function DocsIndexStatus({ job }) {
+  if (!job) return null
+  if (job.status === 'started') {
+    return <p className="dim small" aria-live="polite">Indexing docs in progress…</p>
+  }
+  if (job.status === 'completed') {
+    const quota = job.quota_hit ? ' (plan quota reached)' : ''
+    return <p className="dim small" aria-live="polite">{job.documents_indexed ?? 0} documents indexed{quota}.</p>
+  }
+  if (job.status === 'failed') {
+    const err = job.error || ''
+    const reason = /TORTOISE_INGEST_BASE_DIR|base dir|base is not set/i.test(err)
+      ? 'docs sandbox not configured'
+      : /quota|exhaust/i.test(err)
+        ? 'plan quota reached'
+        : /in[- ]flight|already running/i.test(err)
+          ? 'a docs job is already running'
+          : 'retry'
+    return <p className="error small" role="alert">Docs indexing failed — {reason}</p>
+  }
+  if (job.status === 'expired') {
+    return <p className="dim small" aria-live="polite">Status expired — re-check</p>
+  }
+  if (job.status === 'timeout') {
+    return <p className="dim small" aria-live="polite">Still running — check back in a moment</p>
+  }
+  return null
 }
 
 createRoot(document.getElementById('root')).render(<App />)
