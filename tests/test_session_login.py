@@ -477,6 +477,54 @@ class TestRateLimitChargePoints:
         r = _exchange(client, key)
         assert r.status_code == 429
 
+    def test_concurrent_charges_cannot_exceed_burst_bound(self, client, fake, monkeypatch):
+        """#1738: the deferred check and the terminal charge are SEPARATE
+        lock acquisitions — N concurrent 401s can each pass the check, then
+        all charge, bursting the bucket to limit+concurrency. _charge_ip_bucket
+        re-checks len(bucket) >= limit under the lock and DROPS over-limit
+        charges, preserving the 5/hr boundary."""
+        self._limiter_on(monkeypatch)
+        from tortoise import hosted_api as ha
+        ip = "203.0.113.9"
+        # Seed the window AT the limit — as if 5 earlier 401s had charged.
+        ha._SESSION_BUCKETS[ip] = [time.time()] * ha._SESSION_LOGIN_LIMIT
+        # A burst of concurrent terminal-outcome charges must not inflate
+        # the bucket past the limit (each sees the full window under the lock).
+        import asyncio
+        async def _burst():
+            await asyncio.gather(*[
+                ha._charge_ip_bucket(
+                    ha._SESSION_BUCKETS, ha._SESSION_LOGIN_LOCK, ip,
+                    limit=ha._SESSION_LOGIN_LIMIT,
+                    window_s=ha._SESSION_LOGIN_WINDOW_S)
+                for _ in range(8)
+            ])
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+        try:
+            loop.run_until_complete(_burst())
+        finally:
+            loop.close()
+        assert len(ha._SESSION_BUCKETS[ip]) == ha._SESSION_LOGIN_LIMIT
+
+    def test_charge_below_limit_still_appends(self, client, fake, monkeypatch):
+        """#1738: the burst bound only drops OVER-limit charges — a charge
+        into a window with room still appends (the deferred-charge contract)."""
+        self._limiter_on(monkeypatch)
+        from tortoise import hosted_api as ha
+        ip = "203.0.113.10"
+        ha._SESSION_BUCKETS[ip] = []
+        import asyncio
+        loop = asyncio.get_event_loop_policy().new_event_loop()
+        try:
+            loop.run_until_complete(
+                ha._charge_ip_bucket(
+                    ha._SESSION_BUCKETS, ha._SESSION_LOGIN_LOCK, ip,
+                    limit=ha._SESSION_LOGIN_LIMIT,
+                    window_s=ha._SESSION_LOGIN_WINDOW_S))
+        finally:
+            loop.close()
+        assert len(ha._SESSION_BUCKETS[ip]) == 1
+
 
 class TestChargeBucketResilience:
     """#1719 code-review P2: _charge_ip_bucket must never raise — a charge
@@ -496,7 +544,8 @@ class TestChargeBucketResilience:
         import asyncio
         asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
             ha._charge_ip_bucket(ha._SESSION_BUCKETS, ha._SESSION_LOGIN_LOCK,
-                                 ip, window_s=ha._SESSION_LOGIN_WINDOW_S))
+                                 ip, limit=ha._SESSION_LOGIN_LIMIT,
+                                 window_s=ha._SESSION_LOGIN_WINDOW_S))
         assert ha._SESSION_BUCKETS[ip], "bucket must be recreated and charged"
 
     def _limiter_on(self, monkeypatch):

@@ -2033,7 +2033,7 @@ async def _check_ip_bucket_rate_limit(
 
 async def _charge_ip_bucket(
     buckets: dict, lock: asyncio.Lock, key: str, *,
-    window_s: int = 3600, max_entries: int = 10_000,
+    limit: int, window_s: int = 3600, max_entries: int = 10_000,
 ) -> None:
     """#1719 (Task 5): append one charge to a deferred bucket store.
 
@@ -2043,6 +2043,12 @@ async def _charge_ip_bucket(
     with the raw key would split dual-stack buckets). Best-effort — a charge
     is telemetry, never a failure path. Async: the bucket lock is an
     asyncio.Lock (all callers are async endpoints).
+
+    #1738: the deferred check and this charge are SEPARATE lock acquisitions
+    — N concurrent 401s can each pass the check, then all charge, bursting
+    the bucket to limit+concurrency. Re-check ``len(bucket) >= limit`` under
+    the lock and DROP the charge when the window is already full: the 429
+    boundary stays at limit.
     """
     if os.environ.get("RATE_LIMIT_DISABLED") == "1":
         return
@@ -2058,6 +2064,11 @@ async def _charge_ip_bucket(
         # telemetry and must never alter the response (code-review P2).
         bucket = buckets.setdefault(ip, [])
         bucket[:] = [t for t in bucket if now - t < window_s]
+        # #1738 burst bound: a charge must never inflate the bucket past the
+        # limiter's limit — drop it (return, no append) when the window is
+        # already full. The 429 boundary is preserved at limit.
+        if len(bucket) >= limit:
+            return
         bucket.append(now)
         if len(buckets) > max_entries:
             stale = [ip for ip, b in buckets.items()
@@ -2896,11 +2907,13 @@ async def session_login(request: Request):
         if exc.status_code in (401, 403) and ip:
             await _charge_ip_bucket(
                 _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+                limit=_SESSION_LOGIN_LIMIT,
                 window_s=_SESSION_LOGIN_WINDOW_S)
         raise
     if ip:
         await _charge_ip_bucket(
             _SESSION_BUCKETS, _SESSION_LOGIN_LOCK, ip,
+            limit=_SESSION_LOGIN_LIMIT,
             window_s=_SESSION_LOGIN_WINDOW_S)
     return session
 

@@ -651,6 +651,46 @@ class TestSessionHelpers:
         assert fake.tables["api_keys"][0]["revoked_at"] == "2026-08-02T00:00:00Z"
 
 
+# ── _is_uuid gate (#1738: match PG's uuid parser, not Python's) ──────────
+
+class TestIsUUID:
+    """#1738: _is_uuid must match PostgreSQL's uuid parser, NOT Python's
+    permissive uuid.UUID(). Python accepts ``urn:uuid:...`` / ``uuid:...``
+    prefixed forms; Postgres REJECTS them (22P02 → PostgREST 400), so they
+    must fail the gate before a ``user_id eq`` filter is built."""
+
+    @staticmethod
+    def _is_uuid(value):
+        from tortoise.supabase_control import _is_uuid
+        return _is_uuid(value)
+
+    def test_urn_form_rejected(self):
+        # uuid.UUID("urn:uuid:...") succeeds — PG's parser rejects it.
+        assert self._is_uuid(
+            "urn:uuid:e7e0794e-267d-427c-a3a2-7d01cfd5611e") is False
+
+    def test_uuid_prefix_form_rejected(self):
+        assert self._is_uuid(
+            "uuid:e7e0794e-267d-427c-a3a2-7d01cfd5611e") is False
+
+    def test_hyphenated_accepted(self):
+        assert self._is_uuid(
+            "e7e0794e-267d-427c-a3a2-7d01cfd5611e") is True
+
+    def test_32_hex_accepted(self):
+        assert self._is_uuid(
+            "e7e0794e267d427ca3a27d01cfd5611e") is True
+
+    def test_braced_accepted(self):
+        assert self._is_uuid(
+            "{e7e0794e-267d-427c-a3a2-7d01cfd5611e}") is True
+
+    def test_non_string_rejected(self):
+        assert self._is_uuid(None) is False
+        assert self._is_uuid(12345) is False
+        assert self._is_uuid("") is False
+
+
 # ── Invitations seam (plan Task 4: mint / accept / rescind) ───────────────
 
 class TestInvitationSeam:

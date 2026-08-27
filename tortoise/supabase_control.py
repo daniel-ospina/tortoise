@@ -685,13 +685,19 @@ def membership_for_user_team(cp, user_id: str, team_id: str) -> dict | None:
 def _is_uuid(value: object) -> bool:
     """True when *value* is a UUID-shaped string, matching PostgreSQL's uuid
     parser acceptance (hyphenated, 32-hex without hyphens, braced, case-
-    insensitive). A strict hyphenated regex would reject 32-hex/braced forms
-    that Postgres accepts and that can therefore be real mint targets
-    (solution-verify P2-B). Returns False for None/non-strings so callers can
-    gate before building a ``user_id eq`` filter on a uuid column (a non-UUID
-    literal would 22P02 → PostgREST 400 — the #1719 500 class).
+    insensitive) — NOT Python's more permissive uuid.UUID() parser. Python
+    accepts ``urn:uuid:...`` / ``uuid:...`` prefixed forms; Postgres REJECTS
+    them (22P02 → PostgREST 400), so they must fail the gate before a
+    ``user_id eq`` filter is built (#1738). A strict hyphenated regex would
+    reject 32-hex/braced forms that Postgres accepts and that can therefore
+    be real mint targets (solution-verify P2-B). Returns False for
+    None/non-strings so callers can gate before building a ``user_id eq``
+    filter on a uuid column (a non-UUID literal would 22P02 → PostgREST 400
+    — the #1719 500 class).
     """
     if not isinstance(value, str) or not value:
+        return False
+    if value.startswith(("urn:", "uuid:")):
         return False
     try:
         _uuid.UUID(value)
