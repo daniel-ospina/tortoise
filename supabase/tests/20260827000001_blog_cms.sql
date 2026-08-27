@@ -1,5 +1,7 @@
 -- ============================================================================
 -- SQL-level verification for migration 20260827000001 (issue #1793 — blog CMS)
+-- NOTE: assertion messages use the '0017' shorthand for this migration
+-- (0017 == migration 20260827000001, blog CMS).
 -- blog_posts lifecycle triggers, RLS, is_admin(), blog_agent_keys isolation.
 --
 -- HOW TO RUN (no Docker — PGlite harness):

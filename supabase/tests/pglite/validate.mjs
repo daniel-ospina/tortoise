@@ -2,7 +2,7 @@
 // suites WITHOUT Docker (issue #770). Supabase-local bootstrap (roles,
 // default privileges, auth schema with auth.uid()/auth.jwt() GUC shims),
 // applies migrations 0001-20260827000001 in order, then runs ALL assertion suites
-// (0006–0009 from #769, 0010 from #770, 2026 token suites, 0017 blog CMS) with ON_ERROR_STOP semantics.
+// (0006–0009 from #769, 0010 from #770, 2026 token suites, 20260827000001 blog CMS) with ON_ERROR_STOP semantics.
 //
 // Run:   npm install   (once, in this directory)
 //        npm run validate
