@@ -34,7 +34,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { useAuth } from '@/hooks/useAuth';
 import { useHashRoute, navigate } from '@/hooks/useHashRoute';
-import { wasAbandoned } from '@/lib/unsaved-guard';
+import { wasAbandoned, resetAbandoned } from '@/lib/unsaved-guard';
 import {
   getPost, uploadBlogImage, deleteBlogImage, updatePost,
   isValidSlug, tagsError,
@@ -134,6 +134,12 @@ export default function PostEditor() {
     },
     enabled: !isNew,
   });
+  const isArchived = existingPost?.status === 'archived';
+
+  // Archived posts are read-only (terminal) — editor editable follows the row.
+  useEffect(() => {
+    if (editor) editor.setEditable(!isArchived);
+  }, [editor, isArchived]);
 
   // Hydrate form + editor from the DB row — hydration guard so background
   // refetches don't wipe user edits (ported pattern from GuideEditor).
@@ -256,6 +262,7 @@ export default function PostEditor() {
       setDirty(false);
       if (isNew) {
         if (!wasAbandoned()) navigate(`#/edit/${savedId}`);
+        resetAbandoned(); // self-heal: clear the flag so the next create navigates normally
       }
     },
     onError: (err) => {
@@ -297,6 +304,7 @@ export default function PostEditor() {
   }
 
   async function handleSave(mode: 'draft' | 'publish') {
+    if (isArchived) return; // terminal — never allow saves on archived
     if (!validateForm()) return;
 
     // Client-side tag cap — matches the API contract (max 10).
@@ -366,14 +374,22 @@ export default function PostEditor() {
               </Button>
             </a>
           )}
-          <Button variant="outline" onClick={() => handleSave('draft')} disabled={saving}>
-            {saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <Save className="w-4 h-4 mr-1.5" />}
-            Save as draft
-          </Button>
-          <Button onClick={() => handleSave('publish')} disabled={saving}>
-            {saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <ExternalLink className="w-4 h-4 mr-1.5" />}
-            {existingPost?.status === 'published' ? 'Save & Republish' : 'Publish'}
-          </Button>
+          {isArchived ? (
+            <div className="text-sm text-muted-foreground border border-amber-500/30 bg-amber-500/5 rounded-md px-3 py-2">
+              <strong>Archived</strong> — archive is terminal. This post is read-only.
+            </div>
+          ) : (
+            <>
+              <Button variant="outline" onClick={() => handleSave('draft')} disabled={saving}>
+                {saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <Save className="w-4 h-4 mr-1.5" />}
+                Save as draft
+              </Button>
+              <Button onClick={() => handleSave('publish')} disabled={saving}>
+                {saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <ExternalLink className="w-4 h-4 mr-1.5" />}
+                {existingPost?.status === 'published' ? 'Save & Republish' : 'Publish'}
+              </Button>
+            </>
+          )}
         </div>
       </div>
 

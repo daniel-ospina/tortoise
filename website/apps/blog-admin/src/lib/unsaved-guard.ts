@@ -23,3 +23,4 @@ export function isDirty(): boolean {
 let abandoned = false;
 export function markAbandoned(): void { abandoned = true; }
 export function wasAbandoned(): boolean { return abandoned; }
+export function resetAbandoned(): void { abandoned = false; }
