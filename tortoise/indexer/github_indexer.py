@@ -40,6 +40,7 @@ from typing import Any
 import httpx
 
 from tortoise import github_map
+from tortoise.quota import QuotaCheckError, QuotaExceededError
 
 logger = logging.getLogger(__name__)
 
@@ -121,14 +122,21 @@ class GitHubIndexer:
             f"for {url}")
 
     async def resolve_repos(self, org: str) -> list[str]:
-        """Resolve repo names for an org (try org, fall back to user)."""
+        """Resolve repo names for an org (try org, fall back to user).
+
+        A non-200 from BOTH (org not found / no access) RAISES
+        GitHubFetchError — the job must fail honestly, never silently
+        complete with 0 points + github_indexed=True (P2, PR #1792).
+        """
         client = await self._get_client()
         for kind in ("orgs", "users"):
             r = await self._get(
                 client, f"{_GITHUB_API}/{kind}/{org}/repos?per_page=100")
             if r.status_code == 200:
                 return [repo["full_name"] for repo in r.json()]
-        return []
+        raise GitHubFetchError(
+            f"GitHub org/user {org!r} not found or no access (non-200 on "
+            f"both orgs/{org}/repos and users/{org}/repos)")
 
     @staticmethod
     def _link_header_urls(link: str) -> dict[str, str]:
@@ -190,15 +198,20 @@ class GitHubIndexer:
         return batch, urls.get("next"), self._last_page_estimate(link)
 
     @staticmethod
-    def _inside_cursor(issue: dict, cursor: dict | None) -> bool:
-        """True when the issue is a BOUNDARY-SECOND item already indexed.
+    def _inside_cursor(issue: dict, cursor: dict | None, *,
+                       drain: bool = False) -> bool:
+        """True when the issue was ALREADY indexed by the run that produced
+        the cursor.
 
-        Composite ``(updated_at, number)`` (T2-P4): the resume skip applies
-        ONLY to items at the cursor's ``updated_at`` second with a number ≤
-        the cursor's number — those were processed by the run that produced
-        the cursor. Items at OLDER seconds are never skipped (they are the
-        deferred backlog — capped runs must keep draining them, and
-        idempotent probes make any overlap harmless).
+        Composite ``(updated_at, number)`` (T2-P4): items at the cursor's
+        ``updated_at`` second with a number ≤ the cursor's number are always
+        skipped — they were processed by the run that produced the cursor.
+
+        DRAIN mode (previous run cap-truncated or quota-interrupted) ALSO
+        skips items with ``updated_at > cursor.updated_at`` — they were
+        indexed by the run that minted the cursor, and counting them toward
+        the cap again is what let a >2×cap backlog oscillate between two
+        boundary seconds forever, its tail never indexed (P1-4, PR #1792).
         """
         if not cursor:
             return False
@@ -207,6 +220,8 @@ class GitHubIndexer:
         cur_number = int(cursor.get("number") or 0)
         if not n["updated_at"] or not cur_updated:
             return False
+        if drain and n["updated_at"] > cur_updated:
+            return True
         return (n["updated_at"] == cur_updated
                 and n["number"] <= cur_number)
 
@@ -232,8 +247,10 @@ class GitHubIndexer:
         items: list[dict] = []
         total_estimate: int | None = None
         cap_hit = False
-        # DRAIN mode when the persisted cursor carries the truncation flag.
-        since_cursor = None if (cursor and cursor.get("truncated")) else cursor
+        # DRAIN mode when the persisted cursor carries the truncation flag
+        # (cap-truncated or quota-interrupted previous run).
+        drain = bool(cursor and cursor.get("truncated"))
+        since_cursor = None if drain else cursor
         batch, next_url, total_estimate = await self._fetch_page(
             client, repo, since_cursor)
         while True:
@@ -248,7 +265,7 @@ class GitHubIndexer:
                 reverse=True,
             )
             for item in batch:
-                if self._inside_cursor(item, cursor):
+                if self._inside_cursor(item, cursor, drain=drain):
                     continue
                 items.append(item)
                 if len(items) >= cap:
@@ -284,17 +301,58 @@ class GitHubIndexer:
 
     # ── Phase 2: write path ─────────────────────────────────────────
 
+    @staticmethod
+    def _event_exists(proj, event_id: str) -> bool:
+        """True when an Event node with the eventId already exists."""
+        rows = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN e.eventId",
+            params={"eid": event_id}).result_set
+        return bool(rows)
+
+    def _next_transition_id(self, proj, base_id: str) -> str:
+        """Monotonic transition eventId (P1-3, PR #1792).
+
+        The FIRST close/reopen mints the base id (``-closed`` / ``-reopened``
+        — the pinned vocabulary). A REPEATED transition of the same kind
+        mints ``-closed-2``, ``-closed-3``, … so each transition is a
+        DISTINCT node in the event timeline — close→reopen→close must keep
+        both closes, never a MERGE-overwrite of the first close node.
+        """
+        if not self._event_exists(proj, base_id):
+            return base_id
+        rows = proj.g.query(
+            "MATCH (e:Event) WHERE e.eventId STARTS WITH $prefix "
+            "RETURN e.eventId",
+            params={"prefix": base_id + "-"}).result_set
+        max_n = 1
+        for (eid,) in rows:
+            suffix = str(eid)[len(base_id) + 1:]
+            if suffix.isdigit():
+                max_n = max(max_n, int(suffix))
+        return f"{base_id}-{max_n + 1}"
+
     def _project_issue(self, sdk, proj, repo: str, issue: dict) -> dict:
         """Project one issue: Object + Subjects + Events + statement.
 
-        Returns {"points_created", "statements_superseded", "events_minted",
-        "quota_hit"} — the lifecycle decision table lives here.
+        Returns {"points_created", "statements_superseded", "events_minted"}
+        — the lifecycle decision table lives here.
         """
         stats = {"points_created": 0, "statements_superseded": 0,
                  "events_minted": 0}
         obj = github_map.issue_to_object(issue, repo)
         if obj is None:
             return stats
+        # P1-5 (PR #1792): the indexer is a ROUTING PASS-THROUGH — it never
+        # emits default/empty routing props (routed_team '', routed_role
+        # 'product-implementer', complexity 'standard', …). Left in, the
+        # projection's _persist_extra_props (`SET n += extra`) would
+        # clobber the connector's label-derived routing on the shared
+        # Object on every indexer run.
+        for _k in ("routed_team", "routed_role", "routed_product",
+                   "complexity", "ux_rating"):
+            if _k in obj and obj[_k] in ("", None, "standard",
+                                         "product-implementer"):
+                del obj[_k]
         obj_id = obj["id"]
         # Previous issue-state from the PRE-EXISTING Object.status — read
         # BEFORE applying the fresh Object (a new Object defaults to
@@ -314,18 +372,29 @@ class GitHubIndexer:
                 params={"oid": obj_id, "sid": sid},
             )
 
-        # Creation event — ALWAYS (first ingest mints `-created` only, even
-        # for an already-closed issue — kind carries the state).
+        # Creation event — FIRST observation mints `-created` (even for an
+        # already-closed issue — the kind carries the state). P1-2 (PR
+        # #1792): the creation record is FROZEN at first observation — probe
+        # the eventId and apply ONLY when it does not exist. Re-applying it
+        # with the CURRENT state would flip the node's kind (open→closed→
+        # open) and mutate endedAt on every re-run, violating
+        # Events-as-truth; a closed-kind `-created` must only ever come from
+        # a first ingest of an already-closed issue.
         created = github_map.issue_to_event(issue, repo, previous_state=None)
-        if created is not None:
+        if (created is not None
+                and not self._event_exists(proj, created["eventId"])):
             proj.apply(created)
-            stats["events_minted"] += 1
+            stats["events_minted"] += 1  # genuine mint only (P2)
         # Transition events — ONLY on a real state change (diff against the
         # persisted Object.status projection, never the fetch window).
+        # Repeated transitions mint monotonic ids (P1-3) so the timeline
+        # never loses a close/reopen.
         if prev_state is not None:
             trans = github_map.issue_to_event(issue, repo,
                                               previous_state=prev_state)
             if trans is not None:
+                trans["eventId"] = self._next_transition_id(
+                    proj, trans["eventId"])
                 proj.apply(trans)
                 stats["events_minted"] += 1
 
@@ -428,8 +497,12 @@ class GitHubIndexer:
         ev = github_map.pr_to_event(pr, repo)
         if ev is None:
             return {"events_minted": 0}
+        # PR events share one deterministic id — the MERGE updates the node
+        # in place (state changes keep it current), but the count must be
+        # honest: events_minted counts GENUINE mints only (P2, PR #1792).
+        minted = 0 if self._event_exists(proj, ev["eventId"]) else 1
         proj.apply(ev)
-        return {"events_minted": 1}
+        return {"events_minted": minted}
 
     # ── Backfill (T1-P1 + T2-P3) ────────────────────────────────────
 
@@ -516,10 +589,15 @@ class GitHubIndexer:
             if quota_check is not None:
                 try:
                     quota_check()
-                except Exception as e:  # QuotaExceededError / QuotaCheckError
+                except QuotaExceededError as e:
                     stats["quota_hit"] = True
                     stats["errors"].append(str(e))
                     break
+                except QuotaCheckError:
+                    # Fail-closed: a quota COUNTING/config failure is NOT a
+                    # quota hit — re-raise so the job fails honestly (P2,
+                    # PR #1792), never swallowed as a quota-break.
+                    raise
             n = github_map._norm_issue(item)
             if "pull_request" in item:
                 stats["events_minted"] += self._project_pr(proj, repo, item)["events_minted"]
@@ -546,9 +624,11 @@ class GitHubIndexer:
         if last is not None:
             new_cursor: dict[str, Any] = {
                 "updated_at": last["updated_at"], "number": last["number"]}
-            # Cap-truncated runs stamp `truncated` so the next run enters
-            # DRAIN mode and keeps draining the deferred backlog.
-            if cap_hit:
+            # Cap-truncated runs AND quota-interrupted runs stamp
+            # `truncated` so the next run enters DRAIN mode and keeps
+            # draining the deferred backlog (P2, PR #1792: a quota break
+            # must not silently drop the unprocessed tail).
+            if cap_hit or stats["quota_hit"]:
                 new_cursor["truncated"] = True
             stats["cursor"] = new_cursor
         await self._close()

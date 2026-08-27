@@ -248,18 +248,36 @@ def test_quota_honest_fail(client, tmp_path, monkeypatch):
 
 # ── Single-flight (T2-P2 + cycle-3 P1-3) ──────────────────────────
 
-def test_in_flight_single_flight_reuses(provisioned, mock_github):
+def test_in_flight_single_flight_reuses(provisioned, mock_github, monkeypatch):
     """A `started` job for the team is REUSED — its job_id is returned
-    (guard-check FIRST)."""
+    (guard-check FIRST), and the reused POST spawns NO second run — two
+    concurrent POSTs produce EXACTLY ONE _run_indexing execution (P1-1:
+    single-flight dedupes the RUN, not just the entry)."""
     team_id = provisioned.team_id
-    job_id = _start_index_job(team_id)
+    calls = []
+    import asyncio as _asyncio
+    import tortoise.hosted_api as ha
+    orig_run = ha._run_indexing
+
+    async def _counting(*args, **kw):
+        calls.append(args)
+        # keep the run IN-FLIGHT across both POSTs (the mock walk is
+        # millisecond-fast — without the hold the portal settles it before
+        # the second POST and the entry turns terminal)
+        await _asyncio.sleep(0.2)
+        await orig_run(*args, **kw)
+
+    monkeypatch.setattr(ha, "_run_indexing", _counting)
+    r1 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    assert r1.status_code == 200
+    job_id = r1.json()["job_id"]
     assert _INDEX_JOBS[job_id]["status"] == "started"
-    r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
-    assert r.status_code == 200
-    assert r.json()["job_id"] == job_id, "in-flight job must be reused"
-    # poll the reused job to completion (single point set)
+    r2 = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
+    assert r2.status_code == 200
+    assert r2.json()["job_id"] == job_id, "in-flight job must be reused"
     body = _poll_until(provisioned.tc, job_id, "completed")
     assert body["points_created"] == 2
+    assert len(calls) == 1, "concurrent POSTs must spawn exactly ONE run"
 
 
 def test_stuck_started_evicted(provisioned, mock_github):
@@ -267,7 +285,7 @@ def test_stuck_started_evicted(provisioned, mock_github):
     evicted — a hung run never bricks the team."""
     from tortoise.hosted_api import _INDEX_JOB_TTL_S
     team_id = provisioned.team_id
-    stale = _start_index_job(team_id)
+    stale, _ = _start_index_job(team_id)
     _INDEX_JOBS[stale]["started_at"] = time.time() - _INDEX_JOB_TTL_S - 10
     r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
     assert r.status_code == 200
@@ -281,7 +299,7 @@ def test_terminal_jobs_evicted_on_enqueue(provisioned, mock_github):
     """Terminal (completed) entries for the team are cleared on the next
     enqueue (T1-P14)."""
     team_id = provisioned.team_id
-    job_id = _start_index_job(team_id)
+    job_id, _ = _start_index_job(team_id)
     _INDEX_JOBS[job_id]["status"] = "completed"
     r = provisioned.tc.post("/v1/index/github", json={"org": "acme"})
     new_job = r.json()["job_id"]
@@ -359,6 +377,156 @@ def test_cursor_and_backfill_marker_persisted(provisioned, mock_github):
     assert cursor and "acme/repo1" in cursor
     assert cursor["acme/repo1"]["updated_at"]
     assert "number" in cursor["acme/repo1"]
+
+
+# ── P2 (PR #1792): marker / 404 / quota-break honesty ────────────────
+
+def test_backfill_marker_set_only_on_success(client, tmp_path, monkeypatch):
+    """P2: github_legacy_backfill_done is set ONLY when the backfill
+    SUCCEEDS — a transient failure must not skip the one-time migration
+    forever (the job still completes; the backfill re-runs next time)."""
+    _provision(client.db_path, team_id=client.team_id)
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    fail_backfill = {"fail": True}
+
+    def _flaky_backfill(self, proj):
+        if fail_backfill["fail"]:
+            raise RuntimeError("backfill boom")
+        return 0
+
+    monkeypatch.setattr(GitHubIndexer, "backfill_legacy_closed",
+                        _flaky_backfill)
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    _poll_until(client.tc, r.json()["job_id"], "completed")
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert state["github_legacy_backfill_done"] is False, \
+        "marker must stay UNSET when the backfill raises"
+    # heal the backfill → the next run re-runs it and sets the marker
+    fail_backfill["fail"] = False
+    r2 = client.tc.post("/v1/index/github/re-poll")
+    _poll_until(client.tc, r2.json()["job_id"], "completed")
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert state["github_legacy_backfill_done"] is True
+
+
+def test_resolve_repos_404_fails_job(client, tmp_path, monkeypatch):
+    """P2: an org that 404s on BOTH orgs/ and users/ must FAIL the job
+    with a readable error — never silently complete with 0 points +
+    github_indexed=True."""
+    _provision(client.db_path, team_id=client.team_id)
+    t = MockGitHubTransport(issues=[], resolve_repos_404=True)
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    job_id = r.json()["job_id"]
+    body = _poll_until(client.tc, job_id, "failed")
+    assert "not found" in body["error"] or "no access" in body["error"]
+    assert body["status"] == "failed"
+
+
+def test_quota_break_cursor_stamps_truncated(client, tmp_path, monkeypatch):
+    """P2: a quota-interrupted run stamps the persisted cursor `truncated`
+    so the next run stays in DRAIN mode — the unprocessed tail is never
+    silently dropped (a quota break is not a clean window end)."""
+    _provision(client.db_path, team_id=client.team_id, max_points=1)
+    t = MockGitHubTransport(issues=[gh_issue(1), gh_issue(2)])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    job_id = r.json()["job_id"]
+    body = _poll_until(client.tc, job_id, "completed")
+    assert body["quota_hit"] is True
+    assert body["points_created"] == 1
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    cursor = state["github_index_cursor"]["acme/repo1"]
+    assert cursor["truncated"] is True, \
+        "quota-break cursor must stay in DRAIN mode"
+
+
+def test_preflight_failure_preserves_persisted_cursors(client, tmp_path,
+                                                        monkeypatch):
+    """P2: a PRE-WALK failure (quota preflight) must not WIPE previously
+    persisted cursors — the finally persists the loaded state back (a
+    `cursors={}` blind write would silently drop the resume point)."""
+    _provision(client.db_path, team_id=client.team_id, max_points=10000)
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    # seed persisted cursors + indexed state
+    client.tc.patch("/v1/onboarding/state", json={
+        "github_index_cursor": {
+            "acme/repo1": {"updated_at": "2026-07-19T12:00:00Z",
+                            "number": 7}},
+        "github_indexed": True})
+    # drop the team to a 0-point cap → the preflight fails
+    reg_sdk = TortoiseSDK(db_path=client.db_path, namespace="registry")
+    reg_sdk._get_registry().query(
+        "MATCH (t:Team {id:$id}) SET t.max_points = 0",
+        params={"id": client.team_id})
+    reg_sdk.close()
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    body = _poll_until(client.tc, r.json()["job_id"], "failed")
+    assert "limit reached" in body["error"]
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert state["github_index_cursor"] == {
+        "acme/repo1": {"updated_at": "2026-07-19T12:00:00Z",
+                        "number": 7}}, \
+        "preflight failure must not wipe persisted cursors"
+
+
+def test_owner_token_eviction_aborts_stale_run(client, tmp_path, monkeypatch):
+    """P2: a stale run whose entry was TTL-evicted / replaced (owner token
+    gone) must settle SILENTLY — no KeyError on status writes, no
+    resurrection of the entry (pre-fix: `_INDEX_JOBS[job_id].update` raised
+    KeyError on the missing entry)."""
+    _provision(client.db_path, team_id=client.team_id)
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    from tortoise.hosted_api import _INDEX_JOB_OWNERS, _run_indexing
+    stale_job, _ = _start_index_job(client.team_id)
+    # entry + owner gone — as after a TTL eviction + replacement by a newer
+    # run (the stale coroutine still holds its old job_id)
+    _INDEX_JOBS.pop(stale_job, None)
+    _INDEX_JOB_OWNERS.pop(stale_job, None)
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            _run_indexing(stale_job, client.team_id, "acme", None))
+    finally:
+        loop.close()
+    # the stale run settled without resurrecting its entry (ownership-gated
+    # status writes were no-ops) and without raising
+    assert stale_job not in _INDEX_JOBS
+    assert stale_job not in _INDEX_JOB_OWNERS
 
 
 # ── Historical observation-dedup script (Task 7) ──────────────────
@@ -444,3 +612,21 @@ def test_dedup_script_leave_as_is_by_default(dedup_sdk):
     assert report["dry_run"] is True
     assert report["merged"] == 0
     assert proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 2
+
+
+def test_dedup_script_resolve_uri_honors_explicit_uri(monkeypatch):
+    """P2 (PR #1792): an EXPLICIT --uri equal to the default constant is
+    honored verbatim — the old constant-comparison silently rerouted it to
+    the embedded DB (the operator's explicit target was ignored)."""
+    script = _load_dedup_script()
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    # no URI anywhere → embedded default path (not a URI)
+    embedded = script._resolve_uri("")
+    assert embedded and not embedded.startswith("docker://")
+    # explicit URI equal to the constant → honored verbatim
+    assert script._resolve_uri(script.DEFAULT_URI) == script.DEFAULT_URI
+    # explicit --uri wins over env
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:x@localhost:9999/other")
+    assert script._resolve_uri(script.DEFAULT_URI) == script.DEFAULT_URI
+    # env-only → env wins
+    assert script._resolve_uri("") == "docker://:x@localhost:9999/other"

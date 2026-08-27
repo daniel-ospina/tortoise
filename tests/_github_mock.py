@@ -58,7 +58,9 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
                  repos: list[str] | None = None,
                  link_rel_last_page: int | None = None,
                  failures: list[tuple[int, int]] | None = None,
-                 respect_since: bool = True):
+                 respect_since: bool = True,
+                 page_size: int | None = None,
+                 resolve_repos_404: bool = False):
         self.issues_by_repo = issues_by_repo or {}
         if issues is not None:
             self.issues_by_repo["acme/repo1"] = issues
@@ -66,6 +68,12 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
         self.link_rel_last_page = link_rel_last_page
         self.failures = list(failures or [])
         self.respect_since = respect_since
+        # When set, the issues endpoint paginates (page_size per page) with
+        # Link rel="next"/"prev"/"last" — multi-page DRAIN walks (P1-4).
+        self.page_size = page_size
+        # When set, BOTH orgs/ and users/ repo resolution return 404 —
+        # resolve_repos must fail the job (P2, PR #1792).
+        self.resolve_repos_404 = resolve_repos_404
         self.requests: list[httpx.Request] = []
         self._fail_idx = 0
         self._since_last: dict[str, str] = {}
@@ -103,6 +111,8 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
                 return httpx.Response(status, json={"message": f"injected {status}"},
                                       request=request)
         if "/repos" in url and "/issues" not in url:
+            if self.resolve_repos_404:
+                return httpx.Response(404, json={}, request=request)
             return httpx.Response(200, json=[{"full_name": r} for r in self.repos],
                                   request=request)
         if "/issues" in url:
@@ -120,6 +130,28 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
             items.sort(key=lambda i: (i.get("updated_at") or "", i.get("number") or 0),
                        reverse=True)
             headers: dict[str, str] = {}
+            if self.page_size:
+                total = len(items)
+                last_page = max(1, -(-total // self.page_size))
+                page = max(1, min(int(params.get("page", "1") or 1), last_page))
+                page_items = items[(page - 1) * self.page_size:page * self.page_size]
+                links = []
+                if page < last_page:
+                    links.append(
+                        f'<https://api.github.com/repos/{repo}/issues?page={page + 1}>; '
+                        'rel="next"')
+                if page > 1:
+                    links.append(
+                        f'<https://api.github.com/repos/{repo}/issues?page={page - 1}>; '
+                        'rel="prev"')
+                if page < last_page:
+                    links.append(
+                        f'<https://api.github.com/repos/{repo}/issues?page={last_page}>; '
+                        'rel="last"')
+                if links:
+                    headers["Link"] = ", ".join(links)
+                return httpx.Response(200, json=page_items, headers=headers,
+                                      request=request)
             if self.link_rel_last_page:
                 headers["Link"] = (
                     f'<https://api.github.com/repos/{repo}/issues?page={self.link_rel_last_page}>; '

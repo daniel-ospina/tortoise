@@ -2526,13 +2526,16 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         return {"error": f"{plane} unavailable"}
     if not encrypted:
         return {"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."}
-    # #1725: single-flight — an in-flight started job for the team is reused.
-    job_id = _start_index_job(team_id)
-    try:
-        _asyncio.get_event_loop().create_task(
-            _run_indexing(job_id, team_id, org, repo))
-    except RuntimeError:
-        return {"error": "No running event loop"}
+    # #1725 + P1-1 (PR #1792): single-flight — an in-flight started job for
+    # the team is reused AND the run is spawned ONLY when the job was
+    # freshly minted (never two concurrent walks on one job).
+    job_id, is_new = _start_index_job(team_id)
+    if is_new:
+        try:
+            _asyncio.get_event_loop().create_task(
+                _run_indexing(job_id, team_id, org, repo))
+        except RuntimeError:
+            return {"error": "No running event loop"}
     return {"job_id": job_id, "status": "started"}
 
 

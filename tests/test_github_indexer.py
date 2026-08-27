@@ -25,6 +25,7 @@ import pytest
 
 from tests._embedded import _wipe_or
 from tests._github_mock import MockGitHubTransport, gh_issue, gh_pr
+from tortoise import github_map
 from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
 
 
@@ -331,6 +332,213 @@ def test_backfill_mints_closed_for_legacy_created(sdk):
         ("github-issue-acme/repo1-1-closed", "github.issue.closed")]
     # idempotent — re-running the backfill mints nothing new
     assert indexer.backfill_legacy_closed(proj) == 0
+
+
+# ── P1-2/P1-3 (PR #1792): frozen creation record + monotonic transitions ─
+
+def test_created_event_frozen_across_close_reopen(sdk):
+    """P1-2: the `-created` node is FROZEN at first observation — its
+    eventKind/endedAt stay byte-stable across close/reopen/re-poll cycles.
+    Pre-fix: _event_plain_merge's last-writer-wins (ON MATCH SET e += props)
+    rewrote the creation record with the CURRENT state on every re-run
+    (open→close flipped the kind + added endedAt; reopen flipped it back)."""
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)  # open → -created (open kind, no endedAt)
+    proj = sdk._get_proj()
+
+    def _created():
+        return tuple(proj.g.query(
+            "MATCH (e:Event {eventId:'github-issue-acme/repo1-1-created'}) "
+            "RETURN e.eventKind, e.endedAt").result_set[0])
+
+    assert _created() == ("github.issue.open", None)
+    # close → -closed minted; the -created record must stay open-kind + no
+    # endedAt (the creation record is truth-of-first-observation)
+    t.issues_by_repo["acme/repo1"] = [
+        gh_issue(1, state="closed", closed_at="2026-07-20T08:00:00Z",
+                 updated_at="2026-07-20T08:00:00Z")]
+    _run(_indexer(t), sdk)
+    assert _created() == ("github.issue.open", None), \
+        "-created must be frozen after close"
+    # reopen → still frozen
+    t.issues_by_repo["acme/repo1"] = [
+        gh_issue(1, state="open", closed_at=None,
+                 updated_at="2026-07-21T08:00:00Z")]
+    _run(_indexer(t), sdk)
+    assert _created() == ("github.issue.open", None), \
+        "-created must be frozen after reopen"
+    # re-poll the same state → still byte-identical
+    _run(_indexer(t), sdk)
+    assert _created() == ("github.issue.open", None), \
+        "-created must be frozen across re-polls"
+
+
+def test_repeated_transitions_mint_monotonic_ids(sdk):
+    """P1-3: close→reopen→close mints `-closed` AND `-closed-2` (distinct
+    nodes) — the event timeline keeps BOTH closes; the final close is never
+    lost to a MERGE-overwrite of the first close node."""
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    proj = sdk._get_proj()
+    t.issues_by_repo["acme/repo1"] = [
+        gh_issue(1, state="closed", closed_at="2026-07-20T08:00:00Z",
+                 updated_at="2026-07-20T08:00:00Z")]
+    _run(_indexer(t), sdk)  # close #1 → -closed
+    t.issues_by_repo["acme/repo1"] = [
+        gh_issue(1, state="open", closed_at=None,
+                 updated_at="2026-07-21T08:00:00Z")]
+    _run(_indexer(t), sdk)  # reopen → -reopened
+    t.issues_by_repo["acme/repo1"] = [
+        gh_issue(1, state="closed", closed_at="2026-07-22T08:00:00Z",
+                 updated_at="2026-07-22T08:00:00Z")]
+    _run(_indexer(t), sdk)  # close #2 → -closed-2
+    rows = proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId IN "
+        "['github-issue-acme/repo1-1-closed', "
+        " 'github-issue-acme/repo1-1-closed-2', "
+        " 'github-issue-acme/repo1-1-reopened'] "
+        "RETURN e.eventId, e.endedAt ORDER BY e.eventId"
+    ).result_set
+    assert [tuple(r) for r in rows] == [
+        ("github-issue-acme/repo1-1-closed", "2026-07-20T08:00:00Z"),
+        ("github-issue-acme/repo1-1-closed-2", "2026-07-22T08:00:00Z"),
+        ("github-issue-acme/repo1-1-reopened", None),
+    ], "both closes must exist with distinct monotonic ids"
+    # Object.status projection reflects the FINAL close
+    status = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.status"
+    ).result_set[0][0]
+    assert status == "completed"
+
+
+# ── P1-5 (PR #1792): indexer is a routing pass-through ───────────────
+
+def test_indexer_preserves_connector_routing_props(sdk):
+    """P1-5: an indexer re-run must NOT clobber the connector's
+    label-derived routing on the shared Object. Pre-fix: issue_to_object
+    emitted default routing props (routed_team '', routed_role
+    'product-implementer', …) and the projection's _persist_extra_props
+    (`SET n += extra`) overwrote the connector's values on every run."""
+    proj = sdk._get_proj()
+    # simulate the connector's ingest: ObjectRegistered + routing SET
+    obj = github_map.issue_to_object(
+        gh_issue(1), "acme/repo1",
+        routed_team="epistemic-team", routed_role="implementer",
+        routed_product="acme", complexity="complex", ux_rating="medium")
+    proj.apply(obj)
+    proj.g.query(
+        "MATCH (o:Object {id:$id}) "
+        "SET o.routed_team=$t, o.routed_role=$r, o.routed_product=$p, "
+        "o.complexity=$c, o.ux_rating=$u",
+        params={"id": obj["id"], "t": "epistemic-team",
+                "r": "implementer", "p": "acme",
+                "c": "complex", "u": "medium"})
+    # indexer re-run on the SAME issue (default routing — pure pass-through)
+    t = MockGitHubTransport(issues=[gh_issue(1)])
+    _run(_indexer(t), sdk)
+    rows = proj.g.query(
+        "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) "
+        "RETURN o.routed_team, o.routed_role, o.routed_product, "
+        "       o.complexity, o.ux_rating"
+    ).result_set[0]
+    assert tuple(rows) == ("epistemic-team", "implementer", "acme",
+                           "complex", "medium"), \
+        "indexer re-run must preserve the connector's routing props"
+
+
+# ── P1-4 (PR #1792): DRAIN-mode backlog drain ────────────────────────
+
+def test_drain_mode_drains_backlog_across_runs(sdk):
+    """P1-4: a >2×cap multi-second multi-page backlog FULLY drains across
+    DRAIN-mode runs — already-processed items (updated AFTER the cursor
+    second) are skipped so the cap is spent on NEW backlog only. Pre-fix:
+    the drain refetched from the top and re-processed items counted toward
+    the cap, so a >2×cap backlog oscillated between two boundary seconds
+    forever and the tail was never indexed."""
+    from datetime import datetime, timedelta, timezone
+    base = datetime(2026, 7, 19, 12, 0, 0, tzinfo=timezone.utc)
+    issues = []
+    for i in range(600):
+        second = base - timedelta(seconds=i // 50)  # 12 distinct seconds
+        issues.append(gh_issue(
+            i + 1,
+            updated_at=second.isoformat().replace("+00:00", "Z")))
+    t = MockGitHubTransport(issues=issues, page_size=100)  # 6 pages
+    # run 1: cap 500 → 500 processed, cursor stamped truncated
+    stats1 = _run(_indexer(t), sdk, cap=500)
+    assert stats1["processed"] == 500
+    assert stats1["cursor"]["truncated"] is True
+    # run 2 (DRAIN): skips the 500 already-processed items, drains the
+    # remaining 100 (the pre-fix oscillation never reached them)
+    stats2 = _run(_indexer(t), sdk, cursor=stats1["cursor"], cap=500)
+    assert stats2["processed"] == 100
+    assert stats2["points_created"] == 100
+    assert stats2["cursor"].get("truncated") is None  # clean window end
+    # the FULL backlog is indexed across the two runs
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 600
+    # run 3 (DIFF): idempotent — nothing NEW (re-fetched boundary items
+    # are probes, zero writes)
+    stats3 = _run(_indexer(t), sdk, cursor=stats2["cursor"], cap=500)
+    assert stats3["points_created"] == 0
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 600
+
+
+# ── P2 (PR #1792): indexer-level honesty ─────────────────────────────
+
+def test_resolve_repos_404_raises(sdk):
+    """P2: an org that 404s on BOTH orgs/ and users/ raises
+    GitHubFetchError — the job fails honestly, never a silent 0-point
+    complete with github_indexed=True."""
+    t = MockGitHubTransport(issues=[], resolve_repos_404=True)
+    indexer = _indexer(t)
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(GitHubFetchError) as ei:
+            loop.run_until_complete(indexer.resolve_repos("acme"))
+        assert "not found" in str(ei.value) or "no access" in str(ei.value)
+    finally:
+        loop.close()
+
+
+def test_quota_break_stamps_truncated_cursor(sdk):
+    """P2: a quota-interrupted run stamps the cursor `truncated` so the
+    next run stays in DRAIN mode — the unprocessed tail is never silently
+    dropped (a quota break is not a clean window end)."""
+    t = MockGitHubTransport(issues=[gh_issue(1), gh_issue(2)])
+    from tortoise.quota import QuotaExceededError
+    calls = {"n": 0}
+
+    def _quota_check():
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise QuotaExceededError("limit reached (test)")
+
+    stats = _run(_indexer(t), sdk, quota_check=_quota_check)
+    assert stats["quota_hit"] is True
+    assert stats["processed"] == 1
+    assert stats["cursor"]["truncated"] is True
+
+
+def test_quota_check_error_re_raised(sdk):
+    """P2: a QuotaCheckError (fail-closed infra failure) is RE-RAISED in
+    the per-item catch — never swallowed as a quota hit."""
+    t = MockGitHubTransport(issues=[gh_issue(1), gh_issue(2)])
+    from tortoise.quota import QuotaCheckError
+
+    def _boom():
+        raise QuotaCheckError("counting failed")
+
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(QuotaCheckError):
+            loop.run_until_complete(
+                _indexer(t).index_repo(sdk, "acme/repo1", quota_check=_boom))
+    finally:
+        loop.close()
 
 
 # ── Cursor semantics (T2-P4 / P1-3) ───────────────────────────────

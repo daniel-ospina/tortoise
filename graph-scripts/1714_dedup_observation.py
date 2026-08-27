@@ -42,9 +42,16 @@ DEFAULT_URI = "docker://:falkordb@localhost:16379/tortoise"
 
 
 def _resolve_uri(args_uri: str) -> str:
-    """--uri > TORTOISE_DB_URI > embedded default path."""
-    uri = args_uri or os.environ.get("TORTOISE_DB_URI", "") or DEFAULT_URI
-    if uri == DEFAULT_URI:
+    """--uri > TORTOISE_DB_URI > embedded default path.
+
+    P2 (PR #1792): the embedded fallback applies ONLY when no URI was
+    given anywhere (--uri absent AND TORTOISE_DB_URI unset). The old
+    comparison against the DEFAULT_URI constant silently rerouted an
+    EXPLICIT --uri equal to the constant (or an env var equal to it) to
+    the embedded DB — the operator's explicit target was ignored.
+    """
+    uri = args_uri or os.environ.get("TORTOISE_DB_URI", "")
+    if not uri:
         from tortoise.config import resolve_db_path
         return resolve_db_path()
     return uri
