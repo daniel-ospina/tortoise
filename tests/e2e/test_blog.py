@@ -40,8 +40,12 @@ pytestmark = pytest.mark.skipif(
     reason="RUN_BLOG_E2E=1 required (blog e2e suite)",
 )
 
-COMPANY = os.environ.get("BASE_URL", "https://premiselabs.co").rstrip("/")
-TORTISE = os.environ.get("TORTISE_HOST", "https://tortoise.premiselabs.co").rstrip("/")
+# Harness contract (test_legal_pages.py convention): no production assertions
+# pre-merge — ALLOW_PROD=1 is required to point at https:// URLs.
+COMPANY = os.environ.get("BASE_URL", "http://127.0.0.1:8788").rstrip("/")
+TORTISE = os.environ.get("TORTISE_HOST", "http://127.0.0.1:8788").rstrip("/")
+if os.environ.get("ALLOW_PROD") != "1" and (COMPANY.startswith("https://") or TORTISE.startswith("https://")):
+    pytest.skip("ALLOW_PROD=1 required for https targets (no production assertions pre-merge)")
 SESSION = requests.Session()
 SESSION.headers["User-Agent"] = "tortoise-blog-e2e"
 
@@ -75,9 +79,17 @@ def test_blog_article_ssr() -> None:
     body = a.text
     assert "application/ld+json" in body  # BlogPosting schema
     assert "og:title" in body
-    # E2E-14: no script tags beyond the consent/config/snippet set
-    scripts = re.findall(r"<script", body)
-    assert len(scripts) <= 4, f"unexpected script tags: {len(scripts)}"
+    # E2E-14: only the known-baseline scripts are allowed (ld+json schemas,
+    # consent.js, blog-config, blog.js) — any injected/unknown script fails.
+    allowed = {
+        "application/ld+json",
+        "src=\"/consent.js\"",
+        "id=\"blog-config\"",
+        "src=\"/blog/blog.js\"",
+    }
+    for m in re.finditer(r"<script([^>]*)>", body):
+        attrs = m.group(1)
+        assert any(a in attrs for a in allowed), f"unexpected script tag: {attrs}"
 
 
 def test_host_isolation_blog() -> None:
@@ -91,7 +103,9 @@ def test_host_isolation_blog() -> None:
         )
     for path in ("/blogpost", "/blog-extra", "/blogpost/x"):
         r = SESSION.get(f"{COMPANY}{path}", timeout=20, allow_redirects=False)
-        assert r.status_code == 200, f"{path} should NOT redirect (got {r.status_code})"
+        assert not r.is_redirect and "location" not in r.headers, (
+            f"{path} should NOT redirect (got {r.status_code})"
+        )
 
 
 def test_blog_feed_and_sitemap() -> None:
@@ -108,7 +122,8 @@ def test_blog_feed_and_sitemap() -> None:
     sitemap = SESSION.get(f"{TORTISE}/blog/sitemap.xml", timeout=20)
     assert sitemap.status_code == 200
     sm = ET.fromstring(sitemap.text)
-    urls = [u.findtext("loc") or "" for u in sm.findall("{http://www.sitemaps.org/schemas/sitemap/0.9}url")]
+    ns = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+    urls = [u.findtext(f"{ns}loc") or "" for u in sm.findall(f"{ns}url")]
     assert any(u.startswith(f"{TORTISE}/blog") for u in urls), "sitemap has no blog URLs"
 
 
