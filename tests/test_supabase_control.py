@@ -1017,6 +1017,10 @@ class TestOnboardingState:
             "demo_created": False, "session_recording": False,
             "team_created": False, "prompt_pasted": False,
             "onboarding_complete": False,
+            # #1725 (Slice 0): registered in the default-state dict (hosted_api
+            # _ONBOARDING_DEFAULT_STATE) — the test must match the canonical shape.
+            "github_index_cursor": None,
+            "github_legacy_backfill_done": False,
         }
 
     def test_read_merges_partial_state_over_defaults(self, fake):
