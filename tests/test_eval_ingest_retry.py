@@ -461,12 +461,15 @@ def test_idempotent_replay_partial_session_no_duplicates(tmp_path, monkeypatch):
             "MATCH (s:Session)-[:CONTAINS]->(p:Point) RETURN count(*)"
         ).result_set[0][0]
 
-        # re-invoke (the resume/retry replay) → zero duplicate points/edges
-        # (R8 contract: points + CONTAINS edges + no re-supersede — entities/
-        # events have no deterministic ids; the operator dup-guard is a
-        # pre-existing gap untouched by #1786 and out of the R8 surface)
+        # re-invoke (the resume/retry replay) → zero duplicate points/edges/
+        # events (R8 contract: points + CONTAINS edges + no re-supersede —
+        # events now carry a deterministic lme_event_id probe [#1786 F5
+        # cycle 2], so they are idempotent too; entities have no
+        # deterministic ids and the operator dup-guard is a pre-existing gap
+        # untouched by #1786 — both out of the R8 surface)
         stats2 = ingest_haystack_v2(sdk, _v2_question(), object())
         assert stats2["points"] == 0  # everything already present (probe)
+        assert stats2["events"] == 0  # event idempotent via lme_event_id probe
         assert stats2["supersessions_written"] == 0
         assert _count_points(sdk) == count_after
         contains_now = sdk._get_proj().g.query(

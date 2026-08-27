@@ -2259,27 +2259,14 @@ def run_evaluation(
                               if f.get("question_id") == qid), None)
         resume_reattempt = False
         resume_semaphore_held = False
+        _need_claim = False
         if prior_failure is not None:
             if not retry_failed or _retry_failed_skip_reason(
                     prior_failure, cap=resume_attempts_cap) is not None:
                 print(f"  [resume] {qid} previously failed — skipping "
                       f"(delete the checkpoint to retry)", file=sys.stderr)
                 return
-            if not _claim_reattempt(checkpoint, qid, resume_attempts_cap):
-                print(f"  [resume] {qid} re-attempt claimed by another "
-                      f"process — skipping", file=sys.stderr)
-                return
-            # #1786 (P2-1): a resume re-attempt acquires the SHARED
-            # resume-tier limiter at claim (released on completion/failure
-            # in the outer finally, parallel to the R2 semaphore flag) — a
-            # resume run with N eligible entries + workers=N must not
-            # launch N concurrent ~25-min re-ingests (retry-amplification,
-            # AWS REL05-BP03).
-            _REINGEST_LIMITER.acquire()
-            resume_semaphore_held = True
-            resume_reattempt = True
-            print(f"  [resume] {qid} re-attempting transient failure "
-                  f"(--retry-failed)", file=sys.stderr)
+            _need_claim = True
         t_q_start = time.monotonic()
         # M7 (D6): the failure site for the error census. Covers the non-LLM
         # graph pipeline (ingest + retrieve) first; reader/judge set it just
@@ -2308,6 +2295,28 @@ def run_evaluation(
         # ``done`` mutation raised RuntimeError → bogus failure entry).
         _save_remove_failures: list[str] | None = None
         try:
+            # #1786 (code-review F9 cycle 2): acquire-then-claim INSIDE the
+            # try — (a) the limiter slot is released by the outer finally even
+            # on a raise between acquire and the claim; (b) the flocked CAS
+            # re-reads the on-disk entry AFTER the wait, so a worker blocked
+            # on acquire no longer holds a live claim stamp while not working
+            # (a stale claim stolen + completed by another process reads as
+            # ``prior is None`` → claim fails → self-healing skip, never a
+            # duplicate ~25-min re-ingest). P2-1: the resume tier shares the
+            # limiter with R2 (released on completion/failure in the outer
+            # finally) — N eligible entries + workers=N must not launch N
+            # concurrent ~25-min re-ingests (retry-amplification,
+            # AWS REL05-BP03).
+            if _need_claim:
+                _REINGEST_LIMITER.acquire()
+                resume_semaphore_held = True
+                if not _claim_reattempt(checkpoint, qid, resume_attempts_cap):
+                    print(f"  [resume] {qid} re-attempt claimed by another "
+                          f"process — skipping", file=sys.stderr)
+                    return
+                resume_reattempt = True
+                print(f"  [resume] {qid} re-attempting transient failure "
+                      f"(--retry-failed)", file=sys.stderr)
             while True:
                 try:
                     sdk, cleanup = _make_question_sdk(
