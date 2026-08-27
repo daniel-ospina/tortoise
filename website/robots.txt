@@ -7,6 +7,7 @@
 #
 #   premiselabs.co          → company page       (sitemap-company.xml)
 #   tortoise.premiselabs.co → product + docs + legal + auth (sitemap-product.xml)
+#   tortoise.premiselabs.co → blog               (/blog/sitemap.xml — dynamic, published only)
 #   app.premiselabs.co      → dashboard          (separate tortoise-dashboard project)
 #
 # Auth-gated pages (welcome, invite-accept) are excluded from sitemaps and
@@ -18,3 +19,4 @@ Allow: /
 Sitemap: https://premiselabs.co/sitemap-company.xml
 Sitemap: https://tortoise.premiselabs.co/sitemap-product.xml
 Sitemap: https://app.premiselabs.co/sitemap.xml
+Sitemap: https://tortoise.premiselabs.co/blog/sitemap.xml
