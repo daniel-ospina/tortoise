@@ -2096,3 +2096,91 @@ def test_session_links_resolve_after_index(consent_client):
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# #1727 Slice 2 (Task 13) — tortoise_session_capture MCP tool.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp"):
+    """Set the MCP auth ContextVars (hosted-tenant shape) + provision/opt the
+    team, so the tool's hosted pipeline runs against the temp DB."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _ctx():
+        from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+                                       _transport_mode)
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        orig_init = _patch_sdk_to_temp(tmp_path)
+        _ha._FALLBACK_KEEPALIVE.clear()
+        _provision_team(team_id)
+        _ha._update_onboarding_state(team_id, session_recording=True)
+        tok_t = _current_team_id.set(team_id)
+        tok_l = _current_team_limits.set(
+            {"team_id": team_id, "tier": "free", "max_points": 100000})
+        tok_m = _transport_mode.set("http")
+        try:
+            yield team_id
+        finally:
+            _current_team_id.reset(tok_t)
+            _current_team_limits.reset(tok_l)
+            _transport_mode.reset(tok_m)
+            _ha.TortoiseSDK.__init__ = orig_init
+            _ha._FALLBACK_KEEPALIVE.clear()
+
+    return _ctx()
+
+
+def test_session_capture_tool_registered_and_invokeable(tmp_path, monkeypatch):
+    """Task 13: the tool is registered in the registry AND invokeable with
+    TORTOISE_SESSION_LLM_MOCK=1 — a real capture through the MCP surface
+    (Session + receipt)."""
+    from tortoise.mcp_server import tortoise_session_capture
+    with _mcp_team_context(tmp_path, monkeypatch):
+        result = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-mcp-1727")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+    assert result.get("session_id") == "s-mcp-1727", result
+    assert "error" not in result, result
+    assert result.get("turns") == len(_CONV)
+    assert st.get("session_capture_receipt_claude"), \
+        "MCP capture must set the per-harness receipt"
+
+
+def test_session_capture_tool_unopted_403(tmp_path, monkeypatch):
+    """Task 13: the MCP tool carries the SAME consent gate — an un-opted
+    team gets the honest 403-style error, never a silent capture."""
+    from tortoise.mcp_auth import _current_team_id, _current_team_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    orig_init = _patch_sdk_to_temp(tmp_path)
+    _ha._FALLBACK_KEEPALIVE.clear()
+    _provision_team("team-1727-mcp-opt")  # provisioned but NOT opted in
+    tok_t = _current_team_id.set("team-1727-mcp-opt")
+    tok_l = _current_team_limits.set(
+        {"team_id": "team-1727-mcp-opt", "tier": "free", "max_points": 100000})
+    try:
+        result = tortoise_session_capture(conversation=_CONV, harness="pi")
+        st = _ha._get_onboarding_state("team-1727-mcp-opt")
+    finally:
+        _current_team_id.reset(tok_t)
+        _current_team_limits.reset(tok_l)
+        _ha.TortoiseSDK.__init__ = orig_init
+        _ha._FALLBACK_KEEPALIVE.clear()
+    assert result.get("status") == 403, result
+    assert "not enabled" in result.get("error", ""), result
+    assert st.get("session_capture_last_error_pi"), \
+        "un-opted MCP attempt must record the per-harness last error"
+    assert st.get("session_capture_receipt_pi") is None
+
+
+def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
+    """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
+    mode' error — no local fallback that bypasses the gates."""
+    from tortoise.mcp_auth import _current_team_id, SELFHOST_TEAM_ID
+    from tortoise.mcp_server import tortoise_session_capture
+    tok = _current_team_id.set(SELFHOST_TEAM_ID)
+    try:
+        result = tortoise_session_capture(conversation=_CONV, harness="claude")
+    finally:
+        _current_team_id.reset(tok)
+    assert "error" in result, result
+    assert "hosted mode" in result["error"], result

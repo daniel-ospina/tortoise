@@ -2503,6 +2503,68 @@ def tortoise_onboarding_github_status() -> dict:
     return {"connected": True, "org": org, "repos_count": None}
 
 
+# ── #1727 Slice 2 (Task 13): tortoise_session_capture — the T3 filing tool ──
+# Claude Web (and every harness with an MCP surface) files sessions through
+# this tool. It calls the SAME capture pipeline as POST /v1/sessions
+# (hosted_api._capture_session_impl) so the two surfaces can never drift on
+# gate order: server-enforced consent 403 FIRST → empty 422 → provider 503 →
+# quota 402. Stdio/self-host returns an honest "requires hosted mode" error —
+# there is deliberately NO local fallback that bypasses the consent gate
+# (P0: a prompt-injection exfiltration surface must not exist).
+
+
+def tortoise_session_capture(conversation: list[dict],
+                             harness: str | None = None,
+                             session_id: str | None = None) -> dict:
+    """File an agent session into the graph (T3 workflows prompt surface).
+
+    Server-enforced gates (identical to POST /v1/sessions): the team's
+    ``session_recording`` consent flag is checked FIRST (403 when not
+    enabled), then the provider 503 / quota 402 / empty-422 gates. Returns
+    the capture result on success, or an honest error dict on failure (the
+    per-harness last-error state key is recorded on non-2xx, cleared on 2xx
+    — same receipt semantics as the REST path).
+    """
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits  # noqa: I001
+    team_id = _current_team_id.get()
+    if not team_id or team_id == SELFHOST_TEAM_ID:
+        # stdio / self-host HTTP: no tenant consent plane, no receipts — the
+        # honest error (matching the onboarding-tool precedent), never a
+        # local fallback that bypasses the 403/402/503 gates.
+        return {"error": "session capture requires hosted mode — the "
+                          "tortoise_session_capture tool files to Tortoise "
+                          "Cloud (server-enforced consent + receipts); "
+                          "self-hosted stdio capture is not available."}
+    from tortoise.hosted_api import (
+        SessionRequest,
+        _capture_session_impl,
+        _record_capture_last_error,
+    )
+    limits = _current_team_limits.get() or {}
+    team = {"team_id": team_id, "tier": limits.get("tier", "free"),
+            "key_id": None}
+    if limits.get("max_points") is not None:
+        team["max_points"] = int(limits["max_points"])
+    try:
+        body = SessionRequest(conversation=conversation, harness=harness,
+                              session_id=session_id)
+    except Exception as e:
+        # Pydantic 422-equivalent (invalid harness / conversation shape).
+        return {"error": f"invalid capture payload: {e}", "status": 422}
+    try:
+        import asyncio
+        return asyncio.run(_capture_session_impl(body, None, team))
+    except Exception as e:
+        status = getattr(e, "status_code", 500)
+        detail = getattr(e, "detail", str(e))
+        if status >= 400:
+            try:
+                _record_capture_last_error(team_id, harness, str(detail))
+            except Exception:
+                pass
+        return {"error": str(detail), "status": status}
+
+
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     """Start background GitHub indexing of an org's issues/PRs (Q2).
