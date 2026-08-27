@@ -117,6 +117,16 @@ MAX_OPERATORS = 500
 # pricing.json field — flat 1000 across tiers (matches REST today).
 DEFAULT_MAX_SESSIONS = 1000
 
+# ── Documents cap: DERIVED-CONSTANT (T2-P2a, #1726 Slice 1) ────────────────
+# max_documents is DERIVED from max_points with a documented conversion
+# factor — deliberately NOT a pricing.json field (a pricing field would ripple
+# through tier_limits/_REQUIRED_LIMIT_KEYS and every tier's resolved limits;
+# the issue pins the derived-constant option to avoid that KeyError surface).
+# Rationale for 10×: docs are content nodes WITHOUT claim extraction or EP
+# churn (Sources only, #1726 slice 1) — an order of magnitude cheaper than
+# points; the gate still bounds runaway corpus growth.
+_DOCUMENTS_FROM_POINTS_FACTOR = 10
+
 _RESOURCE_LIMIT_KEYS = {
     "points": "max_points",
     "api_keys": "max_api_keys",
@@ -270,7 +280,8 @@ def count_team_usage(team_id: str, resource: str, sdk=None) -> int:
     Public so callers needing the raw count (e.g. extraction-aware estimates)
     can use it without duplicating the fail-closed handling.
 
-    Supported resources: points, api_keys, sessions, users, graphs.
+    Supported resources: points, api_keys, sessions, users, graphs,
+    documents (#1726: the :Document count with the transcript discriminator).
     """
     return _count_resource(team_id, resource, sdk=sdk)
 
@@ -289,6 +300,12 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
       all-nodes count; #947 P0)
     - users: active Membership nodes in registry
     - graphs: Graph nodes in registry
+    - documents (#1726): :Document nodes in the tenant graph with the
+      discriminator ``COALESCE(documentKind,'') != 'transcript'`` — NULL-kind
+      docs COUNT (no leak; a frontmatter-less docs-endpoint doc is NULL-kind
+      and counts), session transcripts (documentKind='transcript', the
+      /v1/sessions commit MERGE at hosted_api.py) are EXCLUDED so a captured
+      session never consumes the docs gate.
     """
     try:
         # ── Registry-scoped counts (api_keys, users, graphs) ──
@@ -347,6 +364,19 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
         # ── Tenant-graph-scoped counts (sessions, points) ──
         if sdk is None:
             sdk = _make_sdk(namespace=team_id)
+        if resource == "documents":
+            # #1726 Slice 1: the documents resource — :Document count with
+            # the transcript discriminator (T2-P2a). NULL-kind docs COUNT
+            # (COALESCE) — a frontmatter-less docs-endpoint doc never leaks;
+            # session transcripts (documentKind='transcript', hosted_api.py
+            # commit MERGE) are excluded so capture never consumes the docs
+            # gate (the gate fires on /v1/index/docs ONLY).
+            rows = sdk._get_proj().g.query(
+                "MATCH (d:Document) "
+                "WHERE COALESCE(d.documentKind, '') <> 'transcript' "
+                "RETURN count(d)",
+            ).result_set
+            return int(rows[0][0])
         if resource == "sessions":
             # #947 (epic #909 §4.4, W-4): the P0 — count Session nodes, NOT
             # all nodes. Pre-fix this fell through to MATCH (n) (~25 nodes
@@ -384,7 +414,8 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
     Args:
         limits: resolved team limits dict (from resolve_team_limits or the
             authenticated caller). None → skip (stdio/operator, no team).
-        resource: "points" | "api_keys" | "sessions" | "users" | "graphs".
+        resource: "points" | "api_keys" | "sessions" | "users" | "graphs"
+            | "documents".
         sdk: pre-built team SDK (REST callers already hold one) — optional.
 
     Raises:
@@ -395,6 +426,33 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
         return  # stdio/operator — no team context
     team_id = limits.get("team_id")
     if not team_id:
+        return
+    # ── documents: DERIVED-CONSTANT cap (T2-P2a, #1726) — handled BEFORE the
+    # pricing-keyed generic path. Deliberately NOT in _RESOURCE_LIMIT_KEYS: a
+    # pricing.json max_documents field would ripple through tier_limits /
+    # _REQUIRED_LIMIT_KEYS / every tier's resolved limits (the KeyError
+    # surface the plan pins against). max_documents = max_points ×
+    # _DOCUMENTS_FROM_POINTS_FACTOR; an explicitly-None max_points is
+    # UNLIMITED (Team tier) — skip. The documents gate fires on the
+    # /v1/index/docs job ONLY (cycle-3 P2: never an unpinned tenant-global
+    # surprise).
+    if resource == "documents":
+        max_points = limits.get("max_points")
+        if max_points is None:
+            return  # explicitly-None = unlimited
+        try:
+            max_points = int(max_points)
+        except (TypeError, ValueError):
+            raise QuotaCheckError(
+                f"team limits max_points invalid for documents resource "
+                f"({max_points!r})") from None
+        limit = max_points * _DOCUMENTS_FROM_POINTS_FACTOR
+        count = _count_resource(team_id, "documents", sdk=sdk)
+        if count >= limit:
+            raise QuotaExceededError(
+                f"Team documents limit reached ({limit}). Upgrade your plan "
+                f"to increase it."
+            )
         return
     limit_key = _RESOURCE_LIMIT_KEYS.get(resource)
     if limit_key is None:

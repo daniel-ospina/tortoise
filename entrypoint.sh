@@ -33,6 +33,15 @@ fi
 export HF_HOME="${HF_HOME:-/app/model}"
 export SENTENCE_TRANSFORMERS_HOME="${SENTENCE_TRANSFORMERS_HOME:-/app/model}"
 
+# #1726 (Slice 1): the GitHub-docs ingest sandbox — a SERVER-OWNED staging
+# dir (docs are staged under {TORTOISE_INGEST_BASE_DIR}/{team_id}/).
+# /data is the persistent Fly volume (fly.toml mounts) — a restart keeps
+# the staged corpus so re-runs stay 0-new (hash dedup); the dir is
+# server-owned, so the #236 user-supplied-path exclusion is untouched (the
+# tenant path never passes a user path). Fail-closed: /v1/index/docs
+# refuses to run without this set.
+export TORTOISE_INGEST_BASE_DIR="${TORTOISE_INGEST_BASE_DIR:-/data/ingest}"
+
 # Fast-fail if the pre-downloaded model cache is missing (code-review P3, #160)
 # — the build-time bake in Dockerfile.hosted is the ONLY source; a missing
 # cache means a broken image, not a retryable condition. #1349: the bake is
@@ -68,6 +77,10 @@ for _arg in "$@"; do
 done
 
 if [ "$_IS_SERVER" = "1" ]; then
+    # #1726 (Slice 1): pre-create the server-owned ingest sandbox (fail-closed
+    # at startup if the persistent volume is missing/unwritable). Only in
+    # server mode — the release/guard invocations never mount /data.
+    mkdir -p "$TORTOISE_INGEST_BASE_DIR"
     echo "tortoise: uvicorn server — embedding pre-warm runs in-app (non-blocking, degraded-but-alive)"
 else
     echo "tortoise: skipping embedding pre-warm (non-server command: release check)"

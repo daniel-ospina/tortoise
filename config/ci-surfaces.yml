@@ -137,6 +137,7 @@ surfaces:
   - test_deployment.py
   - test_derived_names.py
   - test_divergence_conformance.py
+  - test_docs_fetcher.py
   - test_doctor.py
   - test_domain_loader_adapter.py
   - test_domain_validators.py
@@ -181,6 +182,7 @@ surfaces:
   - test_idempotency.py
   - test_index_cli.py
   - test_index_directory.py
+  - test_index_docs_api.py
   - test_index_restore.py
   - test_index_surfacing.py
   - test_indexes.py

@@ -57,6 +57,10 @@ primary_region = "iad"
   # a non-proxy ingress must never let a client set its own limiter key
   # or redirect scheme.
   TORTOISE_TRUST_FLY_CLIENT_IP = "1"
+  # #1726 (Slice 1): the GitHub-docs ingest sandbox — server-owned staging
+  # dir on the persistent volume (entrypoint.sh defaults to this too).
+  # Fail-closed: /v1/index/docs refuses to run without it.
+  TORTOISE_INGEST_BASE_DIR = "/data/ingest"
   # Hosted backups (#305) — set via fly secrets (deploy workflow syncs from GitHub)
   TORTOISE_BACKUP_KEY = ""
   R2_ACCOUNT_ID = ""

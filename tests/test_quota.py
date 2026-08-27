@@ -334,6 +334,81 @@ class TestSessionsQuota:
             tenant.close()
 
 
+# ── #1726 Slice 1: documents resource (derived-constant cap) ─────
+
+class TestDocumentsQuota:
+    """#1726: the documents gate fires on /v1/index/docs ONLY, with the
+    derived-constant cap (max_documents = max_points ×
+    _DOCUMENTS_FROM_POINTS_FACTOR — deliberately NOT a pricing.json field)
+    and the discriminator COALESCE(documentKind,'') != 'transcript' (NULL-
+    kind docs COUNT — no leak; session transcripts excluded)."""
+
+    def _tenant(self, tmp_path, reg_sdk):
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
+        import os
+        db = os.path.join(tmp_path, "quota.db")
+        tid = _find_team_id(reg_sdk)
+        return tid, TortoiseSDK(db, namespace=tid)
+
+    def _seed_doc(self, tenant, i: int, kind: str | None) -> None:
+        if kind is None:
+            tenant._get_proj().g.query(
+                "CREATE (d:Document {id:$id, title:$t})",
+                params={"id": f"doc_{i}", "t": f"doc {i}"})
+        else:
+            tenant._get_proj().g.query(
+                "CREATE (d:Document {id:$id, title:$t, documentKind:$k})",
+                params={"id": f"doc_{i}", "t": f"doc {i}", "k": kind})
+
+    def test_null_kind_docs_count(self, reg_sdk, tmp_path):
+        """A NULL-kind Document COUNTS toward the documents resource — a
+        frontmatter-less docs-endpoint doc never leaks past the gate."""
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            for i in range(3):
+                self._seed_doc(tenant, i, kind=None)
+            assert count_team_usage(tid, "documents", sdk=tenant) == 3
+        finally:
+            tenant.close()
+
+    def test_transcript_not_counted(self, reg_sdk, tmp_path):
+        """Session transcripts (documentKind='transcript') do NOT consume the
+        documents gate — a captured session never 402s docs indexing."""
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            self._seed_doc(tenant, 0, kind="brief")
+            self._seed_doc(tenant, 1, kind="transcript")
+            assert count_team_usage(tid, "documents", sdk=tenant) == 1
+        finally:
+            tenant.close()
+
+    def test_derived_cap_402_and_points_independent(self, reg_sdk, tmp_path):
+        """max_documents is DERIVED from max_points (10×) — the points gate
+        itself is irrelevant to the documents resource."""
+        from tortoise.quota import _DOCUMENTS_FROM_POINTS_FACTOR
+        tid, tenant = self._tenant(tmp_path, reg_sdk)
+        try:
+            reg_sdk._get_registry().query(
+                "MATCH (t:Team {id:$id}) SET t.max_points = 1",
+                params={"id": tid})
+            # 2 non-episodic points → OVER the points cap (max_points=1) —
+            # irrelevant here; 9 docs < 10 (derived cap) → passes
+            tenant.create_point("statement", "claim one")
+            tenant.create_point("statement", "claim two")
+            for i in range(9):
+                self._seed_doc(tenant, i, kind="brief")
+            limits = resolve_team_limits(tid)
+            assert limits["max_points"] == 1
+            assert (1 * _DOCUMENTS_FROM_POINTS_FACTOR) == 10
+            enforce_team_limit(limits, "documents", sdk=tenant)  # no raise
+            # 10th doc → 402-equivalent at the derived cap
+            self._seed_doc(tenant, 9, kind="brief")
+            with pytest.raises(QuotaExceededError, match="documents limit reached"):
+                enforce_team_limit(limits, "documents", sdk=tenant)
+        finally:
+            tenant.close()
+
+
 class TestIsEpisodicBackfill:
     """R-18 (DE2E-7 legacy fixture): legacy nodes lack is_episodic → the
     one-query backfill (graph-scripts/backfill_is_episodic.py) stamps them →
