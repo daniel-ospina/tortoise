@@ -213,16 +213,6 @@ class GitHubDocsIndexer(GitHubIndexer):
                 f"tree path {entry_path!r} escapes the corpus dir") from None
         return target
 
-    @staticmethod
-    def _atomic_write(target: Path, text: str) -> None:
-        """Atomic per-file staging (temp + rename) — a partial write never
-        leaves a corrupt half-file for the next corpus pass."""
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f".{target.name}.tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-        os.replace(tmp, target)
-
     async def _fetch_blob(self, client, repo: str, entry: dict) -> bytes:
         """Fetch one blob (base64 → raw bytes)."""
         sha = entry.get("sha")
@@ -336,18 +326,27 @@ class GitHubDocsIndexer(GitHubIndexer):
                 os.replace(tmp, target)
             # 2. remove stale files: any path the OLD manifest knew about that
             #    is no longer kept (deleted from tree, OR now skipped as
-            #    oversized/binary) — Fix 2b.
-            for old_path in manifest_blobs:
-                if old_path in kept:
-                    continue
-                stale = self._stage_path(corpus_dir, old_path)
-                try:
-                    if stale.is_file():
-                        stale.unlink()
-                        stats["files_reconciled_removed"] += 1
-                except OSError as e:
-                    stats["errors"].append(
-                        f"reconcile unlink {old_path}: {e}")
+            #    oversized/binary) — Fix 2b. EXCEPT on a truncated tree: the
+            #    recursive view is PARTIAL, so a path absent from the listing
+            #    may simply sit beyond the truncation point — carry it forward
+            #    instead of unlinking (never destroy corpus files we cannot
+            #    see; Fix 5 × 2b interaction).
+            if tree.get("truncated"):
+                for old_path, old_sha in manifest_blobs.items():
+                    if old_path not in kept:
+                        kept[old_path] = old_sha
+            else:
+                for old_path in manifest_blobs:
+                    if old_path in kept:
+                        continue
+                    stale = self._stage_path(corpus_dir, old_path)
+                    try:
+                        if stale.is_file():
+                            stale.unlink()
+                            stats["files_reconciled_removed"] += 1
+                    except OSError as e:
+                        stats["errors"].append(
+                            f"reconcile unlink {old_path}: {e}")
 
             # Manifest only on FULL success — a failed run re-walks from the
             # old manifest (refetching everything changed since; idempotent).

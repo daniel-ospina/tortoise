@@ -281,6 +281,44 @@ def test_tree_truncated_surfaced(tmp_path, monkeypatch):
     assert stats2["blobs_unchanged"] == 1  # unchanged blobs still dedup
 
 
+def test_truncated_tree_preserves_hidden_files(tmp_path, monkeypatch):
+    """A truncated tree is a PARTIAL view: a previously-staged path absent
+    from the truncated listing is NOT reconcile-deleted (it may sit beyond
+    the 100k-entry truncation point) — it is carried forward in the manifest
+    (Fix 5 × 2b interaction)."""
+    base = str(tmp_path / "ingest")
+    monkeypatch.setenv("TORTOISE_INGEST_BASE_DIR", base)
+    a1 = gh_docs_entry("docs/a.md")
+    t1 = MockGitHubDocsTransport(
+        trees=_docs_tree(sha="tree-v1", entries=[a1]),
+        blobs={a1["sha"]: b"# docs/a.md v1\n"})
+    idx = _indexer(t1, monkeypatch)
+    _run(idx.walk_repo(TEAM_A, "acme/repo1"))
+    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    a_file = os.path.join(corpus, "docs", "a.md")
+    assert os.path.isfile(a_file)
+
+    # tree-v2 truncated: a.md NOT in the (partial) listing; b.md is new.
+    b = gh_docs_entry("docs/b.md")
+    t2 = MockGitHubDocsTransport(
+        trees=_docs_tree(sha="tree-v2", entries=[b]),
+        blobs={b["sha"]: b"# docs/b.md\n"},
+        tree_truncated=True)
+    idx2 = _indexer(t2, monkeypatch)
+    stats = _run(idx2.walk_repo(TEAM_A, "acme/repo1"))
+    assert stats["tree_truncated"] is True
+    # a.md is carried forward — NOT reconcile-deleted
+    assert os.path.isfile(a_file)
+    assert stats["files_reconciled_removed"] == 0
+    manifest_path = os.path.join(base, TEAM_A, ".manifest", "acme",
+                                 "repo1.json")
+    with open(manifest_path, encoding="utf-8") as mf:
+        manifest = json.load(mf)
+    assert manifest["blobs"].get("docs/a.md") == a1["sha"], \
+        "a truncated view must not drop hidden paths from the manifest"
+    assert manifest["blobs"].get("docs/b.md") == b["sha"]
+
+
 # ── dedup (tree-by-sha + per-path blob sha) ──────────────────────
 
 def test_unchanged_tree_short_circuits_zero_fetch(tmp_path, monkeypatch):
