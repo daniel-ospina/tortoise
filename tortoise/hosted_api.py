@@ -1869,19 +1869,13 @@ class BackupRestoreRequest(BaseModel):
     confirm: bool = False
 
 
-class OnboardingStatePatchRequest(BaseModel):
-    github_connected: bool | None = None
-    github_org: str | None = None
-    github_connected_at: str | None = None
-    github_indexed: bool | None = None
-    github_index_job_id: str | None = None
-    session_recording: bool | None = None
-    demo_created: bool | None = None
-    team_created: bool | None = None
-
-
 # ── Onboarding: Default State ─────────────────────────────────────
 
+# #1727 (Slice 2, Task 11): DEFAULT_ONBOARDING_STATE (the LIVE provisioning
+# default, written at team creation — hosted_api.py:3132) carries the SAME
+# key set as _ONBOARDING_DEFAULT_STATE (the read-time merge default). Every
+# capture-surface key must be registered in BOTH dicts + the PATCH model or
+# the allowlist filter silently drops it (STATE-KEY REGISTRATION TABLE).
 DEFAULT_ONBOARDING_STATE = {
     "github_connected": False,
     "github_org": None,
@@ -1894,6 +1888,26 @@ DEFAULT_ONBOARDING_STATE = {
     "demo_created": False,
     "team_created": False,
     "completed_at": None,
+    # #1727 Slice 2 (Task 11) — registration-table members (see
+    # _ONBOARDING_DEFAULT_STATE for the full table; capture receipts,
+    # last-attempt failures, re-ask flags, install probes).
+    "capture_revised": False,
+    "capture_ask_shown": False,
+    "session_capture_receipt": None,
+    "session_capture_receipt_claude": None,
+    "session_capture_receipt_claude-desktop": None,
+    "session_capture_receipt_claude-web": None,
+    "session_capture_receipt_codex": None,
+    "session_capture_receipt_cursor": None,
+    "session_capture_receipt_pi": None,
+    "session_capture_last_error_claude": None,
+    "session_capture_last_error_claude-desktop": None,
+    "session_capture_last_error_claude-web": None,
+    "session_capture_last_error_codex": None,
+    "session_capture_last_error_cursor": None,
+    "session_capture_last_error_pi": None,
+    "install_probe_claude": None,
+    "install_probe_pi": None,
 }
 
 
@@ -4267,6 +4281,17 @@ async def toggle_api_key_enabled(
 
 # ── Session Capture ───────────────────────────────────────────────
 
+# #1727 Slice 2 (Task 11): the SessionRequest harness vocabulary — the
+# SINGLE cross-surface harness value set. Contract (pinned by the plan's
+# cross-surface vocab test): _HARNESS_ANALYTICS_VALUES ⊆ this Literal, and
+# receipt keys are derived per Literal member. Invalid harness values fail
+# Pydantic validation with 422 (tested on an OPTED team — a rejected harness
+# must not confuse the consent gate).
+_SESSION_HARNESS_VALUES = frozenset({
+    "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+})
+
+
 class SessionRequest(BaseModel):
     conversation: list[dict] = Field(..., max_length=1000)
 
@@ -4278,6 +4303,23 @@ class SessionRequest(BaseModel):
     # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
     session_id: str | None = None
     metadata: dict | None = None
+    # #1727 Slice 2 (Task 11, T1-P3 pinned): harness is OPTIONAL (None default)
+    # so pre-installed hooks and SDK callers that POST without it never 422;
+    # session_id is the idempotency key (re-POST same id ⇒ 0 new nodes);
+    # source carries the transcript stem (forwarded by _cmd_session_capture).
+    harness: str | None = None
+    source: str | None = None
+
+    # Invalid harness ⇒ 422 at the model boundary (FastAPI validation), never
+    # a silent drop or a 200 — a typo'd harness must be visible (Task 11).
+    @field_validator("harness")
+    @classmethod
+    def _validate_harness(cls, v):
+        if v is not None and v not in _SESSION_HARNESS_VALUES:
+            raise ValueError(
+                f"invalid harness {v!r} — must be one of "
+                f"{sorted(_SESSION_HARNESS_VALUES)}")
+        return v
 
 
 # ── Session extraction (LLM-default — issue #822) ──────────────────────────
@@ -4323,17 +4365,29 @@ def _llm_provider_available() -> bool:
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
     """Capture an agent session and extract turns as episodic Points.
 
-    #822: extraction is LLM-default — the M2 two-stage LLMExtractor (epic
-    #909) runs over the conversation when a provider key is configured; the
-    regex loop was removed as a product path and the no-key case fails
-    closed (503). #329 flood gate (historical): the regex amplifier created
-    ~160 nodes/turn and Points were unbounded. Bounds (checked in order):
-    provider gate → 503; per-request turn cap → 400; empty/blank
-    conversation gate → 422 (P1 #1529 — pre-mutation, never a silent
-    extracted:0); extraction-aware pre-write estimate (M2 points +
-    operators) vs the points quota → 402; per-turn sentence cap in the
-    transcript builder (the M2 point ceiling). Extraction failures surface
-    as 200 + additive errors/warnings (the turn mutation already happened).
+    #1727 Slice 2 (Task 11): the server-enforced consent gate + per-harness
+    receipts. The consent 403 is checked FIRST in the gate stack (before the
+    provider 503 / quota 402) so un-opted teams do no quota work at all; any
+    non-2xx failure records ``session_capture_last_error_{harness}`` (the
+    dashboard failure sub-line reads this, NOT client state) and 2xx records
+    ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
+    for legacy no-harness hooks).
+    """
+    try:
+        return await _capture_session_impl(body, request, team)
+    except HTTPException as e:
+        if e.status_code >= 400:
+            _record_capture_last_error(team["team_id"], body.harness, e.detail)
+        raise
+
+
+async def _capture_session_impl(body: SessionRequest, request: Request | None,
+                                team: dict) -> dict:
+    """The capture pipeline (gates + writes). Shared by the REST endpoint and
+    the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
+    surfaces can never drift on gate order (403 → 422 → 503 → 402).
+    ``request`` is optional (the MCP tool has no HTTP Request) — audit and
+    abuse recording degrade to a best-effort stub.
     """
     import uuid
     from datetime import datetime
@@ -4342,6 +4396,22 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         MAX_SESSION_TURNS,
         QuotaCheckError,
     )
+
+    # #1727 Slice 2 (Task 11, P0): the ENFORCED session_recording flag IS the
+    # consent — checked FIRST in the gate stack, before provider/quota work.
+    # Closes the prompt-injection exfiltration hole: a team that never opted
+    # in can not have conversations uploaded (POST /v1/sessions or the MCP
+    # tool), no matter what a prompt says. Legacy session_recording=True is
+    # grandfathered as consent (re-ask surface in Slice 3).
+    state = _get_onboarding_state(team["team_id"])
+    if not state.get("session_recording"):
+        raise HTTPException(
+            status_code=403,
+            detail="Session capture is not enabled for this team. Enable it "
+                   "in the dashboard (Memory sources > Agent sessions) or via "
+                   "tortoise_onboarding_session_recording before filing "
+                   "sessions.",
+        )
 
     # #822: LLM extraction is the default (and only) capture extraction —
     # the regex loop was removed as a product path. No provider key →
@@ -4428,10 +4498,33 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
     now = datetime.now(UTC).isoformat()
 
+    # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
+    # NEVER erases a stored value — a legacy no-harness re-capture must not
+    # wipe a harness that a previous capture stored). The conditional clause
+    # also keeps the parametrized query valid in both embedded and Docker
+    # lanes (no unused param binding).
+    _merge_sets = ["s.created_at=$now", "s.turn_count=$tc",
+                   "s.is_episodic=true"]
+    _merge_params = {"sid": session_id, "now": now,
+                     "tc": len(body.conversation)}
+    if body.harness:
+        _merge_sets.append("s.harness=$harness")
+        _merge_params["harness"] = body.harness
+
+    # #1727 Slice 2 (Task 11, T2-P2c): idempotency scope = Session + turn
+    # Points. A re-POST of the same session_id (Claude Code's real session id
+    # forwarded by the end hook) must mint ZERO new nodes: the Session MERGE
+    # is a no-op update, the turn loop MERGEs the same {session_id}_t{i} ids,
+    # and the LLM extraction is SKIPPED (M2/v2-minted points are not
+    # deterministically keyed — not in scope). The receipt still lands on the
+    # 2xx (converges to one Session, one receipt — T1-P3/T1-P12).
+    session_existed = bool(proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN count(s)",
+        params={"sid": session_id},
+    ).result_set[0][0])
     proj.g.query(
-        "MERGE (s:Session {id:$sid}) SET s.created_at=$now, s.turn_count=$tc, "
-        "    s.is_episodic=true",
-        params={"sid": session_id, "now": now, "tc": len(body.conversation)},
+        f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
+        params=_merge_params,
     )
 
     extracted = []
@@ -4484,20 +4577,18 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
             params={"sid": session_id, "tid": turn_id},
         )
 
-    # M2 LLM extraction over the whole conversation (#822) — replaces the
-    # regex decision/claim loop (removed as a product path). Shared with the
-    # SDK copy via TortoiseSDK._extract_session_llm; extracted Points get
-    # session CONTAINS edges inside that helper (same wiring the regex loop
-    # did), then their eventId provenance stamping below.
-    # #1350: capture runs the v2 5-stage extractor; the M2 two-stage
-    # extractor remains behind TORTOISE_SESSION_EXTRACTOR=m2 (same seam as
-    # the SDK copy so the two capture loops stay in sync).
-    # #1530 D3 divergence handling: the INNER v2 routing gate is narrower
-    # than this broad outer gate (e.g. an openai-only deploy passes
-    # _llm_provider_available but the adapter cannot consume OPENAI_API_KEY) —
-    # the inner ValueError converts to a clean fail-closed 503, never an
-    # uncaught 500 (the #1468 lesson: outer/inner drift must not 500).
-    if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+    # #1727 Slice 2 (T2-P2c): idempotent re-POST — the Session already
+    # existed, so the LLM extraction is SKIPPED (M2/v2-minted points are not
+    # deterministically keyed; re-running would mint fresh nodes). The turn
+    # loop above re-MERGEd the same {session_id}_t{i} ids (0 new). The
+    # response reports extraction_mode "replayed" — honest about what ran.
+    if session_existed:
+        meta = {"errors": [], "warnings": [], "mode": "replayed",
+                "route": None, "provider": None}
+        extraction_errors: list = []
+        extraction_warnings = [
+            "session already captured (same session_id) — no new extraction"]
+    elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
         # P1 #1529 (D5): the M2 branch returns the SAME (extracted, meta)
         # contract as v2 — no fabricated empty meta; extraction-stage failures
         # are structured, never raised (turn points have already landed).
@@ -4520,8 +4611,9 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # extraction failure keeps 200 + additive errors (the mutation already
     # happened — turn points landed — and E2E-8 permits "non-200 OR additive
     # warnings"; a non-200 would hide the partial write).
-    extraction_errors = list(meta.get("errors") or [])
-    extraction_warnings = list(meta.get("warnings") or [])
+    if not session_existed:
+        extraction_errors = list(meta.get("errors") or [])
+        extraction_warnings = list(meta.get("warnings") or [])
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and stamp its eventId onto the extracted
@@ -4530,58 +4622,69 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # reserves aboutEvent for "What Event this describes"). The :Session node
     # remains the API-visible handle; the Event carries ontology-compliant
     # provenance via the points' eventId.
-    event_id = None
-    try:
-        event = sdk.create_event(
-            f"session_{session_id}",
-            "sessionCaptured",
-            startedAt=now,
-            endedAt=now,
-            sessionId=session_id,
-            is_episodic=True,
-        )
-        event_id = event.get("id") or event.get("eventId")
-        if event_id:
-            proj.g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
-                params={"ids": [p["id"] for p in extracted],
-                        "eid": event_id},
+    # #1727 Slice 2 (T2-P2c): the sessionCaptured Event mint + typed Source
+    # materialization run ONLY on a genuine capture — a re-POST of an
+    # existing session_id skips them (the Event id is a fresh ULID per
+    # create_event, so running it would mint a new node — violating the
+    # "0 new nodes" idempotency contract).
+    if not session_existed:
+        event_id = None
+        try:
+            event = sdk.create_event(
+                f"session_{session_id}",
+                "sessionCaptured",
+                startedAt=now,
+                endedAt=now,
+                sessionId=session_id,
+                is_episodic=True,
             )
-        else:
-            # P1 #1529 (D4): create_event returning no id/eventId silently
-            # skips stamping — surface as an additive warning.
+            event_id = event.get("id") or event.get("eventId")
+            if event_id:
+                proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    params={"ids": [p["id"] for p in extracted],
+                            "eid": event_id},
+                )
+            else:
+                # P1 #1529 (D4): create_event returning no id/eventId silently
+                # skips stamping — surface as an additive warning.
+                extraction_warnings.append(
+                    "sessionCaptured Event write returned no id/eventId — "
+                    "extracted points not stamped")
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "session Event creation failed (non-fatal)")
+            # P1 #1529 (D4): a missing Event is visible, never indistinguishable
+            # from a clean capture.
             extraction_warnings.append(
-                "sessionCaptured Event write returned no id/eventId — "
-                "extracted points not stamped")
-    except Exception:
-        import logging
-        logging.getLogger("tortoise.api").exception(
-            "session Event creation failed (non-fatal)")
-        # P1 #1529 (D4): a missing Event is visible, never indistinguishable
-        # from a clean capture.
-        extraction_warnings.append(
-            "sessionCaptured Event write failed (non-fatal)")
+                "sessionCaptured Event write failed (non-fatal)")
 
-    # #1352: the extraction projection auto-created a document-typed Source
-    # stub at `session:{id}` (default sourceKind in _link_source) — the
-    # ontology v3.6 §4.6 session source kind is agentSession. Materialize the
-    # typed Source (capture metadata + sessionId + capturedAt + eventId) and
-    # wire (Source)-[:references]->(sessionCaptured Event) — parity with the
-    # SDK capture path via the shared sdk._materialize_session_source helper.
-    # P1 #1529 (D4): a Source materialization failure is non-fatal and
-    # surfaced as an additive warning — never a 500 after writes.
-    try:
-        sdk._materialize_session_source(
-            session_id, event_id, now, body.conversation)
-    except Exception:
-        import logging
-        logging.getLogger("tortoise.api").exception(
-            "session Source materialization failed (non-fatal)")
-        extraction_warnings.append(
-            "session Source materialization failed (non-fatal)")
+        # #1352: the extraction projection auto-created a document-typed Source
+        # stub at `session:{id}` (default sourceKind in _link_source) — the
+        # ontology v3.6 §4.6 session source kind is agentSession. Materialize the
+        # typed Source (capture metadata + sessionId + capturedAt + eventId) and
+        # wire (Source)-[:references]->(sessionCaptured Event) — parity with the
+        # SDK capture path via the shared sdk._materialize_session_source helper.
+        # P1 #1529 (D4): a Source materialization failure is non-fatal and
+        # surfaced as an additive warning — never a 500 after writes.
+        try:
+            sdk._materialize_session_source(
+                session_id, event_id, now, body.conversation)
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "session Source materialization failed (non-fatal)")
+            extraction_warnings.append(
+                "session Source materialization failed (non-fatal)")
 
     # Log audit event — P1 #1529 (D4): a committed capture must never 500
-    # over audit bookkeeping (log-only wrap).
+    # over audit bookkeeping (log-only wrap). The MCP tool path has no HTTP
+    # Request — audit/abuse degrade to the best-effort stub.
+    if request is None:
+        import types
+        request = types.SimpleNamespace(
+            state=types.SimpleNamespace(), client=None)
     try:
         await _async_audit(
             request, team["team_id"], "session_capture",
@@ -4599,6 +4702,29 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     # runs inside the SDK write; recounting here would cost a second query).
     await _abuse_record_points(request, team, len(body.conversation) + len(extracted))
 
+
+
+    # #1727 Slice 2 (Task 11): the per-harness RECEIPT is set ONLY on a 2xx
+    # (the data is durable at this point — T1-P12 receipt↔Session invariant),
+    # and the per-harness last-error key is cleared (the dashboard failure
+    # sub-line reads session_capture_last_error_{harness}, which a successful
+    # capture must clear). Legacy no-harness hooks write the bare
+    # session_capture_receipt. A receipt PATCH failure is non-fatal — the
+    # mutation already landed; the missing marker is surfaced as an additive
+    # warning (the dashboard honestly shows no receipt → install-pending),
+    # and a retry with the same session_id converges (T1-P12).
+    try:
+        _update_onboarding_state(team["team_id"], **{
+            _capture_receipt_key(body.harness): now,
+        })
+        _record_capture_last_error(team["team_id"], body.harness, None)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "session capture receipt write failed (non-fatal)")
+        extraction_warnings.append(
+            "session capture receipt write failed (non-fatal)")
+
     # P1 #1529 (D2): truthful extraction_mode on every response — "llm:<route>"
     # / "llm" on success, "empty" and "error" never claim success (the 422
     # empty gate makes "empty" unreachable here, but the mapping is defensive).
@@ -4607,6 +4733,8 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         effective_mode = "error" if mode != "empty" else "empty"
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
+    elif mode == "replayed":
+        effective_mode = "replayed"
     else:
         effective_mode = "llm"
     resp = {"session_id": session_id, "turns": len(body.conversation),
@@ -4616,6 +4744,43 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
     return resp
+
+
+# ── #1727 Slice 2 (Task 11): per-harness receipt + last-error helpers ──────
+# The dashboard's capture-status surface reads THESE server-written keys
+# (never client state): session_capture_receipt_{harness} proves a durable
+# hosted 2xx capture; session_capture_last_error_{harness} carries the last
+# non-2xx attempt's detail (the per-harness failure sub-line). Both are
+# REGISTERED onboarding state keys (Task 11's registration table) — an
+# unregistered key would be silently dropped by the _update_onboarding_state
+# allowlist filter.
+
+def _capture_receipt_key(harness: str | None) -> str:
+    """Receipt state key for a harness — per-harness when present, the bare
+    legacy key for no-harness hooks (T1-P3 None-guard)."""
+    return f"session_capture_receipt_{harness}" if harness else \
+        "session_capture_receipt"
+
+
+def _capture_last_error_key(harness: str | None) -> str | None:
+    """Per-harness last-error state key. No bare variant is registered — a
+    legacy no-harness hook has no per-harness dashboard row to read it."""
+    if not harness:
+        return None
+    return f"session_capture_last_error_{harness}"
+
+
+def _record_capture_last_error(team_id: str, harness: str | None,
+                               detail: str | None) -> None:
+    """Set (detail) or clear (None) the per-harness last-attempt failure key.
+    Called on every non-2xx (set) and every 2xx (cleared) capture attempt."""
+    key = _capture_last_error_key(harness)
+    if key is None:
+        return
+    _update_onboarding_state(team_id, **{key: detail})
+
+
+
 
 
 # ── POST /v1/sessions/commit — epic #909 slice 5b (plan §6.1, W-3, W-7) ────
@@ -8403,6 +8568,30 @@ _ONBOARDING_DEFAULT_STATE = {
     # drops them (the plan's STATE-KEY REGISTRATION TABLE, cycle-3 P1-2).
     "github_index_cursor": None,           # per-repo composite (updated_at, number)
     "github_legacy_backfill_done": False,  # one-time legacy `-closed` backfill marker
+    # #1727 (Slice 2, Task 11) STATE-KEY REGISTRATION TABLE — every key below
+    # is an EXPLICIT member in BOTH default-state dicts + _ALLOWED_STATE_KEYS
+    # (derived) + the live PATCH model, and is pinned by the parametrized
+    # allowlist-registration test (test_onboarding_endpoints.py::
+    # test_state_keys_registered_parametrized). Unregistered keys are silently
+    # dropped by the allowlist filter — these are the capture surface the
+    # dashboard reads (receipts / last-attempt failures / install probes).
+    "capture_revised": False,              # exactly-once re-ask resolution (Slice 3)
+    "capture_ask_shown": False,            # re-ask pane answered (ANSWER only, T2-P2f)
+    "session_capture_receipt": None,       # bare legacy no-harness receipt
+    "session_capture_receipt_claude": None,
+    "session_capture_receipt_claude-desktop": None,
+    "session_capture_receipt_claude-web": None,
+    "session_capture_receipt_codex": None,
+    "session_capture_receipt_cursor": None,
+    "session_capture_receipt_pi": None,
+    "session_capture_last_error_claude": None,
+    "session_capture_last_error_claude-desktop": None,
+    "session_capture_last_error_claude-web": None,
+    "session_capture_last_error_codex": None,
+    "session_capture_last_error_cursor": None,
+    "session_capture_last_error_pi": None,
+    "install_probe_claude": None,          # Task 14: harness + timestamp, no content
+    "install_probe_pi": None,
 }
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
@@ -8410,7 +8599,12 @@ _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
 # Epic #529: copy-attribution enums (#235 artifact_copied schema, verbatim).
 # Not state keys — the PATCH handler pops harness/section and emits an
 # analytics event instead of persisting them.
-_HARNESS_ANALYTICS_VALUES = {"claude", "codex", "cursor", "pi"}
+# #1727 (Task 11, T2-P2d): claude-web/claude-desktop join the values — the
+# cross-surface vocab test asserts _HARNESS_ANALYTICS_VALUES ⊆ the
+# SessionRequest harness Literal (both surfaces share one value set).
+_HARNESS_ANALYTICS_VALUES = {
+    "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+}
 # "setup" (welcome page one-click setup prompt) added alongside the #529
 # "config"/"prompt" copy-attribution sections — see welcome.html copySetupPrompt.
 _SECTION_ANALYTICS_VALUES = {"config", "prompt", "both", "setup"}
@@ -8497,6 +8691,20 @@ class OnboardingStateResponse(BaseModel):  # noqa: F811
     email: str | None = None
 
 
+# #1727 (Slice 2, Task 11): PATCH-field → state-key translation for the
+# per-harness capture keys. Pydantic field names cannot carry hyphens, but
+# the STATE keys are hyphenated per Literal member (session_capture_receipt_
+# claude-desktop etc.) — the PATCH handler must translate underscore fields
+# back to their hyphenated state keys, else the allowlist filter silently
+# drops them (the parametrized registration test catches exactly this).
+_PATCH_FIELD_TO_STATE_KEY: dict[str, str] = {
+    "session_capture_receipt_claude_desktop": "session_capture_receipt_claude-desktop",
+    "session_capture_receipt_claude_web": "session_capture_receipt_claude-web",
+    "session_capture_last_error_claude_desktop": "session_capture_last_error_claude-desktop",
+    "session_capture_last_error_claude_web": "session_capture_last_error_claude-web",
+}
+
+
 class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
     github_connected: bool | None = None
     github_indexed: bool | None = None
@@ -8510,6 +8718,27 @@ class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
     # through the PATCH surface like every other registered key.
     github_index_cursor: dict | None = None
     github_legacy_backfill_done: bool | None = None
+    # #1727 (Slice 2, Task 11): capture-surface registration-table members —
+    # the server writes receipts/probes; the fields exist so every registered
+    # key round-trips through the PATCH surface (parametrized registration
+    # test) and the dashboard can read them back.
+    capture_revised: bool | None = None
+    capture_ask_shown: bool | None = None
+    session_capture_receipt: str | None = None
+    session_capture_receipt_claude: str | None = None
+    session_capture_receipt_claude_desktop: str | None = None
+    session_capture_receipt_claude_web: str | None = None
+    session_capture_receipt_codex: str | None = None
+    session_capture_receipt_cursor: str | None = None
+    session_capture_receipt_pi: str | None = None
+    session_capture_last_error_claude: str | None = None
+    session_capture_last_error_claude_desktop: str | None = None
+    session_capture_last_error_claude_web: str | None = None
+    session_capture_last_error_codex: str | None = None
+    session_capture_last_error_cursor: str | None = None
+    session_capture_last_error_pi: str | None = None
+    install_probe_claude: str | None = None
+    install_probe_pi: str | None = None
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
@@ -8534,6 +8763,12 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
                                 team: dict = Depends(get_current_team)):  # noqa: B008
     """Merge provided onboarding fields into the team's state."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
+    # #1727 (Task 11): translate underscore PATCH fields back to hyphenated
+    # per-harness state keys (pydantic cannot carry hyphens; the allowlist
+    # filter would silently drop the underscore form).
+    for field, state_key in _PATCH_FIELD_TO_STATE_KEY.items():
+        if field in updates:
+            updates[state_key] = updates.pop(field)
     email = updates.pop("email", None)  # state keys only — email is a teams column
     # Epic #529 copy-attribution beacon: analytics-only fields — pop before
     # the state merge (email pattern) and emit artifact_copied for enum-valid
@@ -9238,6 +9473,7 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
              quota_hit=totals["quota_hit"],
              errors=totals["errors"],
              error=None)
+
     except GitHubFetchError as e:
         # Mid-walk 401/429 / unresolved org (T1-P13 + P2): honest "failed"
         # status with a readable error; the cursor was NOT advanced past
@@ -9267,6 +9503,9 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
             _INDEX_JOB_EVICT_S,
             lambda: (_INDEX_JOBS.pop(job_id, None),
                      _INDEX_JOB_OWNERS.pop(job_id, None)))
+
+
+
 
 
 @app.post("/v1/index/github")

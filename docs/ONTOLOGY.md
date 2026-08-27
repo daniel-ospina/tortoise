@@ -187,7 +187,7 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | Predicate | From → To | Direction | Cardinality | Standard alignment | Meaning |
 |-----------|-----------|-----------|-------------|--------------------|---------|
 | `aboutSubject` | Point/Document/Event → Subject | unidirectional | many→many | `schema:about` (typed) | What Subject this describes |
-| `aboutObject` | Point/Document/Event → Object | unidirectional | many→many | `schema:about` (typed) | What Object this describes |
+| `aboutObject` | Point/Document/Event/**Session** → Object | unidirectional | many→many | `schema:about` (typed) | What Object this describes |
 | `aboutEvent` | Point/Document → Event | unidirectional | many→many | `schema:about` (typed) | What Event this describes. Event is a target only — Events don't describe other Events |
 | `aboutPoint` | Event → Point | unidirectional | many→many | `schema:about` (typed) | What Point this Event describes. Event-only edge |
 | `aboutDocument` | Event → Document | unidirectional | many→many | `schema:about` (typed) | What Document this Event describes |
@@ -196,6 +196,8 @@ Per-type edges (chosen over single polymorphic edge — FalkorDB matrix-per-type
 | `TAGGED` | Point → Tag | unidirectional | many→many | `schema:keywords` | Free-form label on a Point. Tags are `:Tag` nodes (Object subclass, `objectKind: tag`) shared across Points via MERGE. Created by hosted-api point ingestion (hosted_api.py:695-787). ⚠️ **Write-only today — no tag-filter query surfaced yet** (see follow-up). |
 
 > **Legacy:** `aboutEntities` property → per-type `about*` edges. `_create_about_edges()` auto-detects Subject/Object from the legacy property. `schema:about` is polymorphic; we split per-type for graph performance.
+
+> **Session as an aboutObject source (#1727 Slice 2, Task 12):** the capture path links `(s:Session)-[:aboutObject]->(o:Object)` and `(p:Point)-[:aboutObject]->(o:Object)` for extracted episodic turn Points, driven by a regex trigger over the conversation text (`github.com/{org}/{repo}/issues/{n}`, `{repo}#{n}`, bare `#n` with a false-positive guard) — first-match per point, all-matches for the Session node; no-match ⇒ no link, honest. Resolution is by the stable WorkItem Object id (`github-issue-{repo}-{n}`), so aboutObject never dangles on supersede. Outcomes are tracked on the Session node (`entity_links_attempted` / `entity_links_created`) and the pass re-runs on index completion.
 
 > **`aboutEvent` is content-only (#1417):** the edge means "this Point/Document describes this Event" — never "this Point was produced by this Event". Capture-path provenance (a Point produced from a session/meeting) lives on the Point's **`eventId` property** (the provenance surface, stamped by `capture_session`, hosted `/v1/sessions`, and the mining path), with the full chain `(Point)-[:extractedFrom]->(Source)-[:references]->(Event)` (§3.3/§3.4). Pre-#1417 `aboutEvent`-as-provenance edges remain readable and are semantically reinterpreted (no migration); new writes must not mint them. NOTE: the D10 subject-resolution fallback (point's source-event's subject) now requires the `eventId` property — legacy aboutEvent-only points silently stop resolving that fallback (review P2).
 
