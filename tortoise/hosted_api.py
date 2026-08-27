@@ -4811,7 +4811,72 @@ def _record_capture_last_error(team_id: str, harness: str | None,
     _update_onboarding_state(team_id, **{key: detail})
 
 
+# ── #1727 Slice 2 (Task 14, T2-P1): POST /v1/sessions/install-probe ────────
+# The SERVER-VISIBLE install signal: the browser dashboard cannot stat the
+# user's filesystem, so "is the hook installed?" is answered by a probe the
+# installed artifact itself fires. The in-repo session-start.sh hook (and the
+# Pi extension on load) POST this route; the team's onboarding state key
+# install_probe_{harness} (REGISTERED — Task 11's registration table)
+# records harness + server timestamp. The dashboard 4-state (off →
+# install-pending → waiting → active, Task 16/17 canonical names) reads it:
+# NO probe yet ⇒ install-pending; probe no receipt ⇒ waiting; receipt ⇒
+# active (receipt authoritative over probe).
+#
+# The probe is UNCONDITIONAL install telemetry (harness + timestamp ONLY —
+# zero conversation content), NOT consent-gated: a team that hasn't opted in
+# still reports that a hook was installed, so the dashboard can show install
+# status before consent exists. It IS get_current_team-gated (auth required
+# — probes are per-team state). Clients MUST target the configured
+# TORTOISE_API_URL (never a hardcoded hosted host — self-hosted routing pin):
+# the `tortoise session probe` CLI resolves it from the .tortoise config the
+# same way `tortoise session capture` does.
 
+
+class InstallProbeRequest(BaseModel):
+    harness: str = Field(...)
+    # Optional client-side probe timestamp (ISO). The server re-stamps
+    # regardless — the STORED value is server-time (client clocks are not
+    # trusted).
+    client_ts: str | None = None
+
+    @field_validator("harness")
+    @classmethod
+    def _validate_probe_harness(cls, v):
+        # Only harnesses with a REGISTERED install_probe_{harness} state key
+        # (Task 11 registration table) can probe — an unregistered key would
+        # be silently dropped by the allowlist filter, which must never look
+        # like a recorded probe.
+        key = f"install_probe_{v}"
+        if v not in _SESSION_HARNESS_VALUES or key not in _ALLOWED_STATE_KEYS:
+            raise ValueError(
+                f"no install-probe surface registered for harness {v!r} "
+                "(registered: claude, pi)")
+        return v
+
+
+@app.post("/v1/sessions/install-probe")
+async def session_install_probe(body: InstallProbeRequest,
+                                team: dict = Depends(get_current_team)):  # noqa: B008
+    """Record a harness install probe (Task 14, T2-P1).
+
+    Consent-gating decision (pinned): the probe is UNCONDITIONAL install
+    telemetry — harness + timestamp only, no content — so it is NOT gated on
+    session_recording (an un-opted team still reports the hook installed,
+    which is what lets the dashboard show install status pre-consent). Auth
+    (get_current_team) IS required: probes are per-team onboarding state.
+    """
+    now = datetime.now(UTC).isoformat()
+    key = f"install_probe_{body.harness}"
+    try:
+        _update_onboarding_state(team["team_id"], **{key: now})
+    except Exception:
+        _logger.exception(
+            "install-probe state write failed (team=%s harness=%s)",
+            team["team_id"], body.harness)
+        raise HTTPException(status_code=500,
+                            detail="install-probe recording failed")
+    return {"harness": body.harness, "probe_at": now,
+            "team_id": team["team_id"]}
 
 
 # ── POST /v1/sessions/commit — epic #909 slice 5b (plan §6.1, W-3, W-7) ────

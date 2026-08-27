@@ -338,3 +338,83 @@ def test_capture_surface_keys_shared_across_defaults():
     assert capture_keys <= set(DEFAULT_ONBOARDING_STATE)
 
 
+# ── #1727 Slice 2 (Task 14, T2-P1): install-probe round-trip ────────────
+
+
+def test_install_probe_round_trip(client):
+    """Task 14 (T2-P1): POST /v1/sessions/install-probe records the
+    install_probe_{harness} REGISTERED state key (harness + server timestamp
+    only — no content) and reads back. The probe is NOT consent-gated (it's
+    install telemetry, so the dashboard can show install status before
+    consent), but it IS get_current_team-gated (auth required — probes are
+    per-team state)."""
+    from tortoise.hosted_api import _get_onboarding_state
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
+    # Provision the Team node so state writes persist (the state writer is
+    # MATCH...SET — a silent no-op without the node).
+    from tortoise.hosted_api import _make_sdk
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.post("/v1/sessions/install-probe",
+                    json={"harness": "claude"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["harness"] == "claude", body
+    assert body["probe_at"], "server must stamp the probe time"
+    state = _get_onboarding_state("test-team-1")
+    assert state.get("install_probe_claude") == body["probe_at"], \
+        "install_probe_claude must be recorded verbatim (server-stamped)"
+    # pi probe lands on its own registered key (per-harness isolation).
+    r2 = client.post("/v1/sessions/install-probe",
+                     json={"harness": "pi"})
+    assert r2.status_code == 200, r2.text
+    state2 = _get_onboarding_state("test-team-1")
+    assert state2.get("install_probe_pi") == r2.json()["probe_at"]
+
+
+def test_install_probe_unregistered_harness_422(client):
+    """Task 14: a harness with no REGISTERED install_probe_ key (codex /
+    claude-desktop / claude-web / cursor — backfill-only or pending-spike
+    harnesses) → 422 at the model boundary, never a silent drop (an
+    unregistered key would be discarded by the allowlist filter and look
+    like a recorded probe)."""
+    from tortoise.hosted_api import _make_sdk
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.post("/v1/sessions/install-probe",
+                    json={"harness": "codex"})
+    assert r.status_code == 422, r.text
+
+
+def test_install_probe_requires_auth(unauth_client):
+    """Task 14: the probe is get_current_team-gated — no auth, no probe."""
+    r = unauth_client.post("/v1/sessions/install-probe",
+                           json={"harness": "claude"})
+    assert r.status_code == 401, r.text
+
+
+def test_install_probe_not_consent_gated(client):
+    """Task 14: an UN-OPTED team (session_recording=False) still records the
+    probe — the probe is unconditional install telemetry (harness + timestamp
+    only), deliberately NOT consent-gated so the dashboard can show install
+    status before consent. The capture POST itself remains 403-gated."""
+    from tortoise.hosted_api import _get_onboarding_state, _make_sdk
+    from tortoise.hosted_api import _update_onboarding_state
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    _update_onboarding_state("test-team-1", session_recording=False)
+    r = client.post("/v1/sessions/install-probe",
+                    json={"harness": "claude"})
+    assert r.status_code == 200, r.text
+    assert _get_onboarding_state("test-team-1").get("install_probe_claude")
+    # the consent gate is untouched: an un-opted capture POST is still 403.
+    r2 = client.post("/v1/sessions",
+                     json={"conversation": [
+                         {"role": "user", "content": "hello"}]})
+    assert r2.status_code == 403, r2.text
