@@ -26,6 +26,22 @@ from tortoise.kind_classifier import (  # noqa: E402, RUF100
 )
 from tortoise.kind_index import KindIndex, _clear_index_cache
 
+
+@pytest.fixture(autouse=True)
+def _isolated_kind_caches():
+    """Cross-test isolation (mirrors test_kind_index.py's _isolated_cache):
+    the module-level memos must not leak built indexes / kind-specs between
+    tests — test_two_default_constructions_build_index_once monkeypatches
+    the production _DefaultEncoder and would otherwise leave its FakeDefault
+    index memoized under the PRODUCTION key (cycle-3 P2 test hygiene)."""
+    from tortoise.value_extractor import _clear_kind_spec_cache
+
+    _clear_index_cache()
+    _clear_kind_spec_cache()
+    yield
+    _clear_index_cache()
+    _clear_kind_spec_cache()
+
 # ── Controlled fixture: a tiny spec + one-hot keyword encoder ──────────────
 
 FIXTURE_SPEC = {
@@ -228,20 +244,30 @@ class TestAdjudication:
         assert out["assignments"]["i0"]["mode"] == "llm"
         assert out["assignments"]["i1"]["kind"] == "core:workflow"
 
-    def test_adjudication_spend_recorded_even_on_failure(self):
-        """The batched spend is accumulated even when a batch fails (the
-        calls were made — the cost gate must not under-count the arm)."""
+    def test_adjudication_failure_falls_back(self, monkeypatch):
+        """BoomModel → fail-open kNN top-1 fallback AND the failed batch's
+        LLM spend is still recorded (the calls were made — the A/B cost gate
+        must not under-count the arm). Retry/backoff constants are pinned so
+        the fail path never sleeps (cycle-3 P2 test hygiene: the duplicate
+        spend test is folded here)."""
+        import tortoise.extractor_v2 as v2
 
         class BoomModel(MockModel):
             def complete(self, *, system, user, max_tokens=None):
                 raise RuntimeError("adjudicator down")
 
+        # _complete reads these at call time — pin to zero/small so the
+        # transient-classified boom raises after ONE attempt, no backoff.
+        monkeypatch.setattr(v2, "_COMPLETE_RETRIES", 0)
+        monkeypatch.setattr(v2, "_BACKOFF_BASE_S", 0.01)
+        monkeypatch.setattr(v2, "_BACKOFF_CAP_S", 0.01)
         clf = self._clf(BoomModel([]))
         out = clf.classify_items(_items(("entity", "the plan workflow")))
         assert out["stats"]["classify_errors"] == 1
-        usage = out["stats"]["llm"]
-        assert usage["attempts"] >= 1, "failed calls are still LLM spend"
         assert out["assignments"]["i0"]["mode"] == "knn"
+        usage = out["stats"]["llm"]
+        assert usage["attempts"] == 1, "failed calls are still LLM spend"
+        assert usage["retries"] == 0
 
     def test_bare_array_response_rejected(self):
         """The adjudication contract is object-wrapped: a bare-array
@@ -251,16 +277,6 @@ class TestAdjudication:
             return '["core:plan", "statement"]'
 
         clf = self._clf(MockModel(resp))
-        out = clf.classify_items(_items(("entity", "the plan workflow")))
-        assert out["stats"]["classify_errors"] == 1
-        assert out["assignments"]["i0"]["mode"] == "knn"
-
-    def test_adjudication_failure_falls_back(self):
-        class BoomModel(MockModel):
-            def complete(self, *, system, user, max_tokens=None):
-                raise RuntimeError("adjudicator down")
-
-        clf = self._clf(BoomModel([]))
         out = clf.classify_items(_items(("entity", "the plan workflow")))
         assert out["stats"]["classify_errors"] == 1
         assert out["assignments"]["i0"]["mode"] == "knn"

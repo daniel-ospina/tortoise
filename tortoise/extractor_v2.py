@@ -3097,9 +3097,11 @@ def _restamp_s2_kinds(merged: dict, register: dict,
     """Kind preservation (post-E4): S2 classifier kinds survive S4
     re-emission. Every merged item whose section-aware identity matches a
     registered S2 item but whose kind was lost (missing/unclassified) is
-    re-stamped with the S2 kind; a re-typed S4 duplicate (same identity,
-    different kind) is folded into the S2 version (no duplicate :Object on
-    kind mismatch). Returns the override count (observable via census)."""
+    re-stamped with the S2 kind. The fold removes ONLY sentinel/missing/
+    identical duplicates — a same-name member carrying a DIFFERENT
+    non-sentinel kind is preserved as a distinct (name, kind) :Object and
+    is NEVER folded or re-stamped (the S2 re-stamp fills LOST kinds only;
+    cycle-3 P2). Returns the override count (observable via census)."""
     overrides = 0
     for section, kind_field, _item_type in _CLASSIFY_SECTIONS:
         items = merged.get(section) or []
@@ -3141,13 +3143,20 @@ def _restamp_s2_kinds(merged: dict, register: dict,
             if not s2k:
                 continue
             cur = str(it.get(kind_field) or "").strip()
-            # re-stamp ANY kind drift on a register-matched item (missing,
-            # the sentinel, or an S4 re-type to a different kind — the
-            # re-emit clause forbids re-typing S2 items; events/points merge
-            # content-keyed so S4's re-type would otherwise clobber silently)
-            if cur.lower() != s2k.lower():
+            # Re-stamp ONLY LOST kinds (missing / the sentinel). A
+            # register-matched item carrying a DIFFERENT valid non-sentinel
+            # kind is a preserved distinct (name, kind) :Object — the S2
+            # re-stamp must never clobber it (cycle-3 P2: the fold above
+            # preserves it, so the re-stamp must too).
+            if not cur or cur.lower() == UNCLASSIFIED:
                 it[kind_field] = s2k
                 overrides += 1
+            elif cur.lower() != s2k.lower():
+                ident = str(it.get("name") if section == "entities"
+                            else it.get("content"))[:60]
+                warnings.append(
+                    f"entity '{ident}' re-typed by S4 (kind {cur!r}) — "
+                    f"preserved as distinct (name, kind) :Object")
     return overrides
 
 
@@ -3830,9 +3839,9 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
 
 
 def _complete(model, system: str, user: str, *, deadline_s: int = 600,
-              max_tokens: int | None = None, retries: int = _COMPLETE_RETRIES,
-              backoff_base: float = _BACKOFF_BASE_S,
-              backoff_cap: float = _BACKOFF_CAP_S,
+              max_tokens: int | None = None, retries: int | None = None,
+              backoff_base: float | None = None,
+              backoff_cap: float | None = None,
               stats: dict | None = None) -> str:
     """Wall-clock-bounded completion with retry/backoff (M3 #1524, D1).
 
@@ -3849,9 +3858,20 @@ def _complete(model, system: str, user: str, *, deadline_s: int = 600,
     attempts / retries / truncated / last_class per call for the per-session
     LLM roll-up (D3).
 
+    ``retries``/``backoff_*`` default to None → the module constants
+    (``_COMPLETE_RETRIES`` / ``_BACKOFF_BASE_S`` / ``_BACKOFF_CAP_S``) are
+    read at CALL time (live constants — the test hook pins them to zero/small
+    values so the fail path never sleeps; cycle-3 P2 test hygiene).
+
     Total worst-case wall clock = attempts × deadline_s (documented — the
     abandoned daemon thread after a deadline keeps running and the provider
     keeps billing; accepted, bounded per attempt)."""
+    if retries is None:
+        retries = _COMPLETE_RETRIES
+    if backoff_base is None:
+        backoff_base = _BACKOFF_BASE_S
+    if backoff_cap is None:
+        backoff_cap = _BACKOFF_CAP_S
     for attempt in range(1, retries + 2):
         try:
             resp, finish_reason = _call_once(model, system, user,

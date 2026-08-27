@@ -118,19 +118,35 @@ class KindClassifier:
         Production (``encoder is None``): the content-addressed npz is
         LOADED when present and BUILT+PERSISTED when missing (the Task 3
         deliverable — the 54-kind vocabulary is embedded once per content
-        hash, never per session). Injected stub encoders change the vector
-        space: their builds are never memoized/persisted (a stub build must
-        never shadow the production index)."""
-        from tortoise.kind_index import KindIndex
+        hash, never per session). Two degraded-persistence guards (cycle-3
+        P2): a persisted index that was built DEGRADED (embedder down at
+        build time) never loads — ``KindIndex.load`` returns None and the
+        caller rebuilds; and when the CURRENT process's embedder is
+        unavailable, a good npz is NOT loaded — the index is rebuilt
+        in-process DEGRADED (persist=False, so the good npz survives for
+        when the embedder recovers) so the degraded TF-IDF item lane stays
+        dimension-matched. Injected stub encoders change the vector space:
+        their builds are never memoized/persisted (a stub build must never
+        shadow the production index)."""
+        import tortoise.kind_index as ki
         from tortoise.value_extractor import compile_kind_index_spec
 
         spec = compile_kind_index_spec()
         if encoder is None:
-            idx = KindIndex.load(spec)
+            from tortoise.embeddings import EmbeddingModel
+            if EmbeddingModel.get() is None:
+                # Embedder down NOW: the persisted npz (real-embedder dims)
+                # would dimension-mismatch the degraded TF-IDF item lane.
+                # Rebuild in-process degraded and do NOT overwrite the good
+                # npz. The memo is evicted for this key so a previously
+                # loaded/built good-dim index can't shadow the rebuild.
+                ki._evict_index(ki.cache_key_for(spec))
+                return ki.KindIndex.build(spec, persist=False)
+            idx = ki.KindIndex.load(spec)
             if idx is not None:
                 return idx
-            return KindIndex.build(spec, persist=True)
-        return KindIndex.build(spec, encoder=encoder, persist=False)
+            return ki.KindIndex.build(spec, persist=True)
+        return ki.KindIndex.build(spec, encoder=encoder, persist=False)
 
     # ── candidate restriction ──────────────────────────────────────────────
 
@@ -282,7 +298,14 @@ class KindClassifier:
         Returns ``(calls, usage)`` — ``usage`` is the accumulated LLM spend
         across batches (``{"calls", "attempts", "retries", "truncated"}``,
         rollable into the session llm_stats via ``_rollup_llm``), so the
-        adjudication tail's cost is never invisible to the A/B gate."""
+        adjudication tail's cost is never invisible to the A/B gate.
+        ``usage["calls"]`` is the BATCH count (one per adjudication call),
+        ``usage["attempts"]`` the total adapter-call attempts across
+        batches (the total-attempts proxy the session rollup consumes), and
+        ``usage["retries"]`` sums BOTH the adapter-level retries (top-level
+        ``batch_stats["retries"]``) and the parse-level re-prompts
+        (nested ``batch_stats["llm"]["retries"]`` — cycle-3 P2: a
+        parse-retry on the adjudication tail must reach llm_stats)."""
         if self.model is None:
             for iid, _item, top in tail:
                 stats["assigned_knn"] += 1
@@ -340,8 +363,12 @@ class KindClassifier:
             finally:
                 # The spend is accumulated even when the batch failed (the
                 # calls were made — the A/B cost gate must see them).
+                # Retries sum the adapter-level loop AND the parse-level
+                # re-prompts (_complete_parsed records those nested under
+                # stats["llm"]["retries"] — cycle-3 P2 undercount).
                 usage["attempts"] += batch_stats.get("attempts", 0)
                 usage["retries"] += batch_stats.get("retries", 0)
+                usage["retries"] += (batch_stats.get("llm") or {}).get("retries", 0)
                 usage["truncated"] = usage["truncated"] or bool(
                     batch_stats.get("truncated"))
             if not isinstance(parsed, dict):
@@ -376,7 +403,9 @@ class KindClassifier:
                 chosen_sim = next((s for k, s in top if k == resolved), top[0][1])
                 assignments[iid] = {"kind": resolved, "margin": chosen_sim,
                                     "mode": "llm"}
-        usage["calls"] = usage["attempts"]
+        # usage["calls"] is the BATCH count (aligns with
+        # stats["adjudication_calls"]); attempts is the spend proxy.
+        usage["calls"] = calls
         return calls, usage
 
     def _fallback(self, item: dict) -> dict:

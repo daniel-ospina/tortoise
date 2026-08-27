@@ -30,9 +30,9 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
     # NOTE: glob order intentionally NOT sorted — the flag-off S2 prompt and
     # verbose master render must stay byte-identical to main on the same
     # platform, and the pack-manifest glob order (readdir-dependent) is the
-    # pre-existing behavior. Determinism across filesystems is provided only
-    # where the pipeline needs it (compile_kind_index_spec sorts its own
-    # namespace key set via _KIND_SPEC_CACHE).
+    # pre-existing behavior. Deterministic order is guaranteed only
+    # downstream: KindIndex.build sorts the kind names, render_s2_prompt
+    # sorts the pack-namespace set.
     for mf in packs_dir.glob("*/manifest.yaml"):
         d = yaml.safe_load(mf.read_text()) or {}
         if d.get("namespace"):
@@ -96,13 +96,20 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
     the eval's confusability analysis.
 
     Lazy imports keep the module importable without the pack machinery
-    (``extractor_v2`` imports this module's ``compile_value_brief``)."""
+    (``extractor_v2`` imports this module's ``compile_value_brief``).
+
+    Memoized per RESOLVED ``packs_dir`` (the key is the resolved path, so a
+    custom-dir call never poisons the default-dir memo and vice versa —
+    cycle-3 P2 unkeyed memo)."""
     import copy
     global _KIND_SPEC_CACHE
-    if _KIND_SPEC_CACHE is not None:
+    packs_dir = (Path(packs_dir) if packs_dir else
+                 Path(__file__).resolve().parent.parent / "packs").resolve()
+    cached = _KIND_SPEC_CACHE.get(str(packs_dir))
+    if cached is not None:
         # deep copy — callers must never mutate the shared cache (the
         # build/load paths treat the spec as read-only).
-        return copy.deepcopy(_KIND_SPEC_CACHE)
+        return copy.deepcopy(cached)
     from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
 
     def _surface(kind: str, desc: str, syns: list, exs: list) -> str:
@@ -138,8 +145,6 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
     # eventKinds → events, documentKinds/objectKinds → objects) so Task 4's
     # per-type candidate restriction is correct.
     from tortoise.pack_registry import PackRegistry
-    packs_dir = Path(packs_dir) if packs_dir else \
-        Path(__file__).resolve().parent.parent / "packs"
     reg = PackRegistry(packs_dir)
     reg.load_all()
     for ns, pack in reg.packs.items():
@@ -158,24 +163,27 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
                        "description": desc,
                        "synonyms": syns, "examples": exs,
                        "nearMisses": nms}
-    _KIND_SPEC_CACHE = spec
-    return copy.deepcopy(_KIND_SPEC_CACHE)
+    _KIND_SPEC_CACHE[str(packs_dir)] = spec
+    return copy.deepcopy(spec)
 
 
 _VOCAB_CACHE: dict | None = None
 
 
-#: Load-once memo for the kind-index spec (packs are static per process —
-#: per-session classifier construction must not re-read + YAML-parse every
-#: pack manifest; mirrors ``_MASTER_LIST_CACHE`` / ``_VOCAB_CACHE``).
-_KIND_SPEC_CACHE: dict | None = None
+#: Load-once memo for the kind-index spec, keyed by the RESOLVED packs dir
+#: (packs are static per process per dir — per-session classifier
+#: construction must not re-read + YAML-parse every pack manifest; the key
+#: keeps a custom-dir call from poisoning the default-dir memo and vice
+#: versa — cycle-3 P2 unkeyed memo). Mirrors ``_MASTER_LIST_CACHE`` /
+#: ``_VOCAB_CACHE``.
+_KIND_SPEC_CACHE: dict[str, dict] = {}
 
 
 def _clear_kind_spec_cache() -> None:
-    """Test hook — clear the memoized kind-index spec (cross-test
+    """Test hook — clear ALL memoized kind-index specs (cross-test
     isolation; the per-session re-parse is exactly what the memo avoids)."""
     global _KIND_SPEC_CACHE
-    _KIND_SPEC_CACHE = None
+    _KIND_SPEC_CACHE = {}
 
 
 def _object_kind_vocab() -> set[str]:

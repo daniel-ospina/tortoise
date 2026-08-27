@@ -47,6 +47,14 @@ def _clear_index_cache() -> None:
         _INDEX_CACHE.clear()
 
 
+def _evict_index(key: str) -> None:
+    """Evict ONE memoized index (cycle-3 P2 degraded-path hook): the
+    classifier drops a good-dim memo entry when the embedder goes down
+    mid-process so the degraded rebuild can't be shadowed by it."""
+    with _INDEX_LOCK:
+        _INDEX_CACHE.pop(key, None)
+
+
 def cache_key_for(spec: dict) -> str:
     """Content-addressed cache key: sha256 of the canonical spec JSON + the
     embedder id + its pinned HF revision. A pack install, core-vocabulary
@@ -166,7 +174,9 @@ class KindIndex:
         cls, spec: dict, *, cache_dir: Path | str | None = None, encoder=None
     ) -> KindIndex | None:
         """Load the persisted index for this spec's cache key; None when the
-        file is missing (caller builds). Encoder is only used when building."""
+        file is missing OR the stored index was built DEGRADED (embedder was
+        down — never trust a degraded persisted index; the caller rebuilds
+        in-process, cycle-3 P2). Encoder is only used when building."""
         key = cache_key_for(spec)
         with _INDEX_LOCK:
             cached = _INDEX_CACHE.get(key)
@@ -176,11 +186,18 @@ class KindIndex:
         if not path.exists():
             return None
         with np.load(path, allow_pickle=False) as data:
+            if bool(data.get("degraded", False)):
+                # A persisted index built while the embedder was DOWN
+                # (degraded vectors) is never trusted — return None so the
+                # caller rebuilds in-process (cycle-3 P2: a degraded npz
+                # must not load forever after the embedder recovers; the
+                # in-process rebuild self-heals on recovery).
+                return None
             idx = cls(
                 [str(x) for x in data["kind_names"]],
                 data["vectors"],
                 json.loads(str(data["metadata"])),
-                degraded=bool(data.get("degraded", False)),
+                degraded=False,
             )
         with _INDEX_LOCK:
             _INDEX_CACHE[key] = idx

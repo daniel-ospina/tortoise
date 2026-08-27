@@ -120,6 +120,17 @@ class TestPersistLoad:
     def test_missing_file_returns_none(self, spec, tmp_path):
         assert KindIndex.load(spec, cache_dir=tmp_path) is None
 
+    def test_degraded_npz_load_returns_none(self, spec, tmp_path):
+        """A persisted index built while the embedder was DOWN (the stored
+        degraded flag) must never load — the classifier rebuilds in-process
+        so a degraded npz can't load forever after the embedder recovers
+        (cycle-3 P2 degraded-npz stickiness)."""
+        idx = KindIndex.build(spec, encoder=StubEncoder(), persist=False)
+        idx.degraded = True
+        path = idx.persist(cache_dir=tmp_path)
+        assert path.exists()
+        assert KindIndex.load(spec, cache_dir=tmp_path) is None
+
     def test_persisted_file_is_gitignored_dir(self, spec):
         from tortoise.kind_index import DEFAULT_CACHE_DIR
 
@@ -201,10 +212,13 @@ class TestMemoizationAndLazy:
         assert DEFAULT_CACHE_DIR.name == "kind_index"
         assert DEFAULT_CACHE_DIR.parent.name == "data"
 
-    def test_kind_spec_parsed_once_and_clear_hook(self, monkeypatch):
-        """compile_kind_index_spec is load-once per process (Task 3
-        deliverable — per-session classifier construction must not re-read
-        + YAML-parse every pack manifest); the clear hook forces a re-parse."""
+    def test_kind_spec_parsed_once_and_clear_hook(self, monkeypatch, tmp_path):
+        """compile_kind_index_spec is load-once per process per RESOLVED
+        packs_dir (Task 3 deliverable — per-session classifier construction
+        must not re-read + YAML-parse every pack manifest); the clear hook
+        forces a re-parse. The memo is KEYED by the resolved dir: a
+        custom-dir call never poisons the default-dir memo and vice versa
+        (cycle-3 P2 unkeyed memo)."""
         import tortoise.pack_registry as pr
         from tortoise.value_extractor import (
             _clear_kind_spec_cache,
@@ -225,8 +239,23 @@ class TestMemoizationAndLazy:
         assert first >= 2  # compile_value_brief + the kindDefs pass
         spec_b = compile_kind_index_spec()
         assert calls["n"] == first, \
-            "a second call must hit the memo (no manifest re-parse)"
+            "a second default-dir call must hit the memo (no manifest re-parse)"
         assert spec_a == spec_b
+        # custom dir → SEPARATE memo slot (resolved-path key): the custom
+        # call parses its own (empty) dir, and the default-dir memo is
+        # untouched by it — no cross-dir poisoning.
+        other_dir = tmp_path / "packs"
+        other_dir.mkdir()
+        spec_custom = compile_kind_index_spec(other_dir)
+        assert calls["n"] > first, \
+            "a custom-dir call parses its own manifests (separate memo slot)"
+        assert spec_custom != spec_a, \
+            "the custom dir (no packs) yields only the core vocabulary"
+        after_custom = calls["n"]
+        spec_a2 = compile_kind_index_spec()
+        assert spec_a2 == spec_a
+        assert calls["n"] == after_custom, \
+            "the default-dir memo is untouched by the custom-dir call"
         _clear_kind_spec_cache()
         compile_kind_index_spec()
         assert calls["n"] > first, "clear hook must force a re-parse"

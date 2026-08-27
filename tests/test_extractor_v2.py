@@ -2342,8 +2342,9 @@ class TestClassifyStage:
     def test_fold_never_drops_different_non_sentinel_kind(self):
         """A same-name duplicate carrying a DIFFERENT non-sentinel kind is
         a distinct (name, kind) :Object (Layer-1) — the name-collision
-        fold must NOT delete it (only sentinel/missing/identical
-        duplicates fold; final-review P2)."""
+        fold must NOT delete it AND the S2 re-stamp must NOT clobber it
+        (only sentinel/missing/identical duplicates fold; only LOST kinds
+        re-stamp; cycle-3 P2)."""
         def ent(name, kind):
             return {"name": name, "kind": kind, "lifecycle": "created",
                     "supersedes": None, "note": None}
@@ -2353,10 +2354,18 @@ class TestClassifyStage:
                   "events": [], "points": [], "operators": [],
                   "chain_notes": [], "link_before_create": []}
         warnings: list[str] = []
-        v2._restamp_s2_kinds(merged, {"entities:plan": "core:plan"}, warnings)
+        n = v2._restamp_s2_kinds(merged, {"entities:plan": "core:plan"},
+                                 warnings)
         assert len(merged["entities"]) == 2, \
             "the different-kind duplicate must survive the fold"
+        kinds = {e["kind"] for e in merged["entities"]}
+        assert kinds == {"core:plan", "core:goal"}, \
+            "the S2-registered copy keeps core:plan; the re-typed survivor " \
+            "keeps its original kind (core:goal)"
         assert not any("folded into the S2" in w for w in warnings)
+        assert any("preserved as distinct" in w for w in warnings), \
+            "the preserved re-typed :Object is announced (observable census)"
+        assert n == 0, "a valid non-sentinel kind is never re-stamped"
 
     def test_rekey_slots_skips_sentinel_entity_kind(self):
         """An entity still carrying the 'unclassified' sentinel must not
