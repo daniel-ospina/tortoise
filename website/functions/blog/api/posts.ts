@@ -147,7 +147,7 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
   const author = str(input.author);
   if (author && author.length > 100) errors.author = "author max 100 chars";
 
-  if (status && status !== "draft" && status !== "published") errors.status = "status must be draft | published";
+  if (status !== null && status !== "draft" && status !== "published") errors.status = "status must be draft | published";
   if (status === "published" && input.hold_for_review === true) errors.hold_for_review = "hold_for_review cannot be combined with status=published";
 
   if (input.tags !== undefined && input.tags !== null) {
@@ -379,7 +379,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const created = (await res.json()) as Array<{ id: string; slug: string }>;
   const post = created[0];
   return json(
-    { id: post?.id, slug: post?.slug, url: post ? `https://tortoise.premiselabs.co/blog/${post.slug}` : null },
+    { id: post?.id, slug: post?.slug, url: post ? `${SITE_URL}/blog/${post.slug}` : null },
     201,
   );
 };
