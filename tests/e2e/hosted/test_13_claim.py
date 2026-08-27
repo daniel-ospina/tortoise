@@ -57,6 +57,13 @@ SERVICE_KEY = "svc_claim_e2e_1082"
 SECRET_PEPPER = "e2e-claim-pepper-1082"
 INTERNAL_KEY = "e2e-claim-internal-1082"
 
+# #1719 (Task 3): real UUIDs — JWT subjects are uuid in prod; non-UUID
+# literals 22P02 on team_memberships.user_id (the fake enforces it).
+_U_CLAIM_A = "9f2c1a40-0000-4a00-8000-0000000000a1"
+_U_CLAIM_B = "9f2c1a40-0000-4a00-8000-0000000000a2"
+_U_PASS = "9f2c1a40-0000-4a00-8000-0000000000a3"
+_U_PASS2 = "9f2c1a40-0000-4a00-8000-0000000000a4"
+
 
 
 class _JWKS:
@@ -313,7 +320,7 @@ class TestClaimE2E:
         assert team["team_id"] == team_id
 
         # 3. welcome guard probe: claimable BEFORE the claim
-        jwt_a = keys.mint(claim_server["mock_url"], "user-claim-a",
+        jwt_a = keys.mint(claim_server["mock_url"], _U_CLAIM_A,
                           "claim-a@e2e.premise-labs.dev", ["github"])
         status, probe = _get(
             base, "/v1/claim/status",
@@ -343,7 +350,7 @@ class TestClaimE2E:
             base, f"/v1/teams/{team_id}/members",
             headers={"Authorization": f"Bearer {jwt_a}"})
         assert status == 200, members
-        assert any(m["user_id"] == "user-claim-a" and m["role"] == "owner"
+        assert any(m["user_id"] == _U_CLAIM_A and m["role"] == "owner"
                    for m in members), members
 
         # 7. same key still auths + reads the same graph (indicators 1 + 3)
@@ -364,7 +371,7 @@ class TestClaimE2E:
         assert probe2["claimed"] is True
 
         # 9. first-claim-wins (indicator 5): a second user cannot claim
-        jwt_b = keys.mint(claim_server["mock_url"], "user-claim-b",
+        jwt_b = keys.mint(claim_server["mock_url"], _U_CLAIM_B,
                           "claim-b@e2e.premise-labs.dev", ["google"])
         status, second = _post(
             base, "/v1/claim",
@@ -376,7 +383,7 @@ class TestClaimE2E:
         # 10. membership rows: exactly one owner, linked, identity cleared
         mems = [m for m in cp.tables["team_memberships"] if m["team_id"] == team_id]
         assert len(mems) == 1, mems
-        assert mems[0]["user_id"] == "user-claim-a"
+        assert mems[0]["user_id"] == _U_CLAIM_A
         assert mems[0]["identity"] is None
         team_row = next(t for t in cp.tables["teams"] if t["id"] == team_id)
         assert team_row["email"] == "claim-a@e2e.premise-labs.dev"
@@ -387,7 +394,7 @@ class TestClaimE2E:
         status, body = _post(base, "/v1/claim", body={"api_key": "tt_x"})
         assert status == 401, body
         # password-only provider → 403 (provider-invariant fail-closed)
-        jwt = claim_server["keys"].mint(claim_server["mock_url"], "user-pass",
+        jwt = claim_server["keys"].mint(claim_server["mock_url"], _U_PASS,
                                         "pass@e2e.premise-labs.dev", ["email"])
         status, body = _post(base, "/v1/claim",
                              headers={"Authorization": f"Bearer {jwt}"},
@@ -397,7 +404,7 @@ class TestClaimE2E:
         claim_server["cp"]  # noqa: B018, RUF100
         _SupabaseMockHandler.email_confirmed = False
         try:
-            jwt2 = claim_server["keys"].mint(claim_server["mock_url"], "user-pass2",
+            jwt2 = claim_server["keys"].mint(claim_server["mock_url"], _U_PASS2,
                                              "pass2@e2e.premise-labs.dev", ["github"])
             status, body = _post(base, "/v1/claim",
                                  headers={"Authorization": f"Bearer {jwt2}"},
