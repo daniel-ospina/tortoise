@@ -60,7 +60,9 @@ await db.exec(`
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
   );
+  GRANT USAGE ON SCHEMA storage TO anon, authenticated, service_role;
   GRANT ALL ON storage.buckets, storage.objects TO anon, authenticated, service_role;
+  ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
 `);
 
 // ── Apply migrations 0001-20260813000005 in order ──
@@ -79,6 +81,7 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '0011_teams_name_unique.sql','0012_teams_billing_columns.sql',
                '0013_webhook_events.sql','0014_metering_records.sql',
                '0015_abuse_events.sql',
+               '0016_oauth.sql',
                '20260813000001_teams_deleted_at.sql',
                '20260813000002_metering_nodes_written.sql',
                '20260813000003_audit_ip_time_index.sql',

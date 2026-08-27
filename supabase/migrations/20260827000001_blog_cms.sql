@@ -1,13 +1,18 @@
 -- ============================================================================
--- Migration 0017: Blog CMS — blog_posts, blog_agent_keys, blog-images bucket
+-- Migration 20260827000001: Blog CMS — blog_posts, blog_agent_keys, blog-admins,
+-- blog-images bucket
 -- Epic: docs/epics/2026-08-27-tortoise-blog-cms/03-plan.md §4
 -- Issue: #1793
 --
 -- SITE-WIDE marketing content (NOT tenant-scoped — the blog is the public
 -- surface of tortoise.premiselabs.co). Access model:
 --   anon/authenticated   → SELECT published AND NOT hold_for_review only
---   authenticated admin  → SELECT ALL + full CRUD (is_admin() gate)
+--   authenticated admin  → SELECT ALL + full CRUD (blog_admins allowlist)
 --   service_role         → ALL (agent publish API + seed/ops scripts)
+--
+-- NOTE: named 20260827000001 (not 0017) — is_admin() depends on
+-- teams.deleted_at (20260813000001) only in the allowlist-seed path; the
+-- timestamp prefix sorts after the 2026 batch for fresh-DB applies.
 --
 -- Lifecycle (plan W4): draft → published → archived (terminal);
 -- published → draft (unpublish / request-changes, clears review state but
@@ -62,6 +67,19 @@ CREATE TABLE public.blog_agent_keys (
 -- Keys are read ONLY by the agent API Function (service_role) — no client role
 -- ever sees them.
 REVOKE ALL ON public.blog_agent_keys FROM anon, authenticated;
+
+-- ---------------------------------------------------------------------------
+-- blog_admins — explicit allowlist for the SITE-WIDE blog admin surface.
+-- Owner/user ids are seeded by the ops seed script (service_role) — team
+-- ownership is NOT sufficient (team creation is open self-serve, so "any
+-- team owner" would make every registered user a blog admin).
+-- ---------------------------------------------------------------------------
+CREATE TABLE public.blog_admins (
+  user_id    uuid PRIMARY KEY,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+REVOKE ALL ON public.blog_admins FROM anon, authenticated;
 
 -- ---------------------------------------------------------------------------
 -- Functions / triggers
@@ -120,8 +138,9 @@ CREATE TRIGGER blog_posts_archive_terminal
   FOR EACH ROW EXECUTE FUNCTION public.blog_posts_archive_terminal();
 
 -- ---------------------------------------------------------------------------
--- is_admin() — blog admin gate (no helper existed before; plan §4 MUST create)
--- Owner/admin of any active, non-deleted team.
+-- is_admin() — blog admin gate: membership in the blog_admins allowlist.
+-- (Team-ownership was rejected in review: open self-serve team creation
+-- would grant every registered user full blog CRUD on the public surface.)
 -- ---------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION public.is_admin()
 RETURNS boolean
@@ -131,13 +150,7 @@ SECURITY DEFINER
 SET search_path = public
 AS $$
   SELECT EXISTS (
-    SELECT 1
-    FROM public.team_memberships tm
-    JOIN public.teams t ON t.id = tm.team_id
-    WHERE tm.user_id = auth.uid()
-      AND tm.status = 'active'
-      AND tm.role IN ('owner', 'admin')
-      AND t.deleted_at IS NULL
+    SELECT 1 FROM public.blog_admins WHERE user_id = auth.uid()
   );
 $$;
 
@@ -167,6 +180,13 @@ CREATE POLICY blog_posts_service_all ON public.blog_posts
 ALTER TABLE public.blog_agent_keys ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY blog_agent_keys_service_all ON public.blog_agent_keys
+  FOR ALL TO service_role
+  USING (true)
+  WITH CHECK (true);
+
+ALTER TABLE public.blog_admins ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY blog_admins_service_all ON public.blog_admins
   FOR ALL TO service_role
   USING (true)
   WITH CHECK (true);
@@ -211,4 +231,5 @@ COMMENT ON COLUMN public.blog_posts.hold_for_review IS 'When true the post is ex
 COMMENT ON COLUMN public.blog_posts.published_by IS 'Audit: agent name or user id that published (or direct-published).';
 COMMENT ON COLUMN public.blog_posts.created_by IS 'Audit + agent edit scope: PATCH allowed only when created_by = calling agent_name.';
 COMMENT ON TABLE public.blog_agent_keys IS 'Per-agent publish credentials — sha256 hashes only. Issued/rotated/revoked via seed/ops script (service_role).';
-COMMENT ON FUNCTION public.is_admin() IS 'Blog admin gate: authenticated user is owner/admin of an active, non-deleted team.';
+COMMENT ON TABLE public.blog_admins IS 'Blog admin allowlist — user ids seeded via ops script. Team ownership is NOT sufficient (open self-serve team creation).';
+COMMENT ON FUNCTION public.is_admin() IS 'Blog admin gate: user_id present in blog_admins allowlist.';

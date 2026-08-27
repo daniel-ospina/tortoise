@@ -148,17 +148,15 @@ SELECT tests.assert(
 RESET ROLE;
 
 -- ── 6. is_admin() + admin RLS ─────────────────────────────────────────────
--- Admin user: owner of an active team (seed as service_role)
+-- Admin user: seeded into the blog_admins allowlist (seed as service_role)
 SET ROLE service_role;
 INSERT INTO auth.users (id, email) VALUES ('11111111-1111-1111-1111-111111111111', 'blog-admin@example.com');
-INSERT INTO public.teams (id, name, graph_name) VALUES ('blog-team', 'blog-team', 'team_blog-team');
-INSERT INTO public.team_memberships (user_id, team_id, team_name, graph_name, role, status)
-VALUES ('11111111-1111-1111-1111-111111111111', 'blog-team', 'blog-team', 'team_blog-team', 'owner', 'active');
+INSERT INTO public.blog_admins (user_id) VALUES ('11111111-1111-1111-1111-111111111111');
 RESET ROLE;
 
 SET request.jwt.claim.sub = '11111111-1111-1111-1111-111111111111';
 SET ROLE authenticated;
-SELECT tests.assert(public.is_admin(), '0017: team owner is_admin() = true');
+SELECT tests.assert(public.is_admin(), '0017: allowlisted user is_admin() = true');
 SELECT tests.assert(
   (SELECT count(*) FROM public.blog_posts) >= 4,
   '0017 RLS: admin sees ALL rows (incl. draft + hold)');
@@ -178,7 +176,42 @@ SELECT tests.assert(
 RESET ROLE;
 RESET request.jwt.claim.sub;
 
--- ── 7. blog_agent_keys isolation ───────────────────────────────────────────
+-- Non-admin INSERT also blocked (FOR ALL WITH CHECK gate)
+SET ROLE anon;
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.blog_posts (slug, title, status, published_by, published_at)
+    VALUES ('anon-insert-blog', 'x', 'published', 'anon', now());
+    RAISE EXCEPTION '0017 RLS: anon INSERT NOT blocked';
+  EXCEPTION WHEN raise_exception OR insufficient_privilege THEN
+    NULL; -- expected
+  END;
+END $$;
+RESET ROLE;
+
+-- ── 7. Storage RLS (harness storage.objects now has RLS enabled) ───────────
+SET ROLE service_role;
+INSERT INTO storage.objects (bucket_id, name) VALUES ('blog-images', 'test-img.png');
+RESET ROLE;
+-- public read allowed
+SET ROLE anon;
+SELECT tests.assert(
+  (SELECT count(*) FROM storage.objects WHERE bucket_id = 'blog-images' AND name = 'test-img.png') = 1,
+  '0017 storage: public read of blog-images object allowed');
+-- anon INSERT denied (WITH CHECK is_admin())
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO storage.objects (bucket_id, name) VALUES ('blog-images', 'anon-img.png');
+    RAISE EXCEPTION '0017 storage: anon INSERT NOT blocked';
+  EXCEPTION WHEN raise_exception OR insufficient_privilege THEN
+    NULL; -- expected
+  END;
+END $$;
+RESET ROLE;
+
+-- ── 8. blog_agent_keys isolation ───────────────────────────────────────────
 SELECT tests.assert(
   has_table_privilege('anon', 'public.blog_agent_keys', 'SELECT') = false
   AND has_table_privilege('authenticated', 'public.blog_agent_keys', 'SELECT') = false,
@@ -196,7 +229,7 @@ SET ROLE service_role;
 DELETE FROM public.blog_posts WHERE slug IN
   ('valid-slug-blog','publish-ok-blog','pub-blog','draft-blog','held-blog');
 DELETE FROM public.blog_agent_keys WHERE agent_name = 'test-agent-blog';
-DELETE FROM public.team_memberships WHERE team_id = 'blog-team';
-DELETE FROM public.teams WHERE id = 'blog-team';
+DELETE FROM public.blog_admins WHERE user_id = '11111111-1111-1111-1111-111111111111';
 DELETE FROM auth.users WHERE id = '11111111-1111-1111-1111-111111111111';
+DELETE FROM storage.objects WHERE bucket_id = 'blog-images' AND name = 'test-img.png';
 RESET ROLE;
