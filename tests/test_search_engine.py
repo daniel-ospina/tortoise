@@ -637,6 +637,130 @@ class TestR2OrUnionAndSearchKeys:
             reset_circuit_breakers()
 
 
+# ───────────────────────── #1791 special-char FTS escape (live) ─────────────
+
+# The R2 class above probes the UNAUTHENTICATED :16379 service; this repo's
+# compose lane (eldato/operations/memory/docker-compose.yml) maps only the
+# authed 6379 (FALKORDB_PASSWORD). Probe the docker-lane URI so the #1791
+# regression RUNS on the standard local lane (and in CI, which provisions
+# both services).
+_FTS_LANE_URI = os.environ.get("TORTOISE_DB_URI") or \
+    "docker://:falkordb@localhost:6379/tortoise_test_sdk125"
+_FTS_ESCAPE_LIVE = False
+try:
+    from tortoise.projection import FalkorProjection as _FP_escape
+    _old_uri = os.environ.get("TORTOISE_DB_URI")
+    os.environ["TORTOISE_DB_URI"] = _FTS_LANE_URI
+    _probe = _FP_escape.from_uri(_FTS_LANE_URI)
+    _probe.close()
+    _FTS_ESCAPE_LIVE = True
+except Exception:
+    _FTS_ESCAPE_LIVE = False
+finally:
+    if _old_uri is not None:
+        os.environ["TORTOISE_DB_URI"] = _old_uri
+    else:
+        os.environ.pop("TORTOISE_DB_URI", None)
+
+
+@pytest.mark.skipif(not _FTS_ESCAPE_LIVE, reason="Live FalkorDB (Docker) not available")
+class TestFtsSpecialCharEscape:
+    """#1791 live regression: degenerate query terms carrying RediSearch-
+    special chars (times, quotes, parens, field modifiers, fuzzy ops from
+    conversation content) previously flowed RAW into queryNodes →
+    "RediSearch: Syntax error at offset N" → FTS leg failed → breaker
+    degraded FTS for ALL later queries. Post-fix the escaped form must parse
+    clean: the leg runs (empty or matched), the breaker stays closed, and a
+    subsequent NORMAL query still gets the FTS leg."""
+
+    @pytest.fixture()
+    def proj(self):
+        from tortoise.projection import FalkorProjection
+        reset_circuit_breakers()
+        p = FalkorProjection.from_uri(
+            _FTS_LANE_URI,
+            graph_name=f"test_fts_escape_{os.urandom(4).hex()}")
+        p.g.query("MATCH (n) DETACH DELETE n")
+        yield p
+        reset_circuit_breakers()
+        p.close()
+
+    def _seed(self, proj, rows):
+        for pid, content, sk in rows:
+            proj.g.query(
+                "CREATE (n:Point {id:$id, content:$c, search_keys:$sk, "
+                "is_operator:false, pointKind:'statement'})",
+                params={"id": pid, "c": content, "sk": sk or None},
+            )
+
+    def test_special_char_terms_no_syntax_error_no_breaker_trip(self, proj):
+        """The revalidation-log signature is ``10:00`` (all-digit tokens →
+        0 surviving → RAW passthrough → ':' field-separator → "Syntax error
+        at offset 2"). Each degenerate term must parse clean post-escape:
+        the FTS leg records ran=True, never query_failed, and the per-strategy
+        breaker stays closed — then a NORMAL query still runs the FTS leg
+        (the #1791 recall regression: breaker skip = degraded recall)."""
+        from tortoise import search_engine as se
+        self._seed(proj, [
+            ("p1", "meeting at 10:00 (urgent) @home 100% ready", None),
+            ("p2", "gym schedule 5pm", None),
+        ])
+        reset_circuit_breakers()
+        # pre-fix, the 3rd of these (breaker fail_threshold=3) trips FTS.
+        # The 21-char escape set is byte-pinned at the unit layer; this loop
+        # live-verifies the "every escaped form parses clean" claim (issue
+        # #1791's evidence class — documented semantics diverged per-char:
+        # 10:00→offset 2, @speed→offset 0) for ALL of them: each term
+        # resolves to the RAW fallback (≤1 surviving token, asserted below)
+        # and must parse against real RediSearch.
+        import time
+
+        from tortoise.sparse import tokenize_sparse_query
+        for term in ("10:00", '"(maybe)"', "@home", "100%", "A|B",
+                     "{urgent}", "a~", "(maybe", 'say"', ":",
+                     "-x", "[x]", "x;y", "a,b", "a<b", "a>b", "a=b",
+                     "$x", "a\\b", "foo*"):
+            # self-verifying: the loop only exercises the escape if the term
+            # actually lands on the raw fallback (≤1 surviving token).
+            assert len(tokenize_sparse_query(term)) <= 1, term
+            for attempt in range(3):
+                trace: list[dict] = []
+                hits = run_fts_query(proj.g, term, leg_trace=trace)
+                fts = next(e for e in trace if e["leg"] == "fts")
+                if fts["reason"] in ("ok", "empty_results"):
+                    break
+                # #1568: transient load can starve the FIRST call — retry
+                # (idempotent read), resetting the breaker so a transient
+                # failure cannot bleed into the next term's assertion.
+                if attempt < 2:
+                    reset_circuit_breakers()
+                    time.sleep(0.5 * (attempt + 1))
+            assert fts["ran"] is True, f"{term!r}: {fts}"
+            assert fts["reason"] in ("ok", "empty_results"), \
+                f"{term!r}: {fts}"
+            assert not se._breaker("fts").is_open(), \
+                f"{term!r} tripped the FTS breaker: {fts}"
+            # the trace is always internally consistent (count == len(hits));
+            # the hit COUNT itself is incidental — escaped literals may or
+            # may not match indexed tokens (tokenizer-dependent), so zero
+            # hits is NOT contractual. The discriminating guards are the
+            # trace assertions above + the normal queries after the batch.
+            assert fts["count"] == len(hits), f"{term!r}: {fts} {hits}"
+        # the actual #1791 recall regression: after the degenerate terms, a
+        # NORMAL query (single-token AND OR-union) still gets the FTS leg
+        # (breaker never opened) and hits.
+        trace: list[dict] = []
+        hits = run_fts_query(proj.g, "meeting", leg_trace=trace)
+        assert {h[0] for h in hits} == {"p1"}, hits
+        fts = next(e for e in trace if e["leg"] == "fts")
+        assert fts["reason"] == "ok", fts
+        trace = []
+        hits = run_fts_query(proj.g, "gym schedule", leg_trace=trace)
+        assert "p2" in {h[0] for h in hits}, hits
+        fts = next(e for e in trace if e["leg"] == "fts")
+        assert fts["reason"] == "ok", fts
+
+
 class TestFusionWeightsProductionDefault:
     """#1657 (owner decision 2026-08-25): the PRODUCTION fusion default is
     vector=1.5 (the measured dilution fix, ON by default); env override
