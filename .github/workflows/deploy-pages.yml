@@ -25,6 +25,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: website/apps/blog-admin/package-lock.json
       - name: Stage onboarding prompt + harness variants (single source of truth → deployed copies)
         # tortoise/onboarding/AGENT_ONBOARDING.md is canonical (issues #496/#540).
         # The welcome page fetches https://premiselabs.co/onboarding-prompt.md
@@ -66,6 +71,25 @@ jobs:
           else
             echo "CNAME already correct"
           fi
+      - name: Build blog admin SPA (vite) → stage into website/admin/ (#1800)
+        # The admin gate Function serves /admin/index.html from ASSETS; the
+        # built app must land at website/admin/ before the Pages deploy. Env
+        # comes from repo secrets (VITE_* are public-safe — anon key). The
+        # app's env guard throws at RUNTIME (browser), so missing secrets
+        # would silently ship a white-screen SPA — fail fast instead.
+        run: |
+          if [ -z "${{ secrets.SUPABASE_URL }}" ] || [ -z "${{ secrets.SUPABASE_ANON_KEY }}" ]; then
+            echo "::error::SUPABASE_URL / SUPABASE_ANON_KEY repo secrets required for the blog-admin build"
+            exit 1
+          fi
+          cd website/apps/blog-admin
+          npm ci
+          VITE_SUPABASE_URL="${{ secrets.SUPABASE_URL }}" \
+          VITE_SUPABASE_ANON_KEY="${{ secrets.SUPABASE_ANON_KEY }}" \
+            npm run build
+          mkdir -p ../../admin
+          cp -r dist/* ../../admin/
+          test -s ../../admin/index.html
       - name: Deploy to Cloudflare Pages (premise-labs project)
         run: |
           cd website
@@ -263,3 +287,30 @@ jobs:
           else
             echo "effective date matches deploy commit date ($SERVED_DATE)"
           fi
+
+  # ── Post-deploy blog E2E (warn-only — #1800) ─────────────────────────
+  # Runs the blog verification suite against production after deploy.
+  # REQUIRES the Pages Function env bindings on the premise-labs project:
+  #   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_JWT_SECRET
+  # (ops step documented in docs/epics/2026-08-27-tortoise-blog-cms/README.md).
+  # continue-on-error: warn-only — the deploy is already live.
+  verify-blog:
+    runs-on: ubuntu-latest
+    needs: deploy
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install e2e deps
+        # conftest.py imports playwright at collection time (top-level import)
+        # even for requests-only suites — install it (no browser download
+        # needed; test_blog.py never launches a browser).
+        run: |
+          pip install pytest requests playwright pytest-playwright
+      - name: Run blog E2E suite against production
+        run: |
+          RUN_BLOG_E2E=1 ALLOW_PROD=1 BASE_URL=https://premiselabs.co \
+            TORTISE_HOST=https://tortoise.premiselabs.co \
+            python3 -m pytest tests/e2e/test_blog.py -v
