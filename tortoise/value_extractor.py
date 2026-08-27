@@ -27,7 +27,9 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
     reg = PackRegistry(packs_dir)
     reg.load_all()
     ns_files = {}
-    for mf in packs_dir.glob("*/manifest.yaml"):
+    # sorted glob — the namespace order must be deterministic across
+    # filesystems (the CI runner is Linux; macOS readdir order differs).
+    for mf in sorted(packs_dir.glob("*/manifest.yaml")):
         d = yaml.safe_load(mf.read_text()) or {}
         if d.get("namespace"):
             ns_files[d["namespace"]] = mf
@@ -91,6 +93,12 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
 
     Lazy imports keep the module importable without the pack machinery
     (``extractor_v2`` imports this module's ``compile_value_brief``)."""
+    import copy
+    global _KIND_SPEC_CACHE
+    if _KIND_SPEC_CACHE is not None:
+        # deep copy — callers must never mutate the shared cache (the
+        # build/load paths treat the spec as read-only).
+        return copy.deepcopy(_KIND_SPEC_CACHE)
     from tortoise.extractor_v2 import CORE_OBJECT_KEYS, EVENTS, POINTS, SUBJECTS
 
     def _surface(kind: str, desc: str, syns: list, exs: list) -> str:
@@ -146,10 +154,24 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
                        "description": desc,
                        "synonyms": syns, "examples": exs,
                        "nearMisses": nms}
-    return spec
+    _KIND_SPEC_CACHE = spec
+    return copy.deepcopy(_KIND_SPEC_CACHE)
 
 
 _VOCAB_CACHE: dict | None = None
+
+
+#: Load-once memo for the kind-index spec (packs are static per process —
+#: per-session classifier construction must not re-read + YAML-parse every
+#: pack manifest; mirrors ``_MASTER_LIST_CACHE`` / ``_VOCAB_CACHE``).
+_KIND_SPEC_CACHE: dict | None = None
+
+
+def _clear_kind_spec_cache() -> None:
+    """Test hook — clear the memoized kind-index spec (cross-test
+    isolation; the per-session re-parse is exactly what the memo avoids)."""
+    global _KIND_SPEC_CACHE
+    _KIND_SPEC_CACHE = None
 
 
 def _object_kind_vocab() -> set[str]:

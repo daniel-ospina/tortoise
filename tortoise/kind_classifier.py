@@ -99,7 +99,10 @@ class KindClassifier:
         the adjudication tail. ``llm_tail=False`` runs the deterministic
         kNN/rerank path only (offline eval)."""
         self.encoder = encoder if encoder is not None else _default_encoder()
-        self.index = index if index is not None else self._build_index(self.encoder)
+        # Pass the RAW constructor arg: None (the production default path)
+        # → load-then-build with persist+memoize; an injected stub encoder
+        # → stub build (never memoized — the vector space differs).
+        self.index = index if index is not None else self._build_index(encoder)
         self.model = model
         self.sim_floor = sim_floor
         self.margin = margin
@@ -110,10 +113,23 @@ class KindClassifier:
 
     @staticmethod
     def _build_index(encoder=None):
+        """The index for the classification candidate set.
+
+        Production (``encoder is None``): the content-addressed npz is
+        LOADED when present and BUILT+PERSISTED when missing (the Task 3
+        deliverable — the 54-kind vocabulary is embedded once per content
+        hash, never per session). Injected stub encoders change the vector
+        space: their builds are never memoized/persisted (a stub build must
+        never shadow the production index)."""
         from tortoise.kind_index import KindIndex
         from tortoise.value_extractor import compile_kind_index_spec
 
         spec = compile_kind_index_spec()
+        if encoder is None:
+            idx = KindIndex.load(spec)
+            if idx is not None:
+                return idx
+            return KindIndex.build(spec, persist=True)
         return KindIndex.build(spec, encoder=encoder, persist=False)
 
     # ── candidate restriction ──────────────────────────────────────────────
@@ -221,9 +237,13 @@ class KindClassifier:
             stats["adjudication_tail"] += 1
             tail.append((iid, item, top))
         if tail and self.llm_tail:
-            stats["adjudication_calls"] += self._adjudicate_batches(
-                tail, assignments, stats, warnings
-            )
+            calls, usage = self._adjudicate_batches(tail, assignments, stats, warnings)
+            stats["adjudication_calls"] += calls
+            # The batched LLM spend reaches the caller's stats so the A/B
+            # cost gate sees the flag-on arm's adjudication calls (the
+            # session rollup consumes this via _rollup_llm).
+            if usage["attempts"]:
+                stats["llm"] = usage
         elif tail:
             # llm_tail off (offline eval): deterministic kNN top-1 fallback
             for iid, _item, top in tail:
@@ -254,18 +274,24 @@ class KindClassifier:
 
     # ── LLM adjudication (batched, object-wrapped) ─────────────────────────
 
-    def _adjudicate_batches(self, tail, assignments, stats, warnings) -> int:
+    def _adjudicate_batches(self, tail, assignments, stats, warnings) -> tuple[int, dict]:
         """Batched adjudication: 25–50 items/call, ONE ``_complete_parsed``
         per batch, object-wrapped payload → object response. Fail-open:
-        any exception → kNN top-1 fallback + ``classify_error`` census."""
+        any exception → kNN top-1 fallback + ``classify_error`` census.
+
+        Returns ``(calls, usage)`` — ``usage`` is the accumulated LLM spend
+        across batches (``{"calls", "attempts", "retries", "truncated"}``,
+        rollable into the session llm_stats via ``_rollup_llm``), so the
+        adjudication tail's cost is never invisible to the A/B gate."""
         if self.model is None:
             for iid, _item, top in tail:
                 stats["assigned_knn"] += 1
                 assignments[iid] = {"kind": top[0][0], "margin": top[0][1], "mode": "knn"}
-            return 0
+            return 0, {"calls": 0, "attempts": 0, "retries": 0, "truncated": False}
         from tortoise.extractor_v2 import _complete_parsed
 
         calls = 0
+        usage = {"calls": 0, "attempts": 0, "retries": 0, "truncated": False}
         try:
             batch_size = max(1, min(int(self.batch_size), 50))  # plan: 25-50/call
         except (TypeError, ValueError):  # caller passed junk — bounded default
@@ -273,6 +299,10 @@ class KindClassifier:
         for start in range(0, len(tail), batch_size):
             batch = tail[start : start + batch_size]
             calls += 1
+            # Per-batch stats: the LLM spend (attempts/retries/truncated)
+            # rides out of _complete_parsed through this dict (previously
+            # stats=None made the batched spend invisible to the cost gate).
+            batch_stats: dict = {}
             try:
                 payload = {}
                 for iid, item, top in batch:
@@ -295,7 +325,8 @@ class KindClassifier:
                     + '\n\nReturn {"item_key": "chosen-kind"} for every item.'
                 )
                 parsed = _complete_parsed(
-                    self.model, system, user, max_tokens=ADJUDICATION_MAX_TOKENS, stats=None
+                    self.model, system, user, max_tokens=ADJUDICATION_MAX_TOKENS,
+                    stats=batch_stats,
                 )
             except Exception as e:  # fail-open
                 warnings.append(
@@ -306,6 +337,13 @@ class KindClassifier:
                     stats["assigned_knn"] += 1
                     assignments[iid] = {"kind": top[0][0], "margin": top[0][1], "mode": "knn"}
                 continue
+            finally:
+                # The spend is accumulated even when the batch failed (the
+                # calls were made — the A/B cost gate must see them).
+                usage["attempts"] += batch_stats.get("attempts", 0)
+                usage["retries"] += batch_stats.get("retries", 0)
+                usage["truncated"] = usage["truncated"] or bool(
+                    batch_stats.get("truncated"))
             if not isinstance(parsed, dict):
                 warnings.append("adjudication returned a non-object — kNN top-1 fallback")
                 stats["classify_errors"] += 1
@@ -338,7 +376,8 @@ class KindClassifier:
                 chosen_sim = next((s for k, s in top if k == resolved), top[0][1])
                 assignments[iid] = {"kind": resolved, "margin": chosen_sim,
                                     "mode": "llm"}
-        return calls
+        usage["calls"] = usage["attempts"]
+        return calls, usage
 
     def _fallback(self, item: dict) -> dict:
         """Fail-open terminal: best core kind for the type (the write path's

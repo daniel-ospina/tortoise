@@ -2114,6 +2114,147 @@ class TestClassifyStage:
         assert "product-strategy:product" not in r
         assert r == v2._render_master_core_only(m)  # deterministic (no shuffle)
 
+    def test_core_only_render_byte_pinned_golden(self):
+        """Task 5's byte-pinned golden fixture: the core-only master render
+        equals the committed golden byte-for-byte (regenerate consciously
+        when the packs or the hint blocks change)."""
+        m = v2.build_master_list()
+        r = v2._render_master_core_only(m)
+        golden = (Path(__file__).resolve().parent / "fixtures"
+                  / "core_only_master.golden.txt")
+        assert golden.read_text(encoding="utf-8") == r, \
+            "core-only master render drifted from the golden fixture " \
+            "(regenerate tests/fixtures/core_only_master.golden.txt)"
+
+    def test_core_only_ups_block_keeps_not_kinds_guard(self):
+        """The core-only USER-PERSONAL-STATE block carries the E2 (#1534)
+        guard — the vocabulary is a classification hint, never a kind."""
+        r = v2._render_master_core_only(v2.build_master_list())
+        assert "USER-PERSONAL-STATE VOCABULARY (Tier-A classification " \
+               "hint — the VALUE is the fact, retain verbatim; these are " \
+               "NOT kinds: do NOT emit them as entity/event/point kinds)" in r
+
+    def test_core_only_s2_prompt_pack_namespaces_dynamic(self):
+        """The core-only S2 prompt's pack-namespace list is DYNAMIC —
+        derived from the INSTALLED packs (never hardcoded: epistemic-team
+        is not installed, and a future pack must route to unclassified)."""
+        m = v2.build_master_list()
+        prompt = v2.render_s2_prompt(m, core_only=True)
+        ns = sorted({k.rsplit(":", 1)[0] + ":" for k in m["pack_kinds"]})
+        assert ns, "installed pack namespaces must be non-empty"
+        assert "({})".format("/".join(ns)) in prompt
+        assert "epistemic-team:" not in prompt
+        assert "{pack_namespaces}" not in prompt, "placeholder must be filled"
+
+    def test_core_only_contract_sentinel_only_top_level(self):
+        """The sentinel lands on the TOP-LEVEL entities/events/points kind
+        fields — never on the participant-slot kind fields (the slots
+        schema keeps plain str; the write path would otherwise silently
+        undo the contract's slots advertisement)."""
+        c = v2.OUTPUT_CONTRACT_CORE_ONLY
+        # top-level fields widen
+        assert '"name": str, "kind": str|"unclassified", "lifecycle"' in c
+        assert '"eventKind": str|"unclassified",' in c
+        assert '"pointKind": "statement"|"unclassified",' in c
+        # slot schemas keep plain str — never advertise the sentinel
+        assert '"subject": [{"name": str, "kind": str' in c
+        assert '"object": [{"name": str, "kind": str' in c
+        assert '"event": [{"name": str, "kind": str' in c
+        assert '"kind": str|"unclassified", "confidence"' not in c
+
+    def test_core_only_derivations_anchors_present_in_base(self):
+        """The _CORE_ONLY constants are .replace-derivations of the base
+        templates/contract; a future base edit that breaks an anchor would
+        silently no-op the derives (a half-applied flag-on template). These
+        pins make that fail loudly in CI."""
+        # S2 anchors
+        assert ("- CHAINS — mapping must respect the chain positions "
+                "(WARN, then TRY TO REPAIR):\n"
+                "{chains_text}\n"
+                "  If a mapping would connect across a chain in a way that "
+                "violates it, WARN in\n"
+                "  chain_notes and TRY TO REPAIR by re-mapping toward the "
+                "nearest valid chain\n"
+                "  position. NEVER invent entities to satisfy a chain."
+                in v2.S2_TMPL)
+        assert ("MASTER LIST\n{master_list}\n\nCONDENSED SEMANTIC CORE"
+                in v2.S2_TMPL)
+        # S4 anchors
+        assert ("MASTER LIST (same closed vocabulary as S2 — no minted "
+                "kinds)\n{master_list}\n\n"
+                "CHAINS\n{chains_text}\n\nS1 STORY" in v2.S4_TMPL)
+        assert ("- Re-emit the S2 items you keep, corrected where the "
+                "search results show they\n"
+                "  already exist (lifecycle changed/unchanged + supersedes "
+                "= the existing id)." in v2.S4_TMPL)
+        # OUTPUT_CONTRACT anchors
+        assert '"name": str, "kind": str, "lifecycle"' in v2.OUTPUT_CONTRACT
+        assert '"eventKind": str,' in v2.OUTPUT_CONTRACT
+        assert '"pointKind": "statement",' in v2.OUTPUT_CONTRACT
+
+    def test_unclassified_constant_shared_with_classifier(self):
+        """The sentinel constant must not drift between modules (a mismatch
+        would silently break the classify-later sentinel round-trip)."""
+        from tortoise.kind_classifier import UNCLASSIFIED as CL_UNCLASSIFIED
+
+        assert v2.UNCLASSIFIED == CL_UNCLASSIFIED == "unclassified"
+
+    def test_sentinel_never_flagged_minted(self):
+        """Below-floor items carry kind='unclassified' through to the
+        minted-kind report — the reserved sentinel is a terminal, not a
+        minted kind (final-review P2 false positive)."""
+        embed = {"entities": [
+            {"name": "xyzzy", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [{"content": "e", "eventKind": "unclassified"}],
+            "points": [{"content": "p", "pointKind": "unclassified"}],
+            "operators": [], "chain_notes": [], "link_before_create": []}
+        assert v2._minted_kind_report(embed) == []
+        # a real minted kind is still flagged (the report is not gutted)
+        bad = dict(embed)
+        bad["entities"] = [{"name": "x", "kind": "worktree",
+                             "lifecycle": "created", "supersedes": None,
+                             "note": None}]
+        assert any("worktree" in m for m in v2._minted_kind_report(bad))
+
+    def test_fold_never_drops_different_non_sentinel_kind(self):
+        """A same-name duplicate carrying a DIFFERENT non-sentinel kind is
+        a distinct (name, kind) :Object (Layer-1) — the name-collision
+        fold must NOT delete it (only sentinel/missing/identical
+        duplicates fold; final-review P2)."""
+        def ent(name, kind):
+            return {"name": name, "kind": kind, "lifecycle": "created",
+                    "supersedes": None, "note": None}
+
+        merged = {"entities": [ent("plan", "core:plan"),
+                                ent("plan", "core:goal")],
+                  "events": [], "points": [], "operators": [],
+                  "chain_notes": [], "link_before_create": []}
+        warnings: list[str] = []
+        v2._restamp_s2_kinds(merged, {"entities:plan": "core:plan"}, warnings)
+        assert len(merged["entities"]) == 2, \
+            "the different-kind duplicate must survive the fold"
+        assert not any("folded into the S2" in w for w in warnings)
+
+    def test_rekey_slots_skips_sentinel_entity_kind(self):
+        """An entity still carrying the 'unclassified' sentinel must not
+        copy it into slot kinds (_clean_slots would otherwise emit a
+        spurious 'minted slot kind' warning for the sentinel)."""
+        embed = {"entities": [
+            {"name": "xyzzy", "kind": "unclassified",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "the claim", "pointKind": "statement",
+                         "about_entities": ["xyzzy"],
+                         "slots": {"subject": [
+                             {"name": "xyzzy", "kind": "core:other",
+                              "confidence": 0.9}]}}]}
+        n = v2._rekey_slots(embed)
+        assert n == 0, "the sentinel is never copied into a slot kind"
+        slot = embed["points"][0]["slots"]["subject"][0]
+        assert slot["kind"] == "core:other"
+
     def test_slot_rekey_follows_classified_kind(self):
         """Participant slot kinds follow the classified entity kind."""
         embed = {"entities": [

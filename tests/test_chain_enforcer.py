@@ -483,6 +483,50 @@ class TestEnforcerFixtures:
         assert 123 in about, "non-string ref must survive the splice"
         assert "arch" in about and "useCase" in about
 
+    def test_duplicate_lowest_position_splice_fully_ascending(self):
+        """P1 splice pin (final-review): TWO members at the LOWEST chain
+        position (same chain kind duplicated) + an intermediate at low+1 —
+        the intermediate must be spliced after the LAST below member, so
+        the rewired list is fully ascending (a naive insert-after-first-
+        below-member strands the second duplicate out of order)."""
+        embed = {"entities": [
+            {"name": "uc1", "kind": "product-strategy:useCase",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "uc2", "kind": "product-strategy:useCase",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "feat1", "kind": "product-strategy:feature",
+             "lifecycle": "created", "supersedes": None, "note": None},
+            {"name": "arch", "kind": "product-strategy:architecture",
+             "lifecycle": "created", "supersedes": None, "note": None}],
+            "events": [], "operators": [], "chain_notes": [],
+            "link_before_create": [],
+            "points": [{"content": "c", "pointKind": "statement",
+                         "about_entities": ["arch", "uc1", "uc2"]}]}
+        result, notes, stats = validate_and_rewire(embed)
+        assert notes and notes[0]["action"] == "rewired"
+        assert stats["rewired"] == 1
+        about = result["points"][0]["about_entities"]
+        assert about == ["uc1", "uc2", "feat1", "arch"], \
+            f"splice must be fully ascending, got {about}"
+        # chain order valid: the advisory backstop finds no violations
+        assert v2.validate_chains(result) == []
+
+    def test_truthy_non_list_sections_never_raise(self):
+        """A truthy NON-LIST points/events value (e.g. {"points": "junk"})
+        must be skipped, not crash the section walk (final-review P2: the
+        previous ``(out.get("points") or []) + ...`` raised TypeError)."""
+        for embed in (
+            {"points": "junk"},
+            {"points": {"a": 1}},
+            {"points": 42, "events": None},
+            {"events": "junk", "points": ["x"]},
+            {"points": [None], "events": [{"about_entities": "nope"}]},
+        ):
+            result, notes, stats = validate_and_rewire(embed)  # never raises
+            assert isinstance(result, dict)
+            assert notes == []
+            assert set(stats) == {"items_checked", "violations", "rewired", "warned"}
+
     def test_orchestrator_notes_authoritative_not_duplicated(self, monkeypatch):
         """F2/F3 pin at the orchestrator: when the enforcer rules a pair
         (warn-and-keep), the backstop's advisory note is NOT duplicated into

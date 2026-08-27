@@ -69,9 +69,10 @@ def validate_and_rewire(
       "note"}]`` mirroring ``validate_chains``' format (one per violation).
     - ``stats`` — ``{"items_checked", "violations", "rewired", "warned"}``.
 
-    Never raises: junk input (non-dict top-level, non-dict items, missing
-    keys) is skipped, and every repair decision is deterministic (sorted,
-    never guessed).
+    Never raises on junk embed_list input (non-dict top-level, non-dict
+    items, missing keys) — a malformed master dict is the caller's
+    responsibility (production wraps the call in try/except). Every repair
+    decision is deterministic (sorted, never guessed).
     """
     import copy
 
@@ -113,7 +114,10 @@ def validate_and_rewire(
             return None
         return pos.get(kind.rsplit(":", 1)[-1].lower())
 
-    for item in (out.get("points") or []) + (out.get("events") or []):
+    # Truthy non-list sections (e.g. {"points": "junk"}) are skipped — the
+    # sections iterable only walks LIST sections (never raises on junk).
+    sections = (out.get("points"), out.get("events"))
+    for item in [i for s in sections if isinstance(s, list) for i in s]:
         if not isinstance(item, dict):
             continue
         about = item.get("about_entities")
@@ -214,8 +218,8 @@ def _rewire_item(
         # unambiguous → rewire: rebuild the chain subsequence ascending,
         # inserting the nearest-position intermediate at its chain position.
         # Non-member refs keep their EXACT slots (only the member names are
-        # re-placed; the intermediate is spliced in right after the highest-
-        # position member below it — unrelated refs never relocate).
+        # re-placed; the intermediate is spliced in right after the LAST
+        # member below it — unrelated refs never relocate).
         mid_name = nearest_entities[0]
         member_names = {m[0] for m in members}
         seq_names = [m[0] for m in ordered]
@@ -226,6 +230,12 @@ def _rewire_item(
         mid_pos = kind_pos(mid_name)[1]
         si = 0
         mid_pending = mid_name not in member_names
+        # The intermediate goes right after the LAST member below mid_pos —
+        # when TWO members share the LOWEST position (same chain kind
+        # duplicated), inserting after the first below-member would strand
+        # the second out of order (P1 splice pin); below_count positions the
+        # splice after ALL of them (seq_members is position-ascending).
+        below_count = sum(1 for m in seq_members if kind_pos(m)[1] < mid_pos)
         # Splice is built from the ACCUMULATED new_about (previous chains'
         # fixes compose — a second violating chain in the same item must
         # not overwrite the first chain's repair), and non-string refs are
@@ -235,7 +245,7 @@ def _rewire_item(
             if isinstance(name, str) and name in member_names:
                 spliced.append(seq_members[si])
                 si += 1
-                if mid_pending and kind_pos(seq_members[si - 1])[1] < mid_pos:
+                if mid_pending and si == below_count:
                     spliced.append(mid_name)
                     mid_pending = False
             else:

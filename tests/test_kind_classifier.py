@@ -205,7 +205,8 @@ class TestAdjudication:
 
     def test_batched_object_wrapped_assigns(self):
         """Two tail items → ONE adjudication call; the object-wrapped
-        payload parses and assigns (mode=llm)."""
+        payload parses and assigns (mode=llm). The batched LLM spend is
+        recorded in stats['llm'] (the A/B cost gate sees the flag-on arm)."""
 
         def resp(system, user):
             return json.dumps({"i0": "core:plan", "i1": "core:workflow"})
@@ -216,10 +217,31 @@ class TestAdjudication:
             _items(("entity", "the plan workflow"), ("entity", "the workflow plan"))
         )
         assert out["stats"]["adjudication_calls"] == 1
+        assert out["stats"]["assigned_llm"] == 2
+        # the adjudication spend reached the classifier's stats
+        usage = out["stats"]["llm"]
+        assert usage["attempts"] == 1  # one _complete call for the batch
+        assert usage["retries"] == 0
+        assert usage["truncated"] is False
+        assert usage["calls"] == usage["attempts"]
         assert out["assignments"]["i0"]["kind"] == "core:plan"
         assert out["assignments"]["i0"]["mode"] == "llm"
         assert out["assignments"]["i1"]["kind"] == "core:workflow"
-        assert out["stats"]["assigned_llm"] == 2
+
+    def test_adjudication_spend_recorded_even_on_failure(self):
+        """The batched spend is accumulated even when a batch fails (the
+        calls were made — the cost gate must not under-count the arm)."""
+
+        class BoomModel(MockModel):
+            def complete(self, *, system, user, max_tokens=None):
+                raise RuntimeError("adjudicator down")
+
+        clf = self._clf(BoomModel([]))
+        out = clf.classify_items(_items(("entity", "the plan workflow")))
+        assert out["stats"]["classify_errors"] == 1
+        usage = out["stats"]["llm"]
+        assert usage["attempts"] >= 1, "failed calls are still LLM spend"
+        assert out["assignments"]["i0"]["mode"] == "knn"
 
     def test_bare_array_response_rejected(self):
         """The adjudication contract is object-wrapped: a bare-array
@@ -255,6 +277,49 @@ class TestAdjudication:
         assert out["stats"]["closed_vocab_rejects"] == 1
         assert out["assignments"]["i0"]["mode"] == "knn"
         assert any("not a candidate" in w for w in out["warnings"])
+
+
+class TestClassifierConstruction:
+    """The default-construction index path (final-review P1): production
+    KindClassifier() builds/persists/loads the content-addressed index ONCE
+    per spec (memo+persist); injected stub encoders never touch the
+    production memo (their vector space differs)."""
+
+    def test_two_default_constructions_build_index_once(self, monkeypatch, tmp_path):
+        """Two production-default KindClassifier() constructions → exactly
+        ONE index build (load-then-build with persist on the default path;
+        the second construction loads the memoized index)."""
+        import tortoise.kind_index as ki
+        from tortoise.kind_classifier import KindClassifier
+
+        calls = {"n": 0}
+
+        class FakeDefault:
+            def encode(self, texts):
+                calls["n"] += 1
+                rng = np.random.default_rng(1)
+                return rng.standard_normal((len(texts), 4)), False
+
+        monkeypatch.setattr(ki, "_DefaultEncoder", FakeDefault)
+        monkeypatch.setattr(ki, "DEFAULT_CACHE_DIR", tmp_path)
+        clf1 = KindClassifier(model=None, llm_tail=False)
+        clf2 = KindClassifier(model=None, llm_tail=False)
+        assert clf1.index is not None and clf2.index is not None
+        assert calls["n"] == 1, "one default build for two constructions"
+        assert clf1.index.kind_names == clf2.index.kind_names
+
+    def test_stub_encoder_classifier_build_never_memoized(self):
+        """An injected stub encoder builds via the stub path — the
+        production memo is untouched (a stub build must never shadow the
+        production index, and vice versa)."""
+        import tortoise.kind_index as ki
+        from tortoise.kind_classifier import KindClassifier
+
+        _clear_index_cache()
+        clf = KindClassifier(encoder=KeywordEncoder(), model=None, llm_tail=False)
+        assert clf.index is not None and len(clf.index) > 0
+        with ki._INDEX_LOCK:
+            assert ki._INDEX_CACHE == {}, "stub builds must never touch the production memo"
 
 
 class TestTypeRestriction:

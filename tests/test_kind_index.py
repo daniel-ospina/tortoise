@@ -24,11 +24,15 @@ from tortoise.value_extractor import compile_kind_index_spec
 
 @pytest.fixture(autouse=True)
 def _isolated_cache():
-    """Cross-test isolation: the module-level memo must not leak built
-    indexes between tests (persist/load/missing-file pins)."""
+    """Cross-test isolation: the module-level memos must not leak built
+    indexes / kind-specs between tests (persist/load/missing-file pins)."""
+    from tortoise.value_extractor import _clear_kind_spec_cache
+
     _clear_index_cache()
+    _clear_kind_spec_cache()
     yield
     _clear_index_cache()
+    _clear_kind_spec_cache()
 
 
 class StubEncoder:
@@ -196,3 +200,33 @@ class TestMemoizationAndLazy:
         assert "data/kind_index/" in gitignore
         assert DEFAULT_CACHE_DIR.name == "kind_index"
         assert DEFAULT_CACHE_DIR.parent.name == "data"
+
+    def test_kind_spec_parsed_once_and_clear_hook(self, monkeypatch):
+        """compile_kind_index_spec is load-once per process (Task 3
+        deliverable — per-session classifier construction must not re-read
+        + YAML-parse every pack manifest); the clear hook forces a re-parse."""
+        import tortoise.pack_registry as pr
+        from tortoise.value_extractor import (
+            _clear_kind_spec_cache,
+            compile_kind_index_spec,
+        )
+
+        _clear_kind_spec_cache()
+        calls = {"n": 0}
+        orig = pr.PackRegistry.load_all
+
+        def counting_load_all(self):
+            calls["n"] += 1
+            return orig(self)
+
+        monkeypatch.setattr(pr.PackRegistry, "load_all", counting_load_all)
+        spec_a = compile_kind_index_spec()
+        first = calls["n"]
+        assert first >= 2  # compile_value_brief + the kindDefs pass
+        spec_b = compile_kind_index_spec()
+        assert calls["n"] == first, \
+            "a second call must hit the memo (no manifest re-parse)"
+        assert spec_a == spec_b
+        _clear_kind_spec_cache()
+        compile_kind_index_spec()
+        assert calls["n"] > first, "clear hook must force a re-parse"

@@ -254,18 +254,8 @@ def _needs_gloss(kind: str, desc: str) -> bool:
 def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     """Selective pack injection: only sections whose domain words appear in
     the story. Conservative fallback — if nothing matches, return all so no
-    needed kind is ever dropped — INVERTED under the classify-later flag
-    (#1695 Task 5: pack vocabulary leaves the prompt, so the fallback is
-    ``{}``, never the full set)."""
-    if _classify_later_enabled():
-        low = story.lower() if story else ""
-        selected = {}
-        for k, v in pack_kinds.items():
-            ns = k.split(":")[0] + ":"
-            triggers = _PACK_TRIGGERS.get(ns, ())
-            if any(t in low for t in triggers):
-                selected[k] = v
-        return selected  # no pack vocabulary under flag-on
+    needed kind is ever dropped (the flag-on path never calls this — the
+    pack vocabulary is owned by ``_render_master_core_only``)."""
     if not story:
         return dict(pack_kinds)
     low = story.lower()
@@ -375,7 +365,8 @@ def _render_master_core_only(master: dict, rng=None) -> str:
     ups = master.get("user_personal_state") or {}
     if ups:
         lines.append("\nUSER-PERSONAL-STATE VOCABULARY (Tier-A classification "
-                     "hint — the VALUE is the fact, retain verbatim)")
+                     "hint — the VALUE is the fact, retain verbatim; these are "
+                     "NOT kinds: do NOT emit them as entity/event/point kinds)")
         lines += [f"- {cat}: {desc}" for cat, desc in ups.items()]
     g = master.get("memory_granularity") or {}
     if g:
@@ -696,7 +687,12 @@ OUTPUT_CONTRACT = """{
 # out of the prompt).
 OUTPUT_CONTRACT_CORE_ONLY = (
     OUTPUT_CONTRACT
-    .replace('"kind": str,', '"kind": str|"unclassified",')
+    # The full entities anchor — the three PARTICIPANT-SLOT kind fields
+    # ("name": str, "kind": str, "confidence") share the bare
+    # '"kind": str,' fragment and must NOT advertise the sentinel (the
+    # write path would silently undo it). Only the top-level fields widen.
+    .replace('"name": str, "kind": str, "lifecycle"',
+             '"name": str, "kind": str|"unclassified", "lifecycle"')
     .replace('"eventKind": str,', '"eventKind": str|"unclassified",')
     .replace('"pointKind": "statement",',
              '"pointKind": "statement"|"unclassified",')
@@ -877,7 +873,7 @@ S2_TMPL_CORE_ONLY = S2_TMPL.replace(
     "MASTER LIST\n{master_list}\n\nCONDENSED SEMANTIC CORE",
     "MASTER LIST (CORE ONLY — the pack vocabulary is NOT here)\n{master_list}\n\n"
     "PACK-DOMAIN CONTENT → UNCLASSIFIED: content whose kind would be a PACK kind\n"
-    "(product-strategy:/dev:/marketing:/pm:/epistemic-team:) is NOT in the\n"
+    "({pack_namespaces}) is NOT in the\n"
     "vocabulary above. For such content emit kind/eventKind/pointKind: \"unclassified\"\n"
     "— a later deterministic stage assigns the pack kind. Core kinds are in-context:\n"
     "emit them directly. NEVER mint a pack kind name you cannot see in the list.\n\n"
@@ -916,9 +912,16 @@ def render_s2_prompt(master: dict | None = None, *,
     tmpl = S2_TMPL_CORE_ONLY if core_only else S2_TMPL
     contract = OUTPUT_CONTRACT_CORE_ONLY if core_only else OUTPUT_CONTRACT
     chains = "" if core_only else _render_chains(master)
+    # The pack-namespace list is DYNAMIC — derived from the INSTALLED packs
+    # (master["pack_kinds"] keys), never hardcoded (epistemic-team is not
+    # installed; a future pack must route to unclassified too).
+    pack_ns = "/".join(sorted(
+        {k.rsplit(":", 1)[0] + ":" for k in (master.get("pack_kinds") or {})}
+    )) if core_only else ""
     return (tmpl
             .replace("{master_list}", _render_master(
                 master, story, core_only=core_only))
+            .replace("{pack_namespaces}", pack_ns)
             .replace("{chains_text}", chains)
             .replace("{date_anchor}", _date_anchor(
                 session_date, include_emission_rules=True))
@@ -2321,19 +2324,23 @@ def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[st
         if not isinstance(e, dict):
             continue
         k = str(e.get("kind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        # The unclassified sentinel is a reserved terminal, not a minted
+        # kind — below-floor items on the flag-on path carry it through
+        # to the report and must NOT be flagged (the write path resolves
+        # it with its own census).
+        if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (entity '{e.get('name', '')[:60]}')")
     for ev in embed_list.get("events", []) or []:
         if not isinstance(ev, dict):
             continue
         k = str(ev.get("eventKind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (event '{ev.get('content', '')[:60]}')")
     for p in embed_list.get("points", []) or []:
         if not isinstance(p, dict):
             continue
         k = str(p.get("pointKind", ""))
-        if k and k.lower() not in full and k.lower() not in bare:
+        if k and k.lower() != UNCLASSIFIED and k.lower() not in full and k.lower() not in bare:
             minted.append(f"{k} (point '{p.get('content', '')[:60]}')")
     return minted
 
@@ -3113,13 +3120,20 @@ def _restamp_s2_kinds(merged: dict, register: dict,
                     (it for it in group
                      if str(it.get(kind_field) or "").strip() == s2_reg), group[0])
                 for it in list(group):
-                    if it is not keeper:
+                    if it is keeper:
+                        continue
+                    # Fold ONLY sentinel / missing / identical duplicates —
+                    # a same-name member carrying a DIFFERENT non-sentinel
+                    # kind is a distinct (name, kind) :Object (Layer-1)
+                    # that the fold must never delete (final-review P2).
+                    cur = str(it.get(kind_field) or "").strip()
+                    if not cur or cur.lower() == UNCLASSIFIED or cur == s2_reg:
                         warnings.append(
                             f"entity '{str(it.get('name'))[:60]}' re-typed by S4 "
                             f"(kind {it.get(kind_field)!r}) — folded into the S2 "
                             f"classifier kind {s2_reg!r} (no duplicate :Object)")
                         items[:] = [x for x in items if x is not it]
-                overrides += len(group) - 1
+                        overrides += 1
         for it in items:
             if not isinstance(it, dict):
                 continue
@@ -3144,7 +3158,12 @@ def _rekey_slots(embed_list: dict) -> int:
     kind_by_name: dict[str, str] = {}
     for e in embed_list.get("entities") or []:
         if isinstance(e, dict) and e.get("name") and e.get("kind"):
-            kind_by_name[_norm(e["name"])] = str(e["kind"])
+            k = str(e["kind"])
+            if k.lower() == UNCLASSIFIED:
+                # never copy the sentinel into a slot kind — _clean_slots
+                # would emit a spurious "minted slot kind" warning for it
+                continue
+            kind_by_name[_norm(e["name"])] = k
     rekeyed = 0
     for section in ("points", "events"):
         for it in embed_list.get(section) or []:
@@ -3317,6 +3336,12 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 s2_classify_warnings = out["warnings"]
                 s2_assignments = out["assignments"]
                 _bump_classify_census(error_census, out["stats"])
+                # The adjudication tail's LLM spend (calls/retries/truncated)
+                # rolls into the per-session llm_stats — the A/B cost gate
+                # must see the flag-on arm's batched adjudication cost.
+                usage = out["stats"].get("llm")
+                if usage:
+                    _rollup_llm(llm_stats, usage)
         except Exception as e:  # never block capture (P1)
             errors.append(f"classify(S2) failed: {type(e).__name__}: {e}")
             _bump_census_class(error_census, "classify_error")
@@ -3381,6 +3406,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 union_classify_stats = out["stats"]
                 union_classify_warnings = out["warnings"]
                 _bump_classify_census(error_census, out["stats"])
+                # roll the adjudication tail spend (same as the S2 pass).
+                usage = out["stats"].get("llm")
+                if usage:
+                    _rollup_llm(llm_stats, usage)
             slot_rekeys = _rekey_slots(complete_list)
         except Exception as e:  # never block capture (P1)
             errors.append(f"classify(union) failed: {type(e).__name__}: {e}")
