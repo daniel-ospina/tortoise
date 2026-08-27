@@ -128,6 +128,15 @@ directory of markdown files, I can index them into your memory."
    `tortoise_ingest_corpus`, or run `tortoise onboard` for the self-hosted
    setup. I'll skip ahead."
 6. (HTTP-transport ingest of a directory is not supported — see error recovery)
+7. **GitHub docs (hosted) — the honest stdio-only difference (#1726):** hosted
+   users can index a connected repo's `docs/` REMOTELY (no local clone): the
+   dashboard's Memory sources panel "Index docs" action runs the server-side
+   docs job (fetched under the server-owned ingest sandbox, quota-fair). The
+   stdio/self-hosted agent CANNOT invoke that remote fetch — self-hosted docs
+   ingestion means cloning the repo locally (or pointing at an existing
+   checkout) and running `tortoise_ingest_corpus` on the clone's `docs/`
+   directory, exactly as above. Never present remote docs indexing as
+   available over stdio.
 
 **If no:** "Skipping document ingestion. You can ingest docs later."
 

@@ -1915,6 +1915,7 @@ DEFAULT_ONBOARDING_STATE = {
     "github_index_job_id": None,
     "github_index_cursor": None,          # #1725: per-repo composite (updated_at, number) diff cursor
     "github_legacy_backfill_done": False,  # #1725: one-time legacy `-closed` backfill marker
+    "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
     "session_recording": False,
     "demo_created": False,
     "team_created": False,
@@ -8855,6 +8856,7 @@ async def issue_insight(title: str, body: str | None = None,
 _ONBOARDING_DEFAULT_STATE = {
     "github_connected": False,
     "github_indexed": False,
+    "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
     "demo_created": False,
     "session_recording": False,
     "team_created": False,
@@ -9040,6 +9042,9 @@ class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
     session_capture_last_error_pi: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
+    # #1726 (Slice 1): docs staged + ingested — server-written; registered so
+    # the key round-trips through the PATCH surface.
+    github_docs_indexed: bool | None = None
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
@@ -9597,7 +9602,7 @@ _INDEX_JOB_TTL_S = 30 * 60
 _INDEX_JOB_EVICT_S = 3600
 
 
-def _start_index_job(team_id: str) -> tuple[str, bool]:
+def _start_index_job(team_id: str, *, kind: str = "github") -> tuple[str, bool]:
     """Per-team single-flight job creation (T2-P2, ordered algorithm).
 
     Returns ``(job_id, is_new)``: ``is_new=False`` means an in-flight
@@ -9607,9 +9612,14 @@ def _start_index_job(team_id: str) -> tuple[str, bool]:
     walks → duplicate statement ids + version inflation + job-status
     races).
 
-    1. Guard-check FIRST: a `started` entry for the team is REUSED (return
-       its job_id with is_new=False) — kills the TOCTOU probe→create
-       duplicate.
+    ``kind`` scopes the guard ("github" | "docs", #1726): the docs job
+    shares the team-scoped ``_INDEX_JOBS`` store but its single-flight is
+    kind-scoped — an in-flight github walk never blocks/blends a docs job
+    and vice versa.
+
+    1. Guard-check FIRST: a `started` entry for the team AND kind is
+       REUSED (return its job_id with is_new=False) — kills the TOCTOU
+       probe→create duplicate.
     2. Only then evict terminal entries or `started` older than the 30-min
        TTL (presumed-dead); the just-reused in-flight entry is never
        evicted.
@@ -9620,6 +9630,8 @@ def _start_index_job(team_id: str) -> tuple[str, bool]:
     now = time.time()
     for jid, job in list(_INDEX_JOBS.items()):
         if job.get("team_id") != team_id:
+            continue
+        if job.get("kind", "github") != kind:
             continue
         if job.get("status") == "started":
             started = job.get("started_at") or job.get("created_at") or now
@@ -9635,7 +9647,8 @@ def _start_index_job(team_id: str) -> tuple[str, bool]:
     job_id = secrets.token_hex(8)
     _INDEX_JOBS[job_id] = {"status": "started", "progress": 0,
                            "points_created": 0, "error": None,
-                           "team_id": team_id, "created_at": now,
+                           "team_id": team_id, "kind": kind,
+                           "created_at": now,
                            "started_at": now}
     _INDEX_JOB_OWNERS[job_id] = secrets.token_hex(8)
     return job_id, True
@@ -9914,6 +9927,234 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     # Cross-tenant isolation (P2 review fix): only the owning team can poll
+    if job.get("team_id") != team["team_id"]:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"job_id": job_id, **job}
+
+
+# ── GitHub docs indexing endpoints (#1726 Slice 1) ───────────────
+# POST /v1/index/docs mirrors /v1/index/github: team-scoped _INDEX_JOBS
+# single-flight (kind-scoped — an in-flight github walk never blends a docs
+# job), honest job poll, and the DOCUMENTS gate (the points gate is vacuous
+# for Documents — ingest_corpus/index_directory creates Document/Source
+# nodes, not Points). Fail-closed when TORTOISE_INGEST_BASE_DIR is unset
+# (the endpoint is tenant-reachable; the ingest_dir_is_safe
+# "any absolute path when unset" leniency is for the operator stdio path
+# only — the tenant path demands the server-owned sandbox).
+
+
+class DocsIndexRequest(BaseModel):
+    org: str
+    repo: str | None = None
+    branch: str | None = None  # default "main" (fetcher falls back to master)
+
+
+async def _run_docs_indexing(job_id: str, team_id: str, org: str,
+                             repo: str | None,
+                             branch: str | None) -> None:
+    """Background docs-indexing job: GitHub docs/ → staged corpus →
+    deterministic ingest (Sources only — NO claim extraction, deferred
+    #1724).
+
+    Mirrors ``_run_indexing``: quota-preflighted (DOCUMENTS gate), per-repo
+    re-check, owner-token-gated status writes, ``github_docs_indexed`` state
+    key on progress, one-hour eviction. The sandbox check is FIRST — no
+    writes (no staging, no graph writes) when TORTOISE_INGEST_BASE_DIR is
+    unset.
+    """
+    from tortoise.indexer.github_docs import GitHubDocsIndexer
+    from tortoise.indexer.github_indexer import GitHubFetchError
+    # P2: generation/owner token stamped at mint (see _run_indexing).
+    owner = _INDEX_JOB_OWNERS.get(job_id)
+
+    def _job(**fields) -> None:
+        """Update the job entry ONLY while this run still owns it."""
+        if _INDEX_JOB_OWNERS.get(job_id) != owner:
+            return  # entry evicted/replaced — abort silently
+        job = _INDEX_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+    # Stamp the docs stats on the entry up front — a job that fails early
+    # (unset base, quota preflight, unconnected) still reports honest
+    # zeroed counts (mirrors the github entry's points_created=0).
+    _job(documents_indexed=0, documents_updated=0, documents_skipped=0,
+         documents_failed=0, blobs_fetched=0, blobs_skipped_binary=0,
+         blobs_skipped_oversized=0, repos_processed=0, repos_total=0)
+
+    try:
+        encrypted = _github_token_enc(team_id)
+    except Exception:
+        _job(status="failed", error="Control plane unavailable")
+        return
+    if not encrypted:
+        _job(status="failed", error="GitHub not connected")
+        return
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(encrypted)
+    except ValueError:
+        _job(status="failed", error="Token undecryptable")
+        return
+
+    # ── Fail-closed sandbox check FIRST — no writes when unset (the tenant
+    # path never falls through to the ingest_dir_is_safe unset-leniency). ──
+    if not os.environ.get("TORTOISE_INGEST_BASE_DIR", "").strip():
+        _job(status="failed", error=(
+            "TORTOISE_INGEST_BASE_DIR is not set — docs indexing requires "
+            "a server-owned ingest sandbox; no writes performed"))
+        return
+
+    totals = {"documents_indexed": 0, "documents_updated": 0,
+              "documents_skipped": 0, "documents_failed": 0,
+              "blobs_fetched": 0, "blobs_skipped_binary": 0,
+              "blobs_skipped_oversized": 0, "repos_processed": 0,
+              "repos_total": 0, "errors": [], "quota_hit": False}
+    try:
+        team_sdk = _make_sdk(namespace=team_id)
+
+        # ── Documents gate (Task 9): the docs job gates on the DOCUMENTS
+        # resource — the points gate is vacuous for docs (index_directory
+        # creates Document/Source nodes, never Points). Resolved BEFORE any
+        # fetch/staging; an at-cap team fails honestly (402-equivalent
+        # "failed" status), never silently overshooting max_documents. ──
+        from tortoise.quota import (  # noqa: I001
+            QuotaCheckError, QuotaExceededError, enforce_team_limit,
+            resolve_team_limits,
+        )
+        limits = resolve_team_limits(team_id)
+        try:
+            enforce_team_limit(limits, "documents", sdk=team_sdk)
+        except QuotaExceededError as e:
+            _job(status="failed", error=str(e))
+            return
+        except QuotaCheckError as e:
+            _job(status="failed", error=f"Quota check failed: {e}")
+            return
+
+        indexer = GitHubDocsIndexer(token)
+        if repo:
+            repos = [f"{org}/{repo}"]
+        else:
+            repos = await indexer.resolve_repos(org)
+        totals["repos_total"] = len(repos)
+
+        def _docs_quota_check() -> None:
+            enforce_team_limit(limits, "documents", sdk=team_sdk)
+
+        for repo_name in repos:
+            if _INDEX_JOB_OWNERS.get(job_id) != owner:
+                break  # lost ownership (entry evicted/replaced) — abort
+            try:
+                _docs_quota_check()  # per-repo re-check (documents gate)
+            except QuotaExceededError as e:
+                totals["quota_hit"] = True
+                totals["errors"].append(str(e))
+                break
+            walk = await indexer.walk_repo(
+                team_id, repo_name, branch=branch or "main")
+            totals["blobs_fetched"] += walk["blobs_fetched"]
+            totals["blobs_skipped_binary"] += walk["skipped_binary"]
+            totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
+            totals["repos_processed"] += 1
+
+        # ── Deterministic corpus ingest (Sources only — NO claim extraction;
+        # compute_file_hash dedup + derive_document_id + classification via
+        # index_directory). Runs whenever any repo was processed (self-healing:
+        # a staged-but-uningested corpus — e.g. a quota-interrupted prior run —
+        # is picked up on the next run; unchanged files skip on the fast path,
+        # so re-ingest stays 0-new — falsification (f)). corpus_root = the
+        # TEAM partition root: rel-paths embed {owner}/{repo}/docs/... so doc
+        # ids are REPO-UNIQUE (two repos with identical docs paths never share
+        # a Document node). Skipped entirely when the team hit the documents
+        # cap (quota_hit — the gate is the gate). ──
+        if totals["repos_processed"] > 0 and not totals["quota_hit"]:
+            try:
+                team_root = GitHubDocsIndexer.team_root(team_id)
+                ingest = team_sdk.index_directory(
+                    str(team_root), file_type="doc", extract_metadata=False,
+                    corpus_name=f"{org}-docs")
+            except Exception as e:
+                totals["errors"].append(f"corpus ingest: {e}")
+            else:
+                totals["documents_indexed"] += ingest.get("indexed", 0)
+                totals["documents_updated"] += ingest.get("updated", 0)
+                totals["documents_skipped"] += ingest.get("skipped", 0)
+                totals["documents_failed"] += ingest.get("failed", 0)
+
+        _job(status="completed", progress=100,
+             documents_indexed=totals["documents_indexed"],
+             documents_updated=totals["documents_updated"],
+             documents_skipped=totals["documents_skipped"],
+             documents_failed=totals["documents_failed"],
+             blobs_fetched=totals["blobs_fetched"],
+             blobs_skipped_binary=totals["blobs_skipped_binary"],
+             blobs_skipped_oversized=totals["blobs_skipped_oversized"],
+             repos_processed=totals["repos_processed"],
+             repos_total=totals["repos_total"],
+             quota_hit=totals["quota_hit"],
+             errors=totals["errors"],
+             error=None)
+    except GitHubFetchError as e:
+        # Mid-walk 401/429 / unresolved org / unset base: honest "failed"
+        # status with a readable error; the manifest was NOT advanced past
+        # the failed run — a re-run resumes without gaps (idempotent
+        # staging + file-hash dedup make overlap harmless).
+        _job(status="failed", error=str(e))
+    except Exception as e:
+        _job(status="failed", error=str(e))
+    finally:
+        # github_docs_indexed flips True ONLY on real progress (>=1 repo
+        # processed): a 0-repo failure (quota preflight, unset base) leaves
+        # it untouched.
+        updates: dict = {}
+        if totals["repos_processed"] > 0:
+            updates["github_docs_indexed"] = True
+        _update_onboarding_state(team_id, **updates)
+        # Evict after an hour (T1-P14: eviction-expired polls render
+        # honestly).
+        import asyncio as _asyncio
+        _asyncio.get_running_loop().call_later(
+            _INDEX_JOB_EVICT_S,
+            lambda: (_INDEX_JOBS.pop(job_id, None),
+                     _INDEX_JOB_OWNERS.pop(job_id, None)))
+
+
+@app.post("/v1/index/docs")
+async def index_docs(body: DocsIndexRequest | None = None,
+                     team: dict = Depends(get_current_team)):  # noqa: B008
+    """Start a background GitHub-docs indexing job (#1726 Slice 1).
+
+    Mirrors /v1/index/github: per-team single-flight (kind-scoped), returns
+    job_id for polling via GET /v1/index/docs/{job_id}. The job is
+    documents-gated (derived-constant cap) and fail-closed when the ingest
+    sandbox is unset.
+    """
+    org = (body.org if body else None) or ""
+    if not org:
+        raise HTTPException(status_code=400, detail="org is required")
+    # Verify GitHub connected first (seam-aware read)
+    encrypted = _github_token_enc(team["team_id"])
+    if not encrypted:
+        raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
+    job_id, is_new = _start_index_job(team["team_id"], kind="docs")
+    if is_new:
+        import asyncio as _asyncio
+        _asyncio.get_event_loop().create_task(
+            _run_docs_indexing(job_id, team["team_id"], org,
+                               body.repo if body else None,
+                               body.branch if body else None))
+    return {"job_id": job_id, "status": "started"}
+
+
+@app.get("/v1/index/docs/{job_id}")
+async def docs_job_status(job_id: str,
+                          team: dict = Depends(get_current_team)):  # noqa: B008
+    """Poll a docs-indexing job's progress (team-scoped isolation)."""
+    job = _INDEX_JOBS.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    # Cross-tenant isolation: only the owning team can poll
     if job.get("team_id") != team["team_id"]:
         raise HTTPException(status_code=404, detail="Job not found")
     return {"job_id": job_id, **job}
