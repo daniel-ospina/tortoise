@@ -152,6 +152,20 @@ def _count_embedded_points(proj) -> int:
 #: indistinguishable from recall 0. The in-repo hard tier uses 5000ms.
 VECTOR_TIMEOUT_MS = 5000
 
+# ── #1786 (R5): eval retrieval budget via the existing elevation seam ────
+#: The eval's HYBRID-arm collective retrieval deadline (ms) — threaded into
+#: ``tortoise_fts_query(_elevated_timeout_ms=...)`` → ``degradation_chain``
+#: (per-strategy server timeout + the ``as_completed`` deadline). Derived
+#: from the healthy baseline (p95 82 ms / max 128 ms) + the issue target
+#: p95 ≤ 2 s minus ~500 ms collection-overhead headroom. The SDK default
+#: stays 500 ms (``tests/bench/test_degradation_chain.py`` untouched). The
+#: VECTOR arm is deliberately 3.3x more permissive (``VECTOR_TIMEOUT_MS``,
+#: ``retrieve.py:150-153`` precedent) and is UNAFFECTED by this budget.
+EVAL_RETRIEVAL_BUDGET_MS = 1500
+#: The SDK-default collective cap (sdk.py ``_elevated_timeout_ms or 500``)
+#: — recorded in the report methodology when the eval does not elevate.
+DEFAULT_RETRIEVAL_BUDGET_MS = 500
+
 
 def _encode_query_vec(query: str) -> list[float]:
     """Encode the query via the injected model (EmbeddingModel singleton).
@@ -848,7 +862,8 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
                    *, entity_types: tuple[str, ...] = ("point",),
                    recency_fields: dict[str, str] | None = None,
                    recency_boost: float = 0.0,
-                   leg_trace: list[dict] | None = None) -> list[dict]:
+                   leg_trace: list[dict] | None = None,
+                   retrieval_budget_ms: int | None = None) -> list[dict]:
     """Hybrid retrieval over the question's ingested graph.
 
     R5 (#1544) D4: ``entity_types`` selects the retrieval pool — TR
@@ -873,6 +888,12 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
     contract); the caller surfaces it as ``"legs"`` in the per-question
     result. Default None = no trace (byte-identical behavior).
 
+    ``retrieval_budget_ms`` (#1786 R5): the collective retrieval deadline
+    (ms) threaded into ``tortoise_fts_query(_elevated_timeout_ms=...)``
+    (PRIVATE benchmark-only seam — the production SDK default stays
+    500 ms). The eval passes ``EVAL_RETRIEVAL_BUDGET_MS`` (1500); None
+    keeps the SDK default byte-identical.
+
     include_terminal=True (E5 #1537, E2E-6): superseded points co-retrieve
     so the reader sees the [SUPERSEDED BY] marker and discounts them; the
     marker (A2) is the reader's discount mechanism. Terminal exclusion
@@ -895,6 +916,9 @@ def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
             recency_field=(recency_fields.get(et) if recency_fields
                            else None),
             recency_boost=recency_boost,
+            # #1786 (R5): the eval's elevated hybrid-arm deadline via the
+            # existing benchmark-only seam (SDK default 500 ms untouched).
+            _elevated_timeout_ms=retrieval_budget_ms,
         ):
             merged[h["id"]] = h
     # deterministic union: RRF score desc, then id (no namespace collision
@@ -1037,6 +1061,11 @@ def retrieve_for_question(
     evidence_boost: bool | None = None,
     evidence_boost_verbatim: float | None = None,
     evidence_boost_source: float | None = None,
+    # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
+    # eval passes EVAL_RETRIEVAL_BUDGET_MS (1500); None = SDK default
+    # 500 ms. Threads ONLY the hybrid arm (``hybrid_search`` →
+    # ``tortoise_fts_query``); the vector arm keeps VECTOR_TIMEOUT_MS.
+    retrieval_budget_ms: int | None = None,
 ) -> dict[str, Any]:
     """Run retrieval for one question and compute recall@k + context stats.
 
@@ -1151,6 +1180,9 @@ def retrieve_for_question(
         recency_fields=({"point": "createdAt", "event": "startedAt"}
                         if is_tr else None),
         recency_boost=tr_date_weight if is_tr else 0.0,
+        # #1786 (R5): the eval's elevated hybrid-arm deadline (None keeps
+        # the SDK-default 500 ms collective cap byte-identical).
+        retrieval_budget_ms=retrieval_budget_ms,
     )
     latency_ms = (time.monotonic() - start) * 1000.0
 

@@ -1071,13 +1071,23 @@ def test_checkpoint_cross_surface_and_model_isolation(tmp_path, capsys):
     done, _ = runner._load_checkpoint(str(stale), run_key="embedded__vector__minilm__default")
     assert done == {}
 
-    # corrupt file → warn, never crash
+    # #1786 (P2-12, contract change): a corrupt file is QUARANTINED (guarded
+    # rename) and the loader REFUSES with an actionable error — the old
+    # silent fresh-start discarded the failures list + claim stamps and
+    # bypassed the fingerprint gate (--retry-failed state evaporated).
     corrupt = tmp_path / "corrupt.json"
     corrupt.write_text("{definitely not json", encoding="utf-8")
-    done, _ = runner._load_checkpoint(str(corrupt), run_key="embedded__vector__minilm__default")
-    assert done == {}
-    assert "warning" in capsys.readouterr().err.lower() or \
-        len(capsys.readouterr().err) > 0
+    with pytest.raises(runner.CheckpointStaleError) as ei:
+        runner._load_checkpoint(str(corrupt),
+                                run_key="embedded__vector__minilm__default")
+    assert "quarantined" in str(ei.value)
+    # the corrupt file was renamed away (guarded) — no stale .tmp artifact
+    # (the advisory .lock file persists by design — flock_exclusive creates
+    # it for every checkpoint op, pre-existing behavior)
+    assert not corrupt.exists()
+    quarantined = list(tmp_path.glob("corrupt.json.corrupt.*"))
+    assert len(quarantined) == 1
+    assert not list(tmp_path.glob("*.tmp"))
 
 
 def test_checkpoint_key_shape():
