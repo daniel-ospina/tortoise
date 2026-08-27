@@ -2327,7 +2327,106 @@ def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
     return 0
 
 
+def _cmd_sessions_import(args) -> int:
+    """T2 backfill (#1727 Slice 2, Task 15): import a historical session
+    transcript from a harness store (codex / claude-desktop / pi).
 
+    The parsed session is staged LOCALLY (data preservation), POSTed to
+    /v1/sessions with a deterministic idempotency key (explicit --session-id
+    or a content-hash-derived one), and a LOCAL receipt is written ONLY on a
+    2xx (403/402/503 ⇒ exit 1, honest error, NO receipt). Re-import of the
+    same content is a no-op (receipt exists ⇒ already imported) — and even a
+    re-POST without a local receipt converges server-side (same session_id ⇒
+    zero new nodes). pi REUSES the codex parser (named reuse — pi session
+    JSONL is tree-structured JSONL like codex's, plan P2 Task 15).
+    """
+    import hashlib, json as _json, os, sys as _sys  # noqa: E401, I001
+    from pathlib import Path
+    from urllib.request import Request, urlopen
+    from urllib.error import URLError, HTTPError
+
+    from tortoise.session_import import parse_transcript  # noqa: I001
+
+    file_path = Path(args.file)
+    if not file_path.exists():
+        print(f"Session file not found: {args.file}", file=_sys.stderr)
+        return 1
+    # CLI alias: --harness desktop ⇒ wire harness claude-desktop (canonical
+    # SessionRequest Literal member — receipt key session_capture_receipt_
+    # claude-desktop).
+    harness = {"desktop": "claude-desktop"}.get(args.harness, args.harness)
+    try:
+        turns = parse_transcript(str(file_path), harness)
+    except ValueError as e:
+        print(f"parse failed: {e}", file=_sys.stderr)
+        return 1
+    if not turns:
+        print("No conversation turns parsed from session file.", file=_sys.stderr)
+        return 1
+
+    raw = file_path.read_bytes()
+    session_id = args.session_id or (
+        "imp_" + hashlib.sha256(raw).hexdigest()[:12])
+
+    # Local receipt — 2xx-only (a failed POST must never look imported).
+    receipt_dir = Path(os.environ.get(
+        "TORTOISE_IMPORT_RECEIPT_DIR",
+        str(Path.home() / ".tortoise" / "import-receipts")))
+    receipt = receipt_dir / f"{session_id}.json"
+    if receipt.exists():
+        print(f"Already imported: {session_id} (receipt present) — skipping.")
+        return 0
+
+    try:
+        _cfg_path, _config, api_key, api_url = _resolve_config_path()
+    except _ConfigError as e:
+        print(f"Invalid config at {e} — fix or delete it, or run "
+              "'tortoise init --api-key <key>'.", file=_sys.stderr)
+        return 1
+    if api_key is None:
+        print("No .tortoise config found. Run 'tortoise init --api-key <key>' first.",
+              file=_sys.stderr)
+        return 1
+
+    payload = {"harness": harness, "session_id": session_id,
+               "source": file_path.stem, "conversation": turns}
+    try:
+        data = _json.dumps(payload).encode("utf-8")
+        req = Request(
+            f"{api_url}/v1/sessions",
+            data=data,
+            headers={"Authorization": f"Bearer {api_key}",
+                     "Content-Type": "application/json"},
+            method="POST",
+        )
+        with urlopen(req, timeout=60) as resp:
+            result = _json.loads(resp.read())
+    except HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        # 403/402/503 ⇒ fail, NO receipt, honest error (Task 15 acceptance).
+        print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
+        return 1
+    except URLError as e:
+        print(f"Cannot reach API at {api_url}: {e.reason}", file=_sys.stderr)
+        return 1
+
+    if result.get("extraction_mode") in ("error", "empty") or result.get("errors"):
+        print(f"import failed: {result.get('errors') or result.get('extraction_mode')}",
+              file=_sys.stderr)
+        return 1
+
+    # 2xx ⇒ the receipt lands (the server also wrote the per-harness receipt
+    # state key; this LOCAL marker makes re-import a cheap no-op).
+    receipt_dir.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(_json.dumps({
+        "session_id": result.get("session_id", session_id),
+        "harness": harness, "file": str(file_path),
+        "imported_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "turns": len(turns),
+    }, indent=2), encoding="utf-8")
+    print(f"Imported session {result.get('session_id', session_id)} "
+          f"({len(turns)} turns, harness={harness})")
+    return 0
 
 
 def _cmd_session_list(api_key: str, api_url: str) -> int:
@@ -4974,7 +5073,25 @@ def main(argv: list[str] | None = None) -> int:
     session_list = session_sp.add_parser("list", help="List all sessions")  # noqa: F841
     session_view = session_sp.add_parser("view", help="View a specific session")
     session_view.add_argument("id", help="Session ID")
-
+    # #1727 Slice 2 (Task 15): T2 backfill — `tortoise sessions import`
+    # (plural — the plan's pinned CLI shape) ingests historical transcripts
+    # from harness stores (codex / claude-desktop / pi).
+    sessions = sp.add_parser(
+        "sessions",
+        help="Backfill agent sessions from historical transcripts (#1727 Task 15)")
+    sessions_sp = sessions.add_subparsers(dest="sessions_cmd")
+    sess_import = sessions_sp.add_parser(
+        "import", help="Import a session transcript from a harness store")
+    sess_import.add_argument("--file", required=True,
+                             help="Path to the session transcript (JSONL or text)")
+    sess_import.add_argument(
+        "--harness", required=True,
+        choices=["codex", "claude-desktop", "desktop", "pi"],
+        help="Harness format to parse (pi reuses the codex parser; "
+             "'desktop' is an alias for claude-desktop)")
+    sess_import.add_argument(
+        "--session-id", default=None,
+        help="Explicit idempotency key (default: content-hash derived)")
     # tortoise list-kinds
     lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")  # noqa: F841
     # tortoise context — memory digest for agent session-start hooks
@@ -5107,7 +5224,11 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_create_point(args)
     elif args.cmd == "session":
         return _cmd_session(args)
-
+    elif args.cmd == "sessions":
+        if args.sessions_cmd == "import":
+            return _cmd_sessions_import(args)
+        print("Unknown sessions command. Try import.", file=sys.stderr)
+        return 1
     elif args.cmd == "index":
         if args.index_cmd == "github":
             return _cmd_index_github(args)
