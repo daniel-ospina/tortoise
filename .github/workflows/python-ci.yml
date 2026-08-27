@@ -458,7 +458,7 @@ jobs:
           fi
           # Reuse contract: the skip-guard step's empty-file check reads this.
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Canary producer (epic #1647 Task 9 Step 6, half b, post-merge)
         # The D-3=A instrumented streak's producer half: the fast-matrix job
         # runs PER-LEG, so exactly ONE leg must write the producer marker or
@@ -893,7 +893,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Run slow test suite — leg ${{ matrix.half }} (known-slow files, #647)
         # Same guaranteed-summary treatment as the fast job (#798).
         # Per-test --timeout=300: these files have tests/setups that
@@ -1342,7 +1342,7 @@ jobs:
             exit 0
           fi
           echo "$FILES" > "${RUNNER_TEMP:-/tmp}/pytest-files"
-          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b" --output /tmp/expected-nodeids.txt
+          python3 tools/skip-guard.py --emit-manifest "$FILES" --marker "not track_b and not live" --output /tmp/expected-nodeids.txt
       - name: Run carve-out suite (embedded, URI unset — E2E-4)
         # The 17-file embedded carve-out. Deliberately NO TORTOISE_DB_URI:
         # the carve-out's embedded-specific assertions (recovery, busy-error,

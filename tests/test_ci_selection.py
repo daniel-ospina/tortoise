@@ -812,3 +812,36 @@ def test_canary_streak_job_consumes_half_b_artifacts_only():
               if s.get("name", "").startswith("Upload canary streak"))
     assert up["with"]["name"] == "testdb-canary-streak"
     assert up["with"]["path"] == "config/testdb-canary-streak.json"
+
+
+def test_run_marker_matches_manifest_marker():
+    """#1787 (PR #1811): the live-probe seam raises the docker lanes' run
+    filter to `-m 'not track_b and not live'` while the skip-guard manifest
+    steps still carried the old `--marker "not track_b"` — skip-guard's
+    contract (tools/skip-guard.py ~L107) requires the manifest's collect-only
+    marker to match the run's marker EXACTLY, or the manifest expects nodeids
+    the run deselects and every run reds on vanished nodeids. Pin the
+    equality for the three run jobs (fast/slow/carve-out) so a future edit
+    that changes one side reds at test time instead of CI runtime."""
+    wf = _load_python_ci()
+    run_prefixes = {
+        "test": "Run fast test suite",
+        "test-slow": "Run slow test suite",
+        "test-carve-out": "Run carve-out suite",
+    }
+    for job_name, run_prefix in run_prefixes.items():
+        steps = wf["jobs"][job_name]["steps"]
+        run = next(s for s in steps
+                   if s.get("name", "").startswith(run_prefix))
+        run_line = next(line for line in run["run"].splitlines()
+                        if "python -m pytest" in line)
+        run_marker = _re.search(r"-m '([^']+)'", run_line).group(1)
+        manifest = next(s for s in steps
+                        if s.get("name", "").startswith("Generate coverage manifest"))
+        manifest_marker = _re.search(r'--marker "([^"]+)"', manifest["run"]).group(1)
+        assert run_marker == manifest_marker, (
+            f"{job_name}: run filter -m '{run_marker}' must equal the skip-guard "
+            f"manifest marker '{manifest_marker}' (the manifest's collect-only "
+            "must match the run's deselect set or every run reds on vanished "
+            "nodeids — #1787)"
+        )

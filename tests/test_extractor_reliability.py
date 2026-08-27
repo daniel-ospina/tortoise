@@ -681,10 +681,12 @@ def test_probe_max_tokens_above_8k():
         print(f"probe: finish=length with {tokens} tokens — exhaust, "
               f"NOT a clamp (echo mid-string-truncated by design); PASS")
     else:
-        # finish=stop: the echo is COMPLETE — run the fidelity checks. The
-        # clamp assert is gated on finish=length; stop + tokens ≤ 8192 falls
-        # through to the fidelity check and is classified as an
-        # authoring/sizing signal, NOT a clamp.
+        # finish=stop: the echo is COMPLETE — run the fidelity checks. A
+        # short stop-echo HARD-FAILS the probe here (assert below), with the
+        # authoring/sizing diagnostic: tokens ≤ 8192 means the served
+        # tokenizer is ≥1.6× sparser than cl100k or the model elided the
+        # echo — NOT a clamp (the clamp assert is gated on finish=length,
+        # and a short stop-echo never reaches the fidelity checks).
         assert tokens > 8192, \
             f"echo too short: {tokens} tokens (finish=stop — the served " \
             f"tokenizer is ≥1.6× sparser than cl100k or the model elided " \
