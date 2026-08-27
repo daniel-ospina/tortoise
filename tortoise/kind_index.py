@@ -61,17 +61,47 @@ def cache_key_for(spec: dict) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
 
+#: Module-level TF-IDF degrade vectorizer — fitted ONCE on first use (the
+#: index build's spec texts) and reused for per-item encodes so the degrade
+#: lane is DIMENSION-STABLE across the index and the items (a per-call
+#: refit would mismatch the vector spaces and silently no-op the classifier
+#: whenever the embedder is down — review P2, #1695 Task 5).
+_TFIDF = None
+_TFIDF_LOCK = threading.Lock()
+
+
+def _reset_tfidf() -> None:
+    """Test hook — clear the shared degrade vectorizer."""
+    global _TFIDF
+    with _TFIDF_LOCK:
+        _TFIDF = None
+
+
 class _DefaultEncoder:
     """Production encoder: routes through the EmbeddingModel singleton
-    (never re-instantiates the model) with the TF-IDF degrade fallback.
+    (never re-instantiates the model) with a dimension-stable TF-IDF
+    degrade fallback (one shared vectorizer).
 
     ``encode(texts)`` → ``(vectors: np.ndarray, degraded: bool)``.
     """
 
     def encode(self, texts: list[str]) -> tuple[np.ndarray, bool]:
-        from tortoise.embeddings import _encode
-
-        return _encode(texts)
+        global _TFIDF
+        from tortoise.embeddings import EmbeddingModel
+        model = EmbeddingModel.get()
+        if model is not None:
+            try:
+                vecs = model.encode(texts, show_progress_bar=False)
+                if vecs is not None and len(vecs) > 0:
+                    return np.asarray(vecs, dtype=np.float64), False
+            except Exception:  # degrade path
+                pass
+        from sklearn.feature_extraction.text import TfidfVectorizer  # lazy: [embeddings] extra
+        with _TFIDF_LOCK:
+            if _TFIDF is None:
+                _TFIDF = TfidfVectorizer()
+                return _TFIDF.fit_transform(texts).toarray(), True
+            return _TFIDF.transform(texts).toarray(), True
 
 
 class KindIndex:
