@@ -532,7 +532,7 @@ jobs:
               echo "HEARTBEAT: pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 55m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
           # test_ep_directional's 81-char nodeid reason entirely — so the guard
@@ -935,7 +935,7 @@ jobs:
           # -r flags, and a trailing -rfE would suppress the skip summary the
           # guard depends on; pinned by
           # tests/test_ci_selection.py::test_test_slow_job_carries_junitxml_manifest_guard).
-          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true
@@ -1366,7 +1366,7 @@ jobs:
               echo "HEARTBEAT: carve-out pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
-          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
+          timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
           kill $HB_PID 2>/dev/null || true

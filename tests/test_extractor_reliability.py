@@ -726,9 +726,12 @@ def test_probe_v4_flash_non_thinking():
                          "(P2-G); re-enable after the companion adapter "
                          "migration (#1790) or when the direct API serves it")
         raise  # genuine unexpected error — hard FAIL
-    if resp == "":
-        # documented collapse — assert the SIGNATURE (finish=length: all
-        # tokens spent reasoning, zero content), not just emptiness.
+    # documented collapse — assert the SIGNATURE (finish=length: all
+    # tokens spent reasoning, zero content), not just emptiness. `not resp`
+    # covers BOTH the empty-string and content:null collapse forms
+    # (DeepSeek returns null content for a pure-reasoning response — the
+    # pilot #1549 "ZERO content" signature).
+    if not resp:
         assert m.last_finish_reason == "length", (
             f"v4-flash returned empty WITHOUT finish=length "
             f"({m.last_finish_reason!r}) — not the documented collapse; "
