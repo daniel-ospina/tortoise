@@ -697,10 +697,17 @@ def _is_uuid(value: object) -> bool:
     """
     if not isinstance(value, str) or not value:
         return False
-    if value.startswith(("urn:", "uuid:")):
+    # Python's uuid.UUID() strips urn:/uuid: prefixes AND accepts braced
+    # forms — so a braced urn like "{urn:uuid:...}" would parse. Postgres
+    # REJECTS urn forms regardless of braces (22P02). Strip braces first so
+    # the prefix check catches the braced variants too (code-review P2).
+    probe = value.strip()
+    if probe.startswith("{") and probe.endswith("}"):
+        probe = probe[1:-1].strip()
+    if probe.startswith(("urn:", "uuid:")):
         return False
     try:
-        _uuid.UUID(value)
+        _uuid.UUID(probe)
         return True
     except (ValueError, TypeError, AttributeError):
         return False

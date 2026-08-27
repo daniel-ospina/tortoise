@@ -673,6 +673,18 @@ class TestIsUUID:
         assert self._is_uuid(
             "uuid:e7e0794e-267d-427c-a3a2-7d01cfd5611e") is False
 
+    def test_braced_urn_form_rejected(self):
+        # Python accepts "{urn:uuid:...}" (strips braces AND prefix) —
+        # Postgres rejects it. The prefix check must strip braces first.
+        assert self._is_uuid(
+            "{urn:uuid:e7e0794e-267d-427c-a3a2-7d01cfd5611e}") is False
+        assert self._is_uuid(
+            "{uuid:e7e0794e-267d-427c-a3a2-7d01cfd5611e}") is False
+
+    def test_braced_plain_accepted(self):
+        assert self._is_uuid(
+            "{e7e0794e-267d-427c-a3a2-7d01cfd5611e}") is True
+
     def test_hyphenated_accepted(self):
         assert self._is_uuid(
             "e7e0794e-267d-427c-a3a2-7d01cfd5611e") is True
