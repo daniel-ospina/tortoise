@@ -782,6 +782,10 @@ function claimIntentInFlight() {
     }
     const data = await res.json()
     if (!data.key) throw new Error('Session mint returned no key')
+    // #1828 (review P3-2): the recovery fallback rotated a session
+    // credential to make room — one-time banner so the user knows their
+    // setup command key changed (the returned key IS the new one).
+    if (data.rotated) setBanner('Signed-in key was rotated to make room — your setup command now uses a new key.')
     // Fix C (review round 2): return the team actually minted for so callers
     // cache on the right id even when the 400-fallback picked it (a null
     // firstTeamId previously skipped the cache → cap burn on every switch).
@@ -1064,7 +1068,15 @@ function claimIntentInFlight() {
             const minted = await mintSessionKey('bootstrap', firstTeamId)
             key = minted.key
             mintedTeamId = minted.teamId || null
-            if (minted.teamId) teamKeysRef.current[minted.teamId] = key
+            if (minted.teamId) {
+              teamKeysRef.current[minted.teamId] = key
+              // #1828 (review): pin the minted team BEFORE completeLogin so
+              // session-driven reads (?team_id=) resolve the MINTED team, not
+              // the first membership (multi-membership users). Only when the
+              // selection is still unset — a mid-mint switch owns it (the
+              // guard below bails on the mismatch).
+              if (!teamIdRef.current) teamIdRef.current = minted.teamId
+            }
           } catch (e) {
             // #308: a suspended team's mint 403s — show the appeal banner.
             if (e && e.suspended) setSuspended(e.suspended)
@@ -1124,7 +1136,17 @@ function claimIntentInFlight() {
     // P2 (code-review): key param so the refetch targets the selected team —
     // the overview cards + header tier badge read /v1/team, which resolves
     // the team from the API key.
-    const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+    // #1828 (review): the Team card now rides the SESSION JWT (dual-auth
+    // get_current_team_session) when signed in — pinned ?team_id= so
+    // multi-membership users resolve the SELECTED team, not the first
+    // membership; the api() helper's useSession only wins when a session JWT
+    // is present, so the key stays the fallback for key-only callers
+    // (stored-key reuse / switchTeam with a fresh mint).
+    const _teamAtCall = expectedTeamId || teamIdRef.current
+    const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+    const t = await api(`/v1/team${q}`, sessionTokenRef.current
+      ? { useSession: true }
+      : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
     // Round-13/14 (P2): never land a team's data under a different team's
     // selection. Two guards:
     //  - expectedTeamId (checkout poll pin): null on Stripe-return loads
@@ -1158,7 +1180,14 @@ function claimIntentInFlight() {
     setError('')
     const teamAtCompleteLogin = teamIdRef.current
     try {
-      const t = await api('/v1/team', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+      // #1828 (review): session-driven Team card — pinned ?team_id= so the
+      // session resolves the MINTED/stored-key team, not the first
+      // membership (multi-membership users); the key remains the fallback
+      // when no session JWT exists (api() useSession only wins with one).
+      const q = teamAtCompleteLogin ? `?team_id=${encodeURIComponent(teamAtCompleteLogin)}` : ''
+      const t = await api(`/v1/team${q}`, sessionTokenRef.current
+        ? { useSession: true }
+        : (key ? { headers: { Authorization: `Bearer ${key}` } } : {}))
       // #1567 (review P1): the chrome renders early, so a team switch can
       // land DURING this await — never land team A's data under team B's
       // selection (the refreshTeam response-identity guard, applied here).
@@ -1438,9 +1467,12 @@ function claimIntentInFlight() {
                                           // A→B→C switch must not land B's data
                                           // under team C's header
     // #1828: overview reads ride the SESSION JWT (get_current_team_session
-    // dual-auth) instead of the freshly-minted bootstrap key — the overview
-    // renders even when the 3-active bootstrap cap + max_api_keys deadlock
-    // the mint. Multi-team: pin ?team_id= so the cards track the team
+    // dual-auth) instead of the freshly-minted bootstrap key — the Team /
+    // Keys / Sessions cards render without a key mint, and the review-P1
+    // ungated reads keep tt_ keys working on flag-off teams, so the
+    // 3-active bootstrap cap + max_api_keys deadlock no longer blocks the
+    // overview itself (the mint still matters for agent keys + management
+    // writes). Multi-team: pin ?team_id= so the cards track the team
     // switcher (session resolution defaults to the first membership); the
     // key param is accepted for backwards-compatible callers but unused.
     const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''

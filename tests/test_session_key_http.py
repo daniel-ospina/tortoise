@@ -162,6 +162,17 @@ def _count_active_keys(reg, team_id: str) -> int:
     return int(rows[0][0])
 
 
+def _count_persistent_keys(reg, team_id: str) -> int:
+    """Non-revoked keys that COUNT against max_api_keys (bootstrap-excluded
+    — mirrors the mint's count predicate)."""
+    rows = reg.query(
+        "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
+        params={"tid": team_id},
+    ).result_set
+    return int(rows[0][0])
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
@@ -319,11 +330,14 @@ class TestRecoveryMint:
         assert all(revoked is None for (revoked,) in rows)
 
     def test_at_cap_rotates_own_oldest_bootstrap_key(self, client, reg):
-        """#1828: at max_api_keys with only OWN keys, the recovery fallback
-        rotates the user's own OLDEST bootstrap key (24h ephemeral — safe to
-        rotate) and mints — breaking the dashboard deadlock (bootstrap 429 →
-        recovery 402) instead of 402ing. Persistent user-minted keys stay
-        untouched (#750.10)."""
+        """#1828 + review P2-1: at max_api_keys with only OWN keys, the
+        recovery fallback rotates the user's own OLDEST bootstrap key (24h
+        ephemeral — safe to rotate; EXPIRED ones included, review P3) then
+        RE-CHECKS the persistent count — a rotated modern bootstrap was never
+        in the count, so the mint fails CLOSED (402) instead of minting cap+1
+        persistent keys (the old overshoot grew persistent keys unboundedly
+        per login). Persistent user-minted keys stay untouched (#750.10); the
+        rotated ephemeral frees bootstrap headroom for the next login."""
         _seed_team(reg, "team-a")
         _seed_membership(reg, "team-a", _U1, "owner")
         # 2 own PERSISTENT recovery keys fill the free-tier cap (2)...
@@ -331,16 +345,19 @@ class TestRecoveryMint:
                       created_via="recovery", created_at=_hours_ago(10))
         _seed_api_key(reg, "team-a", "own-rec-2", created_by=_U1,
                       created_via="recovery", created_at=_hours_ago(1))
-        # ...and 2 own 24h bootstrap keys are rotatable (oldest first).
+        # ...and 2 own 24h bootstrap keys are rotatable (oldest first; the
+        # OLDEST is already EXPIRED — P3: expiry is no longer a barrier).
         _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
                       created_via="bootstrap", created_at=_hours_ago(8),
-                      expires_at=_hours_ahead(1))
+                      expires_at=_hours_ago(1))
         _seed_api_key(reg, "team-a", "own-boot-2", created_by=_U1,
                       created_via="bootstrap", created_at=_hours_ago(2),
                       expires_at=_hours_ahead(1))
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
-        assert r.status_code == 200, r.text
-        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        # P2-1: fail-closed — the rotation freed NO persistent slot (modern
+        # bootstraps never count), so the re-check 402s (no cap+1 overshoot).
+        assert r.status_code == 402, r.text
+        assert "Key limit reached" in r.json()["detail"]
         rows = reg.query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-boot-1','own-boot-2'] "
             "RETURN k.id, k.revoked_at",
@@ -348,12 +365,47 @@ class TestRecoveryMint:
         by_id = {rid: revoked for rid, revoked in rows}
         assert by_id["own-boot-1"] is not None  # oldest own bootstrap rotated
         assert by_id["own-boot-2"] is None      # newest own bootstrap survives
-        # Persistent keys untouched (#750.10)
+        # Persistent keys untouched (#750.10) + count never exceeds the cap
         rows = reg.query(
             "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2'] "
             "RETURN k.revoked_at",
         ).result_set
         assert all(revoked is None for (revoked,) in rows)
+        assert _count_persistent_keys(reg, "team-a") <= 2
+
+    def test_at_cap_rotates_legacy_unowned_key_when_it_frees_a_slot(
+            self, client, reg):
+        """#1828 review P3-4 + P2-1: a LEGACY team-scoped unowned key
+        (created_by IS NULL — a pre-created_by session credential by
+        construction) COUNTS against max_api_keys, so rotating it frees a
+        REAL slot: the re-check passes and the mint lands at exactly the cap
+        (never cap+1). Legacy is preferred over own modern bootstraps."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: one own persistent key + one LEGACY unowned key (counted) —
+        # no OTHER-user key to auto-revoke (#750.10), so the fallback runs.
+        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "legacy-1", created_by=None,
+                      created_via=None, created_at=_hours_ago(6))
+        # a newer own bootstrap exists — legacy must win (frees a slot)
+        _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(2),
+                      expires_at=_hours_ahead(1))
+        assert _count_persistent_keys(reg, "team-a") == 2
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is True     # rotation signal → UI banner
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['legacy-1','own-boot-1','own-rec-1'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["legacy-1"] is not None   # legacy rotated (frees a slot)
+        assert by_id["own-boot-1"] is None     # own bootstrap survives
+        assert by_id["own-rec-1"] is None      # own persistent untouched
+        assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
 
 
 class TestMintGuards:
