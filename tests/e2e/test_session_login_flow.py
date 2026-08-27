@@ -101,12 +101,15 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
     def handle(route):
         url = route.request.url
         if url.startswith(API_HOST):
+            # #1828: loadAll pins ?team_id= on overview reads — match on the
+            # query-stripped path so /v1/team/keys?team_id=… still resolves.
+            path = url.split("?", 1)[0]
             if url.endswith("/v1/session/login") and route.request.method == "POST":
                 route.fulfill(status=exchange_status,
                               content_type=exchange_ctype,
                               body=json.dumps(exchange_body or {}))
                 return
-            if url.endswith("/v1/session/key") and route.request.method == "POST":
+            if path.endswith("/v1/session/key") and route.request.method == "POST":
                 # The dashboard's session-key mint (Bearer = the loop session).
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"key": minted_key, "team_id": "team_loop"}))
@@ -120,23 +123,23 @@ def _wire_prod_domains(page: Page, exchange_body=None, exchange_status=200,
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"portal_url": "https://billing.stripe.com/p/session/test_123"}))
                 return
-            if url.endswith("/v1/teams") and route.request.method == "GET":
+            if path.endswith("/v1/teams") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([team_row]))
                 return
-            if url.endswith("/v1/team/keys"):
+            if path.endswith("/v1/team/keys"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"keys": []}))
                 return
-            if url.endswith("/v1/sessions"):
+            if path.endswith("/v1/sessions"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"sessions": []}))
                 return
-            if url.endswith("/backups"):
+            if path.endswith("/backups"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"backups": []}))
                 return
-            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps(team_row))
                 return

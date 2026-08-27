@@ -239,6 +239,79 @@ class TestSessionKeyRoundTrip:
         assert new_rows[0]["revoked_at"] is None  # minted key lands unrevoked
         assert new_rows[0]["created_via"] == "recovery"
 
+    def test_recovery_cap_rotates_own_bootstrap_when_all_keys_own(
+            self, rest_client, authed_user):
+        """#1828 + review P2-1: at max_api_keys with only OWN keys, the
+        recovery fallback rotates the user's own OLDEST bootstrap key (24h
+        ephemeral — safe to rotate) then RE-CHECKS the persistent count — a
+        rotated modern bootstrap was never in the count, so the mint fails
+        CLOSED (402) instead of minting cap+1 persistent keys (the old
+        overshoot grew persistent keys unboundedly per login). Persistent
+        user-minted keys stay untouched (#750.10)."""
+        tc, fake = rest_client
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("api_keys", [
+            _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-rec-2", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h2", created_at="2026-08-02T00:00:00Z"),
+            _key_row(id="own-boot-1", created_via="bootstrap", created_by=_USER1,
+                     lookup_hash="h3", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-boot-2", created_via="bootstrap", created_by=_USER1,
+                     lookup_hash="h4", created_at="2026-08-03T00:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        # P2-1: fail-closed — the rotation freed NO persistent slot (modern
+        # bootstraps never count), so the re-check 402s (no cap+1 overshoot).
+        assert r.status_code == 402, r.text
+        assert "Key limit reached" in r.json()["detail"]
+        by_id = {row["id"]: row for row in fake.tables["api_keys"]}
+        assert by_id["own-boot-1"]["revoked_at"] is not None  # oldest own bootstrap rotated
+        assert by_id["own-boot-2"]["revoked_at"] is None
+        assert by_id["own-rec-1"]["revoked_at"] is None       # persistent keys untouched
+        assert by_id["own-rec-2"]["revoked_at"] is None
+        # post-mint persistent count never exceeds the cap
+        persistent = [r for r in fake.tables["api_keys"]
+                      if r.get("revoked_at") is None
+                      and r.get("created_via") != "bootstrap"]
+        assert len(persistent) <= 2
+
+    def test_recovery_cap_rotates_legacy_unowned_key(self, rest_client,
+                                                     authed_user):
+        """#1828 review P3-4 + P2-1 (Supabase lane): a LEGACY team-scoped
+        unowned key (created_by IS NULL) is a rotation candidate — it COUNTS
+        against max_api_keys (created_via NULL), so rotating it frees a REAL
+        slot: the mint lands at exactly the cap (never cap+1). In this lane
+        the legacy key resolves as an 'oldest OTHER' key (#750.10 — NULL !=
+        the user's id), so the #1828 fallback (rotated flag) does not fire."""
+        tc, fake = rest_client
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("api_keys", [
+            _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
+            # legacy unowned persistent key (created_by NULL, created_via NULL)
+            _key_row(id="legacy-1", created_via=None, created_by=None,
+                     lookup_hash="h2", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-boot-1", created_via="bootstrap", created_by=_USER1,
+                     lookup_hash="h3", created_at="2026-08-03T00:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is False  # rotated via #750.10 others-branch
+        by_id = {row["id"]: row for row in fake.tables["api_keys"]}
+        assert by_id["legacy-1"]["revoked_at"] is not None   # legacy rotated
+        assert by_id["own-rec-1"]["revoked_at"] is None      # own untouched
+        assert by_id["own-boot-1"]["revoked_at"] is None     # bootstrap survives
+        new_rows = [row for row in fake.tables["api_keys"]
+                    if row["id"] not in ("own-rec-1", "legacy-1", "own-boot-1")]
+        assert len(new_rows) == 1
+        assert new_rows[0]["created_via"] == "recovery"
+        # revoke(legacy) + mint = exactly the cap, never cap+1
+        persistent = [r for r in fake.tables["api_keys"]
+                      if r.get("revoked_at") is None
+                      and r.get("created_via") != "bootstrap"]
+        assert len(persistent) <= 2
+
     def test_mint_requires_membership(self, rest_client, authed_user):
         tc, fake = rest_client
         fake.tables["team_memberships"] = []

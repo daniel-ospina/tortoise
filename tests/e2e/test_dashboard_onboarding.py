@@ -44,16 +44,19 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
     def handle(route):
         url = route.request.url
         method = route.request.method
+        # #1828: loadAll pins ?team_id= on overview reads — match on the
+        # query-stripped path so /v1/team/keys?team_id=… still resolves.
+        path = url.split("?", 1)[0]
         if "api.premiselabs.co" in url:
-            if url.endswith("/v1/teams") and method == "GET":
+            if path.endswith("/v1/teams") and method == "GET":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([{"team_id": "team_o", "name": "Onboarding Test"}]))
                 return
-            if url.endswith("/v1/session/key") and method == "POST":
+            if path.endswith("/v1/session/key") and method == "POST":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"key": "tt_onb_key_1234567890abcdef", "team_id": "team_o"}))
                 return
-            if url.endswith("/v1/team") or url.endswith("/v1/team/"):
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"team_id": "team_o", "name": "Onboarding Test",
                                                "tier": "free", "graph_ready": True, "point_count": 0,
@@ -61,36 +64,36 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
                                                "checkout_price_ids": {"solo": "price_solo", "pro": "price_pro", "team": "price_team"},
                                                "write_ops_limit": 1000, "write_ops_used": 0}))
                 return
-            if url.endswith("/v1/sessions") or url.endswith("/v1/team/keys") or url.endswith("/backups"):
+            if path.endswith("/v1/sessions") or path.endswith("/v1/team/keys") or path.endswith("/backups"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"sessions": [], "keys": [], "backups": []}))
                 return
-            if url.endswith("/v1/objects") and method == "POST":
+            if path.endswith("/v1/objects") and method == "POST":
                 body = json.loads(route.request.post_data or "{}")
                 cap["objects"].append(body)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps(seed_objects[0]))
                 return
-            if url.endswith("/v1/points") and method == "POST":
+            if path.endswith("/v1/points") and method == "POST":
                 body = json.loads(route.request.post_data or "{}")
                 cap["points"].append(body)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"id": "point-1", "content": body.get("content", "")}))
                 return
-            if url.endswith("/v1/onboarding/state") and method == "PATCH":
+            if path.endswith("/v1/onboarding/state") and method == "PATCH":
                 cap["state"].append(json.loads(route.request.post_data or "{}"))
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"onboarding_complete": True}))
                 return
-            if url.endswith("/v1/onboarding/github/connect") and method == "POST":
+            if path.endswith("/v1/onboarding/github/connect") and method == "POST":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"auth_url": "https://github.com/login/oauth/authorize?fake"}))
                 return
-            if url.endswith("/v1/onboarding/github/status"):
+            if path.endswith("/v1/onboarding/github/status"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"connected": False, "repos_count": None}))
                 return
-            if url.endswith("/v1/teams") or url.endswith("/v1/team/keys") or url.endswith("/v1/sessions") or url.endswith("/backups"):
+            if path.endswith("/v1/teams") or path.endswith("/v1/team/keys") or path.endswith("/v1/sessions") or path.endswith("/backups"):
                 route.fulfill(status=401, content_type="application/json", body="{}")
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")

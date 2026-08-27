@@ -1462,6 +1462,16 @@ async def _session_user_team(request: Request, user: dict) -> dict:
                          _TEAM_ADDITIVE_BILLING_TIER])
     if row is None:
         raise HTTPException(status_code=403, detail="Team not found")
+    # #1828 review P2: a suspended team must 403 on SESSION-authed
+    # management reads too — the key-auth lane enforces this in
+    # get_current_team (~1390); the session lane resolved the team without
+    # raising. One place fixes every session endpoint. The deliberate
+    # "reachable while suspended" appeal flow (/v1/team/alerts) uses
+    # get_current_user + _membership_team directly and is unaffected. The
+    # fail-soft seam keeps 0015 drift degrade-safe (missing suspended_at
+    # column → None → passes, never a 500).
+    if (row or {}).get("suspended_at") is not None:
+        raise HTTPException(status_code=403, detail=_suspended_detail())
     from tortoise.pricing import tier_limits
     lim = tier_limits(row.get("tier") or "free")
     return {
@@ -1483,17 +1493,26 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     }
 
 
-async def get_current_team_session(request: Request) -> dict:
+async def get_current_team_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_team + the
     dashboard-login gate; session JWT resolves via _session_user_team and
     always passes the gate (the flag gates the API-key credential, never the
-    human session). #1148 review P1-2."""
+    human session). #1148 review P1-2.
+
+    gate_key_login=False opts the KEY branch out of the #1148 dashboard-login
+    gate — used by the overview READS (see get_current_team_session_ungated)
+    so tt_ keys keep working on flag-off teams (agents + the dashboard's own
+    reads). The gate stays scoped to the #1148 management set
+    (mint/revoke/restore/billing)."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer ") and not auth[7:].startswith("eyJ"):
-        # API key (tt_) — the gate applies to real key-auth.
+        # API key (tt_) — the gate applies to real key-auth (unless the
+        # caller opts out: overview reads stay reachable for key-driven
+        # agents on flag-off teams).
         team = await get_current_team(request)
-        _check_dashboard_key_login(team, request)
+        if gate_key_login:
+            _check_dashboard_key_login(team, request)
         return team
     # Test env / non-key call: honor a dependency override of get_current_team
     # (the hosted_api suite overrides it to bypass auth entirely). FastAPI
@@ -1516,6 +1535,17 @@ async def get_current_team_session(request: Request) -> dict:
     # to "api").
     team["session_user_id"] = user["user_id"]
     return team
+
+
+async def get_current_team_session_ungated(request: Request) -> dict:
+    """#1828 review P1: dual-auth dependency for OVERVIEW READS — team_info,
+    list_api_keys, list_sessions, onboarding state/github. The KEY branch
+    skips the #1148 dashboard-login gate, so a tt_ key on a
+    dashboard_key_login=false team still 200s these reads (agents + the
+    dashboard's own session-driven reads). The gate stays scoped to the
+    #1148 management set (mint/revoke/restore/billing — those keep
+    get_current_team_session's default gate_key_login=True)."""
+    return await get_current_team_session(request, gate_key_login=False)
 
 
 def _check_team_limit(team: dict, resource: str) -> None:
@@ -2792,8 +2822,14 @@ async def topic_summary(
 
 
 @app.get("/v1/team", response_model=TeamInfoResponse)
-async def team_info(team: dict = Depends(get_current_team)):  # noqa: B008
-    """Get current team info: tier, usage, limits."""
+async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Get current team info: tier, usage, limits.
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard overview reads
+    the team on the signed-in session, so it renders without a fresh
+    bootstrap-key mint (agents keep passing their tt_ key). #1828 review
+    P1: ungated — overview reads stay reachable for tt_ keys on flag-off
+    teams (the #1148 gate stays scoped to the management set)."""
     sdk = _make_sdk(namespace=team["team_id"])
     # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
     # graph (half-failed provisioning, restores) must not dead-end the
@@ -3994,8 +4030,15 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 
 
 @app.get("/v1/team/keys")
-async def list_api_keys(team: dict = Depends(get_current_team)):  # noqa: B008
+async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """List API keys for the team (hashes only — no plaintext).
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard's overview API
+    Keys card reads on the session, so it renders without a fresh bootstrap
+    mint; agents keep passing their tt_ key. Only team["team_id"] is read,
+    so a session team dict (no key_id/created_by) resolves identically.
+    #1828 review P1: ungated — a key-driven agent keeps listing keys on a
+    flag-off team (the #1148 gate stays scoped to the management set).
 
     #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
@@ -5561,8 +5604,14 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
 
 
 @app.get("/v1/sessions")
-async def list_sessions(team: dict = Depends(get_current_team)):  # noqa: B008
+async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """List captured sessions with turn and extracted point counts (#714).
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard's overview
+    sessions card reads on the session, so it renders without a fresh
+    bootstrap mint; agents keep passing their tt_ key. #1828 review P1:
+    ungated — the #1148 dashboard-login gate stays scoped to the management
+    set (this is an overview read).
 
     #1591: FAIL SOFT — a missing team graph (half-failed provisioning)
     returns an empty list, never a 500 (a 500 also strips the CORS headers
@@ -8451,7 +8500,12 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     no pre-existing key required. Two purposes (plan §6.2 E1):
     - bootstrap: 24h ephemeral, cap-EXEMPT (R13), 3-active backstop (dashboard auth)
     - recovery: persistent (no expiry), revocable, counts against max_api_keys;
-      at cap, auto-revokes the oldest orphaned key so recovery never dead-ends.
+      at cap, auto-revokes the oldest other key, then a session credential —
+      a LEGACY team-scoped unowned key (created_by IS NULL — frees a real
+      slot) or the user's own OLDEST bootstrap key (#1828, 24h ephemeral,
+      safe to rotate; expired ones included) — with a RE-CHECK so a rotation
+      that doesn't free a persistent slot fails CLOSED (402, never cap+1);
+      402 when nothing at all is rotatable.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -8508,6 +8562,9 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     key_hash = _hash(api_key)
     kid = _short_id()
     now = datetime.now(UTC).isoformat()
+    # #1828 review P3-2: True when the recovery fallback rotated a session
+    # credential to make room — the dashboard shows a one-time banner.
+    rotated = False
 
     if purpose == "bootstrap":
         active_boot = reg.query(
@@ -8547,7 +8604,56 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     params={"id": oldest[0][0], "now": now},
                 )
             else:
-                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                # #1828: at max_api_keys with no OTHER key to revoke, the
+                # recovery fallback dead-locks on the user's OWN persistent
+                # keys (#750.10 refuses to touch them). Rotate a session
+                # credential instead — a LEGACY team-scoped unowned key
+                # (created_by IS NULL — a pre-created_by session credential
+                # by construction; it COUNTS against the cap, so rotating it
+                # frees a real slot and is preferred) or the user's own
+                # OLDEST bootstrap key (24h ephemeral, re-minted per login).
+                # Review P3: expired own bootstraps are rotatable too (24h
+                # ephemeral — pre-rotation harmless; #742 auth remains
+                # unaffected, expired keys still never authenticate).
+                # Review P2-1: RE-CHECK the persistent count after the
+                # revoke — a rotated modern bootstrap was never in the count,
+                # so a rotation that doesn't free a slot fails CLOSED (402)
+                # instead of minting cap+1 persistent keys (unbounded growth
+                # per login).
+                legacy = reg.query(
+                    "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                    "AND k.created_by IS NULL "
+                    "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
+                    "RETURN k.id "
+                    "ORDER BY k.created_at ASC LIMIT 1",
+                    params={"tid": tid},
+                ).result_set
+                own_boot = reg.query(
+                    "MATCH (k:APIKey {team_id:$tid, created_via:'bootstrap', "
+                    "created_by:$uid}) WHERE k.revoked_at IS NULL "
+                    "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                    params={"tid": tid, "uid": user_id},
+                ).result_set
+                rotate_id = (legacy[0][0] if legacy
+                             else (own_boot[0][0] if own_boot else None))
+                if rotate_id:
+                    reg.query(
+                        "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
+                        params={"id": rotate_id, "now": now},
+                    )
+                    # P2-1: only mint when a persistent slot actually opened
+                    # (legacy rotation frees one; a modern bootstrap never
+                    # counted against max_api_keys).
+                    recheck = reg.query(
+                        "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
+                        "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') RETURN count(k)",
+                        params={"tid": tid},
+                    ).result_set[0][0]
+                    if max_keys is not None and recheck >= max_keys:
+                        raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                    rotated = True
+                else:
+                    raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
         expires_at = None
         created_via = "recovery"
 
@@ -8563,18 +8669,20 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
-            "team_id": tid, "purpose": purpose}
+            "team_id": tid, "purpose": purpose, "rotated": rotated}
 
 
 async def _session_key_supabase(body: dict, request: Request, user: dict) -> dict:
     """E1 session-key mint against Supabase (#767 E2E-2 round-trip).
 
     Mirrors the registry mint exactly (bootstrap: 24h expiry, 3-active cap;
-    recovery: persistent, max_api_keys cap with oldest-OTHER auto-revoke so
-    recovery never dead-ends) with reads/writes on team_memberships / teams /
-    api_keys. The minted key lands in api_keys with lookup_hash + created_via
-    + expires_at, so get_current_team / MCP resolve it via the unique
-    lookup_hash index, and api_keys.revoked_at is the authoritative revoke.
+    recovery: persistent, max_api_keys cap with oldest-OTHER auto-revoke, then
+    a session-credential rotation — legacy unowned / own oldest bootstrap
+    (#1828) with a fail-closed RE-CHECK so the mint never overshoots the cap)
+    with reads/writes on team_memberships / teams / api_keys. The minted key
+    lands in api_keys with lookup_hash + created_via + expires_at, so
+    get_current_team / MCP resolve it via the unique lookup_hash index, and
+    api_keys.revoked_at is the authoritative revoke.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -8617,6 +8725,9 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     api_key = f"tt_{_uuid.uuid4().hex}"
     kid = _short_id()
     now = datetime.now(UTC).isoformat()
+    # #1828 review P3-2: True when the recovery fallback rotated a session
+    # credential to make room — the dashboard shows a one-time banner.
+    rotated = False
 
     if purpose == "bootstrap":
         active_boot = active_api_keys(cp, tid, created_via="bootstrap", created_by=user_id)
@@ -8640,7 +8751,47 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
             if others:
                 revoke_api_key(cp, others[0]["id"], now)
             else:
-                raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                # #1828: at max_api_keys with no OTHER key to revoke, the
+                # recovery fallback dead-locks on the user's OWN persistent
+                # keys (#750.10 refuses to touch them). Rotate a session
+                # credential instead — a LEGACY team-scoped unowned key
+                # (created_by IS NULL — a pre-created_by session credential
+                # by construction; it COUNTS against the cap, so rotating it
+                # frees a real slot and is preferred) or the user's own
+                # OLDEST bootstrap key (24h ephemeral, re-minted per login).
+                # Review P3: expired own bootstraps are rotatable too (the
+                # row scan below drops the expiry filter; #742 auth remains
+                # unaffected — expired keys still never authenticate).
+                # Review P2-1: RE-CHECK the persistent count after the
+                # revoke — a rotated modern bootstrap was never in the count,
+                # so a rotation that doesn't free a slot fails CLOSED (402)
+                # instead of minting cap+1 persistent keys (unbounded growth
+                # per login).
+                cands = cp.query(
+                    "api_keys",
+                    select=["id", "created_at", "created_by", "created_via"],
+                    filters=[("team_id", "eq", tid), ("revoked_at", "is", None)],
+                )
+                legacy = [r for r in cands
+                          if r.get("created_by") is None
+                          and r.get("created_via") != "bootstrap"]
+                own_boot = [r for r in cands
+                            if r.get("created_by") == user_id
+                            and r.get("created_via") == "bootstrap"]
+                rotatable = legacy if legacy else own_boot
+                rotatable.sort(key=lambda r: r.get("created_at") or "")
+                if rotatable:
+                    revoke_api_key(cp, rotatable[0]["id"], now)
+                    # P2-1: only mint when a persistent slot actually opened
+                    # (legacy rotation frees one; a modern bootstrap never
+                    # counted against max_api_keys).
+                    recheck = [r for r in active_api_keys(cp, tid)
+                               if r.get("created_via") != "bootstrap"]
+                    if max_keys is not None and len(recheck) >= max_keys:
+                        raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
+                    rotated = True
+                else:
+                    raise HTTPException(status_code=402, detail="Key limit reached — revoke an existing key")
         expires_at = None
         created_via = "recovery"
 
@@ -8660,7 +8811,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
-            "team_id": tid, "purpose": purpose}
+            "team_id": tid, "purpose": purpose, "rotated": rotated}
 
 
 @app.get("/v1/context")
@@ -8900,8 +9051,14 @@ class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
-async def get_onboarding_state(team: dict = Depends(get_current_team)):  # noqa: B008
-    """Return the team's onboarding progress + team email."""
+async def get_onboarding_state(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Return the team's onboarding progress + team email.
+
+    #1828: dual-auth (session JWT OR tt_ key) — the dashboard re-entry card
+    reads on the session (it already calls this with useSession: true), so it
+    renders without a fresh bootstrap mint. #1828 review P1: ungated — the
+    #1148 dashboard-login gate stays scoped to the management set (this is
+    an overview read)."""
     return {
         "onboarding": _get_onboarding_state(team["team_id"]),
         "email": _team_email(team["team_id"]),
@@ -8910,8 +9067,12 @@ async def get_onboarding_state(team: dict = Depends(get_current_team)):  # noqa:
 
 @app.patch("/v1/onboarding/state", response_model=OnboardingStateResponse)
 async def patch_onboarding_state(body: OnboardingStatePatchRequest,
-                                team: dict = Depends(get_current_team)):  # noqa: B008
-    """Merge provided onboarding fields into the team's state."""
+                                team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Merge provided onboarding fields into the team's state.
+
+    #1828 review P3: same non-gated dual-auth as GET /v1/onboarding/state —
+    the dashboard calls this with useSession: true (session-only users got
+    401 under the old get_current_team key-only auth)."""
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     # #1727 (Task 11): translate underscore PATCH fields back to hyphenated
     # per-harness state keys (pydantic cannot carry hyphens; the allowlist
@@ -9291,8 +9452,11 @@ def _github_repos_count(token: str) -> int | None:
 
 @app.post("/v1/onboarding/github/connect")
 async def github_connect(body: GitHubConnectRequest | None = None,
-                         team: dict = Depends(get_current_team)):  # noqa: B008
-    """Initiate GitHub OAuth. Returns the authorize URL + CSRF state."""
+                         team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Initiate GitHub OAuth. Returns the authorize URL + CSRF state.
+
+    #1828 review P3: same non-gated dual-auth as the other onboarding
+    endpoints — the dashboard calls this with useSession: true."""
     import secrets
     from urllib.parse import urlencode
     client_id = os.environ.get("GITHUB_CLIENT_ID")
@@ -9395,8 +9559,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
 
 
 @app.get("/v1/onboarding/github/status")
-async def github_status(team: dict = Depends(get_current_team)):  # noqa: B008
-    """Return GitHub connection status + repo count."""
+async def github_status(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Return GitHub connection status + repo count.
+
+    #1828 review P3: same non-gated dual-auth as the other onboarding
+    endpoints — the dashboard calls this with useSession: true."""
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repos_count": None}
