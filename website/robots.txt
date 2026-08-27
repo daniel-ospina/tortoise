@@ -18,3 +18,4 @@ Allow: /
 Sitemap: https://premiselabs.co/sitemap-company.xml
 Sitemap: https://tortoise.premiselabs.co/sitemap-product.xml
 Sitemap: https://app.premiselabs.co/sitemap.xml
+Sitemap: https://tortoise.premiselabs.co/blog/sitemap.xml
