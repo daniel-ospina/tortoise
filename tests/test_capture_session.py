@@ -1688,3 +1688,518 @@ def test_client_commit_id_capture_parity(sdk, monkeypatch):
         payload["session_id"], payload["points"], payload["entities"],
         payload["operators"], payload["summary"], payload["story_arc"],
         payload.get("events", []), payload.get("supersessions", [])) == cid
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #1727 Slice 2 (Task 11) — server-enforced consent + Session.harness +
+# idempotency + per-harness receipts (hosted POST /v1/sessions).
+#
+# The SDK-level tests above exercise capture_session directly (no consent
+# gate — the gate is hosted-only). These tests drive the HOSTED endpoint with
+# a TestClient against a temp embedded DB (the test_hosted_api pattern: SDK
+# init patched so registry + team graphs share one temp DB).
+# ═══════════════════════════════════════════════════════════════════════════
+
+import tempfile
+
+from fastapi.testclient import TestClient  # noqa: I001
+
+from tortoise import hosted_api as _ha
+from tortoise.hosted_api import app, get_current_team
+
+_CONSENT_TEAM = {
+    "team_id": "team-1727-consent", "tier": "free", "key_id": "k-1727",
+    "max_points": 100000,
+}
+
+
+def _patch_sdk_to_temp(tmp_path):
+    """Force every TortoiseSDK construction to one temp embedded DB."""
+    orig_init = _ha.TortoiseSDK.__init__
+
+    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
+        orig_init(self, db_path=str(tmp_path / "c.db"), namespace=namespace)
+
+    _ha.TortoiseSDK.__init__ = _patched
+    return orig_init
+
+
+@pytest.fixture()
+def consent_client(tmp_path, monkeypatch):
+    """Hosted TestClient for the consent/harness/receipt surface.
+
+    The team starts UN-OPTED (consent off — the fixture does not seed
+    session_recording); tests opt in via seeding state directly. The Team
+    node is PROVISIONED first — the registry state writer is a MATCH...SET
+    (silent no-op without the node), mirroring the production provision path.
+    TORTOISE_SESSION_LLM_MOCK=1 satisfies the provider gate.
+    """
+    orig_init = _patch_sdk_to_temp(tmp_path)
+    _ha._FALLBACK_KEEPALIVE.clear()
+    app.dependency_overrides[get_current_team] = lambda: dict(_CONSENT_TEAM)
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    _provision_team(_CONSENT_TEAM["team_id"])
+    try:
+        with TestClient(app) as tc:
+            yield tc
+    finally:
+        app.dependency_overrides.clear()
+        _ha.TortoiseSDK.__init__ = orig_init
+        _ha._FALLBACK_KEEPALIVE.clear()
+
+
+def _provision_team(team_id: str) -> None:
+    """Create the registry Team node (onboarding state lives on it)."""
+    _ha._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": team_id, "st": "{}"},
+    )
+
+
+def _opt_in(team_id: str = _CONSENT_TEAM["team_id"], enabled: bool = True):
+    _ha._update_onboarding_state(team_id, session_recording=enabled)
+
+
+def _state(team_id: str = _CONSENT_TEAM["team_id"]) -> dict:
+    return _ha._get_onboarding_state(team_id)
+
+
+def _graph(team_id: str = _CONSENT_TEAM["team_id"]):
+    return _ha._make_sdk(namespace=team_id)._get_proj()
+
+
+def _session_count(team_id: str = _CONSENT_TEAM["team_id"]) -> int:
+    rows = _graph(team_id).g.query(
+        "MATCH (s:Session) RETURN count(s)").result_set
+    return int(rows[0][0])
+
+
+_CONV = [{"role": "user", "content": "we decided to ship the memory capture slice"},
+         {"role": "assistant", "content": "agree — the consent gate is the P0"},
+         {"role": "user", "content": "ok"}]
+
+
+def test_unopted_403_valid_harness(consent_client):
+    """Task 11: un-opted team POST with a VALID harness → 403, checked FIRST
+    (before provider/quota), and NO Session node is written."""
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude"})
+    assert r.status_code == 403, r.text
+    assert "not enabled" in r.json()["detail"]
+    assert _session_count() == 0, "no write for an un-opted team"
+
+
+def test_opted_200_and_harness_persisted(consent_client):
+    """Task 11: opted team → 200; Session.harness persisted graph-side."""
+    _opt_in()
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "codex"})
+    assert r.status_code == 200, r.text
+    rows = _graph().g.query(
+        "MATCH (s:Session) RETURN s.id, s.harness").result_set
+    assert len(rows) == 1
+    assert rows[0][1] == "codex", f"harness not persisted: {rows}"
+
+
+def test_harness_none_never_erases_stored_value(consent_client):
+    """Task 11 (set-only-when-present): a re-POST without harness must NEVER
+    erase a stored harness value."""
+    _opt_in()
+    r1 = consent_client.post("/v1/sessions",
+                             json={"conversation": _CONV, "harness": "pi",
+                                   "session_id": "s-harness-keep"})
+    assert r1.status_code == 200, r1.text
+    r2 = consent_client.post("/v1/sessions",
+                             json={"conversation": _CONV,
+                                   "session_id": "s-harness-keep"})
+    assert r2.status_code == 200, r2.text
+    rows = _graph().g.query(
+        "MATCH (s:Session {id:'s-harness-keep'}) RETURN s.harness").result_set
+    assert rows[0][0] == "pi", f"harness erased by harness-less re-POST: {rows}"
+
+
+def test_invalid_harness_422_opted_team(consent_client):
+    """Task 11 (P2): invalid harness on an OPTED team → 422, no write. The
+    invalid value must be visible (never a silent drop or a 200)."""
+    _opt_in()
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "vim"})
+    assert r.status_code == 422, r.text
+    assert "harness" in json.dumps(r.json()["detail"]).lower()
+    assert _session_count() == 0, "invalid harness must not write"
+
+
+def test_repost_same_session_id_zero_new(consent_client):
+    """Task 11 (T2-P2c): re-POST of the same session_id mints ZERO new
+    nodes for Session + turn Points, and extraction is skipped (mode
+    'replayed') — the M2/v2 extracted points are not deterministically keyed,
+    so they are not in scope."""
+    _opt_in()
+    payload = {"conversation": _CONV, "session_id": "s-idem-1727",
+               "harness": "claude"}
+    r1 = consent_client.post("/v1/sessions", json=payload)
+    assert r1.status_code == 200, r1.text
+    g = _graph()
+    s1 = _session_count()
+    t1 = g.g.query("MATCH (t:Point {pointKind:'event'}) RETURN count(t)"
+                   ).result_set[0][0]
+    ev1 = g.g.query("MATCH (e:Event {eventKind:'sessionCaptured'}) "
+                    "RETURN count(e)").result_set[0][0]
+    r2 = consent_client.post("/v1/sessions", json=payload)
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["extraction_mode"] == "replayed", r2.json()
+    assert r2.json()["extracted"] == 0, r2.json()
+    assert _session_count() == s1, "Session count changed on re-POST"
+    t2 = g.g.query("MATCH (t:Point {pointKind:'event'}) RETURN count(t)"
+                   ).result_set[0][0]
+    assert t2 == t1, f"turn Points grew on re-POST: {t1} -> {t2}"
+    ev2 = g.g.query("MATCH (e:Event {eventKind:'sessionCaptured'}) "
+                    "RETURN count(e)").result_set[0][0]
+    assert ev2 == ev1, f"sessionCaptured Events grew on re-POST: {ev1} -> {ev2}"
+    # Exactly one Session node — convergence (T1-P3).
+    assert _session_count() == 1
+
+
+def test_receipt_requires_durable_data(consent_client):
+    """Task 11 (T1-P12): the receipt is set ONLY on a 2xx — the data is
+    durable at that point. A receipt-PATCH failure must never report a
+    receipt; the retry with the same session_id converges to ONE Session."""
+    _opt_in()
+    calls = {"receipt_writes": 0}
+
+    real_update = _ha._update_onboarding_state
+
+    def failing_update(team_id, **fields):
+        if any(k.startswith("session_capture_receipt") for k in fields):
+            calls["receipt_writes"] += 1
+            raise RuntimeError("simulated receipt PATCH failure")
+        return real_update(team_id, **fields)
+
+    import tortoise.hosted_api as ha_mod
+    ha_mod._update_onboarding_state = failing_update
+    try:
+        r1 = consent_client.post("/v1/sessions",
+                                 json={"conversation": _CONV,
+                                       "session_id": "s-receipt-1727"})
+        # The capture itself 200s (the mutation happened); the receipt write
+        # failed — the response still carries the session.
+        assert r1.status_code == 200, r1.text
+        assert calls["receipt_writes"] == 1
+    finally:
+        ha_mod._update_onboarding_state = real_update
+    # Retry with the same session_id → converges to exactly one Session.
+    r2 = consent_client.post("/v1/sessions",
+                             json={"conversation": _CONV,
+                                   "session_id": "s-receipt-1727"})
+    assert r2.status_code == 200, r2.text
+    assert _session_count() == 1, "receipt-failure retry must converge"
+    assert _state().get("session_capture_receipt_claude") is None
+    assert _state().get("session_capture_receipt") is not None, \
+        "bare receipt written on the converged 2xx (harness-less retry)"
+
+
+def test_receipt_2xx_only_and_last_error_lifecycle(consent_client, monkeypatch):
+    """Task 11 (T1-P12 + cycle-4 P1-2): receipt set ONLY on 2xx; per-harness
+    last-error set on non-2xx and CLEARED on 2xx."""
+    _opt_in()
+    # non-2xx: no provider (mock seam off AND no real keys) → 503 →
+    # last_error set, no receipt
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude"})
+    assert r.status_code == 503, r.text
+    st = _state()
+    assert st.get("session_capture_last_error_claude"), \
+        "503 must set session_capture_last_error_claude"
+    assert st.get("session_capture_receipt_claude") is None, \
+        "no receipt on a non-2xx"
+    # 2xx: mock seam back on → receipt set, last_error cleared
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    r2 = consent_client.post("/v1/sessions",
+                             json={"conversation": _CONV, "harness": "claude"})
+    assert r2.status_code == 200, r2.text
+    st2 = _state()
+    assert st2.get("session_capture_receipt_claude"), \
+        "2xx must set the per-harness receipt"
+    assert st2.get("session_capture_last_error_claude") is None, \
+        "2xx must clear the per-harness last error"
+
+
+def test_decline_clears_consent_403(consent_client):
+    """Task 11 (T1-P8 + T2-P2e): after a decline (session_recording=False),
+    POST → 403 while EXISTING Sessions stay untouched."""
+    _opt_in()
+    r1 = consent_client.post("/v1/sessions",
+                             json={"conversation": _CONV,
+                                   "session_id": "s-decline-1727"})
+    assert r1.status_code == 200, r1.text
+    assert _session_count() == 1
+    # decline (re-ask NO / Q3 no writes the same keys)
+    _opt_in(enabled=False)
+    r2 = consent_client.post("/v1/sessions",
+                             json={"conversation": _CONV,
+                                   "session_id": "s-decline-1727"})
+    assert r2.status_code == 403, r2.text
+    # existing Sessions untouched — the decline must not delete captures
+    assert _session_count() == 1, \
+        "decline must never remove already-captured sessions"
+
+
+def test_legacy_true_grandfathered_200(consent_client):
+    """Task 11: legacy session_recording=True (pre-resolution teams) is
+    GRANDFATHERED as consent — the gate reads the flag, so a legacy-True team
+    captures fine until the re-ask resolves (Slice 3)."""
+    _opt_in(enabled=True)  # same flag a legacy team would carry
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV})
+    assert r.status_code == 200, r.text
+    assert _session_count() == 1
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #1727 Slice 2 (Task 12) — session → entity linking (aboutObject).
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _object(proj, oid: str, name: str):
+    proj.apply({"type": "ObjectRegistered", "id": oid, "name": name,
+                "object_kind": "pm:issue", "title": name})
+
+
+def _link_edges(proj, label: str, sid: str) -> set:
+    rows = proj.g.query(
+        f"MATCH (s:{label} {{id:$sid}})-[:aboutObject]->(o:Object) "
+        "RETURN o.id", params={"sid": sid}).result_set
+    return {r[0] for r in rows}
+
+
+def test_session_links_full_url_form(consent_client):
+    """Task 12: github.com/{org}/{repo}/issues/{n} in the conversation links
+    the Session + the matching turn Point via aboutObject; counters tracked."""
+    from tortoise.session_link import extract_refs
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue-test/repo-42", "test/repo#42")
+    conv = [{"role": "user",
+             "content": "we should fix github.com/test/repo/issues/42 first"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-url"})
+    assert r.status_code == 200, r.text
+    # Session: all-matches (1 target). The turn Point that mentioned it
+    # carries the first-match link.
+    assert _link_edges(proj, "Session", "s-link-url") == {"github-issue-test/repo-42"}
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'s-link-url'}) "
+        "RETURN s.entity_links_attempted, s.entity_links_created").result_set
+    assert rows[0][0] >= 1, f"attempted not tracked: {rows}"
+    assert rows[0][1] >= 1, f"created not tracked: {rows}"
+    # The trigger regex itself is pinned (unit-level).
+    refs = extract_refs("see github.com/acme/web/issues/7 now")
+    assert refs == [{"org": "acme", "repo": "web", "num": "7", "form": "url"}]
+
+
+def test_session_links_repo_num_and_bare_num_forms(consent_client):
+    """Task 12: {repo}#{n} (name-suffix) and bare #n (guarded) forms link;
+    the bare-#n false-positive guard rejects C#42 / v#42 / dir/42."""
+    from tortoise.session_link import extract_refs
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue-acme/tortoise-12", "acme/tortoise#12")
+    _object(proj, "github-issue-acme/other-7", "acme/other#7")
+    conv = [{"role": "assistant",
+             "content": "tortoise#12 is the blocker; other#7 too"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-repo"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-repo") == {
+        "github-issue-acme/tortoise-12", "github-issue-acme/other-7"}
+    # Guard: the bare-#n false-positive guard rejects #n preceded by alnum
+    # or slash — `docs/#42` never matches, and inside `C#42` the bare form
+    # does NOT fire (only the {repo}#{n} form, which is legitimately
+    # ambiguous for single-letter repos — resolution still no-ops without a
+    # matching Object).
+    assert extract_refs("docs/#42") == []
+    assert all(r["form"] != "bare_num" for r in extract_refs("C#42"))
+    assert extract_refs("C#42 is a language") == [
+        {"repo": "C", "num": "42", "form": "repo_num"}]
+    # Guarded bare #n (whitespace/start-of-line preceded) matches.
+    refs = extract_refs("fix #42 now")
+    assert any(r["form"] == "bare_num" and r["num"] == "42" for r in refs)
+
+
+def test_session_links_cross_org_ambiguous_no_link(consent_client):
+    """Review PR #1827: an org-ambiguous ref (#n / {repo}#{n}) links ONLY
+    when EXACTLY ONE Object matches — the same bare #42 or tortoise#12 can
+    exist in every org, so multiple matches are an honest no-match (never a
+    fabricated aboutObject edge)."""
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue-acme/tortoise-12", "acme/tortoise#12")
+    _object(proj, "github-issue-other/tortoise-12", "other/tortoise#12")
+    conv = [{"role": "user",
+             "content": "tortoise#12 is in two orgs — see also #12"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-ambig"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-ambig") == set(), \
+        "ambiguous suffix must not fabricate aboutObject edges"
+
+
+def test_session_links_first_match_per_point_all_for_session(consent_client):
+    """Task 12: the SESSION links all matches; each turn POINT links only its
+    FIRST match (pinned trigger rule)."""
+    _opt_in()
+    proj = _graph()
+    _object(proj, "github-issue-test/repo-1", "test/repo#1")
+    _object(proj, "github-issue-test/repo-2", "test/repo#2")
+    conv = [{"role": "user",
+             "content": "test/repo#1 and test/repo#2 are both in flight"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-first"})
+    assert r.status_code == 200, r.text
+    sid = r.json()["session_id"]
+    assert _link_edges(proj, "Session", sid) == {
+        "github-issue-test/repo-1", "github-issue-test/repo-2"}
+    # The single turn point links only the FIRST ref (#1).
+    turn_edges = _link_edges(proj, "Point", f"{sid}_t0")
+    assert turn_edges == {"github-issue-test/repo-1"}, turn_edges
+
+
+def test_session_links_no_match_honest(consent_client):
+    """Task 12: no references in the conversation ⇒ no links, no counters,
+    no error — honest no-match (nothing fabricated)."""
+    _opt_in()
+    proj = _graph()
+    conv = [{"role": "user", "content": "plain chit-chat with no refs"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-none"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-none") == set()
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'s-link-none'}) "
+        "RETURN s.entity_links_attempted, s.entity_links_created").result_set
+    assert rows[0][0] is None and rows[0][1] is None, \
+        f"counters must stay unset on no-match: {rows}"
+
+
+def test_session_links_resolve_after_index(consent_client):
+    """Task 12 (T1-P15): a session captured BEFORE the entity existed carries
+    no link; the index-completion re-link pass resolves it (resolve-to-current
+    by stable Object id)."""
+    _opt_in()
+    proj = _graph()
+    conv = [{"role": "user",
+             "content": "ship github.com/test/repo/issues/99 this week"}]
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": conv, "harness": "claude",
+                                  "session_id": "s-link-late"})
+    assert r.status_code == 200, r.text
+    assert _link_edges(proj, "Session", "s-link-late") == set(), \
+        "no entity yet — honest no-match at capture time"
+    # Index lands → entity materializes → re-link resolves.
+    _object(proj, "github-issue-test/repo-99", "test/repo#99")
+    _ha._relink_sessions_after_index(_CONSENT_TEAM["team_id"])
+    assert _link_edges(proj, "Session", "s-link-late") == \
+        {"github-issue-test/repo-99"}, "re-link on index completion must resolve"
+    rows = proj.g.query(
+        "MATCH (s:Session {id:'s-link-late'}) "
+        "RETURN s.entity_links_attempted, s.entity_links_created").result_set
+    assert rows[0][1] >= 1, f"counters updated after re-link: {rows}"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #1727 Slice 2 (Task 13) — tortoise_session_capture MCP tool.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp"):
+    """Set the MCP auth ContextVars (hosted-tenant shape) + provision/opt the
+    team, so the tool's hosted pipeline runs against the temp DB."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _ctx():
+        from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+                                       _transport_mode)
+        monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        orig_init = _patch_sdk_to_temp(tmp_path)
+        _ha._FALLBACK_KEEPALIVE.clear()
+        _provision_team(team_id)
+        _ha._update_onboarding_state(team_id, session_recording=True)
+        tok_t = _current_team_id.set(team_id)
+        tok_l = _current_team_limits.set(
+            {"team_id": team_id, "tier": "free", "max_points": 100000})
+        tok_m = _transport_mode.set("http")
+        try:
+            yield team_id
+        finally:
+            _current_team_id.reset(tok_t)
+            _current_team_limits.reset(tok_l)
+            _transport_mode.reset(tok_m)
+            _ha.TortoiseSDK.__init__ = orig_init
+            _ha._FALLBACK_KEEPALIVE.clear()
+
+    return _ctx()
+
+
+def test_session_capture_tool_registered_and_invokeable(tmp_path, monkeypatch):
+    """Task 13: the tool is registered in the registry AND invokeable with
+    TORTOISE_SESSION_LLM_MOCK=1 — a real capture through the MCP surface
+    (Session + receipt)."""
+    from tortoise.mcp_server import tortoise_session_capture
+    with _mcp_team_context(tmp_path, monkeypatch):
+        result = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-mcp-1727")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+    assert result.get("session_id") == "s-mcp-1727", result
+    assert "error" not in result, result
+    assert result.get("turns") == len(_CONV)
+    assert st.get("session_capture_receipt_claude"), \
+        "MCP capture must set the per-harness receipt"
+
+
+def test_session_capture_tool_unopted_403(tmp_path, monkeypatch):
+    """Task 13: the MCP tool carries the SAME consent gate — an un-opted
+    team gets the honest 403-style error, never a silent capture."""
+    from tortoise.mcp_auth import _current_team_id, _current_team_limits
+    from tortoise.mcp_server import tortoise_session_capture
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    orig_init = _patch_sdk_to_temp(tmp_path)
+    _ha._FALLBACK_KEEPALIVE.clear()
+    _provision_team("team-1727-mcp-opt")  # provisioned but NOT opted in
+    tok_t = _current_team_id.set("team-1727-mcp-opt")
+    tok_l = _current_team_limits.set(
+        {"team_id": "team-1727-mcp-opt", "tier": "free", "max_points": 100000})
+    try:
+        result = tortoise_session_capture(conversation=_CONV, harness="pi")
+        st = _ha._get_onboarding_state("team-1727-mcp-opt")
+    finally:
+        _current_team_id.reset(tok_t)
+        _current_team_limits.reset(tok_l)
+        _ha.TortoiseSDK.__init__ = orig_init
+        _ha._FALLBACK_KEEPALIVE.clear()
+    assert result.get("status") == 403, result
+    assert "not enabled" in result.get("error", ""), result
+    assert st.get("session_capture_last_error_pi"), \
+        "un-opted MCP attempt must record the per-harness last error"
+    assert st.get("session_capture_receipt_pi") is None
+
+
+def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
+    """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
+    mode' error — no local fallback that bypasses the gates."""
+    from tortoise.mcp_auth import _current_team_id, SELFHOST_TEAM_ID
+    from tortoise.mcp_server import tortoise_session_capture
+    tok = _current_team_id.set(SELFHOST_TEAM_ID)
+    try:
+        result = tortoise_session_capture(conversation=_CONV, harness="claude")
+    finally:
+        _current_team_id.reset(tok)
+    assert "error" in result, result
+    assert "hosted mode" in result["error"], result

@@ -34,3 +34,31 @@ raise SystemExit(main(['context']))
 else
   tortoise context 2>/dev/null || exit 0
 fi
+
+# #1727 Slice 2 (Task 14, T2-P1): install-probe beacon.
+#
+# The dashboard cannot stat the user's filesystem — "is the capture hook
+# installed?" is answered by a probe the installed artifact itself fires:
+# POST /v1/sessions/install-probe with the harness name (harness + timestamp
+# ONLY — zero conversation content), recording install_probe_claude on the
+# team's onboarding state. The server is reached via the .tortoise config's
+# TORTOISE_API_URL (self-hosted routing pin — never a hardcoded hosted host).
+# Best-effort: no config / unreachable API → exit 0 silently (the session
+# start digest must never be blocked by the probe). The probe is NOT
+# consent-gated — it's install telemetry; the dashboard reads it for the
+# off → install-pending → waiting → active 4-state before/independent of
+# consent.
+TORTOISE_BIN="$(command -v tortoise || true)"
+if [ -n "$TORTOISE_BIN" ]; then
+  "$TORTOISE_BIN" session probe --harness claude >/dev/null 2>&1 || true
+else
+  PYTHON_BIN="$(command -v python3 || true)"
+  if [ -n "$PYTHON_BIN" ] && [ -d "$TORTOISE_MODULE/tortoise" ]; then
+    "$PYTHON_BIN" -c "
+import sys
+sys.path.insert(0, '$TORTOISE_MODULE')
+from tortoise.__main__ import main
+raise SystemExit(main(['session', 'probe', '--harness', 'claude']))
+" >/dev/null 2>&1 || true
+  fi
+fi

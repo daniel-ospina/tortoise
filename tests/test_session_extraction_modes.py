@@ -198,6 +198,7 @@ def client(monkeypatch):
     the LLM path runs with zero network.
     """
     from fastapi.testclient import TestClient  # noqa: I001
+    import tortoise.hosted_api as ha_mod  # noqa: I001
     from tortoise.hosted_api import app, get_current_team
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -207,6 +208,14 @@ def client(monkeypatch):
         }
         _orig_init = _patch_tortoise_sdk_init(db_path)
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+        # #1727 (Task 11): the consent gate 403s un-opted teams FIRST — opt
+        # this team in so the gate-order tests (503/422/200) reach their gates.
+        # Provision the Team node first (the state writer is MATCH...SET).
+        ha_mod._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (t:Team {id:$id, onboarding_state:$st})",
+            params={"id": "test-team-722", "st": "{}"},
+        )
+        ha_mod._update_onboarding_state("test-team-722", session_recording=True)
         try:
             with TestClient(app) as tc:
                 yield tc

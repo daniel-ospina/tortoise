@@ -90,9 +90,9 @@ class TestRegistryEquivalence:
         + 1 #405 (tortoise_validate_domain) + 1 #438 (find_cross_lens_candidates)
         + 1 #348 (tortoise_audit) + 1 #318 (tortoise_packs_list)
         + 1 #1249 (tortoise_dream_health_check) + 1 #1353
-        (tortoise_expand_relationships)."""
+        (tortoise_expand_relationships) + 1 #1727 (tortoise_session_capture)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 94, f"Expected 94, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 95, f"Expected 95, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
@@ -161,6 +161,18 @@ class TestCurationGroups:
         from tortoise.tool_registry import TOOL_REGISTRY
         entry = next(t for t in TOOL_REGISTRY if t.name == "tortoise_events_poll")
         assert entry.group == "sessions", f"got {entry.group}"
+
+    def test_session_capture_tool_grouped_sessions(self):
+        """#1727 (Task 13): tortoise_session_capture groups under "sessions"
+        (else it falls to the implicit "memory" default and is filtered out
+        of sessions-group surfaces)."""
+        from tortoise.tool_registry import TOOL_REGISTRY, tools_by_group
+        entry = next(t for t in TOOL_REGISTRY
+                     if t.name == "tortoise_session_capture")
+        assert entry.group == "sessions", f"got {entry.group}"
+        assert entry.http_policy is True, "must be exposed on HTTP surfaces"
+        assert any(t.name == "tortoise_session_capture"
+                   for t in tools_by_group("sessions"))
 
     def test_groups_reachable_via_helpers(self):
         """tools_by_group / tool_groups expose the corrected groups (#523)."""
