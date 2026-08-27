@@ -1,0 +1,255 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --radius: 0.5rem;
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  html {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  ::selection {
+    background: rgba(6, 182, 212, 0.3);
+  }
+
+  /* Tortoise mono accents (site tokens) */
+  .font-mono {
+    font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  }
+
+  /* Thin dark scrollbars (editor card) */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #1e293b transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  *::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 4px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+/* ── TipTap editor (Google-Docs feel, tortoise theme) ─────────────────── */
+
+.ProseMirror {
+  min-height: 380px;
+  outline: none;
+  font-size: 15px;
+  line-height: 1.7;
+  color: #cbd5e1;
+}
+
+.ProseMirror p {
+  margin: 0.5em 0;
+}
+
+.ProseMirror h1,
+.ProseMirror h2,
+.ProseMirror h3,
+.ProseMirror h4 {
+  font-family: Georgia, Cambria, 'Times New Roman', serif;
+  color: #e2e8f0;
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 1.2em 0 0.4em;
+}
+
+.ProseMirror h1 { font-size: 1.75em; }
+.ProseMirror h2 { font-size: 1.4em; }
+.ProseMirror h3 { font-size: 1.2em; }
+.ProseMirror h4 { font-size: 1.05em; }
+
+.ProseMirror a {
+  color: #06b6d4;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.ProseMirror ul,
+.ProseMirror ol {
+  padding-left: 1.4em;
+  margin: 0.5em 0;
+}
+.ProseMirror ul { list-style: disc; }
+.ProseMirror ol { list-style: decimal; }
+.ProseMirror li { margin: 0.25em 0; }
+.ProseMirror li > p { margin: 0.15em 0; }
+
+.ProseMirror blockquote {
+  border-left: 3px solid #06b6d4;
+  padding-left: 1em;
+  margin: 0.75em 0;
+  color: #94a3b8;
+  font-style: italic;
+}
+
+.ProseMirror pre {
+  background: #04080f;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 12px 14px;
+  overflow-x: auto;
+  margin: 0.75em 0;
+}
+.ProseMirror pre code {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  color: #cbd5e1;
+  background: none;
+  padding: 0;
+}
+
+.ProseMirror code:not(pre code) {
+  font-family: 'SF Mono', 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace;
+  font-size: 0.85em;
+  background: rgba(255, 255, 255, 0.08);
+  padding: 1px 5px;
+  border-radius: 4px;
+  color: #7dd3fc;
+}
+
+.ProseMirror table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75em 0;
+}
+.ProseMirror th {
+  background: rgba(18, 34, 61, 0.6);
+  font-weight: 600;
+}
+.ProseMirror td,
+.ProseMirror th {
+  border: 1px solid #1e293b;
+  padding: 6px 10px;
+}
+
+.ProseMirror hr {
+  border: none;
+  border-top: 1px solid #1e293b;
+  margin: 1.5em 0;
+}
+
+.ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: #475569;
+  pointer-events: none;
+  height: 0;
+}
+
+.ProseMirror img.ProseMirror-selectednode {
+  outline: 2px solid #06b6d4;
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* ── Block drag handles (ported from ElDato, tortoise tokens) ──────────── */
+
+.block-drag-handle-wrapper {
+  height: 0;
+  overflow: visible;
+  position: relative;
+  line-height: 0;
+  pointer-events: none;
+}
+
+.block-drag-handle {
+  position: absolute;
+  left: -28px;
+  top: 0.25em;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.3;
+  cursor: grab;
+  transition: opacity 0.15s ease;
+  user-select: none;
+  border-radius: 4px;
+  color: #64748b;
+  z-index: 10;
+  pointer-events: auto;
+}
+
+.block-drag-handle:hover {
+  opacity: 1 !important;
+  background: #12223d;
+}
+
+.block-drag-handle:active {
+  cursor: grabbing;
+}
+
+/* Drop indicator — horizontal line between blocks for reorder */
+.block-drop-indicator-horizontal {
+  height: 2px;
+  background: #06b6d4;
+  border-radius: 1px;
+  margin: -1px 0;
+  pointer-events: none;
+}
+
+/* Block context menu (shown on handle click) */
+.block-context-menu {
+  position: absolute;
+  background: #0b1220;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  padding: 4px;
+  min-width: 120px;
+  z-index: 50;
+}
+
+.block-context-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  color: #cbd5e1;
+  transition: background 0.1s;
+}
+
+.block-context-menu-item:hover {
+  background: #12223d;
+}
+
+.block-context-menu-item-danger {
+  color: #f87171;
+}
+
+.block-context-menu-item-danger:hover {
+  background: rgba(248, 113, 113, 0.1);
+}
+
+/* Hide drag handles on touch devices (long-press reorder not implemented) */
+@media (max-width: 768px) {
+  .block-drag-handle {
+    display: none !important;
+  }
+}
