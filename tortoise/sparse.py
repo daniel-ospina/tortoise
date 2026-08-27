@@ -128,8 +128,10 @@ def build_or_query(query: str, *, max_terms: int = DEFAULT_MAX_OR_TERMS) -> str:
     (``meet\\*``), not a RediSearch operator, so those shapes intentionally
     drop FTS recall (the index never contains the literal operator text).
     Deliberate, version-safe tradeoff: the blanket 21-char escape set is a
-    superset of the 12 empirically crash-inducing chars (a future engine
-    dialect could reject others), so escaping all of them is dialect-safe.
+    superset of the empirically crash-inducing chars (10:00→offset 2,
+    @speed→offset 0, {urgent}→offset 0, 100%→offset 3, [x]→offset 0,
+    ;→offset 4 — #1791 revalidation log); a future engine dialect could
+    reject others, so escaping all of them is dialect-safe.
     ``max_terms=0`` would produce an empty OR-union (the #1791 crash class —
     "Syntax error at offset 0"); NEGATIVE caps are treated as degenerate
     inputs (escaped-raw) rather than the ``tokens[:-1]`` slice behavior they
