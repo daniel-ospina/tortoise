@@ -364,6 +364,8 @@ surfaces:
   # untouched; real-model smoke subsets skip without the cached bge-small
   # embedder (pytest.importorskip + timeout markers).
   - test_chain_enforcer.py
+  - test_kind_index.py
+  - test_kind_eval_set.py
   eval:
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py

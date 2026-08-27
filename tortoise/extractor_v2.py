@@ -267,32 +267,73 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     return selected or dict(pack_kinds)  # nothing matched → all (safe)
 
 
+def _stable_hash(s: str) -> int:
+    """Deterministic 64-bit hash for the A′ label-order seed (Task 2,
+    #1695): same story → same seed → same shuffle order across paired
+    re-runs (the A′ diagnostic compares bit-level agreement)."""
+    import hashlib
+    return int(hashlib.sha256((s or "").encode("utf-8")).hexdigest()[:16], 16)
+
+
+def _label_order_rng(story: str | None = None):
+    """A′ (#1695 Task 2): the kind-list shuffle RNG — the label-order
+    randomization mitigation (Fantastically Ordered Prompts) and the A′
+    diagnostic hook. OFF by default (``TORTOISE_LABEL_ORDER`` unset →
+    None → byte-identical renders). ``TORTOISE_LABEL_ORDER=shuffle`` enables
+    a deterministic per-call seeded shuffle: the seed is the env override
+    ``TORTOISE_LABEL_ORDER_SEED`` (int) or a hash of the story (same story
+    → same order, so a paired fresh canonical re-run compares the SAME
+    sessions under a different order)."""
+    import os
+    import random
+    if os.environ.get("TORTOISE_LABEL_ORDER", "").strip() != "shuffle":
+        return None
+    seed_raw = os.environ.get("TORTOISE_LABEL_ORDER_SEED", "").strip()
+    if seed_raw:
+        try:
+            return random.Random(int(seed_raw))
+        except ValueError:
+            import warnings
+            warnings.warn(
+                f"invalid TORTOISE_LABEL_ORDER_SEED={seed_raw!r} — falling "
+                "back to the story-derived seed", stacklevel=2)
+    return random.Random(_stable_hash(story))
+
+
 def _render_master(master: dict, story: str | None = None) -> str:
     import os
+    rng = _label_order_rng(story)
     if os.environ.get("TORTOISE_EXTRACTOR_PROMPT", "").strip() == "compact":
-        return _render_master_compact(master, story)
-    return _render_master_verbose(master)
+        return _render_master_compact(master, story, rng)
+    return _render_master_verbose(master, rng)
 
 
-def _render_master_compact(master: dict, story: str | None) -> str:
+def _render_master_compact(master: dict, story: str | None,
+                           rng=None) -> str:
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list. Do NOT mint kinds.",
     ]
 
-    def _group(title: str, d: dict) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
         out = [f"\n{title}"]
-        for k, v in d.items():
+        for k in keys:
+            v = d[k]
             out.append(f"- {k}" if not _needs_gloss(k, v) else f"- {k} — {v}")
         return "\n".join(out)
 
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
     selected = _select_pack_kinds(story, master["pack_kinds"])
-    lines.append(_group("PACK KINDS", selected))
-    # granularity: matched-domain subsections only (compact)
+    lines.append(_group("PACK KINDS", selected, shuffle=True))
+    # granularity: matched-domain subsections only (compact). Hint blocks
+    # (memory granularity, user-personal-state, carve-out) are EXCLUDED from
+    # the shuffle — only the kind vocabulary randomizes.
     g = master.get("memory_granularity") or {}
     if story:
         low = story.lower()
@@ -304,7 +345,7 @@ def _render_master_compact(master: dict, story: str | None) -> str:
     return "\n".join(lines)
 
 
-def _render_master_verbose(master: dict) -> str:
+def _render_master_verbose(master: dict, rng=None) -> str:
     lines = [
         "MASTER LIST — the closed vocabulary. EVERY kind you emit MUST come "
         "from this list (namespaced or bare form). Do NOT mint kinds: "
@@ -312,16 +353,20 @@ def _render_master_verbose(master: dict) -> str:
         "to the nearest listed kind or drop the item.",
     ]
 
-    def _group(title: str, d: dict) -> str:
+    def _group(title: str, d: dict, shuffle: bool = False) -> str:
+        keys = list(d)
+        if shuffle and rng is not None:
+            rng.shuffle(keys)
         out = [f"\n{title}"]
-        out += [f"- {k} — {v}" for k, v in d.items()]
+        out += [f"- {k} — {d[k]}" for k in keys]
         return "\n".join(out)
 
-    lines.append(_group("OBJECTS (core)", master["objects"]))
-    lines.append(_group("SUBJECTS (core)", master["subjects"]))
-    lines.append(_group("POINTS", master["points"]))
-    lines.append(_group("EVENTS", master["events"]))
-    lines.append(_group("PACK KINDS (from the installed packs)", master["pack_kinds"]))
+    lines.append(_group("OBJECTS (core)", master["objects"], shuffle=True))
+    lines.append(_group("SUBJECTS (core)", master["subjects"], shuffle=True))
+    lines.append(_group("POINTS", master["points"], shuffle=True))
+    lines.append(_group("EVENTS", master["events"], shuffle=True))
+    lines.append(_group("PACK KINDS (from the installed packs)",
+                        master["pack_kinds"], shuffle=True))
 
     lines.append("\nCHAINS (the business logic of mapping)")
     for name, c in master["chains"].items():
@@ -913,10 +958,15 @@ def run_s2(model, story: str, master: dict | None = None, *,
     or unparseable response raises ``_ParseError`` → census ``parse_error``
     (the tail-cut tolerance of ``_parse_json`` still recovers truncated
     JSON; the census records the truncation for the fix loop). S2 retries
-    once on parse failure (``_complete_parsed`` — pilot #1549 fix)."""
+    once on parse failure (``_complete_parsed`` — pilot #1549 fix).
+
+    ``story`` threads into the render (A′ #1695 Task 2): the label-order
+    shuffle seed derives from the story, so a paired canonical re-run under
+    a different order reproduces the SAME session — and compact-mode pack
+    selection matches S4's (both render with the story)."""
     return _complete_parsed(model,
                             render_s2_prompt(master, session_date=session_date,
-                                             edus=edus),
+                                             edus=edus, story=story),
                             "S1 STORY:\n" + story,
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
                             stats=stats)

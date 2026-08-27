@@ -1780,6 +1780,84 @@ class TestOrchestrator:
                         {"role": "assistant", "content": "consider interval training"}]
 
 
+# ── A′ (#1695 Task 2): label-order randomization hook ────────────────────
+
+# The canonical kind order (insertion order of build_master_list) — the
+# golden the env-unset render must match byte-for-byte.
+def _canonical_verbose_render():
+    return v2._render_master_verbose(v2.build_master_list())
+
+
+class TestLabelOrder:
+    def test_env_unset_default_order_byte_identical(self, monkeypatch):
+        """Regression pin: TORTOISE_LABEL_ORDER unset → the render is
+        byte-identical to the canonical (pre-shuffle) order, through the
+        _render_master dispatcher."""
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER", raising=False)
+        monkeypatch.delenv("TORTOISE_LABEL_ORDER_SEED", raising=False)
+        assert v2._label_order_rng("any story") is None
+        assert v2._render_master(v2.build_master_list()) == _canonical_verbose_render()
+
+    def test_seeded_shuffle_deterministic_per_story(self, monkeypatch):
+        """Same story → same seeded shuffle; different story → different
+        order (the A′ paired re-run contract)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        m = v2.build_master_list()
+        r1 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        r2 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        assert r1 == r2, "same story must reproduce the same kind order"
+        r3 = v2._render_master_verbose(m, v2._label_order_rng("story B"))
+        keys = lambda r: [ln for ln in r.split("\n") if ln.startswith("- core:")]  # noqa: E731
+        assert keys(r1) != keys(r3), "different stories must shuffle differently"
+        assert len(keys(r1)) == len(keys(r3))
+
+    def test_env_seed_override_deterministic_across_stories(self, monkeypatch):
+        """TORTOISE_LABEL_ORDER_SEED pins the order across stories (the
+        A/B's per-arm order confound control)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER_SEED", "7")
+        m = v2.build_master_list()
+        r1 = v2._render_master_verbose(m, v2._label_order_rng("story A"))
+        r2 = v2._render_master_verbose(m, v2._label_order_rng("story B"))
+        assert r1 == r2, "the env seed overrides the story-derived seed"
+
+    def test_shuffle_reorders_kind_groups_only(self, monkeypatch):
+        """Only the KIND vocabulary randomizes — hint blocks (chains,
+        user-personal-state, memory-granularity, carve-out) keep their
+        canonical positions (byte-identical outside the kind groups)."""
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        m = v2.build_master_list()
+        plain = v2._render_master_verbose(m)
+        shuffled = v2._render_master_verbose(m, v2._label_order_rng("s"))
+        for marker in ("CHAINS (the business logic",
+                       "USER-PERSONAL-STATE VOCABULARY",
+                       "MEMORY GRANULARITY (what to keep",
+                       "STATE-VALUE CARVE-OUT"):
+            assert plain.index(marker) == shuffled.index(marker)
+
+    def test_compact_render_shuffles_too(self, monkeypatch):
+        """Label-order randomization ships in ALL render modes; the compact
+        env-unset render stays byte-identical to its canonical form."""
+        m = v2.build_master_list()
+        compact_canonical = v2._render_master_compact(m, "story")
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        r1 = v2._render_master_compact(m, "a", v2._label_order_rng("x"))
+        r2 = v2._render_master_compact(m, "a", v2._label_order_rng("x"))
+        assert r1 == r2
+        assert r1 != compact_canonical
+
+    def test_s2_prompt_uses_shuffled_master(self, monkeypatch):
+        """The end-to-end hook: render_s2_prompt picks up the shuffle via
+        _render_master when the env is set; byte-identical when unset."""
+        m = v2.build_master_list()
+        baseline = v2.render_s2_prompt(m)
+        monkeypatch.setenv("TORTOISE_LABEL_ORDER", "shuffle")
+        a = v2.render_s2_prompt(m)
+        b = v2.render_s2_prompt(m)
+        assert a == b
+        assert a != baseline  # the shuffle reorders the kind vocabulary
+
+
 # ── S3 integration with the real backend (skip-if-unavailable) ─────────────
 
 def test_s3_real_backend_search(tmp_path):

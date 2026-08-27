@@ -1,0 +1,43 @@
+# Kind-classification mini-gold seed (issue #1695, Task 2 / D0-3).
+#
+# THIS IS THE SCHEMA + PIPELINE FIXTURE — NOT the full D0-3 gold set.
+# The real D0-3 gold (>=2000 bits/arm, owner+adjudicator labels, 10%
+# agreement check, calibrate/holdout split) is authored at RUN level
+# (production S1 capture post-#1468; fallback dev/product-strategy sessions
+# + trigger-bearing synthetic transcripts) per the plan's Step 2 — this
+# committed seed pins the bit-level eval schema, the metadata checks in
+# tests/test_kind_eval_set.py, and gives the D0-2 probe a stable in-domain
+# instrument.
+#
+# Bit schema (one JSON object per line):
+#   id           str  — stable content-derived id
+#   content      str  — the extracted bit (entity name / event content /
+#                       point content) the classifier must kind
+#   type         str  — "entity" | "event" | "point"
+#   gold_kind    str  — the ABSOLUTE gold label (namespaced, from the master
+#                       list vocabulary; NEVER "unclassified")
+#   split        str  — "calibrate" | "holdout"
+#   near_miss_of [str] — kinds this bit is designed to confound (optional)
+#   provenance   dict — {source, author, date, note} (owner + adjudicator
+#                       labeling with conflict rule, 10% agreement check
+#                       on the full set)
+#
+# Sentinel rule: "unclassified" is a SEPARATE bounded class in the eval
+# (sentinel rate <= 5% gate) — gold bits never carry it.
+
+{"id": "g-001", "content": "the EP test migration", "type": "entity", "gold_kind": "dev:issue", "split": "calibrate", "near_miss_of": ["dev:code"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed — schema pin, not the run-level D0-3 set"}}
+{"id": "g-002", "content": "the draft-filter fix", "type": "entity", "gold_kind": "dev:issue", "split": "calibrate", "near_miss_of": ["dev:code"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-003", "content": "Tortoise", "type": "entity", "gold_kind": "product-strategy:product", "split": "calibrate", "near_miss_of": ["core:Project"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-004", "content": "the single-flash pipeline", "type": "entity", "gold_kind": "core:plan", "split": "calibrate", "near_miss_of": ["core:workflow"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-005", "content": "the cleaning-pass tier", "type": "entity", "gold_kind": "core:plan", "split": "calibrate", "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-006", "content": "the solar cleaning launch campaign", "type": "entity", "gold_kind": "marketing:campaign", "split": "holdout", "near_miss_of": ["marketing:content"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-007", "content": "the Q3 launch post", "type": "entity", "gold_kind": "marketing:content", "split": "holdout", "near_miss_of": ["marketing:campaign"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-008", "content": "enterprise buyers in LatAm", "type": "entity", "gold_kind": "product-strategy:customerSegment", "split": "calibrate", "near_miss_of": ["product-strategy:customer"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-009", "content": "the campaign reached the newsletter audience", "type": "event", "gold_kind": "core:occurrence", "split": "calibrate", "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-010", "content": "we decided to adopt B over A", "type": "event", "gold_kind": "core:decision", "split": "holdout", "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-011", "content": "single-flash with granularity is the working path", "type": "point", "gold_kind": "statement", "split": "calibrate", "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-012", "content": "my personal best 5K time is 27:12", "type": "point", "gold_kind": "statement", "split": "calibrate", "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed — Tier-A state-value bit"}}
+{"id": "g-013", "content": "customers hire the product to automate their reporting", "type": "point", "gold_kind": "statement", "split": "holdout", "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-014", "content": "the product roadmap", "type": "entity", "gold_kind": "core:strategy", "split": "holdout", "near_miss_of": ["core:plan"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-015", "content": "the deploy runbook", "type": "entity", "gold_kind": "core:document", "split": "holdout", "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
+{"id": "g-016", "content": "the sprint board cards", "type": "entity", "gold_kind": "pm:card", "split": "holdout", "near_miss_of": ["pm:issue"], "provenance": {"source": "fixture-seed", "author": "epistemic-team", "date": "2026-08-26", "note": "mini-gold seed"}}
