@@ -29,7 +29,7 @@ export interface Env {
   SUPABASE_URL?: string;
   SUPABASE_ANON_KEY?: string;
   SUPABASE_SERVICE_ROLE_KEY?: string; // Pages Function secret — server-side only (agent API, admin)
-  SUPABASE_JWT_SECRET?: string; // Supabase project JWT secret — HS256 session verification (admin gate)
+  SUPABASE_JWT_SECRET?: string; // (optional) — the admin gate validates sessions via /auth/v1/user (no local JWT verify)
   ASSETS: { fetch: (req: Request | string) => Promise<Response> };
 }
 
