@@ -45,12 +45,12 @@ All owned by `team:organisation-design-team`. Next pipeline step per issue-workf
 - **#1864**: robots.txt `Disallow: /admin` (prefix form), `X-Robots-Tag: noindex` in `blog/_lib.ts` `notFound()` (single choke point), admin shell header+meta noindex (built shell already has meta; placeholder doesn't), E2E lifecycle test (draft→404→publish→200→unpublish→404) gated on `BLOG_E2E_AGENT_KEY`. Cache staleness → #1865 (separate).
 - **#1862**: lean scale (~120–150 keywords, NOT ElDato's 1,414), **Strategic tier added** (zero-volume ≠ zero-value for category-defining terms like "epistemic memory"), GSC seed now PRIMARY input (owner confirmed access), default tool = Google Ads Keyword Planner + SERP analysis.
 
-## 4. Owner clarifications pending (asked, not yet answered)
+## 4. Owner clarifications — ALL RESOLVED (2026-08-28)
 
-- #1861: publish-gate block-with-prompt (default); "Publish anyway" escape (default yes); AI slug for new posts (default yes); server-side keyword module (default)
-- #1863: **founder vs abstract covers** — recommendation: founder (default)
-- #1864: cache purge follow-up (default, #1865 filed); `BLOG_E2E_AGENT_KEY` seeding (default yes)
-- Commit the `.mcp.json` changes (both repos) — owner was asked, not answered
+- **#1861 publish-gate: NO separate confirm dialog needed.** The editor UI already has editable fields for slug/excerpt/tags/meta_title/meta_description — AI generation just populates those fields, and the owner reviews them in-place before hitting Publish. Scope simplification: drop the publish-gate AlertDialog from #1861 scoping (fields ARE the review surface).
+- **#1863 covers: founder by default, exceptions allowed.** Majority of posts get founder-likeness covers; individual posts may use abstract mode where a face feels wrong. Keep the one-line abstract toggle in the generator.
+- **#1864/#1865 cache purge: confirmed.** Purge-by-URL (not purge-everything) on unpublish/archive via Cloudflare API; one new secret (`CLOUDFLARE_API_TOKEN`, narrow purge-cache scope). **BLOG_E2E_AGENT_KEY: confirmed.** Provision one `blog-e2e` agent key (sha256 hash into `blog_agent_keys`, raw key as repo secret + local env), test uses the existing X-Agent-Key path.
+- Commit the `.mcp.json` changes (both repos) — **DONE (tortoise `0d57abf5`, premise-labs `d29b773`, 2026-08-28)**
 
 ## 5. Housekeeping / gotchas
 
