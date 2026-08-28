@@ -646,3 +646,92 @@ class TestMintedKeyRoundTrip:
         app.dependency_overrides.clear()
         r = client.post("/v1/session/key", json={"purpose": "bootstrap"})
         assert r.status_code == 401
+
+
+# ── #1855: per-team mint lock — registry lane ───────────────────────────────
+
+class TestSessionKeyMintConcurrency:
+    """#1855 — the REGISTRY (selfhost) mint holds the same per-team lock as
+    the Supabase lane (_team_mint_lock in hosted_api). The embedded store is
+    single-process (no multi-worker story), so the lock is belt-and-braces
+    that makes the serialization explicit. The load-bearing test is
+    test_registry_mint_blocks_while_team_lock_held (fails if the with-lock
+    wrapping is removed); the gather E2E is a regression guard for the cap
+    invariant."""
+
+    def test_registry_mint_blocks_while_team_lock_held(self, client, reg,
+                                                       monkeypatch):
+        """The REGISTRY mint wraps its critical section in the per-team lock:
+        a mint for a team whose lock is HELD by the test blocks until the
+        lock is released. Fails if the with-lock wrapping is ever removed."""
+        import asyncio
+        import threading
+
+        import tortoise.hosted_api as ha
+        from tortoise.hosted_api import _team_mint_lock
+
+        async def _noop(*_a, **_k):
+            return None
+
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        # post-insert side effects run OUTSIDE the lock and need a real
+        # request object — no-op them (we drive the mint directly).
+        monkeypatch.setattr(ha, "_async_audit", _noop)
+        monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
+
+        lock = _team_mint_lock(tid)
+        lock.acquire()
+        done = threading.Event()
+        outcome = {}
+
+        def _mint():
+            try:
+                asyncio.run(ha.session_key({"purpose": "recovery"}, None,
+                                           {"user_id": _U1}))
+                outcome["ok"] = True
+            except Exception as e:
+                outcome["err"] = repr(e)
+            done.set()
+
+        t = threading.Thread(target=_mint, daemon=True)
+        t.start()
+        assert not done.wait(timeout=0.75), \
+            f"registry mint proceeded while the team lock was held (wrapping missing?): {outcome}"
+        lock.release()
+        assert done.wait(timeout=10), "registry mint blocked forever after release"
+        assert outcome.get("ok") is True, f"registry mint failed: {outcome}"
+        assert _count_active_keys(reg, tid) == 1
+
+    def test_concurrent_recovery_mints_stay_at_cap(self, client, reg):
+        """#1855 verification checklist (registry lane): two CONCURRENT
+        recovery mints never overshoot max_api_keys (free = 2). Regression
+        guard — an all-sync section serializes on one event loop regardless
+        of the lock; this catches a future await entering the section."""
+        import asyncio
+
+        import httpx
+
+        from tortoise.hosted_api import app
+
+        tid = "team-a"
+        _seed_team(reg, tid)
+        _seed_membership(reg, tid, _U1, "owner")
+        _seed_api_key(reg, tid, "k-other", created_by=_U2,
+                      created_via="recovery", created_at=_hours_ago(48))
+
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                async def _mint(_i):
+                    return await ac.post("/v1/session/key",
+                                         json={"purpose": "recovery"})
+
+                return await asyncio.gather(*(_mint(i) for i in range(2)))
+
+        results = asyncio.run(_run())
+        assert all(r.status_code == 200 for r in results), \
+            [r.text for r in results]
+        assert _count_persistent_keys(reg, tid) <= 2
