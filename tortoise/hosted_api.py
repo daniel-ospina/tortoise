@@ -9756,7 +9756,7 @@ class GitHubRepollRequest(BaseModel):
 
 
 async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
-    """Background indexing job: GitHub issues/PRs → entities/events/statements.
+    """Background indexing job: GitHub issues/PRs → entities/events.
 
     #1725 Slice 0 rework: cursor-correct (composite (updated_at, number)
     per-repo cursors persisted to onboarding jsonb), ONE-repo bounded first
