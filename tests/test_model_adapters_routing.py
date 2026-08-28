@@ -12,6 +12,7 @@ import pytest
 import requests
 
 from tortoise.model_adapters import (
+    MODELS,
     RoutingModel,
     _primary_in_cooldown,
     _reset_failover_cooldown,
@@ -149,7 +150,7 @@ def test_direct_route_sends_nonreasoning_model_id(monkeypatch):
     # #1790: the direct route sends the current documented flash id with
     # thinking explicitly disabled — 'deepseek-v4-flash' reasons by DEFAULT
     # (thinking: high) and collapses to empty output; the retired
-    # 'deepseek-chat' non-reasoning alias was removed upstream 2026-07-24.
+    # legacy non-reasoning alias was removed upstream 2026-07-24.
     assert body["model"] == "deepseek-v4-flash"
     assert body["thinking"] == {"type": "disabled"}
     assert body["max_tokens"] == 4000
@@ -167,6 +168,31 @@ def test_direct_v4pro_does_not_disable_thinking(monkeypatch):
     body = log[0][1]
     assert body["model"] == "deepseek-v4-pro"
     assert "thinking" not in body
+
+
+def test_flash_direct_registry_model_disables_thinking(monkeypatch):
+    """#1790 drift catch: the REGISTRY ``deepseek-flash-direct`` entry (the
+    eval harness' actual production path) must reach the thinking-disable
+    gate. A future id rename in MODELS without updating the gate fails this
+    — prefixed ids (e.g. "deepseek/deepseek-v4-flash") must not bypass it.
+    The v4-pro sibling must NOT carry thinking (flash-family only)."""
+    log, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    model = MODELS["deepseek-flash-direct"]()
+    out = model.complete(system="s", user="u")
+    assert out == "ok"
+    body = log[0][1]
+    assert body["model"] == "deepseek-v4-flash"
+    assert body["thinking"] == {"type": "disabled"}
+
+    # v4-pro sibling: flash-family only — no thinking key.
+    log2, fake2 = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake2)
+    MODELS["deepseek-v4-pro-direct"]().complete(system="s", user="u")
+    body2 = log2[0][1]
+    assert body2["model"] == "deepseek-v4-pro"
+    assert "thinking" not in body2
 
 
 def test_deepseek_direct_json_mode_default_on(monkeypatch):
@@ -433,7 +459,7 @@ def test_registry_key_normalized_to_real_model_id(monkeypatch):
     suffix reaches DeepSeek as the model name (HTTP 400 on every S1 call)."""
     # Pilot #1549 (2026-08-25) + #1790: the direct-API flash wire id is the
     # current documented 'deepseek-v4-flash' with thinking explicitly
-    # disabled (the retired 'deepseek-chat' non-reasoning alias was removed
+    # disabled (the retired legacy non-reasoning alias was removed
     # upstream 2026-07-24 — v4-flash reasons by default and collapses to
     # empty output on non-trivial S1 prompts otherwise: 1500/1500 reasoning
     # tokens, finish=length, zero content).
@@ -460,7 +486,7 @@ def test_default_build_uses_nonreasoning_direct_id(monkeypatch):
     TORTOISE_EXTRACT_MODEL unset → 'deepseek/deepseek-v4-flash' — must not
     collapse. The direct route sends 'deepseek-v4-flash' with thinking
     disabled on the wire (sdk._model_adapter and the eval CLI both land
-    here; the retired 'deepseek-chat' alias was removed upstream
+    here; the retired legacy alias was removed upstream
     2026-07-24, #1790)."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     model = build_extractor_model()
@@ -473,7 +499,7 @@ def test_three_provider_rotation_pool(monkeypatch):
     RotatingModel pool [deepseek-direct, openrouter, venice]. Each lane gets a
     VALID wire id for its provider: venice serves its documented catalog id,
     openrouter needs the family-prefixed id, the direct lane sends the flash
-    id with thinking disabled (#1790 — the retired 'deepseek-chat' alias was
+    id with thinking disabled (#1790 — the retired legacy alias was
     removed upstream 2026-07-24)."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")

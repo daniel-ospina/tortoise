@@ -216,7 +216,9 @@ class DeepSeekDirectModel(OpenRouterModel):
         # live-verified 2026-08-28: zero reasoning_content, finish=stop,
         # byte-identical usage to the retired alias). ``deepseek-v4-pro``
         # keeps its default (no collapse evidence — pending verification).
-        if self.id == "deepseek-v4-flash":
+        # prefix-agnostic: a provider-prefixed id (e.g. "deepseek/deepseek-v4-flash")
+        # must not bypass the gate (gate ↔ MODELS drift would re-open #1549).
+        if self.id.rsplit("/", 1)[-1] == "deepseek-v4-flash":
             body["thinking"] = {"type": "disabled"}
         r = self._session.post(
             self.base_url,
