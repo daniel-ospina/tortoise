@@ -27,8 +27,11 @@ skip_unless_hosted_e2e()
 def _enable_session_recording(api, tenant: dict) -> None:
     """Opt the tenant into session capture (the #1727 enforced consent)."""
     h = {"Authorization": f"Bearer {tenant['api_key']}"}
+    # playwright-python's APIRequestContext takes `data` (dict → JSON body),
+    # not `json` (#1928 — the #1892 helper was merged with the invalid kwarg
+    # and TypeError'd before ever reaching the consent gate).
     r = api.patch("/v1/onboarding/state", headers=h,
-                  json={"session_recording": True})
+                  data={"session_recording": True})
     assert r.status == 200, f"enable session_recording: {r.status} {r.text()}"
     # Self-verifying: the opt-in must actually stick — a silently dropped
     # PATCH would 403 the capture POSTs below (loud), but asserting the
