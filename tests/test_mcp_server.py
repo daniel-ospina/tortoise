@@ -410,10 +410,10 @@ class TestToolFunctions:
         through the same allowlist validator as the REST re-poll — a bare
         str would be iterated character-by-character by the new contract
         (repo='repo1' → walks org/r, org/e, ...)."""
+        import tortoise.hosted_api as ha
+        import tortoise.mcp_server as ms
         from tortoise.mcp_auth import _current_team_id
         from tortoise.mcp_server import tortoise_onboarding_github_index
-        import tortoise.mcp_server as ms
-        import tortoise.hosted_api as ha
 
         calls: list = []
         token = _current_team_id.set("team-github-index")

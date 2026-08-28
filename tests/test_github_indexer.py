@@ -464,8 +464,8 @@ def test_resolve_repos_falls_back_to_user_repos(sdk):
     /user/repos ALSO fails does it raise (the 404-raises test above covers
     that)."""
     import httpx
+
     from tortoise.indexer.github_indexer import GitHubIndexer
-    from tortoise.indexer.github_indexer import GitHubFetchError
 
     seen: list[str] = []
 
@@ -507,6 +507,7 @@ def test_list_branches_returns_names(sdk):
     """#1845: list_branches returns the branch names for a repo (used by
     the docs per-repo branch picker)."""
     import httpx
+
     from tortoise.indexer.github_indexer import GitHubIndexer
 
     class _BranchesTransport(httpx.AsyncBaseTransport):
@@ -684,8 +685,8 @@ def test_resolve_repos_404_raises_without_fallback(sdk):
     silently walking the token user's personal repos. The selector keeps
     the fallback (default True)."""
     import httpx
-    from tortoise.indexer.github_indexer import GitHubIndexer
-    from tortoise.indexer.github_indexer import GitHubFetchError
+
+    from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
 
     class _Transport(httpx.AsyncBaseTransport):
         async def handle_async_request(self, request):

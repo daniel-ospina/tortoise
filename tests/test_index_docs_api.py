@@ -660,7 +660,6 @@ def test_legacy_unqualified_corpus_cleaned(provisioned, mock_github,
     ({owner}/{repo}/docs/... + .manifest/{owner}/{name}.json) is removed on
     the first new-layout walk — it would otherwise be ingested under the new
     branch-qualified tree, duplicating every doc (same content, two ids)."""
-    import os
     from tortoise.indexer.github_docs import GitHubDocsIndexer
     team_root = GitHubDocsIndexer.team_root(provisioned.team_id)
     legacy_docs = team_root / "acme" / "repo1" / "docs"

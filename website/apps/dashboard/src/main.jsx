@@ -1511,7 +1511,11 @@ function claimIntentInFlight() {
     // #1828 (review P3-2): the recovery fallback rotated a session
     // credential to make room — one-time banner so the user knows their
     // setup command key changed (the returned key IS the new one).
-    if (data.rotated) setBanner('A recovery key was rotated to make room — agents using the old key must be re-connected; your setup command now uses a new key.')
+    // #1854: the banner names the rotated key via rotated_key_prefix
+    // (falls back to a generic message if the prefix is missing).
+    if (data.rotated) setBanner(data.rotated_key_prefix
+      ? `A recovery key was rotated to make room — agents using the old key (prefix ${data.rotated_key_prefix}) must be re-connected; your setup command now uses a new key.`
+      : 'A recovery key was rotated to make room — agents using the old key must be re-connected; your setup command now uses a new key.')
     // Fix C (review round 2): return the team actually minted for so callers
     // cache on the right id even when the 400-fallback picked it (a null
     // firstTeamId previously skipped the cache → cap burn on every switch).

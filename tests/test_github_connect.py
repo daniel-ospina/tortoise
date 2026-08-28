@@ -112,11 +112,6 @@ class TestGitHubCallback:
         stored team_id (a hex UUID) and every org-scoped lookup 404'd."""
         import tortoise.hosted_api as ha
         from tortoise.indexer.github_indexer import GitHubIndexer
-        from tortoise.supabase_control import (
-            get_control_plane as _sc_cp,
-            is_supabase_enabled as _sc_ena,
-            store_github_credentials,
-        )
 
         # Force Supabase mode so the callback's store path is the seam we
         # can intercept (established pattern — test_abuse_integration).
@@ -163,11 +158,6 @@ class TestGitHubCallback:
         body.org from the connect state survives (best-effort), never a 500."""
         import tortoise.hosted_api as ha
         from tortoise.indexer.github_indexer import GitHubIndexer
-        from tortoise.supabase_control import (
-            get_control_plane as _sc_cp,
-            is_supabase_enabled as _sc_ena,
-            store_github_credentials,
-        )
 
         fake_cp = object()
         monkeypatch.setattr("tortoise.supabase_control.is_supabase_enabled",
@@ -372,8 +362,7 @@ class TestGitHubBranches:
         from tortoise.crypto import encrypt_token
         monkeypatch.setattr(ha, "_github_credentials",
                             lambda team_id: (encrypt_token("fake-token"), "acme"))
-        from tortoise.indexer.github_indexer import GitHubIndexer
-        from tortoise.indexer.github_indexer import GitHubFetchError
+        from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
 
         async def fake_list(self, repo):
             raise GitHubFetchError("boom")
