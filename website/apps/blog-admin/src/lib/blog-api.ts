@@ -115,7 +115,7 @@ export async function publishPost(post: BlogPostRow, identity: AuditIdentity): P
 
 /** Unpublish: status → draft, clears review state, drops stale review notes. */
 export async function unpublishPost(post: BlogPostRow): Promise<BlogPostRow> {
-  return updatePost(post.id, {
+  const updated = await updatePost(post.id, {
     status: 'draft',
     published_at: null,
     published_by: null,
@@ -123,6 +123,8 @@ export async function unpublishPost(post: BlogPostRow): Promise<BlogPostRow> {
     reviewed_at: null,
     review_note: null,
   });
+  void purgePostCache(post.slug); // #1865: stale 200 must not survive unpublish
+  return updated;
 }
 
 /** Mark reviewed — leaves the queue (E2E-3). */
@@ -142,7 +144,7 @@ export async function requestChangesPost(post: BlogPostRow, note: string): Promi
   if (post.status === 'archived') {
     throw new Error('Archived posts are terminal — cannot request changes');
   }
-  return updatePost(post.id, {
+  const updated = await updatePost(post.id, {
     status: 'draft',
     published_at: null,
     published_by: null,
@@ -150,11 +152,15 @@ export async function requestChangesPost(post: BlogPostRow, note: string): Promi
     reviewed_at: null,
     review_note: note.trim(),
   });
+  void purgePostCache(post.slug); // #1865: request-changes → draft on a published post
+  return updated;
 }
 
 /** Archive — terminal (no transitions out; trigger-enforced). */
 export async function archivePost(post: BlogPostRow): Promise<BlogPostRow> {
-  return updatePost(post.id, { status: 'archived' });
+  const updated = await updatePost(post.id, { status: 'archived' });
+  void purgePostCache(post.slug); // #1865: archive must not leave a stale 200
+  return updated;
 }
 
 /** Clear hold_for_review (E2E-2 after-clear step — post goes public everywhere). */
@@ -294,6 +300,104 @@ export function buildSaveRecord(
 }
 
 // ── Image upload (plan §4 blog-images contract) ───────────────────────────
+
+// ── Edge-cache purge (#1865) ──────────────────────────────────────────────
+// Best-effort, server-side only (admin-gated /blog/api/purge). The editor
+// writes status changes directly to Supabase, so unpublish/archive must
+// explicitly purge the article URL from the Cloudflare edge cache or a stale
+// 200 survives up to the cache TTL. Fail-open: purge errors never block save.
+let purgeInFlight = new Map<string, Promise<void>>();
+
+export async function purgePostCache(slug: string): Promise<void> {
+  if (!slug) return;
+  const key = slug;
+  const existing = purgeInFlight.get(key);
+  if (existing) return existing;
+  const run = (async () => {
+    try {
+      const { data } = await supabase.auth.getSession();
+      const token = data.session?.access_token;
+      if (!token) return;
+      await fetch('/blog/api/purge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ slug }),
+      });
+    } catch {
+      // fail-open — purge is best-effort correctness, never blocks the write
+    } finally {
+      purgeInFlight.delete(key);
+    }
+  })();
+  purgeInFlight.set(key, run);
+  return run;
+}
+
+// ── AI generation (#1861 generate-seo, #1863 generate-cover) ─────────────
+// Server-side only (admin-gated); the editor sends the user's access token.
+// Fail-open for the caller: generation errors surface as thrown errors the
+// editor catches (toast) — generation never blocks save.
+
+export interface GenerateSeoResult {
+  slug: string;
+  excerpt: string;
+  tags: string[];
+  meta_title: string;
+  meta_description: string;
+  provider: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost_estimate: number;
+}
+
+export async function generateSeo(input: {
+  title: string;
+  body: string;
+  tags: string[];
+}): Promise<GenerateSeoResult> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new Error('No session');
+  const res = await fetch('/blog/api/generate-seo', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(input),
+  });
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    throw new Error((body.message as string) || `Generation failed (${res.status})`);
+  }
+  return body as unknown as GenerateSeoResult;
+}
+
+export interface GenerateCoverResult {
+  image_url: string;
+  provider: string;
+  cost_estimate: number;
+  mode: 'founder' | 'abstract';
+}
+
+export async function generateCover(input: {
+  title: string;
+  tags: string[];
+  mode: 'founder' | 'abstract';
+  slug?: string;
+}): Promise<GenerateCoverResult> {
+  const { data } = await supabase.auth.getSession();
+  const token = data.session?.access_token;
+  if (!token) throw new Error('No session');
+  const res = await fetch('/blog/api/generate-cover', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(input),
+  });
+  const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    throw new Error((body.message as string) || `Generation failed (${res.status})`);
+  }
+  return body as unknown as GenerateCoverResult;
+}
+
 
 export const IMAGE_BUCKET = 'blog-images';
 export const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 5MB cap
