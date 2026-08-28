@@ -250,6 +250,9 @@ def test_mint_429_recoverable_banner_not_stuck_shell(page: Page) -> None:
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     # #1830 recoverable-mint behavior: the dashboard loads with the agent-key
     # banner — never the silent redirect shell, never a stuck error card.
+    # (second-model P2: the banner renders BEFORE the overview hydrates, so pin
+    # a loaded-chrome marker too — a /v1/team 5xx would otherwise pass.)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     expect(page.locator("body")).to_contain_text("Wait for expiry", timeout=20_000)
     expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
     expect(page.locator("body")).not_to_contain_text("HTTP 401")
