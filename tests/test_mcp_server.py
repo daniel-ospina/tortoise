@@ -417,6 +417,12 @@ class TestToolFunctions:
 
         calls: list = []
         token = _current_team_id.set("team-github-index")
+        import asyncio as _asyncio
+        # Hermetic (CI workers may have no current event loop — the tool's
+        # get_event_loop().create_task raises RuntimeError there): create an
+        # explicit loop so the scheduled task actually runs.
+        loop = _asyncio.new_event_loop()
+        _asyncio.set_event_loop(loop)
         try:
             monkeypatch.setattr(ha, "_github_token_enc", lambda tid: "enc")
             monkeypatch.setattr(ha, "_start_index_job",
@@ -437,15 +443,15 @@ class TestToolFunctions:
                                 ha._validate_repo_scope, raising=False)
             result = tortoise_onboarding_github_index("acme", "repo1")
             assert result == {"job_id": "job1", "status": "started"}
-            # the tool schedules _run_indexing via create_task on a fresh
-            # event loop — pump it so the capture runs
-            import asyncio as _asyncio
-            _asyncio.get_event_loop().run_until_complete(
-                _asyncio.sleep(0.05))
+            # the tool schedules _run_indexing via create_task on the loop
+            # we set — pump it so the capture runs
+            loop.run_until_complete(_asyncio.sleep(0.05))
             assert calls == [("acme", ["repo1"])], \
                 "the repo must be wrapped into a one-item list, not a bare str"
         finally:
             _current_team_id.reset(token)
+            loop.close()
+            _asyncio.set_event_loop(None)
 
 
 class TestToolIntegration:
