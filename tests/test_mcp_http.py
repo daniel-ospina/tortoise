@@ -159,6 +159,27 @@ class TestAuthPreLeak:
         body = _parse_sse_json(r)
         assert body is not None and "Bearer tt_" in body["error"]["message"]
 
+    def test_successful_auth_writes_last_used_at(self, mcp_client,
+                                                 seeded_registry_sdk):
+        """#1854 (review P2): a successful MCP resolution bumps the APIKey
+        node's last_used_at (best-effort #685 write-through) — a recovery
+        key used ONLY via MCP must not read as never-used to the NULL-first
+        recovery rotation (that would rotate a LIVE MCP credential).
+        Telemetry-write failures never gate auth (try/except swallow)."""
+        tc, _ = mcp_client
+        sdk, _ = seeded_registry_sdk
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey) RETURN k.last_used_at",
+        ).result_set
+        assert rows and rows[0][0] is None  # fresh key: never used
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200, r.text
+        rows = reg.query(
+            "MATCH (k:APIKey) RETURN k.last_used_at",
+        ).result_set
+        assert rows and rows[0][0] is not None  # write-through bumped it
+
     def test_bearer_wrong_prefix_401(self, mcp_client):
         tc, _ = mcp_client
         tc.headers["Authorization"] = "Bearer not-tt-prefix"
