@@ -26,8 +26,9 @@ from tools.longmem_eval.ingest import (  # noqa: E402, RUF100
     _session_chunks, _session_transcript, ingest_haystack,
 )
 from tools.longmem_eval.judge import (  # noqa: E402, RUF100
-    LLMJudge, MockJudge, OfficialJudgeModel, _parse_judge_response,
-    get_anscheck_prompt, is_abstention,
+    NEAR_MISS_GRADING, AnswerGrade, LLMJudge, MockJudge, OfficialJudgeModel,
+    _normalize_answer_text, _parse_judge_response, classify_answer,
+    get_anscheck_prompt, grade_label, is_abstention,
 )
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
@@ -1307,6 +1308,87 @@ def test_mock_judge_semantics():
                        hypothesis="Her favorite color is red.", abstention=True)
     assert not j.judge(question_type="single-session-user", question="q",
                        answer="Catan", hypothesis="", abstention=False)
+
+
+# ── Near-miss policy (issue #1949 decision record) ─────────────────────────
+
+def test_near_miss_decision_recorded_strict():
+    """Issue #1949 decision: KEEP STRICT grading. The anscheck templates are
+    the benchmark's verbatim rubric — partial credit would change label
+    semantics and break comparability with published LongMemEval
+    accuracies. The near-miss is a *known rubric edge* (pinned by
+    NEAR_MISS_GRADING), not a silent re-grade."""
+    assert NEAR_MISS_GRADING == "strict"
+    # The rubric's own subset rule is what pins the strict reading:
+    p = get_anscheck_prompt("single-session-user", "q",
+                            "University of Melbourne in Australia",
+                            "University of Melbourne.")
+    assert ("If the response only contains a subset of the information "
+            "required by the answer, answer no.") in p
+
+
+def test_near_miss_3b6f954b_classified_not_regraded():
+    """The reval3 3b6f954b shape — entity right, geographic qualifier
+    missing — is classified NEAR_MISS (subset class) and STILL grades wrong,
+    deterministically. A future partial-credit change must break this pin.
+    """
+    gold = "University of Melbourne in Australia"
+    hyp = "University of Melbourne."
+    assert classify_answer(gold, hyp) is AnswerGrade.NEAR_MISS
+    assert grade_label(gold, hyp) is False          # strict: still wrong
+    assert not MockJudge().judge(
+        question_type="single-session-user", question="q",
+        answer=gold, hypothesis=hyp, abstention=False)
+    # Reverse direction pinned too: the full gold contained in the
+    # hypothesis is CORRECT, not a near-miss.
+    assert classify_answer(gold, "I went to the University of Melbourne "
+                                 "in Australia.") is AnswerGrade.CORRECT
+
+
+def test_near_miss_clear_wrong_still_wrong():
+    """A clear wrong (different entity) is not a near-miss and grades
+    wrong — unchanged from the pre-#1949 strict rubric."""
+    gold = "University of Melbourne in Australia"
+    hyp = "University of Sydney."
+    assert classify_answer(gold, hyp) is AnswerGrade.WRONG
+    assert grade_label(gold, hyp) is False
+    assert not MockJudge().judge(
+        question_type="single-session-user", question="q",
+        answer=gold, hypothesis=hyp, abstention=False)
+
+
+def test_near_miss_clear_right_still_right():
+    """A clear right (gold contained in hypothesis) is not a near-miss and
+    grades correct — the accuracy computation is unchanged for clear cases.
+    """
+    gold = "University of Melbourne in Australia"
+    hyp = ("I studied abroad at the University of Melbourne in Australia "
+           "during my junior year.")
+    assert classify_answer(gold, hyp) is AnswerGrade.CORRECT
+    assert grade_label(gold, hyp) is True
+    assert MockJudge().judge(
+        question_type="single-session-user", question="q",
+        answer=gold, hypothesis=hyp, abstention=False)
+
+
+def test_near_miss_empty_hypothesis_is_wrong_not_near_miss():
+    """An empty hypothesis can never be a near-miss ("" is a substring of
+    everything) — the classifier guards it as WRONG, and an empty gold is
+    WRONG too."""
+    assert classify_answer("University of Melbourne in Australia",
+                           "") is AnswerGrade.WRONG
+    assert classify_answer("", "University of Melbourne.") is AnswerGrade.WRONG
+    assert grade_label("University of Melbourne in Australia", "") is False
+
+
+def test_near_miss_normalization_keeps_internal_punctuation():
+    """Normalization strips leading/trailing punctuation and collapses
+    whitespace, but preserves INTERNAL punctuation so distinct answers
+    cannot merge ("St. Louis" must not become "st louis")."""
+    assert _normalize_answer_text("  University of Melbourne.  ") == \
+        "university of melbourne"
+    assert _normalize_answer_text("St. Louis") == "st. louis"
+    assert _normalize_answer_text("a   b") == "a b"
 
 
 def test_mock_reader_returns_evidence():
