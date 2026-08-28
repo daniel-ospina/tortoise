@@ -1982,6 +1982,16 @@ function claimIntentInFlight() {
       loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
       await cardLoads
     } catch (e) {
+      // #1856 P0: bail on staleness FIRST — a mid-flight team switch means
+      // this catch belongs to the PREVIOUS team's request, and the switch's
+      // own flow owns error state under the new selection. Running
+      // setAuthed(false) before the bail left the user on the dead
+      // "Redirecting to the sign-in page…" shell (mountError never set,
+      // authed false, no navigation). The finally below still runs on the
+      // return, so the busy/checking cleanup is preserved. Bails before
+      // setSuspended too — a stale team's suspension must not stick to the
+      // switched session.
+      if (teamAtCompleteLogin !== null && teamIdRef.current !== teamAtCompleteLogin) return
       if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
@@ -1995,7 +2005,6 @@ function claimIntentInFlight() {
       // is in flight, and the old `!==` guard then saw list[0] !== null and
       // bailed silently (stranded on the redirect shell). Only a REAL
       // mid-load switch (a non-null capture that moved) bails now.
-      if (teamAtCompleteLogin !== null && teamIdRef.current !== teamAtCompleteLogin) return
       const errStatus = (e && e.status) || 0
       setMountError(errStatus >= 500
         ? UNAVAILABLE_COPY
@@ -3580,9 +3589,15 @@ function claimIntentInFlight() {
                                     {p.limits.map((l) => <li key={l}>{l}</li>)}
                                   </ul>
                                   {p.tier === 'free' ? (
+                                    // #1856: same as the header "Open dashboard →" button — this
+                                    // first-timer exit (completeLogin never runs) must still fire
+                                    // finishWelcomeLoads() or currentTeamId/teams/apiKey stay unset
+                                    // (account blob "No team", Members "Loading…" forever). The plans
+                                    // block only renders with welcomeKey set, so it reads the revealed
+                                    // key. Fire-and-forget: finishWelcomeLoads never rejects.
                                     <button
                                       className="btn-primary"
-                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
+                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}
                                     >
                                       Start free
                                     </button>
