@@ -10171,15 +10171,14 @@ async def _heal_github_org(team_id: str, encrypted: str,
         await indexer._close()
     if not login or login == org:
         return login or org
-    try:
-        _store_github_org(team_id, encrypted, login)
-    except Exception:
+    from contextlib import suppress
+    with suppress(Exception):
         # Review: the heal write must NEVER 500 the read endpoints it feeds
         # (github_status/repos/branches promise "never a 500"). A control-
         # plane blip during the one-time patch falls back to the resolver's
         # /user/repos fallback on the next call — the login is returned
         # either way.
-        pass
+        _store_github_org(team_id, encrypted, login)
     return login
 
 
