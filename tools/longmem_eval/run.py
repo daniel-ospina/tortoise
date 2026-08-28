@@ -102,11 +102,25 @@ from .retrieve import (
     DEFAULT_RETRIEVAL_BUDGET_MS,
     DEFAULT_TR_TOP_K,
     EVAL_RETRIEVAL_BUDGET_MS,
+    GATE_MARKER_TTL_MIN,
+    GATE_MAX_GATED,
+    GATE_QUERY_Q_MS,
+    GATE_REASON_CENSUS_ERROR,
+    GATE_REASONS,
+    GATE_RETRY_N,
+    GATE_TIMEOUT_MS,
+    HARD_GATE_REASONS,
     MODEL_ENCODE_FAILED_EXIT,
     VECTOR_TIMEOUT_MS,
+    CensusReads,
     ModelEncodeFailedError,
     VectorBreakerOpenError,
+    _consensus_read,
+    _query_with_deadline,
+    folded_pool_rows,
+    resolve_answer_session_indices,
     retrieve_for_question,
+    run_integrity_gate,
 )
 
 DEFAULT_KS = (5, 10, 20)
@@ -1362,6 +1376,82 @@ BENIGN_LEG_REASONS: tuple[str, ...] = (
 KNOWN_LEG_REASONS: tuple[str, ...] = tuple(
     sorted(set(DEAD_LEG_REASONS) | set(BENIGN_LEG_REASONS)))
 
+#: Per-leg result-count floors F_leg (#1785, plan Task 1 Step 2) — derived
+#: from the committed historical re-validation fixture (31 healthy full-graph
+#: outcomes): min observed per-leg return count minus 1, CLAMPED >= 1, with
+#: by-design-zero legs (TR entity legs, abstention questions) excluded from
+#: the min. NOT a threshold-from-noise constant (the anti-pattern retracted
+#: for the ratio tier); a committed constant — a change breaks CI. Derivation:
+#: fts min=25 -> 24; structural min=120 -> 119; vector min=120 -> 119
+#: (checkpoint git_sha 57f43978, dataset digest d6f21ea9d60a0d56). A leg
+#: count AT or BELOW its floor is an OBSERVABLE degradation signal for the
+#: leg-health predicate / watchdog leg-deadness arm (a naturally-short leg
+#: on a ratio=1.000 healthy graph is exempted by the collapse guard).
+F_LEG_FLOORS: dict[str, int] = {
+    "fts": 24,
+    "structural": 119,
+    "vector": 119,
+}
+
+
+def _leg_entry_dead(entry: dict, *, floors: dict[str, int] | None = None) -> bool:
+    """Observable-signal leg-degradation predicate for one leg entry.
+
+    A leg is degraded ONLY on an observable signal (plan second-model P2):
+    a genuinely-dead reason with count==0 (``empty_results``/``query_failed``),
+    a timeout, or a LIVE (``ok``) count BELOW the committed per-leg floor
+    F_leg. Benign reasons (``index_missing``, ``no_embeddings``,
+    ``breaker_open``) carry MEANINGLESS counts (no index / zero embedded
+    points) — never dead, never floor-checked. Above-floor live counts
+    with no exception/timeout are classified HEALTHY (a silent mid-cursor
+    short-read above the floor is indistinguishable from a healthy
+    low-count leg — the trigger stays armed rather than suppressing on an
+    unobservable signal)."""
+    floors = floors if floors is not None else F_LEG_FLOORS
+    reason = entry.get("reason")
+    if reason in ("timeout", "query_failed"):
+        return True
+    if reason == "empty_results" and entry.get("count", 0) == 0:
+        return True
+    if reason == "ok" and floors:
+        floor = floors.get(entry.get("leg"))
+        if floor is not None and entry.get("count", 0) < floor:
+            return True
+    return False
+
+
+def _legs_degraded(outcome: dict, question_type: str = "", *,
+                   floors: dict[str, int] | None = None) -> list[tuple[str, list]]:
+    """Degraded (non-by-design) legs of an outcome, per the conservative
+    leg-health predicate (#1785). Returns ``[]`` for a healthy outcome.
+
+    By-design-zero exclusion (plan cycle3-P1-8): TR questions run with
+    ``entity_types=("point", "event")`` — the event FTS leg is EMPTY BY
+    DESIGN and must not count as a signal (the point leg is the non-by-design
+    one; both entries share the ``fts`` trace, so a signal requires ALL fts
+    entries dead on a TR question). Legless outcomes (vector-arm /
+    retrieval-only — no ``legs`` key) are exempt (healthy-vacuous, never a
+    KeyError), consistent with the ``retrieval_only`` exemption.
+    """
+    legs = outcome.get("legs")
+    if not isinstance(legs, list):
+        return []
+    is_tr = str(question_type) == "temporal-reasoning"
+    by_leg: dict[str, list[dict]] = {}
+    for leg in legs:
+        if isinstance(leg, dict) and leg.get("leg"):
+            by_leg.setdefault(str(leg["leg"]), []).append(leg)
+    degraded: list[tuple[str, list]] = []
+    for name, entries in by_leg.items():
+        if name == "fts" and is_tr and entries:
+            if all(_leg_entry_dead(e, floors=floors) for e in entries):
+                degraded.append((name, entries))
+            continue
+        for entry in entries:
+            if _leg_entry_dead(entry, floors=floors):
+                degraded.append((name, [entry]))
+    return degraded
+
 
 def session_recall_all_zero(sr) -> bool:
     """Type-strict all-zero predicate for a ``session_recall@k`` dict:
@@ -1480,6 +1570,22 @@ def resume_gate_reject_reason(outcome: dict) -> str | None:
     """
     if not isinstance(outcome, dict):
         return None
+    # #1785 (Task 2): the graph-integrity gate's reasons refuse a resume —
+    # a gated outcome (shape-OK, would otherwise load byte-identical and
+    # re-enter aggregates) must never resume. The refusal consumes the
+    # UNION of the phase-keyed reason lists (``gate_reasons`` = pre-
+    # retrieval, ``post_retrieval_reasons`` = post-retrieval), so a
+    # pre-green/post-red outcome (H6 loss between gate and retrieval) is
+    # refused too. ``gate_reasons`` is NEVER a required key — read via
+    # ``.get`` with a ``[]`` default so every pre-change checkpoint resumes
+    # identically (the abstention exemption is a GATE-side presence skip;
+    # a truncated graph on an abstention question is still integrity loss
+    # and IS refused here).
+    gate_reasons = outcome.get("gate_reasons") or []
+    post_reasons = outcome.get("post_retrieval_reasons") or []
+    for reason in list(gate_reasons) + list(post_reasons):
+        if reason in GATE_REASONS:
+            return f"gate-red: {reason}"
     if _legit_sessionless(outcome):
         return None  # N/A — no answer session to recall, never a dead leg
     legs = outcome.get("legs")
@@ -1662,6 +1768,21 @@ def _load_checkpoint(path: str | None,
             f"checkpoint {p} is unreadable ({e!r}) — refusing to resume") from e
     fmt = data.get("format")
     saved_key = data.get("run_key")
+    # #1785 (Task 2, cycle2-P2-21 / P2-10b): a checkpoint carrying a
+    # run-level abort marker (``degraded_aborted`` — the mid-run watchdog
+    # aborted; ``checkpoint_abort`` — a checkpoint-persist failure) is
+    # REFUSED by the runner's OWN resume path — never a silent continuation
+    # of an aborted run's gate-green completed questions into a 'clean'
+    # baseline (two-population contamination). The protocol scan's refusal
+    # shares the same marker names (run_protocol.py, parallel #1785 file).
+    for _marker, _label in (("degraded_aborted", "degraded-aborted"),
+                            ("checkpoint_abort", "checkpoint-abort")):
+        if data.get(_marker):
+            raise CheckpointStaleError(
+                f"checkpoint {p} carries a {_label} run marker "
+                f"({data.get(_marker)!r}) — refusing resume (the run aborted "
+                f"before completing; delete the file or force a fresh run "
+                f"with re-pre-flight)")
     if fmt is None and saved_key is None:
         # No #1349 format marker AND no run_key → stale #1144-era or
         # foreign. A file carrying an M7 fingerprint falls through to the
@@ -1935,7 +2056,9 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
                      run_key: str | None = None, surface: str | None = None,
                      retriever: str | None = None, model: str | None = None,
                      prompt: str | None = None,
-                     remove_failures: list[str] | None = None) -> None:
+                     remove_failures: list[str] | None = None,
+                     degraded_aborted: dict | None = None,
+                     checkpoint_abort: dict | None = None) -> None:
     """Atomically persist partial results after each question (resume).
 
     M7 (#1527, D7/D8): writes the code fingerprint; the write happens under
@@ -1949,6 +2072,11 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
     (a kill -9 between an outcome write and a separate removal write would
     leave a stale failure entry for a completed qid → the next resume
     re-burns a completed question and the report misgrades it).
+
+    #1785 (P2-10/P1-7): ``degraded_aborted``/``checkpoint_abort`` ride the
+    SAME flocked write as the final outcomes — a run-level abort marker is
+    persisted atomically WITH the final checkpoint write (no persist-race
+    window where gate-green outcomes resume into a 'clean' continuation).
     """
     if not path:
         return
@@ -1960,20 +2088,24 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
         _write_checkpoint_locked(
             p, merged_outcomes, merged_failures, fingerprint,
             run_key=run_key, surface=surface, retriever=retriever,
-            model=model, prompt=prompt)
+            model=model, prompt=prompt,
+            degraded_aborted=degraded_aborted,
+            checkpoint_abort=checkpoint_abort)
 
 
 def _write_checkpoint_locked(
         p: Path, outcomes: list[dict], failures: list[dict],
         fingerprint: dict | None = None, *, run_key: str | None = None,
         surface: str | None = None, retriever: str | None = None,
-        model: str | None = None, prompt: str | None = None) -> None:
+        model: str | None = None, prompt: str | None = None,
+        degraded_aborted: dict | None = None,
+        checkpoint_abort: dict | None = None) -> None:
     """Inline atomic checkpoint write (tmp + ``os.replace``) for callers
     ALREADY holding the checkpoint flock (P2-1 flock-reentrancy pin: never
     call ``_save_checkpoint`` from inside a held flock — the nested
     ``flock_exclusive`` would spin 5 s and raise ``TimeoutError`` (an
-    OSError subclass, misreportable as corruption)."""
-    _write_json_atomic(p, {
+    OSError subclass, misreportable as corruption))."""
+    payload: dict = {
         "format": CHECKPOINT_FORMAT,
         "run_key": run_key,
         "surface": surface,
@@ -1984,7 +2116,738 @@ def _write_checkpoint_locked(
         "outcomes": outcomes,
         "failures": failures,
         "updated_at_utc": _utc_now().isoformat(),
-    })
+    }
+    # #1785: run-level abort markers ride the checkpoint top level
+    # (additive — absent on healthy runs; the resume-scan + the runner's
+    # own load path refuse them, plan P2-10b/P1-3).
+    if degraded_aborted is not None:
+        payload["degraded_aborted"] = degraded_aborted
+    if checkpoint_abort is not None:
+        payload["checkpoint_abort"] = checkpoint_abort
+    _write_json_atomic(p, payload)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #1785 graph-integrity run machinery — watchdog, live-run markers,
+# checkpoint-persist retry, per-session census replay (Task 3), and the
+# falsification-trigger predicate (Task 5 consumes it, does not build it).
+# Plan: docs/plans/2026-08-27-1785-session-recall.md.
+# ═══════════════════════════════════════════════════════════════════════════
+
+class WatchdogAbortError(RuntimeError):
+    """Mid-run watchdog abort — the run is degrading and can never certify.
+
+    The run aborts early with a DISTINCT reason (plan Task 1 Step 5) and
+    the ``degraded_aborted`` marker is recorded on the checkpoint — never a
+    bare traceback, never a 4.5h burn to a guaranteed-fail verdict.
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(f"run aborted by watchdog: {reason}")
+        self.reason = reason
+
+
+class CheckpointPersistError(RuntimeError):
+    """Checkpoint persist failed after retry-N-with-backoff (plan P2-10).
+
+    The run aborts with a DISTINCT ``checkpoint_abort`` marker on the
+    checkpoint (never a bare traceback); a resume refuses it (Task 2).
+    """
+
+
+#: Watchdog rolling-window length (questions) — the latency and gate-red
+#: windows are GLOBAL across workers (plan cycle2-P2-24).
+_WATCHDOG_WINDOW = 10
+#: Strategy-timeout-rate arm: >= 2 timeouts in the last-10 window.
+_WATCHDOG_TIMEOUT_RATE = 2
+#: Gate-red-fraction arm: > 0.25 of the last-10 window.
+_WATCHDOG_GATE_RED_FRACTION = 0.25
+#: Consecutive-census_error arm: >= 3 in a row (per worker).
+_WATCHDOG_CONSEC_CENSUS_ERROR = 3
+#: Mid-write failure-rate arm: cumulative failures > 0.05 with min count 2
+#: (min-count-2 waived for short runs where one failure already exceeds the
+#: rate — n < 20; plan cycle4-P1-12/P1-15).
+_WATCHDOG_FAILURE_RATE = 0.05
+_WATCHDOG_FAILURE_MIN = 2
+_WATCHDOG_FAILURE_MIN_WAIVE_N = 20
+
+
+class _RunWatchdog:
+    """Task 1 Step 5 mid-run watchdog — six in-process signals.
+
+      * strategy-timeout rate >= 2 in the last 10;
+      * gate-red fraction > 0.25 in the last 10 (gate-red = the UNION of
+        ``gate_reasons`` + ``post_retrieval_reasons`` — plan P1-5);
+      * >= 3 consecutive ``census_error`` (per-worker by nature);
+      * census-query latency p95 > 2x Q (100 ms) across the last 10
+        (SUCCESSFUL-read latency only — retried reads are excluded, P2-9);
+      * mid-write failure-rate: cumulative n_failures / n_questions > 0.05
+        (SCOPED — fires only when the run has gated outcomes OR is a
+        revalidation run; a gated-free recoverable-failure run keeps the
+        #1776 certifier semantics un-aborted, cycle4-P1-12);
+      * leg-deadness: >= 2 consecutive questions with ANY non-by-design leg
+        degraded (below F_leg / empty / exception / timeout) — the run's
+        DOMINANT degradation signature (15/46 FTS-leg-empty outcomes).
+
+    Thresholds are evaluated with a CUMULATIVE degradation accumulator —
+    a recovery window does NOT reset prior degradation to zero (sawtooth
+    cannot evade; P1-8); the abort condition for each rolling arm is the
+    window signal holding with a cumulative crossing count >= 2 (a single
+    one-off crossing window never aborts; two arms crossing in the same
+    window produce EXACTLY ONE abort — the first signal checked wins).
+
+    Mode-aware arms (P1-2/cycle4-P1-15): under ``revalidate=True`` the
+    watchdog aborts on the FIRST gate-red / FIRST strategy timeout / FIRST
+    mid-write failure (single-outcome arms — the run can never certify, so
+    no burn to a guaranteed-fail verdict); under ``revalidate=False`` it
+    adds run-can-never-certify cumulative aborts aligned to the certifier's
+    whole-run bounds (strategy-timeout at bound+1, the FIRST hard census
+    class, and the first gated outcome pushing the running whole-run gated
+    fraction past the shared ``TORTOISE_LME_GATE_MAX_GATED`` bound).
+    """
+
+    def __init__(self, *, revalidate: bool, n_questions: int):
+        self.revalidate = bool(revalidate)
+        self.n_questions = max(1, n_questions)
+        self._lock = threading.Lock()
+        self._window: list[dict] = []
+        self._crossings: dict[str, int] = {}
+        self._gate_red_total = 0
+        self._n_gated_total = 0
+        self._n_hard_invalid = 0
+        self._timeout_total = 0
+        self._failures = 0
+        self._n_seen = 0
+        self._aborted = False
+        # strategy-timeout cumulative bound: bound+1 (the 3rd for the 50-Q
+        # run, the 2nd for a 10-Q smoke; plan cycle4-P1-15).
+        self._timeout_bound = max(1, round(0.04 * self.n_questions)) + 1
+
+    # ── signal recording (called per completed question) ──
+    def record(self, *, qid: str, gate_reasons: list[str],
+               post_retrieval_reasons: list[str], strategy_timeout: bool,
+               census_latency_ms: float | None, consec_census_error: int,
+               legs_degraded: bool) -> str | None:
+        """Record one completed question's signals; returns an abort
+        reason (str) when the watchdog fires, else None. EXACTLY ONE abort
+        record per run (``_aborted`` latches)."""
+        with self._lock:
+            if self._aborted:
+                return None
+            gate_red = bool(gate_reasons or post_retrieval_reasons)
+            hard = [r for r in (gate_reasons or []) + (post_retrieval_reasons or [])
+                    if r in HARD_GATE_REASONS]
+            if gate_red:
+                self._gate_red_total += 1
+                self._n_gated_total += 1
+            if hard:
+                self._n_hard_invalid += 1
+            if strategy_timeout:
+                self._timeout_total += 1
+            self._n_seen += 1
+            self._window.append({
+                "gate_red": gate_red,
+                "timeout": bool(strategy_timeout),
+                "latency": census_latency_ms,
+                "legs_degraded": bool(legs_degraded),
+            })
+            if len(self._window) > _WATCHDOG_WINDOW:
+                self._window.pop(0)
+            reason = self._abort_reason(
+                consec_census_error=consec_census_error,
+                legs_degraded=bool(legs_degraded))
+            if reason:
+                self._aborted = True
+            return reason
+
+    def record_failure(self) -> str | None:
+        """Record a mid-write failure (failures never enter outcomes — this
+        is the only arm that samples them). Returns an abort reason when
+        the (scoped) failure-rate arm fires."""
+        with self._lock:
+            if self._aborted:
+                return None
+            if self.revalidate:
+                self._aborted = True
+                return "mid_write_failure"
+            # SCOPED (cycle4-P1-12): fires only when the run has gated
+            # outcomes — a gated-free recoverable-failure run keeps the
+            # #1776 certifier semantics un-aborted.
+            if self._n_gated_total == 0:
+                return None
+            self._failures += 1
+            rate = self._failures / self.n_questions
+            min_count = (_WATCHDOG_FAILURE_MIN
+                         if self.n_questions >= _WATCHDOG_FAILURE_MIN_WAIVE_N
+                         else 1)
+            if self._failures >= min_count and rate > _WATCHDOG_FAILURE_RATE:
+                self._aborted = True
+                return "mid_write_failure"
+            return None
+
+    # ── internal: evaluate the arms (first-wins; exactly one record) ──
+    def _abort_reason(self, *, consec_census_error: int,
+                      legs_degraded: bool) -> str | None:
+        if self.revalidate:
+            # single-outcome arms
+            if self._gate_red_total >= 1:
+                return "gate_red"
+            if self._timeout_total >= 1:
+                return "strategy_timeout"
+            return None
+        # run-can-never-certify cumulative arms (non-revalidate)
+        if self._timeout_total >= self._timeout_bound:
+            return "strategy_timeout"
+        if self._n_hard_invalid >= 1:
+            return "census_error"
+        if self._n_seen and self._n_gated_total / self.n_questions > GATE_MAX_GATED:
+            return "gated_fraction"
+        # rolling-window arms are INERT on runs < 10 questions (plan
+        # cycle2-P3: the whole-run cumulative + revalidate single-outcome
+        # arms cover short runs — a 5-Q smoke must not abort on a
+        # naturally-short small-graph leg).
+        if self.n_questions < 10:
+            return None
+        # rolling window arms (window signal + cumulative crossing >= 2)
+        if (len(self._window) == _WATCHDOG_WINDOW
+                and sum(1 for w in self._window if w["timeout"])
+                >= _WATCHDOG_TIMEOUT_RATE):
+            self._bump("timeout_rate")
+            if self._crossings["timeout_rate"] >= 2:
+                return "strategy_timeout"
+        if (len(self._window) == _WATCHDOG_WINDOW
+                and (sum(1 for w in self._window if w["gate_red"])
+                     / _WATCHDOG_WINDOW) > _WATCHDOG_GATE_RED_FRACTION):
+            self._bump("gate_red_fraction")
+            if self._crossings["gate_red_fraction"] >= 2:
+                return "gate_red"
+        if consec_census_error >= _WATCHDOG_CONSEC_CENSUS_ERROR:
+            self._bump("consec_census_error")
+            if self._crossings["consec_census_error"] >= 2:
+                return "census_error"
+        latencies = [w["latency"] for w in self._window
+                     if w["latency"] is not None]
+        if len(latencies) >= 5 and _p95(latencies) > 2 * GATE_QUERY_Q_MS:
+            self._bump("latency_p95")
+            if self._crossings["latency_p95"] >= 2:
+                return "latency"
+        if legs_degraded and len(self._window) >= 2                 and all(w["legs_degraded"] for w in self._window[-2:]):
+            self._bump("leg_dead")
+            if self._crossings["leg_dead"] >= 2:
+                return "leg_dead"
+        return None
+
+    def _bump(self, signal: str) -> None:
+        self._crossings[signal] = self._crossings.get(signal, 0) + 1
+
+
+def _p95(values: list[float]) -> float:
+    if not values:
+        return 0.0
+    s = sorted(values)
+    return s[min(len(s) - 1, max(0, round(0.95 * len(s)) - 1))]
+
+
+# ── live-run markers (plan cycle4-P1-13 / cycle4-P2-37) ────────────────────
+#: Out-of-band JSON sentinel keyed by per-question namespace in the work
+#: dir (NOT a Point property — §9 no-schema-changes). Content: run_key +
+#: pid + launch/heartbeat UTC. A marker with no heartbeat within the TTL
+#: is STALE and auto-cleared with a warning; a LIVE marker owned by a
+#: different process means a peer is mid-question — the fresh-run
+#: namespace cleanup REFUSES (never clobber a peer's in-flight graph).
+
+
+def _marker_file(work_dir: str | None, namespace: str) -> Path | None:
+    if not work_dir or not namespace:
+        return None
+    return Path(work_dir) / "lme_markers" / f"{namespace}.json"
+
+
+def _marker_live(path: Path, *, ttl_min: int | None = None) -> bool:
+    """True when the marker file exists and its heartbeat is fresh."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    hb = data.get("heartbeat_utc")
+    if not isinstance(hb, str):
+        return False
+    ttl = (ttl_min if ttl_min is not None
+           else GATE_MARKER_TTL_MIN)
+    try:
+        age_min = (datetime.now(UTC) - datetime.fromisoformat(hb)).total_seconds() / 60
+    except ValueError:
+        return False
+    return age_min <= ttl
+
+
+def _namespace_cleanup_allowed(work_dir: str | None, namespace: str,
+                               run_key: str | None) -> bool:
+    """#1785 Task 1 Step 2 cleanup-site guard: cleanup proceeds unless a
+    LIVE peer marker exists (a peer is mid-question on this namespace).
+    Our OWN process marker (same pid) never blocks the cleanup. A stale
+    marker is auto-cleared with a warning (the owner crashed). Returns
+    True (cleanup allowed) or False (refused — never clobbered)."""
+    path = _marker_file(work_dir, namespace)
+    if path is None:
+        return True  # no marker surface (work_dir unset) — residual stated
+    if not path.exists():
+        return True
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return True
+    if data.get("pid") == os.getpid():
+        return True  # our own marker (resume continuation) — allowed
+    if _marker_live(path):
+        print(f"[longmem_eval] WARNING: live run marker on namespace "
+              f"{namespace!r} owned by pid {data.get('pid')} — refusing "
+              f"fresh-namespace cleanup (a peer is mid-question); leftover "
+              f"nodes stay (presence tier remains primary)",
+              file=sys.stderr)
+        return False
+    # stale marker → auto-clear with a warning
+    print(f"[longmem_eval] WARNING: stale run marker on namespace "
+          f"{namespace!r} (owner pid {data.get('pid')} gone) — clearing",
+          file=sys.stderr)
+    with contextlib.suppress(OSError):
+        path.unlink()
+    return True
+
+
+def _write_run_marker(work_dir: str | None, namespace: str | None,
+                      run_key: str | None) -> None:
+    """Write/refresh the run's own marker for a namespace (heartbeat).
+
+    Refuses to OVERWRITE a LIVE foreign-pid marker (defense-in-depth on the
+    cleanup guard's check-before-write ordering — a peer mid-question on
+    the same namespace must never have its live marker clobbered by our
+    heartbeat refresh; plan cycle3-P2-33 / cycle4-P2-37)."""
+    if not work_dir or not namespace:
+        return
+    path = _marker_file(work_dir, namespace)
+    try:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            if (data.get("pid") != os.getpid() and _marker_live(path)):
+                return  # a live peer's marker — never clobber it
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({
+            "run_key": run_key,
+            "pid": os.getpid(),
+            "heartbeat_utc": datetime.now(UTC).isoformat(),
+        }), encoding="utf-8")
+    except OSError:
+        pass  # marker is advisory — a write failure never aborts the run
+
+
+def _clear_run_marker(work_dir: str | None, namespace: str | None) -> None:
+    """Decommission OUR OWN live marker (pid-checked) — a peer's live
+    marker on the same namespace is never unlinked (review P1: the run-end
+    clear is pid-blind otherwise and could delete a concurrent peer's
+    marker, resurrecting the clobber hazard)."""
+    if not work_dir or not namespace:
+        return
+    path = _marker_file(work_dir, namespace)
+    with contextlib.suppress(OSError):
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return
+            if data.get("pid") == os.getpid():
+                path.unlink()
+
+
+# ── checkpoint-persist retry (plan P2-10) ──────────────────────────────────
+#: Checkpoint persist retry count + backoff (seconds).
+CHECKPOINT_SAVE_RETRIES = 3
+_CHECKPOINT_BACKOFF_BASE_S = 0.5
+
+
+def _save_checkpoint_safe(path: str | None, outcomes: list[dict],
+                          failures: list[dict], fingerprint: dict | None = None,
+                          *, run_key: str | None = None,
+                          surface: str | None = None,
+                          retriever: str | None = None,
+                          model: str | None = None,
+                          prompt: str | None = None,
+                          remove_failures: list[str] | None = None,
+                          degraded_aborted: dict | None = None,
+                          checkpoint_abort: dict | None = None) -> None:
+    """_save_checkpoint with retry-N-with-backoff; on exhaustion raises
+    CheckpointPersistError (never a bare traceback; the run-level marker
+    is recorded on the checkpoint so a resume refuses it — Task 2)."""
+    attempt = 0
+    while True:
+        try:
+            _save_checkpoint(
+                path, outcomes, failures, fingerprint, run_key=run_key,
+                surface=surface, retriever=retriever, model=model,
+                prompt=prompt, remove_failures=remove_failures,
+                degraded_aborted=degraded_aborted,
+                checkpoint_abort=checkpoint_abort)
+            return
+        except Exception as e:  # noqa: BLE001, RUF100
+            attempt += 1
+            if attempt > CHECKPOINT_SAVE_RETRIES:
+                raise CheckpointPersistError(
+                    f"checkpoint persist failed after "
+                    f"{CHECKPOINT_SAVE_RETRIES} retries ({e!r})") from e
+            time.sleep(_CHECKPOINT_BACKOFF_BASE_S * attempt)
+
+
+def _record_run_abort(path: str | None, *, marker: str, detail: dict,
+                      outcomes: list[dict], failures: list[dict],
+                      fingerprint: dict | None = None, run_key: str | None = None,
+                      surface: str | None = None, retriever: str | None = None,
+                      model: str | None = None, prompt: str | None = None) -> None:
+    """Best-effort persist of a run-level abort marker (``degraded_aborted``
+    or ``checkpoint_abort``) onto the checkpoint so a resume refuses it —
+    atomic WITH the final checkpoint write (plan P1-7: no persist-race
+    window where gate-green outcomes resume into a 'clean' continuation)."""
+    if not path:
+        return
+    p = Path(path)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with flock_exclusive(p.with_suffix(p.suffix + ".lock")):
+            data = {}
+            if p.is_file():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    data = {}
+            data[marker] = {**detail, "utc": _utc_now().isoformat()}
+            data["outcomes"] = outcomes
+            data["failures"] = failures
+            if fingerprint is not None:
+                data["fingerprint"] = fingerprint
+            _write_json_atomic(p, data)
+    except Exception:  # noqa: BLE001, RUF100
+        pass  # best-effort — the abort still propagates loudly
+
+
+# ── Task 3: per-session census replay (loss-location diagnostic) ───────────
+#: Verdict states (plan Task 3 acceptance): H6a (never-durably-written under
+#: load), H6b (post-ingest removal — GC/durability; H6c UNREACHABLE by this
+#: protocol — no restart cycle, so 'loss only post-ingest' is NECESSARILY
+#: H6b), INCONCLUSIVE (signature reproduced, no loss), and 'H6a unexercised
+#: — env remediation only' (failure signature NOT reproduced — explicitly
+#: NOT a passing verdict, plan P2-3).
+REPLAY_VERDICT_H6A = "H6a"
+REPLAY_VERDICT_H6B = "H6b"
+REPLAY_VERDICT_INCONCLUSIVE = "INCONCLUSIVE"
+REPLAY_VERDICT_UNEXERCISED = "H6a unexercised — env remediation only"
+
+
+def replay_verdict(trace: dict, gc_events: list | None = None) -> str:
+    """Task 3 decision rule (pure): classify the loss stage from the
+    per-session census trace.
+
+      * loss accumulating DURING ingest (any Phase-A census observed < its
+        turns+chunks expectation) → H6a (never-durably-written), UNLESS a
+        GC/fork-compaction event sits inside the loss window (a fork-GC
+        removal inside the narrow per-session window is indistinguishable
+        from never-written at that check — the GC capture is required for
+        BOTH verdict branches, final-verification P2) → then H6b;
+      * loss appearing only between the per-session censuses and the post-
+        ingest census → H6b (H6c is UNREACHABLE — no restart cycle in the
+        protocol, plan P2-2);
+      * no loss reproduced → INCONCLUSIVE when the failure signature WAS
+        reproduced; otherwise 'H6a unexercised — env remediation only'
+        (explicitly NOT passing, plan P2-3/P2-6).
+    """
+    gc = gc_events or []
+    sessions = trace.get("sessions") or {}
+    during_ingest_loss = False
+    loss_sis: list[int] = []
+    for si, s in sessions.items():
+        if not isinstance(s, dict):
+            continue
+        exp_a = s.get("phase_a_expected")
+        obs_a = s.get("phase_a_observed")
+        if (isinstance(exp_a, int) and isinstance(obs_a, int)
+                and obs_a < exp_a):
+            during_ingest_loss = True
+            loss_sis.append(int(si))
+    if during_ingest_loss:
+        if any(gc_in_window(gc, si) for si in loss_sis):
+            return REPLAY_VERDICT_H6B
+        return REPLAY_VERDICT_H6A
+    post = trace.get("post_ingest") or {}
+    exp_p = post.get("expected")
+    obs_p = post.get("observed")
+    if (isinstance(exp_p, int) and isinstance(obs_p, int)
+            and obs_p < exp_p):
+        return REPLAY_VERDICT_H6B
+    if trace.get("signature_reproduced"):
+        return REPLAY_VERDICT_INCONCLUSIVE
+    return REPLAY_VERDICT_UNEXERCISED
+
+
+def gc_in_window(gc_events: list, si: int) -> bool:
+    """True when any GC/fork-compaction event is attributable to the loss
+    window of session ``si`` (events carry a session index or timestamp;
+    a timestamp-only event counts when the trace is post-hoc correlated)."""
+    for ev in gc_events:
+        if isinstance(ev, dict) and ev.get("si") == si:
+            return True
+    return bool(gc_events)  # timestamp-only capture → conservative
+
+
+class _PerSessionCensus:
+    """Task 3 per-session census — interleaves with ingest via the shared
+    query-wrapper seam (retrieve.install_gate_fault_proxy; the #1744
+    dual-copy caveat: the replay runs with ``session_workers=1`` sequential,
+    so the shared live copy is the one exercised). Detects session
+    boundaries by the deterministic id pattern ``lme:{qid}:s{si}`` in write
+    params; after each session's Phase A (raw turn/chunk) batch and Phase C
+    (payload) batch, runs a per-session census (read-verified — a partial
+    read is labeled read-fault and retried; only a stable two-read consensus
+    counts as loss, plan Task 3). The census's OWN reads carry no id-pattern
+    params (``{"q": ..., "si": ...}``), so the wrapper forwards them without
+    re-triggering boundary detection (no recursion). The trace + verdict are
+    written to a diagnostic JSON under the work dir. Diagnostic-only —
+    fingerprint-excluded (plan P3)."""
+
+    _SI_RE = re.compile(r"lme:[^:]+:s(\d+)")
+
+    def __init__(self, proj: Any, qid: str, question: dict,
+                 chunk_turns: int, work_dir: str | None = None,
+                 signature_reproduced: bool = False,
+                 gc_events: list | None = None):
+        self.proj = proj
+        self.qid = qid
+        self.question = question
+        self.chunk_turns = chunk_turns
+        self.work_dir = work_dir
+        self.signature_reproduced = bool(signature_reproduced)
+        self.gc_events = gc_events or []
+        self.sessions: dict[str, dict] = {}
+        self.post_ingest: dict = {}
+        self.faults: list[dict] = []
+        self._current_si: int | None = None
+        self._batch_no: dict[int, int] = {}
+        self._prior_proxy = None
+
+    def _si_of(self, params: dict | None) -> int | None:
+        if not params:
+            return None
+        for v in params.values():
+            if isinstance(v, str):
+                m = self._SI_RE.search(v)
+                if m:
+                    return int(m.group(1))
+            elif isinstance(v, list):
+                for item in v:
+                    if isinstance(item, str):
+                        m = self._SI_RE.search(item)
+                        if m:
+                            return int(m.group(1))
+        return None
+
+    def _wrapped(self, cypher: str, params: dict | None = None,
+                 timeout=None):
+        si = self._si_of(params)
+        if si is not None:
+            if self._current_si is not None and si != self._current_si:
+                self._census(self._current_si)
+            self._current_si = si
+        return self._real_query(cypher, params=params, timeout=timeout)
+
+    def __enter__(self) -> _PerSessionCensus:
+        # ``proj.g`` is a _GuardedGraph (__slots__ — its ``query`` cannot be
+        # shadowed); the underlying falkordb Graph handle ``proj.g._g`` is a
+        # plain object whose ``query`` method CAN be shadowed. The census's
+        # OWN reads carry no id-pattern params ({"q", "si"}) so the wrapper
+        # forwards them without re-triggering boundary detection (no
+        # recursion).
+        graph = self.proj.g
+        self._real_query = graph._g.query
+        graph._g.query = self._wrapped
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        self.proj.g._g.query = self._real_query
+        if self._current_si is not None:
+            self._census(self._current_si)
+        return False
+
+    # ── per-session census (read-verified) ──
+    def _census(self, si: int) -> None:
+        batch = self._batch_no.get(si, 0)
+        self._batch_no[si] = batch + 1
+        phase = "phase_a" if batch == 0 else "phase_c"
+        sessions_list = self.question.get("haystack_sessions") or []
+        if si < len(sessions_list):
+            n_turns = len(sessions_list[si])
+            n_chunks = len(_session_chunk_windows(
+                sessions_list[si], self.chunk_turns))
+        else:
+            n_turns = n_chunks = 0
+        expected = n_turns + n_chunks
+        reads = self._read_verify_count(si)
+        if reads.status == "consensus":
+            observed = reads.value
+        else:
+            observed = None
+            self.faults.append({"si": si, "phase": phase, "label": "read-fault",
+                                "retried": True, "reads": reads.reads})
+        entry = self.sessions.setdefault(str(si), {})
+        entry[f"{phase}_expected"] = expected
+        entry[f"{phase}_observed"] = observed
+
+    def _read_verify_count(self, si: int) -> CensusReads:
+        return _consensus_read(
+            self.proj, {
+                "label_scan": lambda: self._si_count_label(si),
+                "traversal": lambda: self._si_count_traversal(si),
+            }, retry_n=GATE_RETRY_N, timeout_ms=GATE_TIMEOUT_MS,
+            label=f"per-session-{si}")
+
+    def _si_count_label(self, si: int) -> int:
+        rows = _query_with_deadline(
+            self.proj,
+            "MATCH (p:Point {lme_question_id:$q, lme_session_index:$si}) "
+            "RETURN count(*)",
+            params={"q": self.qid, "si": si}, timeout_ms=GATE_TIMEOUT_MS)
+        return rows[0][0] if rows else 0
+
+    def _si_count_traversal(self, si: int) -> int:
+        rows = _query_with_deadline(
+            self.proj,
+            "MATCH (s:Session {lme_question_id:$q, lme_session_index:$si})"
+            "-[:CONTAINS]->(p:Point) WHERE p.lme_session_index = $si "
+            "RETURN count(DISTINCT p)",
+            params={"q": self.qid, "si": si}, timeout_ms=GATE_TIMEOUT_MS)
+        return rows[0][0] if rows else 0
+
+    def finalize(self, ingest_stats: dict | None) -> dict:
+        """Post-ingest full-question census + trace + verdict. Called AFTER
+        the ingest returns (the post-ingest census needs the ingest stats'
+        expected denominator). Returns the trace dict."""
+        stats = ingest_stats or {}
+        if "points" in stats:
+            expected = (stats.get("turns", 0) + stats.get("chunks", 0)
+                        + stats.get("points", 0))
+        else:
+            expected = stats.get("turns", 0) + stats.get("chunks", 0)
+        try:
+            idxs, _ = resolve_answer_session_indices(self.question)
+            pool = folded_pool_rows(self.proj, self.qid, idxs or [])
+            self.post_ingest = {"expected": expected,
+                                "observed": pool.get("ns_count", 0)}
+        except Exception:  # noqa: BLE001, RUF100
+            self.post_ingest = {"expected": expected, "observed": None,
+                                "error": "post-ingest census failed"}
+        trace = {
+            "qid": self.qid,
+            "chunk_turns": self.chunk_turns,
+            "signature_reproduced": self.signature_reproduced,
+            "sessions": self.sessions,
+            "post_ingest": self.post_ingest,
+            "faults": self.faults,
+            "verdict": replay_verdict({
+                "signature_reproduced": self.signature_reproduced,
+                "sessions": self.sessions,
+                "post_ingest": self.post_ingest,
+            }, gc_events=self.gc_events),
+        }
+        print(f"[longmem_eval] per-session census replay ({self.qid}): "
+              f"verdict = {trace['verdict']}", file=sys.stderr)
+        if self.work_dir:
+            try:
+                out = Path(self.work_dir) / f"per_session_census_{self.qid}.json"
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_text(json.dumps(trace, indent=2, sort_keys=True)
+                               + "\n", encoding="utf-8")
+            except OSError:
+                pass
+        return trace
+
+
+def _session_chunk_windows(session: list[dict], chunk_turns: int) -> list:
+    """Chunk-window partitioning mirroring ingest._session_chunks' window
+    (chunk_turns turns per window) — used for the per-session Phase-A
+    census expectation (turns + chunks)."""
+    if chunk_turns <= 0 or not session:
+        return []
+    return [session[i:i + chunk_turns]
+            for i in range(0, len(session), chunk_turns)]
+
+
+class _ReplayLoadWorkers:
+    """Task 3 load injection: N synthetic write workers hammering scratch
+    namespaces on the same FalkorDB server while the per-session census
+    replay ingests — reproduces the degraded environment's write pressure
+    (concurrent TimeoutErrors / AOF-fsync stalls). Default 0 = no load."""
+
+    def __init__(self, sdk_factory: Callable[[], Any], n: int):
+        self.sdk_factory = sdk_factory
+        self.n = max(0, int(n))
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+
+    def start(self) -> None:
+        if self.n == 0:
+            return
+        for i in range(self.n):
+            t = threading.Thread(target=self._worker, args=(i,),
+                                 daemon=True)
+            t.start()
+            self._threads.append(t)
+
+    def stop(self) -> None:
+        self._stop.set()
+        for t in self._threads:
+            t.join(timeout=5)
+
+    def _worker(self, i: int) -> None:
+        import random as _random
+        try:
+            sdk = self.sdk_factory()
+            proj = sdk._get_proj()
+            qid = f"replay-load-{i}"
+            while not self._stop.is_set():
+                si = _random.randint(0, 3)
+                pid = f"lme:{qid}:s{si}:p{_random.randint(0, 1 << 30)}"
+                with contextlib.suppress(Exception):
+                    proj.g.query(
+                        "MERGE (p:Point {id:$id}) SET p.lme_question_id=$q, "
+                        "p.lme_session_index=$si, p.has_answer=true",
+                        params={"id": pid, "q": qid, "si": si})
+        except Exception:  # noqa: BLE001, RUF100
+            pass
+
+
+# ── falsification-trigger predicate (Task 5 consumes; pure) ────────────────
+def falsification_trigger(*, ratio_ok: bool, presence_ok: bool,
+                          floor_ok: bool, post_census_ok: bool,
+                          legs_healthy: bool, strategy_timeout: bool,
+                          miss: bool) -> bool:
+    """Task 5 falsification trigger — a pure function over the FULL 6-input
+    conjunction (plan §1 falsification check + Task 5): fires ONLY on
+    ratio = 1.000 AND presence green AND per-session floor green AND post-
+    retrieval census green AND legs healthy AND NOT a strategy-timeout
+    artifact AND still a miss. Every suppression arm enumerated in
+    tests/test_graph_integrity_gate.py."""
+    return (miss and ratio_ok and presence_ok and floor_ok
+            and post_census_ok and legs_healthy and not strategy_timeout)
+
+
+def _gate_red(outcome: dict) -> list[str]:
+    """Union of phase-keyed gate reasons for one outcome (watchdog +
+    certifier + resume refusal consume the same union — plan P1-3/P1-5)."""
+    return list((outcome.get("gate_reasons") or [])
+                + (outcome.get("post_retrieval_reasons") or []))
+
+
+def _hard_gate_red(outcome: dict) -> list[str]:
+    return [r for r in _gate_red(outcome) if r in HARD_GATE_REASONS]
 
 
 def run_evaluation(
@@ -2063,6 +2926,21 @@ def run_evaluation(
     # (run_main) always passes EVAL_RETRIEVAL_BUDGET_MS (1500); None keeps
     # the SDK-default 500 ms for programmatic callers.
     retrieval_budget_ms: int | None = None,
+    # #1785 (Task 1 Step 5 / Task 3): the mid-run watchdog + revalidation
+    # mode signal + the per-session census replay (diagnostic-only).
+    # ``revalidate`` is forwarded to the report certifier (build_report)
+    # — a Task-5 re-validation refuses ANY gate-red outcome / strategy
+    # timeout / mid-write failure (no exclusion path) and the watchdog
+    # aborts on the FIRST such outcome (no 4.5h burn). ``per_session_census``
+    # + ``replay_load_workers`` + ``replay_signature_reproduced`` +
+    # ``replay_gc_events`` drive the Task 3 loss-location replay — all
+    # fingerprint-excluded (a knob change must not alter resume-eligibility
+    # of pre-change checkpoints).
+    revalidate: bool = False,
+    per_session_census: bool = False,
+    replay_load_workers: int = 0,
+    replay_signature_reproduced: bool = False,
+    replay_gc_events: list | None = None,
     # #1349 vector arm: retriever routing + injected model + retrieval-only.
     retriever: str = "hybrid",
     model: str | None = None,
@@ -2233,6 +3111,18 @@ def run_evaluation(
                                             retry_failed=retry_failed)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
+    # #1785 (Task 1 Step 2): FRESH vs RESUME — the ratio denominator is only
+    # meaningful on a clean per-question namespace. A resume (prior completed
+    # or failed state in the checkpoint) SKIPS the fresh-run namespace
+    # cleanup and the ratio tier is suppressed in the gate (leftover nodes
+    # from the prior partial run are expected; presence is primary).
+    resumed_run = bool(done or prior_failures)
+    # #1785 (Task 1 Step 5): the mid-run watchdog — shared run-level state
+    # across workers (the latency/gate-red windows are GLOBAL; the
+    # consecutive-census_error arm is per-worker by nature). Aborts the run
+    # early with ``degraded_aborted`` on sustained degradation so a re-
+    # validation can never burn ~4.5h to a guaranteed-fail verdict.
+    watchdog = _RunWatchdog(revalidate=revalidate, n_questions=len(instances))
     import threading
     _lock = threading.Lock()
     # M5 (#1525): the run's reader prompt constants, recorded verbatim in the
@@ -2288,6 +3178,12 @@ def run_evaluation(
         r2_retained: BaseException | None = None
         r2_attempted = 0
         r2_semaphore_held = False
+        # #1785 (Task 1 Step 5): per-worker consecutive-census_error
+        # counter (the watchdog's per-worker arm) + the gate timing/ratio
+        # signals recorded per completed question.
+        _consec_census = 0
+        _gate_latency_ms: float | None = None
+        _gate_ratio: float | None = None
         # #1786 (code-review F3): the success/breaker paths fall through to
         # the SAME trailing save as the failure path (under ``_lock``) —
         # this flag carries their ``remove_failures`` tombstone so a
@@ -2321,64 +3217,179 @@ def run_evaluation(
                       f"(--retry-failed)", file=sys.stderr)
             while True:
                 try:
+                    namespace = (question_graph_namespace(
+                        model, query_prompt, qid) if db_uri else None)
                     sdk, cleanup = _make_question_sdk(
                         db_uri=db_uri,
-                        namespace=question_graph_namespace(model, query_prompt, qid)
-                        if db_uri else None,
+                        namespace=namespace,
                         work_dir=work_dir)
                     try:
                         _sdk_cleanup = cleanup
+                        # #1785 (Task 1 Step 2): FRESH-run per-question
+                        # namespace cleanup — the ratio denominator is only
+                        # meaningful on a clean namespace (leftover nodes from
+                        # a prior partial run would push the ratio > 1.0 →
+                        # ``census_overflow`` on a clean question). SKIPPED on
+                        # resume (presence is primary; leftovers expected) and
+                        # in embedded mode (fresh tempdir — isolation by
+                        # construction). The cleanup REFUSES while a LIVE peer
+                        # marker exists on the same namespace — never clobber
+                        # a concurrent run's in-flight question graph (plan
+                        # cycle3-P2-33 / cycle4-P2-37: 'never clobbered'
+                        # fallback). ORDERING PINNED (review P1): the guard is
+                        # checked BEFORE our own marker is written — a
+                        # write-before-check ordering would overwrite the
+                        # peer's LIVE marker with our pid and the cleanup
+                        # would proceed, clobbering the peer's in-flight
+                        # graph. Our marker is written only AFTER the guard
+                        # passes (heartbeats refresh it at the gate sites).
+                        if (db_uri and not resumed_run
+                                and _namespace_cleanup_allowed(
+                                    work_dir, namespace, run_key)):
+                            _write_run_marker(work_dir, namespace, run_key)
+                            # TARGETED per-question wipe (not a bulk
+                            # ``MATCH (n) DETACH DELETE n`` — the
+                            # _GuardedGraph bulk-wipe guard refuses non-
+                            # test-named graphs; the namespace is per-
+                            # question, so the lme_question_id-scoped delete
+                            # removes every node this question's ingest can
+                            # write (operator Points carry no
+                            # lme_question_id and are NOT counted by the
+                            # label-scan census anyway).
+                            with contextlib.suppress(Exception):
+                                sdk._get_proj().g.query(
+                                    "MATCH (n) WHERE n.lme_question_id = $q "
+                                    "DETACH DELETE n", params={"q": qid})
                         # M7 (D5): ingest is timed in isolation — the write-path
                         # cost is a report component (extractor vs retrieve vs
                         # reader vs judge attribution).
-                        t_ingest = time.monotonic()
-                        if ingest_mode == "v2":
-                            from tests.model_adapters import build_extractor_model
+                        # #1785 (Task 3): the per-session census replay wraps
+                        # the ingest — a query wrapper interleaves a read-
+                        # verified per-session census after each session's
+                        # Phase A/C writes, and the post-ingest census runs via
+                        # ``finalize`` (the trace + verdict are written to the
+                        # work dir). Diagnostic-only — fingerprint-excluded.
+                        _replay_census = (None if not per_session_census
+                                          else _PerSessionCensus(
+                                              sdk._get_proj(), qid, question,
+                                              chunk_turns, work_dir=work_dir,
+                                              signature_reproduced=
+                                              replay_signature_reproduced,
+                                              gc_events=replay_gc_events))
 
-                            from .ingest_v2 import ingest_haystack_v2
-                            ingest_stats = ingest_haystack_v2(
-                                sdk, question, extractor_model,
-                                chunk_turns=chunk_turns,
-                                # Pilot #1549: session-parallel extraction within a
-                                # question (the LLM phase is the wall-clock dominant
-                                # cost). NOTE: the live ingest_haystack_v2 on main
-                                # shadows the parallel worker-factory path with a
-                                # sequential copy (pre-existing duplicate, tracked
-                                # separately — #1744), so workers currently fall
-                                # back to the shared extractor_model — which is
-                                # exactly what the fingerprint records.
-                                session_workers=session_workers,
-                                # M7 #1739 / #1742: the factory spec + tuning are
-                                # threaded in (never the run_main-local ``args``
-                                # closure — that was a latent NameError) and mirror
-                                # exactly what _build_cli_extractor_model
-                                # fingerprints: the workers serve the SAME config
-                                # the checkpoint records.
-                                model_factory=(
-                                    (lambda: build_extractor_model(
-                                        session_worker_model_spec or None,
-                                        max_tokens=session_worker_max_tokens,
-                                        temperature=session_worker_temperature))
-                                    if session_workers > 1 else None),
-                                # #1786 (R1): the write-stage retry budget — the
-                                # SAME value the fingerprint records — + marker
-                                # arming (DISARMED during a --retry-failed resume
-                                # re-attempt: no resume-internal whole-question
-                                # retry budget, P1-1).
-                                ingest_write_retries=ingest_write_retries,
-                                write_marker_armed=not resume_reattempt)
+                        def _run_ingest(_sdk):
+                            if ingest_mode == "v2":
+                                from tests.model_adapters import build_extractor_model
+
+                                from .ingest_v2 import ingest_haystack_v2
+                                return ingest_haystack_v2(
+                                    _sdk, question, extractor_model,
+                                    chunk_turns=chunk_turns,
+                                    # Pilot #1549: session-parallel extraction
+                                    # within a question (the LLM phase is the
+                                    # wall-clock dominant cost). NOTE: the live
+                                    # ingest_haystack_v2 on main shadows the
+                                    # parallel worker-factory path with a
+                                    # sequential copy (pre-existing duplicate,
+                                    # tracked separately — #1744), so workers
+                                    # currently fall back to the shared
+                                    # extractor_model — which is exactly what
+                                    # the fingerprint records. The per-session
+                                    # census replay forces ``session_workers=1``
+                                    # for deterministic measurement (#1744
+                                    # caveat).
+                                    session_workers=(
+                                        1 if per_session_census
+                                        else session_workers),
+                                    # M7 #1739 / #1742: the factory spec +
+                                    # tuning are threaded in (never the
+                                    # run_main-local ``args`` closure — that was
+                                    # a latent NameError) and mirror exactly what
+                                    # _build_cli_extractor_model fingerprints:
+                                    # the workers serve the SAME config the
+                                    # checkpoint records.
+                                    model_factory=(
+                                        (lambda: build_extractor_model(
+                                            session_worker_model_spec or None,
+                                            max_tokens=session_worker_max_tokens,
+                                            temperature=session_worker_temperature))
+                                        if session_workers > 1 else None),
+                                    # #1786 (R1): the write-stage retry budget —
+                                    # the SAME value the fingerprint records — +
+                                    # marker arming (DISARMED during a
+                                    # --retry-failed resume re-attempt: no
+                                    # resume-internal whole-question retry
+                                    # budget, P1-1).
+                                    ingest_write_retries=ingest_write_retries,
+                                    write_marker_armed=not resume_reattempt)
+                            return ingest_haystack(
+                                _sdk, question, chunk_turns=chunk_turns)
+
+                        t_ingest = time.monotonic()
+                        if _replay_census is not None:
+                            with _replay_census:
+                                ingest_stats = _run_ingest(sdk)
+                            _replay_census.finalize(ingest_stats)
                         else:
-                            ingest_stats = ingest_haystack(
-                                sdk, question, chunk_turns=chunk_turns)
+                            ingest_stats = _run_ingest(sdk)
                         ingest_latency_ms = round(
                             (time.monotonic() - t_ingest) * 1000.0, 2)
                         # M7 (D3): the authoritative live graph pool size — the
-                        # retrieval-pool denominator the methodology documents
-                        # (single Cypher, no N+1).
-                        pool_rows = sdk._get_proj().g.query(
-                            "MATCH (p:Point {lme_question_id:$q}) RETURN count(*)",
-                            params={"q": qid}).result_set
-                        pool_size = pool_rows[0][0] if pool_rows else 0
+                        # retrieval-pool denominator the methodology documents.
+                        # #1785: FOLDED pool_rows (plan P2-2/P2-5) — a single
+                        # Cypher returning BOTH the unfiltered namespace count
+                        # (the ratio numerator) AND per-session membership for
+                        # the mapped answer-session indices (the presence +
+                        # per-session-floor + lost-mark-cross-check data). The
+                        # join resolution is fail-closed (``dataset_join_error``
+                        # rides the gate, never a ValueError, never silently
+                        # matching nothing).
+                        _ans_idxs, _join_err = resolve_answer_session_indices(
+                            question)
+                        pool_census = folded_pool_rows(
+                            sdk._get_proj(), qid, _ans_idxs or [])
+                        pool_size = pool_census["ns_count"]
+                        # #1785 (Task 1): the PRE-RETRIEVAL graph-integrity
+                        # gate — flags truncated graphs fail-loud (ratio
+                        # sub-1.0 → ``graph_truncated``, >1.0 →
+                        # ``census_overflow``, presence-red →
+                        # ``answer_session_absent``, evidence-mark short →
+                        # ``evidence_mark_census``, fault → ``census_error``).
+                        # The gate FLAGS, never skips retrieval — a red
+                        # question STILL runs retrieve_for_question and its
+                        # outcome stays shape-OK, graded via grade_by_qid
+                        # (plan final-verification P2). ``resumed_run``
+                        # suppresses the ratio tier (leftover nodes from a
+                        # prior partial run are expected) — presence stays
+                        # primary. ``retrieval_only`` exempts the tiers.
+                        _t_gate = time.monotonic()
+                        _gate = run_integrity_gate(
+                            sdk._get_proj(), question, qid,
+                            ingest_stats=ingest_stats,
+                            pool_result=pool_census,
+                            retrieval_only=retrieval_only,
+                            resumed=resumed_run)
+                        # P1-1 (review): the watchdog latency arm keys on the
+                        # AVERAGE per-query census latency (plan P2-9: per-
+                        # query p95 > 2xQ — never the per-question total, a
+                        # count-vs-latency mix). Reads that went to read-
+                        # verify retry are excluded by the read-verify layer
+                        # (only successful reads are counted).
+                        _gate_reads = max(1, int(_gate.get("census", {}).get("reads", 10)))
+                        _gate_latency_ms = round(
+                            ((time.monotonic() - _t_gate) * 1000.0)
+                            / _gate_reads, 2)
+                        # P2-4 (review): refresh the live-marker heartbeat at
+                        # the pre-retrieval gate (a v2 question can exceed the
+                        # marker TTL mid-question; a stale marker would be
+                        # auto-cleared by a peer and clobbered).
+                        if db_uri and not resumed_run:
+                            _write_run_marker(work_dir, namespace, run_key)
+                        gate_reasons = list(_gate["reasons"])
+                        _gate_ratio = _gate.get("ratio")
+                        _consec_census = (0 if GATE_REASON_CENSUS_ERROR
+                                          not in gate_reasons
+                                          else _consec_census + 1)
                         ret = retrieve_for_question(
                             sdk, question, ks=ks, top_k=top_k,
                             retriever=retriever,
@@ -2404,6 +3415,41 @@ def run_evaluation(
                             # vector arm keeps VECTOR_TIMEOUT_MS=5000).
                             retrieval_budget_ms=retrieval_budget_ms)
 
+                        # #1785 (Task 1): the POST-RETRIEVAL census — a second
+                        # invocation of the shared gate predicates immediately
+                        # after retrieval (inside the try, before the finally's
+                        # sdk.close) distinguishes loss-between-gate-and-
+                        # retrieval (H6 — the falsification-critical case) from
+                        # genuine retrieval misses. Runs on gate-green questions
+                        # only (already-red questions keep their pre-existing
+                        # red — no wasted budget on final verdicts; plan P2-3).
+                        # The reasons are phase-keyed (``post_retrieval_reasons``
+                        # vs ``gate_reasons``) so downstream consumers (resume
+                        # refusal, certifier, falsification trigger) can tell
+                        # them apart (plan P2-8).
+                        if not gate_reasons:
+                            _t_post = time.monotonic()
+                            _post = run_integrity_gate(
+                                sdk._get_proj(), question, qid,
+                                ingest_stats=ingest_stats,
+                                pool_result=None,
+                                retrieval_only=retrieval_only,
+                                resumed=resumed_run)
+                            if _gate_latency_ms is not None:
+                                _post_reads = max(1, int(
+                                    _post.get("census", {}).get("reads", 10)))
+                                _gate_latency_ms = round(
+                                    _gate_latency_ms
+                                    + ((time.monotonic() - _t_post) * 1000.0)
+                                    / _post_reads, 2)
+                            if db_uri and not resumed_run:
+                                _write_run_marker(work_dir, namespace, run_key)
+                            post_retrieval_reasons = list(_post["reasons"])
+                            _consec_census = (0 if GATE_REASON_CENSUS_ERROR
+                                              not in post_retrieval_reasons
+                                              else _consec_census + 1)
+                        else:
+                            post_retrieval_reasons = []
                         # #1349 retrieval-only: reader/judge never invoked — the
                         # outcome carries retrieval + breaker accounting only.
                         if retrieval_only:
@@ -2496,6 +3542,14 @@ def run_evaluation(
                         "leg_mix": ret.get("match_source_counts"),
                         "leg_mix@k": ret.get("match_source_counts@k"),
                         "pool_size": pool_size,
+                        # #1785 (Task 1): graph-integrity gate reasons —
+                        # phase-keyed lists ([] = gate green; plan P2-8).
+                        # Consumed by the resume-scan refusal (Task 2,
+                        # union semantics), the report certifier, and the
+                        # falsification trigger. Read via .get defaults so
+                        # pre-change checkpoints resume identically.
+                        "gate_reasons": gate_reasons,
+                        "post_retrieval_reasons": post_retrieval_reasons,
                         "evidence_written": evidence_written,
                         "evidence_retrieved@k": ret.get("evidence_retrieved@k"),
                         "ingest_latency_ms": ingest_latency_ms,
@@ -2552,6 +3606,43 @@ def run_evaluation(
                             # remove_failures tombstone.
                             failures[:] = [f for f in failures
                                            if f.get("question_id") != qid]
+                    # #1785 (Task 1 Step 5): the mid-run watchdog records
+                    # this question's signals (gate-red union, strategy
+                    # timeout, census latency, consecutive census_error,
+                    # leg-deadness) and aborts the run early with a
+                    # DISTINCT reason when a sustained/mode-aware arm fires
+                    # (no 4.5h burn to a guaranteed-fail verdict).
+                    _strategy_timeout = any(
+                        isinstance(leg, dict)
+                        and leg.get("reason") == "timeout"
+                        for leg in (outcome.get("legs") or []))
+                    _leg_sigs = _legs_degraded(
+                        outcome, question.get("question_type", ""))
+                    _dead_sigs = [name for name, entries in _leg_sigs
+                                  if any(e.get("reason") in ("timeout", "query_failed")
+                                         or (e.get("reason") == "empty_results"
+                                             and e.get("count", 0) == 0)
+                                         for e in entries)]
+                    _below_floor = [name for name, entries in _leg_sigs
+                                    if name not in _dead_sigs]
+                    # collapse guard (plan P2-12): below-floor-only legs on
+                    # a ratio=1.000 gate-green question are NATURALLY short
+                    # (small graphs) — not a degradation signal.
+                    if (_below_floor and not _dead_sigs
+                            and not outcome.get("gate_reasons")
+                            and _gate_ratio == 1.0):
+                        _below_floor = []
+                    _abort_reason = watchdog.record(
+                        qid=qid,
+                        gate_reasons=list(outcome.get("gate_reasons") or []),
+                        post_retrieval_reasons=list(
+                            outcome.get("post_retrieval_reasons") or []),
+                        strategy_timeout=_strategy_timeout,
+                        census_latency_ms=_gate_latency_ms,
+                        consec_census_error=_consec_census,
+                        legs_degraded=bool(_dead_sigs or _below_floor))
+                    if _abort_reason:
+                        raise WatchdogAbortError(_abort_reason)
                     # #1786 (code-review F3): the save is NOT done here — it
                     # falls through to the SAME trailing ``with _lock:
                     # _save_checkpoint(...)`` as the failure path so the
@@ -2606,6 +3697,14 @@ def run_evaluation(
                     # runner exits MODEL_ENCODE_FAILED_EXIT.
                     raise
                 except Exception as e:  # noqa: BLE001, RUF100
+                    # #1785 (review P0-1): a watchdog abort / checkpoint-
+                    # persist failure raised on the SUCCESS path must NOT be
+                    # swallowed by the per-question failure handler (it would
+                    # record a bogus failure entry and continue the run — the
+                    # watchdog would never abort). Re-raise so the dispatch
+                    # handler records the run-level marker and aborts.
+                    if isinstance(e, (WatchdogAbortError, CheckpointPersistError)):
+                        raise
                     # M2 (#1523, D4): a fatal-class provider error mid-run means the
                     # key died (billing cap hit, revocation) — continuing would
                     # silently produce garbage questions. Abort the run instead of
@@ -2690,6 +3789,16 @@ def run_evaluation(
                         failures[:] = (
                             [f for f in failures
                              if f.get("question_id") != qid] + [entry])
+                        # #1785 (Task 1 Step 5): the mid-write failure-rate
+                        # arm samples failures here (failures never enter
+                        # outcomes — no other arm sees them). Under
+                        # revalidate=True a single mid-write failure aborts
+                        # (zero-failure verdict); under revalidate=False the
+                        # scoped rate arm fires when the run has gated
+                        # outcomes and the rate bound is exceeded.
+                        _abort = watchdog.record_failure()
+                        if _abort:
+                            raise WatchdogAbortError(_abort) from None
                     break
         finally:
             if r2_semaphore_held:
@@ -2697,31 +3806,73 @@ def run_evaluation(
             if resume_semaphore_held:
                 _REINGEST_LIMITER.release()
         with _lock:
-            _save_checkpoint(
+            _save_checkpoint_safe(
                 checkpoint, list(done.values()), failures, fingerprint,
                 run_key=run_key, surface=surface, retriever=retriever,
                 model=model, prompt=query_prompt,
                 remove_failures=_save_remove_failures)
 
     # ── dispatch: sequential (workers=1) or a thread pool ──
-    if workers <= 1:
-        for i, question in enumerate(instances):
-            _run_one(question, i)
-    else:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-            futures = [
-                ex.submit(_run_one, question, i)
-                for i, question in enumerate(instances)
-            ]
-            for f in concurrent.futures.as_completed(futures):
-                f.result()  # re-raise any unexpected error
+    # #1785: the run's own live marker is written per-question namespace at
+    # the start and cleared on completion/abort (decommission — plan
+    # cycle4-P1-13(d)); the Task 3 load-injection workers run concurrently
+    # with the per-session-census replay questions.
+    _load_workers = (_ReplayLoadWorkers(
+        lambda: _make_question_sdk(db_uri=db_uri, namespace=None,
+                                   work_dir=work_dir)[0] if db_uri
+        else _make_question_sdk(db_uri=None, namespace=None,
+                                work_dir=work_dir)[0],
+        replay_load_workers)
+        if (per_session_census and replay_load_workers > 0) else None)
+    if _load_workers is not None:
+        _load_workers.start()
+    try:
+        if workers <= 1:
+            for i, question in enumerate(instances):
+                _run_one(question, i)
+        else:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers) as ex:
+                futures = [
+                    ex.submit(_run_one, question, i)
+                    for i, question in enumerate(instances)
+                ]
+                for f in concurrent.futures.as_completed(futures):
+                    f.result()  # re-raise any unexpected error
+    except (WatchdogAbortError, CheckpointPersistError) as e:
+        # #1785 (Task 1 Step 5 / P2-10): a mid-run abort is recorded on the
+        # checkpoint with a DISTINCT run-level marker (``degraded_aborted`` /
+        # ``checkpoint_abort``) — never a bare traceback; a resume refuses it
+        # (Task 2 run-level refusal). The completed window's outcomes never
+        # reach an aggregate/report claim (the exception propagates).
+        _marker = ("degraded_aborted" if isinstance(e, WatchdogAbortError)
+                   else "checkpoint_abort")
+        _detail = ({"reason": getattr(e, "reason", str(e))}
+                   if isinstance(e, WatchdogAbortError) else {"reason": str(e)})
+        print(f"[longmem_eval] RUN ABORTED — {_marker}: "
+              f"{_detail['reason']}", file=sys.stderr)
+        _record_run_abort(
+            checkpoint, marker=_marker, detail=_detail,
+            outcomes=list(done.values()), failures=failures,
+            fingerprint=fingerprint, run_key=run_key, surface=surface,
+            retriever=retriever, model=model, prompt=query_prompt)
+        raise
+    finally:
+        if _load_workers is not None:
+            _load_workers.stop()
+        if db_uri and not resumed_run and work_dir:
+            for question in instances:
+                _clear_run_marker(
+                    work_dir, question_graph_namespace(
+                        model, query_prompt, question["question_id"]))
 
     return outcomes, outcomes_to_report(
         outcomes,
         # #1349 vector arm: retriever/model/query_prompt/mode/run_key.
         retriever=retriever, model=model, query_prompt=query_prompt,
         retrieval_only=retrieval_only, surface=surface, run_key=run_key,
+        revalidate=revalidate,
         reader_model=(reader.model_id if reader is not None
                       else "n/a (retrieval-only)"),
         reader_model_spec=getattr(reader, "model_spec", "") if reader else "",
@@ -2806,6 +3957,15 @@ def run_evaluation(
     )
 
 
+#: #1785 (P2-7): whether the parallel report.py's ``build_report`` has
+#: landed the ``revalidate`` param yet — the outcomes_to_report forward is
+#: guarded so either parallel merge order stays green (a pre-param
+#: build_report must not TypeError).
+_BUILD_REPORT_REVALIDATE_OK: frozenset[str] = frozenset(
+    getattr(build_report, "__code__", None).co_varnames
+    if getattr(build_report, "__code__", None) is not None else ())
+
+
 def outcomes_to_report(
     outcomes: list[dict[str, Any]],
     *,
@@ -2831,6 +3991,13 @@ def outcomes_to_report(
     retrieval_only: bool = False,
     surface: str = "embedded",
     run_key: str | None = None,
+    # #1785 (Task 1 Step 4 / P2-7): the revalidation mode signal — forwarded
+    # to build_report's certifier (a Task-5 re-validation refuses ANY gate-
+    # red outcome / strategy timeout / mid-write failure — no exclusion
+    # path). The forwarding is unit-tested (P2-6: a regression dropping it
+    # fails CI); build_report's parallel #1785 file owns the param — the
+    # forward is guarded so either merge order stays green.
+    revalidate: bool = False,
     # R3 (#1542) D5: forwarded to build_report — the dense-leg methodology
     # keys are always emitted (not_checked default when omitted).
     embedder_status: dict | None = None,
@@ -2895,6 +4062,12 @@ def outcomes_to_report(
                 "valid", "error_classes", "leg_mix", "leg_mix@k",
                 "pool_size", "evidence_written", "evidence_retrieved@k",
                 "ingest_latency_ms",
+                # #1785 (Task 1): the graph-integrity gate reasons (phase-
+                # keyed lists) ride the Layer-1 projection — read via
+                # o.get defaults so a pre-change checkpoint resumes without
+                # KeyError (the keys stay absent until the outcome carries
+                # them; plan P1-3).
+                "gate_reasons", "post_retrieval_reasons",
                 # #1786 (Task 1 Step 5): the per-question recovery counters
                 # (ingest_retries = write-stage retry count; whole_question_
                 # retries = the R2 count, 0 or 1 — read via o.get so a
@@ -2994,6 +4167,12 @@ def outcomes_to_report(
         python_version=python_version,
         workers=workers,
         dataset_fingerprint=dataset_fingerprint,
+        # #1785 (P2-7): forward the revalidation mode signal to the
+        # certifier — guarded against either parallel merge order (a
+        # pre-param build_report must not TypeError; the parallel report.py
+        # file adds ``revalidate: bool = False``).
+        **({"revalidate": revalidate}
+           if "revalidate" in _BUILD_REPORT_REVALIDATE_OK else {}),
     )
 
 
@@ -3326,6 +4505,36 @@ def _build_parser() -> argparse.ArgumentParser:
                         "grades the qid clean. NOT fingerprinted (a recorded "
                         "resume-mode — the revalidation protocol sets it); "
                         "default off for back-compat")
+    # #1785 (Task 1 Step 4 / Task 3): the revalidation mode signal + the
+    # loss-location replay flags — ALL fingerprint-excluded (a knob change
+    # must never alter resume-eligibility of pre-change checkpoints).
+    p.add_argument("--revalidate", action="store_true",
+                   help="#1785 (Task 5): revalidation mode — the report "
+                        "certifier refuses ANY gate-red outcome / strategy "
+                        "timeout / mid-write failure (no exclusion path; the "
+                        "mid-run watchdog aborts on the FIRST such outcome); "
+                        "env TORTOISE_LME_REVALIDATE=1; resolution CLI > env "
+                        "> default (False)")
+    p.add_argument("--per-session-census", action="store_true",
+                   help="#1785 (Task 3): loss-location replay — a read-verified "
+                        "per-session census interleaves with ingest (after each "
+                        "session's Phase A/C writes) under concurrent write "
+                        "load; the trace + verdict (H6a / H6b / INCONCLUSIVE / "
+                        "H6a unexercised) are written to the work dir. "
+                        "Diagnostic-only — fingerprint-excluded; forces "
+                        "session_workers=1 for deterministic measurement")
+    p.add_argument("--replay-load-workers", type=int, default=0,
+                   help="#1785 (Task 3): concurrent synthetic write workers "
+                        "hammering scratch namespaces while the per-session-"
+                        "census replay ingests (reproduces the degraded run's "
+                        "write pressure). 0 = no load injection")
+    p.add_argument("--replay-signature-reproduced", action="store_true",
+                   help="#1785 (Task 3): record that the real run's failure "
+                        "signature (concurrent TimeoutErrors / AOF-fsync "
+                        "stalls) WAS reproduced during the replay — required "
+                        "for an INCONCLUSIVE verdict to count as pass-with-"
+                        "evidence; without it the verdict is 'H6a unexercised "
+                        "— env remediation only' (NOT passing, plan P2-3)")
     p.add_argument("--max-retries", type=int, default=DEFAULT_MAX_RETRIES,
                    help="per-question LLM-call retries with exponential backoff "
                         "before the question is recorded as failed (default 3)")
@@ -3865,6 +5074,16 @@ def _run_main(parser: argparse.ArgumentParser, args,
                 ingest_question_retries=INGEST_QUESTION_RETRIES,
                 resume_attempts_cap=RESUME_ATTEMPTS_CAP,
                 retrieval_budget_ms=EVAL_RETRIEVAL_BUDGET_MS,
+                # #1785 (Task 1 Step 4 / Task 3): revalidation mode + the
+                # loss-location replay flags (CLI > env > default).
+                revalidate=(args.revalidate
+                            or ((os.environ.get(
+                                "TORTOISE_LME_REVALIDATE") or "")
+                                .strip().lower() in _TRUTHY)),
+                per_session_census=args.per_session_census,
+                replay_load_workers=args.replay_load_workers,
+                replay_signature_reproduced=(
+                    args.replay_signature_reproduced),
             )
         except FatalProviderError as e:
             print("[longmem_eval] RUN ABORTED — fatal provider error mid-run "

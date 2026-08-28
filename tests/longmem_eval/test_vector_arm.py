@@ -1026,7 +1026,12 @@ def test_checkpoint_retriever_mismatch_warns_not_refuses(tmp_path, capsys):
 
 def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):
     """An ENOSPC/OSError on the atomic checkpoint rename must surface as an
-    error — never silently drop the question from the denominator."""
+    error — never silently drop the question from the denominator.
+
+    #1785 (P2-10): the persist path now retries N times with backoff and
+    then aborts with a DISTINCT ``CheckpointPersistError`` (never a bare
+    OSError traceback; the ``checkpoint_abort`` run marker rides the
+    checkpoint so a resume refuses it)."""
     import os as _os
 
     cp = tmp_path / "state.json"
@@ -1035,7 +1040,7 @@ def test_checkpoint_write_failure_surfaces_error(tmp_path, monkeypatch):
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(_os, "replace", _enospc)
-    with pytest.raises(OSError):
+    with pytest.raises(runner.CheckpointPersistError):
         runner.run_evaluation(
             _mini()[:1], reader=None, judge=None, ks=(5,), top_k=5, split="s",
             work_dir=str(tmp_path), checkpoint=str(cp), retrieval_only=True,

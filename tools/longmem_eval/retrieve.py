@@ -65,7 +65,9 @@ from __future__ import annotations
 import math
 import os
 import re
+import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -1278,11 +1280,11 @@ def retrieve_for_question(
     # (removes the granularity-bias confound: with chunks in the shared
     # denominator, the per-session chunk cap would structurally cap the
     # numerator below it and the ceiling would tighten as chunk_turns
-    # shrinks). ──
-    ev_rows = sdk._get_proj().g.query(
-        "MATCH (p:Point) WHERE p.lme_question_id = $q AND p.has_answer = true "
-        "AND coalesce(p.pointKind, '') <> 'session-transcript' "
-        "RETURN count(*)", params={"q": qid}).result_set
+    # shrinks). ── The query shapes live in the SHARED evidence-mark census
+    # helper (retrieve.py, #1785 P2-7) so the retrieval path, the pre-
+    # retrieval gate, the post-retrieval census, and the per-session census
+    # can never drift on the D5 pointKind filter.
+    ev_rows = evidence_mark_count(sdk._get_proj(), qid)
     evidence_point_count = ev_rows[0][0] if ev_rows else 0
     ch_rows = sdk._get_proj().g.query(
         "MATCH (p:Point) WHERE p.lme_question_id = $q AND p.has_answer = true "
@@ -1495,3 +1497,724 @@ def retrieve_for_question(
         out["rerank_pass"] = rerank_pass
         out["rerank_latency_ms"] = round(rerank_ms, 2)
     return out
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #1785 graph-integrity gate — shared gate-predicate callable
+# ---------------------------------------------------------------------------
+# The re-validation's 5 session@20=0.0 questions were graph-integrity
+# artifacts: their answer sessions' Point nodes were ABSENT from the graph at
+# retrieval time (pool_size : points_total ratio 0.005–0.196 vs exactly 1.000
+# healthy), NOT retrieval misses (3/5 answered correctly in the pilot with
+# intact graphs). The gate below makes truncation fail-loud at run time so no
+# third aggregate can silently blend degraded outcomes. Plan:
+# docs/plans/2026-08-27-1785-session-recall.md (Task 1).
+#
+# Tier resolution (plan §4A): hard-reject is PRESENCE-driven (primary,
+# exact); the ratio is a secondary sub-1.0 truncation FLAG (any sub-1.0 ratio
+# is a truncated graph — healthy is exactly 1.000; there is NO clean
+# separation below 1.0); ratio > 1.0 is an integrity anomaly (``census_overflow``,
+# fail-closed, never silently passed). The 0.25 ratio reject constant is
+# RETRACTED (e47becba 0.026 and af8d2e46 0.148 were hits).
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── closed reason vocabulary (report.py + run_protocol.py consume these) ──
+GATE_REASON_GRAPH_TRUNCATED = "graph_truncated"
+GATE_REASON_ANSWER_SESSION_ABSENT = "answer_session_absent"
+GATE_REASON_EVIDENCE_MARK_CENSUS = "evidence_mark_census"
+GATE_REASON_CENSUS_ERROR = "census_error"
+GATE_REASON_DATASET_JOIN_ERROR = "dataset_join_error"
+GATE_REASON_CENSUS_OVERFLOW = "census_overflow"
+
+#: Every reason key the gate can emit (also the vocabulary the resume-scan
+#: refusal predicate and the report certifier consume).
+GATE_REASONS: tuple[str, ...] = (
+    GATE_REASON_GRAPH_TRUNCATED,
+    GATE_REASON_ANSWER_SESSION_ABSENT,
+    GATE_REASON_EVIDENCE_MARK_CENSUS,
+    GATE_REASON_CENSUS_ERROR,
+    GATE_REASON_DATASET_JOIN_ERROR,
+    GATE_REASON_CENSUS_OVERFLOW,
+)
+
+#: Fail-closed classes — a hard census class vetoes through the report's
+#: attempted-set grading (plan Task 1 Step 4 reason→grade mapping).
+HARD_GATE_REASONS: tuple[str, ...] = (
+    GATE_REASON_CENSUS_ERROR,
+    GATE_REASON_DATASET_JOIN_ERROR,
+    GATE_REASON_CENSUS_OVERFLOW,
+)
+
+#: Tracked-only classes — counted in n_gated, graded normally otherwise.
+TRACKED_GATE_REASONS: tuple[str, ...] = (
+    GATE_REASON_GRAPH_TRUNCATED,
+    GATE_REASON_ANSWER_SESSION_ABSENT,
+    GATE_REASON_EVIDENCE_MARK_CENSUS,
+)
+
+
+def _gate_env_int(name: str, default: int) -> int:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _gate_env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# ── gate-config knobs (ALL fingerprint-excluded — a knob change must never
+# alter resume-eligibility of pre-change checkpoints; plan Task 2) ──
+#: Read-verify retry count N (fixed constant per plan Task 1 Step 2).
+GATE_RETRY_N: int = _gate_env_int("TORTOISE_LME_GATE_RETRY_N", 2)
+#: Per-session node-count floor tolerance T (evidence-bearing points).
+GATE_FLOOR_T: int = _gate_env_int("TORTOISE_LME_GATE_FLOOR_T", 5)
+#: Per-query latency allowance Q (ms) — the watchdog latency arm keys on
+#: p95 > 2× Q across the last-10 window (SUCCESSFUL reads only).
+GATE_QUERY_Q_MS: int = _gate_env_int("TORTOISE_LME_GATE_QUERY_Q", 100)
+#: Per-query census timeout T_census (ms) — a census query exceeding this
+#: yields ``census_error``, never a hang (enforced by the proxy deadline,
+#: not the driver socket timeout).
+GATE_TIMEOUT_MS: int = _gate_env_int("TORTOISE_LME_GATE_TIMEOUT_MS", 500)
+#: Certifier / watchdog gated-fraction bound (shared knob, plan cycle2-P2-16).
+GATE_MAX_GATED: float = _gate_env_float("TORTOISE_LME_GATE_MAX_GATED", 0.25)
+#: Leg-deadness arm rolling window (questions).
+GATE_LEG_DEAD_WINDOW: int = _gate_env_int("TORTOISE_LME_GATE_LEG_DEAD_WINDOW", 10)
+#: Live-run-marker TTL (minutes) — a marker with no heartbeat within the TTL
+#: is stale and auto-cleared with a warning (plan cycle4-P1-13).
+GATE_MARKER_TTL_MIN: int = _gate_env_int("TORTOISE_LME_GATE_MARKER_TTL_MIN", 30)
+
+#: D5 evidence-mark filter fragment — SINGLE-SOURCED so the shared helper,
+#: the independent second read, and the raw third-shape probe can never
+#: drift (plan P2-7). Excludes session-transcript raw chunks in BOTH ingest
+#: modes (a naive ``has_answer=true`` count exceeds ``evidence_points`` on
+#: healthy v2 questions because v2 transcript chunks carry
+#: ``has_answer = contains_evidence``).
+D5_POINTKIND_FILTER = "coalesce(p.pointKind, '') <> 'session-transcript'"
+
+# ── fault-injection seam (plan P2-5) ───────────────────────────────────────
+#: Test-only query wrapper around ``proj.g.query`` — unit/docker fault
+#: scenarios (short-reads, timeouts, stalls) install a proxy here instead of
+#: touching the real client. ``None`` = no injection (production path is
+#: byte-identical). Every census query goes through :func:`_gate_query`.
+_gate_fault_proxy: Callable | None = None
+
+
+def install_gate_fault_proxy(proxy: Callable | None) -> None:
+    """Install (or clear) the gate fault-injection proxy (test seam).
+
+    The proxy signature is ``proxy(query_fn, cypher, params) -> result`` —
+    it may call ``query_fn``, return a synthetic result_set list, raise, or
+    block past T_census. ``None`` restores the production path.
+    """
+    global _gate_fault_proxy
+    _gate_fault_proxy = proxy
+
+
+def reset_gate_fault_proxy() -> None:
+    install_gate_fault_proxy(None)
+
+
+def _gate_query(proj: Any, cypher: str, params: dict | None = None) -> Any:
+    if _gate_fault_proxy is not None:
+        return _gate_fault_proxy(proj.g.query, cypher, params)
+    return proj.g.query(cypher, params=params)
+
+
+class _DeadlineTimedOut(RuntimeError):
+    """A census query exceeded T_census inside the proxy deadline."""
+
+
+class _DeadlineFaulted(RuntimeError):
+    """A census query raised inside the proxy deadline thread."""
+
+
+def _query_with_deadline(proj: Any, cypher: str, params: dict | None = None,
+                         timeout_ms: int | None = None) -> list:
+    """Run a census query bounded by its OWN deadline (T_census).
+
+    The stateless single-shot ``proj.g.query`` driver has no timeout param
+    (``socket_timeout=10`` is a backstop, not a budget mechanism) — a
+    stalled server (the AOF-fsync-stall fault class) would block ~10 s per
+    query. The proxy deadline converts an exceeded census query into
+    ``_DeadlineTimedOut`` within the stated budget (plan cycle2-P1-7).
+    """
+    budget = timeout_ms if timeout_ms is not None else GATE_TIMEOUT_MS
+    result: list = []
+    error: BaseException | None = None
+    done = threading.Event()
+
+    def _run() -> None:
+        nonlocal result, error
+        try:
+            rows = _gate_query(proj, cypher, params)
+            result = list(rows.result_set)
+        except BaseException as ex:
+            error = ex
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    if not done.wait(budget / 1000.0):
+        raise _DeadlineTimedOut(
+            f"census query exceeded T_census={budget}ms")
+    if error is not None:
+        raise error  # type: ignore[misc]
+    return result
+
+
+# ── read-verify protocol (plan Task 1 Step 2) ───────────────────────────────
+@dataclass
+class CensusReads:
+    """Two-read consensus outcome for one census."""
+    value: Any          # agreed value (None on mismatch)
+    status: str         # "consensus" | "mismatch"
+    reads: dict         # shape → value per read
+    retries: int        # retry count consumed
+
+
+def _consensus_read(proj: Any, shapes: dict[str, Callable[[], list]], *,
+                    retry_n: int | None = None,
+                    timeout_ms: int | None = None,
+                    label: str = "census") -> CensusReads:
+    """Two independent-shape reads with retry-on-mismatch (read-verify).
+
+    Both shapes run; a disagreement (different values, or any read faulted)
+    retries the pair up to ``retry_n`` times. Only a stable agreement counts
+    as a value. A persistent mismatch returns status="mismatch" (caller
+    maps to ``census_error`` — NEVER a verdict, never pick-a-read; plan
+    P2-2). The shapes MUST be genuinely different access paths (plan
+    second-model P2: a syntax-level change does not qualify — a systematic
+    server-side partial read poisons same-plan reads identically).
+    """
+    n = retry_n if retry_n is not None else GATE_RETRY_N
+    last_reads: dict = {}
+    for attempt in range(n + 1):
+        reads: dict = {}
+        faulted = False
+        for name, fn in shapes.items():
+            try:
+                reads[name] = fn()
+            except Exception:  # noqa: BLE001, RUF100
+                reads[name] = None
+                faulted = True
+        last_reads = reads
+        values = [v for v in reads.values() if v is not None]
+        if not faulted and values and len(set(map(repr, values))) == 1:
+            return CensusReads(value=values[0], status="consensus",
+                               reads=reads, retries=attempt)
+    return CensusReads(value=None, status="mismatch",
+                       reads=last_reads, retries=n)
+
+
+def _probe_raw(proj: Any, cypher: str, params: dict | None = None,
+               timeout_ms: int | None = None) -> list:
+    """Third-shape probe — a RAW query NOT via any shared helper (plan
+    Task 1 Step 2: a discriminating probe confirms before anything is
+    labeled absent/lost). Every query with the stateless single-shot
+    client sees CURRENT state — a fresh session by construction (plan
+    P1-I); the shim-only session-fault scenarios fabricate the fault via
+    the injected proxy instead."""
+    return _query_with_deadline(proj, cypher, params, timeout_ms=timeout_ms)
+
+
+# ── folded pool_rows census (plan P2-2: presence folds into pool_rows) ─────
+#: Single Cypher returning BOTH the unfiltered namespace count (the ratio
+#: numerator) AND per-session membership for the mapped answer-session
+#: indices (presence + lost-mark cross-check + per-session floor). The
+#: membership is an OPTIONAL MATCH so an EMPTY membership still preserves
+#: the namespace count (a truncated graph with zero answer-session points
+#: must not collapse ns_count to 0).
+FOLDED_POOL_ROWS_CYPHER = (
+    "MATCH (p:Point {lme_question_id:$q}) "
+    "WITH count(p) AS ns_count "
+    "OPTIONAL MATCH (m:Point {lme_question_id:$q}) "
+    "WHERE m.lme_session_index IN $idxs "
+    "RETURN ns_count, m.lme_session_index AS si, "
+    "coalesce(m.has_answer, false) AS has "
+    "ORDER BY si"
+)
+
+#: Independent ratio second shape — a genuinely different ACCESS PATH (a
+#: relationship traversal vs the label+property scan of the folded query),
+#: per plan P1-5/second-model P2. Counts points reachable from Session nodes
+#: via CONTAINS; turn/chunk/extracted points all carry CONTAINS edges in
+#: both ingest modes (entities are Object nodes, events are Event nodes,
+#: operator Points carry no ``lme_question_id`` — none match the label scan).
+RATIO_SECOND_SHAPE_CYPHER = (
+    "MATCH (s:Session {lme_question_id:$q})-[:CONTAINS]->(p:Point) "
+    "RETURN count(DISTINCT p)"
+)
+
+
+def classify_ratio(pool_size, expected) -> str | None:
+    """Pure ratio-tier classification (no reads) — the SAME classification
+    the gate's read-verified ratio tier applies (plan §4A tier resolution):
+
+      * healthy = exactly 1.000 → ``None`` (no reason; there is NO clean
+        separation below 1.0 — any sub-1.0 ratio is a truncated graph);
+      * sub-1.0 → ``graph_truncated`` (truncation FLAG — the reject tier
+        is presence-driven, the 0.25 ratio constant is retracted);
+      * >1.0 → ``census_overflow`` (integrity anomaly — census counting
+        leftovers from a prior partial run; fail-closed, never silently
+        passed);
+      * expected <= 0 → ``census_error`` (a zero-point completed ingest is
+        itself integrity suspicion; never ZeroDivisionError).
+
+    Shared by the gate and the historical checkpoint ratio-tier replay
+    (tests/test_graph_integrity_gate.py) so the replay tests the REAL
+    classification function.
+    """
+    if expected is None or expected <= 0:
+        return GATE_REASON_CENSUS_ERROR
+    if pool_size is None:
+        return None  # absent pool readout — read-verify layer handles it
+    if pool_size < expected:
+        return GATE_REASON_GRAPH_TRUNCATED
+    if pool_size > expected:
+        return GATE_REASON_CENSUS_OVERFLOW
+    return None
+
+
+def folded_pool_rows(proj: Any, qid: str, idxs: list[int]) -> dict:
+    """Run the folded pool_rows census — namespace count + per-session
+    membership for the mapped answer-session indices (plan P2-2/P2-5).
+    Returns ``{"ns_count": int, "members": [(si, has_answer), ...]}`` —
+    computed on the UNFILTERED namespace set regardless of any
+    retrieval-side filters pool_rows carries. ``idxs == []`` (abstention
+    exemption) returns just the namespace count (membership trivially
+    empty). Raises on query failure (caller maps to ``census_error``).
+    """
+    rows = _query_with_deadline(
+        proj, FOLDED_POOL_ROWS_CYPHER,
+        params={"q": qid, "idxs": list(idxs)})
+    if not rows:
+        return {"ns_count": 0, "members": []}
+    ns_count = rows[0][0]
+    members = [(int(r[1]), bool(r[2])) for r in rows if r[1] is not None]
+    return {"ns_count": ns_count, "members": members}
+
+
+def ratio_second_read(proj: Any, qid: str) -> int:
+    """Independent ratio second shape — the CONTAINS traversal count."""
+    rows = _query_with_deadline(
+        proj, RATIO_SECOND_SHAPE_CYPHER, params={"q": qid})
+    return rows[0][0] if rows else 0
+
+
+# ── dataset-join resolution (plan Task 1 Step 2) ────────────────────────────
+def resolve_answer_session_indices(question: dict) -> tuple[list[int], str | None]:
+    """Resolve the mapped answer-session indices for a question.
+
+    ``answer_session_ids`` (dataset source-session id strings) → positions
+    within ``haystack_session_ids``. Returns ``(indices, None)`` on success
+    (``[]`` for the abstention exemption — EMPTY ``answer_session_ids``),
+    or ``(None, GATE_REASON_DATASET_JOIN_ERROR)`` on a fail-closed join
+    failure: an answer id absent from ``haystack_session_ids``, an
+    out-of-range index, a duplicated source-session id (uniqueness
+    unestablishable — never silent first-occurrence resolution), or an
+    empty ``haystack_session_ids``. ``answer_session_ids=None`` or a
+    key-absent field is NOT the abstention path — it fails closed (plan
+    P2-11: None/key-absent must not silently skip the presence check).
+    """
+    answer_ids = question.get("answer_session_ids")
+    if answer_ids is None:
+        return None, GATE_REASON_DATASET_JOIN_ERROR
+    if not isinstance(answer_ids, list) or not all(
+            isinstance(a, str) for a in answer_ids):
+        return None, GATE_REASON_DATASET_JOIN_ERROR
+    if not answer_ids:
+        return [], None  # abstention exemption (empty ids only)
+    haystack = question.get("haystack_session_ids")
+    if not isinstance(haystack, list) or not haystack:
+        return None, GATE_REASON_DATASET_JOIN_ERROR
+    # duplicate source-session id → uniqueness unestablishable
+    seen: set[str] = set()
+    for h in haystack:
+        if not isinstance(h, str):
+            return None, GATE_REASON_DATASET_JOIN_ERROR
+        if h in seen:
+            return None, GATE_REASON_DATASET_JOIN_ERROR
+        seen.add(h)
+    position = {sid: i for i, sid in enumerate(haystack)}
+    indices: list[int] = []
+    for aid in answer_ids:
+        if aid not in position:
+            return None, GATE_REASON_DATASET_JOIN_ERROR
+        idx = position[aid]
+        if idx >= len(question.get("haystack_sessions") or []):
+            return None, GATE_REASON_DATASET_JOIN_ERROR
+        indices.append(idx)
+    return sorted(set(indices)), None
+
+
+# ── evidence-mark census (extracted D5 shared helper, plan P1-1/P2-7) ──────
+def evidence_mark_count(proj: Any, qid: str, *,
+                        created_point_ids: list[str] | None = None,
+                        per_session: bool = False,
+                        timeout_ms: int | None = None) -> list:
+    """D5 evidence-mark census — pointKind-filtered ``has_answer`` count.
+
+    Scoped WRITE-OBSERVED to ``created_point_ids`` (the ids this run's
+    ``_write_payload`` actually created — plan P1-1) when supplied, else
+    namespace-wide (the ``evidence_turns``-denominator fallback for ingest
+    paths without created-ids exposure). ``per_session=True`` groups by
+    ``lme_session_index`` (the per-session floor + Task 3's census share
+    this shape — the floor adds NO first reads, plan cycle2-P2-19).
+    ``timeout_ms`` routes through the T_census deadline wrapper (gate
+    callers); the retrieval path leaves it None for byte-identical
+    transport (the shared requirement is the QUERY SHAPE — the single-
+    sourced D5_POINTKIND_FILTER fragment — not the transport, plan P2-7).
+
+    Returns a list of rows: ``[[count]]`` (flat) or ``[[si, count], ...]``
+    (per-session).
+    """
+    if created_point_ids is not None:
+        base = (
+            "MATCH (p:Point) WHERE p.id IN $ids "
+            f"AND {D5_POINTKIND_FILTER} AND p.has_answer = true"
+        )
+        params: dict = {"ids": list(created_point_ids)}
+    else:
+        base = (
+            "MATCH (p:Point) WHERE p.lme_question_id = $q "
+            f"AND {D5_POINTKIND_FILTER} AND p.has_answer = true"
+        )
+        params = {"q": qid}
+    if per_session:
+        # RedisGraph/FalkorDB GROUP BY is IMPLICIT (non-aggregated return
+        # columns group) — an explicit ``GROUP BY si`` alias clause is a
+        # syntax error.
+        cypher = base + " RETURN p.lme_session_index, count(*)"
+    else:
+        cypher = base + " RETURN count(*)"
+    if timeout_ms is not None:
+        return _query_with_deadline(proj, cypher, params=params,
+                                    timeout_ms=timeout_ms)
+    return _gate_query(proj, cypher, params=params).result_set
+
+
+# ── the shared gate-predicate callable ─────────────────────────────────────
+def run_integrity_gate(
+    proj: Any, question: dict, qid: str, *,
+    ingest_stats: dict | None = None,
+    pool_result: dict | None = None,
+    retrieval_only: bool = False,
+    resumed: bool = False,
+    retry_n: int | None = None,
+    floor_t: int | None = None,
+    timeout_ms: int | None = None,
+) -> dict:
+    """Evaluate the graph-integrity gate for one question (plan Task 1).
+
+    Returns ``{"reasons": [...], "ratio": float|None, "expected": int|None,
+    "pool_size": int|None, "members": [(si, has_answer)], "census": {...}}``.
+    ``reasons == []`` = gate green. Every census runs the read-verify
+    protocol (two independent shapes + retry + third-shape probe on
+    absence); a persistent fault maps to ``census_error`` (fail CLOSED —
+    excluded from aggregates, never a verdict, never a crash). The gate
+    FLAGS, never skips retrieval (a red question still runs
+    ``retrieve_for_question`` — the run site owns that contract).
+
+    Tier resolution:
+      * ``retrieval_only=True`` → no tiers (breaker-open / vector-arm /
+        full-context: no ingest-stats surface; plan P1-4).
+      * extraction-error fold (plan cycle3-P1-11): ingest stats recording a
+        session extraction exception → NO integrity reasons (the question
+        is already invalid via ``n_ingest_errors``/``error_census`` — the
+        error attribution is the true cause; NEVER ``census_overflow`` on
+        the corrupted denominator, never a bare ``answer_session_absent``).
+      * ratio: sub-1.0 → ``graph_truncated`` (flag); >1.0 →
+        ``census_overflow`` (fail-closed anomaly); suppressed on resume
+        (leftover nodes from a prior partial run are expected — presence is
+        primary). expected == 0 with a completed ingest → ``census_error``
+        (a zero-point completed ingest is itself integrity suspicion;
+        distinct from the ``retrieval_only`` exemption by the ABSENCE of
+        the flag — never ZeroDivisionError).
+      * presence: red when ANY mapped answer-session index has zero points
+        (multi-session red-on-any); skipped for the abstention exemption
+        (EMPTY ``answer_session_ids`` only); join failure →
+        ``dataset_join_error`` (fail-closed, never a ValueError, never
+        silently matching nothing).
+      * per-session floor: derived at gate time from the write-path
+        per-session evidence-point stat (``ingest_stats["per_session_"
+        "evidence_points"]`` — the ONE floor source, plan §11 decision 5);
+        floor = max(1, expected − T). Red-on-any. Absent stat → tier not
+        applicable. A present session with expected 0 evidence stays GREEN
+        (P2-11 — marks live entirely on transcript chunks or a no-evidence
+        extractor must not silently gate-red via floor max(1, 0−T) = 1).
+      * evidence-mark census: write-observed count of ``has_answer`` among
+        ``created_point_ids`` (loss-only red: count < expected; inflation
+        from OR-in / NOOP-fold / within-run collisions is diagnostic-only,
+        never red — plan P2-1); fallback to the namespace-wide
+        pointKind-filtered count vs ``evidence_points`` (v2) or
+        ``evidence_turns`` (legacy) when created ids are absent; the
+        lost-mark cross-check (marks present among a mapped answer
+        session's points regardless of creation run) red-flags a
+        mark-stripped session even when both created-id counts are 0
+        (plan P1-4); the client-side created-id-set anchor fires
+        ``census_error`` on a shape-independent short consensus (cycle3-
+        P2-31: ns_count < len(created_point_ids) is provably faulted).
+    """
+    reasons: list[str] = []
+    stats = ingest_stats or {}
+    n = retry_n if retry_n is not None else GATE_RETRY_N
+    t = floor_t if floor_t is not None else GATE_FLOOR_T
+    budget = timeout_ms if timeout_ms is not None else GATE_TIMEOUT_MS
+    result: dict = {"reasons": reasons, "ratio": None, "expected": None,
+                    "pool_size": None, "members": [],
+                    "census": {"reads": 0, "read_latency_ms": 0.0}}
+    if retrieval_only:
+        return result
+
+    # ── extraction-error fold (true cause first) ──
+    if stats.get("errors") or stats.get("error_census"):
+        result["census"]["error_fold"] = True
+        return result
+
+    # ── read-verify latency accounting (plan P1-2/P2-7) ──
+    reads_done = 0
+    reads_latency_ms = 0.0
+    _t_reads = time.monotonic()
+
+    def _note_reads(n: int) -> None:
+        nonlocal reads_done, reads_latency_ms
+        reads_done += n
+        reads_latency_ms = (time.monotonic() - _t_reads) * 1000.0
+
+    # ── expected denominator (both stats shapes) ──
+    if "points" in stats:
+        expected = (stats.get("turns", 0) + stats.get("chunks", 0)
+                    + stats.get("points", 0))
+    else:
+        # legacy ingest_haystack: only turn Points + session-transcript
+        # chunks exist; evidence_points is a SUBSET of turn Points (never
+        # an additional node class) — adding it would double-count and
+        # push every healthy legacy ratio < 1.0 (plan P1-1).
+        expected = stats.get("turns", 0) + stats.get("chunks", 0)
+    result["expected"] = expected
+    if expected == 0:
+        reasons.append(GATE_REASON_CENSUS_ERROR)
+        return result
+
+    # ── dataset-join resolution + folded pool_rows census ──
+    idxs, join_error = resolve_answer_session_indices(question)
+    if join_error is not None:
+        reasons.append(join_error)
+    try:
+        pool = (pool_result if pool_result is not None
+                else folded_pool_rows(proj, qid, idxs or []))
+    except Exception:  # noqa: BLE001, RUF100
+        reasons.append(GATE_REASON_CENSUS_ERROR)
+        return result
+    _note_reads(1)
+    ns_count = int(pool.get("ns_count") or 0)
+    members: list[tuple[int, bool]] = [
+        (int(si), bool(has)) for si, has in pool.get("members") or []]
+    result["pool_size"] = ns_count
+    result["members"] = members
+    per_session_counts: dict[int, int] = {}
+    per_session_marks: dict[int, int] = {}
+    for si, has in members:
+        per_session_counts[si] = per_session_counts.get(si, 0) + 1
+        if has:
+            per_session_marks[si] = per_session_marks.get(si, 0) + 1
+    #: per-session evidence stat — the ONE floor source (plan §11 decision 5)
+    floor_stats = stats.get("per_session_evidence_points")
+
+    # ── ratio tier (read-verified; suppressed on resume) ──
+    if not resumed and join_error is None:
+        ratio = ns_count / expected
+        result["ratio"] = ratio
+        # read-verify: read1 = the folded label scan (already in hand),
+        # read2 = the independent CONTAINS traversal access path.
+        reads = _consensus_read(
+            proj, {
+                "label_scan": lambda: ns_count,
+                "traversal": lambda: ratio_second_read(proj, qid),
+            }, retry_n=n, timeout_ms=budget, label="ratio")
+        _note_reads(len(reads.reads))
+        if reads.status != "consensus":
+            reasons.append(GATE_REASON_CENSUS_ERROR)
+        else:
+            agreed = reads.value
+            # shape-independent-truncation anchor (cycle3-P2-31): the
+            # client-known created-id set size never passes through the
+            # server cursor — a consensus namespace count SHORTER than it
+            # is provably faulted (the namespace must contain the created
+            # ids), fail-closed to census_error, never a phantom flag.
+            created_ids = stats.get("created_point_ids")
+            if (isinstance(created_ids, list)
+                    and agreed < len(created_ids)):
+                reasons.append(GATE_REASON_CENSUS_ERROR)
+                return result
+            # wrong-count disagreement (cycle2-P2-15): the third-shape
+            # probe fires when the consensus count disagrees with the
+            # CLIENT-KNOWN expectation (agreed != expected — a healthy
+            # consensus needs no probe; base-10 budget preserved). A
+            # fresh-session probe contradicting the consensus means the
+            # reads were faulted — census_error, never a verdict.
+            _ratio_reason = classify_ratio(agreed, expected)
+            if _ratio_reason is not None:
+                try:
+                    probe_rows = _probe_raw(
+                        proj,
+                        "MATCH (p:Point {lme_question_id:$q}) RETURN count(*)",
+                        params={"q": qid}, timeout_ms=budget)
+                    probe_count = probe_rows[0][0] if probe_rows else 0
+                except Exception:  # noqa: BLE001, RUF100
+                    reasons.append(GATE_REASON_CENSUS_ERROR)
+                    return result
+                _note_reads(1)
+                if probe_count != agreed:
+                    reasons.append(GATE_REASON_CENSUS_ERROR)
+                    return result
+                reasons.append(_ratio_reason)
+
+    # ── presence tier + per-session floor ──
+    if join_error is None and idxs:
+        pres = _presence_consensus(
+            proj, qid, idxs, per_session_counts,
+            retry_n=n, timeout_ms=budget)
+        _note_reads(len(pres.reads))
+        if pres.status != "consensus":
+            reasons.append(GATE_REASON_CENSUS_ERROR)
+        else:
+            observed = pres.value
+            confirmed_missing = [si for si in idxs
+                                 if observed.get(si, 0) == 0]
+            for si in confirmed_missing:
+                # absence confirmation: raw third-shape probe on a fresh
+                # query; a probe finding the session means the consensus
+                # reads were faulted.
+                try:
+                    probe_rows = _probe_raw(
+                        proj,
+                        "MATCH (p:Point {lme_question_id:$q, "
+                        "lme_session_index:$si}) RETURN count(*)",
+                        params={"q": qid, "si": si}, timeout_ms=budget)
+                    probe_n = probe_rows[0][0] if probe_rows else 0
+                except Exception:  # noqa: BLE001, RUF100
+                    reasons.append(GATE_REASON_CENSUS_ERROR)
+                    break
+                if probe_n > 0:
+                    reasons.append(GATE_REASON_CENSUS_ERROR)
+                    break
+            if confirmed_missing and GATE_REASON_CENSUS_ERROR not in reasons:
+                reasons.append(GATE_REASON_ANSWER_SESSION_ABSENT)
+            # per-session node-count floor (write-path stat = ONE source)
+            if (isinstance(floor_stats, dict) and floor_stats
+                    and GATE_REASON_ANSWER_SESSION_ABSENT not in reasons
+                    and GATE_REASON_CENSUS_ERROR not in reasons):
+                for si in idxs:
+                    exp_ev = floor_stats.get(str(si))
+                    if not isinstance(exp_ev, int):
+                        continue
+                    if exp_ev == 0:
+                        continue  # P2-11: present + zero expected → green
+                    floor = max(1, exp_ev - t)
+                    if per_session_counts.get(si, 0) == 0:
+                        continue  # already red via presence
+                    if per_session_marks.get(si, 0) < floor:
+                        reasons.append(GATE_REASON_EVIDENCE_MARK_CENSUS)
+
+    # ── evidence-mark census (write-observed; loss-only red) ──
+    if join_error is None:
+        created_ids = stats.get("created_point_ids")
+        if isinstance(created_ids, list):
+            expected_ev = stats.get("evidence_points", 0)
+            ids_param = created_ids
+        else:
+            ids_param = None
+            expected_ev = (stats.get("evidence_points", 0)
+                           if "points" in stats
+                           else stats.get("evidence_turns", 0))
+        try:
+            def _flat() -> int:
+                rows = evidence_mark_count(proj, qid, created_point_ids=ids_param,
+                                           timeout_ms=budget)
+                return rows[0][0] if rows else 0
+
+            def _per_session_sum() -> int:
+                rows = evidence_mark_count(
+                    proj, qid, created_point_ids=ids_param, per_session=True,
+                    timeout_ms=budget)
+                return sum(int(r[1]) for r in rows) if rows else 0
+
+            reads = _consensus_read(
+                proj, {"flat": _flat, "per_session_sum": _per_session_sum},
+                retry_n=n, timeout_ms=budget, label="evidence_mark")
+        except Exception:  # noqa: BLE001, RUF100
+            reads = CensusReads(value=None, status="mismatch",
+                                reads={}, retries=n)
+        _note_reads(len(reads.reads))
+        if reads.status != "consensus":
+            reasons.append(GATE_REASON_CENSUS_ERROR)
+        else:
+            census_count = reads.value
+            if census_count < expected_ev:
+                reasons.append(GATE_REASON_EVIDENCE_MARK_CENSUS)
+            # lost-mark cross-check (plan P1-4): a mapped answer session
+            # with ≥1 point but ZERO marks while the write-path stat claims
+            # evidence red-flags a mark-stripped session (H6 attribution)
+            # even when both created-id counts are 0.
+            if (isinstance(floor_stats, dict) and idxs
+                    and GATE_REASON_ANSWER_SESSION_ABSENT not in reasons
+                    and GATE_REASON_CENSUS_ERROR not in reasons):
+                for si in idxs:
+                    ev_stat = floor_stats.get(str(si))
+                    if (isinstance(ev_stat, int) and ev_stat > 0
+                            and per_session_counts.get(si, 0) > 0
+                            and per_session_marks.get(si, 0) == 0):
+                        reasons.append(GATE_REASON_EVIDENCE_MARK_CENSUS)
+                        break
+    result["census"]["reads"] = reads_done
+    result["census"]["read_latency_ms"] = round(reads_latency_ms, 2)
+    return result
+
+
+def _presence_consensus(proj: Any, qid: str, idxs: list[int],
+                        folded_counts: dict[int, int], *, retry_n: int,
+                        timeout_ms: int) -> CensusReads:
+    """Presence read-verify: read1 = the folded label-scan membership
+    (already in hand), read2 = the independent per-index CONTAINS
+    traversal count (different access path). Retry on mismatch; only a
+    stable two-read agreement counts as presence data."""
+    def _traversal() -> dict:
+        out: dict = {}
+        for si in idxs:
+            rows = _query_with_deadline(
+                proj,
+                "MATCH (s:Session {lme_question_id:$q, "
+                "lme_session_index:$si})-[:CONTAINS]->(p:Point) "
+                "WHERE p.lme_session_index = $si "
+                "RETURN count(p)",
+                params={"q": qid, "si": si}, timeout_ms=timeout_ms)
+            out[si] = rows[0][0] if rows else 0
+        return out
+
+    read1 = {si: folded_counts.get(si, 0) for si in idxs}
+    n = retry_n
+    for attempt in range(n + 1):
+        try:
+            read2 = _traversal()
+        except Exception:  # noqa: BLE001, RUF100
+            read2 = None
+        if read2 is not None and read1 == read2:
+            return CensusReads(value=read1, status="consensus",
+                               reads={"label_scan": read1, "traversal": read2},
+                               retries=attempt)
+    return CensusReads(value=None, status="mismatch",
+                       reads={"label_scan": read1},
+                       retries=n)
