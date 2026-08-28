@@ -6425,6 +6425,18 @@ async def invite_info(token: str):
     }
 
 
+def _delete_fake_invite_membership(sdk, team_id: str, invitation_id: str) -> None:
+    """#1880: drop the fake Membership(user_id='invite-{iid}') row on a
+    terminal invite state (accept success/402, rescind, and — via #1875 —
+    invitee decline). Without this, registry list_members shows ghost
+    'invited' members with the invitee's email forever. Uses
+    sdk._get_registry() (NOT a bare reg — the rescind branch has no reg)."""
+    sdk._get_registry().query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
+        params={"tid": team_id, "fake": f"invite-{invitation_id}"},
+    )
+
+
 @app.post("/v1/invites/accept")
 async def accept_invite(body: dict, request: Request,
                          user: dict = Depends(get_current_user)):  # noqa: B008
@@ -6514,7 +6526,13 @@ async def accept_invite(body: dict, request: Request,
     try:
         sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
     except Exception as e:
+        # #1880: the accepted_at write above ran BEFORE membership_create, so a
+        # max_users 402 leaves a consumed invite + NO real membership — the fake
+        # invite-{iid} row must still be deleted (permanent ghost otherwise).
+        _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
         raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
+    # #1880: drop the fake invite-{iid} membership row (ghost-members bug)
+    _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
     _forget_invite_accept(request, token)
     return {"team_id": invite["team_id"], "role": invite["role"]}
 
@@ -6621,7 +6639,10 @@ async def rescind_invite(invitation_id: str, team_id: str,
     if inv.get("status") == "accepted" or inv.get("accepted_at"):
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot rescind")
-    return sdk.invitation_revoke(invitation_id)
+    result = sdk.invitation_revoke(invitation_id)
+    # #1880: ghost-members cleanup — the fake row dies with the invite
+    _delete_fake_invite_membership(sdk, team_id, invitation_id)
+    return result
 
 
 @app.get("/v1/teams/{team_id}/members")
