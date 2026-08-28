@@ -16,14 +16,37 @@
 //     content-derived keywords when a post's tags have no entry here.
 //   - English-only v1 (blog epic deferred i18n).
 //
-// Usage in a Pages Function:
-//   import { TAG_KEYWORDS } from "../_shared/seo-keywords";
-//   const kw = tags.flatMap((t) => TAG_KEYWORDS[t] ?? []); // content fallback when []
+// Usage in a Pages Function (import path is depth-dependent — this module lives
+// at blog/_shared/):
+//   import { TAG_KEYWORDS } from "./_shared/seo-keywords.ts";   // consumer at blog/ root
+//   import { TAG_KEYWORDS } from "../_shared/seo-keywords.ts";  // consumer in blog/api/
+//   const kw = [...new Set(tags.flatMap((t) => TAG_KEYWORDS[t] ?? []))];
+//   // ^ dedupe: the semantic/episodic orientation-mirror pair (§4.4/§4.5) emits
+//   // the same phrase from both tags; Set collapses it. Content fallback when [].
 //
-// ZERO-DEPENDENCY (plain TS, no imports) — matches the repo's Pages Functions
-// pattern (no bundling, underscore-prefixed helpers are not routed).
+// ZERO-DEPENDENCY (plain TS, no imports) — the _shared/ layout is an intentional
+// port of the ElDato `supabase/functions/_shared/` convention (the repo's own
+// convention is underscore-prefixed helper FILES at the function-dir root, e.g.
+// blog/_lib.ts). No bundling; underscore-prefixed paths are not routed.
 
-export type TagKeywords = Record<string, string[]>;
+// Starter tag taxonomy — the documented 12-tag vocabulary (research.md §1). The
+// narrow key type makes a typo'd tag a compile error instead of a silent
+// content-fallback; runtime free-form tags still fall through to the fallback.
+type TagName =
+  | "agent-memory"
+  | "epistemic-memory"
+  | "knowledge-graph"
+  | "semantic-memory"
+  | "episodic-memory"
+  | "mcp"
+  | "self-hosting"
+  | "retrieval"
+  | "belief-propagation"
+  | "sessions"
+  | "memory-systems"
+  | "provenance";
+
+export type TagKeywords = Partial<Record<TagName, string[]>>;
 
 export const TAG_KEYWORDS: TagKeywords = {
   // Umbrella category: memory systems for AI agents across sessions.

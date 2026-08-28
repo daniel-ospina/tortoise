@@ -1,6 +1,6 @@
 ---
 title: "Tortoise Blog Keyword Research — Topic Taxonomy + Keyword Map (port of ElDato KEYWORD_RESEARCH_MASTER methodology)"
-type: growth
+type: synthesis
 domain: growth
 doc_status: live
 created: 2026-08-28
@@ -96,7 +96,7 @@ Result: **136 unique keywords** across 12 tag buckets.
 | **Tier 2** | vol ≥500 AND diff ≤25 | 2 (+2 borderline T2/T3) |
 | **Tier 3** | vol ≥100 AND diff ≤30 | 14 (+4 T3-watch head terms) |
 | **Quick Win** | diff ≤15 AND vol ≥100 | 80 |
-| **Strategic** | high intent / category-defining, low-or-zero reported vol, low competition (NEW tier — inverts ElDato's zero-volume-is-zero-value) | 30 (12 are **Strategic** in §4.13) |
+| **Strategic** | high intent / category-defining, low-or-zero reported vol, low competition (NEW tier — inverts ElDato's zero-volume-is-zero-value) | 30 (taxonomy tiers; §4.13 adds 12 more) |
 | Skip | vol <100 AND not Strategic | 4 (extreme competition) |
 
 > Counts are §4.1–4.12 only (136); §4.13 adds 28 (15 QuickWin · 12 Strategic · 1 T3). All 164 rows analyzed; 147 in module; 17 excluded (4 skip + 3 T3-watch + 1 near-dup + 5 Domain brand-line + 4 value-prop content-only).
