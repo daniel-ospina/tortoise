@@ -472,10 +472,11 @@ def test_registry_key_normalized_to_real_model_id(monkeypatch):
     suffix reaches DeepSeek as the model name (HTTP 400 on every S1 call)."""
     # Pilot #1549 (2026-08-25) + #1790: the direct-API flash wire id is the
     # current documented 'deepseek-v4-flash' with thinking explicitly
-    # disabled (the retired legacy non-reasoning alias was removed
-    # upstream 2026-07-24 — v4-flash reasons by default and collapses to
-    # empty output on non-trivial S1 prompts otherwise: 1500/1500 reasoning
-    # tokens, finish=length, zero content).
+    # disabled (the legacy non-reasoning alias was retired upstream
+    # 2026-07-24 — still served during the transition — but v4-flash
+    # reasons by default and collapses to empty output on non-trivial S1
+    # prompts otherwise: 1500/1500 reasoning tokens, finish=length, zero
+    # content).
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")  # the pilot's direct route
     m = build_extractor_model("deepseek-flash-direct")
     # family-prefixed key → direct route strips → flash id on the wire

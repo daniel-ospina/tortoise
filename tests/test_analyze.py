@@ -316,3 +316,28 @@ def test_analyze_unknown_pattern_not_echoed():
     from tortoise.analyze import analyze
     result = analyze("x", proj=None, use_llm=False)
     assert "couldn't understand" in result["answer"].lower()
+
+
+def test_llm_classify_gate_basis_flash_family_only(monkeypatch):
+    """#1790 gate-basis pin: llm_classify's thinking-disable must be keyed on
+    the MODEL id (rsplit, flash-family only), not the provider URL — a
+    prefixed id must reach the toggle, and a future v4-pro entry must NOT
+    silently disable thinking (the adapter's flash-only scope guard). A
+    URL-basis gate or a dropped rsplit fails this (mutation-verified)."""
+    from tortoise import analyze as _a
+    captured: dict = {}
+    _patch_urlopen(monkeypatch, captured)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-ds")
+    _a._LLM_PROVIDERS["DEEPSEEK_API_KEY"] = (
+        "https://api.deepseek.com/v1/chat/completions",
+        "deepseek/deepseek-v4-flash")
+    _a.llm_classify("x")
+    import json
+    assert json.loads(captured["data"].decode())["thinking"] == {"type": "disabled"}
+    captured.clear()
+    _a._LLM_PROVIDERS["DEEPSEEK_API_KEY"] = (
+        "https://api.deepseek.com/v1/chat/completions",
+        "deepseek-v4-pro")
+    _a.llm_classify("x")
+    assert "thinking" not in json.loads(captured["data"].decode())

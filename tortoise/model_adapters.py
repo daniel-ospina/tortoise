@@ -25,8 +25,9 @@ Routing env vars (documented here; ``.env.example`` entries deferred to P4):
     (default ``deepseek/deepseek-v4-flash``); the direct route sends the
     flash family's documented id (``deepseek-v4-flash``) with thinking
     explicitly disabled on the wire (pilot #1549 — ``deepseek-v4-flash``
-    reasons by default and collapses to empty output; the retired
-    non-reasoning chat alias was removed upstream 2026-07-24, #1790); the
+    reasons by default and collapses to empty output; the legacy
+    non-reasoning chat alias was retired upstream 2026-07-24 (still
+    served during transition), #1790); the
     openrouter route sends the spec unchanged (D6).
 
 Taxonomy contract (M2/M3 import these — do not fork):
@@ -163,9 +164,10 @@ class DeepSeekDirectModel(OpenRouterModel):
     The flash family runs NON-reasoning: ``deepseek-v4-flash`` with thinking
     explicitly disabled (pilot #1549: api.deepseek.com's ``deepseek-v4-flash``
     reasons by default — thinking defaults ON — and collapses to empty
-    output, 1500/1500 reasoning tokens, finish=length; the retired legacy
-    alias that used to provide non-reasoning chat was removed upstream
-    2026-07-24, #1790); ``deepseek-v4-pro`` stays as-is (no
+    output, 1500/1500 reasoning tokens, finish=length; the legacy
+    alias that used to provide non-reasoning chat was retired upstream
+    2026-07-24 (still served during transition), #1790);
+    ``deepseek-v4-pro`` stays as-is (no
     collapse evidence — pending verification). Used when DEEPSEEK_API_KEY is
     set and TORTOISE_EXTRACTOR_PROVIDER != 'openrouter' (#1350 — the
     extractor's LLM calls were hitting OpenRouter connection errors under
@@ -206,9 +208,10 @@ class DeepSeekDirectModel(OpenRouterModel):
         # (the preflight probe / ping prompts lack it).
         if _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
-        # #1790: the flash family runs NON-reasoning. The retired legacy
-        # alias (routed to v4-flash non-thinking) was removed upstream
-        # 2026-07-24; ``deepseek-v4-flash`` reasons by
+        # #1790: the flash family runs NON-reasoning. The legacy
+        # alias (routed to v4-flash non-thinking) was retired upstream
+        # 2026-07-24 (still served during transition); ``deepseek-v4-flash``
+        # reasons by
         # DEFAULT (thinking: high) and collapses non-trivial prompts into
         # hidden reasoning tokens (pilot #1549: 1500/1500 reasoning tokens,
         # zero content). Disable thinking explicitly — the documented
@@ -245,8 +248,9 @@ MODELS = {
     # budget on hidden reasoning tokens for non-trivial prompts (observed:
     # 1500/1500 reasoning tokens, finish_reason=length, ZERO output content)
     # — S1 then returns an empty story, S2/S4 never run, and extraction
-    # silently produces no points. The retired legacy alias (routed to
-    # v4-flash non-thinking) was removed upstream 2026-07-24 (#1790); the
+    # silently produces no points. The legacy alias (routed to
+    # v4-flash non-thinking) was retired upstream 2026-07-24
+    # (still served during transition, #1790); the
     # replacement is the documented id ``deepseek-v4-flash``
     # WITH thinking explicitly disabled in ``DeepSeekDirectModel.complete``
     # (live-verified 2026-08-28: full story output, finish_reason=stop,
@@ -569,8 +573,9 @@ def _direct_wire_id(model_id: str) -> str:
     lane keeps the family prefix). The flash family keeps its current
     documented id ``deepseek-v4-flash``; non-reasoning behavior is achieved
     by explicitly disabling thinking in ``DeepSeekDirectModel.complete``
-    (the retired legacy alias — routing to v4-flash non-thinking — was
-    removed upstream 2026-07-24, #1790). ``deepseek-v4-pro`` is
+    (the legacy alias — routing to v4-flash non-thinking — was
+    retired upstream 2026-07-24 (still served during transition),
+    #1790). ``deepseek-v4-pro`` is
     unchanged (no collapse evidence — out of scope pending verification)."""
     return _strip_family_prefix(model_id)
 
@@ -690,7 +695,9 @@ _REGISTRY_KEY_TO_ID = {
     # Pilot #1549 (2026-08-25) + #1790: the DIRECT-API flash wire id is the
     # current documented id ``deepseek-v4-flash``; non-reasoning behavior is
     # achieved by disabling thinking explicitly in ``DeepSeekDirectModel.complete``
-    # (the retired legacy alias was removed upstream 2026-07-24, #1790 — v4-flash reasons by default and burns the max_tokens budget on
+    # (the legacy alias was retired upstream 2026-07-24 (still served
+    # during transition), #1790 — v4-flash reasons by default and burns
+    # the max_tokens budget on
     # hidden reasoning for non-trivial prompts: 1500/1500 reasoning tokens
     # observed, finish_reason=length, ZERO content — S1 collapses to an empty
     # story and extraction silently produces no points). The key maps to the
