@@ -277,9 +277,13 @@ def test_signup_marker_is_host_conditional() -> None:
     norm = body.replace('"', "'")
     assert "endsWith('.premiselabs.co')" in norm
     assert "? '; Domain=.premiselabs.co'" in norm
+    # exactly ONE occurrence each — a hardcode that leaves dead conditional
+    # code in place would otherwise keep the ternary literals present
+    assert norm.count("; Domain=.premiselabs.co") == 1
     # https-conditional Secure: gated on protocol, not unconditional
     assert "protocol === 'https:'" in norm
     assert "? '; Secure'" in norm
+    assert norm.count("; Secure") == 1
     assert "SameSite=Lax" in body
     assert "Expires=" in body
 
