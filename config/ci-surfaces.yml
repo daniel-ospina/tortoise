@@ -114,6 +114,7 @@ surfaces:
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
+  - test_action_endpoints_dual_auth.py
   - test_alert_store.py
   - test_analytics.py
   - test_analyze.py
