@@ -2222,7 +2222,12 @@ function claimIntentInFlight() {
   // #1842 P2 (re-review): a REF latch never schedules a render, so the cue
   // text stayed 'Loading overview…' forever unless another re-render
   // happened — STATE, not a ref, so the announce fires via a real update.
-  const overviewDataComplete = !!team && graphsStatus === 'ok' && membersStatus !== 'loading' && backupInfo !== null
+  // #1842 P2 (final review): graphs counts as done on ANY terminal state —
+  // 'error'/'denied' included — so a failed /v1/graphs still announces
+  // "Overview loaded" instead of reading "Loading overview…" forever while
+  // the Graphs card shows terminal '—' (mirrors members/backups terminal
+  // handling).
+  const overviewDataComplete = !!team && graphsStatus !== 'loading' && membersStatus !== 'loading' && backupInfo !== null
   const [overviewAnnounced, setOverviewAnnounced] = React.useState(false)
   React.useEffect(() => {
     if (!overviewAnnounced && overviewDataComplete) setOverviewAnnounced(true)
@@ -2241,18 +2246,35 @@ function claimIntentInFlight() {
   const STALE_LOADING_MS = 15000
   const frameStartRef = React.useRef(null)
   const [now, setNow] = React.useState(() => Date.now())
-  const overviewSkeletonLive = tab === 'overview' &&
+  // #1842 P2-1 (final review): the clock must NOT run (or stamp frameStart)
+  // while the first-timer sits on the welcome screen — the Overview section
+  // can't render there, so ticking would re-render the whole app for nothing,
+  // AND a lingering welcome (> STALE_LOADING_MS) would open the dashboard
+  // with an already-stale frame (instant '—' instead of shimmer for a fast
+  // load). Gate overviewSkeletonLive on !welcomeMode; the tick effect's else
+  // branch keeps frameStart null while welcome is up.
+  const overviewSkeletonLive = tab === 'overview' && !welcomeMode &&
     (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupInfo === null)
   const frameStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
+  // #1842 P2-1: reset the frame start when the Overview section actually
+  // mounts (team null + Overview tab + not welcome) so no stale stamp carries
+  // over from the welcome screen. Declared BEFORE the tick effect so a fresh
+  // stamp in the same commit is never clobbered.
   React.useEffect(() => {
-    if (overviewSkeletonLive) {
+    if (tab === 'overview' && !welcomeMode && team === null) frameStartRef.current = null
+  }, [tab, welcomeMode, team])
+  // #1842 P2-2 (final review): gate the tick on !frameStale too — once the
+  // skeleton flips to the terminal '—' the clock must terminate (clear the
+  // interval), not re-render the app every second forever.
+  React.useEffect(() => {
+    if (overviewSkeletonLive && !frameStale) {
       if (frameStartRef.current === null) frameStartRef.current = Date.now()
       const id = window.setInterval(() => setNow(Date.now()), 1000)
       return () => window.clearInterval(id)
     }
     frameStartRef.current = null
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overviewSkeletonLive])
+  }, [overviewSkeletonLive, frameStale])
 
   async function createKey() {
     // Round-17 (P3): capture the team AT CALL TIME — the previous guard compared
