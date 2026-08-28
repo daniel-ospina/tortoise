@@ -26,10 +26,6 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Page, expect
 
-from tests.e2e.test_session_login_flow import (  # noqa: F401  (kept for parity with test_dashboard_gate.py; _session() is defined locally)
-    _session_json as _unused_session_json,
-)
-
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
@@ -259,10 +255,16 @@ def test_account_menu_multi_team_switch(page: Page):
     # active team carries aria-current
     expect(menu.locator("button[aria-current='true']")).to_contain_text("Alpha")
     # switch to Bravo → active moves AND the data layer re-reads team_b
-    menu.get_by_role("button", name="Bravo").click()
+    # switch to Bravo — the ?team_id= pin must reach the API. expect_response
+    # pumps the Playwright sync event loop while waiting (a Python sleep-poll
+    # would block the message pump and stall the mock's response — the
+    # observed 15s "stall" was exactly that artifact).
+    with page.expect_response(lambda r: "/v1/team" in r.url and "team_id=team_b" in r.url,
+                              timeout=15000):
+        menu.get_by_role("button", name="Bravo").click()
+    assert "team_b" in team_reads, f"?team_id= pin must reach the API: {team_reads}"
     _open_account_menu(page)
     expect(page.locator(".account-menu").locator("button[aria-current='true']")).to_contain_text("Bravo")
-    assert "team_b" in team_reads, f"?team_id= pin must reach the API: {team_reads}"
 
 
 def test_members_heading_and_nav(page: Page):

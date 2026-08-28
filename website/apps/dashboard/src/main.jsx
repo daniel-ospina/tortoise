@@ -3664,7 +3664,6 @@ function claimIntentInFlight() {
             className="account-blob-btn"
             onClick={() => setAccountMenuOpen(!accountMenuOpen)}
             onKeyDown={(e) => { if (e.key === 'Escape') setAccountMenuOpen(false) }}
-            aria-haspopup="menu"
             aria-expanded={accountMenuOpen}
             aria-label={`Account menu — ${currentTeamName || 'No team'}`}
           >
