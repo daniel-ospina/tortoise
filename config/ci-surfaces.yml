@@ -116,6 +116,7 @@ surfaces:
   core:
   - test_about_edges.py
   - test_about_event_untangle.py
+  - test_action_endpoints_dual_auth.py
   - test_alert_store.py
   - test_analytics.py
   - test_analyze.py
@@ -288,6 +289,7 @@ surfaces:
   - test_structural_leg_r4.py
   - test_suggest_entry_points.py
   - test_supabase_control.py
+  - test_suspension_parity.py
   - test_taxonomy.py
   - test_tool_registry.py
   - test_topic_summarization.py

@@ -41,6 +41,127 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _extract_helper(text: str, name: str) -> str:
+    """Extract the full declaration source of a named helper from either
+    adapter style: ES5 `var f = function () { ... };` (shared bridge), ES6
+    `const f = () => { ... }` / `const f = () => (expr)` (dashboard main.jsx),
+    or the oauth.py inline copy. Returns from the declaration keyword through
+    the matching close brace/paren (plus a trailing `;` if present)."""
+    # f-string braces vs regex char class — build the opener pattern without
+    # interpolation so `([\({])` stays literal
+    m = re.search(
+        rf"(?:const|var)\s+{re.escape(name)}\s*=\s*(?:function\s*)?\(\s*\)\s*(?:=>\s*)?"
+        + r"([\({])",
+        text,
+    )
+    assert m, f"missing helper declaration: {name}"
+    start = m.start()
+    opener = m.group(1)
+    close = {"(": ")", "{": "}"}[opener]
+    depth = 0
+    i = m.end() - 1
+    while i < len(text):
+        c = text[i]
+        if c == opener:
+            depth += 1
+        elif c == close:
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    else:
+        raise AssertionError(f"unbalanced helper declaration: {name}")
+    end = i + 1
+    if end < len(text) and text[end] == ";":
+        end += 1
+    return text[start:end]
+
+
+def _extract_fn_body(text: str, name: str) -> str:
+    """Extract a named function/method body (any style: `name(key, value) {`,
+    `name: function (key, value) {`, `function name() {`, or
+    `var name = function (...) {`) up to the matching close brace, including
+    the signature line. Does NOT match call sites (`name(...);` — no `{`)."""
+    m = re.search(
+        rf"(?:var\s+|function\s+)?{re.escape(name)}\s*"
+        rf"(?:(?:\:\s*function\s*|\=)\s*(?:function\s*)?)?\([^)]*\)\s*(?:=>\s*)?{{",
+        text,
+    )
+    assert m, f"missing function: {name}"
+    start = m.start()
+    depth = 0
+    i = m.end() - 1  # the '{'
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        i += 1
+    raise AssertionError(f"unbalanced function body: {name}")
+
+
+def _normalize_helper(src: str) -> str:
+    """Collapse a helper declaration to a comparable token stream so the ES5
+    shared-bridge form (`var f = function () { return X; };`), the ES6
+    dashboard form (`const f = () => X` / block body), and the oauth.py inline
+    copy compare EQUAL on the logic they encode, ignoring formatting/quote/
+    semicolon drift. Any semantic drift (changed hostname list, dropped isLocal
+    check, flipped operator) changes the normalized form."""
+    s = re.sub(r"\bvar\b", "const", src)
+    # strip // and /* */ comments (comments differ between the copies and are
+    # not part of the encoded logic)
+    s = re.sub(r"/\*.*?\*/", " ", s, flags=re.DOTALL)
+    s = re.sub(r"//[^\n]*", " ", s)
+    # normalize the signature: ES5 `function ()` == ES6 `() =>`
+    s = s.replace("function ()", "() =>").replace("function()", "() =>")
+    # drop semicolons BEFORE unwrapping so oauth's trailing `;` can't defeat
+    # the `$` anchor on the expression-body regex
+    s = s.replace(";", "")
+    # unwrap expression bodies: `() => (X)` → `() => X` (dashboard/oauth style)
+    s = re.sub(r"\(\s*\)\s*=>\s*\((.*?)\)$", r"() => \1", s, flags=re.DOTALL)
+    # unwrap single-return block bodies: `() => { return X; }` → `() => X`
+    # (shared-bridge style; multi-statement block bodies stay as-is)
+    s = re.sub(r"\(\s*\)\s*=>\s*\{\s*return\s+(.*?)\s*\}", r"() => \1", s, flags=re.DOTALL)
+    s = s.replace('"', "'")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def test_adapters_share_host_conditional_attribute_logic() -> None:
+    """#1857: the host-conditional Domain/Secure logic must be SEMANTICALLY
+    identical across all THREE adapter copies (shared bridge, dashboard
+    main.jsx, oauth.py inline). A mere presence check ("domainAttr" in text)
+    catches a MISSING helper but not DRIFT in one adapter's logic — the exact
+    bug class #1857 is about (dashboard hardcoded Domain+Secure while the
+    shared bridge was conditional, and the string-presence test didn't catch
+    it). Normalize each helper declaration across styles and assert equality;
+    then assert the conditional helpers are actually WIRED into the write/
+    remove templates, not just declared."""
+    helpers = ("isLocal", "isPremiselabsHost", "domainAttr", "secureAttr")
+    copies = [("shared", _read(SHARED)), ("dash", _read(DASHBOARD)), ("oauth", _read(OAUTH))]
+    for name in helpers:
+        normalized = [
+            (label, _normalize_helper(_extract_helper(text, name)))
+            for label, text in copies
+        ]
+        first = normalized[0][1]
+        for label, n in normalized[1:]:
+            assert n == first, (
+                f"{name} conditional logic drifted across adapters:\n"
+                f"  shared: {normalized[0][1]}\n"
+                f"  {label}:  {n}\n"
+                "KEEP website/assets/supabase-session.js, "
+                "website/apps/dashboard/src/main.jsx and tortoise/oauth.py in sync."
+            )
+    # the conditionals must be wired into the actual write/remove templates
+    # (declared-but-unused helpers pass the parity check but do nothing)
+    for label, text in ((SHARED, _read(SHARED)), (DASHBOARD, _read(DASHBOARD)), (OAUTH, _read(OAUTH))):
+        assert "domainAttr()" in text, f"{label}: domainAttr() not wired into templates"
+        assert "secureAttr()" in text, f"{label}: secureAttr() not wired into templates"
+
+
 def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
     """Both adapters must declare the same cookie name + domain (anchored to
     const declarations so comment text can't false-match)."""
@@ -66,6 +187,105 @@ def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
     assert "setItem(key, value) {" in oauth_text
     assert "removeItem(key) {" in oauth_text
     assert "SIZE_GUARD" in oauth_text and "provider_token" in oauth_text
+
+
+def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
+    """#1857 (code-review P2-1/2/3): the host-conditional helpers must be wired
+    into EVERY cookie-writing template in EVERY adapter — not merely present in
+    the file. A partial revert of ONE template (e.g. setItem back to a hardcoded
+    `Domain=${COOKIE_DOMAIN}; Secure`) while another template keeps the
+    conditionals passes the helper-parity + file-wide presence checks but
+    silently recreates the exact bug this issue fixes (cookie dropped on
+    localhost/previews). Assert per-function: both helpers called, Path= +
+    SameSite=Lax present, no hardcoded `Domain=` / `; Secure` literal in the
+    template body (the only legal Domain/Secure come via domainAttr()/
+    secureAttr()), and the correct expiry token per kind (set→Expires=,
+    remove→Max-Age=0)."""
+    surfaces = [
+        # (adapter text, [(fn, kind)]) — kind 'set' requires Expires=,
+        # 'remove' requires Max-Age=0. clearStoredSession and
+        # setLastAuthMethod are the shared bridge's OTHER parent-domain
+        # cookie writes — a revert there recreates the #1857 class
+        # (stale session survives logout / last-auth cookie dropped).
+        (SHARED, [
+            ("setItem", "set"),
+            ("removeItem", "remove"),
+            ("clearStoredSession", "remove"),
+            ("setLastAuthMethod", "set"),
+        ]),
+        (DASHBOARD, [
+            ("setItem", "set"),
+            ("removeItem", "remove"),
+            ("setClaimPendingMarker", "set"),
+            ("clearClaimPendingMarker", "remove"),
+        ]),
+        (OAUTH, [("setItem", "set"), ("removeItem", "remove")]),
+    ]
+    for path, fns in surfaces:
+        text = _read(path)
+        for fn, kind in fns:
+            body = _extract_fn_body(text, fn)
+            assert "domainAttr()" in body, f"{path.name}:{fn}: missing domainAttr() call"
+            assert "secureAttr()" in body, f"{path.name}:{fn}: missing secureAttr() call"
+            assert "Path=" in body, f"{path.name}:{fn}: missing Path="
+            assert "SameSite=Lax" in body, f"{path.name}:{fn}: missing SameSite=Lax"
+            assert "Domain=" not in body, (
+                f"{path.name}:{fn}: hardcoded Domain= in template — use domainAttr()"
+            )
+            assert "; Secure" not in body, (
+                f"{path.name}:{fn}: hardcoded Secure in template — use secureAttr()"
+            )
+            if kind == "set":
+                assert "Expires=" in body, f"{path.name}:{fn}: missing Expires="
+            else:
+                assert "Max-Age=0" in body, f"{path.name}:{fn}: missing Max-Age=0"
+    # Completeness: EVERY document.cookie write in the three adapter files must
+    # fall inside one of the watched bodies above. Auto-catches a future
+    # unwatched write (the cycle-1/2/3 finding class) without hand-maintaining
+    # the surface list.
+    for path, fns in surfaces:
+        text = _read(path)
+        spans = []
+        for fn, _kind in fns:
+            body = _extract_fn_body(text, fn)
+            start = text.index(body)
+            spans.append((start, start + len(body)))
+        spans.sort()
+        for wm in re.finditer(r"document\.cookie\s*=", text):
+            wpos = wm.start()
+            assert any(a <= wpos < b for a, b in spans), (
+                f"{path.name}: document.cookie write at offset {wpos} is NOT inside a "
+                "watched function body — add it to the surfaces list"
+            )
+
+
+def test_signup_marker_is_host_conditional() -> None:
+    """#1857 (code-review P2, cycle 3): signup.html has its OWN inline
+    tt_claim_pending marker writer (setClaimPendingMarker) that shares the
+    bug class — a revert to hardcoded `; Domain=.premiselabs.co; Secure` there
+    would drop the marker on localhost/previews and break cross-origin claim
+    routing. It uses inline conditions (hostname + protocol), not the shared
+    domainAttr()/secureAttr() helpers, so it needs its own contract: no
+    unconditional Domain/Secure, host-conditional Domain, https-conditional
+    Secure, SameSite=Lax, Expires=."""
+    text = _read(REPO_ROOT / "website" / "signup.html")
+    body = _extract_fn_body(text, "setClaimPendingMarker")
+    # host-conditional domain: the .premiselabs.co value must be gated on a
+    # hostname check (an unconditional `; Domain=.premiselabs.co` write would
+    # drop the marker on localhost/previews — the #1857 bug class)
+    # normalize to single quotes so either JS quote style matches
+    norm = body.replace('"', "'")
+    assert "endsWith('.premiselabs.co')" in norm
+    assert "? '; Domain=.premiselabs.co'" in norm
+    # exactly ONE occurrence each — a hardcode that leaves dead conditional
+    # code in place would otherwise keep the ternary literals present
+    assert norm.count("; Domain=.premiselabs.co") == 1
+    # https-conditional Secure: gated on protocol, not unconditional
+    assert "protocol === 'https:'" in norm
+    assert "? '; Secure'" in norm
+    assert norm.count("; Secure") == 1
+    assert "SameSite=Lax" in body
+    assert "Expires=" in body
 
 
 def test_both_adapters_write_and_remove_cookie_with_same_attributes() -> None:
@@ -112,12 +332,13 @@ def test_adapters_share_size_guard_and_localhost_handling() -> None:
     wrongly assumed to never need the guard — a Google OAuth session
     (provider_token ~1200 chars + full identity, ~5012 encoded bytes) exceeds
     the cap and is silently rejected, so the dashboard must strip provider
-    tokens exactly like the shared factory. (Localhost/off-premiselabs
-    degradation is shared-file-only — the dashboard hardcodes
-    .premiselabs.co.)"""
+    tokens exactly like the shared factory. #1857: the dashboard adapter ALSO
+    now degrades off-premiselabs (host-conditional Domain/Secure), so
+    localhost handling is no longer shared-file-only."""
     shared = _read(SHARED)
     dash = _read(DASHBOARD)
     assert "localhost" in shared and "127.0.0.1" in shared
+    assert "localhost" in dash and "127.0.0.1" in dash  # #1857
     assert "premiselabs.co" in shared
     # size guard strips provider tokens when the cookie would exceed the cap
     # — required in BOTH adapters (#1835 parity)
@@ -170,8 +391,16 @@ def test_shared_helpers_present() -> None:
 def test_dashboard_public_copy_is_byte_identical() -> None:
     """The dashboard loads the shared script from its own public/ copy (the
     dashboard is a separate Pages project — dist/ only deploys). It must stay
-    byte-identical to the shared file (Task 5 asserts the built dist copy)."""
+    byte-identical to the shared file (Task 5 asserts the built dist copy).
+    The built dist/ copy is also git-tracked and is what the deployed
+    dashboard actually serves — assert it too so a forgotten rebuild can't
+    ship a stale bridge (code-review P3, cycle 3)."""
     public_copy = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "assets" / "supabase-session.js"
+    dist_copy = REPO_ROOT / "website" / "apps" / "dashboard" / "dist" / "assets" / "supabase-session.js"
+    shared = _read(SHARED)
     assert public_copy.exists(), "missing dashboard public/ copy"
-    assert public_copy.read_text(encoding="utf-8") == _read(SHARED), \
+    assert public_copy.read_text(encoding="utf-8") == shared, \
         "dashboard public/ copy drifted from the shared file"
+    assert dist_copy.exists(), "missing dashboard dist/ copy"
+    assert dist_copy.read_text(encoding="utf-8") == shared, \
+        "dashboard dist/ copy drifted from the shared file (rebuild dashboard)"

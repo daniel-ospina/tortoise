@@ -37,17 +37,19 @@ const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 // Phase-2 mint guard and the signin/signup claim-intent routing on
 // tortoise.premiselabs.co know a claim is in flight from the dashboard
 // (app.premiselabs.co) — without exposing the raw tt_ key (P1-2).
-// Short TTL (1h — the OAuth round-trip is minutes); Secure + SameSite=Lax.
+// Short TTL (1h — the OAuth round-trip is minutes); SameSite=Lax, Secure via
+// the host-conditional secureAttr() (#1857) so the marker also works on
+// localhost/previews.
 function setClaimPendingMarker() {
   try {
     const expires = new Date(Date.now() + 60 * 60 * 1000).toUTCString()
-    document.cookie = `${CLAIM_PENDING_COOKIE}=1; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+    document.cookie = `${CLAIM_PENDING_COOKIE}=1${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
   } catch { /* best-effort */ }
 }
 
 function clearClaimPendingMarker() {
   try {
-    document.cookie = `${CLAIM_PENDING_COOKIE}=; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Max-Age=0`
+    document.cookie = `${CLAIM_PENDING_COOKIE}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
   } catch { /* best-effort */ }
 }
 const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
@@ -67,6 +69,29 @@ const COOKIE_DOMAIN = '.premiselabs.co'
 // loop was never hit because its provider token is shorter). Mirrors
 // website/assets/supabase-session.js SIZE_GUARD exactly.
 const SIZE_GUARD = 3800
+// #1857: host-conditional cookie attributes (RFC 6265). A hardcoded
+// `Domain=.premiselabs.co; Secure` is REJECTED by the browser on localhost,
+// 127.0.0.1, and *.pages.dev preview origins (non-matching Domain → cookie
+// silently dropped; Secure over http → dropped) → getSession() null → bounce
+// to /auth on every load. Mirrors website/assets/supabase-session.js (and
+// tortoise/oauth.py) — KEEP IN SYNC (tests/test_cross_subdomain_cookie_sync.py
+// asserts helper parity across the adapters).
+const isLocal = () => {
+  const h = window.location.hostname
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true
+  if (h.startsWith('10.') || h.startsWith('192.168.')) return true
+  return /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+}
+const isPremiselabsHost = () => {
+  const h = window.location.hostname
+  return h === 'premiselabs.co' || h.endsWith('.premiselabs.co')
+}
+// Domain attribute only on premiselabs.co hosts — host-only cookie elsewhere
+// (localhost, *.pages.dev previews) so those origins keep working.
+const domainAttr = () => (isPremiselabsHost() && !isLocal() ? '; Domain=' + COOKIE_DOMAIN : '')
+// Secure only on non-local origins — localhost/loopback/RFC1918 http would
+// reject a Secure cookie.
+const secureAttr = () => (isLocal() ? '' : '; Secure')
 
 const supabaseStorage = {
   getItem(key) {
@@ -94,10 +119,13 @@ const supabaseStorage = {
       }
     }
     const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString()
-    document.cookie = `${key}=${encoded}; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+    document.cookie = `${key}=${encoded}${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
   },
   removeItem(key) {
-    document.cookie = `${key}=; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Max-Age=0`
+    // `=;` + domainAttr() yields `;;` when the Domain attribute is present
+    // (premiselabs hosts) — intentional, byte-matches supabase-session.js;
+    // the empty cookie-av is ignored per RFC 6265 §5.2.
+    document.cookie = `${key}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
   },
 }
 
@@ -274,13 +302,17 @@ function claimIntentInFlight() {
   const docsPollRef = React.useRef(null)
   // #1845: source-scope selector state (shared by the docs + issues rows).
   // reposList = SHORT repo names from GET /v1/onboarding/github/repos (loaded
-  // once when connected); docsScope/issuesScope carry the per-row selection
-  // (repo '' = "All repos"). docsScope.branch defaults to 'main' (the fetcher
-  // falls back to master server-side).
+  // once when connected); branchLists[repo] = branches for a repo (lazy-loaded
+  // from GET /v1/onboarding/github/branches when the repo is selected).
+  // docsScope/issuesScope carry the per-row selection: `repos: []` = "All
+  // repos"; a non-empty list = exactly those repos. docsScope.branches[repo]
+  // is the per-repo branch choice ('' = default main/master fallback,
+  // 'all' = every branch, else a branch name).
   const [reposList, setReposList] = React.useState([])
   const [reposLoaded, setReposLoaded] = React.useState(false)
-  const [docsScope, setDocsScope] = React.useState({ repo: '', branch: 'main' })
-  const [issuesScope, setIssuesScope] = React.useState({ repo: '' })
+  const [branchLists, setBranchLists] = React.useState({})
+  const [docsScope, setDocsScope] = React.useState({ repos: [], branches: {} })
+  const [issuesScope, setIssuesScope] = React.useState({ repos: [] })
   // #1728 (Task 17): the misled-user re-ask — exactly once per visit until
   // resolved. `capture_ask_shown` is set on ANSWER only; dismissal NEVER
   // consumes the ask (re-shown next visit). One flag for BOTH surfaces
@@ -1015,6 +1047,43 @@ function claimIntentInFlight() {
       setReposLoaded(true)
     }
   }
+  // #1845: lazily load a repo's branch list for the docs per-repo branch
+  // picker. Best-effort — a failure leaves the picker on its default
+  // option. Review P2-4: also records the API-reported default_branch so
+  // the default option is labeled truthfully for repos whose default is
+  // neither main nor master.
+  async function loadBranches(repo) {
+    if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
+    try {
+      const q = encodeURIComponent(repo)
+      const res = await api(`/v1/onboarding/github/branches?repo=${q}`, { useSession: true })
+      const branches = res && Array.isArray(res.branches) ? res.branches : []
+      const defaultBranch = (res && res.default_branch) || ''
+      setBranchLists((prev) => ({ ...prev, [repo]: { branches, defaultBranch } }))
+    } catch {
+      setBranchLists((prev) => ({ ...prev, [repo]: { branches: [], defaultBranch: '' } }))
+    }
+  }
+  // review P2-4: once a repo's branches + default load, seed the picker's
+  // branch choice to the API default ('' = server main/master fallback) so
+  // a repo whose default is neither main nor master indexes the right
+  // branch out of the box.
+  React.useEffect(() => {
+    setDocsScope((prev) => {
+      let changed = false
+      const branches = { ...prev.branches }
+      prev.repos.forEach((r) => {
+        if (!Object.prototype.hasOwnProperty.call(branchLists, r)) return
+        const info = branchLists[r]
+        if (info && info.defaultBranch && !branches[r]) {
+          branches[r] = info.defaultBranch
+          changed = true
+        }
+      })
+      return changed ? { ...prev, branches } : prev
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branchLists])
   // Load once when the team is connected (re-connect/rotation re-loads via the
   // connected-flip guard below). reposLoaded marks the attempt so a failed load
   // doesn't retry on every render.
@@ -1088,8 +1157,9 @@ function claimIntentInFlight() {
     setRowError('issues', '')
     setIndexJob({ status: 'starting' })
     try {
-      // #1845: send the selected repo scope (short name) — empty = all repos.
-      const body = issuesScope.repo ? { repo: issuesScope.repo } : {}
+      // #1845: send the selected repo scope (list of SHORT names) — empty =
+      // all repos (org-wide diff).
+      const body = issuesScope.repos.length ? { repos: issuesScope.repos } : {}
       const res = await api('/v1/index/github/re-poll', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body) })
@@ -1123,8 +1193,15 @@ function claimIntentInFlight() {
       } catch { /* org stays undefined — the server 400s "org is required" and the row error surfaces it */ }
       const payload = {}
       if (org) payload.org = org
-      if (docsScope.repo) payload.repo = docsScope.repo
-      if (docsScope.branch) payload.branch = docsScope.branch
+      // #1845: per-repo scope list — each selected repo carries its own
+      // branch ('' = default main/master fallback, 'all' = every branch).
+      // Empty repos = ALL repos (org-wide, default branch).
+      if (docsScope.repos.length) {
+        payload.repos = docsScope.repos.map((r) => ({
+          repo: r,
+          branch: docsScope.branches[r] || '',
+        }))
+      }
       const res = await api('/v1/index/docs', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload) })
@@ -1933,6 +2010,16 @@ function claimIntentInFlight() {
       loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
       await cardLoads
     } catch (e) {
+      // #1856 P0: bail on staleness FIRST — a mid-flight team switch means
+      // this catch belongs to the PREVIOUS team's request, and the switch's
+      // own flow owns error state under the new selection. Running
+      // setAuthed(false) before the bail left the user on the dead
+      // "Redirecting to the sign-in page…" shell (mountError never set,
+      // authed false, no navigation). The finally below still runs on the
+      // return, so the busy/checking cleanup is preserved. Bails before
+      // setSuspended too — a stale team's suspension must not stick to the
+      // switched session.
+      if (teamAtCompleteLogin !== null && teamIdRef.current !== teamAtCompleteLogin) return
       if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
@@ -1946,7 +2033,6 @@ function claimIntentInFlight() {
       // is in flight, and the old `!==` guard then saw list[0] !== null and
       // bailed silently (stranded on the redirect shell). Only a REAL
       // mid-load switch (a non-null capture that moved) bails now.
-      if (teamAtCompleteLogin !== null && teamIdRef.current !== teamAtCompleteLogin) return
       const errStatus = (e && e.status) || 0
       setMountError(errStatus >= 500
         ? UNAVAILABLE_COPY
@@ -2161,6 +2247,7 @@ function claimIntentInFlight() {
     apiKeyRef.current = null
     setAuthed(false)
     setTeam(null)
+    setStaleFired(false) // #1858: null→null when logging out from the terminal '—' state — the reset effect won't fire, so clear the per-load latch directly; the next session's skeleton must get a fresh floor
     setKeys([])
     setSessions([])
     setNewKey(null)
@@ -2273,6 +2360,7 @@ function claimIntentInFlight() {
     setGraphsStatus('loading') // #1842 P2-1: mirror the membersStatus reset
     setCurrentGraphId(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
+    setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
     setSessions([])
     setBackupInfo(null)
@@ -2341,6 +2429,7 @@ function claimIntentInFlight() {
           setCurrentTeamId(prevTeamId)
           teamIdRef.current = prevTeamId
           setTeam(null)
+          setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
           await refreshTeam(restoreKey).catch(() => {})
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.
@@ -2605,6 +2694,20 @@ function claimIntentInFlight() {
   const STALE_LOADING_MS = 15000
   const frameStartRef = React.useRef(null)
   const [now, setNow] = React.useState(() => Date.now())
+  // #1858 (P3): staleFired LATCHES the floor. frameStale below is derived
+  // from the clock (ref + now), so once the tick effect nulls frameStartRef
+  // at firing time a later unrelated setState recomputes frameStale=false
+  // and resurrects the shimmer for another 15s. STATE, not a ref: the load-
+  // site clears (switchTeam / revert / logout) must force a recompute render
+  // so the tick effect re-runs and stamps a fresh floor — a ref write
+  // schedules no render, so a switch that happened to change no other state
+  // would leave the '—' frame up with no clock behind it. (The effect-time
+  // set/clear happens to coincide with an already-scheduled render — the
+  // clock fire or the data landing — so those two writes add no render.)
+  // The latch is per-load: cleared on window resolve, on team→null, and at
+  // the three load-initiation sites (covers null→null from the terminal
+  // '—' state where the reset effect's team dep doesn't fire).
+  const [staleFired, setStaleFired] = React.useState(false)
   // #1842 P2-1 (final review): the clock must NOT run (or stamp frameStart)
   // while the first-timer sits on the welcome screen — the Overview section
   // can't render there, so ticking would re-render the whole app for nothing,
@@ -2612,26 +2715,62 @@ function claimIntentInFlight() {
   // with an already-stale frame (instant '—' instead of shimmer for a fast
   // load). Gate overviewSkeletonLive on !welcomeMode; the tick effect's else
   // branch keeps frameStart null while welcome is up.
-  const overviewSkeletonLive = tab === 'overview' && !welcomeMode &&
+  // #1858 (review A): also gate on authed — the checking/claim screens
+  // render via the early return at !authed, so the Overview skeleton is
+  // never visible pre-login. Without the gate, a slow session restore
+  // (> STALE_LOADING_MS under the checking screen) would fire the floor and
+  // latch staleFired while NO skeleton was ever on screen, then open the
+  // dashboard on '—' for a load that just started.
+  const overviewSkeletonLive = authed && tab === 'overview' && !welcomeMode &&
     (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupInfo === null)
-  const frameStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
+  // clockStale: raw 15s check against the frame start. frameStale: what the
+  // render reads — latched once the floor has ever fired for this load.
+  const clockStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
+  const frameStale = staleFired || clockStale
   // #1842 P2-1: reset the frame start when the Overview section actually
   // mounts (team null + Overview tab + not welcome) so no stale stamp carries
-  // over from the welcome screen. Declared BEFORE the tick effect so a fresh
-  // stamp in the same commit is never clobbered.
+  // over from the welcome screen. #1858: every team→null transition here is a
+  // genuine new load (switchTeam, its revert path, logout) — clear the stale
+  // latch too, or the next team's skeleton would open on '—'. (The window is
+  // PER-WINDOW: tab/welcome changes also clear the latch via the tick's
+  // !overviewSkeletonLive branch, so leaving Overview and returning re-arms
+  // a fresh 15s floor for the same stuck load — pre-fix behavior, accepted.)
+  // Declared BEFORE the tick effect so a fresh stamp in the same commit is
+  // never clobbered.
   React.useEffect(() => {
-    if (tab === 'overview' && !welcomeMode && team === null) frameStartRef.current = null
+    if (tab === 'overview' && !welcomeMode && team === null) {
+      frameStartRef.current = null
+      setStaleFired(false)
+    }
   }, [tab, welcomeMode, team])
   // #1842 P2-2 (final review): gate the tick on !frameStale too — once the
   // skeleton flips to the terminal '—' the clock must terminate (clear the
   // interval), not re-render the app every second forever.
+  // #1858 (P2): re-stamp INSIDE the interval callback. The reset effect
+  // (deps [tab, welcomeMode, team]) nulls frameStartRef on a mid-load team
+  // switch, but neither overviewSkeletonLive nor frameStale change, so this
+  // effect never re-runs — without the in-callback re-stamp the old interval
+  // would tick with a null ref and frameStale could never become true. The
+  // re-stamp fires only when the ref IS null (ref non-null ⟹ the window
+  // continues from its original stamp — e.g. a null→null switch mid-load
+  // keeps the pre-switch deadline, which is correct: the shimmer has been
+  // showing since the load began).
   React.useEffect(() => {
     if (overviewSkeletonLive && !frameStale) {
       if (frameStartRef.current === null) frameStartRef.current = Date.now()
-      const id = window.setInterval(() => setNow(Date.now()), 1000)
+      const id = window.setInterval(() => {
+        if (frameStartRef.current === null) frameStartRef.current = Date.now()
+        setNow(Date.now())
+      }, 1000)
       return () => window.clearInterval(id)
     }
     frameStartRef.current = null
+    // #1858 (P3): latch the floor on the raw clock firing, but ONLY while the
+    // skeleton window is still live; clear the latch when the window resolves
+    // (data landed, tab/welcome changed) so a resolved window never leaves a
+    // latch that blocks a legitimate later skeleton.
+    if (overviewSkeletonLive && clockStale) setStaleFired(true)
+    else if (!overviewSkeletonLive) setStaleFired(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overviewSkeletonLive, frameStale])
 
@@ -3431,10 +3570,12 @@ function claimIntentInFlight() {
                         onReindexGithub={reindexGithub}
                         reposList={reposList}
                         reposLoaded={reposLoaded}
+                        branchLists={branchLists}
                         docsScope={docsScope}
                         issuesScope={issuesScope}
                         onDocsScopeChange={setDocsScope}
                         onIssuesScopeChange={setIssuesScope}
+                        onLoadBranches={loadBranches}
                       />
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
@@ -3529,9 +3670,15 @@ function claimIntentInFlight() {
                                     {p.limits.map((l) => <li key={l}>{l}</li>)}
                                   </ul>
                                   {p.tier === 'free' ? (
+                                    // #1856: same as the header "Open dashboard →" button — this
+                                    // first-timer exit (completeLogin never runs) must still fire
+                                    // finishWelcomeLoads() or currentTeamId/teams/apiKey stay unset
+                                    // (account blob "No team", Members "Loading…" forever). The plans
+                                    // block only renders with welcomeKey set, so it reads the revealed
+                                    // key. Fire-and-forget: finishWelcomeLoads never rejects.
                                     <button
                                       className="btn-primary"
-                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys') }}
+                                      onClick={() => { window.clearTimeout(checkoutResetTimerRef.current); setCheckoutPending(false); window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}
                                     >
                                       Start free
                                     </button>
@@ -3921,10 +4068,12 @@ function claimIntentInFlight() {
               onReindexGithub={reindexGithub}
               reposList={reposList}
               reposLoaded={reposLoaded}
+              branchLists={branchLists}
               docsScope={docsScope}
               issuesScope={issuesScope}
               onDocsScopeChange={setDocsScope}
               onIssuesScopeChange={setIssuesScope}
+              onLoadBranches={loadBranches}
             />
             {/* #1148-ux review: Team ID / Limits / billing-actions / quickstart
                 removed — noise (the quickstart lives on the empty state; limits
@@ -4322,10 +4471,10 @@ function MemorySources(props) {
     indexJob, docsJob,
     memoryBusy, memoryErrors,
     reaskBusy,
-    reposList, reposLoaded, docsScope, issuesScope,
+    reposList, reposLoaded, docsScope, issuesScope, branchLists,
     onToggleIssues, onToggleDocs, onToggleSessions,
     onConnectGithub, onIndexDocs, onReindexGithub,
-    onDocsScopeChange, onIssuesScopeChange,
+    onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
   } = props
 
   if (loading) {
@@ -4375,23 +4524,45 @@ function MemorySources(props) {
                   {indexJob && indexJob.status === 'started' ? 'Indexing…' : 'Re-index'}
                 </button>
               </p>
-              {/* #1845: repo-scope selector ("All repos" default) — the list
-                  comes from GET /v1/onboarding/github/repos (server-side
-                  token), never a client GitHub call. */}
+              {/* #1845: repo-scope selector (multi-select checkboxes, "All
+                  repos" default) — the list comes from GET
+                  /v1/onboarding/github/repos (server-side token), never a
+                  client GitHub call. repos: [] = ALL; a non-empty list =
+                  exactly those repos. */}
               {!(indexJob && (indexJob.status === 'starting' || indexJob.status === 'started')) && (
                 <div className="scope-selector">
-                  <label htmlFor="issues-repo-select">Repo</label>
-                  <select
-                    id="issues-repo-select"
-                    value={issuesScope.repo}
-                    onChange={(e) => onIssuesScopeChange({ repo: e.target.value })}
-                  >
-                    <option value="">All repos</option>
-                    {reposList.map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <fieldset className="scope-fieldset">
+                    <legend className="dim small">Repos to index</legend>
+                    <label className="scope-option">
+                      <input
+                        type="checkbox"
+                        checked={issuesScope.repos.length === 0}
+                        onChange={(e) => onIssuesScopeChange({ repos: e.target.checked ? [] : [...reposList] })}
+                      />
+                      All repos
+                    </label>
+                    {reposList.map((r) => (
+                      <label key={r} className="scope-option">
+                        <input
+                          type="checkbox"
+                          checked={issuesScope.repos.includes(r)}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? issuesScope.repos.includes(r) ? issuesScope.repos : [...issuesScope.repos, r]
+                              : issuesScope.repos.filter((x) => x !== r)
+                            onIssuesScopeChange({ repos: next })
+                          }}
+                        />
+                        {r}
+                      </label>
+                    ))}
+                    {reposLoaded && reposList.length === 0 && (
+                      <span className="dim small">No repos listed — the index will run org-wide.</span>
+                    )}
+                  </fieldset>
                   <span className="dim small" aria-live="polite">
-                    {issuesScope.repo
-                      ? `Indexing ${issuesScope.repo}.`
+                    {issuesScope.repos.length
+                      ? `Indexing ${issuesScope.repos.length} selected repo${issuesScope.repos.length > 1 ? 's' : ''}.`
                       : (reposLoaded && reposList.length > 0 ? `Indexing all ${reposList.length} repos.` : 'Indexing all repos.')}
                   </span>
                 </div>
@@ -4441,29 +4612,81 @@ function MemorySources(props) {
           {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
             <>
               {/* #1845: repo + branch scope for the docs index — "All repos"
-                  default, branch defaults to main (server falls back master). */}
+                  default; when specific repos are picked, each gets its own
+                  branch picker ('' = default main/master fallback,
+                  'all' = every branch, else a real branch from
+                  GET /v1/onboarding/github/branches). */}
               <div className="scope-selector">
-                <label htmlFor="docs-repo-select">Repo</label>
-                <select
-                  id="docs-repo-select"
-                  value={docsScope.repo}
-                  onChange={(e) => onDocsScopeChange({ ...docsScope, repo: e.target.value })}
-                >
-                  <option value="">All repos</option>
-                  {reposList.map((r) => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <label htmlFor="docs-branch-select">Branch</label>
-                <select
-                  id="docs-branch-select"
-                  value={docsScope.branch}
-                  onChange={(e) => onDocsScopeChange({ ...docsScope, branch: e.target.value })}
-                >
-                  <option value="main">main</option>
-                  <option value="master">master</option>
-                </select>
+                <fieldset className="scope-fieldset">
+                  <legend className="dim small">Repos to index</legend>
+                  <label className="scope-option">
+                    <input
+                      type="checkbox"
+                      checked={docsScope.repos.length === 0}
+                      onChange={(e) => {
+                        const repos = e.target.checked ? [] : [...reposList]
+                        onDocsScopeChange({ ...docsScope, repos })
+                      }}
+                    />
+                    All repos
+                  </label>
+                  {reposList.map((r) => {
+                    const checked = docsScope.repos.includes(r)
+                    const repoInfo = Object.prototype.hasOwnProperty.call(branchLists, r)
+                      ? branchLists[r] || { branches: [], defaultBranch: '' }
+                      : { branches: [], defaultBranch: '' }
+                    const branches = repoInfo.branches || []
+                    const defaultBranch = repoInfo.defaultBranch || ''
+                    const currentBranch = docsScope.branches[r] || ''
+                    return (
+                      <div key={r} className="scope-repo-row">
+                        <label className="scope-option">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              const next = e.target.checked
+                                ? docsScope.repos.includes(r) ? docsScope.repos : [...docsScope.repos, r]
+                                : docsScope.repos.filter((x) => x !== r)
+                              onDocsScopeChange({ ...docsScope, repos: next })
+                              if (e.target.checked) onLoadBranches(r)
+                            }}
+                          />
+                          {r}
+                        </label>
+                        {checked && (
+                          <label className="scope-branch">
+                            <span className="dim small">branch</span>
+                            <select
+                              value={currentBranch}
+                              onChange={(e) => onDocsScopeChange({
+                                ...docsScope,
+                                branches: { ...docsScope.branches, [r]: e.target.value },
+                              })}
+                            >
+                              {/* review P2-4: the default option carries the
+                                  repo's API default branch ('' falls back to
+                                  main/master server-side); the seeding effect
+                                  sets branches[r] to that same value so the
+                                  select matches. */}
+                              <option value={defaultBranch || ''}>default ({defaultBranch || 'main'})</option>
+                              <option value="all">all branches</option>
+                              {branches.filter((b) => b !== defaultBranch && b !== '' && b !== 'all').map((b) => (
+                                <option key={b} value={b}>{b}</option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                      </div>
+                    )
+                  })}
+                  {reposLoaded && reposList.length === 0 && (
+                    <span className="dim small">No repos listed — the index will run org-wide.</span>
+                  )}
+                </fieldset>
                 <span className="dim small" aria-live="polite">
-                  {docsScope.repo
-                    ? `Indexing ${docsScope.repo} @ ${docsScope.branch || 'main'}.`
+                  {docsScope.repos.length
+                    ? `Indexing ${docsScope.repos.length} selected repo${docsScope.repos.length > 1 ? 's' : ''}.`
                     : (reposLoaded && reposList.length > 0 ? `Indexing all ${reposList.length} repos.` : 'Indexing all repos.')}
                 </span>
               </div>
