@@ -62,10 +62,22 @@ def _unique_model(tag: str) -> str:
 def _clean_question(namespace: str, qid: str) -> None:
     sdk = TortoiseSDK(namespace=namespace)
     try:
-        sdk._get_proj().g.query(
+        proj = sdk._get_proj()
+        # #1884: the opt-in-only sweep no longer removes team_* graphs, so
+        # each test drops its OWN isolated graph — GRAPH.DELETE while it
+        # still holds nodes (an EMPTIED graph key refuses the delete with
+        # "Invalid graph operation on empty key"; the client method rides
+        # execute_command, never query("GRAPH.DELETE")). Falls back to the
+        # node-level DETACH DELETE if the graph is already gone.
+        try:
+            proj.db.select_graph(f"team_{namespace}").delete()
+            return
+        except Exception:
+            pass
+        proj.g.query(
             "MATCH (p:Point {lme_question_id:$q}) DETACH DELETE p",
             params={"q": qid})
-        sdk._get_proj().g.query(
+        proj.g.query(
             "MATCH (s:Session {lme_question_id:$q}) DETACH DELETE s",
             params={"q": qid})
     finally:
@@ -208,3 +220,118 @@ def test_docker_persistent_pool_fault_never_phantom_truncated():
 class _FakeResult:
     def __init__(self, result_set):
         self.result_set = result_set
+
+
+# ── #1884 regression: mini-pipeline pool:ingest invariant ──────────────────
+# reval2 showed silent write loss on 12-18/50 questions (pool_size <<
+# ingest.points, e.g. e47becba ingest 374 → pool 8) with ingest_retries=0,
+# errors=[] — writes succeeded client-side but were absent at census time.
+# Root cause: a CONCURRENT docker-lane pytest session's last-suite-standing
+# _leftover_sweep → _sweep_team_strays DETACH-DELETEd + GRAPH.DELETEd the
+# eval's LIVE team_default__default__{qid} graphs (the URI-path "test"
+# inference in _team_sweep_allowed treated the shared dev container as a
+# dedicated test DB). These tests pin the WRITE-PATH side of the invariant
+# on the REAL server: the #1785 gate census interleaved with the #1806
+# write-stage retry does NOT drop points (ratio stays >= 0.9 per question).
+# The sweep-side regression lives in tests/test_wipe_server.py.
+
+_MIN_POOL_RATIO = 0.9
+
+
+def _expected_denominator(outcome: dict) -> int:
+    ing = outcome.get("ingest") or {}
+    if "points" in ing:
+        return int(ing.get("turns", 0) + ing.get("chunks", 0)
+                   + ing.get("points", 0))
+    return int(ing.get("turns", 0) + ing.get("chunks", 0))
+
+
+def test_docker_mini_pipeline_pool_ratio_per_question():
+    """A 3-question mini-pipeline on the REAL FalkorDB keeps
+    pool_size : (turns+chunks+points) >= 0.9 per question — the invariant
+    reval2 violated (write loss surfaced as sub-0.1 ratios at census). On a
+    dedicated/CI docker (no concurrent session sweeping team_*) this pins
+    the write-path + gate-census interaction on the unshimmed client; on a
+    SHARED dev container a concurrent session's leftover sweep can delete
+    the test's own graphs mid-run (the #1884 mechanism) — that sweep-side
+    regression is pinned in tests/test_wipe_server.py."""
+    model = _unique_model("poolratio")
+    qids = ["mini_ie_user_001", "mini_msr_002", "mini_tr_003"]
+    instances = [q for q in _mini() if q["question_id"] in qids]
+    try:
+        outcomes, _ = runner.run_evaluation(
+            instances, reader=MockReader(), judge=MockJudge(), ks=(5,),
+            top_k=5, split="s", ingest_mode="deterministic",
+            db_uri=DB_URI, model=model, query_prompt="query")
+        assert len(outcomes) == len(qids)
+        for out in outcomes:
+            expected = _expected_denominator(out)
+            ratio = out["pool_size"] / expected if expected else 0.0
+            assert ratio >= _MIN_POOL_RATIO, (
+                f"{out['question_id']}: pool {out['pool_size']} vs "
+                f"expected {expected} (ratio {ratio:.3f}) — write loss")
+    finally:
+        for qid in qids:
+            _clean_question(
+                runner.question_graph_namespace(model, "query", qid), qid)
+
+
+def test_docker_v2_ingest_retry_gate_pool_ratio(monkeypatch):
+    """reval2's exact write path (v2 ingest + #1806 write-stage retry +
+    #1785 gate census) on the REAL FalkorDB with a mocked extractor: the
+    gate census interleaved between Phase A/C writes does NOT drop points —
+    every question keeps pool:ingest >= 0.9 and gates green. This isolates
+    the reval2 loss from the (disproven) gate×retry write-loss hypothesis:
+    the loss was external (concurrent test-session sweep), not the write
+    path."""
+    import tortoise.extractor_v2 as ev2
+
+    def _fake_extract(model, turns, **kw):
+        pts = []
+        for i, t in enumerate(turns or []):
+            content = str(t.get("content") or "")
+            if not content:
+                continue
+            pts.append({
+                "id": f"pt_1884_{kw.get('session_id', 's')}_{i}",
+                "content": content, "pointKind": "statement",
+                "quote": "", "source_turn_id": i,
+            })
+        return {"payload": {"entities": [], "points": pts, "events": [],
+                            "operators": [], "supersessions": []},
+                "minted_kinds": [], "supersessions": [], "errors": [],
+                "warnings": [],
+                "stats": {"llm": {"calls": 1, "retries": 0, "truncated": 0}},
+                "error_census": {}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+    model = _unique_model("v2pool")
+
+    class _StubModel:
+        """Stable-id adapter stub — keeps the extractor fingerprint
+        deterministic (an address-bearing repr would warn)."""
+        model_id = "stub-1884-v2"
+        id = model_id
+
+    qids = ["mini_ie_user_001", "mini_ku_004"]
+    instances = [q for q in _mini() if q["question_id"] in qids]
+    try:
+        outcomes, _ = runner.run_evaluation(
+            instances, reader=MockReader(), judge=MockJudge(), ks=(5,),
+            top_k=5, split="s", ingest_mode="v2", extractor_model=_StubModel(),
+            db_uri=DB_URI, model=model, query_prompt="query",
+            ingest_write_retries=2)
+        assert len(outcomes) == len(qids)
+        for out in outcomes:
+            expected = _expected_denominator(out)
+            ratio = out["pool_size"] / expected if expected else 0.0
+            assert ratio >= _MIN_POOL_RATIO, (
+                f"{out['question_id']}: pool {out['pool_size']} vs "
+                f"expected {expected} (ratio {ratio:.3f}) — v2 write loss")
+            assert out["gate_reasons"] == [], (
+                f"{out['question_id']}: gate red {out['gate_reasons']}")
+            assert out.get("ingest_retries", 0) == 0
+    finally:
+        for qid in qids:
+            _clean_question(
+                runner.question_graph_namespace(model, "query", qid), qid)
