@@ -182,6 +182,10 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         page.goto(
             "https://tortoise.premiselabs.co/signup", wait_until="domcontentloaded", timeout=30_000
         )
+        # #1494: the email+password form lives in the email modal (the ids
+        # of the retired inline form were kept for the #527 pins) — open it
+        # before filling or fill waits on a display:none input forever.
+        page.locator("#btn-email").click()
         page.locator("#email").fill(email)
         page.locator("#password").fill(password)
         page.locator("#btn-submit").click()
