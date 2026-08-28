@@ -1461,10 +1461,11 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         cp, team_id, select=_QUOTA_SELECT,
         # #1832: the FULL additive ladder (import tier dropped FIRST — newest
         # migration first), same as resolve_api_key / recover_team_key. The
-        # phantom import columns (last_import_sha256/max_points, NO migration
-        # in prod) ride _QUOTA_SELECT; omitting the import tier made EVERY
-        # ladder attempt 400 (PGRST204) → terminal raise → HTTP 500 on
-        # /v1/team, /v1/team/keys, /v1/sessions, /v1/onboarding/state.
+        # #1230 import ledger + points-cap columns (last_import_sha256/
+        # max_points, migration 20260817000001) ride _QUOTA_SELECT; omitting
+        # the import tier made EVERY ladder attempt 400 (PGRST204) → terminal
+        # raise → HTTP 500 on /v1/team, /v1/team/keys, /v1/sessions,
+        # /v1/onboarding/state.
         additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
                          _TEAM_ADDITIVE_0015_TIER,
                          _TEAM_ADDITIVE_BILLING_TIER])
