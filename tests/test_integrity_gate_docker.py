@@ -16,6 +16,7 @@ fresh-namespace ratio=1.000 assumption.
 """
 from __future__ import annotations
 
+import os
 import socket
 import uuid
 
@@ -33,7 +34,12 @@ from tools.longmem_eval.retrieve import (
 )
 from tortoise.sdk import TortoiseSDK
 
-DB_URI = "docker://localhost:6379/tortoise_test_matrix"
+DB_URI = os.environ.get(
+    "TORTOISE_DB_URI",
+    # CI's falkordb service requires the password (python-ci.yml
+    # `--requirepass falkordb`); local passwordless instances can override.
+    "docker://:falkordb@localhost:6379/tortoise_test_matrix",
+)
 
 
 def _falkordb_up() -> bool:

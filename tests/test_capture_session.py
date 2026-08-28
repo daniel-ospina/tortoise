@@ -10,7 +10,10 @@ import logging
 import re
 
 import pytest
+from fastapi.testclient import TestClient
 
+from tortoise import hosted_api as _ha
+from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
 
 
@@ -1700,12 +1703,6 @@ def test_client_commit_id_capture_parity(sdk, monkeypatch):
 # init patched so registry + team graphs share one temp DB).
 # ═══════════════════════════════════════════════════════════════════════════
 
-import tempfile
-
-from fastapi.testclient import TestClient  # noqa: I001
-
-from tortoise import hosted_api as _ha
-from tortoise.hosted_api import app, get_current_team
 
 _CONSENT_TEAM = {
     "team_id": "team-1727-consent", "tier": "free", "key_id": "k-1727",
@@ -2125,8 +2122,7 @@ def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp"):
 
     @contextmanager
     def _ctx():
-        from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
-                                       _transport_mode)
+        from tortoise.mcp_auth import _current_team_id, _current_team_limits, _transport_mode
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
         orig_init = _patch_sdk_to_temp(tmp_path)
         _ha._FALLBACK_KEEPALIVE.clear()
@@ -2194,7 +2190,7 @@ def test_session_capture_tool_unopted_403(tmp_path, monkeypatch):
 def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
     """Task 13: stdio (no team context / selfhost) → honest 'requires hosted
     mode' error — no local fallback that bypasses the gates."""
-    from tortoise.mcp_auth import _current_team_id, SELFHOST_TEAM_ID
+    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
     from tortoise.mcp_server import tortoise_session_capture
     tok = _current_team_id.set(SELFHOST_TEAM_ID)
     try:

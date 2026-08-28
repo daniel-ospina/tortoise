@@ -198,7 +198,7 @@ def client(monkeypatch):
     the LLM path runs with zero network.
     """
     from fastapi.testclient import TestClient  # noqa: I001
-    import tortoise.hosted_api as ha_mod  # noqa: I001
+    import tortoise.hosted_api as ha_mod
     from tortoise.hosted_api import app, get_current_team
 
     with tempfile.TemporaryDirectory() as tmpdir:
