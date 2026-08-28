@@ -445,6 +445,32 @@ class TestDashboardLoginGate:
         assert r.status_code == 200, r.text  # degrade, never 500
         assert any("additive" in rec.message for rec in caplog.records)
 
+    def test_session_mgmt_degrades_under_phantom_import_columns(
+            self, client, fake, monkeypatch, caplog):
+        """#1832: the session branch (_session_user_team) must degrade when
+        the PHANTOM import columns (last_import_sha256 / max_points — #1230
+        columns with NO migration in prod) are missing from the teams table.
+        The fail-soft ladder drops _TEAM_ADDITIVE_IMPORT_TIER first (newest
+        migration first); before the #1832 fix the tier was absent from the
+        ladder, so EVERY retry still selected the phantom columns → PGRST204
+        → terminal raise → HTTP 500 on /v1/team (and /v1/team/keys,
+        /v1/sessions, /v1/onboarding/state) for every session-JWT user."""
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        user_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, user_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(key),
+                            user_id=user_id, email="owner@example.com")
+        fake.missing_columns = {"teams": {
+            "last_import_sha256", "last_import_quarantined_sha256",
+            "max_points"}}
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            r = client.get("/v1/team",
+                            headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 200, r.text  # degrade, never 500
+        assert r.json()["team_id"] == team_id
+        assert any("additive" in rec.message for rec in caplog.records)
+
 
 class TestClaimEmail:
     def test_claim_email_creates_user_and_claims(self, client, fake, monkeypatch):

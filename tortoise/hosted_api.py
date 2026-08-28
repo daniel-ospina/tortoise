@@ -1454,11 +1454,19 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         _TEAM_ADDITIVE_0015_TIER,
         _TEAM_ADDITIVE_BILLING_TIER,
         _TEAM_ADDITIVE_DKL_TIER,
+        _TEAM_ADDITIVE_IMPORT_TIER,
         _teams_row_fail_soft,
     )
     row = _teams_row_fail_soft(
         cp, team_id, select=_QUOTA_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
+        # #1832: the FULL additive ladder (import tier dropped FIRST — newest
+        # migration first), same as resolve_api_key / recover_team_key. The
+        # phantom import columns (last_import_sha256/max_points, NO migration
+        # in prod) ride _QUOTA_SELECT; omitting the import tier made EVERY
+        # ladder attempt 400 (PGRST204) → terminal raise → HTTP 500 on
+        # /v1/team, /v1/team/keys, /v1/sessions, /v1/onboarding/state.
+        additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+                         _TEAM_ADDITIVE_0015_TIER,
                          _TEAM_ADDITIVE_BILLING_TIER])
     if row is None:
         raise HTTPException(status_code=403, detail="Team not found")
