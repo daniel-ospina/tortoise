@@ -676,3 +676,31 @@ def test_pr_events_minted(sdk):
         "MATCH (e:Event {eventId:'github-pr-acme/repo1-7'}) RETURN e.eventKind"
     ).result_set
     assert [r[0] for r in rows] == ["github.pr.open"]
+
+
+def test_resolve_repos_404_raises_without_fallback(sdk):
+    """#1845 review (deep bug scan): the org-wide WALK path passes
+    allow_user_fallback=False — a 404 org RAISES (fail honestly) instead of
+    silently walking the token user's personal repos. The selector keeps
+    the fallback (default True)."""
+    import httpx
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    from tortoise.indexer.github_indexer import GitHubFetchError
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            # /user would succeed, but the walk path must not use it
+            return httpx.Response(404, json={}, request=request)
+
+    indexer = GitHubIndexer("fake-token",
+                            httpx_client=httpx.AsyncClient(
+                                transport=_Transport()))
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(GitHubFetchError):
+            loop.run_until_complete(
+                indexer.resolve_repos("ghost-org", allow_user_fallback=False))
+    finally:
+        loop.run_until_complete(indexer._close())
+        loop.close()

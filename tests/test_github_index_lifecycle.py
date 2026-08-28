@@ -582,7 +582,7 @@ def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
                             "number": 7}},
         "github_indexed": True})
     # break the org resolution → the pre-walk resolve_repos fails
-    async def _boom(self, org):
+    async def _boom(self, org, **kw):
         raise GitHubFetchError("org not found")
 
     monkeypatch.setattr(GitHubIndexer, "resolve_repos", _boom)

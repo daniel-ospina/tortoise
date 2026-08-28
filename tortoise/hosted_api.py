@@ -10167,7 +10167,15 @@ async def _heal_github_org(team_id: str, encrypted: str,
         await indexer._close()
     if not login or login == org:
         return login or org
-    _store_github_org(team_id, encrypted, login)
+    try:
+        _store_github_org(team_id, encrypted, login)
+    except Exception:
+        # Review: the heal write must NEVER 500 the read endpoints it feeds
+        # (github_status/repos/branches promise "never a 500"). A control-
+        # plane blip during the one-time patch falls back to the resolver's
+        # /user/repos fallback on the next call — the login is returned
+        # either way.
+        pass
     return login
 
 
@@ -10189,6 +10197,44 @@ def _store_github_org(team_id: str, encrypted: str, org: str) -> None:
             "MATCH (t:Team {id: $id}) SET t.github_org = $org",
             params={"id": team_id, "org": org},
         )
+
+
+def _cleanup_legacy_docs_corpus(team_id: str,
+                                walk_items: list[tuple[str, str | None]]) -> None:
+    """Review (deep bug scan): remove a pre-#1845 UNQUALIFIED docs corpus.
+
+    The old docs layout staged at {base}/{team}/{owner}/{repo}/docs/... with
+    a .manifest/{owner}/{name}.json; the #1845 branch-qualified layout
+    stages under {owner}/{repo}/{branch}/docs/... and would INGEST the
+    legacy corpus too (same content, two doc ids — duplicates that the new
+    per-branch manifest can never reconcile away). Best-effort: removes the
+    legacy unqualified docs/ dir + legacy manifest for each scoped repo when
+    they exist. Never removes branch-qualified dirs (those live one level
+    deeper). No prod team ever had a legacy corpus (github_docs_indexed was
+    false for every connected team — the old connect bug 404'd every
+    org-scoped walk), so this is a defensive guard for API clients that
+    used the old open endpoint.
+    """
+    from tortoise.indexer.github_docs import GitHubDocsIndexer
+    team_root = GitHubDocsIndexer.team_root(team_id)
+    for repo_name, _branch in walk_items:
+        parts = repo_name.split("/", 1)
+        if len(parts) != 2:
+            continue
+        owner, name = parts
+        legacy_dir = team_root / owner / name / "docs"
+        legacy_manifest = team_root / ".manifest" / owner / f"{name}.json"
+        try:
+            if legacy_dir.is_dir():
+                import shutil
+                shutil.rmtree(legacy_dir, ignore_errors=True)
+        except OSError:
+            pass  # best-effort
+        try:
+            if legacy_manifest.is_file():
+                legacy_manifest.unlink(missing_ok=True)
+        except OSError:
+            pass  # best-effort
 
 
 @app.get("/v1/onboarding/github/status")
@@ -10406,7 +10452,9 @@ def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
         return None
     out: list[str] = []
     for r in repos:
-        r = (r or "").strip()
+        if not isinstance(r, str):
+            raise HTTPException(status_code=400, detail="Invalid repo name")
+        r = r.strip()
         if not r:
             raise HTTPException(status_code=400, detail="Invalid repo name")
         if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", r):
@@ -10419,6 +10467,9 @@ def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
 # Git-ref-safe branch token (review P1-1): git refs can NEVER contain "..",
 # "@{}", spaces, control chars, or "~^:?*[\\" — but MAY contain "/"
 # (feature/x). This is the same conservative surface the fetcher walks.
+# ⚠️ keep-in-sync with github_docs._safe_branch — both guard the same
+# client branch before URL interpolation (API layer + fetcher defense-in-
+# depth); a charset change must land in BOTH.
 _SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
 
 
@@ -10453,7 +10504,9 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
     #1844: OBJECT-ONLY — zero non-episodic :Point writes, so no points-quota
     gate (see the pre-walk comment; the #1843 statement-write resurrection
     #1845: ``repos`` is a list of SHORT repo names (None/empty = ALL repos,
-    org-wide diff; the first run stays bounded to ONE repo regardless).
+    org-wide diff). The first-run ONE-repo bound applies to the org-wide
+    path only — an explicit repos list walks exactly those repos even on
+    the first run (the user scoped them deliberately).
     would re-add it).
 
     P1-1 / P2 (PR #1792): every caller spawns this task ONLY when
@@ -10541,7 +10594,12 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
         if repos:
             walk_repos = [f"{org}/{r}" for r in repos]
         else:
-            walk_repos = await indexer.resolve_repos(org)
+            # Review (deep bug scan): the org-wide WALK path must fail
+            # honestly on a 404 org, never silently walk the token user's
+            # personal namespace — only the selector keeps the /user/repos
+            # fallback (allow_user_fallback=False).
+            walk_repos = await indexer.resolve_repos(
+                org, allow_user_fallback=False)
             if first_run:
                 walk_repos = walk_repos[:1]
 
@@ -10739,7 +10797,11 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):
 
 
 class DocsIndexRequest(BaseModel):
-    org: str
+    # Review (deep bug scan): org is ACCEPTED for backward compat but is
+    # never used — index_docs resolves org server-side from the stored
+    # credentials (never client-trusted). Optional so a client following
+    # the new contract ({repos: [...]} without org) does not 422.
+    org: str | None = None
     # #1845: multi-repo scope — list of {"repo": short, "branch": str|None}.
     # branch None/"" = default (main, master fallback); "all" = every branch;
     # a name = that branch. Empty/absent = ALL repos (org-wide).
@@ -10846,7 +10908,11 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
             walk_items: list[tuple[str, str | None]] = [
                 (f"{org}/{s.get('repo')}", s.get("branch")) for s in scopes]
         else:
-            resolved = await indexer.resolve_repos(org)
+            # Review (deep bug scan): same as _run_indexing — the docs
+            # org-wide walk must fail honestly on a 404 org, never silently
+            # walk the token user's personal repos.
+            resolved = await indexer.resolve_repos(
+                org, allow_user_fallback=False)
             walk_items = [(r, None) for r in resolved]
         totals["repos_total"] = len(walk_items)
 
@@ -10856,6 +10922,19 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
         # derive_document_id path-collision edge). #1845: branch-qualified
         # walks add {owner}/{repo}/{branch}/docs/... — BRANCH-unique too.
         team_root = GitHubDocsIndexer.team_root(team_id)
+
+        # Review (deep bug scan): one-time legacy cleanup. Pre-#1845 walks
+        # staged an UNQUALIFIED corpus at {team}/{owner}/{repo}/docs/...
+        # with a .manifest/{owner}/{name}.json — the new branch-qualified
+        # layout would ingest that legacy corpus UNDER the new tree, giving
+        # the same content TWO doc ids (doc_{owner}/{repo}/docs/x.md vs
+        # doc_{owner}/{repo}/{branch}/docs/x.md) and the legacy manifest
+        # would never reconcile it away. Remove the legacy unqualified docs
+        # dir + legacy manifest once (best-effort — the layout never
+        # existed for any prod team, verified github_docs_indexed=false for
+        # every connected team; this is a defensive guard for API clients
+        # that used the old open endpoint).
+        _cleanup_legacy_docs_corpus(team_id, walk_items)
 
         def _docs_quota_check() -> None:
             enforce_team_limit(limits, "documents", sdk=team_sdk)
@@ -10999,7 +11078,9 @@ async def index_docs(body: DocsIndexRequest | None = None,
         for s in body.repos:
             if not isinstance(s, dict) or not s.get("repo"):
                 raise HTTPException(status_code=400, detail="Invalid repo scope")
-            repo = str(s["repo"]).strip()
+            if not isinstance(s["repo"], str):
+                raise HTTPException(status_code=400, detail="Invalid repo name")
+            repo = s["repo"].strip()
             if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
                 raise HTTPException(status_code=400, detail="Invalid repo name")
             branch = s.get("branch")

@@ -1025,7 +1025,7 @@ function claimIntentInFlight() {
   // the default option is labeled truthfully for repos whose default is
   // neither main nor master.
   async function loadBranches(repo) {
-    if (branchLists[repo]) return  // already loaded
+    if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
     try {
       const q = encodeURIComponent(repo)
       const res = await api(`/v1/onboarding/github/branches?repo=${q}`, { useSession: true })
@@ -1045,6 +1045,7 @@ function claimIntentInFlight() {
       let changed = false
       const branches = { ...prev.branches }
       prev.repos.forEach((r) => {
+        if (!Object.prototype.hasOwnProperty.call(branchLists, r)) return
         const info = branchLists[r]
         if (info && info.defaultBranch && !branches[r]) {
           branches[r] = info.defaultBranch
@@ -4531,7 +4532,9 @@ function MemorySources(props) {
                   </label>
                   {reposList.map((r) => {
                     const checked = docsScope.repos.includes(r)
-                    const repoInfo = branchLists[r] || { branches: [], defaultBranch: '' }
+                    const repoInfo = Object.prototype.hasOwnProperty.call(branchLists, r)
+                      ? branchLists[r] || { branches: [], defaultBranch: '' }
+                      : { branches: [], defaultBranch: '' }
                     const branches = repoInfo.branches || []
                     const defaultBranch = repoInfo.defaultBranch || ''
                     const currentBranch = docsScope.branches[r] || ''
@@ -4568,7 +4571,7 @@ function MemorySources(props) {
                                   select matches. */}
                               <option value={defaultBranch || ''}>default ({defaultBranch || 'main'})</option>
                               <option value="all">all branches</option>
-                              {branches.filter((b) => b !== defaultBranch && b !== '').map((b) => (
+                              {branches.filter((b) => b !== defaultBranch && b !== '' && b !== 'all').map((b) => (
                                 <option key={b} value={b}>{b}</option>
                               ))}
                             </select>

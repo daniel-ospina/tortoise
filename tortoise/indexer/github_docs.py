@@ -79,6 +79,9 @@ def _safe_segment(value: str, what: str) -> str:
 # Branch token for the tree URL (review P1-1): git refs may contain "/"
 # (feature/x) but NEVER "..", "@{}", spaces, or control chars. "all" is the
 # #1845 multi-branch marker handled by the caller, never a real ref.
+# ⚠️ keep-in-sync with hosted_api._is_safe_branch — both guard the same
+# client branch before URL interpolation (API layer + fetcher defense-in-
+# depth); a charset change must land in BOTH.
 _SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
 
 

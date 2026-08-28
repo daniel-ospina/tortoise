@@ -652,3 +652,29 @@ def test_docs_job_non_string_branch_400(provisioned, mock_github,
     r = provisioned.tc.post("/v1/index/docs", json={
         "org": "acme", "repos": [{"repo": "repo1", "branch": 5}]})
     assert r.status_code == 400, "non-string branch should 400, not 500"
+
+
+def test_legacy_unqualified_corpus_cleaned(provisioned, mock_github,
+                                           ingest_base):
+    """#1845 review (deep bug scan): a pre-#1845 UNQUALIFIED corpus
+    ({owner}/{repo}/docs/... + .manifest/{owner}/{name}.json) is removed on
+    the first new-layout walk — it would otherwise be ingested under the new
+    branch-qualified tree, duplicating every doc (same content, two ids)."""
+    import os
+    from tortoise.indexer.github_docs import GitHubDocsIndexer
+    team_root = GitHubDocsIndexer.team_root(provisioned.team_id)
+    legacy_docs = team_root / "acme" / "repo1" / "docs"
+    legacy_docs.mkdir(parents=True, exist_ok=True)
+    (legacy_docs / "README.md").write_text("# legacy\n")
+    legacy_manifest = team_root / ".manifest" / "acme" / "repo1.json"
+    legacy_manifest.parent.mkdir(parents=True, exist_ok=True)
+    legacy_manifest.write_text('{"tree_sha":"legacy","branch":"main"}')
+
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1"}]})
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
+    assert body["status"] == "completed"
+    assert not legacy_docs.exists(), \
+        "the legacy unqualified docs/ dir must be removed"
+    assert not legacy_manifest.exists(), \
+        "the legacy unqualified manifest must be removed"

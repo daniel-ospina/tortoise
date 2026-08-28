@@ -404,6 +404,49 @@ class TestToolFunctions:
             _current_team_id.reset(token)
         assert result == {"error": "No team context (HTTP mode required)"}
 
+    def test_github_index_wraps_repo_into_list(self, monkeypatch):
+        """#1845 review (deep bug scan): _run_indexing now takes a repo LIST.
+        The MCP caller wraps its single optional repo into a one-item list
+        through the same allowlist validator as the REST re-poll — a bare
+        str would be iterated character-by-character by the new contract
+        (repo='repo1' → walks org/r, org/e, ...)."""
+        from tortoise.mcp_auth import _current_team_id
+        from tortoise.mcp_server import tortoise_onboarding_github_index
+        import tortoise.mcp_server as ms
+        import tortoise.hosted_api as ha
+
+        calls: list = []
+        token = _current_team_id.set("team-github-index")
+        try:
+            monkeypatch.setattr(ha, "_github_token_enc", lambda tid: "enc")
+            monkeypatch.setattr(ha, "_start_index_job",
+                                lambda tid, kind="github": ("job1", True))
+
+            async def _capture(job_id, team_id, org, repos):
+                calls.append((org, repos))
+
+            monkeypatch.setattr(ha, "_run_indexing", _capture)
+            # the tool imports names into its module namespace at call time
+            monkeypatch.setattr(ms, "_github_token_enc",
+                                lambda tid: "enc", raising=False)
+            monkeypatch.setattr(ms, "_start_index_job",
+                                lambda tid, kind="github": ("job1", True),
+                                raising=False)
+            monkeypatch.setattr(ms, "_run_indexing", _capture, raising=False)
+            monkeypatch.setattr(ms, "_validate_repo_scope",
+                                ha._validate_repo_scope, raising=False)
+            result = tortoise_onboarding_github_index("acme", "repo1")
+            assert result == {"job_id": "job1", "status": "started"}
+            # the tool schedules _run_indexing via create_task on a fresh
+            # event loop — pump it so the capture runs
+            import asyncio as _asyncio
+            _asyncio.get_event_loop().run_until_complete(
+                _asyncio.sleep(0.05))
+            assert calls == [("acme", ["repo1"])], \
+                "the repo must be wrapped into a one-item list, not a bare str"
+        finally:
+            _current_team_id.reset(token)
+
 
 class TestToolIntegration:
     """Integration tests that require FalkorDB."""

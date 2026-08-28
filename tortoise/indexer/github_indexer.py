@@ -138,7 +138,8 @@ class GitHubIndexer:
             return login if isinstance(login, str) and login else None
         return None
 
-    async def resolve_repos(self, org: str) -> list[str]:
+    async def resolve_repos(self, org: str,
+                            allow_user_fallback: bool = True) -> list[str]:
         """Resolve repo names for an org (try org, fall back to user).
 
         A non-200 from BOTH (org not found / no access) falls back to the
@@ -151,11 +152,14 @@ class GitHubIndexer:
         Review P2-1 (org-boundary integrity): the fallback is BOUNDED to
         the token user's own repos (``full_name`` starts with the token's
         login). It never widens an org-wide walk across the boundary into
-        other orgs' private repos — the fallback resolves exactly what the
-        token user owns/contributes to under their own namespace. Only when
-        /user/repos ALSO fails (or the login cannot be resolved) does this
-        RAISE GitHubFetchError — the job must fail honestly, never silently
-        complete with 0 points + github_indexed=True (P2, PR #1792).
+        other orgs' private repos.
+
+        Review (deep bug scan): ``allow_user_fallback=False`` (the org-wide
+        WALK paths) RAISES on a 404 org instead of silently walking the
+        token user's personal namespace — the job must fail honestly when
+        the org the user picked no longer resolves (P2, PR #1792). Only the
+        SELECTOR path keeps the fallback. Only when /user/repos ALSO fails
+        (or the login cannot be resolved) does the fallback raise.
         """
         client = await self._get_client()
         for kind in ("orgs", "users"):
@@ -163,6 +167,10 @@ class GitHubIndexer:
                 client, f"{_GITHUB_API}/{kind}/{org}/repos?per_page=100")
             if r.status_code == 200:
                 return [repo["full_name"] for repo in r.json()]
+        if not allow_user_fallback:
+            raise GitHubFetchError(
+                f"GitHub org/user {org!r} not found or no access (non-200 on "
+                f"orgs/{org}/repos and users/{org}/repos)")
         login = await self.current_login()
         if login:
             r = await self._get(
@@ -180,18 +188,26 @@ class GitHubIndexer:
         """List branch names for a repo (``GET /repos/{repo}/branches``).
 
         Used by the #1845 source-scope selector's per-repo branch picker
-        (server-side token — the client never calls GitHub directly). A
-        non-200 raises GitHubFetchError; the endpoint layer catches and
-        degrades to an empty list (the selector still renders its default
-        branch, never a 500).
+        and the docs "all branches" walk (server-side token — the client
+        never calls GitHub directly). Paginates through the Link header
+        (review: a >100-branch repo must not silently truncate the "all
+        branches" walk or the picker). A non-200 raises GitHubFetchError;
+        the endpoint layer catches and degrades to an empty list (the
+        selector still renders its default branch, never a 500).
         """
         client = await self._get_client()
-        r = await self._get(
-            client, f"{_GITHUB_API}/repos/{repo}/branches?per_page=100")
-        if r.status_code == 200:
-            return [b.get("name") for b in r.json() if b.get("name")]
-        raise GitHubFetchError(
-            f"GitHub branch list failed for {repo} ({r.status_code})")
+        branches: list[str] = []
+        url: str | None = (
+            f"{_GITHUB_API}/repos/{repo}/branches?per_page=100")
+        while url:
+            r = await self._get(client, url)
+            if r.status_code != 200:
+                raise GitHubFetchError(
+                    f"GitHub branch list failed for {repo} ({r.status_code})")
+            branches.extend(b.get("name") for b in r.json() if b.get("name"))
+            url = GitHubIndexer._link_header_urls(
+                r.headers.get("Link", "")).get("next")
+        return branches
 
     async def default_branch(self, repo: str) -> str | None:
         """The API-reported default branch (``GET /repos/{repo}``) — None on
