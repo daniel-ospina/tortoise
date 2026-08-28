@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import types
+import uuid
 
 import pytest
 
@@ -850,7 +851,7 @@ def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
     # the retracted inference: the URI path says "test" but the gate refuses
     assert _team_sweep_allowed(eval_uri) is False, \
         "URI-path 'test' inference must be retracted (#1884)"
-    stray = "team_ws_eval_stray_9d1f"
+    stray = f"team_ws_eval_stray_{uuid.uuid4().hex[:8]}"
     proj = FalkorProjection.from_uri(
         "docker://:falkordb@localhost:6379", graph_name="test_ws_evalsweep_probe")
     try:

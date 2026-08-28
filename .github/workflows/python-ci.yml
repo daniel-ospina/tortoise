@@ -420,9 +420,15 @@ jobs:
           URI=""
           EXPECT_URI=""
           CARVE_OUT=""
+          SWEEP_TEAM_STRAYS=""
           if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
             URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"
             EXPECT_URI="1"
+            # #1886 (issue #1884): the docker lane is a DEDICATED fresh-per-
+            # job container — the journal-blind team_* stray pass is safe
+            # here and stays live (opt-in only since #1884; the shared dev
+            # container never sets this).
+            SWEEP_TEAM_STRAYS="1"
           else
             # Tier-2 URI-less embedded shape (epic #1647 Task 10, P1-9): the
             # P4 enforcement fails URI-less runs unless CARVE_OUT=1 — tier-2
@@ -433,6 +439,7 @@ jobs:
           echo "URI=$URI" >> "$GITHUB_ENV"
           echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"
           echo "CARVE_OUT=$CARVE_OUT" >> "$GITHUB_ENV"
+          echo "SWEEP_TEAM_STRAYS=$SWEEP_TEAM_STRAYS" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (expected nodeids, epic #1647 Task 6/9)
         # Cycle-2 P2-12: the collect-only runs in its OWN step (off the
         # pytest step's 55m watchdog budget — the collect-only wall can
@@ -596,6 +603,10 @@ jobs:
           # enforcement (CARVE_OUT=1 when full=false — the tier-2 embedded
           # shape). Full docker legs set URI, so CARVE_OUT is empty there.
           TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
+          # #1886: dedicated fresh-per-job docker container — keep the
+          # journal-blind team_* stray pass live in CI (opt-in only; the
+          # shared dev container never sets it — issue #1884).
+          TORTOISE_TEST_SWEEP_TEAM_STRAYS: ${{ env.SWEEP_TEAM_STRAYS }}
 
       - name: Upload pytest log (measurement artifact, #1477)
         # #1477: non-gating upload so ci-timing.yml can extract per-file
@@ -871,15 +882,21 @@ jobs:
           URI=""
           EXPECT_URI=""
           CARVE_OUT=""
+          SWEEP_TEAM_STRAYS=""
           if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
             URI="docker://:falkordb@localhost:6379/tortoise_test_matrix"
             EXPECT_URI="1"
+            # #1886 (issue #1884): dedicated fresh-per-job container — the
+            # journal-blind team_* stray pass is safe here and stays live
+            # (opt-in only since #1884).
+            SWEEP_TEAM_STRAYS="1"
           else
             CARVE_OUT="1"  # tier-2 URI-less embedded shape — the P4 opt-in (Task 10)
           fi
           echo "URI=$URI" >> "$GITHUB_ENV"
           echo "EXPECT_URI=$EXPECT_URI" >> "$GITHUB_ENV"
           echo "CARVE_OUT=$CARVE_OUT" >> "$GITHUB_ENV"
+          echo "SWEEP_TEAM_STRAYS=$SWEEP_TEAM_STRAYS" >> "$GITHUB_ENV"
       - name: Generate coverage manifest (slow legs — expected nodeids, epic #1647 Task 9)
         # Cycle-6 P2-8 (int-10): the manifest runs in its OWN step BEFORE the
         # pytest step (off the 75m watchdog), using each leg's committed
@@ -964,6 +981,9 @@ jobs:
           TORTOISE_DB_URI: ${{ env.URI }}
           TORTOISE_TEST_EXPECT_URI: ${{ env.EXPECT_URI }}
           TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
+          # #1886: dedicated fresh-per-job docker container — journal-blind
+          # team_* stray pass stays live in CI (opt-in only — issue #1884).
+          TORTOISE_TEST_SWEEP_TEAM_STRAYS: ${{ env.SWEEP_TEAM_STRAYS }}
 
       - name: Skip-fail guard (slow legs, epic #1647 Task 9)
         # Cycle-6 P2-8: the same junitxml-reconciled coverage manifest as the

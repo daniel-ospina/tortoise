@@ -16,6 +16,8 @@ fresh-namespace ratio=1.000 assumption.
 """
 from __future__ import annotations
 
+import contextlib
+import logging
 import socket
 import uuid
 
@@ -63,23 +65,32 @@ def _clean_question(namespace: str, qid: str) -> None:
     sdk = TortoiseSDK(namespace=namespace)
     try:
         proj = sdk._get_proj()
+        graph_name = f"team_{namespace}"
         # #1884: the opt-in-only sweep no longer removes team_* graphs, so
         # each test drops its OWN isolated graph — GRAPH.DELETE while it
-        # still holds nodes (an EMPTIED graph key refuses the delete with
-        # "Invalid graph operation on empty key"; the client method rides
-        # execute_command, never query("GRAPH.DELETE")). Falls back to the
-        # node-level DETACH DELETE if the graph is already gone.
+        # still holds nodes. Verified on the server: delete() raises
+        # "Invalid graph operation on empty key" on a key that never
+        # existed, succeeds on a live key, and a DETACH query on a missing
+        # graph AUTO-CREATES the key — so the fallback must re-delete to
+        # avoid leaving an empty shell (review P2).
         try:
-            proj.db.select_graph(f"team_{namespace}").delete()
+            proj.db.select_graph(graph_name).delete()
             return
-        except Exception:
-            pass
+        except Exception as ex:
+            if "empty key" in str(ex):
+                return  # graph never existed — nothing to clean
+            logging.getLogger(__name__).warning(
+                "clean_question GRAPH.DELETE failed for %s: %r",
+                graph_name, ex)
         proj.g.query(
             "MATCH (p:Point {lme_question_id:$q}) DETACH DELETE p",
             params={"q": qid})
         proj.g.query(
             "MATCH (s:Session {lme_question_id:$q}) DETACH DELETE s",
             params={"q": qid})
+        # the DETACH queries recreated the (now empty) key — drop it
+        with contextlib.suppress(Exception):
+            proj.db.select_graph(graph_name).delete()
     finally:
         sdk.close()
 
