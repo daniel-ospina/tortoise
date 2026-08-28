@@ -1023,7 +1023,7 @@ function claimIntentInFlight() {
     // #1828 (review P3-2): the recovery fallback rotated a session
     // credential to make room — one-time banner so the user knows their
     // setup command key changed (the returned key IS the new one).
-    if (data.rotated) setBanner('Signed-in key was rotated to make room — your setup command now uses a new key.')
+    if (data.rotated) setBanner('A recovery key was rotated to make room — agents using the old key must be re-connected; your setup command now uses a new key.')
     // Fix C (review round 2): return the team actually minted for so callers
     // cache on the right id even when the 400-fallback picked it (a null
     // firstTeamId previously skipped the cache → cap burn on every switch).
@@ -1318,31 +1318,55 @@ function claimIntentInFlight() {
           } catch (e) {
             // #308: a suspended team's mint 403s — show the appeal banner.
             if (e && e.suspended) setSuspended(e.suspended)
-            // #1559: the mint failed (429 rate limit / 5xx) — the dashboard
-            // has NO key-only fallback anymore (deleted in #1511), so a
-            // silent setChecking(false) stranded users on the fake
-            // "Redirecting to the sign-in page…" shell. Surface an
-            // actionable error instead (the Retry button re-runs the mount).
+            // #1559: the mint failed — the dashboard has NO key-only
+            // fallback anymore (deleted in #1511), so a silent
+            // setChecking(false) stranded users on the fake "Redirecting to
+            // the sign-in page…" shell. Surface an actionable error instead
+            // (the Retry button re-runs the mount).
             const msg = (e && e.message) || 'Could not prepare your session.'
             if (teamIdRef.current !== teamAtMountMint) return  // switched mid-mint
             // #1719 (Task 6): a 5xx mint failure is the server's fault, not
             // the user's — render the honest unavailable copy (a raw
             // "Internal server error" string reads like a client bug).
             const errStatus = (e && e.status) || 0
-            setMountError(errStatus >= 500
-              ? UNAVAILABLE_COPY
-              : /429|rate limit/i.test(msg)
-                ? 'Too many requests from this network — try again in a minute.'
-                : msg)
-            setAuthed(false)  // #1567 P0: the error card renders in !authed
-            setChecking(false)
-            return
+            if (errStatus >= 500 || (e && e.suspended)) {
+              // 5xx (server fault) or suspension: keep the blocking error
+              // card + appeal banner (unchanged behavior).
+              setMountError(errStatus >= 500 ? UNAVAILABLE_COPY : msg)
+              setAuthed(false)  // #1567 P0: the error card renders in !authed
+              setChecking(false)
+              return
+            }
+            // #1830: a NON-5xx, NON-suspension mint failure (402 key limit /
+            // 429 bootstrap cap / other 4xx) must NOT block the dashboard —
+            // the overview reads ride the session JWT (#1828), so proceeding
+            // to completeLogin(null) still renders Team/Keys/Sessions. Set a
+            // one-time banner instead: agent connections need a key, but the
+            // dashboard works without one.
+            // #1831 P3-b: drop the stale stored key — it just failed its
+            // /v1/team probe, and keeping it re-fires the probe (and its
+            // 401) on every reload.
+            try { localStorage.removeItem(KEY_STORAGE) } catch { /* best-effort */ }
+            // #1831 P3-a: the remedy depends on the failure — a 402 key-limit
+            // never clears on its own (recovery keys don't expire), so
+            // "wait for expiry" is wrong advice there; keep it only for the
+            // 429 rate-limit case.
+            const mintRemedy = errStatus === 402
+              ? 'Revoke an old key to make room.'
+              : errStatus === 429
+                ? 'Wait for expiry, then try again.'
+                : 'Revoke an old key or wait for expiry.'
+            setBanner(`Couldn't create an agent key: ${msg} — the dashboard works, but agent connections need a key. ${mintRemedy}`)
           }
         }
         // Round-9: a SIGNED_OUT during the mint must not complete the login
         // with a fresh key on the tab the user just signed out of.
         if (!sessionTokenRef.current) { setAuthed(false); setChecking(false); setMountError('Your session ended — sign in again.'); return }
-        if (!key) { setAuthed(false); setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        // #1830: key may be null here — a recoverable mint failure (4xx,
+        // non-suspension) proceeds to completeLogin(null): the overview
+        // reads ride the session JWT, so the dashboard still renders. The
+        // old hard gate (`if (!key) … mountError`) blocked the WHOLE
+        // dashboard on a mint that only matters for agent connections.
         // #1567 P1 (verifier gate): the chrome is visible NOW — a team
         // switch made during the mint (multi-membership: the mint-400
         // fallback populated the switcher early) must not be clobbered by
@@ -1350,9 +1374,14 @@ function claimIntentInFlight() {
         // moved away from the key's owner (teamIdRef is null on a fresh
         // session — the stored-key path and Round-8 loadTeams own it then).
         if (mintedTeamId && teamIdRef.current && teamIdRef.current !== mintedTeamId) return
-        localStorage.setItem(KEY_STORAGE, key)
-        setApiKey(key)
-        apiKeyRef.current = key
+        // #1830: only persist a REAL key — a recoverable mint failure leaves
+        // key null, and writing it would clobber the stored credential (a
+        // falsy value must never land in localStorage). A null key also
+        // clears the apiKey state so snippets never leak a stale/invalid
+        // key (or "Bearer null").
+        if (key) localStorage.setItem(KEY_STORAGE, key)
+        setApiKey(key || '')
+        apiKeyRef.current = key || ''
         setAuthMode('session')
         await completeLogin(key)
       } catch (e) {
@@ -2616,6 +2645,11 @@ function claimIntentInFlight() {
   // When it shows, the legacy empty-state cards hide.
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
+  // #1831 P2-1: the wizard's setup commands embed the user's key. After a
+  // recoverable mint failure (#1830) BOTH welcomeKey and apiKey can be empty
+  // — never emit `Bearer ` with an empty key; fall back to a create-a-key
+  // message instead (see the wizard step-0 render below).
+  const harnessKey = welcomeKey || apiKey || ''
 
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
@@ -2732,9 +2766,28 @@ function claimIntentInFlight() {
                           </button>
                         ))}
                       </div>
-                      {HARNESS_STEPS(wizardHarness, welcomeKey || apiKey) && (
+                      {!harnessKey ? (
+                        // #1831 P2-1: no key after a recoverable mint
+                        // failure (#1830) — never emit `Bearer ` with an
+                        // empty key. Fall back to a create-a-key message.
+                        <>
+                          <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                            The setup command embeds your API key — create one
+                            first on the API Keys tab, then come back here to
+                            finish setup.
+                          </p>
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              <button type="button" className="ghost" onClick={() => { setWelcomeMode(false); setTab('keys') }}>Go to API Keys →</button>
+                            </div>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                      {HARNESS_STEPS(wizardHarness, harnessKey) && (
                         <ol className="harness-steps" style={{ margin: '0.9rem 0 0.25rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                          {HARNESS_STEPS(wizardHarness, welcomeKey || apiKey).map((s, i) => (
+                          {HARNESS_STEPS(wizardHarness, harnessKey).map((s, i) => (
                             <li key={i} style={{ marginBottom: '0.35rem', fontSize: 14, color: 'var(--text,#e2e8f0)' }}>
                               {typeof s === 'string' ? s : (
                                 <>
@@ -2757,15 +2810,15 @@ function claimIntentInFlight() {
                         </p>
                       )}
                       <pre className="snippet" style={{ marginTop: '0.75rem' }}>
-                        {HARNESS_INSTALL[wizardHarness](welcomeKey || apiKey)}
+                        {HARNESS_INSTALL[wizardHarness](harnessKey)}
                         {HARNESS_SKILLS(wizardHarness)}
-                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(welcomeKey || apiKey)) : ''}
+                        {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''}
                       </pre>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                         <div className="wizard-nav-actions">
                           <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
-                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](welcomeKey || apiKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(welcomeKey || apiKey)) : ''), 'harness')}>
+                            onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](harnessKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''), 'harness')}>
                             {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
                           </button>
                           {wizardCopied === 'harness' && (
@@ -2774,6 +2827,8 @@ function claimIntentInFlight() {
                           <button type="button" className="ghost" onClick={() => setWizardStep(1)}>Skip for now</button>
                         </div>
                       </div>
+                        </>
+                      )}
                     </div>
                   )}
 
@@ -2954,7 +3009,12 @@ function claimIntentInFlight() {
       {banner && (
         <div className="banner" style={{ background: 'var(--surface,#0d1a2d)', borderBottom: '1px solid var(--border,#1e293b)', color: 'var(--green,#4ade80)', padding: '0.6rem 1.5rem', fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span>{banner}</span>
-          <button className="ghost small" onClick={() => setBanner('')} aria-label="Dismiss">✕</button>
+          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+            {/* #1831 P2-3: one-click self-heal — after the user revokes an
+                old key on the API Keys tab, Retry re-mounts and re-mints. */}
+            <button className="ghost small" onClick={() => window.location.reload()}>Try again</button>
+            <button className="ghost small" onClick={() => setBanner('')} aria-label="Dismiss">✕</button>
+          </div>
         </div>
       )}
       {claimError && (
@@ -3148,24 +3208,38 @@ function claimIntentInFlight() {
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
             <h2>Your graph is ready for its first data point</h2>
-            <p className="dim">
-              Your team and API key are live — the graph is created the moment
-              you add data. Connect your agent, or add a point yourself:
-            </p>
-            <div className="snippet-wrap">
-              <pre className="snippet">{firstDataSnippet}</pre>
-              <button
-                type="button"
-                className="snippet-copy"
-                onClick={(e) => {
-                  try { navigator.clipboard.writeText(firstDataSnippet) } catch { /* clipboard blocked */ }
-                  e.currentTarget.textContent = 'Copied'
-                  setTimeout(() => { e.currentTarget.textContent = 'Copy' }, 1600)
-                }}
-              >
-                Copy
-              </button>
-            </div>
+            {apiKey ? (
+              // #1831 P2-1: only show the copyable snippet when a real key
+              // exists — after a recoverable mint failure (#1830) apiKey is
+              // '' and the snippet would render `Bearer ` with an empty key
+              // (and the "key is live" copy would be false).
+              <>
+                <p className="dim">
+                  Your team and API key are live — the graph is created the moment
+                  you add data. Connect your agent, or add a point yourself:
+                </p>
+                <div className="snippet-wrap">
+                  <pre className="snippet">{firstDataSnippet}</pre>
+                  <button
+                    type="button"
+                    className="snippet-copy"
+                    onClick={(e) => {
+                      try { navigator.clipboard.writeText(firstDataSnippet) } catch { /* clipboard blocked */ }
+                      e.currentTarget.textContent = 'Copied'
+                      setTimeout(() => { e.currentTarget.textContent = 'Copy' }, 1600)
+                    }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="dim">
+                Your team is live — create an API key to connect your agent and
+                add your first data point. Mint one on the API Keys tab, or try
+                again above — the dashboard re-keys once a key can be minted.
+              </p>
+            )}
             <div className="empty-actions">
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
@@ -3181,7 +3255,9 @@ function claimIntentInFlight() {
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
               </a>
-              <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${apiKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
+              {apiKey && (
+                <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${apiKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
+              )}
             </div>
           </section>
         )}

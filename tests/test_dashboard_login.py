@@ -527,3 +527,42 @@ class TestCrossTeamMintProtection:
             json={"enabled": False},
         )
         assert r.status_code == 403, r.text
+
+
+class TestBackupsSessionAuth:
+    """#1831 P2-4: GET /backups rides the session dual-auth (#1828).
+
+    loadBackups calls api('/backups') with NO key when a recoverable mint
+    failure (#1830) left apiKey empty — a bare get_current_team dependency
+    would 401 and the Backups card silently vanished for Pro users. The
+    ungated dual-auth accepts session JWT OR tt_ key; only team_id is read.
+    """
+
+    def test_backups_list_with_session_jwt(self, client, fake, monkeypatch):
+        key, team_id = _provision_anon(client, fake)  # noqa: F841
+        user_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, user_id)
+        # claim so the session user resolves a team via memberships
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(key),
+                            user_id=user_id, email="owner@example.com")
+        # in-memory backup store — list must not touch R2
+        from tortoise.hosted_backup import MemoryStorage
+        monkeypatch.setattr(ha_mod, "_backup_storage", lambda: MemoryStorage())
+        r = client.get("/backups", headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"backups": []}
+
+    def test_backups_list_with_key_still_works(self, client, fake, monkeypatch):
+        key, team_id = _provision_anon(client, fake)  # noqa: F841
+        from tortoise.hosted_backup import MemoryStorage
+        monkeypatch.setattr(ha_mod, "_backup_storage", lambda: MemoryStorage())
+        r = client.get("/backups", headers={"Authorization": f"Bearer {key}"})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"backups": []}
+
+    def test_backups_list_no_auth_401(self, client, fake, monkeypatch):
+        from tortoise.hosted_backup import MemoryStorage
+        monkeypatch.setattr(ha_mod, "_backup_storage", lambda: MemoryStorage())
+        r = client.get("/backups")
+        assert r.status_code == 401, r.text
