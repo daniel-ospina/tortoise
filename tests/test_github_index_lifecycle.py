@@ -466,6 +466,53 @@ def test_cursor_and_backfill_marker_persisted(provisioned, mock_github):
     assert "number" in cursor["acme/repo1"]
 
 
+def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
+                                                      monkeypatch):
+    """#1895: the hosted_api persistence round-trip — an exact cap-multiple
+    backlog (600 items @ one second, page_size 100) truncates at 500 on the
+    first POST; the next re-poll (DRAIN) drains the remaining 100 and
+    persists a CLEAN cursor (truncated gone); the following re-poll is DIFF
+    (its first issues request carries `since`) and stays exact-once.
+    Pre-fix: the 0-processed re-poll left `last is None` → the persisted
+    cursor kept truncated forever (the production freeze)."""
+    _provision(client.db_path, team_id=client.team_id)
+    S = "2026-08-18T02:49:35Z"
+    t = MockGitHubTransport(
+        issues=[gh_issue(n, updated_at=S) for n in range(1, 601)],
+        repos=["acme/repo1"], page_size=100)
+
+    async def _fake_get_client(self):
+        if self._client is None:
+            self._client = httpx.AsyncClient(transport=t)
+        return self._client
+
+    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
+    # run 1: cap 500 → truncated cursor persisted
+    r = client.tc.post("/v1/index/github", json={"org": "acme"})
+    body = _poll_until(client.tc, r.json()["job_id"], "completed")
+    assert body["repos_processed"] == 1
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert state["github_index_cursor"]["acme/repo1"] == {
+        "updated_at": S, "number": 500, "truncated": True}
+    # re-poll 1 (DRAIN): drains the remaining 100 → CLEAN persisted cursor
+    r2 = client.tc.post("/v1/index/github/re-poll")
+    body2 = _poll_until(client.tc, r2.json()["job_id"], "completed")
+    assert body2["repos_processed"] == 1
+    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert state["github_index_cursor"]["acme/repo1"] == {
+        "updated_at": S, "number": 600}, \
+        "the drained re-poll must persist a CLEAN cursor (truncated gone)"
+    # re-poll 2 (DIFF): first issues request carries `since` — no DRAIN,
+    # and the run stays exact-once (0 new mints)
+    n_queries_before = len(t.issue_query_params())
+    r3 = client.tc.post("/v1/index/github/re-poll")
+    body3 = _poll_until(client.tc, r3.json()["job_id"], "completed")
+    assert body3["events_minted"] == 0, "exact-once — 0 new mints"
+    new_queries = t.issue_query_params()[n_queries_before:]
+    assert any("since" in p for p in new_queries), \
+        "a clean persisted cursor must exit DRAIN (the next run uses since)"
+
+
 # ── P2 (PR #1792): marker / 404 / quota-break honesty ────────────────
 
 def test_backfill_marker_set_only_on_success(client, tmp_path, monkeypatch):
