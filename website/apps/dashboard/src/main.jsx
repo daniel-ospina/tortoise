@@ -140,6 +140,12 @@ function apiErrorText(status, b) {
   return null
 }
 
+// #1841: skeleton shimmer slots for the overview cards — one shared inline
+// style per slot size (value ≈ number height, label ≈ 13px caption). Spans
+// carry aria-hidden in JSX; the visible progress lives in the role=status cue.
+const SKEL_VALUE = { width: '60%', height: '1.4em' }
+const SKEL_LABEL = { width: '45%', height: '0.9em' }
+
 function App() {
   // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
   // component — a module-top-level useState crashes the whole bundle.
@@ -1356,6 +1362,15 @@ function claimIntentInFlight() {
             mintedTeamId = minted.teamId || null
             if (minted.teamId) {
               teamKeysRef.current[minted.teamId] = key
+              // #1841: ALSO select the minted team in STATE (not just the
+              // ref) — the currentTeamId effect (loadMembers/loadGraphs)
+              // only fires on state changes, so a fresh-mint session (no
+              // valid stored key) never loaded the Graphs/Users cards
+              // (they sat on '—' forever). Selecting here fires those JWT
+              // reads in parallel with completeLogin's /v1/team instead of
+              // never — guarded by the same "selection still unset" check
+              // as the ref pin below so a mid-mint switch keeps its pick.
+              if (!teamIdRef.current) setCurrentTeamId(minted.teamId)
               // #1828 (review): pin the minted team BEFORE completeLogin so
               // session-driven reads (?team_id=) resolve the MINTED team, not
               // the first membership (multi-membership users). Only when the
@@ -1494,6 +1509,20 @@ function claimIntentInFlight() {
   async function completeLogin(key) {
     setError('')
     const teamAtCompleteLogin = teamIdRef.current
+    // #1841: fire the overview card loads in PARALLEL with the /v1/team
+    // gate — the old code awaited /v1/team FIRST (waterfall: team → keys/
+    // sessions/teams/backups → members/graphs via the currentTeamId
+    // effect), so every card sat blank during the team round-trip. Each
+    // loader carries its own teamIdRef staleness guard, so racing them
+    // against the team fetch is safe; /v1/team still owns setTeam +
+    // setAuthed (the section gate) below. (loadGraphs/loadMembers ride
+    // the currentTeamId effect, fired at mount by the stored-key path and
+    // now by the mint path too.)
+    const cardLoads = Promise.all([
+      loadAll(key),
+      loadTeams(),
+      loadBackups(key),
+    ]).catch(() => {})
     try {
       // #1828 (review): session-driven Team card — pinned ?team_id= so the
       // session resolves the MINTED/stored-key team, not the first
@@ -1506,11 +1535,13 @@ function claimIntentInFlight() {
       // #1567 (review P1): the chrome renders early, so a team switch can
       // land DURING this await — never land team A's data under team B's
       // selection (the refreshTeam response-identity guard, applied here).
+      // The in-flight cardLoads land only where their own staleness guards
+      // allow (the switch's loaders own the data under the new selection).
       if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return
       setTeam(t)
       setAuthed(true)
       loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
-      await Promise.all([loadAll(key), loadTeams(), loadBackups(key)])
+      await cardLoads
     } catch (e) {
       if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
@@ -3198,6 +3229,14 @@ function claimIntentInFlight() {
       </header>
 
       <main>
+        {/* #1841: screen-reader progress cue for the overview skeleton —
+            role=status is implicitly aria-live=polite, so the transition
+            (Loading overview… → Overview loaded) is announced without the
+            shimmering frames (which are aria-hidden). Only the overview tab
+            speaks; other tabs render nothing here. */}
+        <p className="sr-only" role="status">
+          {tab === 'overview' ? (team ? 'Overview loaded' : 'Loading overview…') : ''}
+        </p>
         {suspended && (
           <div className="error banner" role="alert">
             ⚠️ {suspended.message || 'This team has been suspended due to unusual activity.'}
@@ -3231,6 +3270,26 @@ function claimIntentInFlight() {
                 </li>
               ))}
             </ul>
+          </section>
+        )}
+        {tab === 'overview' && team === null && (
+          // #1841: frames-first — the overview grid renders IMMEDIATELY as
+          // skeleton frames (the old code gated the WHOLE section on /v1/team,
+          // leaving the tab empty below the menu until the round-trip
+          // resolved, then popping all six cards at once). aria-busy tells
+          // assistive tech content is on the way; the role=status cue above
+          // announces the transition. The reentry / empty-state / graph-
+          // missing branches below take over unchanged once the team lands.
+          <section className="overview" aria-busy="true">
+            <h2>Overview</h2>
+            <div className="cards">
+              {['Data points', 'Graphs', 'Users', 'Backups', 'API Keys', 'Plan'].map((label) => (
+                <div className="card" key={label}>
+                  <div className="card-val"><span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /></div>
+                  <div className="card-label"><span className="skeleton" style={SKEL_LABEL} aria-hidden="true" /></div>
+                </div>
+              ))}
+            </div>
           </section>
         )}
         {tab === 'overview' && team && showReentryCard && (
@@ -3314,9 +3373,9 @@ function claimIntentInFlight() {
             <h2>Overview</h2>
             <div className="cards">
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
-              <div className="card"><div className="card-val">{authMode === 'session' && graphsLoaded ? graphs.length : '—'}</div><div className="card-label">Graphs</div></div>
-              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : '—'}</div><div className="card-label">Users</div></div>
-              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : '—'}</div><div className="card-label">Backups</div></div>
+              <div className="card"><div className="card-val">{authMode === 'session' && graphsLoaded ? graphs.length : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />}</div><div className="card-label">Graphs</div></div>
+              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : (membersStatus === 'loading' ? <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /> : '—')}</div><div className="card-label">Users</div></div>
+              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>
