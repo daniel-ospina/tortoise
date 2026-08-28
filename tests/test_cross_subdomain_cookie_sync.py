@@ -84,7 +84,7 @@ def _extract_fn_body(text: str, name: str) -> str:
     the signature line. Does NOT match call sites (`name(...);` — no `{`)."""
     m = re.search(
         rf"(?:var\s+|function\s+)?{re.escape(name)}\s*"
-        rf"(?:(?:\:\s*function\s*|\=)\s*(?:function\s*)?)?\([^)]*\)\s*{{",
+        rf"(?:(?:\:\s*function\s*|\=)\s*(?:function\s*)?)?\([^)]*\)\s*(?:=>\s*)?{{",
         text,
     )
     assert m, f"missing function: {name}"
@@ -239,6 +239,49 @@ def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
                 assert "Expires=" in body, f"{path.name}:{fn}: missing Expires="
             else:
                 assert "Max-Age=0" in body, f"{path.name}:{fn}: missing Max-Age=0"
+    # Completeness: EVERY document.cookie write in the three adapter files must
+    # fall inside one of the watched bodies above. Auto-catches a future
+    # unwatched write (the cycle-1/2/3 finding class) without hand-maintaining
+    # the surface list.
+    for path, fns in surfaces:
+        text = _read(path)
+        spans = []
+        for fn, _kind in fns:
+            body = _extract_fn_body(text, fn)
+            start = text.index(body)
+            spans.append((start, start + len(body)))
+        spans.sort()
+        for wm in re.finditer(r"document\.cookie\s*=", text):
+            wpos = wm.start()
+            assert any(a <= wpos < b for a, b in spans), (
+                f"{path.name}: document.cookie write at offset {wpos} is NOT inside a "
+                "watched function body — add it to the surfaces list"
+            )
+
+
+def test_signup_marker_is_host_conditional() -> None:
+    """#1857 (code-review P2, cycle 3): signup.html has its OWN inline
+    tt_claim_pending marker writer (setClaimPendingMarker) that shares the
+    bug class — a revert to hardcoded `; Domain=.premiselabs.co; Secure` there
+    would drop the marker on localhost/previews and break cross-origin claim
+    routing. It uses inline conditions (hostname + protocol), not the shared
+    domainAttr()/secureAttr() helpers, so it needs its own contract: no
+    unconditional Domain/Secure, host-conditional Domain, https-conditional
+    Secure, SameSite=Lax, Expires=."""
+    text = _read(REPO_ROOT / "website" / "signup.html")
+    body = _extract_fn_body(text, "setClaimPendingMarker")
+    # host-conditional domain: the .premiselabs.co value must be gated on a
+    # hostname check (an unconditional `; Domain=.premiselabs.co` write would
+    # drop the marker on localhost/previews — the #1857 bug class)
+    # normalize to single quotes so either JS quote style matches
+    norm = body.replace('"', "'")
+    assert "endsWith('.premiselabs.co')" in norm
+    assert "? '; Domain=.premiselabs.co'" in norm
+    # https-conditional Secure: gated on protocol, not unconditional
+    assert "protocol === 'https:'" in norm
+    assert "? '; Secure'" in norm
+    assert "SameSite=Lax" in body
+    assert "Expires=" in body
 
 
 def test_both_adapters_write_and_remove_cookie_with_same_attributes() -> None:
@@ -344,8 +387,16 @@ def test_shared_helpers_present() -> None:
 def test_dashboard_public_copy_is_byte_identical() -> None:
     """The dashboard loads the shared script from its own public/ copy (the
     dashboard is a separate Pages project — dist/ only deploys). It must stay
-    byte-identical to the shared file (Task 5 asserts the built dist copy)."""
+    byte-identical to the shared file (Task 5 asserts the built dist copy).
+    The built dist/ copy is also git-tracked and is what the deployed
+    dashboard actually serves — assert it too so a forgotten rebuild can't
+    ship a stale bridge (code-review P3, cycle 3)."""
     public_copy = REPO_ROOT / "website" / "apps" / "dashboard" / "public" / "assets" / "supabase-session.js"
+    dist_copy = REPO_ROOT / "website" / "apps" / "dashboard" / "dist" / "assets" / "supabase-session.js"
+    shared = _read(SHARED)
     assert public_copy.exists(), "missing dashboard public/ copy"
-    assert public_copy.read_text(encoding="utf-8") == _read(SHARED), \
+    assert public_copy.read_text(encoding="utf-8") == shared, \
         "dashboard public/ copy drifted from the shared file"
+    assert dist_copy.exists(), "missing dashboard dist/ copy"
+    assert dist_copy.read_text(encoding="utf-8") == shared, \
+        "dashboard dist/ copy drifted from the shared file (rebuild dashboard)"
