@@ -7,7 +7,8 @@ on the E2E server) turns conversation sentences into Points.
 
 Negatives: turn cap (MAX_SESSION_TURNS=500) → 400; oversized turn content
 (>5000 chars) → accepted + truncated to the stored window (the old 422 is
-removed — #1532 D1, SDK truncation parity); unauthenticated → 401.
+removed — #1532 D1, SDK truncation parity); unauthenticated → 401; un-opted
+    tenant (never enabled session_recording) → 403 consent gate (#1727).
 
 Consent: #1727 Task 11 (P0) made session_recording the ENFORCED capture
 consent — a fresh team (session_recording=False) gets 403 on POST
@@ -28,8 +29,9 @@ def _enable_session_recording(api, tenant: dict) -> None:
     """Opt the tenant into session capture (the #1727 enforced consent)."""
     h = {"Authorization": f"Bearer {tenant['api_key']}"}
     # playwright-python's APIRequestContext takes `data` (dict → JSON body),
-    # not `json` (#1928 — the #1892 helper was merged with the invalid kwarg
-    # and TypeError'd before ever reaching the consent gate).
+    # not `json` (#1928 — #1892's review-fix commit 24126090 swapped the
+    # original valid `data` kwarg for `json`, which TypeError'd before the
+    # request ever reached the consent gate).
     r = api.patch("/v1/onboarding/state", headers=h,
                   data={"session_recording": True})
     assert r.status == 200, f"enable session_recording: {r.status} {r.text()}"
@@ -95,9 +97,36 @@ def test_session_oversized_turn_truncates(api, tenant_factory):
     t = tenant_factory("session-big")
     _enable_session_recording(api, t)
     h = {"Authorization": f"Bearer {t['api_key']}"}
+    sid = f"sess-e2e10-big-{uuid.uuid4().hex[:8]}"
     r = api.post("/v1/sessions", headers=h,
-                 data={"conversation": [{"role": "user", "content": "x" * 5001}]})
+                 data={"conversation": [{"role": "user", "content": "x" * 5001}],
+                       "session_id": sid})
     assert r.status == 200, f"oversized turn must truncate to 200, got {r.status} {r.text()}"
+
+    # #1928 review P2: don't pass the acceptance half vacuously — verify the
+    # truncation half too: the stored turn is windowed to 5000 chars (the
+    # detail endpoint strips the "[user] " prefix), so the 5001-char body
+    # cannot come back whole.
+    r = api.get(f"/v1/sessions/{sid}", headers=h)
+    assert r.status == 200, f"session detail: {r.status} {r.text()}"
+    turns = r.json()["turn_points"]
+    user_turn = next((tn for tn in turns if tn.get("role") == "user"), None)
+    assert user_turn is not None, f"user turn missing: {r.text()}"
+    assert len(user_turn["content"]) == 5000, (
+        f"oversized turn must truncate to the 5000-char window, "
+        f"got {len(user_turn['content'])} chars")
+
+
+def test_session_consent_gate_403(api, tenant_factory):
+    """#1727 (P0) enforced consent: a fresh team that never opted in gets 403
+    on POST /v1/sessions — the prompt-injection exfiltration hole stays closed.
+    The capture tests above opt in; this one pins the gate itself."""
+    t = tenant_factory("session-noconsent")
+    h = {"Authorization": f"Bearer {t['api_key']}"}
+    r = api.post("/v1/sessions", headers=h,
+                 data={"conversation": [{"role": "user", "content": "hi"}]})
+    assert r.status == 403, f"un-opted team must 403, got {r.status} {r.text()}"
+    assert "not enabled" in r.text().lower(), r.text()
 
 
 def test_session_unauthenticated_401(api):
