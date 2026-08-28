@@ -639,7 +639,25 @@ function claimIntentInFlight() {
       }
       setOnboardingLoading(false)
       setMemoryErrors((e) => ({ ...e, __load: '' }))
-    } catch {
+    } catch (e) {
+      // #1847: first-timer mount race — this mount effect fires BEFORE the
+      // mount gate runs provisionInApp (which creates the team), so the GET
+      // 403s 'No team membership' and the MemorySources panel would render
+      // its error card until reload. Swallow ONLY that exact no-team 403,
+      // discriminated by ref (Round-11: status-based checks read e.status /
+      // refs, not message content): teamIdRef is provably null at swallow
+      // time for the first-timer pre-provision case (provisionInApp never
+      // sets it; the currentTeamId effect only fires post-provision), and
+      // being a ref it has no stale-closure trap (the mount effect closes
+      // over the first-render [], so teamsList.length would wrongly swallow
+      // cross-team 403s for returning users). Suspended teams return a dict
+      // detail → e.suspended is set, and a successful /v1/teams with a
+      // still-403 onboarding leaves teamIdRef set — both fall through to the
+      // normal error state (honest, retryable card) below: keeping the
+      // loading state leaves the panel in its initial state;
+      // finishWelcomeLoads() re-fires this after provisioning and is the
+      // authoritative load.
+      if (e && e.status === 403 && !e.suspended && !teamIdRef.current) return
       setOnboardingLoading(false)  // best-effort — the surface renders its error state
     }
   }
@@ -966,6 +984,13 @@ function claimIntentInFlight() {
   async function finishWelcomeLoads() {
     await loadTeams().catch(() => {})
     loadBackups(welcomeKey || '').catch(() => {})
+    // #1847: re-fire the onboarding-state load NOW that the team exists —
+    // the mount-time refreshOnboarding() fired BEFORE provisioning (mount
+    // gate → provisionInApp) and 403'd 'No team membership' for first-timers,
+    // leaving the Overview MemorySources panel on its error card until
+    // reload. The team now exists → this fetch succeeds → the toggles render
+    // on the first view.
+    await refreshOnboarding().catch(() => {})
   }
 
   async function wizardComplete() {
