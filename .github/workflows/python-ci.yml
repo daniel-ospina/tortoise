@@ -760,7 +760,7 @@ jobs:
               test_backfill_sources test_cli_context
               test_enumeration_surfaces test_event_provenance
               test_index_directory test_ingest test_ingest_validation
-              test_mcp_http test_sdk test_search_engine_gaps
+              test_mcp_http test_pack_shipping_wheel test_sdk test_search_engine_gaps
     name: test-slow (${{ matrix.half }})
     timeout-minutes: 90
     # Epic #1647 Task 9 Step 5: the slow legs run against the provisioned
