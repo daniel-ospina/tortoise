@@ -118,12 +118,33 @@ class TestOnboardingStateFlip:
         # exact-equality pin drifts repo-wide, blocking every PR)
         expected = {
             "github_connected": False, "github_indexed": False,
+            "github_docs_indexed": False,   # #1726 (Slice 1): docs staged + ingested
             "demo_created": False, "session_recording": False,
             "team_created": False, "prompt_pasted": False,
             "onboarding_complete": False,
             # #1725 (Slice 0): registered in _ONBOARDING_DEFAULT_STATE.
             "github_index_cursor": None,
             "github_legacy_backfill_done": False,
+            # #1727/#1728 (capture surface — receipts / last-attempt failures /
+            # install probes; pinned by test_onboarding_endpoints.py::
+            # test_state_keys_registered_parametrized).
+            "capture_revised": False,
+            "capture_ask_shown": False,
+            "session_capture_receipt": None,
+            "session_capture_receipt_claude": None,
+            "session_capture_receipt_claude-desktop": None,
+            "session_capture_receipt_claude-web": None,
+            "session_capture_receipt_codex": None,
+            "session_capture_receipt_cursor": None,
+            "session_capture_receipt_pi": None,
+            "session_capture_last_error_claude": None,
+            "session_capture_last_error_claude-desktop": None,
+            "session_capture_last_error_claude-web": None,
+            "session_capture_last_error_codex": None,
+            "session_capture_last_error_cursor": None,
+            "session_capture_last_error_pi": None,
+            "install_probe_claude": None,
+            "install_probe_pi": None,
         }
         assert expected.items() <= got.items(), f"onboarding default drift: {sorted(got) - sorted(expected)}"
         # session recording is enabled by default (the flip gate asserts the
