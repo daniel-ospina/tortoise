@@ -79,7 +79,7 @@ Seed terms (from §2) × intent modifiers, deduped near-duplicates:
 
 - Seed terms (23): agent memory, epistemic memory, belief graph, semantic memory, episodic memory, knowledge graph, graph database, graph memory, graph rag, vector database, vector search, hybrid search, mcp server, mcp memory server, llm memory, long-term memory, self-hosted memory, falkordb, belief propagation, expectation propagation, confidence, provenance, session memory, memory for agents, agent memory benchmark.
 - Intent modifiers: `what is`, `vs`, `alternative to`, `open source`, `self-hosted`, `tutorial`, `how to build`, `for agents`, `for LLMs`, `database`, `comparison`, `benchmark`, `RAG`, `explained`, `best`.
-- Dedupe: exact duplicate phrases collapsed at analysis time. Near-duplicates (mirror-word-order pairs like "agent memory vs rag" / "rag vs agent memory") are **retained as distinct rows** in the analysis tables — each carries its own orientation — and are canonicalized to a single module entry only at export time (see header: 1 near-duplicate excluded from the module).
+- Dedupe: exact duplicate phrases collapsed at analysis time. Mirror-word-order pairs are **retained as distinct rows** in the analysis tables — each carries its own orientation and, where volumes differ (e.g. "mem0 vs letta" 200–500 vs "letta vs mem0" 100–300), its own search intent. Only the same-tag concept-vs-concept pair with no directional volume signal ("agent memory vs rag") is canonicalized to a single module entry at export time (see header: 1 near-duplicate excluded from the module).
 - Guard: ElDato marketplace terms (city names, cenotes, beach club, deals, etc.) excluded by construction — the seed list is ontology/product-derived, not tourism-derived (verified §9).
 
 Result: **136 unique keywords** across 12 tag buckets.
@@ -270,6 +270,8 @@ Result: **136 unique keywords** across 12 tag buckets.
 | meeting memory ai | 100–300 | 14 | QuickWin | SERP-est |
 
 ### 4.11 `memory-systems` (comparisons — 12 keywords)
+
+> **Orientation note:** the `mem0 vs letta` (200–500) / `letta vs mem0` (100–300) mirror pair is **intentionally retained** in both the analysis and the module — competitor-vs-competitor directional intents with distinct search volumes and distinct audiences (Mem0-searchers vs Letta-searchers). Unlike same-tag concept-vs-concept mirrors (§3 dedupe), these are not canonicalized at export.
 
 | Keyword | Vol | Diff | Tier | Source confidence |
 |---|---|---|---|---|
