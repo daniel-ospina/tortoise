@@ -30,9 +30,9 @@ body { background: var(--bg); color: var(--text); font-family: -apple-system, Bl
 
 /* Layout */
 .app { max-width: 960px; margin: 0 auto; padding: 0 20px 60px; }
-header { display: flex; align-items: center; gap: 16px; padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 24px; }
+header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; padding: 16px 0; border-bottom: 1px solid rgba(255,255,255,0.06); margin-bottom: 24px; }
 header .logo { font-weight: 700; font-size: 18px; }
-header nav { flex: 1; display: flex; gap: 8px; }
+header nav { flex: 1; min-width: 200px; display: flex; flex-wrap: wrap; gap: 8px; }
 header nav button { background: none; border: none; color: var(--text-dim); padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 14px; }
 header nav button.active { color: var(--accent); background: rgba(6,182,212,0.1); }
 
@@ -229,17 +229,25 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
   border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,0.4);
 }
 .account-menu-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.6; padding: 4px 8px 6px; }
-.account-menu button[role='menuitem'] {
+/* #1874: live disclosure-row styles — the P2-1 a11y change dropped
+   role=menuitem, so the old button[role='menuitem'] selectors were dead and
+   menu buttons fell through to the global filled-accent button rule. */
+.account-menu button {
   display: flex; align-items: center; gap: 8px; width: 100%;
-  padding: 7px 8px; border-radius: 6px; border: none; background: none;
-  color: var(--text, #fff); font-size: 13px; text-align: left; cursor: pointer;
+  padding: 8px 12px; border-radius: 6px; border: none; background: none;
+  color: var(--text-dim, #94a3b8); font-size: 13px; font-weight: 400;
+  text-align: left; cursor: pointer;
 }
-.account-menu button[role='menuitem']:hover { background: rgba(6,182,212,0.1); }
-.account-menu button[role='menuitem'].active { color: var(--accent, #06b6d4); }
+.account-menu button:hover { background: rgba(6,182,212,0.1); color: var(--text, #fff); }
+.account-menu button.active { color: var(--accent, #06b6d4); }
 .account-menu .account-check { margin-left: auto; }
 .account-menu-empty { padding: 6px 8px; font-size: 13px; }
 .account-menu-divider { height: 1px; background: var(--border, #334155); margin: 6px 0; }
 .account-menu-logout { color: #f87171 !important; }
+.account-identity { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+.account-identity-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.account-identity-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-identity-email { font-size: 12px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* #1148-ux: graph selector moved into the API Keys page (page-scoped context) */
 .page-graph-selector {
   display: inline-flex; align-items: center; gap: 10px;
