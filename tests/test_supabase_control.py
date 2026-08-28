@@ -19,6 +19,7 @@ import pytest
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
 from tortoise.auth import lookup_hash  # noqa: I001
+from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
 from tortoise.supabase_control import (
     ClaimError,
     InvitationError,
@@ -241,6 +242,19 @@ class TestResolveApiKey:
         assert team["max_points"] == 10000
         assert team["max_sessions"] == 1000
         assert team["max_api_keys"] > 0
+
+    def test_max_points_override_honored_over_graph_size_cap(self, fake):
+        """#1859 P3-2: a teams.max_points override (migration
+        20260817000001) wins over graph_size_cap at resolve_api_key; a NULL
+        override falls back to graph_size_cap (GAP-B), then pricing."""
+        fake.tables["teams"] = [dict(FREE_TEAM, max_points=12345)]
+        fake.seed("api_keys", [_key_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["max_points"] == 12345
+        # NULL override → graph_size_cap fallback
+        fake.tables["teams"] = [dict(FREE_TEAM, max_points=None)]
+        team = resolve_api_key(fake, TOKEN)
+        assert team["max_points"] == FREE_TEAM["graph_size_cap"]
 
     def test_dict_shape_matches_registry_contract(self, fake):
         fake.seed("api_keys", [_key_row()])
@@ -1066,28 +1080,15 @@ class TestOnboardingState:
         """A team row with empty onboarding_state reads as the full hosted
         default shape (registry auto-initialize parity).
 
-        #1765-merge fix: asserted as a SUPERSET check, not exact equality —
-        the canonical default grows with every onboarding slice (#1725/
-        #1726/#1727 added capture_*/session_capture_*/github_docs_indexed
-        keys); an exact-equality dict drifts and blocks unrelated PRs."""
+        #1859 P3-4: asserted against the CANONICAL default itself
+        (hosted_api._ONBOARDING_DEFAULT_STATE) — the previous hardcoded
+        key list drifted as the default grew (#1725/#1726/#1727; now 27
+        keys). The merge must return every canonical key with its default
+        value for an empty stored state."""
         self._set_state(fake, {})
         state = team_onboarding_state(fake, "team-free-001")
-        expected = {
-            "github_connected": False, "github_indexed": False,
-            "demo_created": False, "session_recording": False,
-            "team_created": False, "prompt_pasted": False,
-            "onboarding_complete": False,
-            # #1725 (Slice 0): registered in the default-state dict (hosted_api
-            # _ONBOARDING_DEFAULT_STATE) — the test must match the canonical shape.
-            "github_index_cursor": None,
-            "github_legacy_backfill_done": False,
-            # #1726/#1727: canonical keys from the merged default
-            "github_docs_indexed": False,
-            "capture_revised": False,
-            "capture_ask_shown": False,
-        }
-        assert expected.items() <= state.items(), (
-            f"merged default missing keys; got {sorted(state)}")
+        assert _ONBOARDING_DEFAULT_STATE.items() <= state.items(), (
+            f"merged default missing canonical keys; got {sorted(state)}")
 
     def test_read_merges_partial_state_over_defaults(self, fake):
         self._set_state(fake, {"demo_created": True})

@@ -7,6 +7,7 @@ surfaces:
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
   - test_api.py
+  - test_action_endpoints_dual_auth.py
   - test_audit.py
   - test_battery_arms.py
   - test_battery_cli.py
@@ -91,6 +92,7 @@ surfaces:
   - test_session_semantic_search.py
   - test_signup_token_revoke.py
   - test_subscriptions.py
+  - test_suspension_parity.py
   - test_telegram_push.py
   - test_turnstile_signup.py
   battery:

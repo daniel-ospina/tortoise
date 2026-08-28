@@ -20,7 +20,7 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -37,7 +37,7 @@ def _session(user_id: str = "u-e2e-identity", display_name: str = "danielospinab
     """Supabase session JSON for the parent-domain cookie (mirrors
     test_dashboard_gate's _session). ``display_name=None`` omits
     user_metadata entirely — the email-prefix fallback branch."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     user = {
         "id": user_id,
         "aud": "authenticated",
@@ -85,7 +85,7 @@ def _inventory(login_methods: int = 1, linking: bool = True) -> dict:
         "linking_available": linking,
         "email": "identity-e2e@premise-labs.dev",
         "email_confirmed_at": "2026-08-01T00:00:00Z",
-        "last_sign_in_at": datetime.now(timezone.utc).isoformat(),
+        "last_sign_in_at": datetime.now(UTC).isoformat(),
         "reauth_required": False,
     }
 
@@ -177,9 +177,7 @@ def _wire(page: Page, *, inv: dict | None = None,
                 route.fulfill(status=404, content_type="application/json", body="{}")
                 return
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"team_id": t["team_id"],
-                                           "team_name": t["team_name"],
-                                           "tier": t["tier"], "anon": False}))
+                          body=json.dumps({**t, "anon": False}))
             return
         if path.endswith("/v1/session/key") and method == "POST":
             body = json.loads(route.request.post_data or "{}")
@@ -286,6 +284,44 @@ def test_members_heading_and_nav(page: Page):
     expect(page.get_by_role("heading", name="Team members")).to_be_visible()
 
 
+def test_billing_team_context(page: Page):
+    """#1876: Billing names its team; multi-team can switch in-tab AND the
+    plan data re-hydrates (pinned via team_reads + the Pro-plan badge)."""
+    _seed(page)
+    teams = [
+        {"team_id": "team_a", "team_name": "Alpha", "tier": "free",
+         "subscription_status": None, "write_ops_used": 0, "write_ops_limit": 10000},
+        {"team_id": "team_b", "team_name": "Bravo", "tier": "pro",
+         "subscription_status": "active", "write_ops_used": 100, "write_ops_limit": 50000},
+    ]
+    team_reads: list = []
+    _wire(page, inv=_inventory(login_methods=1), teams=teams, team_reads=team_reads)
+    page.goto(DASHBOARD_URL)
+    page.get_by_role("button", name="Billing").click()
+    expect(page.get_by_role("heading", name="Billing — Alpha")).to_be_visible()
+    expect(page.get_by_text("free plan")).to_be_visible()
+    select = page.get_by_label("Billing team")
+    expect(select).to_be_visible()
+    expect(select.locator("option")).to_have_count(2)
+    # switch — the ?team_id= pin must reach the API and the card re-renders
+    with page.expect_response(lambda r: "/v1/team" in r.url and "team_id=team_b" in r.url,
+                              timeout=15000):
+        select.select_option("team_b")
+    assert "team_b" in team_reads
+    expect(page.get_by_role("heading", name="Billing — Bravo")).to_be_visible()
+    expect(page.get_by_text("Pro plan")).to_be_visible()
+    expect(page.get_by_text("100", exact=True)).to_be_visible()  # write_ops_used re-hydrated
+
+
+def test_billing_team_context_single_team(page: Page):
+    """#1876 single-team: team name shown, no empty selector."""
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+    page.goto(DASHBOARD_URL)
+    page.get_by_role("button", name="Billing").click()
+    expect(page.get_by_role("heading", name="Billing — E2E")).to_be_visible()
+    expect(page.get_by_label("Billing team")).to_have_count(0)
+
 
 def test_recovery_banner_shows_and_routes_to_profile(page: Page):
     _seed(page)
@@ -329,7 +365,16 @@ def test_link_commit_fires_on_oauth_return(page: Page):
 
 def test_no_horizontal_scroll_narrow_viewport(page: Page):
     _seed(page)
-    _wire(page, inv=_inventory(login_methods=1))
+    # two-team fixture with an ACTIVE subscription on the current team so the
+    # Billing header row renders BOTH the team select and the Manage button
+    # at 375px (review c2 P2: a single free team renders neither).
+    teams = [
+        {"team_id": "team_a", "team_name": "Alpha", "tier": "pro",
+         "subscription_status": "active", "write_ops_used": 100, "write_ops_limit": 50000},
+        {"team_id": "team_b", "team_name": "Bravo", "tier": "pro",
+         "subscription_status": "active"},
+    ]
+    _wire(page, inv=_inventory(login_methods=1), teams=teams)
     page.set_viewport_size({"width": 375, "height": 812})
     page.goto(DASHBOARD_URL)
     scroll_w = page.evaluate("document.documentElement.scrollWidth")
@@ -343,6 +388,12 @@ def test_no_horizontal_scroll_narrow_viewport(page: Page):
     scroll_w = page.evaluate("document.documentElement.scrollWidth")
     client_w = page.evaluate("document.documentElement.clientWidth")
     assert scroll_w <= client_w + 1, f"horizontal overflow with menu open: {scroll_w} > {client_w}"
+    # #1876: the Billing header row (team select + Manage button) wraps via
+    # .billing .row flex-wrap — re-check with Billing open.
+    page.get_by_role("button", name="Billing").click()
+    scroll_w = page.evaluate("document.documentElement.scrollWidth")
+    client_w = page.evaluate("document.documentElement.clientWidth")
+    assert scroll_w <= client_w + 1, f"horizontal overflow on Billing: {scroll_w} > {client_w}"
 
 
 def test_change_email_requires_reauth(page: Page):

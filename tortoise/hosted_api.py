@@ -1483,11 +1483,17 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         raise HTTPException(status_code=403, detail=_suspended_detail())
     from tortoise.pricing import tier_limits
     lim = tier_limits(row.get("tier") or "free")
+    # #1859 P3-2: honor the max_points column (points-cap override,
+    # migration 20260817000001) with graph_size_cap fallback — mirror the
+    # import_team precedence instead of reading graph_size_cap only.
+    _mp = row.get("max_points")
+    if _mp is None:
+        _mp = row.get("graph_size_cap")
     return {
         "team_id": team_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
-        "max_points": int(row.get("graph_size_cap")) if row.get("graph_size_cap") is not None else lim["max_graph_nodes"],
+        "max_points": int(_mp) if _mp is not None else lim["max_graph_nodes"],
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": DEFAULT_MAX_SESSIONS,
         "suspended_at": row.get("suspended_at"),
@@ -4594,7 +4600,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
         except QuotaCheckError as e:
             raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
-        max_points = team.get("max_points") or 1000
+        max_points = team.get("max_points")
+        if max_points is None:
+            # #1859 P3-2 review (P4): the dict builders now guarantee
+            # max_points; a legacy dict must fall back to the plan's node
+            # cap, never an arbitrary 1000 (which would mask an explicit 0
+            # override at enforce_team_limit).
+            from tortoise.pricing import tier_limits as _tl
+            max_points = _tl(team.get("tier") or "free").get("max_graph_nodes")
         if count + est > max_points:
             raise HTTPException(
                 status_code=402,
@@ -6482,6 +6495,26 @@ async def invite_info(token: str):
     }
 
 
+def _delete_fake_invite_membership(sdk, team_id: str, invitation_id: str) -> None:
+    """#1880: drop the fake Membership(user_id='invite-{iid}') row on a
+    terminal invite state (accept success/402, rescind, and — via #1875 —
+    invitee decline). Without this, registry list_members shows ghost
+    'invited' members with the invitee's email forever. Uses
+    sdk._get_registry() (NOT a bare reg — the rescind branch has no reg).
+
+    Best-effort (#1902 review P2): a surviving ghost is strictly less harmful
+    than a 500 on a completed accept — a transient delete failure must never
+    mask the accept response or the intended 402."""
+    try:
+        sdk._get_registry().query(
+            "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
+            params={"tid": team_id, "fake": f"invite-{invitation_id}"},
+        )
+    except Exception as _e:
+        _logger.warning("invite ghost-cleanup failed for %s on %s (%s)",
+                        invitation_id, team_id, _e)
+
+
 @app.post("/v1/invites/accept")
 async def accept_invite(body: dict, request: Request,
                          user: dict = Depends(get_current_user)):  # noqa: B008
@@ -6571,7 +6604,17 @@ async def accept_invite(body: dict, request: Request,
     try:
         sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
     except Exception as e:
+        # #1880: the accepted_at write above ran BEFORE membership_create, so a
+        # max_users 402 leaves a consumed invite + NO real membership — the fake
+        # invite-{iid} row must still be deleted (permanent ghost otherwise).
+        # NOTE (second-model P2): this delete is coupled to the consumed-on-402
+        # ordering — if a future fix reorders membership_create BEFORE the
+        # accepted_at write (making 402 non-consuming/retryable), this except-path
+        # delete must be REMOVED (the pending placeholder would be legitimate).
+        _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
         raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
+    # #1880: drop the fake invite-{iid} membership row (ghost-members bug)
+    _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
     _forget_invite_accept(request, token)
     return {"team_id": invite["team_id"], "role": invite["role"]}
 
@@ -6678,7 +6721,10 @@ async def rescind_invite(invitation_id: str, team_id: str,
     if inv.get("status") == "accepted" or inv.get("accepted_at"):
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot rescind")
-    return sdk.invitation_revoke(invitation_id)
+    result = sdk.invitation_revoke(invitation_id)
+    # #1880: ghost-members cleanup — the fake row dies with the invite
+    _delete_fake_invite_membership(sdk, team_id, invitation_id)
+    return result
 
 
 @app.get("/v1/teams/{team_id}/members")
@@ -9475,7 +9521,17 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
             if max_keys is not None and len(active) >= max_keys:
                 # #750.10: never auto-revoke a key the current user created —
                 # recovery must not dead-end by killing the user's own key.
-                others = [r for r in active if r.get("created_by") != user_id]
+                # #1859 P3-1 (lane parity): exclude LEGACY keys (created_by
+                # IS NULL) from the others list — the registry predicate is
+                # `created_by <> $uid`, whose Cypher NULL semantics EXCLUDE
+                # unowned rows, so a legacy key must fall to the rotation
+                # branch (rotated=True), not be revoked via the others branch
+                # (rotated=False). Python's `None != user_id` is True, which
+                # inverted the semantics for exactly the teams where legacy
+                # keys exist (pre-created_by session credentials).
+                others = [r for r in active
+                          if r.get("created_by") is not None
+                          and r.get("created_by") != user_id]
                 others.sort(key=lambda r: r.get("created_at") or "")
                 if others:
                     revoke_api_key(cp, others[0]["id"], now)
@@ -9876,7 +9932,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
-async def set_session_recording(body: dict, team: dict = Depends(get_current_team)):  # noqa: B008
+async def set_session_recording(body: dict, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
 
     #1728 Slice 3 (single consent source): writes the SAME consent keys as
@@ -9884,7 +9940,13 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
     (the data-plane consent) + ``capture_revised`` (a user-initiated enable/
     disable is an explicit decision, so it resolves the exactly-once re-ask;
     fresh opt-ins never see the re-ask pane; a declined user can re-enable
-    here regardless of ``capture_revised``)."""
+    here regardless of ``capture_revised``).
+
+    #1859 P3-3: converted from get_current_team (key-only) to the same
+    non-gated dual-auth as GET/PATCH /v1/onboarding/state — the dashboard
+    was rewired by #1728 to PATCH /v1/onboarding/state (session JWT), while
+    the MCP tool registry (tortoise_onboarding_session_recording) still
+    drives this endpoint with a tt_ key; both must work."""
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=400, detail="'enabled' must be a boolean")

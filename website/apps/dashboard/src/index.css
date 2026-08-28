@@ -249,6 +249,15 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .account-identity-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .account-identity-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .account-identity-email { font-size: 12px; opacity: 0.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* #1876: per-tenant billing team selector + wrapping header row (`.row` has
+   no flex-wrap — with the select + Manage-subscription a 375px viewport
+   would overflow). */
+.billing-team-select {
+  background: var(--surface, #0f172a); color: var(--text, #e2e8f0);
+  border: 1px solid var(--border, #334155); border-radius: 6px;
+  padding: 4px 8px; font-size: 13px; cursor: pointer;
+}
+.billing .row { flex-wrap: wrap; gap: 8px; }
 /* #1148-ux: graph selector moved into the API Keys page (page-scoped context) */
 .page-graph-selector {
   display: inline-flex; align-items: center; gap: 10px;

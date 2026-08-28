@@ -187,7 +187,7 @@ def link_session_entities(proj, session_id: str,
 
     # Per-point: FIRST-match only.
     if turn_ids is not None:
-        for tid, text in zip(turn_ids, turn_texts):
+        for tid, text in zip(turn_ids, turn_texts, strict=False):
             refs = extract_refs(text)
             if not refs:
                 continue
