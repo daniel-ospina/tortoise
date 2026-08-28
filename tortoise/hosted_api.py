@@ -10185,7 +10185,13 @@ async def github_connect(body: GitHubConnectRequest | None = None,
     client_id = os.environ.get("GITHUB_CLIENT_ID")
     if not client_id:
         raise HTTPException(status_code=503, detail="GitHub OAuth not configured")
-    org = (body.org if body else None) or team["team_id"]
+    # #1845: NEVER default org to the internal team_id. The GitHub org/login
+    # is derived from the token at callback time (GET /user → login); the
+    # client cannot know it (the token is server-side encrypted). The old
+    # ``or team["team_id"]`` fallback stored a hex UUID as github_org, which
+    # made every org-scoped repo lookup 404 (empty selector). body.org (an
+    # explicit client org) is still honored when provided.
+    org = (body.org if body else None)
     state = secrets.token_urlsafe(24)
     _GITHUB_STATES[state] = {
         "team_id": team["team_id"],
@@ -10240,6 +10246,25 @@ async def github_callback(code: str | None = None, state: str | None = None,
     # Exchange code for token
     access_token = await _exchange_github_token(code)
 
+    # #1845: derive the real GitHub login from the token (GET /user). The
+    # dashboard never sends body.org, so the old flow stored the internal
+    # team_id UUID as github_org — every org-scoped lookup 404'd (empty
+    # selector). The login IS the org for the org-wide scope (the token's
+    # repos / orgs are resolved under it). Falls back to an explicit
+    # body.org from the connect state when the /user call fails.
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    org = st["org"]
+    try:
+        login_indexer = GitHubIndexer(access_token)
+        try:
+            login = await login_indexer.current_login()
+        finally:
+            await login_indexer._close()
+        if login:
+            org = login
+    except Exception:
+        pass  # best-effort — an explicit body.org (or None) survives
+
     # Encrypt + store on the Team record (never log the raw token).
     # Supabase mode (plan Task 6): PATCH teams via the service-role seam —
     # github_token_enc is column-REVOKEd from anon/authenticated (migration
@@ -10257,12 +10282,12 @@ async def github_callback(code: str | None = None, state: str | None = None,
         store_github_credentials as _sb_store,
     )
     if is_supabase_enabled():
-        _sb_store(get_control_plane(), team_id, token_enc=encrypted, org=st["org"])
+        _sb_store(get_control_plane(), team_id, token_enc=encrypted, org=org)
     else:
         sdk = _make_sdk(namespace="registry")
         sdk._get_registry().query(
             "MATCH (t:Team {id: $id}) SET t.github_token_enc = $tok, t.github_org = $org",
-            params={"id": team_id, "tok": encrypted, "org": st["org"]},
+            params={"id": team_id, "tok": encrypted, "org": org},
         )
     _update_onboarding_state(team_id, github_connected=True)
     # Auto-index after connect (Task 5, amend 11): background first-run
@@ -10275,10 +10300,110 @@ async def github_callback(code: str | None = None, state: str | None = None,
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_indexing(job_id, team_id, st["org"], None))
+            _run_indexing(job_id, team_id, org, None))
     _track_analytics_event(team_id, "question_answered",
                            {"question_id": "github_connect", "answer": "yes"})
     return RedirectResponse(f"{welcome_url}?github=connected", status_code=302)
+
+
+async def _heal_github_org(team_id: str, encrypted: str,
+                          org: str | None) -> str | None:
+    """#1845 self-heal: return the REAL org/login for a connected token.
+
+    The pre-#1845 connect flow stored the internal team_id UUID as
+    github_org (the dashboard never sent body.org, and the server defaulted
+    to ``team["team_id"]``). That made every org-scoped lookup 404 (the
+    empty source-scope selector). When the stored org is missing or is the
+    team_id, derive the token's login via ``GET /user`` and PATCH it back so
+    the fix is permanent (a reconnect is NOT required). Best-effort: any
+    failure returns the stored org unchanged (the resolver's /user/repos
+    fallback still lists the token's repos).
+    """
+    if org and org != team_id:
+        return org
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(encrypted)
+    except ValueError:
+        return org
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    login = None
+    indexer = GitHubIndexer(token)
+    try:
+        login = await indexer.current_login()
+    except Exception:
+        login = None
+    finally:
+        await indexer._close()
+    if not login or login == org:
+        return login or org
+    from contextlib import suppress
+    with suppress(Exception):
+        # Review: the heal write must NEVER 500 the read endpoints it feeds
+        # (github_status/repos/branches promise "never a 500"). A control-
+        # plane blip during the one-time patch falls back to the resolver's
+        # /user/repos fallback on the next call — the login is returned
+        # either way.
+        _store_github_org(team_id, encrypted, login)
+    return login
+
+
+def _store_github_org(team_id: str, encrypted: str, org: str) -> None:
+    """PATCH the stored github_org (seam-aware — mirrors the callback's
+    store path, preserving the existing encrypted token)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        store_github_credentials as _sb_store,
+    )
+    if is_supabase_enabled():
+        _sb_store(get_control_plane(), team_id, token_enc=encrypted, org=org)
+    else:
+        sdk = _make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) SET t.github_org = $org",
+            params={"id": team_id, "org": org},
+        )
+
+
+def _cleanup_legacy_docs_corpus(team_id: str,
+                                walk_items: list[tuple[str, str | None]]) -> None:
+    """Review (deep bug scan): remove a pre-#1845 UNQUALIFIED docs corpus.
+
+    The old docs layout staged at {base}/{team}/{owner}/{repo}/docs/... with
+    a .manifest/{owner}/{name}.json; the #1845 branch-qualified layout
+    stages under {owner}/{repo}/{branch}/docs/... and would INGEST the
+    legacy corpus too (same content, two doc ids — duplicates that the new
+    per-branch manifest can never reconcile away). Best-effort: removes the
+    legacy unqualified docs/ dir + legacy manifest for each scoped repo when
+    they exist. Never removes branch-qualified dirs (those live one level
+    deeper). No prod team ever had a legacy corpus (github_docs_indexed was
+    false for every connected team — the old connect bug 404'd every
+    org-scoped walk), so this is a defensive guard for API clients that
+    used the old open endpoint.
+    """
+    from tortoise.indexer.github_docs import GitHubDocsIndexer
+    team_root = GitHubDocsIndexer.team_root(team_id)
+    for repo_name, _branch in walk_items:
+        parts = repo_name.split("/", 1)
+        if len(parts) != 2:
+            continue
+        owner, name = parts
+        legacy_dir = team_root / owner / name / "docs"
+        legacy_manifest = team_root / ".manifest" / owner / f"{name}.json"
+        try:
+            if legacy_dir.is_dir():
+                import shutil
+                shutil.rmtree(legacy_dir, ignore_errors=True)
+        except OSError:
+            pass  # best-effort
+        try:
+            if legacy_manifest.is_file():
+                legacy_manifest.unlink(missing_ok=True)
+        except OSError:
+            pass  # best-effort
 
 
 @app.get("/v1/onboarding/github/status")
@@ -10286,7 +10411,10 @@ async def github_status(team: dict = Depends(get_current_team_session_ungated)):
     """Return GitHub connection status + repo count.
 
     #1828 review P3: same non-gated dual-auth as the other onboarding
-    endpoints — the dashboard calls this with useSession: true."""
+    endpoints — the dashboard calls this with useSession: true. #1845:
+    self-heals a legacy team_id-as-org (see _heal_github_org) so the
+    selector's org is real.
+    """
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         return {"connected": False, "org": None, "repos_count": None}
@@ -10295,6 +10423,7 @@ async def github_status(team: dict = Depends(get_current_team_session_ungated)):
         token = decrypt_token(encrypted)
     except ValueError:
         return {"connected": False, "org": None, "repos_count": None}
+    org = await _heal_github_org(team["team_id"], encrypted, org)
     repos_count = _github_repos_count(token)
     return {"connected": True, "org": org, "repos_count": repos_count}
 
@@ -10322,6 +10451,7 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
         token = decrypt_token(encrypted)
     except ValueError:
         return {"connected": False, "org": None, "repos": []}
+    org = await _heal_github_org(team["team_id"], encrypted, org)
     from tortoise.indexer.github_indexer import GitHubIndexer
     indexer = GitHubIndexer(token)
     try:
@@ -10333,6 +10463,59 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     # short names (owner prefix stripped) — see the endpoint docstring.
     repos = [r.split("/", 1)[1] if "/" in r else r for r in resolved]
     return {"connected": True, "org": org, "repos": repos}
+
+
+@app.get("/v1/onboarding/github/branches")
+async def github_branches(repo: str,
+                          team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """List a repo's branch names for the source-scope selector (#1845).
+
+    Mirrors /v1/onboarding/github/repos: same non-gated dual-auth, same
+    decrypt-then-best-effort shape, server-side token (the client never
+    calls GitHub directly). ``repo`` is a SHORT name (the stored org is
+    prepended server-side — sending a full_name would double-prefix). A
+    resolve failure returns an EMPTY branch list (the selector still
+    renders its default branch), never a 500. Review P2-4: also returns
+    the repo's API-reported ``default_branch`` (GET /repos/{repo}) so the
+    picker can label/seed its default option truthfully for repos whose
+    default is neither main nor master.
+    """
+    encrypted, org = _github_credentials(team["team_id"])
+    if not encrypted:
+        return {"connected": False, "org": None, "repo": repo,
+                "branches": [], "default_branch": None}
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(encrypted)
+    except ValueError:
+        return {"connected": False, "org": None, "repo": repo,
+                "branches": [], "default_branch": None}
+    org = await _heal_github_org(team["team_id"], encrypted, org)
+    if not org:
+        return {"connected": True, "org": None, "repo": repo,
+                "branches": [], "default_branch": None}
+    # #1845 (review P1 parity): repo is a client-supplied value that reaches
+    # the GitHub URL path — allowlist SHORT names (same conservative token
+    # as github_reindex / github_docs._safe_segment).
+    repo = (repo or "").strip()
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
+        raise HTTPException(status_code=400, detail="Invalid repo name")
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    indexer = GitHubIndexer(token)
+    branches = []
+    default_branch = None
+    try:
+        branches = await indexer.list_branches(f"{org}/{repo}")
+    except Exception:
+        branches = []  # review P2-4: list failure degrades to empty
+    try:
+        default_branch = await indexer.default_branch(f"{org}/{repo}")
+    except Exception:
+        default_branch = None  # review P2-4: default unknown is non-fatal
+    finally:
+        await indexer._close()
+    return {"connected": True, "org": org, "repo": repo,
+            "branches": branches, "default_branch": default_branch}
 
 
 
@@ -10418,12 +10601,69 @@ class GitHubRepollRequest(BaseModel):
 
     ``org`` is deliberately ABSENT — the re-poll reads org from the stored
     credentials (never trusted from the client); only the repo scope is
-    client-supplied. ``repo`` is the SHORT name (the indexer prepends org/).
+    client-supplied. ``repos`` is a list of SHORT names (the indexer
+    prepends org/); empty/absent = ALL repos (org-wide diff). ``repo`` is
+    the legacy single-repo field (kept for backward compat — a value here
+    is equivalent to ``repos=[repo]``).
     """
+    repos: list[str] | None = None
     repo: str | None = None
 
 
-async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
+def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
+    """#1845 (review P1): allowlist SHORT repo names (the ONE
+    client-supplied value that reaches the GitHub URL path). Rejects (400)
+    rather than walk a repo the user never picked. Empty/None stays None
+    (full-org scope). Review P3-1: a blank entry INSIDE a non-empty list is
+    rejected (400) — silently dropping it would turn a client bug into an
+    unintended org-wide diff."""
+    if not repos:
+        return None
+    out: list[str] = []
+    for r in repos:
+        if not isinstance(r, str):
+            raise HTTPException(status_code=400, detail="Invalid repo name")
+        r = r.strip()
+        if not r:
+            raise HTTPException(status_code=400, detail="Invalid repo name")
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", r):
+            raise HTTPException(status_code=400, detail="Invalid repo name")
+        if r not in out:
+            out.append(r)
+    return out or None
+
+
+# Git-ref-safe branch token (review P1-1): git refs can NEVER contain "..",
+# "@{}", spaces, control chars, or "~^:?*[\\" — but MAY contain "/"
+# (feature/x). This is the same conservative surface the fetcher walks.
+# ⚠️ keep-in-sync with github_docs._safe_branch — both guard the same
+# client branch before URL interpolation (API layer + fetcher defense-in-
+# depth); a charset change must land in BOTH.
+_SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
+
+
+def _is_safe_branch(branch: object) -> bool:
+    """#1845 (review P1-1): reject a client branch before it reaches the
+    GitHub URL path. Dot-segment traversal ("../../victimorg/x") and other
+    git-ref-unsafe tokens must never be interpolated into the tree URL.
+    "all" (the multi-branch marker) is allowed; ".." is not a valid git
+    ref segment and is rejected. An empty string ("" = the DEFAULT branch
+    contract) and None are treated as SAFE by the caller — the scope
+    builder normalizes them to None before this check."""
+    if not isinstance(branch, str):
+        return False
+    branch = branch.strip()
+    if not branch:
+        return False
+    if branch == "all":
+        return True
+    if ".." in branch or "//" in branch:
+        return False
+    return bool(_SAFE_BRANCH_RE.match(branch))
+
+
+async def _run_indexing(job_id: str, team_id: str, org: str,
+                        repos: list[str] | None) -> None:
     """Background indexing job: GitHub issues/PRs → entities/events.
 
     #1725 Slice 0 rework: cursor-correct (composite (updated_at, number)
@@ -10432,6 +10672,10 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
     ("N issues beyond window", quota_hit, errors, partial completion).
     #1844: OBJECT-ONLY — zero non-episodic :Point writes, so no points-quota
     gate (see the pre-walk comment; the #1843 statement-write resurrection
+    #1845: ``repos`` is a list of SHORT repo names (None/empty = ALL repos,
+    org-wide diff). The first-run ONE-repo bound applies to the org-wide
+    path only — an explicit repos list walks exactly those repos even on
+    the first run (the user scoped them deliberately).
     would re-add it).
 
     P1-1 / P2 (PR #1792): every caller spawns this task ONLY when
@@ -10511,16 +10755,24 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
 
         # ── Cursor + repo scope (Tasks 2/4). First-run scope = ONE repo
         # regardless of org size (P2-4 pre-decided fallback) with the honest
-        # "index more" affordance (re-poll re-runs with the cursor). ──
+        # "index more" affordance (re-poll re-runs with the cursor).
+        # #1845: an explicit ``repos`` list (SHORT names) scopes the walk to
+        # exactly those repos; None/empty = org-wide (resolve, then bound
+        # the first run to ONE repo). ──
         first_run = not bool(state.get("github_indexed"))
-        if repo:
-            repos = [f"{org}/{repo}"]
+        if repos:
+            walk_repos = [f"{org}/{r}" for r in repos]
         else:
-            repos = await indexer.resolve_repos(org)
+            # Review (deep bug scan): the org-wide WALK path must fail
+            # honestly on a 404 org, never silently walk the token user's
+            # personal namespace — only the selector keeps the /user/repos
+            # fallback (allow_user_fallback=False).
+            walk_repos = await indexer.resolve_repos(
+                org, allow_user_fallback=False)
             if first_run:
-                repos = repos[:1]
+                walk_repos = walk_repos[:1]
 
-        for repo_name in repos:
+        for repo_name in walk_repos:
             if _INDEX_JOB_OWNERS.get(job_id) != owner:
                 break  # lost ownership (entry evicted/replaced) — abort
             result = await indexer.index_repo(
@@ -10542,7 +10794,7 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
              statements_superseded=totals["statements_superseded"],
              events_minted=totals["events_minted"],
              repos_processed=totals["repos_processed"],
-             repos_total=len(repos),
+             repos_total=len(walk_repos),
              issues_beyond_window=totals["issues_beyond_window"],
              backfill_minted=totals["backfill_minted"],
              quota_hit=totals["quota_hit"],
@@ -10639,7 +10891,8 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_indexing(job_id, team["team_id"], org, body.repo))
+            _run_indexing(job_id, team["team_id"], org,
+                          _validate_repo_scope([body.repo] if body.repo else None)))
     return {"job_id": job_id, "status": "started"}
 
 
@@ -10653,36 +10906,39 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
     diff, not a re-ingest. Declared BEFORE /v1/index/github/{job_id} so the
     literal path wins over the job_id path param.
 
-    #1845: accepts an OPTIONAL ``repo`` scope (short name). When set, the diff
-    walks ONLY that repo (reusing its persisted cursor); when unset, the
-    full-org diff (existing behavior). org is still read from the stored
-    credentials, never the client.
+    #1845: accepts an OPTIONAL ``repos`` scope (list of SHORT names). When
+    set, the diff walks ONLY those repos (each reusing its persisted
+    cursor); when unset/empty, the full-org diff (existing behavior). ``repo``
+    is the legacy single-repo field (equivalent to ``repos=[repo]``). org is
+    still read from the stored credentials, never the client.
     """
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
+    org = await _heal_github_org(team["team_id"], encrypted, org)
     if not org:
         raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
-    repo = (body.repo if body else None) or None
-    if repo is not None:
-        # #1845 (review P1): repo is the ONE client-supplied value that
-        # reaches the GitHub URL path. org is read server-side from the
-        # stored credentials, but a malicious repo (e.g. "../victimorg/x" or
-        # "a/b?q=") would be interpolated into f"{org}/{repo}" and could
-        # traverse the org boundary via dot-segment normalization at the
-        # GitHub edge. Allowlist SHORT repo names — GitHub short names are
-        # alnum-start, [A-Za-z0-9._-] only, <=128 chars (the same conservative
-        # token as github_docs._safe_segment). Reject (400) rather than walk
-        # a repo the user never picked.
-        repo = repo.strip() or None
-        if repo is not None and not re.match(
-                r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
-            raise HTTPException(status_code=400, detail="Invalid repo name")
+    # #1845 (review P1): repo(s) are the ONE client-supplied value that
+    # reaches the GitHub URL path. org is read server-side from the stored
+    # credentials, but a malicious repo (e.g. "../victimorg/x" or "a/b?q=")
+    # would be interpolated into f"{org}/{repo}" and could traverse the org
+    # boundary via dot-segment normalization at the GitHub edge. Allowlist
+    # SHORT repo names (see _validate_repo_scope — the LIST form is strict,
+    # a blank entry inside a non-empty list 400s per review P3-1). The
+    # legacy single ``repo`` field keeps its documented whitespace-collapse
+    # to None (full-org) for backward compat.
+    if body and body.repos:
+        repos = _validate_repo_scope(body.repos)
+    elif body and body.repo is not None:
+        legacy = body.repo.strip() or None
+        repos = _validate_repo_scope([legacy]) if legacy else None
+    else:
+        repos = None
     job_id, is_new = _start_index_job(team["team_id"])
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_indexing(job_id, team["team_id"], org, repo))
+            _run_indexing(job_id, team["team_id"], org, repos))
     return {"job_id": job_id, "status": "started"}
 
 
@@ -10710,14 +10966,21 @@ async def index_job_status(job_id: str, team: dict = Depends(get_current_team_se
 
 
 class DocsIndexRequest(BaseModel):
-    org: str
+    # Review (deep bug scan): org is ACCEPTED for backward compat but is
+    # never used — index_docs resolves org server-side from the stored
+    # credentials (never client-trusted). Optional so a client following
+    # the new contract ({repos: [...]} without org) does not 422.
+    org: str | None = None
+    # #1845: multi-repo scope — list of {"repo": short, "branch": str|None}.
+    # branch None/"" = default (main, master fallback); "all" = every branch;
+    # a name = that branch. Empty/absent = ALL repos (org-wide).
+    repos: list[dict] | None = None
     repo: str | None = None
     branch: str | None = None  # default "main" (fetcher falls back to master)
 
 
 async def _run_docs_indexing(job_id: str, team_id: str, org: str,
-                             repo: str | None,
-                             branch: str | None) -> None:
+                             scopes: list[dict] | None) -> None:
     """Background docs-indexing job: GitHub docs/ → staged corpus →
     deterministic ingest (Sources only — NO claim extraction, deferred
     #1724).
@@ -10727,6 +10990,13 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
     key on progress, one-hour eviction. The sandbox check is FIRST — no
     writes (no staging, no graph writes) when TORTOISE_INGEST_BASE_DIR is
     unset.
+
+    #1845: ``scopes`` is a list of ``{"repo": short, "branch": str|None}``
+    dicts. ``branch`` None/"" = the default walk (main, master fallback,
+    legacy corpus layout); "all" = walk EVERY branch of the repo
+    (branch-qualified corpus — branch-unique doc ids); any other name = that
+    specific branch (branch-qualified). None/empty scopes = ALL repos with
+    the default branch (the pre-#1845 org-wide behavior).
     """
     from tortoise.indexer.github_docs import GitHubDocsIndexer
     from tortoise.indexer.github_indexer import GitHubFetchError
@@ -10799,36 +11069,81 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
             return
 
         indexer = GitHubDocsIndexer(token)
-        if repo:
-            repos = [f"{org}/{repo}"]
+        # #1845: resolve the walk list from the scopes. None/empty = ALL
+        # repos, default branch (org-wide). Explicit scopes = exactly those
+        # repos; each carries its own branch (None/"" = default walk;
+        # "all" = every branch; a name = that branch).
+        if scopes:
+            walk_items: list[tuple[str, str | None]] = [
+                (f"{org}/{s.get('repo')}", s.get("branch")) for s in scopes]
         else:
-            repos = await indexer.resolve_repos(org)
-        totals["repos_total"] = len(repos)
+            # Review (deep bug scan): same as _run_indexing — the docs
+            # org-wide walk must fail honestly on a 404 org, never silently
+            # walk the token user's personal repos.
+            resolved = await indexer.resolve_repos(
+                org, allow_user_fallback=False)
+            walk_items = [(r, None) for r in resolved]
+        totals["repos_total"] = len(walk_items)
 
         # team_root = the ingest corpus root — rel-paths embed
         # {owner}/{repo}/docs/... so doc ids stay REPO-UNIQUE (two repos with
         # identical docs paths never share a Document node — the
-        # derive_document_id path-collision edge).
+        # derive_document_id path-collision edge). #1845: branch-qualified
+        # walks add {owner}/{repo}/{branch}/docs/... — BRANCH-unique too.
         team_root = GitHubDocsIndexer.team_root(team_id)
+
+        # Review (deep bug scan): one-time legacy cleanup. Pre-#1845 walks
+        # staged an UNQUALIFIED corpus at {team}/{owner}/{repo}/docs/...
+        # with a .manifest/{owner}/{name}.json — the new branch-qualified
+        # layout would ingest that legacy corpus UNDER the new tree, giving
+        # the same content TWO doc ids (doc_{owner}/{repo}/docs/x.md vs
+        # doc_{owner}/{repo}/{branch}/docs/x.md) and the legacy manifest
+        # would never reconcile it away. Remove the legacy unqualified docs
+        # dir + legacy manifest once (best-effort — the layout never
+        # existed for any prod team, verified github_docs_indexed=false for
+        # every connected team; this is a defensive guard for API clients
+        # that used the old open endpoint).
+        _cleanup_legacy_docs_corpus(team_id, walk_items)
 
         def _docs_quota_check() -> None:
             enforce_team_limit(limits, "documents", sdk=team_sdk)
 
-        for repo_name in repos:
+        for repo_name, scope_branch in walk_items:
             if _INDEX_JOB_OWNERS.get(job_id) != owner:
                 break  # lost ownership (entry evicted/replaced) — abort
             try:
-                walk = await indexer.walk_repo(
-                    team_id, repo_name, branch=branch or "main")
+                # #1845: "all" → walk every branch, each into its own
+                # branch-qualified corpus (branch-unique doc ids); a named
+                # branch → that branch; None/"" → the default walk (main,
+                # master fallback). walk_repo branch-qualifies by the
+                # RESOLVED branch internally (review P2-2 — always
+                # qualified, no legacy layout, so re-indexes never
+                # duplicate).
+                if scope_branch == "all":
+                    branches = await indexer.list_branches(repo_name)
+                    if not branches:
+                        totals["errors"].append(
+                            f"{repo_name}: no branches to index")
+                        continue
+                    for b in branches:
+                        walk = await indexer.walk_repo(
+                            team_id, repo_name, branch=b)
+                        totals["blobs_fetched"] += walk["blobs_fetched"]
+                        totals["blobs_skipped_binary"] += walk["skipped_binary"]
+                        totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
+                    totals["repos_processed"] += 1
+                else:
+                    walk = await indexer.walk_repo(
+                        team_id, repo_name, branch=scope_branch or "main")
+                    totals["blobs_fetched"] += walk["blobs_fetched"]
+                    totals["blobs_skipped_binary"] += walk["skipped_binary"]
+                    totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
+                    totals["repos_processed"] += 1
             except GitHubFetchError as e:
                 # Fix 4: a bad repo must not starve the others — record and
                 # continue; already-staged repos are ingested below.
                 totals["errors"].append(f"{repo_name}: {e}")
                 continue
-            totals["blobs_fetched"] += walk["blobs_fetched"]
-            totals["blobs_skipped_binary"] += walk["skipped_binary"]
-            totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
-            totals["repos_processed"] += 1
 
             # Fix 3: re-check the DOCUMENTS gate immediately BEFORE each ingest
             # (sees the running count after prior repos' ingests — bounds the
@@ -10898,21 +11213,68 @@ async def index_docs(body: DocsIndexRequest | None = None,
     job_id for polling via GET /v1/index/docs/{job_id}. The job is
     documents-gated (derived-constant cap) and fail-closed when the ingest
     sandbox is unset.
+
+    #1845: ``repos`` is the multi-repo scope (list of {repo, branch}); the
+    legacy single ``repo``/``branch`` fields are equivalent to a one-item
+    scope. Empty/absent = ALL repos (org-wide, default branch). Review
+    P2-3: ``org`` is read SERVER-SIDE from the stored credentials (healed
+    via _heal_github_org) — never trusted from the client, mirroring
+    github_reindex. The dashboard's body.org is accepted but ignored for
+    scope resolution (it is the dashboard's read-back of the same stored
+    org, so this is non-breaking); a mismatched/absent body.org falls back
+    to the stored org.
     """
-    org = (body.org if body else None) or ""
-    if not org:
-        raise HTTPException(status_code=400, detail="org is required")
-    # Verify GitHub connected first (seam-aware read)
-    encrypted = _github_token_enc(team["team_id"])
+    # Verify GitHub connected first (seam-aware read) + resolve the REAL
+    # org server-side (review P2-3: the client must not pick the org — a
+    # malicious org would index any accessible repo into this team's
+    # quota/corpus).
+    encrypted, stored_org = _github_credentials(team["team_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
+    org = await _heal_github_org(team["team_id"], encrypted, stored_org)
+    if not org:
+        raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
+    # #1845 (review P1 parity): every repo short name is the ONE
+    # client-supplied value that reaches the GitHub URL path — allowlist
+    # SHORT names (same conservative token as github_reindex). branch
+    # values are validated against git-ref safety (P1-1: an unvalidated
+    # branch like "../../victimorg/git/trees/main" would traverse the org
+    # boundary via httpx dot-segment normalization; git refs can never
+    # contain "..", so the rejection is lossless).
+    scopes: list[dict] | None = None
+    if body and body.repos:
+        scopes = []
+        for s in body.repos:
+            if not isinstance(s, dict) or not s.get("repo"):
+                raise HTTPException(status_code=400, detail="Invalid repo scope")
+            if not isinstance(s["repo"], str):
+                raise HTTPException(status_code=400, detail="Invalid repo name")
+            repo = s["repo"].strip()
+            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
+                raise HTTPException(status_code=400, detail="Invalid repo name")
+            branch = s.get("branch")
+            # '' (the client's default contract) and None mean the default
+            # walk; anything else must be a git-ref-safe branch name.
+            if branch == "" or branch is None:
+                branch = None
+            elif not _is_safe_branch(branch):
+                raise HTTPException(status_code=400, detail="Invalid branch")
+            scopes.append({"repo": repo, "branch": branch})
+    elif body and body.repo:
+        repo = body.repo.strip()
+        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
+            raise HTTPException(status_code=400, detail="Invalid repo name")
+        branch = body.branch
+        if branch == "" or branch is None:
+            branch = None
+        elif not _is_safe_branch(branch):
+            raise HTTPException(status_code=400, detail="Invalid branch")
+        scopes = [{"repo": repo, "branch": branch}]
     job_id, is_new = _start_index_job(team["team_id"], kind="docs")
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_docs_indexing(job_id, team["team_id"], org,
-                               body.repo if body else None,
-                               body.branch if body else None))
+            _run_docs_indexing(job_id, team["team_id"], org, scopes))
     return {"job_id": job_id, "status": "started"}
 
 

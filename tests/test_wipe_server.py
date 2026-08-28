@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import types
+import uuid
 
 import pytest
 
@@ -782,12 +783,12 @@ def test_session_end_sweep_drops_journaled_team_graph(uri_env, monkeypatch, tmp_
 
 def test_leftover_team_strays_dropped_when_opted_in(uri_env, monkeypatch):
     """#1686 closure (review P1-1 fix): the journal-blind team_* residual
-    class is closed by _sweep_team_strays, but ONLY when allowed — a
-    dedicated test DB in the URI path, or an explicit
-    TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in (a pathless shared/dev docker
-    never triggers it). The helper is exercised DIRECTLY (no mid-suite
-    global wipe — the last-suite-standing gate is conftest's, not this
-    helper's; review P1-2)."""
+    class is closed by _sweep_team_strays, but ONLY when allowed — an
+    explicit TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in (never inferred from
+    the URI path since #1884; a pathless shared/dev docker never triggers
+    it). The helper is exercised DIRECTLY (no mid-suite global wipe — the
+    last-suite-standing gate is conftest's, not this helper's; review
+    P1-2)."""
     from tests._embedded import _sweep_team_strays
     from tortoise.projection import FalkorProjection
 
@@ -823,6 +824,44 @@ def test_leftover_team_strays_refused_on_shared_docker(uri_env, monkeypatch):
         assert dropped == [], f"shared-docker sweep must refuse, got {dropped!r}"
         remaining = proj.db.list_graphs() or []
         assert stray in remaining, "product-named graph must survive"
+    finally:
+        proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
+        proj.db.select_graph(stray).delete()
+        proj.close()
+
+
+def test_leftover_team_strays_refused_on_test_matrix_uri(uri_env, monkeypatch):
+    """#1884 regression: the LONGMEM_EVAL URI (docker://.../tortoise_test_
+    matrix — the shared dev container's test-named graph) does NOT trigger
+    the journal-blind team_* pass without the explicit opt-in. The
+    re-validation ran per-question graphs named team_default__default__{qid}
+    against this exact URI; a concurrent docker-lane pytest session ending
+    last-suite-standing inferred "dedicated test DB" from the "test" path
+    substring and DETACH-DELETEd + GRAPH.DELETEd the eval's LIVE graphs
+    mid-ingest (silent write loss: pool_size 8 vs 374 ingested points). The
+    opt-in-only gate makes the eval's graphs survive any concurrent test
+    session's sweep on the shared container."""
+    from tests._embedded import _sweep_team_strays, _team_sweep_allowed
+    from tortoise.projection import FalkorProjection
+
+    eval_uri = "docker://:falkordb@localhost:6379/tortoise_test_matrix"
+    assert "test" in eval_uri.split("/")[-1], \
+        "fixture URI must carry the test-named path (the eval's shared container)"
+    monkeypatch.delenv("TORTOISE_TEST_SWEEP_TEAM_STRAYS", raising=False)
+    # the retracted inference: the URI path says "test" but the gate refuses
+    assert _team_sweep_allowed(eval_uri) is False, \
+        "URI-path 'test' inference must be retracted (#1884)"
+    stray = f"team_ws_eval_stray_{uuid.uuid4().hex[:8]}"
+    proj = FalkorProjection.from_uri(
+        "docker://:falkordb@localhost:6379", graph_name="test_ws_evalsweep_probe")
+    try:
+        proj.db.select_graph(stray).query("CREATE (:TeamMeta {name:'eval'})")
+        dropped = _sweep_team_strays(proj, eval_uri)
+        assert dropped == [], \
+            f"eval-URI sweep must refuse without opt-in, got {dropped!r}"
+        remaining = proj.db.list_graphs() or []
+        assert stray in remaining, \
+            "eval question graphs (team_*) must survive a concurrent session's sweep"
     finally:
         proj.db.select_graph(stray).query("MATCH (n) DETACH DELETE n")
         proj.db.select_graph(stray).delete()

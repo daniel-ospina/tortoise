@@ -288,6 +288,35 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .scope-selector select:focus { border-color: var(--accent); }
 .scope-selector .dim { margin-left: 2px; }
 
+/* #1845: multi-repo scope selectors — checkbox list ("All repos" +
+   per-repo checkboxes), per-repo branch pickers (docs row). Vertical
+   stack inside the surface pill; rows keep the repo + branch inline. */
+.scope-fieldset {
+  border: none; margin: 0; padding: 0;
+  display: flex; flex-direction: column; gap: 4px; min-width: 220px;
+  max-width: 100%;
+}
+.scope-fieldset legend {
+  padding: 0; margin-bottom: 2px; text-transform: uppercase;
+  letter-spacing: 0.08em; font-size: 11px;
+}
+.scope-option {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px !important; text-transform: none !important;
+  letter-spacing: 0 !important; color: var(--text) !important;
+  white-space: nowrap; cursor: pointer; padding: 1px 0;
+}
+.scope-option input[type="checkbox"] { accent-color: var(--accent, #06b6d4); cursor: pointer; }
+.scope-repo-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+}
+.scope-branch {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px !important; text-transform: none !important;
+  letter-spacing: 0 !important; color: var(--text-dim) !important;
+}
+.scope-branch select { padding: 3px 6px; font-size: 12px; }
+
 /* #1148-ux review P4-1: visible focus ring for all interactive controls */
 button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--accent, #06b6d4);

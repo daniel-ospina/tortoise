@@ -95,7 +95,7 @@ def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
 
     assert stats["blobs_fetched"] == 2
     assert stats["files_staged"] == 2
-    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    corpus = os.path.join(base, TEAM_A, "acme/repo1", "main")
     assert stats["staged_corpus"] == corpus
     readme = os.path.join(corpus, "docs", "README.md")
     setup = os.path.join(corpus, "docs", "guides", "setup.md")
@@ -105,7 +105,7 @@ def test_walk_stages_docs_under_team_dir(tmp_path, monkeypatch):
         assert f.read() == "# docs/README.md\ncontent\n"
     # manifest records tree sha + per-path blob shas
     with open(os.path.join(
-            base, TEAM_A, ".manifest", "acme", "repo1.json"),
+            base, TEAM_A, ".manifest", "acme", "repo1", "main.json"),
             encoding="utf-8") as mf:
         manifest = json.load(mf)
     assert manifest["tree_sha"] == "tree-v1"
@@ -125,8 +125,8 @@ def test_two_team_staging_isolation(tmp_path, monkeypatch):
     _run(idx.walk_repo(TEAM_A, "acme/repo1"))
     _run(idx.walk_repo(TEAM_B, "acme/repo1"))
 
-    team_a_corpus = os.path.join(base, TEAM_A, "acme/repo1")
-    team_b_corpus = os.path.join(base, TEAM_B, "acme/repo1")
+    team_a_corpus = os.path.join(base, TEAM_A, "acme/repo1", "main")
+    team_b_corpus = os.path.join(base, TEAM_B, "acme/repo1", "main")
     assert os.path.isfile(os.path.join(team_a_corpus, "docs", "README.md"))
     assert os.path.isfile(os.path.join(team_b_corpus, "docs", "README.md"))
     # no cross-contamination: neither team's partition bleeds into the other
@@ -166,7 +166,7 @@ def test_skip_binary_and_oversized(tmp_path, monkeypatch):
     assert stats["skipped_oversized"] == 1
     assert stats["blobs_fetched"] == 1  # only the text md was fetched
     assert stats["files_staged"] == 1
-    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    corpus = os.path.join(base, TEAM_A, "acme/repo1", "main")
     assert os.path.isfile(os.path.join(corpus, "docs", "ok.md"))
     assert not os.path.exists(os.path.join(corpus, "docs", "logo.png"))
     assert not os.path.exists(os.path.join(corpus, "docs", "huge.md"))
@@ -189,12 +189,12 @@ def test_staging_cleanup_partial_failure(tmp_path, monkeypatch):
         _run(idx.walk_repo(TEAM_A, "acme/repo1"))
 
     # a.md (staged before the failure) must be removed — no stale files
-    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    corpus = os.path.join(base, TEAM_A, "acme/repo1", "main")
     assert not os.path.exists(os.path.join(corpus, "docs", "a.md"))
     assert not os.path.exists(os.path.join(corpus, "docs", "b.md"))
     # manifest not updated on partial failure
     manifest_path = os.path.join(base, TEAM_A, ".manifest", "acme",
-                                 "repo1.json")
+                                 "repo1", "main.json")
     assert not os.path.exists(manifest_path)
 
 
@@ -214,7 +214,7 @@ def test_staging_cleanup_after_prior_success_keeps_old_files(
     idx = _indexer(t1, monkeypatch)
     first = _run(idx.walk_repo(TEAM_A, "acme/repo1"))
     assert first["tree_changed"] is True
-    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    corpus = os.path.join(base, TEAM_A, "acme/repo1", "main")
     a_file = os.path.join(corpus, "docs", "a.md")
     assert os.path.isfile(a_file)
 
@@ -235,7 +235,7 @@ def test_staging_cleanup_after_prior_success_keeps_old_files(
 
     # ── deferred-commit invariants ──
     manifest_path = os.path.join(base, TEAM_A, ".manifest", "acme",
-                                 "repo1.json")
+                                 "repo1", "main.json")
     with open(manifest_path, encoding="utf-8") as mf:
         manifest = json.load(mf)
     assert manifest["tree_sha"] == "tree-v1", \
@@ -294,7 +294,7 @@ def test_truncated_tree_preserves_hidden_files(tmp_path, monkeypatch):
         blobs={a1["sha"]: b"# docs/a.md v1\n"})
     idx = _indexer(t1, monkeypatch)
     _run(idx.walk_repo(TEAM_A, "acme/repo1"))
-    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    corpus = os.path.join(base, TEAM_A, "acme/repo1", "main")
     a_file = os.path.join(corpus, "docs", "a.md")
     assert os.path.isfile(a_file)
 
@@ -311,7 +311,7 @@ def test_truncated_tree_preserves_hidden_files(tmp_path, monkeypatch):
     assert os.path.isfile(a_file)
     assert stats["files_reconciled_removed"] == 0
     manifest_path = os.path.join(base, TEAM_A, ".manifest", "acme",
-                                 "repo1.json")
+                                 "repo1", "main.json")
     with open(manifest_path, encoding="utf-8") as mf:
         manifest = json.load(mf)
     assert manifest["blobs"].get("docs/a.md") == a1["sha"], \
@@ -365,7 +365,7 @@ def test_incremental_blob_dedup_fetches_only_changed(tmp_path, monkeypatch):
     assert stats["blobs_fetched"] == 1
     assert stats["blobs_unchanged"] == 1
     assert stats["files_staged"] == 1
-    with open(os.path.join(base, TEAM_A, "acme/repo1", "docs", "b.md"),
+    with open(os.path.join(base, TEAM_A, "acme/repo1", "main", "docs", "b.md"),
               encoding="utf-8") as f:
         assert f.read() == "# docs/b.md v2\n"
 
@@ -382,7 +382,7 @@ def test_reconcile_removes_deleted_docs(tmp_path, monkeypatch):
         blobs={a["sha"]: b"# docs/a.md\n", b["sha"]: b"# docs/b.md\n"})
     idx = _indexer(t1, monkeypatch)
     _run(idx.walk_repo(TEAM_A, "acme/repo1"))
-    corpus = os.path.join(base, TEAM_A, "acme/repo1")
+    corpus = os.path.join(base, TEAM_A, "acme/repo1", "main")
     assert os.path.isfile(os.path.join(corpus, "docs", "b.md"))
 
     # tree v2: b deleted
@@ -462,8 +462,8 @@ def test_ingest_reingest_zero_new_nodes(sdk, tmp_path, monkeypatch):
     # doc ids are repo-unique: {owner}/{repo} is embedded in the rel path
     rows = sdk._get_proj().g.query(
         "MATCH (d:Document) RETURN d.id ORDER BY d.id").result_set
-    assert rows == [["doc_acme/repo1/docs/README.md"],
-                    ["doc_acme/repo1/docs/guides/setup.md"]]
+    assert rows == [["doc_acme/repo1/main/docs/README.md"],
+                    ["doc_acme/repo1/main/docs/guides/setup.md"]]
 
     # unchanged re-walk + re-ingest ⇒ 0 new nodes (falsification (f))
     t2 = MockGitHubDocsTransport(
