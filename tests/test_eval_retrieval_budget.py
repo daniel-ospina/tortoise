@@ -90,10 +90,10 @@ def test_deadline_degradation_records_timeout_reason(tmp_path, monkeypatch):
             sdk, q, ks=(5,), top_k=5,
             retrieval_budget_ms=EVAL_RETRIEVAL_BUDGET_MS)
         legs = ret["legs"]
-        timeout_legs = [l for l in legs if l.get("reason") == "timeout"]
+        timeout_legs = [leg for leg in legs if leg.get("reason") == "timeout"]
         assert timeout_legs, f"expected a timeout leg, got {legs}"
-        assert any(l.get("leg") == "fts" and l.get("ran") is True
-                   and l.get("degraded") is True for l in timeout_legs)
+        assert any(leg.get("leg") == "fts" and leg.get("ran") is True
+                   and leg.get("degraded") is True for leg in timeout_legs)
     finally:
         sdk.close()
 

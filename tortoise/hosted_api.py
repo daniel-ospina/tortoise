@@ -4807,7 +4807,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # The same stored-window text the turn loop wrote (byte-identical
         # content) drives the link trigger — link what is actually stored.
         link_texts = []
-        for i, turn in enumerate(windowed):
+        for turn in windowed:
             role = _normalize_turn_role(turn.get("role"))
             raw_content = turn.get("content", "")
             content = raw_content if isinstance(raw_content, str) else (
@@ -4968,7 +4968,7 @@ async def session_install_probe(body: InstallProbeRequest,
             "install-probe state write failed (team=%s harness=%s)",
             team["team_id"], body.harness)
         raise HTTPException(status_code=500,
-                            detail="install-probe recording failed")
+                            detail="install-probe recording failed") from None
     return {"harness": body.harness, "probe_at": now,
             "team_id": team["team_id"]}
 
