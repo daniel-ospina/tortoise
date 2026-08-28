@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import uuid
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -163,6 +164,12 @@ def test_agent_api_rejects_bad_actors() -> None:
     assert r.status_code != 201
 
 
+def test_purge_endpoint_rejects_unauthenticated() -> None:
+    """#1865: /blog/api/purge is admin-gated — no session → 401 (no purge fires)."""
+    r = SESSION.post(f"{TORTISE}/blog/api/purge", json={"slug": "any-slug"}, timeout=20)
+    assert r.status_code == 401, f"purge no-session → {r.status_code}"
+
+
 # ── #1864/#1865/#1866: crawler-visibility lifecycle + meta contract ─────────
 # These need a VALID agent key (provisioned in blog_agent_keys with
 # agent_name='blog-e2e'; pass the raw key as BLOG_E2E_AGENT_KEY). Without it
@@ -236,7 +243,8 @@ def test_publish_lifecycle_crawler_visibility() -> None:
     # (already covered by test_admin_gate_redirects_unauthenticated).
     # The X-Robots-Tag on non-published blog responses is asserted below.
 
-    slug = f"lifecycle-e2e-{abs(hash(os.environ.get('RUN_ID', ''))) % 100000}"
+    run_seed = os.environ.get('RUN_ID', uuid.uuid4().hex)
+    slug = f"lifecycle-e2e-{run_seed[:8]}"
     url = f"{TORTISE}/blog/api/posts"
     title = f"Lifecycle E2E {slug}"
 

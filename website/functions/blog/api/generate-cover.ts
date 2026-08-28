@@ -16,6 +16,7 @@
 // uploadBlogImage).
 
 import { type Env, HSTS } from "../_lib.ts";
+import { requireAdmin } from "../_shared/admin-auth.ts";
 import { isValidSlug } from "../_shared/slug.ts";
 
 const IMAGES_API = "https://openrouter.ai/api/v1/images";
@@ -40,62 +41,7 @@ function json(body: unknown, status: number): Response {
   });
 }
 
-// ── Admin-gate port (same fail-closed semantics as functions/admin/[[path]].ts) ──
-function getAccessToken(request: Request): string | null {
-  const auth = request.headers.get("Authorization") ?? "";
-  const m = /^Bearer\s+(.+)$/i.exec(auth);
-  if (m) return m[1].trim();
-  const cookie = request.headers.get("Cookie") ?? "";
-  const cm = /sb-tortoise-auth-token=([^;]+)/.exec(cookie);
-  if (cm) {
-    try {
-      const parsed = JSON.parse(decodeURIComponent(cm[1]));
-      const t = parsed?.access_token;
-      return typeof t === "string" && t ? t : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-async function verifySession(env: Env, token: string): Promise<string | null> {
-  try {
-    const res = await fetch(`${env.SUPABASE_URL ?? ""}/auth/v1/user`, {
-      headers: {
-        apikey: env.SUPABASE_ANON_KEY ?? "",
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const user = (await res.json()) as { id?: string };
-    return typeof user.id === "string" ? user.id : null;
-  } catch {
-    return null;
-  }
-}
-
-async function isAdmin(env: Env, userId: string): Promise<boolean> {
-  try {
-    const url = `${env.SUPABASE_URL ?? ""}/rest/v1/blog_admins?select=user_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`;
-    const res = await fetch(url, {
-      headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return false;
-    const rows = (await res.json()) as Array<{ user_id: string }>;
-    return rows.length > 0;
-  } catch {
-    return false;
-  }
-}
-
+// ── Admin gate (shared — see _shared/admin-auth.ts) ───────────────────────
 // ── Rate limiting (best-effort per isolate, keyed on user id) ─────────────
 const dailyCounts = new Map<string, number[]>();
 
@@ -178,13 +124,23 @@ async function callImageProvider(
 
 // ── QC + upload ────────────────────────────────────────────────────────────
 function mimeFromBase64(b64: string): string | null {
-  const head = atob(b64.slice(0, 16));
-  if (head.startsWith("\uFFFD") || head.length < 8) return null;
-  // JPEG \xff\xd8\xff, PNG \x89PNG\r\n\x1a\n, WebP RIFF....WEBP
+  let head: string;
+  try {
+    head = atob(b64.slice(0, 16));
+  } catch {
+    return null; // malformed base64 → QC failure (502, not a raw 500)
+  }
+  if (head.length < 8) return null;
+  // JPEG \xff\xd8\xff, PNG \x89PNG\r\n\x1a\n, WebP RIFF....WEBP (bytes 8-11)
   const bytes = new Uint8Array([...head].map((c) => c.charCodeAt(0)));
   if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
   if (bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return "image/png";
-  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) return "image/webp";
+  if (bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    const isWebp =
+      bytes[8] === 0x57 && bytes[9] === 0x45 && bytes[10] === 0x42 && bytes[11] === 0x50; // 'WEBP'
+    if (isWebp) return "image/webp";
+    return null; // RIFF but not WEBP (WAV/AVI polyglot) → QC failure
+  }
   return null;
 }
 
@@ -203,7 +159,10 @@ async function uploadImage(
 
     const ext = mime === "image/png" ? "png" : mime === "image/webp" ? "webp" : "jpg";
     const folder = isValidSlug(slug) ? slug : "draft"; // mirror uploadBlogImage fallback
-    const key = `${folder}/${Date.now()}-generated-cover.${ext}`;
+    // Random suffix guarantees uniqueness even for same-ms concurrent/retry
+    // generates (x-upsert: false would 400/502 on a key collision).
+    const rand = crypto.randomUUID().slice(0, 8);
+    const key = `${folder}/${Date.now()}-${rand}-generated-cover.${ext}`;
 
     const url = `${env.SUPABASE_URL}/storage/v1/object/blog-images/${key}`;
     const res = await fetch(url, {
@@ -234,13 +193,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!env.OPENROUTER_API_KEY) {
     return json({ error: "not_configured", message: "OPENROUTER_API_KEY missing" }, 503);
   }
-  const token = getAccessToken(request);
-  if (!token) return json({ error: "unauthorized" }, 401);
-  const userId = await verifySession(env, token);
-  if (!userId) return json({ error: "unauthorized" }, 401);
-  const admin = await isAdmin(env, userId);
-  if (!admin) return json({ error: "forbidden" }, 401);
-  if (rateLimitedDay(userId)) return json({ error: "rate_limited" }, 429);
+  const userId = await requireAdmin(env, request);
+  if (!userId) return json({ error: "unauthorized", message: "Session expired or not an admin — refresh and log in again" }, 401);
+  if (rateLimitedDay(userId)) return json({ error: "rate_limited", message: "Rate limit reached — try again shortly" }, 429);
 
   let input: { title?: unknown; tags?: unknown; mode?: unknown; slug?: unknown };
   try {
@@ -263,7 +218,10 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!result) return json({ error: "generation_failed", message: "both providers failed" }, 502);
 
   const mime = mimeFromBase64(result.b64);
-  const publicUrl = await uploadImage(env, result.b64, mime ?? result.mediaType, slug);
+  // Magic-byte sniff is the QC authority — NEVER fall back to the provider's
+  // declared media_type (arbitrary non-image bytes could clear QC otherwise).
+  if (!mime) return json({ error: "upload_failed", message: "generated image failed QC" }, 502);
+  const publicUrl = await uploadImage(env, result.b64, mime, slug);
   if (!publicUrl) return json({ error: "upload_failed", message: "generated image failed QC or upload" }, 502);
 
   return json(

@@ -11,8 +11,8 @@ import {
   EXCERPT_MAX,
   TAGS_MAX,
   TAG_LEN_MAX,
-  SLUG_MAX,
 } from "./meta-contract.ts";
+import { SLUG_MAX } from "./slug.ts";
 
 export const BRAND_SUFFIX = " | Tortoise";
 
@@ -41,9 +41,11 @@ export interface Constraints {
 
 function truncateAtWord(s: string, max: number): string {
   if (s.length <= max) return s;
-  let cut = s.slice(0, max);
+  const cut = s.slice(0, max);
   const lastSpace = cut.lastIndexOf(" ");
-  if (lastSpace > max * 0.5) cut = cut.slice(0, lastSpace);
+  // Always cut at the last word boundary when one exists (the old heuristic
+  // kept the hard cut when the last space fell in the first half — mid-word).
+  if (lastSpace > 0) return cut.slice(0, lastSpace).replace(/[\s,.;:!?—-]+$/, "").trim();
   return cut.replace(/[\s,.;:!?—-]+$/, "").trim();
 }
 
@@ -53,8 +55,10 @@ export const constraints: Constraints = {
   metaTitle(raw: string): string {
     let t = truncateAtWord(raw.trim(), META_TITLE_MAX);
     if (!t) return "";
-    // Brand suffix when it fits (SSR appends it anyway; storing it makes the
-    // editor + SSR agree on the final title).
+    // Brand suffix when it fits — meta_title is the FINAL title (SSR renders
+    // the stored value verbatim; the suffix is only appended to the title
+    // fallback when meta_title is null). Editor maxLength=60 includes the
+    // suffix, so this matches the contract.
     const withSuffix = `${t}${BRAND_SUFFIX}`;
     if (withSuffix.length <= META_TITLE_MAX) return withSuffix;
     // No room for the suffix — keep the truncated base (SSR appends nothing).

@@ -27,12 +27,20 @@ const TIMEOUT_MS = 3000;
 /**
  * Purge one URL (and its trailing-slash variant) from the Cloudflare edge
  * cache. Resolves true when the purge API accepted the request, false when
- * the env is not configured or the call failed. Never throws.
+ * the env is not configured or the call failed. Never throws. Every failure
+ * path logs a warning (the "fail-open-but-logged" contract) so a dead purge
+ * is observable in Cloudflare logs.
  */
 export async function purgeUrl(url: string, env: PurgeEnv): Promise<boolean> {
   const { CF_API_TOKEN, CF_ZONE_ID } = env;
-  if (!CF_API_TOKEN || !CF_ZONE_ID) return false;
-  if (!/^https:\/\//.test(url)) return false;
+  if (!CF_API_TOKEN || !CF_ZONE_ID) {
+    console.warn(`[purge] skipped (missing CF_API_TOKEN/CF_ZONE_ID): ${url}`);
+    return false;
+  }
+  if (!/^https:\/\//.test(url)) {
+    console.warn(`[purge] skipped (non-https url): ${url}`);
+    return false;
+  }
 
   const files = new Set<string>([url]);
   if (url.endsWith("/")) files.add(url.slice(0, -1));
@@ -48,10 +56,18 @@ export async function purgeUrl(url: string, env: PurgeEnv): Promise<boolean> {
       body: JSON.stringify({ files: [...files] }),
       signal: AbortSignal.timeout(TIMEOUT_MS),
     });
-    if (!res.ok) return false;
+    if (!res.ok) {
+      console.warn(`[purge] api ${res.status}: ${url}`);
+      return false;
+    }
     const body = (await res.json()) as { success?: boolean };
-    return body.success === true;
-  } catch {
+    if (body.success !== true) {
+      console.warn(`[purge] api success=false: ${url}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.warn(`[purge] error (timeout/network): ${url}`, err);
     return false; // timeout / network — fail open, never block the write
   }
 }

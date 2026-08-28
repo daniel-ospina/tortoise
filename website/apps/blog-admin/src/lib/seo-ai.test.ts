@@ -1,5 +1,5 @@
 /**
- * seo-constraints.test.ts — unit tests for the server-side AI SEO constraint
+ * seo-ai.test.ts — unit tests for the server-side AI SEO constraint
  * enforcement (#1861) + edge-cache purge helper (#1865) + meta contract (#1866).
  *
  * Imports the zero-dep modules from website/functions/blog/_shared/ directly
@@ -80,6 +80,15 @@ describe('seo-constraints (#1861) — enforce()', () => {
     // Truncation is at a word boundary — never mid-word
     expect(r.meta_description.endsWith(' ')).toBe(false);
     expect(r.meta_description).not.toMatch(/[a-z]\d/);
+  });
+
+  it('truncates at the last space even when it falls in the first half', () => {
+    // 'a b' + long tail — last space is early; must still cut at the word
+    // boundary, not mid-word (review fix: old heuristic hard-cut mid-word).
+    const hard = `short ${'y'.repeat(200)}`; // last space in first half
+    const r = constraints.enforce({ meta_title: hard, meta_description: hard, excerpt: hard, slug: 'a', tags: [] });
+    expect(r.meta_description.length).toBeLessThanOrEqual(META_DESCRIPTION_MAX);
+    expect(r.meta_description).toBe('short'); // cut at the space, no partial word
   });
 
   it('caps + normalizes tags', () => {

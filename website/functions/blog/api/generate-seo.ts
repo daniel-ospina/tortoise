@@ -15,6 +15,7 @@
 // content-driven fallback when no tags match.
 
 import { type Env, HSTS } from "../_lib.ts";
+import { requireAdmin } from "../_shared/admin-auth.ts";
 import { constraints } from "../_shared/seo-constraints.ts";
 import { TAG_KEYWORDS, keywordsFor } from "../_shared/seo-keywords.ts";
 
@@ -38,62 +39,7 @@ function json(body: unknown, status: number): Response {
   });
 }
 
-// ── Admin-gate port (same fail-closed semantics as functions/admin/[[path]].ts) ──
-function getAccessToken(request: Request): string | null {
-  const auth = request.headers.get("Authorization") ?? "";
-  const m = /^Bearer\s+(.+)$/i.exec(auth);
-  if (m) return m[1].trim();
-  const cookie = request.headers.get("Cookie") ?? "";
-  const cm = /sb-tortoise-auth-token=([^;]+)/.exec(cookie);
-  if (cm) {
-    try {
-      const parsed = JSON.parse(decodeURIComponent(cm[1]));
-      const t = parsed?.access_token;
-      return typeof t === "string" && t ? t : null;
-    } catch {
-      return null;
-    }
-  }
-  return null;
-}
-
-async function verifySession(env: Env, token: string): Promise<string | null> {
-  try {
-    const res = await fetch(`${env.SUPABASE_URL ?? ""}/auth/v1/user`, {
-      headers: {
-        apikey: env.SUPABASE_ANON_KEY ?? "",
-        Authorization: `Bearer ${token}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    const user = (await res.json()) as { id?: string };
-    return typeof user.id === "string" ? user.id : null;
-  } catch {
-    return null;
-  }
-}
-
-async function isAdmin(env: Env, userId: string): Promise<boolean> {
-  try {
-    const url = `${env.SUPABASE_URL ?? ""}/rest/v1/blog_admins?select=user_id&user_id=eq.${encodeURIComponent(userId)}&limit=1`;
-    const res = await fetch(url, {
-      headers: {
-        apikey: env.SUPABASE_SERVICE_ROLE_KEY ?? "",
-        Authorization: `Bearer ${env.SUPABASE_SERVICE_ROLE_KEY ?? ""}`,
-        Accept: "application/json",
-      },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return false;
-    const rows = (await res.json()) as Array<{ user_id: string }>;
-    return rows.length > 0;
-  } catch {
-    return false;
-  }
-}
-
+// ── Admin gate (shared — see _shared/admin-auth.ts) ───────────────────────
 // ── Rate limiting (best-effort per isolate, keyed on user id) ─────────────
 const counters = new Map<string, number[]>();
 
@@ -115,7 +61,8 @@ function injectKeywords(tags: string[]): string[] {
   const seen = new Set<string>();
   for (const tag of tags) {
     const norm = tag.toLowerCase().trim();
-    if (!(norm in TAG_KEYWORDS)) continue;
+    // Object.hasOwn — 'in' would match Object.prototype members ('toString')
+    if (!Object.hasOwn(TAG_KEYWORDS, norm)) continue;
     for (const kw of keywordsFor(norm).slice(0, KEYWORDS_PER_TAG)) {
       if (seen.has(kw)) continue;
       seen.add(kw);
@@ -159,16 +106,20 @@ async function callProvider(
   model: string,
   userPrompt: string,
 ): Promise<GenResult | null> {
-  const body = {
+  const body: Record<string, unknown> = {
     model,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: userPrompt },
     ],
-    response_format: { type: "json_object" },
     temperature: 0.3,
     max_tokens: 400,
   };
+  // Structured output is supported by DeepSeek; the Haiku fallback may reject
+  // response_format (OpenRouter docs: unsupported structured outputs error) —
+  // the JSON-extraction regex + "Return ONLY a JSON object" prompt tolerate
+  // plain JSON, so only send response_format on the primary.
+  if (model === PRIMARY) body.response_format = { type: "json_object" };
   let res: Response;
   try {
     res = await fetch(OPENROUTER, {
@@ -219,13 +170,9 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   if (!env.OPENROUTER_API_KEY) {
     return json({ error: "not_configured", message: "OPENROUTER_API_KEY missing" }, 503);
   }
-  const token = getAccessToken(request);
-  if (!token) return json({ error: "unauthorized" }, 401);
-  const userId = await verifySession(env, token);
-  if (!userId) return json({ error: "unauthorized" }, 401);
-  const admin = await isAdmin(env, userId);
-  if (!admin) return json({ error: "forbidden" }, 401);
-  if (rateLimited(userId)) return json({ error: "rate_limited" }, 429);
+  const userId = await requireAdmin(env, request);
+  if (!userId) return json({ error: "unauthorized", message: "Session expired or not an admin — refresh and log in again" }, 401);
+  if (rateLimited(userId)) return json({ error: "rate_limited", message: "Rate limit reached — try again shortly" }, 429);
 
   let input: { title?: unknown; body?: unknown; tags?: unknown };
   try {

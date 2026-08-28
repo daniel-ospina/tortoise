@@ -372,7 +372,7 @@ export default function PostEditor() {
       updateField('meta_title', result.meta_title);
       updateField('meta_description', result.meta_description);
       setDirty(true);
-      toast.success(`SEO fields generated (${formatCost(result.cost_estimate)})`);
+      toast.success(`SEO fields generated${result.cost_estimate ? ` (${formatCost(result.cost_estimate)})` : ''}`);
     },
     onError: (err) => {
       toast.error(`SEO generation failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
@@ -390,14 +390,23 @@ export default function PostEditor() {
       });
     },
     onSuccess: (result) => {
+      // Regenerate: best-effort delete the superseded cover object (#1863
+      // review C2) so repeated generations don't orphan 5MB objects.
+      const previous = formRef.current.cover_image_url;
       updateField('cover_image_url', result.image_url);
+      if (previous && previous !== result.image_url) {
+        void deleteBlogImage(previous).catch(() => undefined); // fail-open
+      }
       setDirty(true);
-      toast.success(`Cover generated (${result.mode}, ${formatCost(result.cost_estimate)})`);
+      toast.success(`Cover generated (${result.mode}${result.cost_estimate ? `, ${formatCost(result.cost_estimate)}` : ''})`);
     },
     onError: (err) => {
       toast.error(`Cover generation failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
     },
   });
+
+  // Derived flag AFTER both mutations — disables save while generating.
+  const generating = generateSeoMutation.isPending || generateCoverMutation.isPending;
 
   if (loadingPost) {
     return (
@@ -443,13 +452,13 @@ export default function PostEditor() {
             </div>
           ) : (
             <>
-              <Button variant="outline" onClick={() => handleSave('draft')} disabled={saving}>
+              <Button variant="outline" onClick={() => handleSave('draft')} disabled={saving || generating}>
                 {saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <Save className="w-4 h-4 mr-1.5" />}
-                Save as draft
+                {saving ? 'Saving…' : 'Save as draft'}
               </Button>
-              <Button onClick={() => handleSave('publish')} disabled={saving}>
+              <Button onClick={() => handleSave('publish')} disabled={saving || generating}>
                 {saving ? <Loader2 className="w-4 h-4 mr-1.5 animate-spin" /> : <ExternalLink className="w-4 h-4 mr-1.5" />}
-                {existingPost?.status === 'published' ? 'Save & Republish' : 'Publish'}
+                {saving ? 'Saving…' : existingPost?.status === 'published' ? 'Save & Republish' : 'Publish'}
               </Button>
             </>
           )}
@@ -522,6 +531,7 @@ export default function PostEditor() {
                 onChange={e => updateField('excerpt', e.target.value)}
                 placeholder="One-to-two sentence summary shown in cards and search results"
                 maxLength={300}
+                disabled={isArchived}
                 className="resize-none"
               />
               <p className="text-xs text-muted-foreground mt-1">{form.excerpt.length}/300</p>
@@ -534,6 +544,7 @@ export default function PostEditor() {
                 value={form.tags}
                 onChange={e => updateField('tags', e.target.value)}
                 placeholder="memory, graph, agents"
+                disabled={isArchived}
               />
               <p className="text-xs text-muted-foreground mt-1">Comma-separated (max 10)</p>
             </div>
@@ -550,7 +561,7 @@ export default function PostEditor() {
                 variant="outline"
                 size="sm"
                 className="w-full"
-                disabled={generateSeoMutation.isPending || isArchived}
+                disabled={generateSeoMutation.isPending || generating || saving || isArchived}
                 onClick={() => generateSeoMutation.mutate()}
               >
                 {generateSeoMutation.isPending ? (
@@ -572,6 +583,7 @@ export default function PostEditor() {
                 onChange={e => updateField('meta_title', e.target.value)}
                 placeholder={form.title || 'Auto-generated from title'}
                 maxLength={60}
+                disabled={isArchived}
               />
               <p className="text-xs text-muted-foreground mt-1">{form.meta_title.length}/60</p>
             </div>
@@ -583,6 +595,7 @@ export default function PostEditor() {
                 onChange={e => updateField('meta_description', e.target.value)}
                 placeholder="Brief description for search results"
                 maxLength={155}
+                disabled={isArchived}
               />
               <p className="text-xs text-muted-foreground mt-1">{form.meta_description.length}/155</p>
             </div>
@@ -641,7 +654,9 @@ export default function PostEditor() {
                   <button
                     type="button"
                     onClick={() => setCoverMode('founder')}
-                    disabled={isArchived || generateCoverMutation.isPending}
+                    disabled={isArchived || generateCoverMutation.isPending || saving}
+                    aria-pressed={coverMode === 'founder'}
+                    role="button"
                     className={`px-2 py-1 ${coverMode === 'founder' ? 'bg-primary text-primary-foreground' : 'hover:bg-secondary'}`}
                   >
                     Founder
@@ -649,7 +664,9 @@ export default function PostEditor() {
                   <button
                     type="button"
                     onClick={() => setCoverMode('abstract')}
-                    disabled={isArchived || generateCoverMutation.isPending}
+                    disabled={isArchived || generateCoverMutation.isPending || saving}
+                    aria-pressed={coverMode === 'abstract'}
+                    role="button"
                     className={`px-2 py-1 ${coverMode === 'abstract' ? 'bg-primary text-primary-foreground' : 'hover:bg-secondary'}`}
                   >
                     Abstract
@@ -661,7 +678,7 @@ export default function PostEditor() {
                 variant="outline"
                 size="sm"
                 className="w-full"
-                disabled={generateCoverMutation.isPending || isArchived}
+                disabled={generateCoverMutation.isPending || generating || saving || isArchived}
                 onClick={() => generateCoverMutation.mutate()}
               >
                 {generateCoverMutation.isPending ? (
