@@ -92,6 +92,7 @@ surfaces:
   - test_session_semantic_search.py
   - test_signup_token_revoke.py
   - test_subscriptions.py
+  - test_suspension_parity.py
   - test_telegram_push.py
   - test_turnstile_signup.py
   battery:
