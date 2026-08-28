@@ -1888,7 +1888,7 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
 
 # #1877: the per-person "one free team" entitlement — teams WITHOUT an
 # active paid subscription. Mirrors the dashboard ACTIVE_STATUSES
-# (main.jsx:829) — keep in sync (dual-maintenance is documented there).
+# (main.jsx:835) — keep the two definitions in sync (dual-maintenance).
 _BILLING_ACTIVE_STATUSES = frozenset({"active", "past_due", "trialing"})
 
 

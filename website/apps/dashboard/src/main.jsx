@@ -3941,7 +3941,7 @@ function claimIntentInFlight() {
               {/* #1877: create-team entry — UNCONDITIONAL (it's the sole
                   entry for single-team users; the switch label above stays
                   hidden for teams.length ≤ 1). */}
-              <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setAccountMenuOpen(false) }}>
+              <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false) }}>
                 + Create new team
               </button>
               <div className="account-menu-divider" />
@@ -3958,11 +3958,12 @@ function claimIntentInFlight() {
         {createTeamOpen && (
           <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) setCreateTeamOpen(false) }}>
             <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new team"
-                 onClick={(e) => e.stopPropagation()}>
+                 onClick={(e) => e.stopPropagation()}
+                 onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) setCreateTeamOpen(false) }}>
               {createTeamUpgrade ? (
                 <>
                   <h3>Create a new team</h3>
-                  <p className="error">{createTeamError}</p>
+                  <p className="error" role="alert">{createTeamError}</p>
                   <p className="dim">The free plan includes one team. Upgrade an existing team to create more.</p>
                   <div className="row" style={{ marginTop: 12 }}>
                     <button className="btn-primary" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false); setTab('billing') }}>
@@ -3977,11 +3978,12 @@ function claimIntentInFlight() {
                   <input
                     aria-label="Team name"
                     placeholder="Team name"
+                    autoFocus
                     value={createTeamName}
                     onChange={(e) => setCreateTeamName(e.target.value)}
                     onKeyDown={(e) => { if (e.key === 'Enter' && !createTeamBusy) handleCreateTeam() }}
                   />
-                  {createTeamError && <p className="error">{createTeamError}</p>}
+                  {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
                     <button className="btn-primary" onClick={handleCreateTeam} disabled={createTeamBusy}>
                       {createTeamBusy ? 'Creating…' : 'Create team'}

@@ -192,6 +192,25 @@ class TestCreateTeamEntitlement:
         r = tc.post("/v1/teams", json={"name": "fourth"})
         assert r.status_code == 429
 
+    def test_onboarding_patch_cannot_reset_team_created(self, team_client_factory):
+        """#1877 security P1: the re-entry guard is SERVER-authoritative —
+        a PATCH resetting team_created:false must not re-open the
+        unlimited-free-sub-team bypass."""
+        from tortoise.hosted_api import get_current_team_session, \
+            get_current_team_session_ungated
+        tc, fake = team_client_factory
+        dep = dict(FREE_TEAM, team_id="team-free-001", tier="free",
+                   session_user_id=_USER1)
+        app.dependency_overrides[get_current_team_session] = lambda: dict(dep)
+        app.dependency_overrides[get_current_team_session_ungated] = lambda: dict(dep)
+        r1 = tc.post("/v1/onboarding/team", json={"name": "subteam"})
+        assert r1.status_code == 200, r1.text
+        # attempt the client reset via the PATCH surface
+        rp = tc.patch("/v1/onboarding/state", json={"team_created": False})
+        assert rp.status_code == 200, rp.text
+        r2 = tc.post("/v1/onboarding/team", json={"name": "subteam2"})
+        assert r2.status_code == 409, "the guard must survive a PATCH reset attempt"
+
     def test_onboarding_second_call_409(self, team_client_factory):
         """P0 re-entry guard (review P0 fix): the wizard creates the
         sub-team ONCE. A second call through the PRODUCTION-SHAPED

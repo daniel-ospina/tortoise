@@ -5938,9 +5938,14 @@ def _count_active_free_memberships(user_id: str) -> int:
     rows = reg.query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
         "WHERE m.team_id <> '' "
-        "MATCH (t:Team {id:m.team_id, tier:'free'}) RETURN count(m)",
+        "MATCH (t:Team {id:m.team_id}) "
+        "WHERE t.tier='free' OR t.tier IS NULL "
+        "RETURN count(m)",
         params={"uid": user_id},
     ).result_set
+    # review P2: `tier IS NULL` fail-closes the same shape as the supabase
+    # twin (a missing subscription_status counts as free → 402) — a legacy/
+    # manual tier-less Team node must not grant an extra free slot.
     return rows[0][0] if rows else 0
 
 
@@ -9841,6 +9846,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
         if field in updates:
             updates[state_key] = updates.pop(field)
     email = updates.pop("email", None)  # state keys only — email is a teams column
+    # #1877 (security P1): team_created is SERVER-authoritative — the
+    # create_onboarding_team re-entry guard reads it, so the client must
+    # never reset it via this PATCH surface (a reset would re-open the
+    # unlimited-free-sub-team bypass). Stripped here, like email.
+    updates.pop("team_created", None)
     # Epic #529 copy-attribution beacon: analytics-only fields — pop before
     # the state merge (email pattern) and emit artifact_copied for enum-valid
     # pairs; invalid values are ignored (no event, no error) so a stale or
