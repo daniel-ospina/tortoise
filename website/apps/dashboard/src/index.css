@@ -58,8 +58,41 @@ a { color: var(--accent); }
 /* Cards */
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 24px; }
 .card { background: var(--surface); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 16px; }
-.card-val { font-size: 28px; font-weight: 700; color: var(--accent); }
-.card-label { font-size: 13px; color: var(--text-dim); margin-top: 2px; }
+.card-val { font-size: 28px; font-weight: 700; color: var(--accent); line-height: 1.2; } /* #1842 P2-2: fixed line box 28×1.2=33.6px so the skeleton slot (1.2em) swaps without CLS */
+.card-label { font-size: 13px; color: var(--text-dim); margin-top: 2px; line-height: 1.2; } /* #1842 P2-2: 13×1.2=15.6px */
+
+/* #1841: overview skeleton frames + per-card shimmer — dark-theme slate
+   grays at low alpha over the surface (a light #e8e8e8 bar would glare on
+   this theme); 1.4s sweep, disabled under prefers-reduced-motion. */
+@keyframes shimmer {
+  0%   { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  display: inline-block;
+  vertical-align: middle;
+  line-height: 1; /* #1842 P2-2: the skeleton's own line box tracks font-size; the box height from the JSX slot styles (1.2em/1.2em) is what matches the card line boxes */
+  background: linear-gradient(90deg, rgba(148, 163, 184, 0.14) 25%, rgba(148, 163, 184, 0.26) 50%, rgba(148, 163, 184, 0.14) 75%);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 4px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; background: rgba(148, 163, 184, 0.14); }
+}
+/* #1841: visually-hidden live-region text (role=status progress cue). */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Quickstart */
 .quickstart { background: var(--surface); border: 1px solid rgba(255,255,255,0.06); border-radius: 10px; padding: 16px; }
