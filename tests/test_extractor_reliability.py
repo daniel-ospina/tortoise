@@ -707,12 +707,13 @@ def test_probe_v4_flash_non_thinking():
     internally for deepseek-v4-flash (the retired legacy non-reasoning
     alias was removed upstream 2026-07-24), so this probe
     now verifies the PRODUCTION config returns content (anti-collapse
-    verification) — NOT a collapse baseline: api.deepseek.com's
-    deepseek-v4-flash reasons by DEFAULT (pilot #1549: all tokens spent
-    reasoning, finish=length, ZERO content) unless the adapter's thinking
-    toggle is off. A 400/unknown-model on this wire id is itself DOCUMENTED
-    (xfail), not a hard failure. Routed through _complete's deadline
-    machinery (deadline_s=None → the scaled default) like the other probes."""
+    verification). A collapse under the production config — empty content
+    with finish=length (pilot #1549: all tokens spent reasoning unless the
+    adapter's thinking toggle is off) — IS the #1790 regression this probe
+    exists to prevent and now HARD FAILS, not xfails. A 400/unknown-model
+    on this wire id is itself DOCUMENTED (xfail), not a hard failure.
+    Routed through _complete's deadline machinery (deadline_s=None → the
+    scaled default) like the other probes."""
     import os
     if not os.environ.get("DEEPSEEK_API_KEY"):
         pytest.skip("no DEEPSEEK_API_KEY")
@@ -728,18 +729,18 @@ def test_probe_v4_flash_non_thinking():
             pytest.xfail("direct API does not serve deepseek-v4-flash (400 "
                          "unknown-model on this wire id)")
         raise  # genuine unexpected error — hard FAIL
-    # documented collapse — assert the SIGNATURE (finish=length: all
-    # tokens spent reasoning, zero content), not just emptiness. `not resp`
-    # covers BOTH the empty-string and content:null collapse forms
-    # (DeepSeek returns null content for a pure-reasoning response — the
-    # pilot #1549 "ZERO content" signature).
+    # post-#1790 the production config (adapter thinking-disable) MUST
+    # yield content — an empty response is the collapse regression this PR
+    # exists to prevent: HARD FAIL, not xfail. `not resp` covers BOTH the
+    # empty-string and content:null collapse forms (DeepSeek returns null
+    # content for a pure-reasoning response — the pilot #1549 "ZERO content"
+    # signature); the AssertionError fires on either.
     if not resp:
-        assert m.last_finish_reason == "length", (
-            f"v4-flash returned empty WITHOUT finish=length "
-            f"({m.last_finish_reason!r}) — not the documented collapse; "
-            f"update after adapter migration")
-        pytest.xfail("v4-flash reasons by default (pilot #1549) — pending "
-                     "companion adapter-migration (thinking toggle)")
+        assert resp and m.last_finish_reason == "stop", (
+            f"v4-flash collapsed under thinking:{{\"type\": \"disabled\"}} "
+            f"— the adapter's thinking-disable is not effective on the live "
+            f"API (finish={m.last_finish_reason!r}, empty content) — "
+            f"#1549 regression")
     # non-empty path — assert the response is real JSON (the user prompt
     # demanded a JSON value), not any truthy string.
     import json

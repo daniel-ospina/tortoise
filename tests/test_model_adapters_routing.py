@@ -194,6 +194,18 @@ def test_flash_direct_registry_model_disables_thinking(monkeypatch):
     assert body2["model"] == "deepseek-v4-pro"
     assert "thinking" not in body2
 
+    # prefixed direct construction must reach the same gate (the router
+    # strips prefixes at _build_single, but a directly-built adapter with a
+    # prefixed id must not bypass it) — this assertion fails under a
+    # literal `self.id == "deepseek-v4-flash"` gate (mutation-verified).
+    from tortoise.model_adapters import DeepSeekDirectModel
+    log3, fake3 = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake3)
+    prefixed = DeepSeekDirectModel("deepseek/deepseek-v4-flash")
+    prefixed.complete(system="s", user="u")
+    body3 = log3[0][1]
+    assert body3["thinking"] == {"type": "disabled"}
+
 
 def test_deepseek_direct_json_mode_default_on(monkeypatch):
     """#1746 (D6): JSON-mode parity on the direct path — the request body

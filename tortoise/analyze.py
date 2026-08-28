@@ -283,8 +283,11 @@ def llm_classify(question: str) -> tuple[str, dict] | None:
         }
         # #1790: deepseek-v4-flash reasons by DEFAULT (thinking: high) and
         # collapses into hidden reasoning tokens — disable thinking for the
-        # DeepSeek provider ONLY (OpenAI would 400 on the unknown param).
-        if provider_url.startswith("https://api.deepseek.com"):
+        # flash family ONLY (OpenAI would 400 on the unknown param). The
+        # gate is model-id based, mirroring the adapter's flash-family scope
+        # guard: a future pro entry in _LLM_PROVIDERS must NOT silently
+        # disable thinking.
+        if provider_model.rsplit("/", 1)[-1] == "deepseek-v4-flash":
             body["thinking"] = {"type": "disabled"}
         body = json.dumps(body).encode()
         req = urllib.request.Request(

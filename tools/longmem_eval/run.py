@@ -1236,8 +1236,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     matching the session_workers=1 owner decision). Registry entries the
     factory cannot express (thinking_budget/disable_reasoning) are refused
     loudly at session_workers>1. WIRE-ID
-    MUTABILITY: wire ids are API-facing and mutable (e.g. #1706 renamed
-    deepseek-v4-flash → deepseek-chat) — a rename loudly invalidates every
+    MUTABILITY: wire ids are API-facing and mutable (e.g. #1706, pre-#1790,
+    renamed deepseek-v4-flash → deepseek-chat; #1790 migrated back to
+    deepseek-v4-flash) — a rename loudly invalidates every
     existing checkpoint (CheckpointStaleError on ``extractor_model``): safe
     by design, expected on any future normalization change.
     ENV-DEPENDENCE (default path): with ``--extractor-model`` unset the
