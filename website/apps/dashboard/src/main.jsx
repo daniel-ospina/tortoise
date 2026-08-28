@@ -4406,7 +4406,21 @@ function claimIntentInFlight() {
         {tab === 'billing' && team && (
           <section className="billing">
             <div className="row">
-              <h2>Billing</h2>
+              <h2>Billing — {currentTeamName || 'this team'}</h2>
+              {/* #1876: per-tenant billing — in-section context selector
+                  (reuses switchTeam; single-team users get the name only). */}
+              {teams.length > 1 && (
+                <select
+                  className="billing-team-select"
+                  aria-label="Billing team"
+                  value={currentTeamId || ''}
+                  onChange={(e) => { switchTeam(e.target.value); setTab('billing') }}
+                >
+                  {teams.map((t) => (
+                    <option key={t.team_id} value={t.team_id}>{t.team_name}</option>
+                  ))}
+                </select>
+              )}
               {canManageSubscription && (
                 <button className="tier-badge tier-manage" onClick={manageBilling} disabled={billingPending}>
                   {billingPending ? 'Opening portal…' : 'Manage subscription'}
