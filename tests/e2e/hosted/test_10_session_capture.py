@@ -8,7 +8,7 @@ on the E2E server) turns conversation sentences into Points.
 Negatives: turn cap (MAX_SESSION_TURNS=500) → 400; oversized turn content
 (>5000 chars) → accepted + truncated to the stored window (the old 422 is
 removed — #1532 D1, SDK truncation parity); unauthenticated → 401; un-opted
-    tenant (never enabled session_recording) → 403 consent gate (#1727).
+tenant (never enabled session_recording) → 403 consent gate (#1727).
 
 Consent: #1727 Task 11 (P0) made session_recording the ENFORCED capture
 consent — a fresh team (session_recording=False) gets 403 on POST
@@ -20,7 +20,8 @@ from __future__ import annotations
 
 import uuid
 
-from conftest import skip_unless_hosted_e2e
+import pytest
+from conftest import is_remote_mode, skip_unless_hosted_e2e
 
 skip_unless_hosted_e2e()
 
@@ -117,6 +118,7 @@ def test_session_oversized_turn_truncates(api, tenant_factory):
         f"got {len(user_turn['content'])} chars")
 
 
+@pytest.mark.skipif(is_remote_mode(), reason="consent gate needs a fresh un-opted tenant (remote pool shares 3)")
 def test_session_consent_gate_403(api, tenant_factory):
     """#1727 (P0) enforced consent: a fresh team that never opted in gets 403
     on POST /v1/sessions — the prompt-injection exfiltration hole stays closed.
