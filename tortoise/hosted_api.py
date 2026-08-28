@@ -9597,11 +9597,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
             params={"id": team_id, "tok": encrypted, "org": st["org"]},
         )
     _update_onboarding_state(team_id, github_connected=True)
-    # Auto-index after connect (Task 5, amend 11): quota-gated background
-    # first-run (ONE repo — bounded, P2-4). The job is created under the
-    # team's single-flight guard; a quota-cap failure surfaces honestly via
-    # the job poll, never the redirect (the user lands on welcome.html
-    # either way). P1-1 (PR #1792): spawn the run ONLY when the job was
+    # Auto-index after connect (Task 5, amend 11): background first-run
+    # (ONE repo — bounded, P2-4). The job is created under the team's
+    # single-flight guard; an indexing failure surfaces honestly via the
+    # job poll, never the redirect (the user lands on welcome.html either
+    # way). P1-1 (PR #1792): spawn the run ONLY when the job was
     # freshly minted — a reused in-flight job is already being walked.
     job_id, is_new = _start_index_job(team_id)
     if is_new:
@@ -9758,7 +9758,7 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
         _job(status="failed", error="Token undecryptable")
         return
     # State + cursors loaded BEFORE the walk try: the finally persists them
-    # back, so a pre-walk failure (quota preflight, resolve_repos 404) must
+    # back, so a pre-walk failure (resolve_repos 404, pre-walk raise) must
     # never WIPE previously-persisted cursors (P2, PR #1792).
     state = _get_onboarding_state(team_id)
     cursors: dict[str, dict] = state.get("github_index_cursor") or {}
@@ -9851,8 +9851,8 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
         _job(status="failed", error=str(e))
     finally:
         # P2: persist per-repo cursors + github_indexed in a finally so
-        # PARTIAL runs (mid-walk raise, quota-interrupted) leave a
-        # resumable state — previously the accumulated cursors were lost on
+        # PARTIAL runs (mid-walk raise) leave a resumable state —
+        # previously the accumulated cursors were lost on
         # a mid-walk raise and the next run re-walked from the old cursor.
         # github_indexed flips True ONLY on real progress (>=1 repo
         # processed): a 0-repo failure (resolve_repos 404, pre-walk raise)

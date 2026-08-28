@@ -30,9 +30,10 @@ Lifecycle decision table (THE rule):
   the closed state) — the one-time legacy backfill is the only other source
   of ``-closed`` events (marker-gated, T2-P3).
 
-Writes ``statement`` ONLY — never ``observation`` (removed kind, §5).
-(DORMANT since #1844: the default path writes NO statements; see
-``_upsert_statement`` for the #1843-reserved machinery.)
+The (dormant) statement machinery writes ``statement`` ONLY — never
+``observation`` (removed kind, §5). DORMANT since #1844: the default path
+writes NO statements; see ``_upsert_statement`` for the #1843-reserved
+machinery.
 """
 from __future__ import annotations
 
