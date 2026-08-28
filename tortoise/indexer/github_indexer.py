@@ -327,6 +327,18 @@ class GitHubIndexer:
           refetches from the top so the deferred backlog (updated before the
           cursor) keeps draining up to ``cap`` per run. The boundary skip
           keeps it exact-once; idempotent probes make overlap harmless.
+
+        #1895 (second-buffered ASC flush): GitHub's stream
+        (``sort=updated&direction=desc``) delivers each exact ``updated_at``
+        SECOND as a contiguous run; the within-second tie order is
+        unspecified. Instead of re-sorting each page (which processed a
+        page-spanning same-second block high-to-low across pages and minted
+        non-prefix cursors — DRAIN over-skipped → freeze/loss), each second's
+        run is buffered and flushed COMPLETE, sorted ``(updated_at, number)``
+        ASC. A cap/quota cut therefore always lands mid-flush of a complete
+        block, so the minted composite cursor's boundary-second processed set
+        is a contiguous ASC prefix — the cursor always expresses the true
+        processed set (structural exact-once).
         """
         items: list[dict] = []
         total_estimate: int | None = None
@@ -337,25 +349,40 @@ class GitHubIndexer:
         since_cursor = None if drain else cursor
         batch, next_url, total_estimate = await self._fetch_page(
             client, repo, since_cursor)
-        while True:
-            # Deterministic walk order: updated DESC, number ASC within the
-            # same second (GitHub's within-second order is unspecified) — the
-            # composite cursor's number tiebreak is only exact-once when the
-            # walk ascends through a boundary second before truncating.
-            batch = sorted(
-                batch,
-                key=lambda i: (github_map._norm_issue(i)["updated_at"],
-                               -int(github_map._norm_issue(i)["number"] or 0)),
-                reverse=True,
-            )
-            for item in batch:
+
+        def _flush(block: list[dict]) -> bool:
+            """Process ONE complete second-run ASC. True ⇒ cap hit (the
+            walk stops)."""
+            nonlocal items, cap_hit
+            block.sort(key=lambda i: int(
+                github_map._norm_issue(i)["number"] or 0))
+            for item in block:
                 if self._inside_cursor(item, cursor, drain=drain):
                     continue
                 items.append(item)
                 if len(items) >= cap:
                     cap_hit = True
-                    return items, total_estimate, cap_hit  # window full — stop
+                    return True
+            return False
+
+        current_second: str | None = None
+        block: list[dict] = []
+        while True:
+            for item in batch:
+                second = github_map._norm_issue(item)["updated_at"]
+                if current_second is None:
+                    current_second = second
+                elif second != current_second:
+                    # previous second's run is COMPLETE — flush before the
+                    # next one starts (a cap cut mid-flush lands on a
+                    # complete ASC prefix, #1895)
+                    if _flush(block):
+                        return items, total_estimate, cap_hit
+                    current_second = second
+                    block = []
+                block.append(item)
             if not next_url:
+                _flush(block)  # final run — complete at walk end
                 return items, total_estimate, cap_hit
             if since_cursor is None:
                 # DRAIN: GitHub's Link next-URL carries the `since` param —
@@ -371,12 +398,11 @@ class GitHubIndexer:
             if r.status_code != 200:
                 raise GitHubFetchError(
                     f"GitHub issues fetch failed ({r.status_code})")
-            batch = sorted(
-                r.json(),
-                key=lambda i: (github_map._norm_issue(i)["updated_at"],
-                               -int(github_map._norm_issue(i)["number"] or 0)),
-                reverse=True,
-            )
+            # #1895: NO per-page re-sort — the per-second buffer sorts
+            # each COMPLETE second-run; rebind the raw batch so the walk
+            # loop iterates fresh items (losing the rebind re-iterates the
+            # previous page forever).
+            batch = r.json()
             urls = self._link_header_urls(r.headers.get("Link", ""))
             next_url = urls.get("next")
             if total_estimate is None:

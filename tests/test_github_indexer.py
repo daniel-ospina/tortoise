@@ -396,6 +396,58 @@ def test_indexer_preserves_connector_routing_props(sdk):
         "indexer re-run must preserve the connector's routing props"
 
 
+# ── #1895: second-buffered ASC flush — boundary advances, no loss ──────
+
+def test_second_block_spanning_pages_drains_and_advances_boundary(sdk):
+    """#1895: a same-second block spanning pages (production shape: 1425
+    items at one second + 460 newer across pages) must drain ACROSS capped
+    runs with the boundary advancing per run, and must never lose low
+    numbers. Pre-fix: run 1 processed page 5's boundary items high-to-low
+    (a non-prefix set {1386..1425}) and minted {S, 1425, truncated}; run 2
+    (DRAIN) skipped #1..#1385 forever (loss) and froze at 0 processed."""
+    S = "2026-08-18T02:49:35Z"
+    S1 = "2026-08-18T02:49:36Z"
+    issues = [gh_issue(n, updated_at=S1) for n in range(1426, 1886)]
+    issues += [gh_issue(n, updated_at=S) for n in range(1, 1426)]
+    t = MockGitHubTransport(issues=issues, page_size=100)  # 19 pages
+    # run 1: 460 newer + 40 boundary-lowest → {S, 40, truncated}
+    stats1 = _run(_indexer(t), sdk, cap=500)
+    assert stats1["processed"] == 500
+    assert stats1["cursor"] == {"updated_at": S, "number": 40,
+                                 "truncated": True}
+    assert stats1["issues_beyond_window"] > 0
+    # runs 2-3: DRAIN drains 500 more each; boundary number strictly advances
+    stats2 = _run(_indexer(t), sdk, cursor=stats1["cursor"], cap=500)
+    assert stats2["processed"] == 500
+    assert stats2["cursor"] == {"updated_at": S, "number": 540,
+                                 "truncated": True}
+    stats3 = _run(_indexer(t), sdk, cursor=stats2["cursor"], cap=500)
+    assert stats3["processed"] == 500
+    assert stats3["cursor"] == {"updated_at": S, "number": 1040,
+                                 "truncated": True}
+    # run 4: the boundary block tail (385) drains WITHOUT a cap cut → clean
+    stats4 = _run(_indexer(t), sdk, cursor=stats3["cursor"], cap=500)
+    assert stats4["processed"] == 385
+    assert stats4["cursor"] == {"updated_at": S, "number": 1425}  # truncated gone
+    # run 5 (DIFF): boundary-second items are probed, NOT re-minted — exact-once
+    stats5 = _run(_indexer(t), sdk, cursor=stats4["cursor"], cap=500)
+    assert stats5["events_minted"] == 0
+    assert stats5["cursor"]["updated_at"] == S1  # boundary advanced past S
+    # (steady-state probe: the DIFF window [S−1s,∞) re-probes the boundary
+    # window — the 460 processed are the NEWER S1 block (idempotent probes,
+    # 0 mints); the S block is entirely skipped (all numbers <= 1425);
+    # documented §Follow-ups)
+    # NO loss: every number, including the lows the pre-fix code skipped
+    proj = sdk._get_proj()
+    assert proj.g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 1885
+    for n in (1, 40, 41, 1385, 1386, 1425, 1426, 1885):
+        rows = proj.g.query(
+            "MATCH (o:Object {id:$oid}) RETURN count(o)",
+            params={"oid": f"github-issue-acme/repo1-{n}"}).result_set
+        assert int(rows[0][0]) == 1, f"issue #{n} must be indexed (no loss)"
+
+
 # ── P1-4 (PR #1792): DRAIN-mode backlog drain ────────────────────────
 
 def test_drain_mode_drains_backlog_across_runs(sdk):
