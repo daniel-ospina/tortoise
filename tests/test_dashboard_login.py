@@ -448,12 +448,14 @@ class TestDashboardLoginGate:
     def test_session_mgmt_degrades_under_phantom_import_columns(
             self, client, fake, monkeypatch, caplog):
         """#1832: the session branch (_session_user_team) must degrade when
-        the PHANTOM import columns (last_import_sha256 / max_points — #1230
-        columns with NO migration in prod) are missing from the teams table.
+        the #1230 import columns (last_import_sha256 / max_points — real
+        since migration 20260817000001; missing_columns here simulates a
+        schema one migration behind, i.e. DRIFT rather than the original
+        pre-migration reality) are missing from the teams table.
         The fail-soft ladder drops _TEAM_ADDITIVE_IMPORT_TIER first (newest
         migration first); before the #1832 fix the tier was absent from the
-        ladder, so EVERY retry still selected the phantom columns → PGRST204
-        → terminal raise → HTTP 500 on /v1/team (and /v1/team/keys,
+        ladder, so EVERY retry still selected the (then-phantom) columns →
+        PGRST204 → terminal raise → HTTP 500 on /v1/team (and /v1/team/keys,
         /v1/sessions, /v1/onboarding/state) for every session-JWT user."""
         key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         user_id = str(uuid.uuid4())
