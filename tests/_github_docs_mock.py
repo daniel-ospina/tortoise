@@ -101,6 +101,17 @@ class MockGitHubDocsTransport(httpx.AsyncBaseTransport):
                 "encoding": "base64",
                 "size": len(data),
             }, request=request)
+        if "/branches" in url:
+            # /repos/{owner}/{repo}/branches — the #1845 per-repo branch
+            # picker. Branch names derive from the trees dict keys (the
+            # branches that actually serve a tree).
+            repo = url.split("/repos/")[1].split("/branches")[0]
+            t = self.trees.get(repo) or {}
+            if not t:
+                return httpx.Response(404, json={}, request=request)
+            return httpx.Response(
+                200, json=[{"name": b} for b in t.keys()],
+                request=request)
         if "/repos" in url:
             if self.resolve_404:
                 # org/user repo-list resolves to 404 (org not found / no

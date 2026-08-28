@@ -126,11 +126,35 @@ class GitHubIndexer:
             f"GitHub request failed after retries (last status {last_status or 'transport'}) "
             f"for {url}")
 
+    async def current_login(self) -> str | None:
+        """The authenticated user's GitHub login (``GET /user``) — None on
+        failure. Used at connect time (#1845) to store the REAL org/login
+        instead of the internal team_id, and by the self-heal paths."""
+        client = await self._get_client()
+        r = await self._get(client, f"{_GITHUB_API}/user")
+        if r.status_code == 200:
+            data = r.json()
+            login = data.get("login") if isinstance(data, dict) else None
+            return login if isinstance(login, str) and login else None
+        return None
+
     async def resolve_repos(self, org: str) -> list[str]:
         """Resolve repo names for an org (try org, fall back to user).
 
-        A non-200 from BOTH (org not found / no access) RAISES
-        GitHubFetchError — the job must fail honestly, never silently
+        A non-200 from BOTH (org not found / no access) falls back to the
+        authenticated token's OWN repos (``/user/repos``) — the selector
+        (#1845) must list what the token can actually see even when the
+        stored org is a legacy team_id UUID (the pre-#1845 connect bug) or
+        the org lookup 404s. GitHub returns 200 for a valid-but-empty org,
+        so a 404 genuinely means 'unknown/no access'.
+
+        Review P2-1 (org-boundary integrity): the fallback is BOUNDED to
+        the token user's own repos (``full_name`` starts with the token's
+        login). It never widens an org-wide walk across the boundary into
+        other orgs' private repos — the fallback resolves exactly what the
+        token user owns/contributes to under their own namespace. Only when
+        /user/repos ALSO fails (or the login cannot be resolved) does this
+        RAISE GitHubFetchError — the job must fail honestly, never silently
         complete with 0 points + github_indexed=True (P2, PR #1792).
         """
         client = await self._get_client()
@@ -139,9 +163,48 @@ class GitHubIndexer:
                 client, f"{_GITHUB_API}/{kind}/{org}/repos?per_page=100")
             if r.status_code == 200:
                 return [repo["full_name"] for repo in r.json()]
+        login = await self.current_login()
+        if login:
+            r = await self._get(
+                client, f"{_GITHUB_API}/user/repos?per_page=100")
+            if r.status_code == 200:
+                prefix = f"{login}/"
+                return [repo["full_name"] for repo in r.json()
+                        if repo.get("full_name", "").startswith(prefix)]
         raise GitHubFetchError(
             f"GitHub org/user {org!r} not found or no access (non-200 on "
-            f"both orgs/{org}/repos and users/{org}/repos)")
+            f"orgs/{org}/repos and users/{org}/repos; token login "
+            f"unresolvable or /user/repos failed)")
+
+    async def list_branches(self, repo: str) -> list[str]:
+        """List branch names for a repo (``GET /repos/{repo}/branches``).
+
+        Used by the #1845 source-scope selector's per-repo branch picker
+        (server-side token — the client never calls GitHub directly). A
+        non-200 raises GitHubFetchError; the endpoint layer catches and
+        degrades to an empty list (the selector still renders its default
+        branch, never a 500).
+        """
+        client = await self._get_client()
+        r = await self._get(
+            client, f"{_GITHUB_API}/repos/{repo}/branches?per_page=100")
+        if r.status_code == 200:
+            return [b.get("name") for b in r.json() if b.get("name")]
+        raise GitHubFetchError(
+            f"GitHub branch list failed for {repo} ({r.status_code})")
+
+    async def default_branch(self, repo: str) -> str | None:
+        """The API-reported default branch (``GET /repos/{repo}``) — None on
+        failure. Review P2-4: lets the docs picker label/seed its default
+        option truthfully for repos whose default is neither main nor
+        master."""
+        client = await self._get_client()
+        r = await self._get(client, f"{_GITHUB_API}/repos/{repo}")
+        if r.status_code == 200:
+            data = r.json()
+            db = data.get("default_branch") if isinstance(data, dict) else None
+            return db if isinstance(db, str) and db else None
+        return None
 
     @staticmethod
     def _link_header_urls(link: str) -> dict[str, str]:

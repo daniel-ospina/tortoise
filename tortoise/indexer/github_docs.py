@@ -39,6 +39,7 @@ Token scope: ``repo`` (covers the Contents API).
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -75,6 +76,23 @@ def _safe_segment(value: str, what: str) -> str:
     return value
 
 
+# Branch token for the tree URL (review P1-1): git refs may contain "/"
+# (feature/x) but NEVER "..", "@{}", spaces, or control chars. "all" is the
+# #1845 multi-branch marker handled by the caller, never a real ref.
+_SAFE_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]{0,127}$")
+
+
+def _safe_branch(branch: str) -> bool:
+    """Git-ref-safe check for a branch interpolated into a GitHub URL.
+    Rejects dot-segment traversal and git-ref-unsafe tokens (lossless —
+    git refs can never contain "..")."""
+    if not branch:
+        return False
+    if ".." in branch or "//" in branch:
+        return False
+    return bool(_SAFE_BRANCH_RE.match(branch))
+
+
 class GitHubDocsIndexer(GitHubIndexer):
     """Contents-API docs fetcher: tree walk → changed-blob fetch → stage.
 
@@ -107,13 +125,22 @@ class GitHubDocsIndexer(GitHubIndexer):
         return Path(base) / _safe_segment(team_id, "team_id")
 
     @classmethod
-    def _team_paths(cls, team_id: str, repo: str) -> tuple[Path, Path]:
+    def _team_paths(cls, team_id: str, repo: str,
+                    branch_label: str) -> tuple[Path, Path]:
         """(corpus_dir, manifest_path) under the team partition.
 
-        corpus_dir = {base}/{team_id}/{owner}/{repo} — the per-repo fetch
-        target (files at corpus_dir/docs/...)
-        manifest   = {base}/{team_id}/.manifest/{repo}.json (server-owned
-        meta, OUTSIDE the indexed file set — non-md, ignored by the walk).
+        #1845 (review P2-2): ALWAYS branch-qualified by the RESOLVED branch
+        (branch_used after the main→master fallback). corpus_dir =
+        {base}/{team_id}/{owner}/{repo}/{branch} — files at
+        corpus_dir/docs/...; doc ids embed the branch so two branches with
+        the same docs/ path never share a Document node, and a default walk
+        vs "all branches" re-index of the same repo NEVER duplicates (same
+        content → same resolved branch → same doc id). There is no legacy
+        unqualified layout.
+
+        manifest = {base}/{team_id}/.manifest/{owner}/{name}/{branch}.json
+        (server-owned meta, OUTSIDE the indexed file set — non-md, ignored
+        by the walk).
         """
         team = cls.team_root(team_id)
         parts = repo.split("/", 1)
@@ -122,8 +149,19 @@ class GitHubDocsIndexer(GitHubIndexer):
         owner, name = parts
         _safe_segment(owner, "owner")
         _safe_segment(name, "repo")
-        return (team / owner / name,
-                team / ".manifest" / owner / f"{name}.json")
+        # Git branch names may contain `/` (feature/x) — collapse to a
+        # safe filesystem segment (deterministic, collision-resistant:
+        # a sha1 suffix only when the raw name is unsafe). The corpus
+        # path must stay a single safe token: doc ids embed it, and
+        # _safe_segment's no-slash rule would reject feature/x outright.
+        if _SAFE_SEGMENT_RE.match(branch_label):
+            safe_branch = branch_label
+        else:
+            safe_branch = re.sub(
+                r"[^A-Za-z0-9._-]", "_", branch_label)
+            safe_branch = f"{safe_branch}-{hashlib.sha1(branch_label.encode('utf-8')).hexdigest()[:8]}"
+        return (team / owner / name / safe_branch,
+                team / ".manifest" / owner / name / f"{safe_branch}.json")
 
     @staticmethod
     def _load_manifest(manifest_path: Path) -> dict:
@@ -154,8 +192,15 @@ class GitHubDocsIndexer(GitHubIndexer):
 
         Returns (tree_json, branch_used, fell_back). Both probes 404 ⇒
         GitHubFetchError (honest fail — the job reports it, never a silent
-        empty walk).
+        empty walk). #1845 review P1-1: the branch is interpolated into the
+        tree URL, so an unsafe branch (dot-segment traversal) is rejected
+        HERE as defense-in-depth even though the API layer already
+        allowlists it — the fetcher must never interpolate unvalidated
+        input into a URL.
         """
+        if not _safe_branch(branch):
+            raise GitHubFetchError(
+                f"unsafe branch {branch!r} for tree fetch (rejected)")
         candidates = [branch]
         for fb in _BRANCH_FALLBACKS:
             if fb not in candidates:
@@ -241,6 +286,16 @@ class GitHubDocsIndexer(GitHubIndexer):
                         branch: str = "main") -> dict:
         """Fetch + stage ONE repo's ``docs/`` under the team partition.
 
+        #1845: the corpus + manifest are ALWAYS branch-qualified by the
+        RESOLVED branch (branch_used after the main→master fallback), so
+        doc ids stay BRANCH-UNIQUE and a later "all branches" re-index of
+        the same repo never duplicates the default-walk docs (same content
+        → same branch label → same doc id). Review P2-2: there is no legacy
+        unqualified layout — the one-time re-derivation is safe because no
+        docs were ever indexed before this shipped (github_docs_indexed was
+        false for every connected team; the old connect bug 404'd every
+        org-scoped walk).
+
         Returns stats (see the module docstring for the guard semantics).
         Raises GitHubFetchError on any failure — the caller marks the job
         failed with a readable error; the manifest is never advanced past a
@@ -255,9 +310,6 @@ class GitHubDocsIndexer(GitHubIndexer):
             "files_staged": 0, "files_reconciled_removed": 0,
             "staged_corpus": "", "errors": [],
         }
-        corpus_dir, manifest_path = self._team_paths(team_id, repo)
-        stats["staged_corpus"] = str(corpus_dir)
-        manifest = self._load_manifest(manifest_path)
         client = await self._get_client()
         pending: list[tuple[Path, Path]] = []  # (temp, target) staged this run
         try:
@@ -266,6 +318,12 @@ class GitHubDocsIndexer(GitHubIndexer):
             stats["branch"] = branch_used
             stats["branch_fell_back"] = fell_back
             stats["tree_sha"] = tree.get("sha")
+            # #1845: branch-qualified paths keyed on the RESOLVED branch
+            # (see the docstring — always qualified, no legacy layout).
+            corpus_dir, manifest_path = self._team_paths(
+                team_id, repo, branch_label=branch_used)
+            stats["staged_corpus"] = str(corpus_dir)
+            manifest = self._load_manifest(manifest_path)
             stats["tree_truncated"] = bool(tree.get("truncated"))
             entries = self._docs_entries(tree)
             stats["docs_entries"] = len(entries)
