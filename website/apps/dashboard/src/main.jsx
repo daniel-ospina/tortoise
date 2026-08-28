@@ -583,24 +583,30 @@ function claimIntentInFlight() {
   // persisted server-side). #1728 Slice 3: the same read now feeds the full
   // Memory-sources surface (three toggles + the re-ask gate).
   async function refreshOnboarding() {
-    if (!sessionTokenRef.current) {
-      // Mount race (#1838): the onboarding-state GET rides the session JWT —
-      // the mount gate populates sessionTokenRef.current after getSession()
-      // resolves, but this mount effect fires first. Wait for the session to
-      // materialize (bounded) instead of firing an unauthenticated GET that
-      // 401s ("Missing session token"). A null result means the session is
-      // genuinely absent (or the auth lib failed to load — the gate bounces
-      // to /auth / renders the auth-unavailable card), so returning is
-      // correct: the loading surface just stays in its idle state.
-      let session = null
-      if (supabaseClient) {
-        const { data } = await supabaseClient.auth.getSession()
-        session = (data && data.session) || null
-      }
-      if (session && session.access_token) sessionTokenRef.current = session.access_token
-      else { setOnboardingLoading(false); return }
-    }
     try {
+      if (!sessionTokenRef.current) {
+        // Mount race (#1838): the onboarding-state GET rides the session JWT —
+        // the mount gate populates sessionTokenRef.current after getSession()
+        // resolves, but this mount effect fires first. Wait for the session to
+        // materialize (bounded) instead of firing an unauthenticated GET that
+        // 401s ("Missing session token"). A null result means the session is
+        // genuinely absent (or the auth lib failed to load — the gate bounces
+        // to /auth / renders the auth-unavailable card), so returning is
+        // correct: the loading surface just stays in its idle state.
+        let session = null
+        if (supabaseClient) {
+          const { data } = await supabaseClient.auth.getSession()
+          session = (data && data.session) || null
+        }
+        // P2 (review): strict validity check — a non-expired JWT is required,
+        // otherwise fall through to the loading-off return below.
+        if (session && session.access_token && session.expires_at && session.expires_at * 1000 > Date.now()) {
+          sessionTokenRef.current = session.access_token
+        } else {
+          setOnboardingLoading(false)
+          return
+        }
+      }
       const st = await api('/v1/onboarding/state', { useSession: true })
       if (st && st.onboarding) {
         setOnboarding(st.onboarding)
