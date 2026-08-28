@@ -10262,8 +10262,16 @@ def _require_backup_tier(team: dict) -> None:
 
 
 @app.get("/backups")
-async def backups_list(team: dict = Depends(get_current_team)):  # noqa: B008
-    """List this team's backups (newest first) with timestamps + node counts."""
+async def backups_list(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """List this team's backups (newest first) with timestamps + node counts.
+
+    #1831 P2-4: rides the session dual-auth (#1828) — the dashboard's
+    loadBackups call carries NO key when a recoverable mint failure left
+    apiKey empty (the overview reads ride the session JWT), so a bare
+    get_current_team dependency 401'd and the Backups card silently
+    disappeared for Pro users. Ungated dual-auth accepts session JWT OR
+    tt_ key; only team["team_id"] is read below, so a session-resolved
+    dict behaves identically."""
     team_id = team.get("team_id")
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
