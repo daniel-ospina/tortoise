@@ -1012,6 +1012,12 @@ def invitation_accept(cp, token: str, user_id: str,
         # membership kill-switch and the invitation revoke are separate
         # writes).
         raise InvitationError("Team is scheduled for deletion", status=410)
+    if team.get("suspended_at"):
+        # #1853: a suspended team must not mint memberships either — the
+        # invite may predate the suspension, but the membership would be
+        # dead on arrival (every subsequent call 403s). Parity with the
+        # deleted_at kill-switch above.
+        raise InvitationError("Team is suspended", status=403)
     from tortoise.pricing import tier_limits
     tier = team.get("tier") or "free"
     lim = tier_limits(tier)

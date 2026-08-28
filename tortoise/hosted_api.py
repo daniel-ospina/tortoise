@@ -5789,7 +5789,13 @@ async def _user_memberships(user_id: str) -> list[dict]:
 
 
 async def _membership_team(user_id: str, team_id: str) -> dict | None:
-    """Return the membership for (user, team) if active, else None."""
+    """Return the membership for (user, team) if active, else None.
+
+    #1853: this seam is deliberately suspension-UNCHECKED — GET
+    /v1/team/alerts (the appeal flow) resolves through it and must stay
+    reachable while suspended. Callers that gate writes/exports must add
+    ``_ensure_not_suspended(await _team_node(team_id))`` on the team row
+    they fetch (create_graph / list_graphs do; see those endpoints)."""
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -5825,7 +5831,7 @@ async def _team_node(team_id: str) -> dict | None:
     )
     if is_supabase_enabled():
         return _sb_team(get_control_plane(), team_id)
-    sdk = _make_sdk(namespace="registry")
+    sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)",
         params={"id": team_id},
@@ -5833,6 +5839,24 @@ async def _team_node(team_id: str) -> dict | None:
     if not rows:
         return None
     return rows[0][0]
+
+
+def _ensure_not_suspended(team_row: dict | None) -> None:
+    """#1853: 403 SUSPENDED when the team row carries a suspension stamp.
+
+    Enforcement seam shared by the membership/owner endpoints — called from
+    _require_owner / _require_owner_admin and the _membership_team-based
+    write endpoints for parity with the key-auth (get_current_team ~1390)
+    and _session_user_team (~1482) paths, which already 403 SUSPENDED.
+    None team_row → pass: callers handle 404 separately, and the additive-
+    column fail-soft seam degrades to un-suspended rather than a 500
+    (missing suspended_at column → None → passes, same as #1828).
+
+    Deliberately NOT wired into _membership_team itself: the appeal flow
+    (GET /v1/team/alerts) resolves via get_current_user + _membership_team
+    and MUST stay reachable while suspended (scoping delta 12)."""
+    if team_row is not None and team_row.get("suspended_at") is not None:
+        raise HTTPException(status_code=403, detail=_suspended_detail())
 
 
 def _team_limits_from_node(team_node: dict) -> dict:
@@ -5880,6 +5904,11 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
         team = await _team_node(m["team_id"])
         if team is None:
             continue
+        # #1853: a suspended membership 403s the switcher (locked down —
+        # the detail carries the appeal link; mixed healthy/suspended
+        # memberships are blocked as a whole so the suspended state is
+        # never silently hidden).
+        _ensure_not_suspended(team)
         graphs = _make_sdk(namespace="registry").graph_list(m["team_id"])
         out.append({
             "team_id": m["team_id"],
@@ -6030,6 +6059,11 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
 
+    # #1853: a suspended team cannot create graphs (parity with the key
+    # path) — checked here because _membership_team itself stays pure for
+    # the /v1/team/alerts appeal flow.
+    _ensure_not_suspended(team)
+
     # #683: centralized graph-limit enforcement via fail-closed quota
     limits = _team_limits_from_node(team)
     _check_team_limit(limits, "graphs")
@@ -6049,6 +6083,9 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # 
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
+    # #1853: suspended teams are locked down (alerts stays open — see
+    # _ensure_not_suspended).
+    _ensure_not_suspended(team)
     sdk = _make_sdk(namespace="registry")
     graphs = sdk.graph_list(team_id)
     return [{"graph_id": g["graph_id"], "name": g["name"],
@@ -6062,7 +6099,14 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # 
 # (max_users=1 or invite path deferred to billing).
 
 async def _require_owner_admin(user_id: str, team_id: str) -> dict:
-    """Return the membership if the user is owner/admin in the team, else 403."""
+    """Return the membership if the user is owner/admin in the team, else 403.
+
+    #1853: a SUSPENDED team 403s here too (checked AFTER role authz — no
+    existence-oracle change) — this is the enforcement seam for every
+    owner/admin management endpoint (invites, members, key toggle,
+    dashboard-login), so they all inherit suspension parity. The appeal
+    flow (/v1/team/alerts) uses _membership_team directly and is
+    unaffected."""
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -6074,8 +6118,13 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
         membership = _sb_membership(get_control_plane(), user_id, team_id)
         if not membership or membership["role"] not in ("owner", "admin"):
             raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
+        _ensure_not_suspended(await _team_node(team_id))
         return {"team_id": team_id, "role": membership["role"]}
-    sdk = _make_sdk(namespace="registry")
+    # #1853: registry reads use the KEEPALIVE anchor (#1607 pattern — a
+    # fresh _make_sdk is GC'd with close-on-GC + SHUTDOWN NOSAVE, killing
+    # the shared embedded server and losing un-saved cascade writes; the
+    # anchor is process-lifetime and sees them).
+    sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
         "RETURN m.role",
@@ -6083,6 +6132,7 @@ async def _require_owner_admin(user_id: str, team_id: str) -> dict:
     ).result_set
     if not rows or rows[0][0] not in ("owner", "admin"):
         raise HTTPException(status_code=403, detail="Requires owner or admin role in team")
+    _ensure_not_suspended(await _team_node(team_id))
     return {"team_id": team_id, "role": rows[0][0]}
 
 
@@ -6103,6 +6153,12 @@ async def _require_owner(user_id: str, team_id: str, *,
     the cascade. AuthZ-first callers pass this only after reading
     deleted_at, and non-owners get 403 regardless of team state (no
     existence oracle).
+
+    #1853: a SUSPENDED team 403s here too (checked AFTER the owner authz —
+    no existence-oracle change), covering export / import / delete. The one
+    exception is the delete-cascade replay (allow_removed set): the team is
+    already access-killed, so the idempotent 200-already / 410 answer is
+    returned instead of a SUSPENDED 403 (no write or export occurs).
     """
     from tortoise.supabase_control import (
         get_control_plane,
@@ -6118,9 +6174,21 @@ async def _require_owner(user_id: str, team_id: str, *,
             raise HTTPException(status_code=403, detail="Requires owner role in team")
         status = rows[0].get("status")
         if status == "active" or (allow_removed and status == "removed"):
+            # #1853: suspension blocks NEW destructive writes, but the
+            # delete-cascade replay (allow_removed set) is the platform's
+            # own access-kill completing — keys already revoked, memberships
+            # removed, deleted_at stamped; no write/export occurs on the
+            # replay path (it returns the 200 already-scheduled / 410
+            # answer). Skipping the check there keeps the idempotent-delete
+            # contract intact for a suspended team that is delete-pending.
+            if allow_removed is None:
+                _ensure_not_suspended(await _team_node(team_id))
             return {"team_id": team_id, "role": "owner"}
         raise HTTPException(status_code=403, detail="Requires owner role in team")
-    sdk = _make_sdk(namespace="registry")
+    # #1853: anchor-backed registry read (see _require_owner_admin — a
+    # fresh SDK's GC can SHUTDOWN NOSAVE the shared embedded server and
+    # lose un-saved cascade writes, breaking the idempotent replay).
+    sdk = _registry_anchor()
     rows = sdk._get_registry().query(
         "MATCH (m:Membership {user_id:$uid, team_id:$tid}) "
         "RETURN m.role, m.status",
@@ -6130,6 +6198,9 @@ async def _require_owner(user_id: str, team_id: str, *,
         raise HTTPException(status_code=403, detail="Requires owner role in team")
     status = rows[0][1]
     if status == "active" or (allow_removed and status == "removed"):
+        # #1853: same gate as the Supabase branch — see above.
+        if allow_removed is None:
+            _ensure_not_suspended(await _team_node(team_id))
         return {"team_id": team_id, "role": "owner"}
     raise HTTPException(status_code=403, detail="Requires owner role in team")
 
@@ -6430,6 +6501,10 @@ async def accept_invite(body: dict, request: Request,
     if existing:
         raise HTTPException(status_code=409, detail="Already a member of this team")
 
+    # #1853: a suspended team must not mint memberships (registry path —
+    # mirrors the deleted_at kill-switch in invitation_accept).
+    _ensure_not_suspended(await _team_node(invite["team_id"]))
+
     # Token single-use: mark accepted
     reg.query(
         "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
@@ -6519,6 +6594,12 @@ async def rescind_invite(invitation_id: str, team_id: str,
     )
     if is_supabase_enabled():
         try:
+            # #1853: route through the seam — role authz FIRST, suspension
+            # second (a non-member probing a suspended team gets the role
+            # 403, not the SUSPENDED detail — no state oracle, matching the
+            # registry branch below). invitation_rescind re-checks RBAC
+            # internally (harmless duplicate).
+            await _require_owner_admin(user["user_id"], team_id)
             return invitation_rescind(get_control_plane(), invitation_id,
                                       team_id, user["user_id"])
         except InvitationError as e:
