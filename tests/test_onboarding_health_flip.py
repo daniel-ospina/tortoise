@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import uuid
 
 import pytest
 from fastapi.testclient import TestClient
@@ -30,9 +31,10 @@ os.environ.setdefault("GITHUB_CLIENT_ID", "test-client-id")
 os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 
 from tortoise.hosted_api import app  # noqa: I001
+from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
 
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
-from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row
+from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row
 
 
 def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
@@ -113,22 +115,35 @@ class TestOnboardingStateFlip:
         r = tc.get("/v1/onboarding/state")
         assert r.status_code == 200, r.text
         got = r.json()["onboarding"]
-        # #1765 merge-reconciliation: superset check (the canonical default
-        # grows with every onboarding slice — #1725/#1726/#1727 — and an
-        # exact-equality pin drifts repo-wide, blocking every PR)
-        expected = {
-            "github_connected": False, "github_indexed": False,
-            "demo_created": False, "session_recording": False,
-            "team_created": False, "prompt_pasted": False,
-            "onboarding_complete": False,
-            # #1725 (Slice 0): registered in _ONBOARDING_DEFAULT_STATE.
-            "github_index_cursor": None,
-            "github_legacy_backfill_done": False,
-        }
-        assert expected.items() <= got.items(), f"onboarding default drift: {sorted(got) - sorted(expected)}"
-        # session recording is enabled by default (the flip gate asserts the
-        # DEFAULT has it on — #1727)
-        assert got.get("session_recording") is False or "session_recording" in got
+        # #1859 P3-4: assert against the canonical default itself (was a
+        # hardcoded superset that drifts with every onboarding slice — the
+        # canonical is the single source of truth).
+        assert _ONBOARDING_DEFAULT_STATE.items() <= got.items(), (
+            f"onboarding default drift; missing "
+            f"{sorted(set(_ONBOARDING_DEFAULT_STATE) - set(got))}")
+
+    def test_session_recording_toggle_accepts_session_jwt(self, supabase_client,
+                                                          monkeypatch):
+        """#1859 P3-3: POST /v1/onboarding/session-recording accepts a
+        session JWT (dual-auth — converted from key-only get_current_team).
+        The MCP tool registry still drives this endpoint with a tt_ key; the
+        dashboard's session JWT must work too (same ungated dual-auth as
+        GET/PATCH /v1/onboarding/state)."""
+        tc, fake = supabase_client
+        user_id = str(uuid.uuid4())
+        fake.seed("team_memberships", [_membership_row(user_id=user_id,
+                                                       team_id="team-free-001")])
+
+        async def _fake(request):
+            return {"user_id": user_id, "email": "owner@example.com", "sub": user_id}
+        import tortoise.session_auth as sa
+        monkeypatch.setattr(sa, "verify_session_jwt", _fake)
+
+        r = tc.post("/v1/onboarding/session-recording",
+                    headers={"Authorization": "Bearer eyJ.sess"},
+                    json={"enabled": True})
+        assert r.status_code == 200, r.text
+        assert r.json()["onboarding"]["session_recording"] is True
 
     def test_patch_lands_on_teams_jsonb_and_reads_back(self, supabase_client):
         tc, fake = supabase_client

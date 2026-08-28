@@ -416,12 +416,17 @@ class TestSessionKeyRoundTrip:
 
     def test_recovery_cap_rotates_legacy_unowned_key(self, rest_client,
                                                      authed_user):
-        """#1828 review P3-4 + P2-1 (Supabase lane): a LEGACY team-scoped
-        unowned key (created_by IS NULL) is a rotation candidate — it COUNTS
-        against max_api_keys (created_via NULL), so rotating it frees a REAL
-        slot: the mint lands at exactly the cap (never cap+1). In this lane
-        the legacy key resolves as an 'oldest OTHER' key (#750.10 — NULL !=
-        the user's id), so the #1828 fallback (rotated flag) does not fire."""
+        """#1828 review P3-4 + P2-1 + #1859 P3-1 (Supabase lane, LANE
+        PARITY): a LEGACY team-scoped unowned key (created_by IS NULL) is a
+        rotation candidate — it COUNTS against max_api_keys (created_via
+        NULL), so rotating it frees a REAL slot: the mint lands at exactly
+        the cap (never cap+1). #1859: the legacy key is EXCLUDED from the
+        others list (mirroring the registry predicate ``created_by <> $uid``
+        whose Cypher NULL semantics exclude unowned rows), so it falls to
+        the #1828 rotation branch and the rotated flag fires — the SAME
+        scenario as the registry twin
+        (test_session_key_http.py::test_at_cap_rotates_legacy_unowned_key_when_it_frees_a_slot
+        asserts rotated is True there)."""
         tc, fake = rest_client
         fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
         fake.seed("api_keys", [
@@ -435,7 +440,9 @@ class TestSessionKeyRoundTrip:
         ])
         r = tc.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 200, r.text
-        assert r.json()["rotated"] is False  # rotated via #750.10 others-branch
+        # #1859 P3-1: rotation branch fires (legacy excluded from others) —
+        # flag parity with the registry lane (rotated=True there too).
+        assert r.json()["rotated"] is True
         by_id = {row["id"]: row for row in fake.tables["api_keys"]}
         assert by_id["legacy-1"]["revoked_at"] is not None   # legacy rotated
         assert by_id["own-rec-1"]["revoked_at"] is None      # own untouched

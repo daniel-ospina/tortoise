@@ -478,6 +478,9 @@ class FakeControlPlane:
                     "max_graphs": p.get("p_max_graphs", 1),
                     "ops_allowance": p.get("p_ops_allowance", 10000),
                     "graph_size_cap": p.get("p_graph_size_cap", 10000),
+                    # #1859 P3-2: points-cap override column (migration
+                    # 20260817000001, nullable — NULL = use graph_size_cap).
+                    "max_points": None,
                     # #1148: dashboard key-login acceptance (migration default true)
                     "dashboard_key_login": True}
             if p.get("p_email"):
