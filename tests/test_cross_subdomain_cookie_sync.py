@@ -79,10 +79,12 @@ def _extract_helper(text: str, name: str) -> str:
 
 def _extract_fn_body(text: str, name: str) -> str:
     """Extract a named function/method body (any style: `name(key, value) {`,
-    `name: function (key, value) {`, `function name() {`) up to the matching
-    close brace, including the signature line."""
+    `name: function (key, value) {`, `function name() {`, or
+    `var name = function (...) {`) up to the matching close brace, including
+    the signature line. Does NOT match call sites (`name(...);` — no `{`)."""
     m = re.search(
-        rf"(?:function\s+)?{re.escape(name)}\s*(?::\s*function\s*)?\([^)]*\)\s*{{",
+        rf"(?:var\s+|function\s+)?{re.escape(name)}\s*"
+        rf"(?:(?:\:\s*function\s*|\=)\s*(?:function\s*)?)?\([^)]*\)\s*{{",
         text,
     )
     assert m, f"missing function: {name}"
@@ -201,8 +203,16 @@ def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
     remove→Max-Age=0)."""
     surfaces = [
         # (adapter text, [(fn, kind)]) — kind 'set' requires Expires=,
-        # 'remove' requires Max-Age=0
-        (SHARED, [("setItem", "set"), ("removeItem", "remove")]),
+        # 'remove' requires Max-Age=0. clearStoredSession and
+        # setLastAuthMethod are the shared bridge's OTHER parent-domain
+        # cookie writes — a revert there recreates the #1857 class
+        # (stale session survives logout / last-auth cookie dropped).
+        (SHARED, [
+            ("setItem", "set"),
+            ("removeItem", "remove"),
+            ("clearStoredSession", "remove"),
+            ("setLastAuthMethod", "set"),
+        ]),
         (DASHBOARD, [
             ("setItem", "set"),
             ("removeItem", "remove"),
