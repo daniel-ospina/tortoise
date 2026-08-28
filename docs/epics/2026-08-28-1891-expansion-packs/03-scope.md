@@ -38,13 +38,13 @@ Per issue #231 D11 — granular queries fired only where the brief is too broad 
 
 ### Out of Scope
 
-- **Dashboard pack-management UI** — defer to a future issue (sequenced after #557 sub-tenancy; D1 selection UI was explicitly deferred in #318).
-- **Pack marketplace / community distribution** — defer (no distribution before creation).
-- **Large-deploy rate card** — separate pricing issue (blocked on extraction cost data).
-- **First-party Letta/chat-export connector** — separate issue.
-- **Pack version/update/removal governance** (beyond install record) — defer (tiered per #318 D3; `PackInstall.version` record already exists).
-- **Governance app** (violations dashboard, overrides, kind lifecycle) from 2026-08-05 D4 — tiered later, not this epic.
-- **`block` enforcement level** — stays `warn`/`retry` only (adversarial over-constraint risk; block is per-pack opt-in at most).
+- **Dashboard pack-management UI** — defer to a future issue (sequenced after #557 sub-tenancy; D1 selection UI was explicitly deferred in #318). *Queue item pending demand — no issue filed.*
+- **Pack marketplace / community distribution** — defer; tracked as a **queue item pending demand** (no issue yet — deliberately: no distribution before creation; re-open when ≥2 external pack authors request it).
+- **Large-deploy rate card** — separate pricing issue (blocked on extraction cost data; queue item — the 2026-08-28 prospect request is the demand signal).
+- **First-party Letta/chat-export connector** — defer; tracked as a **queue item pending demand** (the prospect said he'd bring his own exporter; file when a second customer needs it).
+- **Pack version/update/removal governance** (beyond install record) — defer (tiered per #318 D3; `PackInstall.version` record already exists). *Queue item pending enterprise-tier demand.*
+- **Governance app** (violations dashboard, overrides, kind lifecycle) from 2026-08-05 D4 — tiered later, not this epic. *Queue item — the violations-event shape committed by this epic's enforcement slice is its data contract.*
+- **`block` enforcement level** — stays `warn`/`retry` only (adversarial over-constraint risk; block is per-pack opt-in at most). *Queue item pending demand + constraint-rule confidence.*
 
 ### Boundary Rationale
 
