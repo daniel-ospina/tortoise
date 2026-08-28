@@ -1248,6 +1248,10 @@ jobs:
     env:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
       TORTOISE_TEST_EXPECT_URI: "1"
+      # #1886 (issue #1884): dedicated fresh-per-job docker lane — the
+      # journal-blind team_* stray pass is safe here and stays live
+      # (opt-in only since #1884; the shared dev container never sets it).
+      TORTOISE_TEST_SWEEP_TEAM_STRAYS: "1"
     services:
       falkordb:
         image: falkordb/falkordb-server:latest

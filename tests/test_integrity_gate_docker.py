@@ -23,6 +23,7 @@ import uuid
 
 import pytest
 
+from tests._embedded import _is_missing_graph_error
 from tests.longmem_eval.test_vector_arm import _mini
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
@@ -77,7 +78,7 @@ def _clean_question(namespace: str, qid: str) -> None:
             proj.db.select_graph(graph_name).delete()
             return
         except Exception as ex:
-            if "empty key" in str(ex):
+            if _is_missing_graph_error(ex):
                 return  # graph never existed — nothing to clean
             logging.getLogger(__name__).warning(
                 "clean_question GRAPH.DELETE failed for %s: %r",
