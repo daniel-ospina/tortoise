@@ -786,7 +786,11 @@ def build_report(
         top_k context the reader saw + per-k over the deduped pool.
       * ``pool_size`` (D3) — live graph point count per question.
       * ``evidence`` (D4) — evidence written vs retrieved + vacuity over
-        evidence-bearing questions only (evidence_absent_n excluded).
+        evidence-bearing questions only (evidence_absent_n excluded) + the
+        #1901 re-calibrated vacuity (no_usable_evidence_rate@k/n/qids: no
+        evidence-bearing content of ANY kind in the top-k context — point OR
+        chunk anchor — over ALL questions; the legacy vacuity_rate stays
+        byte-identical, additive).
       * ``latency_ms.ingest`` (D5) — the isolated write-path cost.
       * paper-aligned ``retrieval.*_paper@k`` keys (non-_abs only, the
         official exclusion) alongside the legacy _abs-inclusive keys.
@@ -1494,6 +1498,93 @@ def build_report(
     retrieved_bearing = [
         float((o.get("evidence_retrieved@k") or {}).get(k_key, 0) or 0)
         for o in ev_written_outcomes]
+
+    # ── #1901: the re-calibrated vacuity — "the reader had NO usable
+    # evidence" (additive; the legacy ``vacuity_rate`` above stays
+    # byte-identical for D5 #1540 comparability, exactly as #1763 kept the
+    # legacy evidence_recall@k when it re-baselined the answer-string
+    # view). The legacy predicate (evidence_retrieved@k == 0 over
+    # evidence-bearing questions only) counts "evidence POINTS not in the
+    # top-k" as vacuous — misleading: on reval3 it flags 36/50 questions
+    # (3 with evidence points written but none surfaced in top-k + 33
+    # ingest-degraded with no points written at all, S1 429 rate limits),
+    # yet 32 of
+    # those 36 are answered CORRECTLY (the reader recovers the answer from
+    # chunk anchors / raw turns / correct abstention via the A1 #1762
+    # clause) — vacuous-acc 0.889 > non-vacuous 0.857, INVERTED. The
+    # re-calibrated predicate flags a question ONLY when the top-k context
+    # carries no evidence-bearing content of ANY kind: no marked extracted
+    # point (evidence_recall@k in {0.0, None} — None = N/A empty
+    # denominator, M6 #1526) AND no marked raw chunk anchor
+    # (chunk_evidence_recall@k in {0.0, None}). On reval3 that concentrates
+    # the failures: @20 → 9/50 vacuous with vacuous-acc 0.778 < non-vacuous
+    # 0.902 (the signal holds at every k: @5 0.765 < 0.939, @10 0.70 <
+    # 0.925). Denominator: ALL outcomes — the old evidence-bearing-only
+    # framing excluded the ingest-degraded questions that were exactly the
+    # misleading population. Emitted only when EVERY outcome carries a
+    # COMPLETE evidence seam (evidence_recall@k AND chunk_evidence_recall@k
+    # both present and covering the aggregation's ks) — fail-closed
+    # (reviewer-pinned, #1901 review rounds 1-2 P2): a MIXED pre-seam/
+    # post-seam checkpoint (resumed run / merged checkpoint set straddling
+    # the M6 seam) or a tampered dict missing a k key leaves the input
+    # state UNKNOWN, and unknown must never be counted as "no evidence"
+    # (the security-review posture: absent/unknown evidence never
+    # fabricates a vacuous classification; uniformly seam-less runs emit
+    # nothing). ──
+    def _no_evidence_value(v: Any) -> bool:
+        """#1901: a recall value meaning "no evidence-bearing content in the
+        top-k": 0.0 (evidence exists but nothing surfaced) or None (N/A —
+        empty denominator, M6 #1526 — no evidence points exist). Anything
+        else is a positive fraction = evidence WAS in the top-k."""
+        return v is None or v == 0.0
+
+    # shape-filtered values are numeric-or-None (bools/non-finite excluded
+    # by _outcome_shape_ok), so the == 0.0 comparison is safe here. The
+    # seam guard is SYMMETRIC and fail-closed (reviewer-pinned, #1901
+    # review round 2 P2): the re-calibrated readout is emitted ONLY when
+    # EVERY outcome carries BOTH recall dicts the predicate reads
+    # (evidence_recall@k AND chunk_evidence_recall@k) present AND covering
+    # every aggregated k. A missing/truncated dict — the mixed pre-seam/
+    # post-seam checkpoint (resumed run / merged checkpoint set) or a
+    # tampered k-truncated dict — leaves the input state UNKNOWN, and
+    # unknown must never be counted as "no evidence" (absent/unknown
+    # evidence never fabricates a vacuous classification; uniformly
+    # seam-less runs emit nothing).
+    def _recall_seam_complete(key: str) -> bool:
+        return all(
+            isinstance(o.get(key), dict)
+            and set(o.get(key) or {}) >= {str(k) for k in ks}
+            for o in outcomes)
+
+    _seam_complete = (_recall_seam_complete("evidence_recall@k")
+                      and _recall_seam_complete("chunk_evidence_recall@k"))
+    no_usable_evidence: dict[str, Any] | None = None
+    if _seam_complete:
+        vacuous_by_k: dict[str, list[dict]] = {str(k): [] for k in ks}
+        for o in outcomes:
+            for k in ks:
+                er = (o.get("evidence_recall@k") or {}).get(str(k), None)
+                cr = (o.get("chunk_evidence_recall@k") or {}).get(str(k), None)
+                if _no_evidence_value(er) and _no_evidence_value(cr):
+                    vacuous_by_k[str(k)].append(o)
+        vacuous_by_k = {str(k): vacuous_by_k[str(k)] for k in sorted(ks)}
+        # the vacuous question ids at the design-locked k (top_k) — the
+        # run-protocol consumer's "which questions were vacuous" list
+        # (mirrors dropped.questions / truncated_valid_qids). Falls back to
+        # the largest carried k when the outcomes' ks do not include top_k
+        # (pathological callers like reduced-ks tests — the legacy block's
+        # top_k reads use the same .get-defensive posture).
+        _qids_k = k_key if k_key in vacuous_by_k else str(max(ks))
+        no_usable_evidence = {
+            "no_usable_evidence_rate@k": {
+                str(k): round(len(qs) / n, 4) if n else 0.0
+                for k, qs in vacuous_by_k.items()},
+            "no_usable_evidence_n@k": {
+                str(k): len(qs) for k, qs in vacuous_by_k.items()},
+            "no_usable_evidence_qids": [
+                o.get("question_id")
+                for o in vacuous_by_k[_qids_k]],
+        }
     evidence = {
         "written_mean": (round(sum(written_all) / len(written_all), 2)
                          if written_all else 0.0),
@@ -1505,6 +1596,11 @@ def build_report(
         "vacuity_rate": (round(
             sum(1.0 for v in retrieved_bearing if v == 0.0)
             / len(retrieved_bearing), 4) if retrieved_bearing else 0.0),
+        # #1901: the re-calibrated vacuity (see the computation above) —
+        # absent unless EVERY outcome carries a complete evidence + chunk
+        # seam (fail-closed: mixed pre-seam/post-seam checkpoints or a
+        # tampered/truncated recall dict emit nothing).
+        **(no_usable_evidence or {}),
         # #1745 (C4): the per-mark-type breakdown aggregated from the
         # checkpoint's per-question ``ingest.evidence_marks`` census
         # (M6 #1526: source_session / verbatim / raw_chunk / answer_string
@@ -1915,7 +2011,40 @@ def build_report(
                                  "= share of evidence-bearing questions (ingest "
                                  "evidence_written > 0) with evidence_retrieved@k "
                                  "== 0 at top_k (evidence-absent abstentions "
-                                 "excluded from the denominator); recall numbers "
+                                 "excluded from the denominator); #1901: "
+                                 "evidence.no_usable_evidence_rate@k = the "
+                                 "RE-CALIBRATED vacuity — share of ALL questions "
+                                 "whose top-k context carried NO evidence-bearing "
+                                 "content of any kind (evidence_recall@k in "
+                                 "{0, None} AND chunk_evidence_recall@k in "
+                                 "{0, None}: no marked extracted point AND no "
+                                 "marked raw chunk anchor; None = N/A empty "
+                                 "denominator, M6 #1526); the legacy vacuity_rate "
+                                 "counted \"evidence points not in the top-k\" as "
+                                 "vacuous — misleading on reval3 (an ALL-questions "
+                                 "per-question reading flags 36/50, 3 with "
+                                 "evidence points written but none surfaced in "
+                                 "top-k + 33 "
+                                 "ingest-degraded by S1 429s (no points "
+                                 "written) — the legacy REPORT "
+                                 "metric itself is evidence-bearing-only, 3/17 = "
+                                 "0.1765, and excludes those 33; 32/36 correct via "
+                                 "chunk anchors / raw turns / "
+                                 "correct abstention: vacuous-acc 0.889 > "
+                                 "non-vacuous 0.857, INVERTED), while the "
+                                 "re-calibrated predicate concentrates failures "
+                                 "(reval3@20: 9/50 vacuous, vacuous-acc 0.778 < "
+                                 "non-vacuous 0.902); both are emitted, the legacy "
+                                 "keys unchanged (additive, D5 #1540 comparability "
+                                 "— the #1763 pattern); no_usable_evidence_qids "
+                                 "lists the vacuous question ids at top_k; "
+                                 "absent unless EVERY outcome carries a complete "
+                                 "evidence + chunk seam (fail-closed, symmetric: "
+                                 "a mixed pre-seam/ post-seam checkpoint — "
+                                 "resumed run or merged "
+                                 "checkpoint set — or a tampered recall dict "
+                                 "missing a k key leaves input state UNKNOWN and "
+                                 "emits nothing, never fabricated); recall numbers "
                                  "are published only under the dataset recall-"
                                  "semantics audit (methodology.dataset_semantics_"
                                  "audit; a not-trusted verdict serializes recall "
