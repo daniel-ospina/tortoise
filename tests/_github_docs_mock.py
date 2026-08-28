@@ -110,7 +110,7 @@ class MockGitHubDocsTransport(httpx.AsyncBaseTransport):
             if not t:
                 return httpx.Response(404, json={}, request=request)
             return httpx.Response(
-                200, json=[{"name": b} for b in t.keys()],
+                200, json=[{"name": b} for b in t],
                 request=request)
         if "/repos" in url:
             if self.resolve_404:
