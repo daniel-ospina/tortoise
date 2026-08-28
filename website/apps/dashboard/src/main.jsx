@@ -1433,7 +1433,11 @@ function claimIntentInFlight() {
         // them, so an OAuth failure during provisioning silently lost the
         // banner's cause).
         if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
-        else window.location.replace('https://tortoise.premiselabs.co/auth')
+        // #1860 (P3-5, review P2-1): the degraded fallback must preserve the
+        // params too — mirror the mount gate's fallback exactly, or the
+        // OAuth-error banner's cause is lost precisely when the bridge is
+        // blocked/unavailable.
+        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
         return { routedAway: true }
       }
       if (response && response.ok) {

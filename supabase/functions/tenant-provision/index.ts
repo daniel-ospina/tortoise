@@ -449,10 +449,13 @@ Deno.serve(async (req: Request) => {
     });
     if (demoRes && !demoRes.ok) {
       // HTTP error (4xx/5xx) — the provision RPC already committed, so the
-      // team exists but its graph lacks demo data. Log loudly; do NOT fail
-      // the whole provisioning (the user can still be onboarded).
+      // team exists but its graph lacks demo data. Log loudly (incl. the
+      // error body, which also drains the connection back to the pool); do
+      // NOT fail the whole provisioning (the user can still be onboarded).
+      const demoErrBody = await demoRes.text().catch(() => "");
       console.error(
-        "Demo seed failed: /internal/demo returned " + demoRes.status
+        "Demo seed failed: /internal/demo returned " + demoRes.status +
+          (demoErrBody ? ": " + demoErrBody : "")
       );
     }
 
