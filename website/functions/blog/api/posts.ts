@@ -458,6 +458,7 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
     patch.published_at = null;
     patch.reviewed_by = null;
     patch.reviewed_at = null;
+    patch.review_note = null;
   }
 
   // status=not.eq.archived guards the TOCTOU window (post archived between GET and PATCH)
