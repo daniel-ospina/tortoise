@@ -96,7 +96,13 @@ const secureAttr = () => (isLocal() ? '' : '; Secure')
 const supabaseStorage = {
   getItem(key) {
     try {
-      const m = document.cookie.match(new RegExp('(?:^|; )' + key + '=([^;]*)'))
+      // #1860 (P3-3): escape the key — same as the shared bridge's
+      // readCookie (website/assets/supabase-session.js). Regex metacharacters
+      // in a cookie name (e.g. supabase's `sb-...-auth-token` pattern is
+      // benign today, but any `[.*+?^${}()|\]` in a key would silently
+      // misparse) must not be treated as regex. Keep in sync with
+      // supabase-session.js readCookie.
+      const m = document.cookie.match(new RegExp('(?:^|; )' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'))
       return m ? decodeURIComponent(m[1]) : null
     } catch { return null }
   },
@@ -959,7 +965,6 @@ function claimIntentInFlight() {
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
       }
       setOnboardingLoading(false)
-      setMemoryErrors((e) => ({ ...e, __load: '' }))
     } catch (e) {
       // #1847: first-timer mount race — this mount effect fires BEFORE the
       // mount gate runs provisionInApp (which creates the team), so the GET
@@ -1422,8 +1427,17 @@ function claimIntentInFlight() {
         // session is stale/invalid — welcome must never render for
         // unauthenticated users. Clear the session and go to /auth.
         if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-        if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
-        else window.location.replace('https://tortoise.premiselabs.co/auth')
+        // #1860 (P3-5): preserve the search params — /auth's OAuth-error
+        // banner reads ?error=... (the mount gate already passes
+        // window.location.search on its bounce; the bare call here dropped
+        // them, so an OAuth failure during provisioning silently lost the
+        // banner's cause).
+        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
+        // #1860 (P3-5, review P2-1): the degraded fallback must preserve the
+        // params too — mirror the mount gate's fallback exactly, or the
+        // OAuth-error banner's cause is lost precisely when the bridge is
+        // blocked/unavailable.
+        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
         return { routedAway: true }
       }
       if (response && response.ok) {
@@ -1780,7 +1794,15 @@ function claimIntentInFlight() {
               // (checkout_price_ids for per-tier Upgrade CTAs) — the welcome
               // card never fetched /v1/team before. Best-effort: a failure
               // falls back to the "See pricing" link on the plan cards.
-              refreshTeam(provisioned.api_key).catch(() => {})
+              // #1860 (P3-2): first-timers never called loadAlerts (only
+              // completeLogin did, and the provisioned branch returns before
+              // it) — the security-alerts section stayed empty until reload.
+              // The provisioned team_id comes from the refreshTeam response
+              // (the team row just created). No double-fire: completeLogin
+              // never runs on this path.
+              refreshTeam(provisioned.api_key)
+                .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
+                .catch(() => {})
             } else {
               setWelcomeProvisionError('Could not create your team — try again.')
               setWelcomeProvisioning(false)
