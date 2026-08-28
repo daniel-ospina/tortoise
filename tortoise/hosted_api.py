@@ -6430,11 +6430,19 @@ def _delete_fake_invite_membership(sdk, team_id: str, invitation_id: str) -> Non
     terminal invite state (accept success/402, rescind, and — via #1875 —
     invitee decline). Without this, registry list_members shows ghost
     'invited' members with the invitee's email forever. Uses
-    sdk._get_registry() (NOT a bare reg — the rescind branch has no reg)."""
-    sdk._get_registry().query(
-        "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
-        params={"tid": team_id, "fake": f"invite-{invitation_id}"},
-    )
+    sdk._get_registry() (NOT a bare reg — the rescind branch has no reg).
+
+    Best-effort (#1902 review P2): a surviving ghost is strictly less harmful
+    than a 500 on a completed accept — a transient delete failure must never
+    mask the accept response or the intended 402."""
+    try:
+        sdk._get_registry().query(
+            "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
+            params={"tid": team_id, "fake": f"invite-{invitation_id}"},
+        )
+    except Exception as _e:
+        _logger.warning("invite ghost-cleanup failed for %s on %s (%s)",
+                        invitation_id, team_id, _e)
 
 
 @app.post("/v1/invites/accept")
