@@ -388,6 +388,41 @@ def test_re_poll_scoped_repo(provisioned, monkeypatch):
     _wait_for(lambda: seen == [("acme", "repo2")])
 
 
+def test_re_poll_invalid_repo_400(provisioned, monkeypatch):
+    """#1845 (review P1): a malicious repo scope must be rejected (400) —
+    the org boundary is server-side and the repo must stay a SHORT name.
+    Dot-segment traversal ("../victimorg/x") and query/whitespace junk are
+    not valid short repo names and must never reach the GitHub URL path."""
+    import tortoise.hosted_api as ha
+    seen = []
+
+    async def _capture(job_id, team_id, org, repo):
+        seen.append((org, repo))
+
+    monkeypatch.setattr(ha, "_run_indexing", _capture)
+    for bad in ("../victimorg/secret", "a/b?q=1", "repo name", "../.."):
+        r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": bad})
+        assert r.status_code == 400, f"repo={bad!r} should 400"
+        assert "Invalid repo name" in r.json()["detail"]
+    assert seen == [], "no job must be spawned for an invalid repo"
+
+
+def test_re_poll_whitespace_repo_is_full_org(provisioned, monkeypatch):
+    """#1845 (review P2): a whitespace-only repo scope collapses to None
+    (full-org diff), never a scoped walk of a junk name."""
+    import tortoise.hosted_api as ha
+    seen = []
+
+    async def _capture(job_id, team_id, org, repo):
+        seen.append((org, repo))
+        ha._INDEX_JOBS[job_id]["status"] = "completed"
+
+    monkeypatch.setattr(ha, "_run_indexing", _capture)
+    r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": "   "})
+    assert r.status_code == 200
+    _wait_for(lambda: seen == [("acme", None)])
+
+
 def test_re_poll_no_repo_is_full_org(provisioned, monkeypatch):
     """#1845: re-poll WITHOUT a body keeps the full-org diff (repo=None) —
     backward compatible with the pre-selector flow."""

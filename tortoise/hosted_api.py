@@ -10015,6 +10015,20 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
     if not org:
         raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
     repo = (body.repo if body else None) or None
+    if repo is not None:
+        # #1845 (review P1): repo is the ONE client-supplied value that
+        # reaches the GitHub URL path. org is read server-side from the
+        # stored credentials, but a malicious repo (e.g. "../victimorg/x" or
+        # "a/b?q=") would be interpolated into f"{org}/{repo}" and could
+        # traverse the org boundary via dot-segment normalization at the
+        # GitHub edge. Allowlist SHORT repo names — GitHub short names are
+        # alnum-start, [A-Za-z0-9._-] only, <=128 chars (the same conservative
+        # token as github_docs._safe_segment). Reject (400) rather than walk
+        # a repo the user never picked.
+        repo = repo.strip() or None
+        if repo is not None and not re.match(
+                r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
+            raise HTTPException(status_code=400, detail="Invalid repo name")
     job_id, is_new = _start_index_job(team["team_id"])
     if is_new:
         import asyncio as _asyncio

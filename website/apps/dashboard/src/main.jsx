@@ -140,6 +140,16 @@ function apiErrorText(status, b) {
   return null
 }
 
+// #1841: skeleton shimmer slots for the overview cards — one shared inline
+// style per slot size (value ≈ number height, label ≈ 13px caption). Spans
+// carry aria-hidden in JSX; the visible progress lives in the role=status cue.
+// #1842 P2-2 (CLS): heights are 1.2em/1.2em so the skeleton BOX matches the
+// real line box exactly — .card-val line-height 1.2 × 28px = 33.6px and
+// .card-label line-height 1.2 × 13px = 15.6px (the old 1.4em/0.9em rendered
+// 39.2px/11.7px, so each skeleton→text swap jittered the card height).
+const SKEL_VALUE = { width: '60%', height: '1.2em' }
+const SKEL_LABEL = { width: '45%', height: '1.2em' }
+
 function App() {
   // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
   // component — a module-top-level useState crashes the whole bundle.
@@ -434,6 +444,10 @@ function claimIntentInFlight() {
   // loading and network failures never masquerade as an RBAC denial.
   const [membersStatus, setMembersStatus] = React.useState('loading')
   const [graphsLoaded, setGraphsLoaded] = React.useState(false) // Round-26: graphs card shows '—' until first load
+  // #1842 P2-1: terminal graphs state — mirrors membersStatus so a failed
+  // /v1/graphs resolves to a '—' card instead of an eternal shimmer (the old
+  // `if (!res.ok) return` + catch{} left graphsLoaded false on any non-200).
+  const [graphsStatus, setGraphsStatus] = React.useState('loading')
   // P1/P2 (code-review): per-team data-plane key cache. Bootstrap mints are
   // capped at 3 active per team, so cache the minted key per team_id and
   // reuse on switch instead of re-minting (which would 429 after 3 switches).
@@ -799,7 +813,7 @@ function claimIntentInFlight() {
       try {
         const gs = await api('/v1/onboarding/github/status', { useSession: true })
         org = gs && gs.org
-      } catch { /* server defaults the org to the team id */ }
+      } catch { /* org stays undefined — the server 400s "org is required" and the row error surfaces it */ }
       const payload = {}
       if (org) payload.org = org
       if (docsScope.repo) payload.repo = docsScope.repo
@@ -937,12 +951,35 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1842 P1 (re-review): the post-welcome load sequence, shared by
+  // wizardComplete AND the welcome header's "Open dashboard →" button
+  // (which previously only setWelcomeMode(false), bypassing the loads —
+  // currentTeamId stayed null, the currentTeamId effect never fired
+  // loadMembers/loadGraphs, and Graphs/Users/Backups shimmered forever on
+  // the first-timer path). loadTeams' Round-8 fallback pins currentTeamId
+  // (firing that effect); AWAIT it first so loadBackups' staleness guard
+  // (teamIdRef at call time) matches, then load the key-scoped backups with
+  // the just-revealed key. Idempotent: the Round-8 pin guards on
+  // teamIdRef.current, so a call when currentTeamId is already set never
+  // re-fires the currentTeamId effect (no duplicated members/graphs loads);
+  // the setTeams refresh + loadBackups re-fetch are harmless.
+  async function finishWelcomeLoads() {
+    await loadTeams().catch(() => {})
+    loadBackups(welcomeKey || '').catch(() => {})
+  }
+
   async function wizardComplete() {
     setWizardDone(true)
     api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
       body: JSON.stringify({ onboarding_complete: true }) }).catch(() => {})
     window.history.replaceState({}, '', '/')
     setWelcomeMode(false)
+    // #1842 P1-1: the first-timer flow (provisionInApp → welcome wizard →
+    // wizardComplete) never ran loadTeams/loadBackups — those fired only in
+    // completeLogin/switchTeam (returning users). currentTeamId stayed null →
+    // the currentTeamId effect never fired loadMembers/loadGraphs → Graphs/
+    // Users/Backups shimmered forever after "Open my dashboard →".
+    await finishWelcomeLoads()
   }
 
   // #1566: in-app first-time provisioning (ported from welcome.html).
@@ -1396,6 +1433,15 @@ function claimIntentInFlight() {
             mintedTeamId = minted.teamId || null
             if (minted.teamId) {
               teamKeysRef.current[minted.teamId] = key
+              // #1841: ALSO select the minted team in STATE (not just the
+              // ref) — the currentTeamId effect (loadMembers/loadGraphs)
+              // only fires on state changes, so a fresh-mint session (no
+              // valid stored key) never loaded the Graphs/Users cards
+              // (they sat on '—' forever). Selecting here fires those JWT
+              // reads in parallel with completeLogin's /v1/team instead of
+              // never — guarded by the same "selection still unset" check
+              // as the ref pin below so a mid-mint switch keeps its pick.
+              if (!teamIdRef.current) setCurrentTeamId(minted.teamId)
               // #1828 (review): pin the minted team BEFORE completeLogin so
               // session-driven reads (?team_id=) resolve the MINTED team, not
               // the first membership (multi-membership users). Only when the
@@ -1534,6 +1580,20 @@ function claimIntentInFlight() {
   async function completeLogin(key) {
     setError('')
     const teamAtCompleteLogin = teamIdRef.current
+    // #1841: fire the overview card loads in PARALLEL with the /v1/team
+    // gate — the old code awaited /v1/team FIRST (waterfall: team → keys/
+    // sessions/teams/backups → members/graphs via the currentTeamId
+    // effect), so every card sat blank during the team round-trip. Each
+    // loader carries its own teamIdRef staleness guard, so racing them
+    // against the team fetch is safe; /v1/team still owns setTeam +
+    // setAuthed (the section gate) below. (loadGraphs/loadMembers ride
+    // the currentTeamId effect, fired at mount by the stored-key path and
+    // now by the mint path too.)
+    const cardLoads = Promise.all([
+      loadAll(key),
+      loadTeams(),
+      loadBackups(key),
+    ]).catch(() => {})
     try {
       // #1828 (review): session-driven Team card — pinned ?team_id= so the
       // session resolves the MINTED/stored-key team, not the first
@@ -1546,11 +1606,13 @@ function claimIntentInFlight() {
       // #1567 (review P1): the chrome renders early, so a team switch can
       // land DURING this await — never land team A's data under team B's
       // selection (the refreshTeam response-identity guard, applied here).
+      // The in-flight cardLoads land only where their own staleness guards
+      // allow (the switch's loaders own the data under the new selection).
       if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return
       setTeam(t)
       setAuthed(true)
       loadAlerts(t?.team_id)  // fire-and-forget (#308 R7)
-      await Promise.all([loadAll(key), loadTeams(), loadBackups(key)])
+      await cardLoads
     } catch (e) {
       if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
@@ -1560,7 +1622,12 @@ function claimIntentInFlight() {
       // failure. The error card (mountError) is the only renderable state.
       // #1719 (Task 6): 5xx → the honest unavailable copy (never a raw
       // "Internal server error" string).
-      if (teamIdRef.current !== teamAtCompleteLogin) return  // switched mid-load
+      // #1842 P2-4: the #1830 null-key path captures teamAtCompleteLogin ===
+      // null — loadTeams' Round-8 fallback can pin teamIdRef while /v1/team
+      // is in flight, and the old `!==` guard then saw list[0] !== null and
+      // bailed silently (stranded on the redirect shell). Only a REAL
+      // mid-load switch (a non-null capture that moved) bails now.
+      if (teamAtCompleteLogin !== null && teamIdRef.current !== teamAtCompleteLogin) return
       const errStatus = (e && e.status) || 0
       setMountError(errStatus >= 500
         ? UNAVAILABLE_COPY
@@ -1884,6 +1951,7 @@ function claimIntentInFlight() {
     setMembersStatus('loading')
     setGraphs([])
     setGraphsLoaded(false) // Round-27: per-team loaded flag — no '0' flash on switch
+    setGraphsStatus('loading') // #1842 P2-1: mirror the membersStatus reset
     setCurrentGraphId(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setKeys([])
@@ -1979,17 +2047,26 @@ function claimIntentInFlight() {
       const res = await fetch(`${API_BASE}/v1/graphs?team_id=${teamId}`, {
         headers: { Authorization: `Bearer ${tok}` },
       })
-      if (!res.ok) return
+      // #1842 P2-1: terminal state on failure — a non-200 (or a transport
+      // error below) must not leave graphsStatus 'loading' forever.
+      if (!res.ok) {
+        if (teamIdRef.current === teamId) setGraphsStatus('error')
+        return
+      }
       const list = await res.json()
       if (teamIdRef.current === teamId) {
         setGraphs(list)
         setGraphsLoaded(true) // Round-26
+        setGraphsStatus('ok')
         // Fix E (review round 2): auto-select first graph so the dropdown
         // shows a selection after switch; Round-3: only when nothing is
         // selected yet (don't clobber a manual pick on re-load).
         setCurrentGraphId((prev) => prev ?? list[0]?.graph_id ?? null)
       }
-    } catch { /* best-effort */ }
+    } catch {
+      // #1842 P2-1: transport/parse failure → terminal 'error', never eternal shimmer
+      if (teamIdRef.current === teamId) setGraphsStatus('error')
+    }
   }
 
   async function createGraph() {
@@ -2153,8 +2230,12 @@ function claimIntentInFlight() {
     const _teamAtCall = teamIdRef.current // Round-10: staleness guard
     // P2 (code-review): /backups is scoped to the API-key's team — fetch with
     // the selected team's key so the Overview Backups card tracks the switcher.
+    // #1842 P1-2: /backups is session-dual-auth (get_current_team_session_ungated)
+    // but the key===null path (#1830 recoverable mint failure) sent NO auth →
+    // 401 → backupInfo null → the Backups card shimmered forever. useSession
+    // sends the JWT; the api() header merge keeps the key winning when present.
     try {
-      const b = await api('/backups', key ? { headers: { Authorization: `Bearer ${key}` } } : {})
+      const b = await api('/backups', { useSession: true, headers: key ? { Authorization: `Bearer ${key}` } : {} })
       if (teamIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       setBackupInfo(list.length ? { latest: list[0], count: list.length } : { count: 0 })
@@ -2172,6 +2253,68 @@ function claimIntentInFlight() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentTeamId])
+
+  // #1842 P2-3: the role=status cue must announce the loading→loaded
+  // transition exactly ONCE — keying on `team` alone announced while the
+  // per-card shimmers still ran, and keying on the tab re-announced on every
+  // switch back to Overview. Gate on data-completeness: the real card frame
+  // is up (team) and every card source reached a terminal/loaded state.
+  // #1842 P2 (re-review): a REF latch never schedules a render, so the cue
+  // text stayed 'Loading overview…' forever unless another re-render
+  // happened — STATE, not a ref, so the announce fires via a real update.
+  // #1842 P2 (final review): graphs counts as done on ANY terminal state —
+  // 'error'/'denied' included — so a failed /v1/graphs still announces
+  // "Overview loaded" instead of reading "Loading overview…" forever while
+  // the Graphs card shows terminal '—' (mirrors members/backups terminal
+  // handling).
+  const overviewDataComplete = !!team && graphsStatus !== 'loading' && membersStatus !== 'loading' && backupInfo !== null
+  const [overviewAnnounced, setOverviewAnnounced] = React.useState(false)
+  React.useEffect(() => {
+    if (!overviewAnnounced && overviewDataComplete) setOverviewAnnounced(true)
+  }, [overviewDataComplete, overviewAnnounced])
+
+  // #1842 P1 (re-review, b): eternal-skeleton floor — if ANY overview
+  // skeleton has been showing for > STALE_LOADING_MS (e.g. loadTeams
+  // silently no-oped on !tok or a fetch failure, so currentTeamId never
+  // pinned and loadMembers/loadGraphs/loadBackups never ran), the card
+  // render flips the shimmer to '—' instead of spinning forever.
+  // frameStartRef records when the skeleton window began; a 1s interval
+  // ticks `now` ONLY while a skeleton is live on the Overview tab (team
+  // null, or any card source still loading), then clears itself. The clock
+  // resets when the window resolves (a completed frame sets a fresh start
+  // for the next skeleton window, e.g. a later team switch).
+  const STALE_LOADING_MS = 15000
+  const frameStartRef = React.useRef(null)
+  const [now, setNow] = React.useState(() => Date.now())
+  // #1842 P2-1 (final review): the clock must NOT run (or stamp frameStart)
+  // while the first-timer sits on the welcome screen — the Overview section
+  // can't render there, so ticking would re-render the whole app for nothing,
+  // AND a lingering welcome (> STALE_LOADING_MS) would open the dashboard
+  // with an already-stale frame (instant '—' instead of shimmer for a fast
+  // load). Gate overviewSkeletonLive on !welcomeMode; the tick effect's else
+  // branch keeps frameStart null while welcome is up.
+  const overviewSkeletonLive = tab === 'overview' && !welcomeMode &&
+    (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupInfo === null)
+  const frameStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
+  // #1842 P2-1: reset the frame start when the Overview section actually
+  // mounts (team null + Overview tab + not welcome) so no stale stamp carries
+  // over from the welcome screen. Declared BEFORE the tick effect so a fresh
+  // stamp in the same commit is never clobbered.
+  React.useEffect(() => {
+    if (tab === 'overview' && !welcomeMode && team === null) frameStartRef.current = null
+  }, [tab, welcomeMode, team])
+  // #1842 P2-2 (final review): gate the tick on !frameStale too — once the
+  // skeleton flips to the terminal '—' the clock must terminate (clear the
+  // interval), not re-render the app every second forever.
+  React.useEffect(() => {
+    if (overviewSkeletonLive && !frameStale) {
+      if (frameStartRef.current === null) frameStartRef.current = Date.now()
+      const id = window.setInterval(() => setNow(Date.now()), 1000)
+      return () => window.clearInterval(id)
+    }
+    frameStartRef.current = null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overviewSkeletonLive, frameStale])
 
   async function createKey() {
     // Round-17 (P3): capture the team AT CALL TIME — the previous guard compared
@@ -2750,7 +2893,7 @@ function claimIntentInFlight() {
           <nav />
           <button
             className="ghost small"
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false) }}
+            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); finishWelcomeLoads() }}
           >
             Open dashboard →
           </button>
@@ -3244,6 +3387,18 @@ function claimIntentInFlight() {
       </header>
 
       <main>
+        {/* #1841: screen-reader progress cue for the overview skeleton —
+            role=status is implicitly aria-live=polite, so the transition
+            (Loading overview… → Overview loaded) is announced without the
+            shimmering frames (which are aria-hidden).
+            #1842 P2-3: the text keys on overviewAnnounced state (flipped
+            when the overview data actually completes), never on `team` alone
+            (announced while per-card shimmers still ran) and never on the
+            tab (a text change on tab-switch re-announced). Once flipped the
+            text is stable, so the live region speaks exactly once. */}
+        <p className="sr-only" role="status">
+          {overviewAnnounced ? 'Overview loaded' : 'Loading overview…'}
+        </p>
         {suspended && (
           <div className="error banner" role="alert">
             ⚠️ {suspended.message || 'This team has been suspended due to unusual activity.'}
@@ -3277,6 +3432,39 @@ function claimIntentInFlight() {
                 </li>
               ))}
             </ul>
+          </section>
+        )}
+        {tab === 'overview' && team === null && (
+          // #1841: frames-first — the overview grid renders IMMEDIATELY as
+          // skeleton frames (the old code gated the WHOLE section on /v1/team,
+          // leaving the tab empty below the menu until the round-trip
+          // resolved, then popping all six cards at once). aria-busy tells
+          // assistive tech content is on the way; the role=status cue above
+          // announces the transition. The reentry / empty-state / graph-
+          // missing branches below take over unchanged once the team lands.
+          // #1842 P2-5: a FAILED team switch (restore error) leaves team null
+          // forever — render the real card frame with '—' values so it reads
+          // as a load failure, not an eternal shimmer.
+          // #1842 P1 (re-review, b): frameStale — the same '—' frame after
+          // the 15s skeleton floor, covering the no-error eternal shimmer
+          // (loadTeams no-op / loader never ran).
+          <section className="overview" aria-busy={!error && !frameStale}>
+            <h2>Overview</h2>
+            <div className="cards">
+              {error || frameStale
+                ? ['Data points', 'Graphs', 'Users', 'Backups', 'API Keys', 'Plan'].map((label) => (
+                    <div className="card" key={label}>
+                      <div className="card-val">—</div>
+                      <div className="card-label">{label}</div>
+                    </div>
+                  ))
+                : ['Data points', 'Graphs', 'Users', 'Backups', 'API Keys', 'Plan'].map((label) => (
+                    <div className="card" key={label}>
+                      <div className="card-val"><span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /></div>
+                      <div className="card-label"><span className="skeleton" style={SKEL_LABEL} aria-hidden="true" /></div>
+                    </div>
+                  ))}
+            </div>
           </section>
         )}
         {tab === 'overview' && team && showReentryCard && (
@@ -3360,9 +3548,9 @@ function claimIntentInFlight() {
             <h2>Overview</h2>
             <div className="cards">
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
-              <div className="card"><div className="card-val">{authMode === 'session' && graphsLoaded ? graphs.length : '—'}</div><div className="card-label">Graphs</div></div>
-              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : '—'}</div><div className="card-label">Users</div></div>
-              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : '—'}</div><div className="card-label">Backups</div></div>
+              <div className="card"><div className="card-val">{graphsStatus === 'ok' ? graphs.length : (graphsStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Graphs</div></div>
+              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : (membersStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Users</div></div>
+              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />)}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>
@@ -3829,7 +4017,7 @@ function MemorySources(props) {
               {/* #1845: repo-scope selector ("All repos" default) — the list
                   comes from GET /v1/onboarding/github/repos (server-side
                   token), never a client GitHub call. */}
-              {!(indexJob && indexJob.status === 'started') && (
+              {!(indexJob && (indexJob.status === 'starting' || indexJob.status === 'started')) && (
                 <div className="scope-selector">
                   <label htmlFor="issues-repo-select">Repo</label>
                   <select
