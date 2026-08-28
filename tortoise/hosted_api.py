@@ -5921,6 +5921,29 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
     return out
 
 
+def _count_active_free_memberships(user_id: str) -> int:
+    """#1877: active memberships in teams WITHOUT an active paid subscription
+    (the per-person "one free team" entitlement). Mode-aware: supabase reads
+    subscription_status; selfhost (no subscription model) uses tier='free'
+    as the no-sub proxy. The supabase twin shape-gates user_id and skips
+    dangling memberships — never a 500."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        count_active_free_memberships as _sb_count,
+    )
+    if is_supabase_enabled():
+        return _sb_count(get_control_plane(), user_id)
+    reg = _make_sdk(namespace="registry")._get_registry()
+    rows = reg.query(
+        "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+        "WHERE m.team_id <> '' "
+        "MATCH (t:Team {id:m.team_id, tier:'free'}) RETURN count(m)",
+        params={"uid": user_id},
+    ).result_set
+    return rows[0][0] if rows else 0
+
+
 @app.post("/v1/teams")
 async def create_team(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E2 — create a team (zero-teams state). Tier defaults Free; team
@@ -5972,6 +5995,16 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
         # pre-check is the friendly fast-path, the RPC 409 is authoritative).
         if team_by_name(cp, name):
             raise HTTPException(status_code=409, detail="Team name already exists")
+        # #1877: per-person entitlement — one free team. Any active
+        # membership in a team without an active paid subscription blocks
+        # creating another (the new team would start Free → 2 free teams).
+        # Order pinned: 429 → 409 → 402 (a free-capped user creating a
+        # duplicate name gets 409, not 402). STRING detail (the dashboard
+        # fetch layer string-handles details).
+        if _count_active_free_memberships(user["user_id"]) >= 1:
+            raise HTTPException(
+                status_code=402,
+                detail="Create another team requires a paid plan — upgrade an existing team first")
 
         team_id = str(_uuid.uuid4().hex[:26])
         graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
@@ -6024,6 +6057,23 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     if recent >= 3:
         raise HTTPException(status_code=429,
                             detail="Too many teams created — try again later")
+
+    # #1877 ordering parity: the registry 409 currently surfaces only from
+    # team_create's exception handler — add a dup-name pre-check BEFORE the
+    # 402 so a free-capped user creating a duplicate name gets 409, not 402
+    # (pinned 429 → 409 → 402).
+    dup = reg.query(
+        "MATCH (t:Team {name:$name}) RETURN count(t)",
+        params={"name": name},
+    ).result_set[0][0]
+    if dup:
+        raise HTTPException(status_code=409, detail="Team name already exists")
+    # #1877: per-person entitlement — one free team (tier='free' proxy;
+    # selfhost has no subscription model). STRING detail.
+    if _count_active_free_memberships(user["user_id"]) >= 1:
+        raise HTTPException(
+            status_code=402,
+            detail="Create another team requires a paid plan — upgrade an existing team first")
 
     try:
         result = sdk.team_create(name)
@@ -9873,6 +9923,19 @@ async def create_onboarding_team(body: dict,
             detail="A session user is required to create a sub-team — "
                    "sign in or mint a session key first",
         )
+    # #1877 (P0 fix): the onboarding lane had NO re-entry guard — a session
+    # user could mint unlimited free sub-teams by calling this endpoint
+    # repeatedly, bypassing POST /v1/teams. The wizard creates the sub-team
+    # ONCE (team_created=True in the MAIN team's PERSISTED onboarding
+    # state); a second call is blocked (409). Read the persisted state
+    # (teams.onboarding_state jsonb / Team node) — the dependency dict's
+    # onboarding_state key is never populated by any production auth path
+    # (review P0: reading the dict left the guard inert). The free-team
+    # entitlement is enforced at POST /v1/teams + this one-shot state, NOT
+    # here (the onboarding sub-team is a sanctioned second team for Q5).
+    onboarding_state = _get_onboarding_state(team["team_id"])
+    if onboarding_state.get("team_created"):
+        raise HTTPException(status_code=409, detail="Sub-team already created")
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,

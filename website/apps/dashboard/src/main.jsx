@@ -466,6 +466,12 @@ function claimIntentInFlight() {
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
   const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
+  // #1877: create-team dialog state (gated-on-click upgrade UX)
+  const [createTeamOpen, setCreateTeamOpen] = React.useState(false)
+  const [createTeamName, setCreateTeamName] = React.useState('')
+  const [createTeamBusy, setCreateTeamBusy] = React.useState(false)
+  const [createTeamError, setCreateTeamError] = React.useState('')
+  const [createTeamUpgrade, setCreateTeamUpgrade] = React.useState(false)
   const accountBlobRef = React.useRef(null) // #1148-ux review P2-4/P3-1: outside-click + Escape close
   React.useEffect(() => {
     if (!accountMenuOpen) return
@@ -2365,6 +2371,41 @@ function claimIntentInFlight() {
     } catch { /* best-effort */ }
   }
 
+  async function handleCreateTeam() {
+    // #1877: create-team dialog submit — validation mirrors POST /v1/teams
+    // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
+    // upgrade UX (the dialog explains "upgrade a team, then create" — the
+    // new team doesn't exist until the gate passes).
+    const name = createTeamName.trim()
+    if (!name) { setCreateTeamError('Team name required'); return }
+    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
+      setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
+      return
+    }
+    setCreateTeamBusy(true)
+    setCreateTeamError('')
+    setCreateTeamUpgrade(false)
+    try {
+      const res = await api('/v1/teams', {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ name }),
+      })
+      setCreateTeamOpen(false)
+      setCreateTeamName('')
+      await loadTeams()
+      if (res?.team_id) switchTeam(res.team_id)
+    } catch (e) {
+      if (e?.status === 402) {
+        setCreateTeamError(e.message || 'Create another team requires a paid plan')
+        setCreateTeamUpgrade(true)
+      } else {
+        setCreateTeamError(e?.message || 'Could not create the team')
+      }
+    } finally {
+      setCreateTeamBusy(false)
+    }
+  }
+
   async function switchTeam(teamId) {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
@@ -3897,6 +3938,12 @@ function claimIntentInFlight() {
                   ))}
                 </>
               )}
+              {/* #1877: create-team entry — UNCONDITIONAL (it's the sole
+                  entry for single-team users; the switch label above stays
+                  hidden for teams.length ≤ 1). */}
+              <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setAccountMenuOpen(false) }}>
+                + Create new team
+              </button>
               <div className="account-menu-divider" />
               <button className="account-menu-logout" onClick={logout}>
                 Log out
@@ -3904,6 +3951,48 @@ function claimIntentInFlight() {
             </div>
           )}
         </div>
+        {/* #1877: create-team dialog — gated-on-click upgrade UX. The 402
+            state explains "upgrade a team, then create" (the new team
+            doesn't exist until the gate passes); the CTA lands on Billing
+            (#1876's team selector). */}
+        {createTeamOpen && (
+          <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) setCreateTeamOpen(false) }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new team"
+                 onClick={(e) => e.stopPropagation()}>
+              {createTeamUpgrade ? (
+                <>
+                  <h3>Create a new team</h3>
+                  <p className="error">{createTeamError}</p>
+                  <p className="dim">The free plan includes one team. Upgrade an existing team to create more.</p>
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button className="btn-primary" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false); setTab('billing') }}>
+                      Upgrade
+                    </button>
+                    <button className="ghost" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false) }}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h3>Create a new team</h3>
+                  <input
+                    aria-label="Team name"
+                    placeholder="Team name"
+                    value={createTeamName}
+                    onChange={(e) => setCreateTeamName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !createTeamBusy) handleCreateTeam() }}
+                  />
+                  {createTeamError && <p className="error">{createTeamError}</p>}
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button className="btn-primary" onClick={handleCreateTeam} disabled={createTeamBusy}>
+                      {createTeamBusy ? 'Creating…' : 'Create team'}
+                    </button>
+                    <button className="ghost" onClick={() => setCreateTeamOpen(false)} disabled={createTeamBusy}>Cancel</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
             {team.tier || 'free'} tier · Upgrade
