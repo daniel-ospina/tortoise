@@ -1893,6 +1893,32 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+# #1877: the per-person "one free team" entitlement — teams WITHOUT an
+# active paid subscription. Mirrors the dashboard ACTIVE_STATUSES
+# (main.jsx:835) — keep the two definitions in sync (dual-maintenance).
+_BILLING_ACTIVE_STATUSES = frozenset({"active", "past_due", "trialing"})
+
+
+def count_active_free_memberships(cp, user_id: str) -> int:
+    """Active memberships in teams WITHOUT an active paid subscription — the
+    Supabase twin of the registry count (tier='free' proxy; selfhost has no
+    subscription model, #1877). Shape-gates user_id (#1719: a non-UUID
+    literal would 22P02 → PostgREST 500) and skips dangling memberships
+    (team_by_id None → not counted — the #302 soft-delete sweep can leave
+    memberships for purged teams).
+    """
+    if not _is_uuid(user_id):
+        return 0
+    count = 0
+    for m in user_memberships(cp, user_id):
+        team = team_by_id(cp, m["team_id"])
+        if team is None:
+            continue  # dangling membership — not counted, never a 500
+        if team.get("subscription_status") not in _BILLING_ACTIVE_STATUSES:
+            count += 1
+    return count
+
+
 def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,
                            identity: str | None = None,
                            role: str | None = None) -> int:

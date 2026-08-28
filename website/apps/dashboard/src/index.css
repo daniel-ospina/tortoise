@@ -244,6 +244,7 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 .account-menu-empty { padding: 6px 8px; font-size: 13px; }
 .account-menu-divider { height: 1px; background: var(--border, #334155); margin: 6px 0; }
 .account-menu-logout { color: #f87171 !important; }
+.account-menu-create { color: var(--accent, #06b6d4); font-weight: 600; }
 .account-identity { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
 .account-identity-text { display: flex; flex-direction: column; min-width: 0; flex: 1; }
 .account-identity-name { font-weight: 600; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
