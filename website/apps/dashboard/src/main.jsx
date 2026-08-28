@@ -37,17 +37,19 @@ const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 // Phase-2 mint guard and the signin/signup claim-intent routing on
 // tortoise.premiselabs.co know a claim is in flight from the dashboard
 // (app.premiselabs.co) — without exposing the raw tt_ key (P1-2).
-// Short TTL (1h — the OAuth round-trip is minutes); Secure + SameSite=Lax.
+// Short TTL (1h — the OAuth round-trip is minutes); SameSite=Lax, Secure via
+// the host-conditional secureAttr() (#1857) so the marker also works on
+// localhost/previews.
 function setClaimPendingMarker() {
   try {
     const expires = new Date(Date.now() + 60 * 60 * 1000).toUTCString()
-    document.cookie = `${CLAIM_PENDING_COOKIE}=1; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+    document.cookie = `${CLAIM_PENDING_COOKIE}=1${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
   } catch { /* best-effort */ }
 }
 
 function clearClaimPendingMarker() {
   try {
-    document.cookie = `${CLAIM_PENDING_COOKIE}=; Domain=.premiselabs.co; Path=/; SameSite=Lax; Secure; Max-Age=0`
+    document.cookie = `${CLAIM_PENDING_COOKIE}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
   } catch { /* best-effort */ }
 }
 const SUPABASE_URL = 'https://ybetwichurajbfswfeqa.supabase.co'
@@ -67,6 +69,29 @@ const COOKIE_DOMAIN = '.premiselabs.co'
 // loop was never hit because its provider token is shorter). Mirrors
 // website/assets/supabase-session.js SIZE_GUARD exactly.
 const SIZE_GUARD = 3800
+// #1857: host-conditional cookie attributes (RFC 6265). A hardcoded
+// `Domain=.premiselabs.co; Secure` is REJECTED by the browser on localhost,
+// 127.0.0.1, and *.pages.dev preview origins (non-matching Domain → cookie
+// silently dropped; Secure over http → dropped) → getSession() null → bounce
+// to /auth on every load. Mirrors website/assets/supabase-session.js (and
+// tortoise/oauth.py) — KEEP IN SYNC (tests/test_cross_subdomain_cookie_sync.py
+// asserts helper parity across the adapters).
+const isLocal = () => {
+  const h = window.location.hostname
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true
+  if (h.startsWith('10.') || h.startsWith('192.168.')) return true
+  return /^172\.(1[6-9]|2\d|3[01])\./.test(h)
+}
+const isPremiselabsHost = () => {
+  const h = window.location.hostname
+  return h === 'premiselabs.co' || h.endsWith('.premiselabs.co')
+}
+// Domain attribute only on premiselabs.co hosts — host-only cookie elsewhere
+// (localhost, *.pages.dev previews) so those origins keep working.
+const domainAttr = () => (isPremiselabsHost() && !isLocal() ? '; Domain=' + COOKIE_DOMAIN : '')
+// Secure only on non-local origins — localhost/loopback/RFC1918 http would
+// reject a Secure cookie.
+const secureAttr = () => (isLocal() ? '' : '; Secure')
 
 const supabaseStorage = {
   getItem(key) {
@@ -94,10 +119,10 @@ const supabaseStorage = {
       }
     }
     const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString()
-    document.cookie = `${key}=${encoded}; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+    document.cookie = `${key}=${encoded}${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
   },
   removeItem(key) {
-    document.cookie = `${key}=; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Max-Age=0`
+    document.cookie = `${key}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
   },
 }
 

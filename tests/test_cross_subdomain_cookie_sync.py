@@ -41,6 +41,102 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _extract_helper(text: str, name: str) -> str:
+    """Extract the full declaration source of a named helper from either
+    adapter style: ES5 `var f = function () { ... };` (shared bridge), ES6
+    `const f = () => { ... }` / `const f = () => (expr)` (dashboard main.jsx),
+    or the oauth.py inline copy. Returns from the declaration keyword through
+    the matching close brace/paren (plus a trailing `;` if present)."""
+    # f-string braces vs regex char class — build the opener pattern without
+    # interpolation so `([\({])` stays literal
+    m = re.search(
+        rf"(?:const|var)\s+{re.escape(name)}\s*=\s*(?:function\s*)?\(\s*\)\s*(?:=>\s*)?"
+        + r"([\({])",
+        text,
+    )
+    assert m, f"missing helper declaration: {name}"
+    start = m.start()
+    opener = m.group(1)
+    close = {"(": ")", "{": "}"}[opener]
+    depth = 0
+    i = m.end() - 1
+    while i < len(text):
+        c = text[i]
+        if c == opener:
+            depth += 1
+        elif c == close:
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    else:
+        raise AssertionError(f"unbalanced helper declaration: {name}")
+    end = i + 1
+    if end < len(text) and text[end] == ";":
+        end += 1
+    return text[start:end]
+
+
+def _normalize_helper(src: str) -> str:
+    """Collapse a helper declaration to a comparable token stream so the ES5
+    shared-bridge form (`var f = function () { return X; };`), the ES6
+    dashboard form (`const f = () => X` / block body), and the oauth.py inline
+    copy compare EQUAL on the logic they encode, ignoring formatting/quote/
+    semicolon drift. Any semantic drift (changed hostname list, dropped isLocal
+    check, flipped operator) changes the normalized form."""
+    s = re.sub(r"\bvar\b", "const", src)
+    # strip // and /* */ comments (comments differ between the copies and are
+    # not part of the encoded logic)
+    s = re.sub(r"/\*.*?\*/", " ", s, flags=re.DOTALL)
+    s = re.sub(r"//[^\n]*", " ", s)
+    # normalize the signature: ES5 `function ()` == ES6 `() =>`
+    s = s.replace("function ()", "() =>").replace("function()", "() =>")
+    # drop semicolons BEFORE unwrapping so oauth's trailing `;` can't defeat
+    # the `$` anchor on the expression-body regex
+    s = s.replace(";", "")
+    # unwrap expression bodies: `() => (X)` → `() => X` (dashboard/oauth style)
+    s = re.sub(r"\(\s*\)\s*=>\s*\((.*?)\)$", r"() => \1", s, flags=re.DOTALL)
+    # unwrap single-return block bodies: `() => { return X; }` → `() => X`
+    # (shared-bridge style; multi-statement block bodies stay as-is)
+    s = re.sub(r"\(\s*\)\s*=>\s*\{\s*return\s+(.*?)\s*\}", r"() => \1", s, flags=re.DOTALL)
+    s = s.replace('"', "'")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def test_adapters_share_host_conditional_attribute_logic() -> None:
+    """#1857: the host-conditional Domain/Secure logic must be SEMANTICALLY
+    identical across all THREE adapter copies (shared bridge, dashboard
+    main.jsx, oauth.py inline). A mere presence check ("domainAttr" in text)
+    catches a MISSING helper but not DRIFT in one adapter's logic — the exact
+    bug class #1857 is about (dashboard hardcoded Domain+Secure while the
+    shared bridge was conditional, and the string-presence test didn't catch
+    it). Normalize each helper declaration across styles and assert equality;
+    then assert the conditional helpers are actually WIRED into the write/
+    remove templates, not just declared."""
+    helpers = ("isLocal", "isPremiselabsHost", "domainAttr", "secureAttr")
+    copies = [("shared", _read(SHARED)), ("dash", _read(DASHBOARD)), ("oauth", _read(OAUTH))]
+    for name in helpers:
+        normalized = [
+            (label, _normalize_helper(_extract_helper(text, name)))
+            for label, text in copies
+        ]
+        first = normalized[0][1]
+        for label, n in normalized[1:]:
+            assert n == first, (
+                f"{name} conditional logic drifted across adapters:\n"
+                f"  shared: {normalized[0][1]}\n"
+                f"  {label}:  {n}\n"
+                "KEEP website/assets/supabase-session.js, "
+                "website/apps/dashboard/src/main.jsx and tortoise/oauth.py in sync."
+            )
+    # the conditionals must be wired into the actual write/remove templates
+    # (declared-but-unused helpers pass the parity check but do nothing)
+    for label, text in ((SHARED, _read(SHARED)), (DASHBOARD, _read(DASHBOARD)), (OAUTH, _read(OAUTH))):
+        assert "domainAttr()" in text, f"{label}: domainAttr() not wired into templates"
+        assert "secureAttr()" in text, f"{label}: secureAttr() not wired into templates"
+
+
 def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
     """Both adapters must declare the same cookie name + domain (anchored to
     const declarations so comment text can't false-match)."""
@@ -112,12 +208,13 @@ def test_adapters_share_size_guard_and_localhost_handling() -> None:
     wrongly assumed to never need the guard — a Google OAuth session
     (provider_token ~1200 chars + full identity, ~5012 encoded bytes) exceeds
     the cap and is silently rejected, so the dashboard must strip provider
-    tokens exactly like the shared factory. (Localhost/off-premiselabs
-    degradation is shared-file-only — the dashboard hardcodes
-    .premiselabs.co.)"""
+    tokens exactly like the shared factory. #1857: the dashboard adapter ALSO
+    now degrades off-premiselabs (host-conditional Domain/Secure), so
+    localhost handling is no longer shared-file-only."""
     shared = _read(SHARED)
     dash = _read(DASHBOARD)
     assert "localhost" in shared and "127.0.0.1" in shared
+    assert "localhost" in dash and "127.0.0.1" in dash  # #1857
     assert "premiselabs.co" in shared
     # size guard strips provider tokens when the cookie would exceed the cap
     # — required in BOTH adapters (#1835 parity)
