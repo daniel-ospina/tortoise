@@ -3242,20 +3242,6 @@ async def register_user(request: Request, response: Response):
                     status_code=409,
                     detail={"message": "already_registered", "email": email},
                 )
-            # #1765: post-demotion idempotency re-anchor — the reg- identity
-            # row is the authoritative unclaimed-owner key (uq_teams_email is
-            # gone; team_by_email is a pre-check, not the only guard). A
-            # leftover unclaimed reg- owner row means the email was already
-            # registered (e.g. a prior attempt that minted the graph but the
-            # client never completed signup).
-            import hashlib as _hl2
-            reg_id = f"reg-{_hl2.sha256(email.lower().encode()).hexdigest()[:12]}"
-            from tortoise.supabase_control import membership_by_identity
-            if membership_by_identity(cp, reg_id):
-                raise HTTPException(
-                    status_code=409,
-                    detail={"message": "already_registered", "email": email},
-                )
         except HTTPException:
             raise
         except Exception:
@@ -3324,21 +3310,12 @@ async def register_user(request: Request, response: Response):
                 "p_email": email,
                 "p_key_prefix": team_id[:8],
             })
-        except Exception as _provision_err:
+        except Exception:
             try:  # noqa: SIM105
                 _make_sdk(namespace=team_id)._get_proj().db.select_graph(graph_name).delete()
             except Exception:
                 pass
-            # #1765: the reg- identity UNIQUE partial index is the race/
-            # retry backstop — a concurrent register with the same email hits
-            # uq_member_identity_active → 409, never a 500 (plan Task 3).
-            msg = str(_provision_err)
-            if "uq_member_identity_active" in msg or "already registered" in msg:
-                raise HTTPException(
-                    status_code=409,
-                    detail={"message": "already_registered", "email": email},
-                ) from None
-            raise HTTPException(status_code=500, detail="Registration failed") from None
+            raise HTTPException(status_code=500, detail="Registration failed")  # noqa: B904
     else:
         sdk = _make_sdk(namespace="registry")
         try:
@@ -4830,7 +4807,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # The same stored-window text the turn loop wrote (byte-identical
         # content) drives the link trigger — link what is actually stored.
         link_texts = []
-        for _, turn in enumerate(windowed):
+        for turn in windowed:
             role = _normalize_turn_role(turn.get("role"))
             raw_content = turn.get("content", "")
             content = raw_content if isinstance(raw_content, str) else (
@@ -8195,13 +8172,15 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
 #     teams.email is NULL, so no logged-in identity can match an unclaimed
 #     team; the key gate also blocks the E1 session-rotation ATO ladder)
 #
-# #1765 (demotion) invariant: claim no longer writes teams.email, so the
-# providers ∩ {github, google} gate is LIFTED — a confirmed email+password
-# session may claim. The security model is now: key-possession anchor (the
-# claim resolves the team from api_keys.lookup_hash ONLY), the confirmed-
-# email conjunct (GoTrue /auth/v1/user email_confirmed_at — fail-closed),
-# and first-claim-wins. The RPC is service-role and holds no auth.uid()
-# (P2-FIX-J); the email is a USER property, never a team write.
+# Provider-verified-email invariant (P2-FIX-J, cycle-2/3 refined):
+# app_metadata.providers ∩ {github, google} ≠ ∅ (app_metadata is user-level,
+# always present, survives token refresh — unlike `amr` which is optional and
+# refresh-mutated to `token_refresh`). Secondary confirmatory conjunct:
+# GoTrue /auth/v1/user email_confirmed_at (AND, never OR). Fail-closed on
+# null email AND on email+password-only sessions (a confirmed password
+# session must NOT claim + overwrite teams.email). NOTE: a password login on
+# a github-LINKED account legitimately passes the invariant (providers
+# accumulates on linking) — intended semantics, documented.
 #
 # The claim_membership RPC resolves the team from api_keys.lookup_hash ONLY
 # (authoritative key→team binding) — client team_id/identity are
@@ -8252,13 +8231,16 @@ async def claim_team(request: Request):
     user_id = session["user_id"]
     email = session.get("email")
 
-    # 2. #1765 demotion: the providers ∩ {github, google} gate is LIFTED —
-    #    claim no longer writes teams.email, so a confirmed email+password
-    #    session may claim (the key-possession anchor + confirmed-email
-    #    conjunct + first-claim-wins remain the security model). app_meta is
-    #    still read for the audit detail below.
+    # 2. provider-verified-email invariant (before key work — cheap).
     app_meta = session.get("app_metadata") or {}
     providers = app_meta.get("providers") or []
+    if not (set(providers) & {"github", "google"}):
+        raise HTTPException(
+            status_code=403,
+            detail=("Claim requires a GitHub or Google sign-in (provider-"
+                    "verified email). Sign in with GitHub or Google, then "
+                    "try again."),
+        )
     if not email:
         raise HTTPException(
             status_code=400,
@@ -8325,12 +8307,11 @@ async def claim_team(request: Request):
         claim_membership(cp, lookup_hash=_lookup_hash(api_key),
                          user_id=user_id, email=email)
     except ClaimError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        raise HTTPException(status_code=e.status, detail=e.message)  # noqa: B904
     except RuntimeError:
         # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
         # plane outage) must degrade to 503 control_plane_unavailable,
-        # never a raw 500. (str(e) not e.message — ClaimError has no .message,
-        # #1765 latent-bug fix.)
+        # never a raw 500.
         raise _control_plane_unavailable() from None
 
     # 7. audit team_claim — provider/email/user_id in detail (0002 has no
@@ -8435,7 +8416,7 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     except ClaimError as e:
         # The RPC's already_claimed guard may fire if a concurrent OAuth
         # claim won first — surface as a plain conflict.
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        raise HTTPException(status_code=e.status, detail=e.message)  # noqa: B904
     except RuntimeError:
         # #1737: a non-ClaimError RuntimeError from the claim RPC (control-
         # plane outage) must degrade to 503 control_plane_unavailable,
@@ -8515,480 +8496,6 @@ async def claim_status(request: Request):
             return {"claimable": False, "claimed": True, "team_id": team_id}
         return {"claimable": False}
     return {"claimable": True, "team_id": team_id}
-
-
-# ── #1765: user identity surface — login-method inventory + linking ─────────
-# Server-authority: the inventory, re-auth gate, unlink floor, and audit all
-# live here (browser gates are advisory). Full design:
-# docs/plans/2026-08-26-1765-identity-profile-scoping.md + plan Task 3.
-_LINK_INTENT_TTL_S = 120
-_REAUTH_WINDOW_S = int(os.environ.get("TORTOISE_REAUTH_WINDOW_SECONDS", "900"))
-# Per-USER in-memory rate buckets (per-process — single-worker deployment;
-# document multi-worker drift). Env-tunable, generous defaults.
-_LINK_RATE_LIMIT = int(os.environ.get("TORTOISE_LINK_RATE_LIMIT", "10"))
-_UNLINK_RATE_LIMIT = int(os.environ.get("TORTOISE_UNLINK_RATE_LIMIT", "10"))
-_RESEND_RATE_LIMIT = int(os.environ.get("TORTOISE_RESEND_RATE_LIMIT", "5"))
-_RATE_WINDOW_S = 3600
-_id_rate_buckets: dict[str, list[float]] = {}
-
-
-def _linking_available() -> bool:
-    """Hosted manual-linking state. Ops sets TORTOISE_MANUAL_LINKING_ENABLED=1
-    when the Supabase toggle is flipped (ops runbook; verified server-side
-    via the Management API). Fail-closed: False until explicitly enabled —
-    the banner's promise-free variant and the link-intent 503 depend on it.
-    """
-    return os.environ.get("TORTOISE_MANUAL_LINKING_ENABLED", "") == "1"
-
-
-def _identity_admin_user(user_id: str) -> dict | None:
-    """Fetch the GoTrue admin user for *user_id* (identities array included).
-    None on 404 (ghosted) — the caller maps to 502; RuntimeError (transport)
-    also → 502 by the caller. Never a raw httpx exception past this helper.
-    """
-    from tortoise.hosted_api import _gotrue_admin_get_user
-    try:
-        res = _gotrue_admin_get_user(user_id)
-    except RuntimeError:
-        return None
-    if res is None:
-        return None
-    status, body = res
-    return body if status == 200 else None
-
-
-def _last_signin_fresh(last_sign_in_at) -> bool:
-    """Re-auth gate: now() - last_sign_in_at <= REAUTH_WINDOW. Fail-closed on
-    NULL (a user who never signed in cannot be re-auth-fresh) — the gate is
-    the security property, not a convenience.
-    """
-    if not last_sign_in_at:
-        return False
-    try:
-        from datetime import datetime
-        if isinstance(last_sign_in_at, str):
-            last = datetime.fromisoformat(last_sign_in_at.replace("Z", "+00:00"))
-            if last.tzinfo is None:
-                last = last.replace(tzinfo=UTC)
-        else:
-            last = last_sign_in_at
-        return (datetime.now(UTC) - last).total_seconds() <= _REAUTH_WINDOW_S
-    except (ValueError, TypeError):
-        return False
-
-
-def _identity_rate_limit(user_id: str, key: str, limit: int) -> None:
-    """Per-USER rate limit (in-memory, per-process). 429 with a retry hint."""
-    import time as _time
-    now = _time.time()
-    bucket = _id_rate_buckets.setdefault(key, [])
-    bucket[:] = [t for t in bucket if now - t < _RATE_WINDOW_S]
-    if len(bucket) >= limit:
-        raise HTTPException(
-            status_code=429,
-            detail="Too many attempts — try again in a few minutes.")
-    bucket.append(now)
-    if len(_id_rate_buckets) > 1000:  # #1765 review: evict IDLE buckets, never
-        # a global clear (a burst of users must not reset everyone's limits)
-        for k, b in list(_id_rate_buckets.items()):
-            if now - b[-1] > _RATE_WINDOW_S:
-                del _id_rate_buckets[k]
-
-
-class LinkIntentRequest(BaseModel):
-    provider: str
-
-
-class LinkCommitRequest(BaseModel):
-    intent_ref: str
-
-
-class UnlinkRequest(BaseModel):
-    identity_id: str  # identity-row id; validated as UUID in the endpoint
-                      # (#1765 review: a free string would 502 on the RPC's
-                      # cast + 404 on the GoTrue URL interpolation)
-
-
-@app.get("/v1/user/identity")
-async def get_user_identity(request: Request, user: dict = Depends(get_current_user)):  # noqa: B008
-    """Login-method inventory (#1765). Session-only. Registry mode →
-    {"unsupported": true} (claim_status precedent). 502 on seam failure.
-    """
-    from tortoise.supabase_control import (
-        get_control_plane,
-        is_supabase_enabled,
-        user_identity_inventory,
-    )
-    if not is_supabase_enabled():
-        return {"unsupported": True}
-    cp = get_control_plane()
-    try:
-        inv = user_identity_inventory(cp, user["user_id"])
-    except Exception:
-        raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
-    admin = _identity_admin_user(user["user_id"])
-    if admin is None:
-        raise HTTPException(status_code=502, detail="Identity service unavailable")
-    return {
-        **inv,
-        "linking_available": _linking_available(),
-        "email": admin.get("email"),
-        "email_confirmed_at": admin.get("email_confirmed_at"),
-        "last_sign_in_at": admin.get("last_sign_in_at"),
-        # drives the client ReauthDialog staleness check (change-email + unlink)
-        "reauth_required": not _last_signin_fresh(admin.get("last_sign_in_at")),
-    }
-
-
-@app.post("/v1/user/identity/link-intent")
-async def create_link_intent(request: Request, body: LinkIntentRequest,
-                             user: dict = Depends(get_current_user)):  # noqa: B008
-    """Mint a signed link intent (add-OAuth preflight). Fail-closed: 503 when
-    manual linking is off or the HMAC secret is unset; 403 REAUTH_REQUIRED
-    when the session is stale; per-user rate-limited. The client then runs
-    the vendored supabase-js linkIdentity(provider) with
-    redirectTo=?link_flow=<intent_ref> and calls link-commit on return.
-    """
-    from tortoise.supabase_control import (
-        get_control_plane,
-        is_supabase_enabled,
-        store_link_intent,
-    )
-    if not is_supabase_enabled():
-        return {"unsupported": True}
-    secret = os.environ.get("TORTOISE_LINK_INTENT_SECRET", "")
-    if not secret:
-        raise HTTPException(status_code=503,
-                            detail="Identity linking is not configured")
-    if not _linking_available():
-        raise HTTPException(status_code=503,
-                            detail="Adding login methods is not enabled yet")
-    provider = (body.provider or "").lower()
-    if provider not in ("github", "google"):
-        raise HTTPException(status_code=422, detail="provider must be github or google")
-    _identity_rate_limit(user["user_id"], f"link:{user['user_id']}", _LINK_RATE_LIMIT)
-    admin = _identity_admin_user(user["user_id"])
-    if admin is None or not _last_signin_fresh(admin.get("last_sign_in_at")):
-        raise HTTPException(status_code=403,
-                            detail="Sign in again to continue (REAUTH_REQUIRED)")
-    # already-linked guard: provider identity already on the account
-    if any(i.get("provider") == provider for i in (admin.get("identities") or [])):
-        raise HTTPException(status_code=409, detail="Already linked to this provider")
-
-    import base64 as _b64
-    import hashlib as _hl
-    import hmac as _hm
-    import secrets as _sec
-    from datetime import datetime, timedelta
-    nonce = _sec.token_urlsafe(32)
-    expires = datetime.now(UTC) + timedelta(seconds=_LINK_INTENT_TTL_S)
-    payload = f"{user['user_id']}|{provider}|{nonce}|{expires.isoformat()}"
-    sig = _hm.new(secret.encode(), payload.encode(), _hl.sha256).hexdigest()
-    intent_ref = _b64.urlsafe_b64encode(payload.encode()).decode().rstrip("=") + "." + sig
-    cp = get_control_plane()
-    try:
-        store_link_intent(cp, nonce=nonce, user_id=user["user_id"],
-                          provider=provider, expires_at=expires.isoformat())
-    except Exception:
-        raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
-    return {"intent_ref": intent_ref, "expires_in": _LINK_INTENT_TTL_S,
-            "provider": provider}
-
-
-@app.post("/v1/user/identity/link-commit")
-async def commit_link_intent(request: Request, body: LinkCommitRequest,
-                             user: dict = Depends(get_current_user)):  # noqa: B008
-    """Verify the OAuth link round-trip completed (server-authority gates).
-
-    Checks: signed ref (HMAC, compare_digest), ownership, consumed-once,
-    a NEW identity row for the provider since intent issuance, and the
-    verified-email conjunct. Adoption signal (new identity email matching
-    another team's teams.email) is SURFACED + audited, never automated.
-    Expired/consumed intents degrade to the "already linked — refresh"
-    state when a matching provider identity now exists (plan-review P2).
-    """
-    from tortoise.supabase_control import (
-        consume_link_intent,
-        get_control_plane,
-        is_supabase_enabled,
-    )
-    if not is_supabase_enabled():
-        return {"unsupported": True}
-    secret = os.environ.get("TORTOISE_LINK_INTENT_SECRET", "")
-    if not secret:
-        raise HTTPException(status_code=503, detail="Identity linking is not configured")
-    import base64 as _b64
-    import hashlib as _hl
-    import hmac as _hm
-    from datetime import datetime
-    ref = (body.intent_ref or "")
-    if "." not in ref:
-        raise HTTPException(status_code=422, detail="Invalid intent")
-    payload_b64, sig = ref.rsplit(".", 1)
-    try:
-        payload = _b64.urlsafe_b64decode(payload_b64 + "==").decode()
-    except Exception:
-        raise HTTPException(status_code=422, detail="Invalid intent")  # noqa: B904
-    expected = _hm.new(secret.encode(), payload.encode(), _hl.sha256).hexdigest()
-    if not _hm.compare_digest(sig, expected):
-        raise HTTPException(status_code=422, detail="Invalid intent")
-    try:
-        intent_user, provider, nonce, expires_iso = payload.split("|")
-    except ValueError:
-        raise HTTPException(status_code=422, detail="Invalid intent")  # noqa: B904
-    if intent_user != user["user_id"]:
-        raise HTTPException(status_code=422, detail="Intent does not belong to this account")
-    now = datetime.now(UTC)
-    expired = False
-    try:
-        expires = datetime.fromisoformat(expires_iso)
-        if expires.tzinfo is None:
-            expires = expires.replace(tzinfo=UTC)
-        expired = now > expires
-    except ValueError:
-        expired = True
-
-    cp = get_control_plane()
-    admin = _identity_admin_user(intent_user)
-    if admin is None:
-        raise HTTPException(status_code=502, detail="Identity service unavailable")
-    identities = admin.get("identities") or []
-    matches = [i for i in identities if i.get("provider") == provider]
-    # Newness: an identity row created at/after the intent window (expires-iso
-    # - TTL). Computed BEFORE the consume so a rejection never burns the nonce.
-    try:
-        intent_created = expires - _link_intent_ttl_delta()
-    except Exception:
-        intent_created = None
-    def _is_fresh(i):
-        created = _identity_created_at(i)
-        return intent_created is None or (created is not None and created >= intent_created)
-    fresh = [i for i in matches if _is_fresh(i)]
-    # #1765 review: check newness/confirmation BEFORE consuming the nonce — a
-    # rejection must NOT burn the intent (the user can retry the same ref).
-    if not admin.get("email_confirmed_at") and not matches:
-        raise HTTPException(status_code=403,
-                            detail="Confirm your email before adding a login method")
-    # Consumed-once (guarded UPDATE; 0 rows = already consumed/expired/wrong user)
-    try:
-        consumed = consume_link_intent(cp, nonce=nonce, user_id=intent_user,
-                                       consumed_at=now.isoformat())
-    except Exception:
-        raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
-    if consumed == 0 or expired:
-        # Expired/consumed intent: degrade gracefully — if the user DID
-        # complete the provider round-trip (matching identity exists), report
-        # the already-linked state rather than a dead-end error.
-        if matches:
-            await _async_audit(request, "", "identity_link", resource_type="identity",
-                               resource_id=provider, actor_user_id=intent_user,
-                               detail={"provider": provider, "email": admin.get("email"),
-                                       "status": "already_linked"})
-            return {"linked": True, "already": True, "provider": provider}
-        raise HTTPException(status_code=422,
-                            detail="Link intent expired — try again")
-    if not fresh:
-        raise HTTPException(status_code=422,
-                            detail="No new login method detected — try again")
-    if not admin.get("email_confirmed_at"):
-        raise HTTPException(status_code=403,
-                            detail="Confirm your email before adding a login method")
-    new_email = (fresh[0].get("identity_data") or {}).get("email") if isinstance(fresh[0].get("identity_data"), dict) else None
-    adoption = _adoption_signal(new_email or admin.get("email"))
-    await _async_audit(request, "", "identity_link", resource_type="identity",
-                       resource_id=provider, actor_user_id=intent_user,
-                       detail={"provider": provider,
-                               "email": admin.get("email"),
-                               "new_identity_email": new_email,
-                               "adoption_signal": adoption})
-    return {"linked": True, "already": False, "provider": provider,
-            "adoption_signal": adoption}
-
-
-def _link_intent_ttl_delta():
-    from datetime import timedelta
-    return timedelta(seconds=_LINK_INTENT_TTL_S)
-
-
-def _identity_created_at(identity: dict):
-    from datetime import datetime
-    raw = identity.get("created_at")
-    if not raw:
-        return None
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-        return dt if dt.tzinfo else dt.replace(tzinfo=UTC)
-    except (ValueError, TypeError):
-        return None
-
-
-def _adoption_signal(email: str) -> bool:
-    """True when *email* matches ANOTHER team's teams.email (a possible
-    second account for the same human). Surfaced + audited, NEVER automated
-    (enumeration-safe copy; signal degrades post-demotion as teams.email
-    goes stale — plan-review P3).
-    """
-    if not email:
-        return False
-    from tortoise.supabase_control import get_control_plane, is_supabase_enabled, team_by_email
-    if not is_supabase_enabled():
-        return False
-    try:
-        return team_by_email(get_control_plane(), email) is not None
-    except Exception:
-        return False
-
-
-@app.post("/v1/user/identity/unlink")
-async def unlink_identity(request: Request, body: UnlinkRequest,
-                          user: dict = Depends(get_current_user)):  # noqa: B008
-    """Remove a login method with an atomic floor (#1765).
-
-    Gates: re-auth freshness, per-user rate limit, reserve_unlink permit
-    (login_methods - pending - 1 >= 2; unique-index backstop). The GoTrue
-    DELETE runs as the USER (BFF — this request's session token forwarded,
-    never stored). Post-verify login_methods >= 1, consume the permit; ANY
-    failure compensates the permit (no deadlock). Error codes mapped, never
-    statuses: single_identity_not_deletable (GoTrue native floor), 404 =
-    already unlinked.
-    """
-    from tortoise.supabase_control import (
-        ClaimError,
-        consume_unlink_permit,
-        get_control_plane,
-        is_supabase_enabled,
-        reserve_unlink,
-        user_identity_inventory,
-    )
-    if not is_supabase_enabled():
-        return {"unsupported": True}
-    _identity_rate_limit(user["user_id"], f"unlink:{user['user_id']}", _UNLINK_RATE_LIMIT)
-    admin = _identity_admin_user(user["user_id"])
-    if admin is None or not _last_signin_fresh(admin.get("last_sign_in_at")):
-        raise HTTPException(status_code=403,
-                            detail="Sign in again to continue (REAUTH_REQUIRED)")
-    cp = get_control_plane()
-    identity_id = body.identity_id
-    import uuid as _uuid_validate
-    try:
-        _uuid_validate.UUID(identity_id)  # #1765 review: reject non-UUID ids
-    except ValueError:
-        raise HTTPException(status_code=422, detail="identity_id must be a UUID")  # noqa: B904
-    try:
-        reserve_unlink(cp, user_id=user["user_id"], identity_id=identity_id)
-    except ClaimError as e:
-        raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
-    except Exception:
-        raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
-
-    def _compensate() -> None:
-        import contextlib
-        with contextlib.suppress(Exception):
-            # sweep TTL covers a stuck permit
-            consume_unlink_permit(cp, user_id=user["user_id"], consumed_at=_now_iso())
-
-    import httpx as _httpx
-    auth = request.headers.get("Authorization", "")
-    # BFF forward: the user's OWN session token — never log headers, never
-    # add httpx event hooks or set an httpx DEBUG logger (headers would
-    # leak the bearer token into logs; the proxy access log is configured
-    # without $http_authorization per the ops runbook).
-    url = (os.environ.get("SUPABASE_URL", "").rstrip("/")
-           + f"/auth/v1/user/identities/{identity_id}")
-    try:
-        resp = _httpx.delete(
-            url,
-            headers={"Authorization": auth,
-                     "apikey": os.environ.get("SUPABASE_ANON_KEY", "")},
-            timeout=15.0,
-        )
-    except (_httpx.HTTPError, _httpx.TimeoutException):
-        _compensate()
-        raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
-
-    if resp.status_code == 404:
-        _compensate()
-        await _async_audit(request, "", "identity_unlink", resource_type="identity",
-                           resource_id=identity_id, actor_user_id=user["user_id"],
-                           detail={"status": "already_unlinked"})
-        return {"unlinked": True, "already": True}
-    if resp.status_code in (401, 422):
-        _compensate()
-        msg = resp.text
-        if "single_identity_not_deletable" in msg:
-            # #1765 review: GoTrue's floor counts IDENTITY ROWS (not password
-            # capability) — the copy must say so, or users see a wrong reason
-            raise HTTPException(status_code=409,
-                                detail="Add another linked login method first — GoTrue "
-                                       "keeps at least two identity rows on your account")
-        if "reauthentication_not_valid" in msg or "reauthentication_needed" in msg:
-            raise HTTPException(status_code=403,
-                                detail="Sign in again to continue (REAUTH_REQUIRED)")
-        if resp.status_code == 401:
-            raise HTTPException(status_code=403,
-                                detail="Sign in again to continue (REAUTH_REQUIRED)")
-        raise HTTPException(status_code=422, detail="Unable to remove this login method")
-    if resp.status_code not in (200, 204):
-        _compensate()
-        raise HTTPException(status_code=502, detail="Identity service unavailable")
-
-    # Success: post-verify + consume + audit
-    try:
-        inv = user_identity_inventory(cp, user["user_id"])
-        remaining = int(inv.get("login_methods", 0))
-    except Exception:
-        remaining = 1  # fail-open on the READ after a successful DELETE
-    if remaining < 1:
-        _compensate()
-        raise HTTPException(status_code=409, detail="Cannot remove the last login method")
-    import contextlib
-    with contextlib.suppress(Exception):
-        consume_unlink_permit(cp, user_id=user["user_id"], consumed_at=_now_iso())
-    await _async_audit(request, "", "identity_unlink", resource_type="identity",
-                       resource_id=identity_id, actor_user_id=user["user_id"],
-                       detail={"remaining_login_methods": remaining})
-    return {"unlinked": True, "already": False, "remaining_login_methods": remaining}
-
-
-@app.post("/v1/user/identity/resend-confirmation")
-async def resend_confirmation(request: Request, user: dict = Depends(get_current_user)):  # noqa: B008
-    """Resend the email-confirmation link (banner affordance, #1765). No-op
-    when already confirmed. GoTrue /auth/v1/resend (type=signup) with the
-    session token; per-user rate-limited; audited.
-    """
-    from tortoise.supabase_control import is_supabase_enabled
-    if not is_supabase_enabled():
-        return {"unsupported": True}
-    _identity_rate_limit(user["user_id"], f"resend:{user['user_id']}", _RESEND_RATE_LIMIT)
-    admin = _identity_admin_user(user["user_id"])
-    if admin is None:
-        raise HTTPException(status_code=502, detail="Identity service unavailable")
-    if admin.get("email_confirmed_at"):
-        return {"already_confirmed": True, "sent": False}
-    import httpx as _httpx
-    auth = request.headers.get("Authorization", "")
-    # same no-log discipline as the unlink BFF forward (see above)
-    url = (os.environ.get("SUPABASE_URL", "").rstrip("/") + "/auth/v1/resend")
-    try:
-        resp = _httpx.post(
-            url,
-            json={"type": "signup", "email": admin.get("email")},
-            headers={"Authorization": auth,
-                     "apikey": os.environ.get("SUPABASE_ANON_KEY", "")},
-            timeout=15.0,
-        )
-    except (_httpx.HTTPError, _httpx.TimeoutException):
-        raise HTTPException(status_code=502, detail="Identity service unavailable")  # noqa: B904
-    if resp.status_code not in (200, 201, 204):
-        raise HTTPException(status_code=502, detail="Unable to resend confirmation")
-    await _async_audit(request, "", "identity_confirm_resend", resource_type="identity",
-                       resource_id=user["user_id"], actor_user_id=user["user_id"])
-    return {"sent": True}
-
-
-def _now_iso() -> str:
-    from datetime import datetime
-    return datetime.now(UTC).isoformat()
 
 
 @app.post("/v1/session/key")
@@ -9631,11 +9138,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
         _track_analytics_event(team["team_id"], "artifact_copied",
                                {"harness": harness, "section": section})
     state = _update_onboarding_state(team["team_id"], **updates)
-    # #1765 review (onboarding dual-auth): a SESSION-authed call's email
-    # belongs on the USER anchor (auth.users — managed via the profile
-    # flow), never teams.email; only the KEY-authed (welcome beacon)
-    # path keeps the sanctioned CONTACT-field write.
-    if email is not None and not team.get("session_user_id"):
+    if email is not None:
         _write_team_email(team["team_id"], email)
     return {
         "onboarding": state,

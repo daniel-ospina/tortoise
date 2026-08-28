@@ -457,7 +457,7 @@ class TestDashboardLoginGate:
         ladder, so EVERY retry still selected the (then-phantom) columns →
         PGRST204 → terminal raise → HTTP 500 on /v1/team (and /v1/team/keys,
         /v1/sessions, /v1/onboarding/state) for every session-JWT user."""
-        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        key, team_id = _provision_anon(client, fake)
         user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         from tortoise.auth import lookup_hash
@@ -567,7 +567,7 @@ class TestBackupsSessionAuth:
     """
 
     def test_backups_list_with_session_jwt(self, client, fake, monkeypatch):
-        key, team_id = _provision_anon(client, fake)  # noqa: F841
+        key, _team_id = _provision_anon(client, fake)
         user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
         # claim so the session user resolves a team via memberships
@@ -582,7 +582,7 @@ class TestBackupsSessionAuth:
         assert r.json() == {"backups": []}
 
     def test_backups_list_with_key_still_works(self, client, fake, monkeypatch):
-        key, team_id = _provision_anon(client, fake)  # noqa: F841
+        key, _team_id = _provision_anon(client, fake)
         from tortoise.hosted_backup import MemoryStorage
         monkeypatch.setattr(ha_mod, "_backup_storage", lambda: MemoryStorage())
         r = client.get("/backups", headers={"Authorization": f"Bearer {key}"})

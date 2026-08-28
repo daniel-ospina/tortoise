@@ -401,10 +401,17 @@ surfaces:
   - test_backfill_embeddings_force.py
   - test_calibrate_thresholds.py
   - test_embedder_probe.py
+  - test_eval_ingest_retry.py
+  - test_eval_resume_retry_failed.py
+  - test_eval_retrieval_budget.py
+  - test_graph_integrity_gate.py
+  - test_integrity_gate_docker.py
   - test_labeled_pairs_schema.py
   - test_lme_ingest_v2_supersession.py
   - test_load_test.py
   - test_pair_label_runner.py
+  - test_per_session_census.py
+  - test_resume_gate_parity.py
 tier1:
 - test_cli_serve.py
 - test_config.py
