@@ -3570,6 +3570,10 @@ def run_evaluation(
                         # C4 (#1745): the reader-surface evidence metric
                         # (context-level; the metric C1 actually moves).
                         "reader_evidence@k": ret.get("reader_evidence@k"),
+                        # #1948: the reader-surface metric (evidence-bearing
+                        # points AND chunks in the FULL reader context) —
+                        # wired end-to-end alongside reader_evidence@k.
+                        "reader_surface@k": ret.get("reader_surface@k"),
                         # Task 0 (#1745): ranked ids + evidence-turn matches
                         # populated for BOTH arms (the pilot's context composition
                         # was unreconstructable — 0/50); ranked_ids_pre_boost is
@@ -4053,6 +4057,11 @@ def outcomes_to_report(
                 # them).
                 "reader_evidence@k", "ranked_ids_pre_boost",
                 "evidence_boost",
+                # #1948: the reader-surface metric rides the projection
+                # alongside reader_evidence@k (absent until the outcome
+                # carries it — pre-#1948 checkpoints resume without
+                # KeyError).
+                "reader_surface@k",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",

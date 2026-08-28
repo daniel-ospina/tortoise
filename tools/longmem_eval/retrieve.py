@@ -647,6 +647,21 @@ def _recall_metrics(
     reused for the rerank pool-recall diagnostic. ``evidence_point_count`` /
     ``chunk_evidence_point_count`` are the D5 denominators (computed once,
     before the loop — no hoisting exists or is needed).
+
+    #1948 turn-vs-evidence semantics (PINNED — reval3 finding (a)):
+    ``turn_recall@k`` and ``evidence_recall@k`` are THE SAME formula whenever
+    evidence points exist — both are marked (``has_answer``) non-chunk hits
+    in top-k ÷ ``evidence_point_count``. The reval3 aggregate split
+    (turn@20 0.722 vs evidence@20 0.299) is a denominator/population
+    artifact, NOT a separate "turn vs evidence" retrieval phenomenon.
+    They diverge ONLY on degraded questions where ``evidence_point_count``
+    is 0 (ingest wrote no evidence points): ``evidence_recall@k`` is None
+    (M6 #1526 — "no evidence exists" stays distinguishable from "never
+    surfaces") while ``turn_recall@k`` falls back to the DETERMINISTIC
+    answer-turn binary — did the answer TURN id (``evidence_turn_ids``)
+    surface in top-k (31/33 = 1.0 on reval3's degraded population). A
+    turn/evidence aggregate pair over a mixed population is therefore a
+    MIXED metric; compare them only on the evidence-bearing subset.
     """
     session_recall: dict[str, float] = {}
     turn_recall: dict[str, float | None] = {}
@@ -675,7 +690,12 @@ def _recall_metrics(
             # "evidence exists but never surfaces" (#1369).
             _evidence_recall[str(k)] = None
             if evidence_turn_ids:
-                # deterministic leg: did the evidence TURN surface?
+                # #1948 (pinned): the degraded-question fallback — a
+                # DIFFERENT (binary) metric from the healthy-formula
+                # turn/evidence above: "did the answer TURN surface in
+                # top-k" (1.0 on 31/33 reval3-degraded questions), NOT
+                # point-level recall. Identical to the healthy formula
+                # only when evidence_point_count > 0.
                 top_ids = {h["id"] for h in top}
                 turn_recall[str(k)] = (
                     len(evidence_turn_ids & top_ids) / len(evidence_turn_ids))
@@ -1415,6 +1435,30 @@ def retrieve_for_question(
             len(ctx_ev) / evidence_point_count if evidence_point_count
             else None)
 
+    # ── #1948: reader_surface@k — the honest "did the reader see the
+    # evidence" measure. Fraction of evidence-bearing content (points AND
+    # chunks — the D5 union of the evidence_point_count and
+    # chunk_evidence_point_count denominators) present in the FULL reader
+    # context (``context_points``, what ``_assemble_context`` actually
+    # delivered, bounded by the context item cap) / evidence-bearing
+    # content total. Distinct from the pool-based metrics: chunk@20
+    # measures pool[:20], but the reader sees up to ``context_item_cap``
+    # items — a marked chunk at pool rank 21+ that IS in the context
+    # counts as read here while chunk_evidence_recall@20 = 0.0 (reval3:
+    # 8550ddae's marked chunk at rank 31 was in context and answered
+    # correctly). k-independent by construction (the context list is the
+    # same for every k; the @k suffix keeps the report shape parallel);
+    # N/A (None) on empty denominators (M6 #1526, mirroring
+    # evidence_recall@k). ──
+    reader_surface: dict[str, float | None] = {}
+    reader_surface_denom = evidence_point_count + chunk_evidence_point_count
+    ctx_evidence_ids = {h["id"] for h in context_points
+                        if h["has_answer"]}
+    for k in ks:
+        reader_surface[str(k)] = (
+            len(ctx_evidence_ids) / reader_surface_denom
+            if reader_surface_denom else None)
+
     out = {
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
@@ -1445,6 +1489,13 @@ def retrieve_for_question(
         # item into the k-prefix).
         # N/A (None) on empty denominators, mirroring evidence_recall@k.
         "reader_evidence@k": reader_evidence,
+        # #1948: the reader-surface metric — evidence-bearing content
+        # (points AND chunks) in the FULL reader context / evidence-
+        # bearing content total. The honest "did the reader see the
+        # evidence" measure (chunk@20 undercounts the rank-(20, cap]
+        # window; reader_evidence@k counts points only); k-independent
+        # by construction, N/A on empty denominators.
+        "reader_surface@k": reader_surface,
         # Task 0 (#1745): ranked ids + evidence-turn matches populated for
         # the hybrid arm (the pilot's context composition was
         # unreconstructable — 0/50). ``ranked_ids`` is the effective pool

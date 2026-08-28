@@ -1700,3 +1700,39 @@ def test_run_protocol_step5_gate_string_pins_criterion():
     import pytest
     with pytest.raises(SystemExit):
         rp.parse_args(_runner_argv(single_tok))  # runner rejects, loudly
+
+
+def test_report_retrieval_emits_reader_surface():
+    """#1948: the retrieval block emits reader_surface@k — evidence-bearing
+    content (points AND chunks) in the reader's FULL context / evidence-
+    bearing content total — aggregated parallel to reader_evidence@k; N/A
+    per-outcome values are dropped from the mean; outcomes without the key
+    leave the aggregate absent (never fabricated from the ingest census)."""
+    from tools.longmem_eval.dataset_audit import TRUSTED_VERDICT
+    trusted_audit = {
+        "verdict": TRUSTED_VERDICT,
+        "n": 3,
+        "fields": {"answer_session_ids": "present", "answer_turn": "absent",
+                   "has_answer": "present"},
+        "violations": 0,
+    }
+    outcomes = [_outcome("q-rs-1"), _outcome("q-rs-2"), _outcome("q-rs-3")]
+    outcomes[0]["reader_surface@k"] = {"5": 1.0}
+    outcomes[0]["reader_evidence@k"] = {"5": 0.5}
+    outcomes[1]["reader_surface@k"] = {"5": 0.5}
+    outcomes[2]["reader_surface@k"] = {"5": None}  # N/A dropped from mean
+    report = build_report(
+        outcomes, dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+        reader_model="mock-reader", judge_model="mock-judge",
+        extraction_approach="deterministic session ingestion",
+        ingest_mode="deterministic", ks=(5,), top_k=5,
+        dataset_semantics_audit=trusted_audit,
+    )
+    r = report["retrieval"]
+    assert r["reader_surface@k"] == {"5": 0.75}
+    assert r["reader_surface_n@k"] == {"5": 2}
+    # the points-only reader-surface view stays independently emitted
+    assert r["reader_evidence@k"] == {"5": 0.5}
+    assert r["reader_evidence_n@k"] == {"5": 1}
+    # methodology records the metric semantics (truthful labels)
+    assert "reader_surface@k" in report["methodology"]["recall_definition"]
