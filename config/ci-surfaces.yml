@@ -73,6 +73,8 @@ surfaces:
   - test_session_index_health.py
   - test_session_index_lock.py
   - test_session_indexer_ollama.py
+  - test_session_import_codex.py
+  - test_session_import_desktop.py
   - test_session_key.py
   - test_session_key_http.py
   - test_session_login.py

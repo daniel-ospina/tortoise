@@ -504,3 +504,45 @@ input::placeholder, textarea::placeholder {
   line-height: 1.6;
   color: var(--text, #e2e8f0);
 }
+
+/* #1728 Slice 3 (Tasks 16-17): Memory sources panel + misled-user re-ask pane.
+   Shared by the wizard step-1 and the dashboard Overview — one component, one
+   style block. The re-ask pane is role="alertdialog" (dark modal card); the
+   per-harness status rows use the canonical 4-state vocabulary
+   (off → install-pending → waiting → active). */
+.memory-sources { display: flex; flex-direction: column; gap: 6px; }
+.reask-pane {
+  background: var(--surface, #0d1a2d);
+  border: 1px solid rgba(6, 182, 212, 0.4);
+  border-left: 4px solid var(--accent, #06b6d4);
+  border-radius: 12px;
+  padding: 18px 20px;
+  margin-bottom: 8px;
+}
+.reask-pane h4 { font-size: 15px; margin: 0 0 8px; color: var(--accent, #06b6d4); }
+.reask-pane p { font-size: 14px; line-height: 1.55; margin: 0 0 8px; }
+.reask-pane .wizard-nav-actions { margin-top: 6px; }
+.reask-pane .btn-primary, .reask-pane .ghost { padding: 8px 14px; font-size: 13px; }
+.harness-statuses { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
+.harness-status {
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-soft, #0d1a2d);
+}
+.harness-status.current { border-color: rgba(6, 182, 212, 0.5); }
+.harness-status-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.harness-status-head strong { font-size: 13px; }
+.capture-state {
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #1e293b);
+  color: var(--text-dim, #64748b);
+  white-space: nowrap;
+}
+.harness-status.status-active .capture-state { color: var(--green, #4ade80); border-color: rgba(74, 222, 128, 0.4); }
+.harness-status.status-waiting .capture-state { color: var(--accent, #06b6d4); border-color: rgba(6, 182, 212, 0.4); }
+.harness-status.status-install-pending .capture-state { color: #facc15; border-color: rgba(196, 167, 60, 0.4); }
+.harness-status .snippet { margin-top: 8px; font-size: 12px; }
+.harness-status .error.small { margin-top: 6px; }
