@@ -28,8 +28,12 @@ def _enable_session_recording(api, tenant: dict) -> None:
     """Opt the tenant into session capture (the #1727 enforced consent)."""
     h = {"Authorization": f"Bearer {tenant['api_key']}"}
     r = api.patch("/v1/onboarding/state", headers=h,
-                  data={"session_recording": True})
+                  json={"session_recording": True})
     assert r.status == 200, f"enable session_recording: {r.status} {r.text()}"
+    # Self-verifying: the opt-in must actually stick — a silently dropped
+    # PATCH would 403 the capture POSTs below (loud), but asserting the
+    # echoed state here makes the consent precondition explicit.
+    assert r.json()["onboarding"]["session_recording"] is True, r.text()
 
 
 def _dense_conversation(n_turns: int = 6) -> list[dict]:
