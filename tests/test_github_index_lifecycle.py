@@ -370,6 +370,40 @@ def test_re_poll_requires_connection(client):
     assert "GitHub not connected" in r.json()["detail"]
 
 
+def test_re_poll_scoped_repo(provisioned, monkeypatch):
+    """#1845: re-poll accepts an optional {repo} scope and forwards it to the
+    run — org is still read server-side from the stored credentials (the
+    client never supplies it)."""
+    import tortoise.hosted_api as ha
+    seen = []
+
+    async def _capture(job_id, team_id, org, repo):
+        seen.append((org, repo))
+        ha._INDEX_JOBS[job_id]["status"] = "completed"  # settle the drain
+
+    monkeypatch.setattr(ha, "_run_indexing", _capture)
+    r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": "repo2"})
+    assert r.status_code == 200
+    assert r.json()["status"] == "started"
+    _wait_for(lambda: seen == [("acme", "repo2")])
+
+
+def test_re_poll_no_repo_is_full_org(provisioned, monkeypatch):
+    """#1845: re-poll WITHOUT a body keeps the full-org diff (repo=None) —
+    backward compatible with the pre-selector flow."""
+    import tortoise.hosted_api as ha
+    seen = []
+
+    async def _capture(job_id, team_id, org, repo):
+        seen.append((org, repo))
+        ha._INDEX_JOBS[job_id]["status"] = "completed"
+
+    monkeypatch.setattr(ha, "_run_indexing", _capture)
+    r = provisioned.tc.post("/v1/index/github/re-poll")
+    assert r.status_code == 200
+    _wait_for(lambda: seen == [("acme", None)])
+
+
 # ── Cursor + backfill marker persistence (Tasks 2/3) ──────────────
 
 def test_cursor_and_backfill_marker_persisted(provisioned, mock_github):

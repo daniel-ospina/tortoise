@@ -117,3 +117,42 @@ class TestGitHubStatus:
         body = r.json()
         assert body["connected"] is False
         assert body["org"] is None
+
+
+class TestGitHubRepos:
+    """#1845: GET /v1/onboarding/github/repos — the source-scope selector's
+    repo-list read path (server-side token, SHORT names)."""
+
+    def test_repos_requires_auth(self, unauth_client):
+        r = unauth_client.get("/v1/onboarding/github/repos")
+        assert r.status_code == 401
+
+    def test_repos_not_connected(self, client):
+        r = client.get("/v1/onboarding/github/repos")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["connected"] is False
+        assert body["org"] is None
+        assert body["repos"] == []
+
+    def test_repos_lists_short_names(self, client, monkeypatch):
+        import tortoise.hosted_api as ha
+        from tortoise.crypto import encrypt_token
+        # Stub the encrypted-credential read (no store/network in tests).
+        monkeypatch.setattr(ha, "_github_credentials",
+                            lambda team_id: (encrypt_token("fake-token"), "acme"))
+        from tortoise.indexer.github_indexer import GitHubIndexer
+
+        async def fake_resolve(self, org):
+            return [f"{org}/repo1", f"{org}/repo2", "solo-repo"]
+
+        monkeypatch.setattr(GitHubIndexer, "resolve_repos", fake_resolve)
+
+        r = client.get("/v1/onboarding/github/repos")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["connected"] is True
+        assert body["org"] == "acme"
+        # full_names are stripped to SHORT names (the /v1/index/* endpoints
+        # already re-add the org/ prefix from the stored org).
+        assert body["repos"] == ["repo1", "repo2", "solo-repo"]
