@@ -18,9 +18,9 @@
 //
 // Usage in a Pages Function (import path is depth-dependent — this module lives
 // at blog/_shared/):
-//   import { TAG_KEYWORDS } from "./_shared/seo-keywords.ts";   // consumer at blog/ root
-//   import { TAG_KEYWORDS } from "../_shared/seo-keywords.ts";  // consumer in blog/api/
-//   const kw = [...new Set(tags.flatMap((t) => TAG_KEYWORDS[t] ?? []))];
+//   import { keywordsFor } from "./_shared/seo-keywords.ts";   // consumer at blog/ root
+//   import { keywordsFor } from "../_shared/seo-keywords.ts";  // consumer in blog/api/
+//   const kw = [...new Set(tags.flatMap((t) => keywordsFor(t)))];
 //   // ^ dedupe: the semantic/episodic orientation-mirror pair (§4.4/§4.5) emits
 //   // the same phrase from both tags; Set collapses it. Content fallback when [].
 //
@@ -249,3 +249,12 @@ export const TAG_KEYWORDS: TagKeywords = {
     "explainable ai memory",
   ],
 };
+
+// Consumer entry point for free-form tags. blog_posts tags are free-form
+// text[] (≤10 per post, no migration), so lookups must tolerate any string:
+// unknown tags fall through to the content-derived fallback at runtime ([]).
+// TagName-keyed direct lookups stay narrow so a typo'd starter tag remains a
+// compile error (see TAG_KEYWORDS above).
+export function keywordsFor(tag: string): string[] {
+  return TAG_KEYWORDS[tag as keyof typeof TAG_KEYWORDS] ?? [];
+}
