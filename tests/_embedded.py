@@ -706,32 +706,39 @@ def _team_sweep_allowed(uri: str) -> bool:
     tenant graphs are named team_...). A blanket team_* delete on a shared
     or dev docker would destroy legitimate product data — the pre-#1686
     design deliberately kept wipes fail-closed to test_/tortoise_test_
-    prefixes. Allowed ONLY on a dedicated test DB (the URI path names one,
-    e.g. .../tortoise_test_matrix — CI) or via an explicit operator opt-in
+    prefixes. Allowed ONLY via an explicit operator opt-in
     (TORTOISE_TEST_SWEEP_TEAM_STRAYS=1). Journaled team_* graphs are always
     dropped via _sweep_drop (the journal is the ownership record) — this
-    gate protects only the journal-blind residual pass."""
-    if os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1":
-        return True
-    from urllib.parse import urlparse
-    try:
-        path = urlparse(uri).path
-    except Exception:
-        path = ""
-    return "test" in (path or "")
+    gate protects only the journal-blind residual pass.
+
+    #1884: the URI-path inference ("test" substring in the graph name) is
+    RETRACTED. The longmem_eval re-validation runs against the SAME
+    test-named URI path (.../tortoise_test_matrix) on the SHARED dev
+    container that concurrent docker-lane pytest sessions use; a session
+    ending last-suite-standing inferred "dedicated test DB" from the path
+    and the journal-blind pass DETACH-DELETEd + GRAPH.DELETEd the eval's
+    LIVE per-question graphs (team_default__default__{qid}) mid-ingest —
+    silent write loss (writes succeed client-side, the post-ingest census
+    reads an empty namespace, gate red). A test-named path on a shared
+    server is NOT an ownership record; the explicit opt-in is (CI's
+    dedicated docker containers are fresh per job, so nothing accumulates
+    there without the pass)."""
+    return os.environ.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1"
 
 
 def _sweep_team_strays(proj, uri: str) -> list[str]:
     """Drop journal-blind stray team_* graphs (#1686 closure).
 
-    Guarded by _team_sweep_allowed(uri) — never on a shared/dev docker.
-    DETACH+DELETE per graph, log-and-continue; returns the dropped names.
+    Guarded by _team_sweep_allowed(uri) — never on a shared/dev docker
+    (explicit opt-in only since #1884; the URI-path "test" inference
+    retracted — see _team_sweep_allowed). DETACH+DELETE per graph,
+    log-and-continue; returns the dropped names.
     Runs AFTER wipe_server in _leftover_sweep (journaled team_* names were
     already dropped by _sweep_drop; this closes the raw-select_graph class)."""
     if not _team_sweep_allowed(uri):
         logging.getLogger(__name__).info(
-            "leftover team_* pass SKIPPED — %r is not a dedicated test DB "
-            "(set TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)", uri)
+            "leftover team_* pass SKIPPED — %r (set "
+            "TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 to opt in)", uri)
         return []
     dropped: list[str] = []
     for g in proj.db.list_graphs() or []:
@@ -751,8 +758,9 @@ def _leftover_sweep(uri: str, *, skip_on_non_loopback: bool = True) -> dict:
     """LAST-suite-standing FULL sweep: every test-prefixed graph on the
     server (wipe_server scope=None → global, drop=True) PLUS, since #1686,
     journal-blind stray team_* graphs — but ONLY when _team_sweep_allowed
-    (a dedicated test DB or an explicit opt-in): team_* is the product's
-    mint namespace and a blanket delete on a shared/dev docker would destroy
+    (an explicit TORTOISE_TEST_SWEEP_TEAM_STRAYS=1 opt-in; the URI-path
+    inference is retracted since #1884): team_* is the product's mint
+    namespace and a blanket delete on a shared/dev docker would destroy
     real tenant data (review P1-1). Log-and-continue on errors — hygiene
     never fails the suite."""
     with _sweep_proj(uri) as proj:

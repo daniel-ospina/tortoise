@@ -3803,24 +3803,21 @@ function claimIntentInFlight() {
           {/* #1623: Billing — plan, usage, upgrade/portal. Session-gated like
               the rest of the dashboard (anon teams get the Protect screen). */}
           <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
-          {/* #1765: user-scoped identity surface — 6th tab (placement DECIDED
-              in scoping cycle-2; data-tab for the ProfileTab keys-tier link) */}
-          <button className={tab === 'profile' ? 'active' : ''} data-tab="profile" onClick={() => setTab('profile')}>Profile</button>
         </nav>
-        {/* #1689: always-visible — OUTSIDE the nav (which can overflow off
-            narrow windows), fixed in the header's right side, on every tab.
-            Reopens the wizard at step 0 (skills). */}
+        {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard at
+            step 0 (skills). (The nav wraps via flex-wrap on narrow windows
+            since #1874, so Setup is no longer displaced by nav overflow.) */}
         <button className="ghost small setup-header" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
-        {/* #1148-ux: account blob — GitHub/Vercel/Linear pattern: current
-            workspace name + avatar top-right; dropdown switches team and
-            signs out. Replaces the bare team <select> (which read as "No
-            team" and gave no account context). */}
+        {/* #1148-ux + #1874: account blob — GitHub/Vercel/Linear pattern:
+            the avatar menu is the personal-account surface (identity block
+            + Profile entry + workspace switch + Log out); the trigger shows
+            the current workspace name. Replaces the bare team <select>
+            (which read as "No team" and gave no account context). */}
         <div className="account-blob" ref={accountBlobRef}>
           <button
             className="account-blob-btn"
             onClick={() => setAccountMenuOpen(!accountMenuOpen)}
             onKeyDown={(e) => { if (e.key === 'Escape') setAccountMenuOpen(false) }}
-            aria-haspopup="menu"
             aria-expanded={accountMenuOpen}
             aria-label={`Account menu — ${currentTeamName || 'No team'}`}
           >
@@ -3847,6 +3844,34 @@ function claimIntentInFlight() {
                Disclosure pattern: labeled group + plain buttons (needs no
                arrow-key handling; Tab + Enter work natively). */
             <div className="account-menu" role="group" aria-label="Account actions">
+              {/* #1874: identity block — the PERSON. Session: display_name →
+                  email-prefix fallback (pattern main.jsx:1227). Team-name
+                  fallback is DEFENSIVE — the menu never renders without a
+                  session in the current architecture (no-session → /auth,
+                  anon → Protect screen). */}
+              <div className="account-identity" role="group" aria-label="Account identity">
+                <span className="account-avatar" aria-hidden="true">
+                  {(sessionMetaRef.current?.display_name ||
+                    (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
+                    currentTeamName || 'T').charAt(0).toUpperCase()}
+                </span>
+                <div className="account-identity-text">
+                  <span className="account-identity-name">
+                    {sessionMetaRef.current?.display_name ||
+                      (sessionMetaRef.current?.email ? sessionMetaRef.current.email.split('@')[0] : '') ||
+                      currentTeamName || 'No team'}
+                  </span>
+                  {sessionMetaRef.current?.email && (
+                    <span className="account-identity-email">{sessionMetaRef.current.email}</span>
+                  )}
+                </div>
+                {team?.tier && <span className="tier-badge">{team.tier}</span>}
+              </div>
+              <div className="account-menu-divider" />
+              <button className="account-menu-profile" onClick={() => { setTab('profile'); setAccountMenuOpen(false) }}>
+                Profile
+              </button>
+              <div className="account-menu-divider" />
               {/* P3-4 (review): hide the switch section for single-team users
                   (anon key-login has no session → teams is empty; showing
                   "Switch team → No team" reads broken). */}
@@ -4317,7 +4342,7 @@ function claimIntentInFlight() {
         {tab === 'members' && (
           <section>
             <div className="row">
-              <h2>Members</h2>
+              <h2>Team members</h2>
               {isOwnerAdmin && (
                 <div className="inline-form">
                   <input

@@ -180,6 +180,10 @@ jobs:
     env:
       TORTOISE_DB_URI: "docker://:falkordb@localhost:6379/tortoise_test_matrix"
       TORTOISE_TEST_EXPECT_URI: "1"
+      # #1886: dedicated fresh-per-job docker container — journal-blind
+      # team_* stray pass stays live in CI (opt-in only; the shared dev
+      # container never sets it — issue #1884).
+      TORTOISE_TEST_SWEEP_TEAM_STRAYS: "1"
     # Mirror the fast matrix's two falkordb services: the passworded 6379
     # (the job URI + probe family) and the legacy passwordless 16379 (the
     # raw-client probes in test_search_engine et al.).
