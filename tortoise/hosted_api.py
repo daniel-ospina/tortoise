@@ -9631,6 +9631,42 @@ async def github_status(team: dict = Depends(get_current_team_session_ungated)):
     return {"connected": True, "org": org, "repos_count": repos_count}
 
 
+@app.get("/v1/onboarding/github/repos")
+async def github_repos(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """List the connected org's repo names for the source-scope selector (#1845).
+
+    The GitHub token is server-side encrypted (never on the client), so the
+    dashboard CANNOT enumerate repos via the GitHub API directly — this is the
+    single read path. Mirrors github_status: same non-gated dual-auth, same
+    decrypt-then-best-effort shape. A resolve failure returns an EMPTY list
+    (the selector still renders its "All repos" default), never a 500 — the
+    selector must render even when GitHub is unreachable.
+
+    Returns SHORT repo names (owner prefix stripped) — the /v1/index/*
+    endpoints already construct ``f"{org}/{repo}"`` from the short name, so
+    sending a full_name would double-prefix the org.
+    """
+    encrypted, org = _github_credentials(team["team_id"])
+    if not encrypted:
+        return {"connected": False, "org": None, "repos": []}
+    from tortoise.crypto import decrypt_token
+    try:
+        token = decrypt_token(encrypted)
+    except ValueError:
+        return {"connected": False, "org": None, "repos": []}
+    from tortoise.indexer.github_indexer import GitHubIndexer
+    indexer = GitHubIndexer(token)
+    try:
+        resolved = await indexer.resolve_repos(org)
+    except Exception:
+        resolved = []
+    finally:
+        await indexer._close()
+    # short names (owner prefix stripped) — see the endpoint docstring.
+    repos = [r.split("/", 1)[1] if "/" in r else r for r in resolved]
+    return {"connected": True, "org": org, "repos": repos}
+
+
 
 # ── GitHub indexing endpoints (#499 Task 5) ─────────────────────
 
@@ -9706,6 +9742,16 @@ def _start_index_job(team_id: str, *, kind: str = "github") -> tuple[str, bool]:
 
 class GitHubIndexRequest(BaseModel):
     org: str
+    repo: str | None = None
+
+
+class GitHubRepollRequest(BaseModel):
+    """#1845: optional repo scope for the issues re-poll (diff).
+
+    ``org`` is deliberately ABSENT — the re-poll reads org from the stored
+    credentials (never trusted from the client); only the repo scope is
+    client-supplied. ``repo`` is the SHORT name (the indexer prepends org/).
+    """
     repo: str | None = None
 
 
@@ -9949,24 +9995,45 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
 
 
 @app.post("/v1/index/github/re-poll")
-async def github_reindex(team: dict = Depends(get_current_team)):  # noqa: B008
+async def github_reindex(body: GitHubRepollRequest | None = None,
+                         team: dict = Depends(get_current_team)):  # noqa: B008
     """Re-run the GitHub diff (diff-on-poll, amend 6) for the connected org.
 
     The ONLY route shape (T1-P2) — no query-param alternative. Reuses the
     persisted per-repo composite cursors, so a re-poll is an incremental
     diff, not a re-ingest. Declared BEFORE /v1/index/github/{job_id} so the
     literal path wins over the job_id path param.
+
+    #1845: accepts an OPTIONAL ``repo`` scope (short name). When set, the diff
+    walks ONLY that repo (reusing its persisted cursor); when unset, the
+    full-org diff (existing behavior). org is still read from the stored
+    credentials, never the client.
     """
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
     if not org:
         raise HTTPException(status_code=400, detail="GitHub org unknown. Re-connect.")
+    repo = (body.repo if body else None) or None
+    if repo is not None:
+        # #1845 (review P1): repo is the ONE client-supplied value that
+        # reaches the GitHub URL path. org is read server-side from the
+        # stored credentials, but a malicious repo (e.g. "../victimorg/x" or
+        # "a/b?q=") would be interpolated into f"{org}/{repo}" and could
+        # traverse the org boundary via dot-segment normalization at the
+        # GitHub edge. Allowlist SHORT repo names — GitHub short names are
+        # alnum-start, [A-Za-z0-9._-] only, <=128 chars (the same conservative
+        # token as github_docs._safe_segment). Reject (400) rather than walk
+        # a repo the user never picked.
+        repo = repo.strip() or None
+        if repo is not None and not re.match(
+                r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
+            raise HTTPException(status_code=400, detail="Invalid repo name")
     job_id, is_new = _start_index_job(team["team_id"])
     if is_new:
         import asyncio as _asyncio
         _asyncio.get_event_loop().create_task(
-            _run_indexing(job_id, team["team_id"], org, None))
+            _run_indexing(job_id, team["team_id"], org, repo))
     return {"job_id": job_id, "status": "started"}
 
 

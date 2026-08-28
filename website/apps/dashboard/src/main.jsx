@@ -246,6 +246,15 @@ function claimIntentInFlight() {
   const [memoryErrors, setMemoryErrors] = React.useState({})      // per-ROW errors (role=alert) — never the global banner
   const indexPollRef = React.useRef(null)
   const docsPollRef = React.useRef(null)
+  // #1845: source-scope selector state (shared by the docs + issues rows).
+  // reposList = SHORT repo names from GET /v1/onboarding/github/repos (loaded
+  // once when connected); docsScope/issuesScope carry the per-row selection
+  // (repo '' = "All repos"). docsScope.branch defaults to 'main' (the fetcher
+  // falls back to master server-side).
+  const [reposList, setReposList] = React.useState([])
+  const [reposLoaded, setReposLoaded] = React.useState(false)
+  const [docsScope, setDocsScope] = React.useState({ repo: '', branch: 'main' })
+  const [issuesScope, setIssuesScope] = React.useState({ repo: '' })
   // #1728 (Task 17): the misled-user re-ask — exactly once per visit until
   // resolved. `capture_ask_shown` is set on ANSWER only; dismissal NEVER
   // consumes the ask (re-shown next visit). One flag for BOTH surfaces
@@ -706,6 +715,29 @@ function claimIntentInFlight() {
   // ── #1728 Slice 3 (Task 16/17): Memory-sources handlers ──
   function setRowError(row, msg) { setMemoryErrors((e) => ({ ...e, [row]: msg })) }
 
+  // ── #1845: load the connected org's repo names for the scope selectors ──
+  async function loadRepos() {
+    try {
+      const res = await api('/v1/onboarding/github/repos', { useSession: true })
+      setReposList(res && Array.isArray(res.repos) ? res.repos : [])
+    } catch {
+      setReposList([])  // best-effort — the selector still shows "All repos"
+    } finally {
+      setReposLoaded(true)
+    }
+  }
+  // Load once when the team is connected (re-connect/rotation re-loads via the
+  // connected-flip guard below). reposLoaded marks the attempt so a failed load
+  // doesn't retry on every render.
+  const githubConnected = !!(onboarding && onboarding.github_connected)
+  const prevConnectedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (githubConnected && (!reposLoaded || (githubConnected && !prevConnectedRef.current))) {
+      loadRepos()
+    }
+    prevConnectedRef.current = githubConnected
+  }, [githubConnected, reposLoaded]) // eslint-disable-line react-hooks/exhaustive-deps
+
   async function toggleSessionRecording(next) {
     if (memoryBusy) return
     setMemoryBusy('sessions')
@@ -767,7 +799,11 @@ function claimIntentInFlight() {
     setRowError('issues', '')
     setIndexJob({ status: 'starting' })
     try {
-      const res = await api('/v1/index/github/re-poll', { method: 'POST', useSession: true })
+      // #1845: send the selected repo scope (short name) — empty = all repos.
+      const body = issuesScope.repo ? { repo: issuesScope.repo } : {}
+      const res = await api('/v1/index/github/re-poll', { method: 'POST', useSession: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body) })
       const jobId = res && res.job_id
       if (!jobId) throw new Error('index job did not return a job id')
       setIndexJob({ status: 'started', job_id: jobId })
@@ -795,10 +831,14 @@ function claimIntentInFlight() {
       try {
         const gs = await api('/v1/onboarding/github/status', { useSession: true })
         org = gs && gs.org
-      } catch { /* server defaults the org to the team id */ }
+      } catch { /* org stays undefined — the server 400s "org is required" and the row error surfaces it */ }
+      const payload = {}
+      if (org) payload.org = org
+      if (docsScope.repo) payload.repo = docsScope.repo
+      if (docsScope.branch) payload.branch = docsScope.branch
       const res = await api('/v1/index/docs', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(org ? { org } : {}) })
+        body: JSON.stringify(payload) })
       const jobId = res && res.job_id
       if (!jobId) throw new Error('docs job did not return a job id')
       setDocsJob({ status: 'started', job_id: jobId })
@@ -3095,6 +3135,12 @@ function claimIntentInFlight() {
                         onConnectGithub={wizardConnectGithub}
                         onIndexDocs={indexDocs}
                         onReindexGithub={reindexGithub}
+                        reposList={reposList}
+                        reposLoaded={reposLoaded}
+                        docsScope={docsScope}
+                        issuesScope={issuesScope}
+                        onDocsScopeChange={setDocsScope}
+                        onIssuesScopeChange={setIssuesScope}
                       />
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
@@ -3554,6 +3600,12 @@ function claimIntentInFlight() {
               onConnectGithub={wizardConnectGithub}
               onIndexDocs={indexDocs}
               onReindexGithub={reindexGithub}
+              reposList={reposList}
+              reposLoaded={reposLoaded}
+              docsScope={docsScope}
+              issuesScope={issuesScope}
+              onDocsScopeChange={setDocsScope}
+              onIssuesScopeChange={setIssuesScope}
             />
             {/* #1148-ux review: Team ID / Limits / billing-actions / quickstart
                 removed — noise (the quickstart lives on the empty state; limits
@@ -3934,8 +3986,10 @@ function MemorySources(props) {
     indexJob, docsJob,
     memoryBusy, memoryErrors,
     reaskBusy,
+    reposList, reposLoaded, docsScope, issuesScope,
     onToggleIssues, onToggleDocs, onToggleSessions,
     onConnectGithub, onIndexDocs, onReindexGithub,
+    onDocsScopeChange, onIssuesScopeChange,
   } = props
 
   if (loading) {
@@ -3978,12 +4032,35 @@ function MemorySources(props) {
           <h4>GitHub issues</h4>
           <p>Issues become work items with a lifecycle record, plus claims extracted from their content.</p>
           {githubConnected ? (
-            <p className="dim small" aria-live="polite">
-              {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}
-              <button type="button" className="small" onClick={onReindexGithub} disabled={memoryBusy === 'issues' || (indexJob && indexJob.status === 'started')}>
-                {indexJob && indexJob.status === 'started' ? 'Indexing…' : 'Re-index'}
-              </button>
-            </p>
+            <>
+              <p className="dim small" aria-live="polite">
+                {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}
+                <button type="button" className="small" onClick={onReindexGithub} disabled={memoryBusy === 'issues' || (indexJob && indexJob.status === 'started')}>
+                  {indexJob && indexJob.status === 'started' ? 'Indexing…' : 'Re-index'}
+                </button>
+              </p>
+              {/* #1845: repo-scope selector ("All repos" default) — the list
+                  comes from GET /v1/onboarding/github/repos (server-side
+                  token), never a client GitHub call. */}
+              {!(indexJob && (indexJob.status === 'starting' || indexJob.status === 'started')) && (
+                <div className="scope-selector">
+                  <label htmlFor="issues-repo-select">Repo</label>
+                  <select
+                    id="issues-repo-select"
+                    value={issuesScope.repo}
+                    onChange={(e) => onIssuesScopeChange({ repo: e.target.value })}
+                  >
+                    <option value="">All repos</option>
+                    {reposList.map((r) => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                  <span className="dim small" aria-live="polite">
+                    {issuesScope.repo
+                      ? `Indexing ${issuesScope.repo}.`
+                      : (reposLoaded && reposList.length > 0 ? `Indexing all ${reposList.length} repos.` : 'Indexing all repos.')}
+                  </span>
+                </div>
+              )}
+            </>
           ) : issuesWantOn ? (
             <p className="dim small">
               <button type="button" className="small" onClick={onConnectGithub} disabled={github.busy}>
@@ -4026,12 +4103,42 @@ function MemorySources(props) {
             <p className="dim small">Docs are indexed and active as a source. Use "Re-index docs" to refresh.</p>
           )}
           {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
-            <p className="dim small">
-              <button type="button" className="small" onClick={onIndexDocs} disabled={memoryBusy === 'docs'}>
-                {memoryBusy === 'docs' ? 'Indexing…' : docsIndexed ? 'Re-index docs' : 'Index docs'}
-              </button>{' '}
-              {docsIndexed ? 'to refresh indexed docs.' : 'to bring your repo docs in as memory sources.'}
-            </p>
+            <>
+              {/* #1845: repo + branch scope for the docs index — "All repos"
+                  default, branch defaults to main (server falls back master). */}
+              <div className="scope-selector">
+                <label htmlFor="docs-repo-select">Repo</label>
+                <select
+                  id="docs-repo-select"
+                  value={docsScope.repo}
+                  onChange={(e) => onDocsScopeChange({ ...docsScope, repo: e.target.value })}
+                >
+                  <option value="">All repos</option>
+                  {reposList.map((r) => <option key={r} value={r}>{r}</option>)}
+                </select>
+                <label htmlFor="docs-branch-select">Branch</label>
+                <select
+                  id="docs-branch-select"
+                  value={docsScope.branch}
+                  onChange={(e) => onDocsScopeChange({ ...docsScope, branch: e.target.value })}
+                >
+                  <option value="main">main</option>
+                  <option value="master">master</option>
+                </select>
+                <span className="dim small" aria-live="polite">
+                  {docsScope.repo
+                    ? `Indexing ${docsScope.repo} @ ${docsScope.branch || 'main'}.`
+                    : (reposLoaded && reposList.length > 0 ? `Indexing all ${reposList.length} repos.` : 'Indexing all repos.')}
+                </span>
+              </div>
+              <p className="dim small">Parts you want to keep private stay out — scope the index to the repos you choose.</p>
+              <p className="dim small">
+                <button type="button" className="small" onClick={onIndexDocs} disabled={memoryBusy === 'docs'}>
+                  {memoryBusy === 'docs' ? 'Indexing…' : docsIndexed ? 'Re-index docs' : 'Index docs'}
+                </button>{' '}
+                {docsIndexed ? 'to refresh indexed docs.' : 'to bring your repo docs in as memory sources.'}
+              </p>
+            </>
           )}
           {docsJob && <DocsIndexStatus job={docsJob} />}
           {memoryErrors.docs && <p className="error" role="alert">{memoryErrors.docs}</p>}
@@ -4124,7 +4231,8 @@ function DocsIndexStatus({ job }) {
   }
   if (job.status === 'completed') {
     const quota = job.quota_hit ? ' (plan quota reached)' : ''
-    return <p className="dim small" aria-live="polite">{job.documents_indexed ?? 0} documents indexed{quota}.</p>
+    const repos = job.repos_processed != null ? ` across ${job.repos_processed} repos` : ''
+    return <p className="dim small" aria-live="polite">{job.documents_indexed ?? 0} documents indexed{repos}{quota}.</p>
   }
   if (job.status === 'failed') {
     const err = job.error || ''
