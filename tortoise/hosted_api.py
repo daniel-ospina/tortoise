@@ -4600,7 +4600,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
         except QuotaCheckError as e:
             raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
-        max_points = team.get("max_points") or 1000
+        max_points = team.get("max_points")
+        if max_points is None:
+            # #1859 P3-2 review (P4): the dict builders now guarantee
+            # max_points; a legacy dict must fall back to the plan's node
+            # cap, never an arbitrary 1000 (which would mask an explicit 0
+            # override at enforce_team_limit).
+            from tortoise.pricing import tier_limits as _tl
+            max_points = _tl(team.get("tier") or "free").get("max_graph_nodes")
         if count + est > max_points:
             raise HTTPException(
                 status_code=402,

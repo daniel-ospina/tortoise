@@ -203,18 +203,29 @@ def resolve_team_limits(team_id: str) -> dict:
     if not team_id:
         raise QuotaCheckError("resolve_team_limits requires a team_id")
     from tortoise.supabase_control import (  # noqa: I001
+        _QUOTA_SELECT,
+        _TEAM_ADDITIVE_0015_TIER,
+        _TEAM_ADDITIVE_BILLING_TIER,
+        _TEAM_ADDITIVE_DKL_TIER,
+        _TEAM_ADDITIVE_IMPORT_TIER,
+        _teams_row_fail_soft,
         get_control_plane, is_supabase_enabled,
     )
     if is_supabase_enabled():
-        rows = get_control_plane().query(
-            "teams",
-            select=["tier", "max_users", "max_graphs", "graph_size_cap",
-                    "max_points", "ops_allowance"],
-            filters=[("id", "eq", team_id)],
+        # #1859 P3-2 review (P2): route through the #1096 fail-soft seam —
+        # the max_points column (20260817000001) is ADDITIVE; a direct
+        # select 400s on a schema one migration behind, which would turn a
+        # degrade-to-tier-defaults into a hard failure. Same additive
+        # ladder as resolve_api_key / _session_user_team.
+        row = _teams_row_fail_soft(
+            get_control_plane(), team_id, select=_QUOTA_SELECT,
+            additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
+                            _TEAM_ADDITIVE_DKL_TIER,
+                            _TEAM_ADDITIVE_0015_TIER,
+                            _TEAM_ADDITIVE_BILLING_TIER],
         )
-        if not rows:
+        if row is None:
             raise QuotaCheckError(f"Team {team_id!r} not found in control plane")
-        row = rows[0]
         # #1082 PR2: the anon ceiling is tier-DERIVED at resolution — an
         # unclaimed zero-email team (owner user_id NULL) resolves to the
         # reduced ``anon`` tier until claimed, then lifts to free. The row
@@ -233,8 +244,10 @@ def resolve_team_limits(team_id: str) -> dict:
         # max_users/max_graphs = UNLIMITED (Team tier) — preserve None,
         # never substitute pricing defaults (enforce_team_limit treats an
         # explicit None limit as unlimited; substituting finite caps would
-        # hard-cap legacy/migrated rows). max_points ← graph_size_cap
-        # (GAP-B); max_api_keys/max_sessions fall back to pricing/defaults.
+        # hard-cap legacy/migrated rows). max_points override (GAP-B,
+        # 20260817000001) takes precedence over graph_size_cap (the
+        # fallback), then pricing; max_api_keys/max_sessions fall back to
+        # pricing/defaults.
         mu = row.get("max_users")
         mg = row.get("max_graphs")
         # #1859 P3-2: max_points column (points-cap override, migration

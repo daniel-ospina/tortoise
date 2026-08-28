@@ -475,12 +475,17 @@ def _assert_team_usable(cp, team_id: str) -> None:
 
 def _quota_fields(cp, team_row: dict) -> dict:
     """Quota shape shared with resolve_api_key so REST/MCP limits match
-    (#329): preserve None (unlimited, Team tier), fall back to pricing."""
+    (#329): preserve None (unlimited, Team tier), fall back to pricing.
+    #1859 P3-2: max_points column (points-cap override) takes precedence
+    over graph_size_cap, then pricing — mirrors resolve_api_key."""
     from tortoise.pricing import tier_limits  # noqa: I001
     from tortoise.quota import DEFAULT_MAX_SESSIONS
     from tortoise.quota import derived_tier
     tier = derived_tier({**team_row, "id": team_row.get("id")})
     lim = tier_limits(tier)
+    mp = team_row.get("max_points")
+    if mp is None:
+        mp = team_row.get("graph_size_cap")
     return {
         "team_id": team_row.get("id"),
         "tier": tier,
@@ -490,8 +495,8 @@ def _quota_fields(cp, team_row: dict) -> dict:
         "max_graphs": (team_row.get("max_graphs")
                        if team_row.get("max_graphs") is not None
                        else lim["max_graphs_per_team"]),
-        "max_points": (int(team_row["graph_size_cap"])
-                       if team_row.get("graph_size_cap") is not None
+        "max_points": (int(mp)
+                       if mp is not None
                        else int(lim["max_graph_nodes"])),
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": DEFAULT_MAX_SESSIONS,
@@ -514,7 +519,7 @@ def _owner_email_or(cp, team_id: str, fallback) -> str | None:
 def _team_row(cp, team_id: str) -> dict | None:
     rows = cp.query("teams", select=[
         "id", "tier", "max_users", "max_graphs", "graph_size_cap",
-        "suspended_at", "flagged_at", "email",
+        "max_points", "suspended_at", "flagged_at", "email",
     ], filters=[("id", "eq", team_id)])
     return rows[0] if rows else None
 

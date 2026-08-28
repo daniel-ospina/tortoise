@@ -12,9 +12,10 @@ the read-side seam the hosted auth paths use AFTER the flip:
   a revoked ``api_keys`` twin REJECTS even when the matching
   ``team_memberships`` row is active.
 - Tier/quota come from the ``teams`` row (max_users/max_graphs/
-  graph_size_cap); fields the 0006 schema does not store (max_points →
-  graph_size_cap, max_api_keys/max_sessions) fall back to
-  ``tortoise.pricing.tier_limits`` defaults, mirroring the registry path.
+  graph_size_cap); max_points (the 20260817000001 points-cap override
+  column) takes precedence over graph_size_cap, which falls back to
+  ``tortoise.pricing.tier_limits`` defaults (max_api_keys/max_sessions
+  always fall back to pricing) — mirroring the registry path.
 - Invitations (plan Task 4): mint/accept/rescind live here too — pending
   invitations are redeemed by plaintext token via indexed lookup_hash
   (SHA-256(pepper + token)), accept creates the real team_memberships row
