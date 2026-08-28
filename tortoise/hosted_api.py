@@ -1510,10 +1510,11 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     human session). #1148 review P1-2.
 
     gate_key_login=False opts the KEY branch out of the #1148 dashboard-login
-    gate — used by the overview READS (see get_current_team_session_ungated)
-    so tt_ keys keep working on flag-off teams (agents + the dashboard's own
-    reads). The gate stays scoped to the #1148 management set
-    (mint/revoke/restore/billing)."""
+    gate — used by the non-management (data-plane) endpoints: overview reads
+    AND the #1852 graph seed writes / index actions (see
+    get_current_team_session_ungated) so tt_ keys keep working on flag-off
+    teams (agents + the dashboard's own session-driven calls). The gate stays
+    scoped to the #1148 management set (mint/revoke/restore/billing)."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer ") and not auth[7:].startswith("eyJ"):
         # API key (tt_) — the gate applies to real key-auth (unless the
@@ -1547,13 +1548,16 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
 
 
 async def get_current_team_session_ungated(request: Request) -> dict:
-    """#1828 review P1: dual-auth dependency for OVERVIEW READS — team_info,
-    list_api_keys, list_sessions, onboarding state/github. The KEY branch
-    skips the #1148 dashboard-login gate, so a tt_ key on a
-    dashboard_key_login=false team still 200s these reads (agents + the
-    dashboard's own session-driven reads). The gate stays scoped to the
-    #1148 management set (mint/revoke/restore/billing — those keep
-    get_current_team_session's default gate_key_login=True)."""
+    """#1828 review P1 / #1852: dual-auth dependency for the non-management
+    (data-plane) surface — overview READS (team_info, list_api_keys,
+    list_sessions, onboarding state/github) and the seed/index ACTION
+    endpoints (POST /v1/objects, /v1/subjects, /v1/points,
+    /v1/index/github*, /v1/index/docs*). The KEY branch skips the #1148
+    dashboard-login gate, so a tt_ key on a dashboard_key_login=false team
+    still 200s these (agents + the dashboard's own session-driven calls) —
+    the gate covers ACCOUNT management, never graph operations. The gate
+    stays scoped to the #1148 management set (mint/revoke/restore/billing —
+    those keep get_current_team_session's default gate_key_login=True)."""
     return await get_current_team_session(request, gate_key_login=False)
 
 

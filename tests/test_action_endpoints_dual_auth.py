@@ -139,16 +139,30 @@ def session_user(env, monkeypatch):
     return SimpleNamespace(client=client, fake=fake, key=key, team_id=team_id)
 
 
-def _drain_job(client, job_id: str, timeout_s: float = 3.0):
+def _drain_job(client, job_id: str, timeout_s: float = 3.0, *, docs: bool = False):
     """Best-effort poll until the background job reaches a terminal state
-    (decrypt-fail is immediate; the entry stays pollable regardless)."""
+    (decrypt-fail is immediate; the entry stays pollable regardless).
+    Authenticates explicitly as the session user (the endpoint is
+    session-auth now — do not rely on the patched verifier ignoring a
+    headerless request)."""
     deadline = time.time() + timeout_s
+    prefix = "/v1/index/docs" if docs else "/v1/index/github"
     while time.time() < deadline:
-        r = client.get(f"/v1/index/github/{job_id}")
+        r = client.get(f"{prefix}/{job_id}",
+                       headers={"Authorization": "Bearer eyJ.sess"})
         if r.status_code == 200 and r.json().get("status") in ("completed", "failed"):
             return r.json()
         time.sleep(0.02)
     return None
+
+
+def _set_dashboard_key_login(fake, team_id: str, enabled: bool):
+    """Flip teams.dashboard_key_login (the #1148 flag)."""
+    for t in fake.tables.get("teams", []):
+        if t.get("id") == team_id:
+            t["dashboard_key_login"] = enabled
+            return
+    raise AssertionError(f"team row for {team_id} not found in fake plane")
 
 
 # ── Seed/write endpoints ────────────────────────────────────────────────────
@@ -210,6 +224,39 @@ class TestCreateEndpointsDualAuth:
         r = session_user.client.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},
                                      json={"content": "over-cap point", "kind": "statement"})
         assert r.status_code == 402, r.text
+
+    def test_create_point_session_jwt_no_membership_403(self, env, monkeypatch):
+        """The session lane's cross-tenant guard (_session_user_team) holds on
+        the action surface: a valid session user WITHOUT a team membership is
+        403 — never a keyless write into someone's graph."""
+        client, fake = env
+        _provision_anon(client)  # mint the team (unclaimed by any session user)
+        user_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, user_id)
+        # deliberately NO _seed_owner_membership — the session user has no
+        # membership in any team → _session_user_team 403s
+        r = client.post("/v1/points", headers={"Authorization": "Bearer eyJ.sess"},
+                        json={"content": "no-membership point", "kind": "statement"})
+        assert r.status_code == 403, r.text
+
+    def test_create_point_flag_off_team_tt_key_still_200(self, session_user):
+        """Pins the UNGATED semantic (#1852): a dashboard_key_login=false team's
+        tt_ keys must keep seeding the graph — the #1148 gate covers account
+        management, never graph operations. A future swap to the GATED
+        dependency would break flag-off agents and this test catches it."""
+        _set_dashboard_key_login(session_user.fake, session_user.team_id, False)
+        r = session_user.client.post(
+            "/v1/points", headers={"Authorization": f"Bearer {session_user.key}"},
+            json={"content": "flag-off seed", "kind": "statement"})
+        assert r.status_code == 200, r.text
+
+    def test_index_github_flag_off_team_tt_key_still_200(self, session_user):
+        """Same ungated pin for the index action lane."""
+        _set_dashboard_key_login(session_user.fake, session_user.team_id, False)
+        r = session_user.client.post(
+            "/v1/index/github", headers={"Authorization": f"Bearer {session_user.key}"},
+            json={"org": "acme"})
+        assert r.status_code == 200, r.text
 
 
 # ── GitHub index endpoints ──────────────────────────────────────────────────
@@ -296,6 +343,7 @@ class TestDocsIndexDualAuth:
                    json={"org": "acme"})
         assert r.status_code == 200, r.text
         assert r.json()["status"] == "started"
+        _drain_job(c, r.json()["job_id"], docs=True)
 
     def test_index_docs_tt_key(self, session_user):
         c = session_user.client
