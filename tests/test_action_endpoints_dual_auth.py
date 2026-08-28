@@ -229,7 +229,7 @@ class TestCreateEndpointsDualAuth:
         """The session lane's cross-tenant guard (_session_user_team) holds on
         the action surface: a valid session user WITHOUT a team membership is
         403 — never a keyless write into someone's graph."""
-        client, fake = env
+        client, _ = env
         _provision_anon(client)  # mint the team (unclaimed by any session user)
         user_id = str(uuid.uuid4())
         _patch_session_user(monkeypatch, user_id)
