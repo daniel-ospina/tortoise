@@ -21,8 +21,10 @@
 //   import { keywordsFor } from "./_shared/seo-keywords.ts";   // consumer at blog/ root
 //   import { keywordsFor } from "../_shared/seo-keywords.ts";  // consumer in blog/api/
 //   const kw = [...new Set(tags.flatMap((t) => keywordsFor(t)))];
-//   // ^ dedupe: the semantic/episodic orientation-mirror pair (§4.4/§4.5) emits
-//   // the same phrase from both tags; Set collapses it. Content fallback when [].
+//   // ^ dedupe: protects against accidental cross-tag duplicates when a post
+//   // carries multiple tags from this vocabulary. (The §4.4/§4.5 orientation
+//   // mirror pair are DISTINCT strings — Set does not collapse them; each tag
+//   // intentionally emits its own orientation.) Content fallback when [].
 //
 // ZERO-DEPENDENCY (plain TS, no imports) — the _shared/ layout is an intentional
 // port of the ElDato `supabase/functions/_shared/` convention (the repo's own
