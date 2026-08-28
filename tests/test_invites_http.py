@@ -536,6 +536,68 @@ class TestMembersRbac:
         assert len(invited) == 1
         assert invited[0]["email"] == "bob@example.com"
 
+    def _ghost_rows(self, client, team_id="team-t"):
+        r = client.get(f"/v1/teams/{team_id}/members")
+        assert r.status_code == 200, r.text
+        return [m for m in r.json() if m["user_id"].startswith("invite-")]
+
+    def test_accept_removes_fake_invite_row(self, client, reg):
+        """#1880: after accept, the fake invite-{iid} membership row is gone
+        — no ghost 'invited' member with the invitee's email."""
+        _seed_team_with_owner(reg, "team-t")
+        r = client.post("/v1/invites",
+                        json={"team_id": "team-t", "email": "bob@example.com"})
+        assert r.status_code == 200, r.text
+        token = r.json()["token"]
+        assert len(self._ghost_rows(client)) == 1  # pending placeholder pre-accept
+        _as_user(_U_BOB, "bob@example.com")
+        r = client.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 200, r.text
+        _as_user(_U1, "owner@example.com")  # members list is owner/admin-only
+        assert self._ghost_rows(client) == [], "ghost invite row survives accept"
+
+    def test_accept_max_users_402_removes_fake_invite_row(self, client, reg):
+        """#1880 + pre-existing ordering bug: accepted_at is written BEFORE
+        membership_create, so an accept-time max_users 402 consumes the invite
+        with NO real membership — the fake row must still be deleted."""
+        # team with room for 2: mint the invite while capacity exists
+        reg.query(
+            "CREATE (t:Team {id:'team-full', name:'team-full', tier:'team', "
+            "max_users:2})",
+        )
+        reg.query(
+            "CREATE (m:Membership {user_id:$uid, team_id:'team-full', "
+            "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
+            params={"uid": _U1},
+        )
+        r = client.post("/v1/invites",
+                        json={"team_id": "team-full", "email": "bob@example.com"})
+        assert r.status_code == 200, r.text
+        token = r.json()["token"]
+        assert len(self._ghost_rows(client, "team-full")) == 1
+        # fill the team before accepting → accept hits the max_users gate
+        _seed_membership(reg, "team-full", _U2, "member")
+        _as_user(_U_BOB, "bob@example.com")
+        r = client.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 402  # max_users gate at accept
+        # hardening (review c2 P3): the invite is consumed with NO real membership
+        assert _U_BOB not in _active_roles(reg, "team-full")
+        _as_user(_U1, "owner@example.com")  # members list is owner/admin-only
+        assert self._ghost_rows(client, "team-full") == [], \
+            "ghost invite row survives a max_users 402"
+
+    def test_rescind_removes_fake_invite_row(self, client, reg):
+        """#1880: owner revoking an invite deletes the fake row."""
+        _seed_team_with_owner(reg, "team-t")
+        r = client.post("/v1/invites",
+                        json={"team_id": "team-t", "email": "bob@example.com"})
+        assert r.status_code == 200, r.text
+        iid = r.json()["invite_id"]
+        assert len(self._ghost_rows(client)) == 1
+        r = client.delete(f"/v1/invites/{iid}?team_id=team-t")
+        assert r.status_code == 200, r.text
+        assert self._ghost_rows(client) == [], "ghost invite row survives rescind"
+
     def test_remove_member_owner_409(self, client, reg):
         """Owner protection: the owner cannot be removed."""
         _seed_team_with_owner(reg, "team-t")
