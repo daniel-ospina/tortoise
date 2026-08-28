@@ -302,13 +302,17 @@ function claimIntentInFlight() {
   const docsPollRef = React.useRef(null)
   // #1845: source-scope selector state (shared by the docs + issues rows).
   // reposList = SHORT repo names from GET /v1/onboarding/github/repos (loaded
-  // once when connected); docsScope/issuesScope carry the per-row selection
-  // (repo '' = "All repos"). docsScope.branch defaults to 'main' (the fetcher
-  // falls back to master server-side).
+  // once when connected); branchLists[repo] = branches for a repo (lazy-loaded
+  // from GET /v1/onboarding/github/branches when the repo is selected).
+  // docsScope/issuesScope carry the per-row selection: `repos: []` = "All
+  // repos"; a non-empty list = exactly those repos. docsScope.branches[repo]
+  // is the per-repo branch choice ('' = default main/master fallback,
+  // 'all' = every branch, else a branch name).
   const [reposList, setReposList] = React.useState([])
   const [reposLoaded, setReposLoaded] = React.useState(false)
-  const [docsScope, setDocsScope] = React.useState({ repo: '', branch: 'main' })
-  const [issuesScope, setIssuesScope] = React.useState({ repo: '' })
+  const [branchLists, setBranchLists] = React.useState({})
+  const [docsScope, setDocsScope] = React.useState({ repos: [], branches: {} })
+  const [issuesScope, setIssuesScope] = React.useState({ repos: [] })
   // #1728 (Task 17): the misled-user re-ask — exactly once per visit until
   // resolved. `capture_ask_shown` is set on ANSWER only; dismissal NEVER
   // consumes the ask (re-shown next visit). One flag for BOTH surfaces
@@ -1043,6 +1047,43 @@ function claimIntentInFlight() {
       setReposLoaded(true)
     }
   }
+  // #1845: lazily load a repo's branch list for the docs per-repo branch
+  // picker. Best-effort — a failure leaves the picker on its default
+  // option. Review P2-4: also records the API-reported default_branch so
+  // the default option is labeled truthfully for repos whose default is
+  // neither main nor master.
+  async function loadBranches(repo) {
+    if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
+    try {
+      const q = encodeURIComponent(repo)
+      const res = await api(`/v1/onboarding/github/branches?repo=${q}`, { useSession: true })
+      const branches = res && Array.isArray(res.branches) ? res.branches : []
+      const defaultBranch = (res && res.default_branch) || ''
+      setBranchLists((prev) => ({ ...prev, [repo]: { branches, defaultBranch } }))
+    } catch {
+      setBranchLists((prev) => ({ ...prev, [repo]: { branches: [], defaultBranch: '' } }))
+    }
+  }
+  // review P2-4: once a repo's branches + default load, seed the picker's
+  // branch choice to the API default ('' = server main/master fallback) so
+  // a repo whose default is neither main nor master indexes the right
+  // branch out of the box.
+  React.useEffect(() => {
+    setDocsScope((prev) => {
+      let changed = false
+      const branches = { ...prev.branches }
+      prev.repos.forEach((r) => {
+        if (!Object.prototype.hasOwnProperty.call(branchLists, r)) return
+        const info = branchLists[r]
+        if (info && info.defaultBranch && !branches[r]) {
+          branches[r] = info.defaultBranch
+          changed = true
+        }
+      })
+      return changed ? { ...prev, branches } : prev
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [branchLists])
   // Load once when the team is connected (re-connect/rotation re-loads via the
   // connected-flip guard below). reposLoaded marks the attempt so a failed load
   // doesn't retry on every render.
@@ -1116,8 +1157,9 @@ function claimIntentInFlight() {
     setRowError('issues', '')
     setIndexJob({ status: 'starting' })
     try {
-      // #1845: send the selected repo scope (short name) — empty = all repos.
-      const body = issuesScope.repo ? { repo: issuesScope.repo } : {}
+      // #1845: send the selected repo scope (list of SHORT names) — empty =
+      // all repos (org-wide diff).
+      const body = issuesScope.repos.length ? { repos: issuesScope.repos } : {}
       const res = await api('/v1/index/github/re-poll', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body) })
@@ -1151,8 +1193,15 @@ function claimIntentInFlight() {
       } catch { /* org stays undefined — the server 400s "org is required" and the row error surfaces it */ }
       const payload = {}
       if (org) payload.org = org
-      if (docsScope.repo) payload.repo = docsScope.repo
-      if (docsScope.branch) payload.branch = docsScope.branch
+      // #1845: per-repo scope list — each selected repo carries its own
+      // branch ('' = default main/master fallback, 'all' = every branch).
+      // Empty repos = ALL repos (org-wide, default branch).
+      if (docsScope.repos.length) {
+        payload.repos = docsScope.repos.map((r) => ({
+          repo: r,
+          branch: docsScope.branches[r] || '',
+        }))
+      }
       const res = await api('/v1/index/docs', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload) })
@@ -3468,10 +3517,12 @@ function claimIntentInFlight() {
                         onReindexGithub={reindexGithub}
                         reposList={reposList}
                         reposLoaded={reposLoaded}
+                        branchLists={branchLists}
                         docsScope={docsScope}
                         issuesScope={issuesScope}
                         onDocsScopeChange={setDocsScope}
                         onIssuesScopeChange={setIssuesScope}
+                        onLoadBranches={loadBranches}
                       />
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
@@ -3964,10 +4015,12 @@ function claimIntentInFlight() {
               onReindexGithub={reindexGithub}
               reposList={reposList}
               reposLoaded={reposLoaded}
+              branchLists={branchLists}
               docsScope={docsScope}
               issuesScope={issuesScope}
               onDocsScopeChange={setDocsScope}
               onIssuesScopeChange={setIssuesScope}
+              onLoadBranches={loadBranches}
             />
             {/* #1148-ux review: Team ID / Limits / billing-actions / quickstart
                 removed — noise (the quickstart lives on the empty state; limits
@@ -4365,10 +4418,10 @@ function MemorySources(props) {
     indexJob, docsJob,
     memoryBusy, memoryErrors,
     reaskBusy,
-    reposList, reposLoaded, docsScope, issuesScope,
+    reposList, reposLoaded, docsScope, issuesScope, branchLists,
     onToggleIssues, onToggleDocs, onToggleSessions,
     onConnectGithub, onIndexDocs, onReindexGithub,
-    onDocsScopeChange, onIssuesScopeChange,
+    onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
   } = props
 
   if (loading) {
@@ -4418,23 +4471,45 @@ function MemorySources(props) {
                   {indexJob && indexJob.status === 'started' ? 'Indexing…' : 'Re-index'}
                 </button>
               </p>
-              {/* #1845: repo-scope selector ("All repos" default) — the list
-                  comes from GET /v1/onboarding/github/repos (server-side
-                  token), never a client GitHub call. */}
+              {/* #1845: repo-scope selector (multi-select checkboxes, "All
+                  repos" default) — the list comes from GET
+                  /v1/onboarding/github/repos (server-side token), never a
+                  client GitHub call. repos: [] = ALL; a non-empty list =
+                  exactly those repos. */}
               {!(indexJob && (indexJob.status === 'starting' || indexJob.status === 'started')) && (
                 <div className="scope-selector">
-                  <label htmlFor="issues-repo-select">Repo</label>
-                  <select
-                    id="issues-repo-select"
-                    value={issuesScope.repo}
-                    onChange={(e) => onIssuesScopeChange({ repo: e.target.value })}
-                  >
-                    <option value="">All repos</option>
-                    {reposList.map((r) => <option key={r} value={r}>{r}</option>)}
-                  </select>
+                  <fieldset className="scope-fieldset">
+                    <legend className="dim small">Repos to index</legend>
+                    <label className="scope-option">
+                      <input
+                        type="checkbox"
+                        checked={issuesScope.repos.length === 0}
+                        onChange={(e) => onIssuesScopeChange({ repos: e.target.checked ? [] : [...reposList] })}
+                      />
+                      All repos
+                    </label>
+                    {reposList.map((r) => (
+                      <label key={r} className="scope-option">
+                        <input
+                          type="checkbox"
+                          checked={issuesScope.repos.includes(r)}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? issuesScope.repos.includes(r) ? issuesScope.repos : [...issuesScope.repos, r]
+                              : issuesScope.repos.filter((x) => x !== r)
+                            onIssuesScopeChange({ repos: next })
+                          }}
+                        />
+                        {r}
+                      </label>
+                    ))}
+                    {reposLoaded && reposList.length === 0 && (
+                      <span className="dim small">No repos listed — the index will run org-wide.</span>
+                    )}
+                  </fieldset>
                   <span className="dim small" aria-live="polite">
-                    {issuesScope.repo
-                      ? `Indexing ${issuesScope.repo}.`
+                    {issuesScope.repos.length
+                      ? `Indexing ${issuesScope.repos.length} selected repo${issuesScope.repos.length > 1 ? 's' : ''}.`
                       : (reposLoaded && reposList.length > 0 ? `Indexing all ${reposList.length} repos.` : 'Indexing all repos.')}
                   </span>
                 </div>
@@ -4484,29 +4559,81 @@ function MemorySources(props) {
           {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
             <>
               {/* #1845: repo + branch scope for the docs index — "All repos"
-                  default, branch defaults to main (server falls back master). */}
+                  default; when specific repos are picked, each gets its own
+                  branch picker ('' = default main/master fallback,
+                  'all' = every branch, else a real branch from
+                  GET /v1/onboarding/github/branches). */}
               <div className="scope-selector">
-                <label htmlFor="docs-repo-select">Repo</label>
-                <select
-                  id="docs-repo-select"
-                  value={docsScope.repo}
-                  onChange={(e) => onDocsScopeChange({ ...docsScope, repo: e.target.value })}
-                >
-                  <option value="">All repos</option>
-                  {reposList.map((r) => <option key={r} value={r}>{r}</option>)}
-                </select>
-                <label htmlFor="docs-branch-select">Branch</label>
-                <select
-                  id="docs-branch-select"
-                  value={docsScope.branch}
-                  onChange={(e) => onDocsScopeChange({ ...docsScope, branch: e.target.value })}
-                >
-                  <option value="main">main</option>
-                  <option value="master">master</option>
-                </select>
+                <fieldset className="scope-fieldset">
+                  <legend className="dim small">Repos to index</legend>
+                  <label className="scope-option">
+                    <input
+                      type="checkbox"
+                      checked={docsScope.repos.length === 0}
+                      onChange={(e) => {
+                        const repos = e.target.checked ? [] : [...reposList]
+                        onDocsScopeChange({ ...docsScope, repos })
+                      }}
+                    />
+                    All repos
+                  </label>
+                  {reposList.map((r) => {
+                    const checked = docsScope.repos.includes(r)
+                    const repoInfo = Object.prototype.hasOwnProperty.call(branchLists, r)
+                      ? branchLists[r] || { branches: [], defaultBranch: '' }
+                      : { branches: [], defaultBranch: '' }
+                    const branches = repoInfo.branches || []
+                    const defaultBranch = repoInfo.defaultBranch || ''
+                    const currentBranch = docsScope.branches[r] || ''
+                    return (
+                      <div key={r} className="scope-repo-row">
+                        <label className="scope-option">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(e) => {
+                              const next = e.target.checked
+                                ? docsScope.repos.includes(r) ? docsScope.repos : [...docsScope.repos, r]
+                                : docsScope.repos.filter((x) => x !== r)
+                              onDocsScopeChange({ ...docsScope, repos: next })
+                              if (e.target.checked) onLoadBranches(r)
+                            }}
+                          />
+                          {r}
+                        </label>
+                        {checked && (
+                          <label className="scope-branch">
+                            <span className="dim small">branch</span>
+                            <select
+                              value={currentBranch}
+                              onChange={(e) => onDocsScopeChange({
+                                ...docsScope,
+                                branches: { ...docsScope.branches, [r]: e.target.value },
+                              })}
+                            >
+                              {/* review P2-4: the default option carries the
+                                  repo's API default branch ('' falls back to
+                                  main/master server-side); the seeding effect
+                                  sets branches[r] to that same value so the
+                                  select matches. */}
+                              <option value={defaultBranch || ''}>default ({defaultBranch || 'main'})</option>
+                              <option value="all">all branches</option>
+                              {branches.filter((b) => b !== defaultBranch && b !== '' && b !== 'all').map((b) => (
+                                <option key={b} value={b}>{b}</option>
+                              ))}
+                            </select>
+                          </label>
+                        )}
+                      </div>
+                    )
+                  })}
+                  {reposLoaded && reposList.length === 0 && (
+                    <span className="dim small">No repos listed — the index will run org-wide.</span>
+                  )}
+                </fieldset>
                 <span className="dim small" aria-live="polite">
-                  {docsScope.repo
-                    ? `Indexing ${docsScope.repo} @ ${docsScope.branch || 'main'}.`
+                  {docsScope.repos.length
+                    ? `Indexing ${docsScope.repos.length} selected repo${docsScope.repos.length > 1 ? 's' : ''}.`
                     : (reposLoaded && reposList.length > 0 ? `Indexing all ${reposList.length} repos.` : 'Indexing all repos.')}
                 </span>
               </div>

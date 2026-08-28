@@ -2345,7 +2345,7 @@ def _cmd_sessions_import(args) -> int:
     from urllib.request import Request, urlopen
     from urllib.error import URLError, HTTPError
 
-    from tortoise.session_import import parse_transcript  # noqa: I001
+    from tortoise.session_import import parse_transcript
 
     file_path = Path(args.file)
     if not file_path.exists():

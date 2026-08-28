@@ -347,21 +347,55 @@ def test_re_poll_requires_connection(client):
 
 
 def test_re_poll_scoped_repo(provisioned, monkeypatch):
-    """#1845: re-poll accepts an optional {repo} scope and forwards it to the
-    run — org is still read server-side from the stored credentials (the
-    client never supplies it)."""
+    """#1845: re-poll accepts an optional {repos} scope and forwards it to
+    the run — org is still read server-side from the stored credentials (the
+    client never supplies it). The legacy single {repo} field is equivalent
+    to a one-item list."""
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repo):
-        seen.append((org, repo))
+    async def _capture(job_id, team_id, org, repos):
+        seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"  # settle the drain
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
     r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": "repo2"})
     assert r.status_code == 200
     assert r.json()["status"] == "started"
-    _wait_for(lambda: seen == [("acme", "repo2")])
+    _wait_for(lambda: seen == [("acme", ["repo2"])])
+
+
+def test_re_poll_multi_repo_scope(provisioned, monkeypatch):
+    """#1845: re-poll with a {repos} LIST forwards exactly those repos (org
+    still read server-side)."""
+    import tortoise.hosted_api as ha
+    seen = []
+
+    async def _capture(job_id, team_id, org, repos):
+        seen.append((org, repos))
+        ha._INDEX_JOBS[job_id]["status"] = "completed"
+
+    monkeypatch.setattr(ha, "_run_indexing", _capture)
+    r = provisioned.tc.post("/v1/index/github/re-poll",
+                            json={"repos": ["repo1", "repo2"]})
+    assert r.status_code == 200
+    _wait_for(lambda: seen == [("acme", ["repo1", "repo2"])])
+
+
+def test_re_poll_empty_repos_is_full_org(provisioned, monkeypatch):
+    """#1845: an EMPTY repos list is the full-org diff (repos=None), not a
+    scoped walk of nothing."""
+    import tortoise.hosted_api as ha
+    seen = []
+
+    async def _capture(job_id, team_id, org, repos):
+        seen.append((org, repos))
+        ha._INDEX_JOBS[job_id]["status"] = "completed"
+
+    monkeypatch.setattr(ha, "_run_indexing", _capture)
+    r = provisioned.tc.post("/v1/index/github/re-poll", json={"repos": []})
+    assert r.status_code == 200
+    _wait_for(lambda: seen == [("acme", None)])
 
 
 def test_re_poll_invalid_repo_400(provisioned, monkeypatch):
@@ -372,14 +406,17 @@ def test_re_poll_invalid_repo_400(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repo):
-        seen.append((org, repo))
+    async def _capture(job_id, team_id, org, repos):
+        seen.append((org, repos))
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
     for bad in ("../victimorg/secret", "a/b?q=1", "repo name", "../.."):
         r = provisioned.tc.post("/v1/index/github/re-poll", json={"repo": bad})
         assert r.status_code == 400, f"repo={bad!r} should 400"
         assert "Invalid repo name" in r.json()["detail"]
+        r2 = provisioned.tc.post("/v1/index/github/re-poll",
+                                 json={"repos": [bad]})
+        assert r2.status_code == 400, f"repos=[{bad!r}] should 400"
     assert seen == [], "no job must be spawned for an invalid repo"
 
 
@@ -389,8 +426,8 @@ def test_re_poll_whitespace_repo_is_full_org(provisioned, monkeypatch):
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repo):
-        seen.append((org, repo))
+    async def _capture(job_id, team_id, org, repos):
+        seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
@@ -400,13 +437,13 @@ def test_re_poll_whitespace_repo_is_full_org(provisioned, monkeypatch):
 
 
 def test_re_poll_no_repo_is_full_org(provisioned, monkeypatch):
-    """#1845: re-poll WITHOUT a body keeps the full-org diff (repo=None) —
+    """#1845: re-poll WITHOUT a body keeps the full-org diff (repos=None) —
     backward compatible with the pre-selector flow."""
     import tortoise.hosted_api as ha
     seen = []
 
-    async def _capture(job_id, team_id, org, repo):
-        seen.append((org, repo))
+    async def _capture(job_id, team_id, org, repos):
+        seen.append((org, repos))
         ha._INDEX_JOBS[job_id]["status"] = "completed"
 
     monkeypatch.setattr(ha, "_run_indexing", _capture)
@@ -545,7 +582,7 @@ def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
                             "number": 7}},
         "github_indexed": True})
     # break the org resolution → the pre-walk resolve_repos fails
-    async def _boom(self, org):
+    async def _boom(self, org, **kw):
         raise GitHubFetchError("org not found")
 
     monkeypatch.setattr(GitHubIndexer, "resolve_repos", _boom)

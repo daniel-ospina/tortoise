@@ -2588,7 +2588,12 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         return {"error": "No team context (HTTP mode required)"}
     import asyncio as _asyncio
 
-    from tortoise.hosted_api import _github_token_enc, _run_indexing, _start_index_job
+    from tortoise.hosted_api import (
+        _github_token_enc,
+        _run_indexing,
+        _start_index_job,
+        _validate_repo_scope,
+    )
     try:
         encrypted = _github_token_enc(team_id)
     except Exception:
@@ -2605,8 +2610,14 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     job_id, is_new = _start_index_job(team_id)
     if is_new:
         try:
+            # #1845: _run_indexing now takes a repo LIST (None = all). The
+            # MCP tool's single optional repo is wrapped into a one-item
+            # list through the same allowlist validator as the REST
+            # re-poll — a bare str would be iterated character-by-character
+            # by the new list contract (regression caught in review).
             _asyncio.get_event_loop().create_task(
-                _run_indexing(job_id, team_id, org, repo))
+                _run_indexing(job_id, team_id, org,
+                              _validate_repo_scope([repo] if repo else None)))
         except RuntimeError:
             return {"error": "No running event loop"}
     return {"job_id": job_id, "status": "started"}
