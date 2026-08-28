@@ -189,6 +189,40 @@ def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
     assert "SIZE_GUARD" in oauth_text and "provider_token" in oauth_text
 
 
+def test_adapters_escape_cookie_key_in_read_regex() -> None:
+    """#1860 (P3-3): the dashboard getItem cookie-read regex must escape the
+    key exactly like the shared bridge's readCookie. An unescaped key treats
+    regex metacharacters ([.*+?^${}()|\\]) as pattern — benign for today's
+    keys, latent drift. Both read paths must carry the same escape replace()
+    (mirrors readCookie's, KEEP IN SYNC)."""
+    shared = _read(SHARED)
+    dash = _read(DASHBOARD)
+    escape = "key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')"
+    # normalize quotes (a cosmetic double-quote refactor is NOT drift)
+    shared_norm = shared.replace('"', "'")
+    dash_norm = dash.replace('"', "'")
+    assert escape in shared_norm, "shared readCookie must escape the key"
+    assert escape in dash_norm, "dashboard getItem must escape the key (drift from readCookie)"
+
+
+def test_dashboard_preserves_search_params_on_auth_bounce() -> None:
+    """#1860 (P3-5): the provisionInApp 401 bounce must preserve the search
+    params — /auth's OAuth-error banner reads ?error=... — in BOTH the
+    bounceToAuth call and the degraded window.location.replace fallback
+    (review P2-1): the bare fallback would drop the banner's cause exactly
+    when the shared bridge is blocked/unavailable. Mirrors the mount gate
+    (main.jsx ~1629) and the signup-form precedent."""
+    dash = _read(DASHBOARD)
+    # the primary path passes the params through bounceToAuth
+    assert "window.bounceToAuth(window.location.search)" in dash, (
+        "provisionInApp 401 bounce must preserve search params"
+    )
+    # the degraded fallback appends them too (mount-gate parity)
+    assert "'https://tortoise.premiselabs.co/auth' + window.location.search" in dash, (
+        "degraded fallback must append window.location.search (mount-gate parity)"
+    )
+
+
 def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
     """#1857 (code-review P2-1/2/3): the host-conditional helpers must be wired
     into EVERY cookie-writing template in EVERY adapter — not merely present in

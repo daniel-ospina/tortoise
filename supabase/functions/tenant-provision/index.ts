@@ -432,7 +432,10 @@ Deno.serve(async (req: Request) => {
     // PR #847 — the RPC has already committed at this point; the hook
     // redelivers the whole request, and deterministic team_id makes that a
     // harmless no-op).
-    await fetch(`${fastApiUrl}/internal/demo`, {
+    // #1860 (P3-1): bind the response — a non-2xx body used to resolve
+    // "successfully" (the old .catch() only handled transport/abort), so a
+    // failed seed left the first-timer's graph silently missing demo data.
+    const demoRes = await fetch(`${fastApiUrl}/internal/demo`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -440,7 +443,21 @@ Deno.serve(async (req: Request) => {
       },
       body: JSON.stringify({ team_id: teamId }),
       signal: AbortSignal.timeout(10_000),
-    }).catch((e) => console.error("Demo seed failed:", e));
+    }).catch((e) => {
+      console.error("Demo seed failed:", e);
+      return null;
+    });
+    if (demoRes && !demoRes.ok) {
+      // HTTP error (4xx/5xx) — the provision RPC already committed, so the
+      // team exists but its graph lacks demo data. Log loudly (incl. the
+      // error body, which also drains the connection back to the pool); do
+      // NOT fail the whole provisioning (the user can still be onboarded).
+      const demoErrBody = await demoRes.text().catch(() => "");
+      console.error(
+        "Demo seed failed: /internal/demo returned " + demoRes.status +
+          (demoErrBody ? ": " + demoErrBody : "")
+      );
+    }
 
     const response: ProvisionResponse = {
       team_id: teamId,

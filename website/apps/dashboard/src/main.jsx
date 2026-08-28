@@ -96,7 +96,13 @@ const secureAttr = () => (isLocal() ? '' : '; Secure')
 const supabaseStorage = {
   getItem(key) {
     try {
-      const m = document.cookie.match(new RegExp('(?:^|; )' + key + '=([^;]*)'))
+      // #1860 (P3-3): escape the key — same as the shared bridge's
+      // readCookie (website/assets/supabase-session.js). Regex metacharacters
+      // in a cookie name (e.g. supabase's `sb-...-auth-token` pattern is
+      // benign today, but any `[.*+?^${}()|\]` in a key would silently
+      // misparse) must not be treated as regex. Keep in sync with
+      // supabase-session.js readCookie.
+      const m = document.cookie.match(new RegExp('(?:^|; )' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '=([^;]*)'))
       return m ? decodeURIComponent(m[1]) : null
     } catch { return null }
   },
@@ -959,7 +965,6 @@ function claimIntentInFlight() {
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
       }
       setOnboardingLoading(false)
-      setMemoryErrors((e) => ({ ...e, __load: '' }))
     } catch (e) {
       // #1847: first-timer mount race — this mount effect fires BEFORE the
       // mount gate runs provisionInApp (which creates the team), so the GET
@@ -1422,8 +1427,17 @@ function claimIntentInFlight() {
         // session is stale/invalid — welcome must never render for
         // unauthenticated users. Clear the session and go to /auth.
         if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
-        if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
-        else window.location.replace('https://tortoise.premiselabs.co/auth')
+        // #1860 (P3-5): preserve the search params — /auth's OAuth-error
+        // banner reads ?error=... (the mount gate already passes
+        // window.location.search on its bounce; the bare call here dropped
+        // them, so an OAuth failure during provisioning silently lost the
+        // banner's cause).
+        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
+        // #1860 (P3-5, review P2-1): the degraded fallback must preserve the
+        // params too — mirror the mount gate's fallback exactly, or the
+        // OAuth-error banner's cause is lost precisely when the bridge is
+        // blocked/unavailable.
+        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
         return { routedAway: true }
       }
       if (response && response.ok) {
@@ -1780,7 +1794,15 @@ function claimIntentInFlight() {
               // (checkout_price_ids for per-tier Upgrade CTAs) — the welcome
               // card never fetched /v1/team before. Best-effort: a failure
               // falls back to the "See pricing" link on the plan cards.
-              refreshTeam(provisioned.api_key).catch(() => {})
+              // #1860 (P3-2): first-timers never called loadAlerts (only
+              // completeLogin did, and the provisioned branch returns before
+              // it) — the security-alerts section stayed empty until reload.
+              // The provisioned team_id comes from the refreshTeam response
+              // (the team row just created). No double-fire: completeLogin
+              // never runs on this path.
+              refreshTeam(provisioned.api_key)
+                .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
+                .catch(() => {})
             } else {
               setWelcomeProvisionError('Could not create your team — try again.')
               setWelcomeProvisioning(false)
@@ -2247,6 +2269,7 @@ function claimIntentInFlight() {
     apiKeyRef.current = null
     setAuthed(false)
     setTeam(null)
+    setStaleFired(false) // #1858: null→null when logging out from the terminal '—' state — the reset effect won't fire, so clear the per-load latch directly; the next session's skeleton must get a fresh floor
     setKeys([])
     setSessions([])
     setNewKey(null)
@@ -2359,6 +2382,7 @@ function claimIntentInFlight() {
     setGraphsStatus('loading') // #1842 P2-1: mirror the membersStatus reset
     setCurrentGraphId(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
+    setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
     setSessions([])
     setBackupInfo(null)
@@ -2427,6 +2451,7 @@ function claimIntentInFlight() {
           setCurrentTeamId(prevTeamId)
           teamIdRef.current = prevTeamId
           setTeam(null)
+          setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
           await refreshTeam(restoreKey).catch(() => {})
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.
@@ -2691,6 +2716,20 @@ function claimIntentInFlight() {
   const STALE_LOADING_MS = 15000
   const frameStartRef = React.useRef(null)
   const [now, setNow] = React.useState(() => Date.now())
+  // #1858 (P3): staleFired LATCHES the floor. frameStale below is derived
+  // from the clock (ref + now), so once the tick effect nulls frameStartRef
+  // at firing time a later unrelated setState recomputes frameStale=false
+  // and resurrects the shimmer for another 15s. STATE, not a ref: the load-
+  // site clears (switchTeam / revert / logout) must force a recompute render
+  // so the tick effect re-runs and stamps a fresh floor — a ref write
+  // schedules no render, so a switch that happened to change no other state
+  // would leave the '—' frame up with no clock behind it. (The effect-time
+  // set/clear happens to coincide with an already-scheduled render — the
+  // clock fire or the data landing — so those two writes add no render.)
+  // The latch is per-load: cleared on window resolve, on team→null, and at
+  // the three load-initiation sites (covers null→null from the terminal
+  // '—' state where the reset effect's team dep doesn't fire).
+  const [staleFired, setStaleFired] = React.useState(false)
   // #1842 P2-1 (final review): the clock must NOT run (or stamp frameStart)
   // while the first-timer sits on the welcome screen — the Overview section
   // can't render there, so ticking would re-render the whole app for nothing,
@@ -2698,26 +2737,62 @@ function claimIntentInFlight() {
   // with an already-stale frame (instant '—' instead of shimmer for a fast
   // load). Gate overviewSkeletonLive on !welcomeMode; the tick effect's else
   // branch keeps frameStart null while welcome is up.
-  const overviewSkeletonLive = tab === 'overview' && !welcomeMode &&
+  // #1858 (review A): also gate on authed — the checking/claim screens
+  // render via the early return at !authed, so the Overview skeleton is
+  // never visible pre-login. Without the gate, a slow session restore
+  // (> STALE_LOADING_MS under the checking screen) would fire the floor and
+  // latch staleFired while NO skeleton was ever on screen, then open the
+  // dashboard on '—' for a load that just started.
+  const overviewSkeletonLive = authed && tab === 'overview' && !welcomeMode &&
     (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupInfo === null)
-  const frameStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
+  // clockStale: raw 15s check against the frame start. frameStale: what the
+  // render reads — latched once the floor has ever fired for this load.
+  const clockStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
+  const frameStale = staleFired || clockStale
   // #1842 P2-1: reset the frame start when the Overview section actually
   // mounts (team null + Overview tab + not welcome) so no stale stamp carries
-  // over from the welcome screen. Declared BEFORE the tick effect so a fresh
-  // stamp in the same commit is never clobbered.
+  // over from the welcome screen. #1858: every team→null transition here is a
+  // genuine new load (switchTeam, its revert path, logout) — clear the stale
+  // latch too, or the next team's skeleton would open on '—'. (The window is
+  // PER-WINDOW: tab/welcome changes also clear the latch via the tick's
+  // !overviewSkeletonLive branch, so leaving Overview and returning re-arms
+  // a fresh 15s floor for the same stuck load — pre-fix behavior, accepted.)
+  // Declared BEFORE the tick effect so a fresh stamp in the same commit is
+  // never clobbered.
   React.useEffect(() => {
-    if (tab === 'overview' && !welcomeMode && team === null) frameStartRef.current = null
+    if (tab === 'overview' && !welcomeMode && team === null) {
+      frameStartRef.current = null
+      setStaleFired(false)
+    }
   }, [tab, welcomeMode, team])
   // #1842 P2-2 (final review): gate the tick on !frameStale too — once the
   // skeleton flips to the terminal '—' the clock must terminate (clear the
   // interval), not re-render the app every second forever.
+  // #1858 (P2): re-stamp INSIDE the interval callback. The reset effect
+  // (deps [tab, welcomeMode, team]) nulls frameStartRef on a mid-load team
+  // switch, but neither overviewSkeletonLive nor frameStale change, so this
+  // effect never re-runs — without the in-callback re-stamp the old interval
+  // would tick with a null ref and frameStale could never become true. The
+  // re-stamp fires only when the ref IS null (ref non-null ⟹ the window
+  // continues from its original stamp — e.g. a null→null switch mid-load
+  // keeps the pre-switch deadline, which is correct: the shimmer has been
+  // showing since the load began).
   React.useEffect(() => {
     if (overviewSkeletonLive && !frameStale) {
       if (frameStartRef.current === null) frameStartRef.current = Date.now()
-      const id = window.setInterval(() => setNow(Date.now()), 1000)
+      const id = window.setInterval(() => {
+        if (frameStartRef.current === null) frameStartRef.current = Date.now()
+        setNow(Date.now())
+      }, 1000)
       return () => window.clearInterval(id)
     }
     frameStartRef.current = null
+    // #1858 (P3): latch the floor on the raw clock firing, but ONLY while the
+    // skeleton window is still live; clear the latch when the window resolves
+    // (data landed, tab/welcome changed) so a resolved window never leaves a
+    // latch that blocks a legitimate later skeleton.
+    if (overviewSkeletonLive && clockStale) setStaleFired(true)
+    else if (!overviewSkeletonLive) setStaleFired(false)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overviewSkeletonLive, frameStale])
 
