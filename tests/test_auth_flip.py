@@ -241,19 +241,23 @@ class TestSessionKeyRoundTrip:
 
     def test_recovery_cap_rotates_own_bootstrap_when_all_keys_own(
             self, rest_client, authed_user):
-        """#1828 + review P2-1: at max_api_keys with only OWN keys, the
-        recovery fallback rotates the user's own OLDEST bootstrap key (24h
-        ephemeral — safe to rotate) then RE-CHECKS the persistent count — a
-        rotated modern bootstrap was never in the count, so the mint fails
-        CLOSED (402) instead of minting cap+1 persistent keys (the old
-        overshoot grew persistent keys unboundedly per login). Persistent
-        user-minted keys stay untouched (#750.10)."""
+        """#1828 + review P2-1: at max_api_keys with only OWN keys and NO
+        own recovery key to rotate (#1830 makes recovery the tier-2
+        candidate — this test isolates the tier-3 bootstrap fallback by
+        seeding PROVISIONED fillers), the recovery fallback rotates the
+        user's own OLDEST bootstrap key (24h ephemeral — safe to rotate)
+        then RE-CHECKS the persistent count — a rotated modern bootstrap was
+        never in the count, so the mint fails CLOSED (402) instead of
+        minting cap+1 persistent keys (the old overshoot grew persistent
+        keys unboundedly per login). Persistent user-minted keys stay
+        untouched (#750.10)."""
         tc, fake = rest_client
         fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
         fake.seed("api_keys", [
-            _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
+            # deliberate user-created keys (never rotation candidates)
+            _key_row(id="own-prov-1", created_via="provisioned", created_by=_USER1,
                      lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
-            _key_row(id="own-rec-2", created_via="recovery", created_by=_USER1,
+            _key_row(id="own-prov-2", created_via="provisioned", created_by=_USER1,
                      lookup_hash="h2", created_at="2026-08-02T00:00:00Z"),
             _key_row(id="own-boot-1", created_via="bootstrap", created_by=_USER1,
                      lookup_hash="h3", created_at="2026-08-01T00:00:00Z"),
@@ -268,9 +272,89 @@ class TestSessionKeyRoundTrip:
         by_id = {row["id"]: row for row in fake.tables["api_keys"]}
         assert by_id["own-boot-1"]["revoked_at"] is not None  # oldest own bootstrap rotated
         assert by_id["own-boot-2"]["revoked_at"] is None
-        assert by_id["own-rec-1"]["revoked_at"] is None       # persistent keys untouched
-        assert by_id["own-rec-2"]["revoked_at"] is None
+        assert by_id["own-prov-1"]["revoked_at"] is None     # provisioned keys untouched
+        assert by_id["own-prov-2"]["revoked_at"] is None
         # post-mint persistent count never exceeds the cap
+        persistent = [r for r in fake.tables["api_keys"]
+                      if r.get("revoked_at") is None
+                      and r.get("created_via") != "bootstrap"]
+        assert len(persistent) <= 2
+
+    def test_recovery_cap_rotates_own_oldest_recovery_key(
+            self, rest_client, authed_user):
+        """#1830: at max_api_keys with only OWN persistent keys, the
+        recovery fallback now rotates the user's own OLDEST recovery key
+        (tier 2 — recovery keys are SYSTEM-MINTED fallback credentials, not
+        deliberate user-created keys (those are created_via='provisioned'),
+        so rotating one at cap is the escape-hatch semantics). A recovery key
+        COUNTS against max_api_keys, so the rotation frees a REAL slot: the
+        re-check passes and the mint lands at exactly the cap (never cap+1)
+        with rotated=True. Own PROVISIONED keys are never rotation
+        candidates (#750.10) and stay untouched."""
+        tc, fake = rest_client
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("api_keys", [
+            # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)…
+            _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-rec-2", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h2", created_at="2026-08-02T00:00:00Z"),
+            # …plus an own PROVISIONED key (deliberate user key, already
+            # revoked) — never a rotation candidate, stays untouched.
+            _key_row(id="own-prov-1", created_via="provisioned", created_by=_USER1,
+                     lookup_hash="h3", created_at="2026-08-01T12:00:00Z",
+                     revoked_at="2026-08-03T00:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is True     # rotation signal → UI banner
+        by_id = {row["id"]: row for row in fake.tables["api_keys"]}
+        assert by_id["own-rec-1"]["revoked_at"] is not None  # oldest recovery rotated
+        assert by_id["own-rec-2"]["revoked_at"] is None      # newest recovery survives
+        # provisioned key untouched — its original revoke timestamp stands
+        assert by_id["own-prov-1"]["revoked_at"] == "2026-08-03T00:00:00Z"
+        # revoke(own-rec-1) + mint = exactly the cap, never cap+1
+        persistent = [r for r in fake.tables["api_keys"]
+                      if r.get("revoked_at") is None
+                      and r.get("created_via") != "bootstrap"]
+        assert len(persistent) <= 2
+        new_rows = [r for r in fake.tables["api_keys"]
+                    if r["id"] not in ("own-rec-1", "own-rec-2", "own-prov-1")]
+        assert len(new_rows) == 1
+        assert new_rows[0]["created_via"] == "recovery"
+
+    def test_recovery_cap_prefers_own_recovery_over_own_bootstrap(
+            self, rest_client, authed_user):
+        """#1830 core (Supabase lane): the tier-2 own-RECOVERY candidate
+        beats the tier-3 own-bootstrap — the exact deadlock scenario (own
+        recovery keys + own bootstraps coexist, no legacy, no other-user
+        key). Rotating the recovery key frees a REAL persistent slot so the
+        re-check passes: 200, rotated=True, the OLDEST recovery key revoked,
+        the bootstrap survives. (A regression swapping tiers 2/3 would
+        re-introduce the 402 deadlock — the rotated bootstrap would free no
+        persistent slot.)"""
+        tc, fake = rest_client
+        fake.seed("team_memberships", [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed("api_keys", [
+            # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)...
+            _key_row(id="own-rec-1", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-rec-2", created_via="recovery", created_by=_USER1,
+                     lookup_hash="h2", created_at="2026-08-02T00:00:00Z"),
+            # ...plus an own bootstrap (24h ephemeral — rotating it would NOT
+            # free a persistent slot; recovery must win the rotation order).
+            _key_row(id="own-boot-1", created_via="bootstrap", created_by=_USER1,
+                     lookup_hash="h3", created_at="2026-08-01T12:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is True  # recovery rotation → UI banner
+        by_id = {row["id"]: row for row in fake.tables["api_keys"]}
+        assert by_id["own-rec-1"]["revoked_at"] is not None  # oldest recovery rotated
+        assert by_id["own-rec-2"]["revoked_at"] is None      # newest recovery survives
+        assert by_id["own-boot-1"]["revoked_at"] is None     # own bootstrap survives (tier 3)
+        # revoke(own-rec-1) + mint = exactly the cap, never cap+1
         persistent = [r for r in fake.tables["api_keys"]
                       if r.get("revoked_at") is None
                       and r.get("created_via") != "bootstrap"]

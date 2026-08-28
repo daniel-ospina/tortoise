@@ -8503,10 +8503,12 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     - recovery: persistent (no expiry), revocable, counts against max_api_keys;
       at cap, auto-revokes the oldest other key, then a session credential —
       a LEGACY team-scoped unowned key (created_by IS NULL — frees a real
-      slot) or the user's own OLDEST bootstrap key (#1828, 24h ephemeral,
-      safe to rotate; expired ones included) — with a RE-CHECK so a rotation
-      that doesn't free a persistent slot fails CLOSED (402, never cap+1);
-      402 when nothing at all is rotatable.
+      slot), the user's own OLDEST recovery key (#1830, system-minted
+      fallback credentials — freeing a real slot), or the user's own OLDEST
+      bootstrap key (#1828, 24h ephemeral, safe to rotate; expired ones
+      included) — with a RE-CHECK so a rotation that doesn't free a
+      persistent slot fails CLOSED (402, never cap+1); 402 when nothing at
+      all is rotatable.
     """
     import uuid as _uuid
     from datetime import datetime, timedelta
@@ -8608,14 +8610,26 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                 # #1828: at max_api_keys with no OTHER key to revoke, the
                 # recovery fallback dead-locks on the user's OWN persistent
                 # keys (#750.10 refuses to touch them). Rotate a session
-                # credential instead — a LEGACY team-scoped unowned key
-                # (created_by IS NULL — a pre-created_by session credential
-                # by construction; it COUNTS against the cap, so rotating it
-                # frees a real slot and is preferred) or the user's own
-                # OLDEST bootstrap key (24h ephemeral, re-minted per login).
-                # Review P3: expired own bootstraps are rotatable too (24h
-                # ephemeral — pre-rotation harmless; #742 auth remains
-                # unaffected, expired keys still never authenticate).
+                # credential instead, in 3 tiers (each frees a slot or is
+                # re-checked fail-closed):
+                #   1. a LEGACY team-scoped unowned key (created_by IS NULL
+                #      — a pre-created_by session credential by construction;
+                #      it COUNTS against the cap, so rotating it frees a real
+                #      slot and is preferred),
+                #   2. the user's own OLDEST recovery key (#1830 — system-
+                #      minted fallback credentials, NOT deliberate
+                #      user-created keys (those are created_via='provisioned'
+                #      via create_api_key); they count against max_api_keys,
+                #      so rotating one frees a REAL persistent slot — this is
+                #      the escape hatch that un-deadlocks a team whose own
+                #      recovery keys fill the cap), then
+                #   3. the user's own OLDEST bootstrap key (24h ephemeral,
+                #      re-minted per login; Review P3: expired own bootstraps
+                #      are rotatable too — pre-rotation harmless, #742 auth
+                #      remains unaffected, expired keys still never
+                #      authenticate).
+                # Own PROVISIONED keys (deliberate user-created keys) are
+                # NEVER rotation candidates (#750.10).
                 # Review P2-1: RE-CHECK the persistent count after the
                 # revoke — a rotated modern bootstrap was never in the count,
                 # so a rotation that doesn't free a slot fails CLOSED (402)
@@ -8629,6 +8643,12 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     "ORDER BY k.created_at ASC LIMIT 1",
                     params={"tid": tid},
                 ).result_set
+                own_recovery = reg.query(
+                    "MATCH (k:APIKey {team_id:$tid, created_via:'recovery', "
+                    "created_by:$uid}) WHERE k.revoked_at IS NULL "
+                    "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                    params={"tid": tid, "uid": user_id},
+                ).result_set
                 own_boot = reg.query(
                     "MATCH (k:APIKey {team_id:$tid, created_via:'bootstrap', "
                     "created_by:$uid}) WHERE k.revoked_at IS NULL "
@@ -8636,7 +8656,8 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     params={"tid": tid, "uid": user_id},
                 ).result_set
                 rotate_id = (legacy[0][0] if legacy
-                             else (own_boot[0][0] if own_boot else None))
+                             else (own_recovery[0][0] if own_recovery
+                                   else (own_boot[0][0] if own_boot else None)))
                 if rotate_id:
                     reg.query(
                         "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
@@ -8678,8 +8699,9 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
 
     Mirrors the registry mint exactly (bootstrap: 24h expiry, 3-active cap;
     recovery: persistent, max_api_keys cap with oldest-OTHER auto-revoke, then
-    a session-credential rotation — legacy unowned / own oldest bootstrap
-    (#1828) with a fail-closed RE-CHECK so the mint never overshoots the cap)
+    a session-credential rotation — legacy unowned / own oldest recovery
+    (#1830) / own oldest bootstrap (#1828) — with a fail-closed RE-CHECK so
+    the mint never overshoots the cap)
     with reads/writes on team_memberships / teams / api_keys. The minted key
     lands in api_keys with lookup_hash + created_via + expires_at, so
     get_current_team / MCP resolve it via the unique lookup_hash index, and
@@ -8755,14 +8777,26 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
                 # #1828: at max_api_keys with no OTHER key to revoke, the
                 # recovery fallback dead-locks on the user's OWN persistent
                 # keys (#750.10 refuses to touch them). Rotate a session
-                # credential instead — a LEGACY team-scoped unowned key
-                # (created_by IS NULL — a pre-created_by session credential
-                # by construction; it COUNTS against the cap, so rotating it
-                # frees a real slot and is preferred) or the user's own
-                # OLDEST bootstrap key (24h ephemeral, re-minted per login).
-                # Review P3: expired own bootstraps are rotatable too (the
-                # row scan below drops the expiry filter; #742 auth remains
-                # unaffected — expired keys still never authenticate).
+                # credential instead, in 3 tiers (each frees a slot or is
+                # re-checked fail-closed):
+                #   1. a LEGACY team-scoped unowned key (created_by IS NULL
+                #      — a pre-created_by session credential by construction;
+                #      it COUNTS against the cap, so rotating it frees a real
+                #      slot and is preferred),
+                #   2. the user's own OLDEST recovery key (#1830 — system-
+                #      minted fallback credentials, NOT deliberate
+                #      user-created keys (those are created_via='provisioned'
+                #      via create_api_key); they count against max_api_keys,
+                #      so rotating one frees a REAL persistent slot — this is
+                #      the escape hatch that un-deadlocks a team whose own
+                #      recovery keys fill the cap), then
+                #   3. the user's own OLDEST bootstrap key (24h ephemeral,
+                #      re-minted per login; Review P3: expired own bootstraps
+                #      are rotatable too (the row scan below drops the expiry
+                #      filter; #742 auth remains unaffected — expired keys
+                #      still never authenticate).
+                # Own PROVISIONED keys (deliberate user-created keys) are
+                # NEVER rotation candidates (#750.10).
                 # Review P2-1: RE-CHECK the persistent count after the
                 # revoke — a rotated modern bootstrap was never in the count,
                 # so a rotation that doesn't free a slot fails CLOSED (402)
@@ -8776,10 +8810,13 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
                 legacy = [r for r in cands
                           if r.get("created_by") is None
                           and r.get("created_via") != "bootstrap"]
+                own_recovery = [r for r in cands
+                                if r.get("created_by") == user_id
+                                and r.get("created_via") == "recovery"]
                 own_boot = [r for r in cands
                             if r.get("created_by") == user_id
                             and r.get("created_via") == "bootstrap"]
-                rotatable = legacy if legacy else own_boot
+                rotatable = legacy if legacy else (own_recovery if own_recovery else own_boot)
                 rotatable.sort(key=lambda r: r.get("created_at") or "")
                 if rotatable:
                     revoke_api_key(cp, rotatable[0]["id"], now)

@@ -312,14 +312,16 @@ class TestRecoveryMint:
             self, client, reg):
         """#750.10 + #1828 fail-closed: recovery never dead-ends by killing
         the user's own PERSISTENT key — when ALL active cap-counting keys are
-        the caller's own recovery keys AND there is no own bootstrap key to
-        rotate (#1828), the mint 402s."""
+        the caller's own PROVISIONED keys (deliberate user-created keys via
+        create_api_key — #1830: NOT rotation candidates; own RECOVERY keys
+        ARE, since they are system-minted fallback credentials), the mint
+        402s."""
         _seed_team(reg, "team-a")
         _seed_membership(reg, "team-a", _U1, "owner")
         _seed_api_key(reg, "team-a", "own-1", created_by=_U1,
-                      created_via="recovery", created_at=_hours_ago(10))
+                      created_via="provisioned", created_at=_hours_ago(10))
         _seed_api_key(reg, "team-a", "own-2", created_by=_U1,
-                      created_via="recovery", created_at=_hours_ago(1))
+                      created_via="provisioned", created_at=_hours_ago(1))
         r = client.post("/v1/session/key", json={"purpose": "recovery"})
         assert r.status_code == 402
         assert "Key limit reached" in r.json()["detail"]
@@ -330,21 +332,25 @@ class TestRecoveryMint:
         assert all(revoked is None for (revoked,) in rows)
 
     def test_at_cap_rotates_own_oldest_bootstrap_key(self, client, reg):
-        """#1828 + review P2-1: at max_api_keys with only OWN keys, the
-        recovery fallback rotates the user's own OLDEST bootstrap key (24h
-        ephemeral — safe to rotate; EXPIRED ones included, review P3) then
-        RE-CHECKS the persistent count — a rotated modern bootstrap was never
-        in the count, so the mint fails CLOSED (402) instead of minting cap+1
-        persistent keys (the old overshoot grew persistent keys unboundedly
-        per login). Persistent user-minted keys stay untouched (#750.10); the
-        rotated ephemeral frees bootstrap headroom for the next login."""
+        """#1828 + review P2-1: at max_api_keys with only OWN keys and NO
+        own recovery key to rotate (#1830 makes recovery the tier-2
+        candidate — this test isolates the tier-3 bootstrap fallback by
+        seeding PROVISIONED fillers), the recovery fallback rotates the
+        user's own OLDEST bootstrap key (24h ephemeral — safe to rotate;
+        EXPIRED ones included, review P3) then RE-CHECKS the persistent
+        count — a rotated modern bootstrap was never in the count, so the
+        mint fails CLOSED (402) instead of minting cap+1 persistent keys
+        (the old overshoot grew persistent keys unboundedly per login).
+        Persistent user-minted keys stay untouched (#750.10); the rotated
+        ephemeral frees bootstrap headroom for the next login."""
         _seed_team(reg, "team-a")
         _seed_membership(reg, "team-a", _U1, "owner")
-        # 2 own PERSISTENT recovery keys fill the free-tier cap (2)...
-        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
-                      created_via="recovery", created_at=_hours_ago(10))
-        _seed_api_key(reg, "team-a", "own-rec-2", created_by=_U1,
-                      created_via="recovery", created_at=_hours_ago(1))
+        # 2 own PERSISTENT PROVISIONED keys (deliberate user keys — never
+        # rotation candidates, #750.10) fill the free-tier cap (2)...
+        _seed_api_key(reg, "team-a", "own-prov-1", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-prov-2", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(1))
         # ...and 2 own 24h bootstrap keys are rotatable (oldest first; the
         # OLDEST is already EXPIRED — P3: expiry is no longer a barrier).
         _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
@@ -367,10 +373,84 @@ class TestRecoveryMint:
         assert by_id["own-boot-2"] is None      # newest own bootstrap survives
         # Persistent keys untouched (#750.10) + count never exceeds the cap
         rows = reg.query(
-            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2'] "
+            "MATCH (k:APIKey) WHERE k.id IN ['own-prov-1','own-prov-2'] "
             "RETURN k.revoked_at",
         ).result_set
         assert all(revoked is None for (revoked,) in rows)
+        assert _count_persistent_keys(reg, "team-a") <= 2
+
+    def test_at_cap_rotates_own_oldest_recovery_key(self, client, reg):
+        """#1830: at max_api_keys with only OWN persistent keys, the
+        recovery fallback now rotates the user's own OLDEST recovery key
+        (tier 2 — recovery keys are SYSTEM-MINTED fallback credentials, not
+        deliberate user-created keys (those are created_via='provisioned'),
+        so rotating one at cap is the escape-hatch semantics). A recovery key
+        COUNTS against max_api_keys, so the rotation frees a REAL slot: the
+        re-check passes and the mint lands at exactly the cap (never cap+1)
+        with rotated=True. Own PROVISIONED keys are never rotation
+        candidates (#750.10) and stay untouched."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)…
+        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-rec-2", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1))
+        # …plus an own PROVISIONED key (a deliberate user-created key the
+        # user already revoked) — it must stay untouched: provisioned keys
+        # are NOT rotation candidates, and the recovery rotation alone frees
+        # the needed slot.
+        _seed_api_key(reg, "team-a", "own-prov-1", created_by=_U1,
+                      created_via="provisioned", created_at=_hours_ago(5),
+                      revoked_at=_hours_ago(2))
+        assert _count_persistent_keys(reg, "team-a") == 2
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
+        assert r.json()["rotated"] is True     # rotation signal → UI banner
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2','own-prov-1'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-rec-1"] is not None   # oldest own recovery rotated
+        assert by_id["own-rec-2"] is None       # newest own recovery survives
+        # provisioned key untouched — its original revoke timestamp stands
+        assert by_id["own-prov-1"] is not None
+        assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
+
+    def test_at_cap_recovery_rotation_prefers_own_recovery_over_bootstrap(
+            self, client, reg):
+        """#1830 core: the tier-2 own-RECOVERY candidate beats the tier-3
+        own-bootstrap — the exact deadlock scenario (own recovery keys + own
+        bootstraps coexist, no legacy, no other-user key). Rotating the
+        recovery key frees a REAL persistent slot so the re-check passes:
+        200, rotated=True, the OLDEST recovery key revoked, the bootstrap
+        survives. (A regression swapping tiers 2/3 would re-introduce the
+        402 deadlock — the rotated bootstrap would free no persistent slot.)"""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: two own RECOVERY keys fill the cap (the #1830 deadlock)...
+        _seed_api_key(reg, "team-a", "own-rec-1", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10))
+        _seed_api_key(reg, "team-a", "own-rec-2", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1))
+        # ...plus an own bootstrap (24h ephemeral — rotating it would NOT
+        # free a persistent slot; recovery must win the rotation order).
+        _seed_api_key(reg, "team-a", "own-boot-1", created_by=_U1,
+                      created_via="bootstrap", created_at=_hours_ago(5),
+                      expires_at=_hours_ahead(1))
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is True  # recovery rotation → UI banner
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-1','own-rec-2','own-boot-1'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-rec-1"] is not None  # oldest own recovery rotated
+        assert by_id["own-rec-2"] is None      # newest own recovery survives
+        assert by_id["own-boot-1"] is None     # own bootstrap survives (tier 3)
         assert _count_persistent_keys(reg, "team-a") <= 2
 
     def test_at_cap_rotates_legacy_unowned_key_when_it_frees_a_slot(

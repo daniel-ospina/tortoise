@@ -1080,31 +1080,42 @@ function claimIntentInFlight() {
           } catch (e) {
             // #308: a suspended team's mint 403s — show the appeal banner.
             if (e && e.suspended) setSuspended(e.suspended)
-            // #1559: the mint failed (429 rate limit / 5xx) — the dashboard
-            // has NO key-only fallback anymore (deleted in #1511), so a
-            // silent setChecking(false) stranded users on the fake
-            // "Redirecting to the sign-in page…" shell. Surface an
-            // actionable error instead (the Retry button re-runs the mount).
+            // #1559: the mint failed — the dashboard has NO key-only
+            // fallback anymore (deleted in #1511), so a silent
+            // setChecking(false) stranded users on the fake "Redirecting to
+            // the sign-in page…" shell. Surface an actionable error instead
+            // (the Retry button re-runs the mount).
             const msg = (e && e.message) || 'Could not prepare your session.'
             if (teamIdRef.current !== teamAtMountMint) return  // switched mid-mint
             // #1719 (Task 6): a 5xx mint failure is the server's fault, not
             // the user's — render the honest unavailable copy (a raw
             // "Internal server error" string reads like a client bug).
             const errStatus = (e && e.status) || 0
-            setMountError(errStatus >= 500
-              ? UNAVAILABLE_COPY
-              : /429|rate limit/i.test(msg)
-                ? 'Too many requests from this network — try again in a minute.'
-                : msg)
-            setAuthed(false)  // #1567 P0: the error card renders in !authed
-            setChecking(false)
-            return
+            if (errStatus >= 500 || (e && e.suspended)) {
+              // 5xx (server fault) or suspension: keep the blocking error
+              // card + appeal banner (unchanged behavior).
+              setMountError(errStatus >= 500 ? UNAVAILABLE_COPY : msg)
+              setAuthed(false)  // #1567 P0: the error card renders in !authed
+              setChecking(false)
+              return
+            }
+            // #1830: a NON-5xx, NON-suspension mint failure (402 key limit /
+            // 429 bootstrap cap / other 4xx) must NOT block the dashboard —
+            // the overview reads ride the session JWT (#1828), so proceeding
+            // to completeLogin(null) still renders Team/Keys/Sessions. Set a
+            // one-time banner instead: agent connections need a key, but the
+            // dashboard works without one.
+            setBanner(`Couldn't create an agent key: ${msg} — the dashboard works, but agent connections need a key. Revoke an old key or wait for expiry.`)
           }
         }
         // Round-9: a SIGNED_OUT during the mint must not complete the login
         // with a fresh key on the tab the user just signed out of.
         if (!sessionTokenRef.current) { setAuthed(false); setChecking(false); setMountError('Your session ended — sign in again.'); return }
-        if (!key) { setAuthed(false); setChecking(false); setMountError('Could not prepare your session — try again.'); return }
+        // #1830: key may be null here — a recoverable mint failure (4xx,
+        // non-suspension) proceeds to completeLogin(null): the overview
+        // reads ride the session JWT, so the dashboard still renders. The
+        // old hard gate (`if (!key) … mountError`) blocked the WHOLE
+        // dashboard on a mint that only matters for agent connections.
         // #1567 P1 (verifier gate): the chrome is visible NOW — a team
         // switch made during the mint (multi-membership: the mint-400
         // fallback populated the switcher early) must not be clobbered by
@@ -1112,9 +1123,14 @@ function claimIntentInFlight() {
         // moved away from the key's owner (teamIdRef is null on a fresh
         // session — the stored-key path and Round-8 loadTeams own it then).
         if (mintedTeamId && teamIdRef.current && teamIdRef.current !== mintedTeamId) return
-        localStorage.setItem(KEY_STORAGE, key)
-        setApiKey(key)
-        apiKeyRef.current = key
+        // #1830: only persist a REAL key — a recoverable mint failure leaves
+        // key null, and writing it would clobber the stored credential (a
+        // falsy value must never land in localStorage). A null key also
+        // clears the apiKey state so snippets never leak a stale/invalid
+        // key (or "Bearer null").
+        if (key) localStorage.setItem(KEY_STORAGE, key)
+        setApiKey(key || '')
+        apiKeyRef.current = key || ''
         setAuthMode('session')
         await completeLogin(key)
       } catch (e) {
