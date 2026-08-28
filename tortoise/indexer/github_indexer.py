@@ -688,6 +688,10 @@ class GitHubIndexer:
         ``cursor``: composite (updated_at, number) from the previous run.
         ``quota_check``: callable re-checked per batch (raises
         QuotaExceededError); None = no quota gate (stdio/operator).
+
+        #1895: a 0-processed run that did NOT cap/quota-cut mints a CLEAN
+        boundary cursor from the input (drops ``truncated``) so a fully-
+        drained backlog exits DRAIN — see the cursor-mint below.
         """
         client = await self._get_client()
         proj = sdk._get_proj()
@@ -757,6 +761,28 @@ class GitHubIndexer:
             if cap_hit or stats["quota_hit"]:
                 new_cursor["truncated"] = True
             stats["cursor"] = new_cursor
+        elif (cursor is not None and cursor.get("truncated")
+                and cursor.get("updated_at")
+                and not cap_hit and not stats["quota_hit"]):
+            # #1895: a 0-processed run that did NOT cap/quota-cut means the
+            # DRAIN walk skipped EVERY item — the deferred backlog is fully
+            # drained (the previous truncated run landed on an exact cap
+            # multiple, or the boundary block is exhausted). Mint a CLEAN
+            # boundary cursor (drop `truncated`) so the next run exits
+            # DRAIN; otherwise the cursor stays truncated forever and every
+            # re-poll re-walks the full stream (production freeze, #1895).
+            # (`last is None and cap_hit` is unreachable with non-empty
+            # updated_at items — cap_hit requires >= cap processed items,
+            # and an empty-updated_at item never pins `last` (pre-existing
+            # degenerate edge, impossible on GitHub's schema); `quota_hit`
+            # with 0 processed keeps truncated: a quota break is not a
+            # clean end — the deferred older backlog would be missed by a
+            # since-bounded DIFF walk. The `.get()` guards + falsy
+            # updated_at check keep the clear path KeyError-proof against
+            # hand-patched cursors — plan-verify cycle 1.)
+            stats["cursor"] = {
+                "updated_at": cursor["updated_at"],
+                "number": int(cursor.get("number") or 0)}
         await self._close()
         return stats
 

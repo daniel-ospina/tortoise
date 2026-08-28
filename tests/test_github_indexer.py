@@ -448,6 +448,104 @@ def test_second_block_spanning_pages_drains_and_advances_boundary(sdk):
         assert int(rows[0][0]) == 1, f"issue #{n} must be indexed (no loss)"
 
 
+def test_truncated_clears_on_zero_processed_drain(sdk):
+    """#1895: an exact-cap-multiple run (500 new items, cap 500) stamps
+    truncated; the NEXT run (DRAIN) processes 0 and must mint a CLEAN
+    boundary cursor so the run after exits DRAIN. Pre-fix: the 0-processed
+    run left `last is None` → cursor untouched → truncated forever."""
+    S = "2026-08-18T02:49:35Z"
+    t = MockGitHubTransport(
+        issues=[gh_issue(n, updated_at=S) for n in range(1, 501)],
+        page_size=100)
+    stats1 = _run(_indexer(t), sdk, cap=500)
+    assert stats1["cursor"] == {"updated_at": S, "number": 500,
+                                 "truncated": True}
+    stats2 = _run(_indexer(t), sdk, cursor=stats1["cursor"], cap=500)
+    assert stats2["processed"] == 0
+    assert stats2["cursor"] == {"updated_at": S, "number": 500}  # clean
+    # run 3 is DIFF (its first issues request carries `since`), not DRAIN —
+    # and stays exact-once
+    n_before = len(t.issue_query_params())
+    stats3 = _run(_indexer(t), sdk, cursor=stats2["cursor"], cap=500)
+    assert stats3["processed"] == 0
+    assert any("since" in p for p in t.issue_query_params()[n_before:]), \
+        "a clean cursor must exit DRAIN (the next run uses since)"
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 500
+
+
+def test_stuck_truncated_cursor_clears_on_empty_drain(sdk):
+    """#1895: the exact production freeze shape — a truncated cursor whose
+    backlog is FULLY indexed (the drain walk skips everything). The run
+    must mint a clean cursor (not stay truncated forever) so re-polls exit
+    DRAIN and stop re-walking the full stream."""
+    S = "2026-08-18T02:49:35Z"
+    t = MockGitHubTransport(issues=[gh_issue(1, updated_at=S),
+                                    gh_issue(2, updated_at=S)])
+    _run(_indexer(t), sdk)  # index both
+    stuck = {"updated_at": S, "number": 2, "truncated": True}
+    stats = _run(_indexer(t), sdk, cursor=stuck)
+    assert stats["processed"] == 0
+    assert stats["cursor"] == {"updated_at": S, "number": 2}  # truncated gone
+
+
+def test_quota_break_at_item_zero_keeps_truncated(sdk):
+    """#1895 (scope-verify): the truncated-clear guard `not quota_hit` is
+    load-bearing. A quota break BEFORE the first item (processed=0,
+    quota_hit=True, last=None) must NOT mint a clean cursor — the deferred
+    backlog (items OLDER than the boundary second) would then be missed by
+    the since-bounded DIFF walk → permanent silent loss. Pre-fix-adjacent:
+    without the guard this test fails (cursor loses truncated)."""
+    S = "2026-08-18T02:49:35Z"
+    t = MockGitHubTransport(issues=[gh_issue(1, updated_at=S),
+                                    gh_issue(2, updated_at=S)])
+    from tortoise.quota import QuotaExceededError
+
+    def _quota_check():
+        raise QuotaExceededError("limit reached (test)")
+
+    stuck = {"updated_at": S, "number": 1, "truncated": True}
+    stats = _run(_indexer(t), sdk, cursor=stuck, quota_check=_quota_check)
+    assert stats["processed"] == 0
+    assert stats["quota_hit"] is True
+    assert stats["cursor"]["truncated"] is True, \
+        "a quota break is not a clean end — truncated must persist"
+    # GUARD test (green pre- AND post-fix): passes on the current code
+    # too — it only fails if an implementation writes the truncated-clear
+    # WITHOUT the `not stats["quota_hit"]` guard (a quota break with 0
+    # processed must keep truncated: the deferred older backlog would be
+    # missed by a since-bounded DIFF walk).
+
+
+def test_within_second_order_independent_advance(sdk):
+    """#1895: the ASC flush is independent of the within-second tie order.
+    250 items at ONE second (page_size 100, cap 100) under the mock's
+    deterministic within-second shuffle (seed=1895 — an ARBITRARY tie
+    order): the boundary advances 100→200→250 (clean) across capped runs
+    and ALL 250 Objects index. The pre-fix per-page re-sort sliced the
+    shuffled stream by page and minted non-prefix cursors (verified: 154
+    numbers lost on this seed → census fails)."""
+    S = "2026-08-18T02:49:35Z"
+    t = MockGitHubTransport(
+        issues=[gh_issue(n, updated_at=S) for n in range(1, 251)],
+        page_size=100, shuffle_within_second=True, seed=1895)
+    stats1 = _run(_indexer(t), sdk, cap=100)
+    assert stats1["processed"] == 100
+    assert stats1["cursor"] == {"updated_at": S, "number": 100,
+                                 "truncated": True}
+    stats2 = _run(_indexer(t), sdk, cursor=stats1["cursor"], cap=100)
+    assert stats2["processed"] == 100
+    assert stats2["cursor"] == {"updated_at": S, "number": 200,
+                                 "truncated": True}
+    stats3 = _run(_indexer(t), sdk, cursor=stats2["cursor"], cap=100)
+    assert stats3["processed"] == 50
+    assert stats3["cursor"] == {"updated_at": S, "number": 250}  # clean
+    # all 250 indexed — the prefix invariant holds under an arbitrary
+    # within-second tie order (no low numbers lost)
+    assert sdk._get_proj().g.query(
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 250
+
+
 # ── P1-4 (PR #1792): DRAIN-mode backlog drain ────────────────────────
 
 def test_drain_mode_drains_backlog_across_runs(sdk):

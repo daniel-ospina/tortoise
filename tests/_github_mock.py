@@ -60,7 +60,9 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
                  failures: list[tuple[int, int]] | None = None,
                  respect_since: bool = True,
                  page_size: int | None = None,
-                 resolve_repos_404: bool = False):
+                 resolve_repos_404: bool = False,
+                 shuffle_within_second: bool = False,
+                 seed: int = 1895):
         self.issues_by_repo = issues_by_repo or {}
         if issues is not None:
             self.issues_by_repo["acme/repo1"] = issues
@@ -74,6 +76,14 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
         # When set, BOTH orgs/ and users/ repo resolution return 404 —
         # resolve_repos must fail the job (P2, PR #1792).
         self.resolve_repos_404 = resolve_repos_404
+        # #1895: deterministic within-second tie-order shuffle — GitHub's
+        # sort=updated tie order within one exact updated_at SECOND is
+        # unspecified; this mode shuffles each equal-second run with a
+        # fixed Random(seed) so the mock exercises an ARBITRARY (but
+        # reproducible) tie order. The indexer's second-buffered ASC flush
+        # must behave identically under any tie order.
+        self.shuffle_within_second = shuffle_within_second
+        self.seed = seed
         self.requests: list[httpx.Request] = []
         self._fail_idx = 0
         self._since_last: dict[str, str] = {}
@@ -129,6 +139,26 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
             # sort updated desc (mirror the pinned fetch params)
             items.sort(key=lambda i: (i.get("updated_at") or "", i.get("number") or 0),
                        reverse=True)
+            # #1895: deterministic within-second tie-order shuffle. NOTE:
+            # rng.shuffle(items[i:j]) would shuffle a slice COPY (a silent
+            # no-op) — assign the shuffled slice back instead. The same
+            # Random(seed) is re-created per request, so every page request
+            # re-produces the SAME permutation and pagination stays
+            # consistent across page boundaries.
+            if self.shuffle_within_second:
+                import random
+                rng = random.Random(self.seed)
+                i = 0
+                while i < len(items):
+                    j = i + 1
+                    while (j < len(items)
+                           and (items[j].get("updated_at")
+                                == items[i].get("updated_at"))):
+                        j += 1
+                    sub = items[i:j]
+                    rng.shuffle(sub)
+                    items[i:j] = sub
+                    i = j
             headers: dict[str, str] = {}
             if self.page_size:
                 total = len(items)
