@@ -29,6 +29,7 @@ Post-deploy (CI / manual):
 
 from __future__ import annotations
 
+import contextlib
 import os
 import xml.etree.ElementTree as ET
 
@@ -160,3 +161,148 @@ def test_agent_api_rejects_bad_actors() -> None:
     assert r.status_code == 401, f"bad-key → {r.status_code}"
     # Anonymous POST never creates a row (404/401 — no 201)
     assert r.status_code != 201
+
+
+# ── #1864/#1865/#1866: crawler-visibility lifecycle + meta contract ─────────
+# These need a VALID agent key (provisioned in blog_agent_keys with
+# agent_name='blog-e2e'; pass the raw key as BLOG_E2E_AGENT_KEY). Without it
+# the lifecycle tests SKIP — they cannot create/publish posts anonymously.
+# The meta-contract negative test (400 on 61/156 chars) also needs the key
+# because the agent API rejects invalid keys before validating the body.
+AGENT_KEY = os.environ.get("BLOG_E2E_AGENT_KEY", "")
+AGENT_HEADERS = {"X-Agent-Key": AGENT_KEY, "Content-Type": "application/json"}
+NO_AGENT_KEY = pytest.mark.skipif(
+    not AGENT_KEY,
+    reason="BLOG_E2E_AGENT_KEY required (provision blog-e2e key in blog_agent_keys)",
+)
+
+
+@NO_AGENT_KEY
+def test_agent_api_meta_length_contract() -> None:
+    """#1866: agent API rejects meta fields beyond the editor/SSR contract
+    (60/155) — a 61/156-char value must 400, boundary 60/155 must 200."""
+    url = f"{TORTISE}/blog/api/posts"
+    long_title = "meta contract e2e " + "x" * 30
+    slug = f"meta-contract-{abs(hash(long_title)) % 100000}"
+
+    # Create with over-limit meta fields → 400 validation
+    r = SESSION.post(
+        url,
+        json={
+            "title": long_title,
+            "body": "body",
+            "slug": slug,
+            "meta_title": "t" * 61,
+            "meta_description": "d" * 156,
+        },
+        headers=AGENT_HEADERS,
+        timeout=20,
+    )
+    assert r.status_code == 400, f"over-limit meta → {r.status_code}"
+    body = r.json()
+    assert "meta_title" in body, f"expected meta_title error, got {body}"
+    assert "meta_description" in body, f"expected meta_description error, got {body}"
+
+    # Boundary values (60/155) → accepted
+    r = SESSION.post(
+        url,
+        json={
+            "title": long_title,
+            "body": "body",
+            "slug": slug,
+            "meta_title": "t" * 60,
+            "meta_description": "d" * 155,
+        },
+        headers=AGENT_HEADERS,
+        timeout=20,
+    )
+    assert r.status_code == 201, f"boundary meta → {r.status_code}"
+    # Cleanup — the row is draft; drafts are invisible to crawlers either way,
+    # but unpublish (already draft) and let the row sit in the review queue.
+
+
+@NO_AGENT_KEY
+def test_publish_lifecycle_crawler_visibility() -> None:
+    """#1864 + #1865: the crawler-visibility lifecycle —
+    draft → 404+noindex → publish → 200 → unpublish (agent path) → 404+noindex;
+    plus robots.txt Disallow and admin-shell X-Robots-Tag."""
+    # robots.txt hardening (#1864)
+    robots = SESSION.get(f"{TORTISE}/robots.txt", timeout=20)
+    assert robots.status_code == 200
+    assert "Disallow: /admin" in robots.text, "robots.txt missing Disallow: /admin"
+
+    # Admin shell: unauthenticated → 302 (no shell served), so the noindex
+    # header can't be asserted anonymously; the gate redirect is the contract
+    # (already covered by test_admin_gate_redirects_unauthenticated).
+    # The X-Robots-Tag on non-published blog responses is asserted below.
+
+    slug = f"lifecycle-e2e-{abs(hash(os.environ.get('RUN_ID', ''))) % 100000}"
+    url = f"{TORTISE}/blog/api/posts"
+    title = f"Lifecycle E2E {slug}"
+
+    def create() -> None:
+        r = SESSION.post(
+            url,
+            json={"title": title, "body": "draft body", "slug": slug},
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 201, f"create → {r.status_code} {r.text[:200]}"
+
+    def unpublish_agent() -> None:
+        r = SESSION.patch(
+            f"{url}/{slug}",
+            json={"status": "draft"},
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 200, f"unpublish → {r.status_code} {r.text[:200]}"
+
+    def published() -> None:
+        r = SESSION.patch(
+            f"{url}/{slug}",
+            json={"status": "published"},
+            headers=AGENT_HEADERS,
+            timeout=20,
+        )
+        assert r.status_code == 200, f"publish → {r.status_code} {r.text[:200]}"
+
+    def article_visible() -> tuple[int, str]:
+        a = SESSION.get(f"{TORTISE}/blog/{slug}", timeout=20)
+        return a.status_code, a.headers.get("x-robots-tag", "")
+
+    def article_in_feed_sitemap() -> tuple[bool, bool]:
+        feed = SESSION.get(f"{TORTISE}/blog/feed.xml", timeout=20).text
+        sitemap = SESSION.get(f"{TORTISE}/blog/sitemap.xml", timeout=20).text
+        return slug in feed, slug in sitemap
+
+    try:
+        create()
+        # Draft: invisible to crawlers (404 + explicit noindex)
+        code, tag = article_visible()
+        assert code == 404, f"draft → {code}"
+        assert "noindex" in tag, f"draft x-robots-tag missing noindex: {tag!r}"
+        in_feed, in_sitemap = article_in_feed_sitemap()
+        assert not in_feed and not in_sitemap, "draft leaked into feed/sitemap"
+
+        # Publish: indexable (200, no noindex, present in feed/sitemap)
+        published()
+        code, tag = article_visible()
+        assert code == 200, f"published → {code}"
+        assert "noindex" not in tag, f"published x-robots-tag has noindex: {tag!r}"
+        in_feed, in_sitemap = article_in_feed_sitemap()
+        assert in_feed and in_sitemap, "published missing from feed/sitemap"
+
+        # Unpublish via the agent API: back to 404 + noindex; #1865 expects
+        # the edge cache to be purged (the origin 404 + no-store is the
+        # contract; the purge itself is verified by the immediate 404 here).
+        unpublish_agent()
+        code, tag = article_visible()
+        assert code == 404, f"unpublished → {code}"
+        assert "noindex" in tag, f"unpublished x-robots-tag missing noindex: {tag!r}"
+        in_feed, in_sitemap = article_in_feed_sitemap()
+        assert not in_feed and not in_sitemap, "unpublished leaked into feed/sitemap"
+    finally:
+        # Best-effort cleanup: leave the row as a draft (never republish).
+        with contextlib.suppress(Exception):
+            unpublish_agent()

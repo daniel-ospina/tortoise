@@ -19,17 +19,22 @@
 import {
   type Env, SLUG_RE, validUrl, SITE_URL,
 } from "../_lib.ts";
+import {
+  META_TITLE_MAX, META_DESCRIPTION_MAX, EXCERPT_MAX, TAGS_MAX, TAG_LEN_MAX,
+} from "../_shared/meta-contract.ts";
+import { purgeUrl } from "../_shared/cloudflare-purge.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 const SLUG_MAX = 100;
 const TITLE_MAX = 200;
-const EXCERPT_MAX = 300;
 const BODY_MAX = 100_000;
-const TAGS_MAX = 10;
 const RATE_WINDOW_MS = 60_000;
 const RATE_BURST = 120;
 const RATE_DAY_MS = 86_400_000;
 const RATE_DAY = 2_000;
+
+// SEO field-length contract — single source of truth (#1866): shared with the
+// AI generator (seo-constraints.ts) and locked to the editor's literals.
 
 // In-memory rate counters per isolate (Cloudflare isolates are per-request;
 // this is best-effort, unit-tested at lowered thresholds — the durable guard is
@@ -141,8 +146,8 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
 
   const metaTitle = str(input.meta_title);
   const metaDesc = str(input.meta_description);
-  if (metaTitle && metaTitle.length > 200) errors.meta_title = "meta_title max 200 chars";
-  if (metaDesc && metaDesc.length > 300) errors.meta_description = "meta_description max 300 chars";
+  if (metaTitle && metaTitle.length > META_TITLE_MAX) errors.meta_title = `meta_title max ${META_TITLE_MAX} chars`;
+  if (metaDesc && metaDesc.length > META_DESCRIPTION_MAX) errors.meta_description = `meta_description max ${META_DESCRIPTION_MAX} chars`;
 
   const author = str(input.author);
   if (author && author.length > 100) errors.author = "author max 100 chars";
@@ -151,8 +156,8 @@ function validateCreate(input: PostInput): { ok: true; value: CreateValues } | {
   if (status === "published" && input.hold_for_review === true) errors.hold_for_review = "hold_for_review cannot be combined with status=published";
 
   if (input.tags !== undefined && input.tags !== null) {
-    if (!Array.isArray(input.tags) || input.tags.length > TAGS_MAX || !input.tags.every((t) => typeof t === "string" && t.length <= 40)) {
-      errors.tags = `tags must be an array of strings (max ${TAGS_MAX}, each ≤40 chars)`;
+    if (!Array.isArray(input.tags) || input.tags.length > TAGS_MAX || !input.tags.every((t) => typeof t === "string" && t.length <= TAG_LEN_MAX)) {
+      errors.tags = `tags must be an array of strings (max ${TAGS_MAX}, each ≤${TAG_LEN_MAX} chars)`;
     }
   }
 
@@ -234,17 +239,17 @@ function validatePatch(input: PostInput): { ok: true; value: PatchValues } | { o
   }
 
   if (input.tags !== undefined) {
-    if (!Array.isArray(input.tags) || input.tags.length > TAGS_MAX || !input.tags.every((t) => typeof t === "string" && t.length <= 40)) {
-      errors.tags = `tags must be an array of strings (max ${TAGS_MAX}, each ≤40 chars)`;
+    if (!Array.isArray(input.tags) || input.tags.length > TAGS_MAX || !input.tags.every((t) => typeof t === "string" && t.length <= TAG_LEN_MAX)) {
+      errors.tags = `tags must be an array of strings (max ${TAGS_MAX}, each ≤${TAG_LEN_MAX} chars)`;
     } else value.tags = input.tags as string[];
   }
 
   const metaTitle = str(input.meta_title);
-  if (metaTitle !== null && metaTitle.length > 200) errors.meta_title = "meta_title max 200 chars";
+  if (metaTitle !== null && metaTitle.length > META_TITLE_MAX) errors.meta_title = `meta_title max ${META_TITLE_MAX} chars`;
   else if (metaTitle !== null) value.meta_title = metaTitle;
 
   const metaDesc = str(input.meta_description);
-  if (metaDesc !== null && metaDesc.length > 300) errors.meta_description = "meta_description max 300 chars";
+  if (metaDesc !== null && metaDesc.length > META_DESCRIPTION_MAX) errors.meta_description = `meta_description max ${META_DESCRIPTION_MAX} chars`;
   else if (metaDesc !== null) value.meta_description = metaDesc;
 
   const author = str(input.author);
@@ -474,6 +479,15 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params 
     return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
   }
   if (updated.length === 0) return err(409, "archived", "post was archived concurrently");
+
+  // #1865: unpublish (resulting status = draft on a previously published post)
+  // → purge the article URL from the edge cache (best-effort, fail-open). The
+  // stale-200 window otherwise survives up to the cache TTL.
+  const wasPublished = post.status === "published";
+  const nowDraft = resultStatus === "draft";
+  if (wasPublished && nowDraft) {
+    void purgeUrl(`${SITE_URL}/blog/${slug}`, env); // fire-and-forget
+  }
 
   return json({ id: post.id, slug, url: `${SITE_URL}/blog/${slug}` }, 200);
 };
