@@ -9070,6 +9070,9 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     # #1828 review P3-2: True when the recovery fallback rotated a session
     # credential to make room — the dashboard shows a one-time banner.
     rotated = False
+    # #1854: prefix of the rotated key (names the banner's victim). Set only
+    # when a rotation happened; None otherwise.
+    rotated_key_prefix = None
 
     if purpose == "bootstrap":
         active_boot = reg.query(
@@ -9118,13 +9121,17 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                 #      — a pre-created_by session credential by construction;
                 #      it COUNTS against the cap, so rotating it frees a real
                 #      slot and is preferred),
-                #   2. the user's own OLDEST recovery key (#1830 — system-
-                #      minted fallback credentials, NOT deliberate
-                #      user-created keys (those are created_via='provisioned'
-                #      via create_api_key); they count against max_api_keys,
-                #      so rotating one frees a REAL persistent slot — this is
-                #      the escape hatch that un-deadlocks a team whose own
-                #      recovery keys fill the cap), then
+                #   2. the user's own LEAST-RECENTLY-USED recovery key
+                #      (#1830 — system-minted fallback credentials, NOT
+                #      deliberate user-created keys (those are
+                #      created_via='provisioned' via create_api_key); they
+                #      count against max_api_keys, so rotating one frees a
+                #      REAL persistent slot — this is the escape hatch that
+                #      un-deadlocks a team whose own recovery keys fill the
+                #      cap; #1854: ordered by last_used_at ASC with never-
+                #      used (NULL) keys first, so a live persistent
+                #      credential another agent/device uses is NOT the one
+                #      rotated), then
                 #   3. the user's own OLDEST bootstrap key (24h ephemeral,
                 #      re-minted per login; Review P3: expired own bootstraps
                 #      are rotatable too — pre-rotation harmless, #742 auth
@@ -9141,26 +9148,38 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
                     "MATCH (k:APIKey {team_id:$tid}) WHERE k.revoked_at IS NULL "
                     "AND k.created_by IS NULL "
                     "AND (k.created_via IS NULL OR k.created_via <> 'bootstrap') "
-                    "RETURN k.id "
+                    "RETURN k.id, k.key_prefix "
                     "ORDER BY k.created_at ASC LIMIT 1",
                     params={"tid": tid},
                 ).result_set
                 own_recovery = reg.query(
                     "MATCH (k:APIKey {team_id:$tid, created_via:'recovery', "
                     "created_by:$uid}) WHERE k.revoked_at IS NULL "
-                    "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                    "RETURN k.id, k.key_prefix, k.last_used_at, k.created_at",
                     params={"tid": tid, "uid": user_id},
                 ).result_set
+                # #1854: own_recovery is rotated least-recently-used FIRST.
+                # Sort key: (last_used_at IS NULL, last_used_at, created_at).
+                # NULL last_used_at = never used = an unused credential —
+                # the SAFEST rotation target (nothing live depends on it),
+                # so NULLs sort first; then least-recently-used; created_at
+                # breaks ties so an all-NULL set keeps the pre-#1854
+                # oldest-created behavior.
+                own_recovery.sort(
+                    key=lambda r: (r[2] is not None, r[2] or "", r[3] or ""))
                 own_boot = reg.query(
                     "MATCH (k:APIKey {team_id:$tid, created_via:'bootstrap', "
                     "created_by:$uid}) WHERE k.revoked_at IS NULL "
-                    "RETURN k.id ORDER BY k.created_at ASC LIMIT 1",
+                    "RETURN k.id, k.key_prefix "
+                    "ORDER BY k.created_at ASC LIMIT 1",
                     params={"tid": tid, "uid": user_id},
                 ).result_set
-                rotate_id = (legacy[0][0] if legacy
-                             else (own_recovery[0][0] if own_recovery
-                                   else (own_boot[0][0] if own_boot else None)))
-                if rotate_id:
+                rotate = (legacy[0] if legacy
+                          else (own_recovery[0] if own_recovery
+                                else (own_boot[0] if own_boot else None)))
+                if rotate:
+                    rotate_id = rotate[0]
+                    rotated_key_prefix = rotate[1]
                     reg.query(
                         "MATCH (k:APIKey {id:$id}) SET k.revoked_at = $now",
                         params={"id": rotate_id, "now": now},
@@ -9193,7 +9212,8 @@ async def session_key(body: dict, request: Request, user: dict = Depends(get_cur
     await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
-            "team_id": tid, "purpose": purpose, "rotated": rotated}
+            "team_id": tid, "purpose": purpose, "rotated": rotated,
+            "rotated_key_prefix": rotated_key_prefix}
 
 
 async def _session_key_supabase(body: dict, request: Request, user: dict) -> dict:
@@ -9253,6 +9273,9 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     # #1828 review P3-2: True when the recovery fallback rotated a session
     # credential to make room — the dashboard shows a one-time banner.
     rotated = False
+    # #1854: prefix of the rotated key (names the banner's victim). Set only
+    # when a rotation happened; None otherwise.
+    rotated_key_prefix = None
 
     if purpose == "bootstrap":
         active_boot = active_api_keys(cp, tid, created_via="bootstrap", created_by=user_id)
@@ -9285,13 +9308,17 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
                 #      — a pre-created_by session credential by construction;
                 #      it COUNTS against the cap, so rotating it frees a real
                 #      slot and is preferred),
-                #   2. the user's own OLDEST recovery key (#1830 — system-
-                #      minted fallback credentials, NOT deliberate
-                #      user-created keys (those are created_via='provisioned'
-                #      via create_api_key); they count against max_api_keys,
-                #      so rotating one frees a REAL persistent slot — this is
-                #      the escape hatch that un-deadlocks a team whose own
-                #      recovery keys fill the cap), then
+                #   2. the user's own LEAST-RECENTLY-USED recovery key
+                #      (#1830 — system-minted fallback credentials, NOT
+                #      deliberate user-created keys (those are
+                #      created_via='provisioned' via create_api_key); they
+                #      count against max_api_keys, so rotating one frees a
+                #      REAL persistent slot — this is the escape hatch that
+                #      un-deadlocks a team whose own recovery keys fill the
+                #      cap; #1854: ordered by last_used_at ASC with never-
+                #      used (NULL) keys first, so a live persistent
+                #      credential another agent/device uses is NOT the one
+                #      rotated), then
                 #   3. the user's own OLDEST bootstrap key (24h ephemeral,
                 #      re-minted per login; Review P3: expired own bootstraps
                 #      are rotatable too (the row scan below drops the expiry
@@ -9306,7 +9333,8 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
                 # per login).
                 cands = cp.query(
                     "api_keys",
-                    select=["id", "created_at", "created_by", "created_via"],
+                    select=["id", "key_prefix", "created_at", "created_by",
+                            "created_via", "last_used_at"],
                     filters=[("team_id", "eq", tid), ("revoked_at", "is", None)],
                 )
                 legacy = [r for r in cands
@@ -9318,10 +9346,23 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
                 own_boot = [r for r in cands
                             if r.get("created_by") == user_id
                             and r.get("created_via") == "bootstrap"]
+                legacy.sort(key=lambda r: r.get("created_at") or "")
+                # #1854: own_recovery is rotated least-recently-used FIRST.
+                # Sort key: (last_used_at IS NULL, last_used_at, created_at).
+                # NULL last_used_at = never used = an unused credential —
+                # the SAFEST rotation target (nothing live depends on it),
+                # so NULLs sort first; then least-recently-used; created_at
+                # breaks ties so an all-NULL set keeps the pre-#1854
+                # oldest-created behavior.
+                own_recovery.sort(
+                    key=lambda r: (r.get("last_used_at") is not None,
+                                   r.get("last_used_at") or "",
+                                   r.get("created_at") or ""))
+                own_boot.sort(key=lambda r: r.get("created_at") or "")
                 rotatable = legacy if legacy else (own_recovery if own_recovery else own_boot)
-                rotatable.sort(key=lambda r: r.get("created_at") or "")
                 if rotatable:
                     revoke_api_key(cp, rotatable[0]["id"], now)
+                    rotated_key_prefix = rotatable[0].get("key_prefix")
                     # P2-1: only mint when a persistent slot actually opened
                     # (legacy rotation frees one; a modern bootstrap never
                     # counted against max_api_keys).
@@ -9351,7 +9392,8 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
     await _abuse_evaluate_keys(tid)
 
     return {"key": api_key, "key_prefix": api_key[:10], "expires_at": expires_at,
-            "team_id": tid, "purpose": purpose, "rotated": rotated}
+            "team_id": tid, "purpose": purpose, "rotated": rotated,
+            "rotated_key_prefix": rotated_key_prefix}
 
 
 @app.get("/v1/context")

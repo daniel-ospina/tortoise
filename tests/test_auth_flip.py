@@ -309,6 +309,9 @@ class TestSessionKeyRoundTrip:
         assert r.status_code == 200, r.text
         assert r.json()["expires_at"] is None  # recovery mint, not bootstrap
         assert r.json()["rotated"] is True     # rotation signal → UI banner
+        # #1854: the mint response names the rotated key for the UI banner
+        # (own-rec-1 was rotated; it carries the shared seeded key_prefix)
+        assert r.json()["rotated_key_prefix"] == "tt_unit_te"
         by_id = {row["id"]: row for row in fake.tables["api_keys"]}
         assert by_id["own-rec-1"]["revoked_at"] is not None  # oldest recovery rotated
         assert by_id["own-rec-2"]["revoked_at"] is None      # newest recovery survives
@@ -323,6 +326,57 @@ class TestSessionKeyRoundTrip:
                     if r["id"] not in ("own-rec-1", "own-rec-2", "own-prov-1")]
         assert len(new_rows) == 1
         assert new_rows[0]["created_via"] == "recovery"
+
+    def test_recovery_cap_rotates_never_used_own_recovery_over_recently_used(
+            self, rest_client, authed_user):
+        """#1854 (supabase lane): own_recovery rotation is last_used_at-
+        aware — a recovery key that was NEVER used (last_used_at NULL) is
+        rotated BEFORE a recently-used one, even when the never-used key was
+        created LATER (pre-#1854 the OLDEST-created key won on every mint,
+        killing a live persistent credential). The mint response names the
+        rotated key (rotated_key_prefix)."""
+        tc, fake = rest_client
+        fake.seed("team_memberships",
+                  [_membership_row(user_id=_USER1, team_id="team-free-001")])
+        fake.seed(
+            "api_keys",
+            [
+                # cap=2: two own RECOVERY keys fill the cap. own-rec-old is the
+                # OLDEST-created but was USED recently (a live credential);
+                # own-rec-new was created later but NEVER used (NULL).
+                _key_row(
+                    id="own-rec-old",
+                    created_via="recovery",
+                    created_by=_USER1,
+                    lookup_hash="h1",
+                    key_prefix="tt_oldrec1",
+                    created_at="2026-08-01T00:00:00Z",
+                    last_used_at="2026-08-05T00:00:00Z",
+                ),
+                _key_row(
+                    id="own-rec-new",
+                    created_via="recovery",
+                    created_by=_USER1,
+                    lookup_hash="h2",
+                    key_prefix="tt_newrec1",
+                    created_at="2026-08-04T00:00:00Z",
+                    last_used_at=None,
+                ),
+            ],
+        )
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is True
+        # the NEVER-USED key is rotated, not the oldest-created one
+        assert r.json()["rotated_key_prefix"] == "tt_newrec1"
+        by_id = {row["id"]: row for row in fake.tables["api_keys"]}
+        assert by_id["own-rec-old"]["revoked_at"] is None      # recently-used survives
+        assert by_id["own-rec-new"]["revoked_at"] is not None  # never-used rotated
+        # revoke(own-rec-new) + mint = exactly the cap, never cap+1
+        persistent = [r for r in fake.tables["api_keys"]
+                      if r.get("revoked_at") is None
+                      and r.get("created_via") != "bootstrap"]
+        assert len(persistent) <= 2
 
     def test_recovery_cap_prefers_own_recovery_over_own_bootstrap(
             self, rest_client, authed_user):

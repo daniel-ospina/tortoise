@@ -144,13 +144,16 @@ def _seed_membership(reg, team_id: str, user_id: str, role: str,
 def _seed_api_key(reg, team_id: str, key_id: str, *, created_by: str,
                   created_via: str, created_at: str,
                   revoked_at: str | None = None,
-                  expires_at: str | None = None):
+                  expires_at: str | None = None,
+                  key_prefix: str = "tt_x",
+                  last_used_at: str | None = None):
     reg.query(
-        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:'h', key_prefix:'tt_x', "
+        "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:'h', key_prefix:$kp, "
         "created_by:$cb, created_at:$ca, revoked_at:$ra, expires_at:$ea, "
-        "created_via:$cv})",
+        "created_via:$cv, last_used_at:$lua})",
         params={"id": key_id, "tid": team_id, "cb": created_by, "ca": created_at,
-                "ra": revoked_at, "ea": expires_at, "cv": created_via},
+                "ra": revoked_at, "ea": expires_at, "cv": created_via,
+                "kp": key_prefix, "lua": last_used_at},
     )
 
 
@@ -417,6 +420,42 @@ class TestRecoveryMint:
         assert by_id["own-rec-2"] is None       # newest own recovery survives
         # provisioned key untouched — its original revoke timestamp stands
         assert by_id["own-prov-1"] is not None
+        assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
+        # #1854: the mint response names the rotated key for the UI banner
+        assert r.json()["rotated_key_prefix"] == "tt_x"
+
+    def test_at_cap_rotates_never_used_own_recovery_over_recently_used(
+            self, client, reg):
+        """#1854: own_recovery rotation is last_used_at-aware — a recovery
+        key that was NEVER used (last_used_at NULL) is rotated BEFORE a
+        recently-used one, even when the never-used key was created LATER.
+        Pre-#1854 the OLDEST-created key won on every mint — killing a live
+        persistent credential agents/other devices use. The mint response
+        also names the rotated key (rotated_key_prefix) so the dashboard
+        banner can point at it."""
+        _seed_team(reg, "team-a")
+        _seed_membership(reg, "team-a", _U1, "owner")
+        # cap=2: two own RECOVERY keys fill the cap. own-rec-old is the
+        # OLDEST-created but was USED 1h ago (a live credential);
+        # own-rec-new was created 1h ago but NEVER used (last_used_at NULL).
+        _seed_api_key(reg, "team-a", "own-rec-old", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(10),
+                      key_prefix="tt_oldrec1", last_used_at=_hours_ago(1))
+        _seed_api_key(reg, "team-a", "own-rec-new", created_by=_U1,
+                      created_via="recovery", created_at=_hours_ago(1),
+                      key_prefix="tt_newrec1")
+        r = client.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+        assert r.json()["rotated"] is True
+        # the NEVER-USED key is rotated, not the oldest-created one
+        assert r.json()["rotated_key_prefix"] == "tt_newrec1"
+        rows = reg.query(
+            "MATCH (k:APIKey) WHERE k.id IN ['own-rec-old','own-rec-new'] "
+            "RETURN k.id, k.revoked_at",
+        ).result_set
+        by_id = {rid: revoked for rid, revoked in rows}
+        assert by_id["own-rec-old"] is None      # recently-used live credential survives
+        assert by_id["own-rec-new"] is not None  # never-used key rotated
         assert _count_persistent_keys(reg, "team-a") <= 2  # revoke+mint = cap
 
     def test_at_cap_recovery_rotation_prefers_own_recovery_over_bootstrap(
