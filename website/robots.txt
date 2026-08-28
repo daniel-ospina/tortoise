@@ -15,6 +15,7 @@
 
 User-agent: *
 Allow: /
+Disallow: /admin
 
 Sitemap: https://premiselabs.co/sitemap-company.xml
 Sitemap: https://tortoise.premiselabs.co/sitemap-product.xml
