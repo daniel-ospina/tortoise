@@ -225,6 +225,28 @@ button.tier-badge:disabled { opacity: 0.6; cursor: wait; }
 }
 .page-graph-selector select:focus { border-color: var(--accent); }
 
+/* #1845: source-scope selector (repo + branch) inside the Memory-sources rows.
+   Shares the page-graph-selector look: uppercase label + accent-focus select,
+   wrapped in a subtle surface pill. Inline-flex so repo + branch + preview sit
+   on one line and wrap gracefully on narrow panels. */
+.scope-selector {
+  display: inline-flex; align-items: center; flex-wrap: wrap; gap: 8px;
+  margin: 4px 0; padding: 8px 10px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); max-width: 100%;
+}
+.scope-selector label {
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-dim); white-space: nowrap;
+}
+.scope-selector select {
+  font-size: 13px; color: var(--text);
+  background: var(--surface-hover); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 8px;
+}
+.scope-selector select:focus { border-color: var(--accent); }
+.scope-selector .dim { margin-left: 2px; }
+
 /* #1148-ux review P4-1: visible focus ring for all interactive controls */
 button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible, [tabindex]:focus-visible {
   outline: 2px solid var(--accent, #06b6d4);
