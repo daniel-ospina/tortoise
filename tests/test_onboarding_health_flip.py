@@ -183,14 +183,23 @@ class TestGithubConnectFlip:
                                                         monkeypatch):
         """Connect → callback: the OAuth exchange result lands as an ENCRYPTED
         token + org on the teams row (service-role seam), and onboarding state
-        marks github_connected. The raw token never appears on the row."""
+        marks github_connected. The raw token never appears on the row.
+        #1845: org is the token's REAL login (GET /user), never the internal
+        team_id — the pre-#1845 team_id default made every org-scoped lookup
+        404 (the empty source-scope selector)."""
         tc, fake = supabase_client
 
         async def _fake_exchange(code: str) -> str:
             return "gho_raw_access_token_123"
 
         import tortoise.hosted_api as ha
+        from tortoise.indexer.github_indexer import GitHubIndexer
         monkeypatch.setattr(ha, "_exchange_github_token", _fake_exchange)
+
+        async def _fake_login(self):
+            return "acme-user"
+
+        monkeypatch.setattr(GitHubIndexer, "current_login", _fake_login)
 
         r = tc.post("/v1/onboarding/github/connect", json={})
         assert r.status_code == 200, r.text
@@ -205,7 +214,7 @@ class TestGithubConnectFlip:
         # encrypted blob stored — never the raw token
         assert row["github_token_enc"] is not None
         assert row["github_token_enc"] != "gho_raw_access_token_123"
-        assert row["github_org"] == "team-free-001"  # default org = team_id
+        assert row["github_org"] == "acme-user"  # #1845: real login, not team_id
         # onboarding state marked connected through the same seam
         assert row["onboarding_state"]["github_connected"] is True
 

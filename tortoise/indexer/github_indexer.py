@@ -126,12 +126,40 @@ class GitHubIndexer:
             f"GitHub request failed after retries (last status {last_status or 'transport'}) "
             f"for {url}")
 
-    async def resolve_repos(self, org: str) -> list[str]:
+    async def current_login(self) -> str | None:
+        """The authenticated user's GitHub login (``GET /user``) — None on
+        failure. Used at connect time (#1845) to store the REAL org/login
+        instead of the internal team_id, and by the self-heal paths."""
+        client = await self._get_client()
+        r = await self._get(client, f"{_GITHUB_API}/user")
+        if r.status_code == 200:
+            data = r.json()
+            login = data.get("login") if isinstance(data, dict) else None
+            return login if isinstance(login, str) and login else None
+        return None
+
+    async def resolve_repos(self, org: str,
+                            allow_user_fallback: bool = True) -> list[str]:
         """Resolve repo names for an org (try org, fall back to user).
 
-        A non-200 from BOTH (org not found / no access) RAISES
-        GitHubFetchError — the job must fail honestly, never silently
-        complete with 0 points + github_indexed=True (P2, PR #1792).
+        A non-200 from BOTH (org not found / no access) falls back to the
+        authenticated token's OWN repos (``/user/repos``) — the selector
+        (#1845) must list what the token can actually see even when the
+        stored org is a legacy team_id UUID (the pre-#1845 connect bug) or
+        the org lookup 404s. GitHub returns 200 for a valid-but-empty org,
+        so a 404 genuinely means 'unknown/no access'.
+
+        Review P2-1 (org-boundary integrity): the fallback is BOUNDED to
+        the token user's own repos (``full_name`` starts with the token's
+        login). It never widens an org-wide walk across the boundary into
+        other orgs' private repos.
+
+        Review (deep bug scan): ``allow_user_fallback=False`` (the org-wide
+        WALK paths) RAISES on a 404 org instead of silently walking the
+        token user's personal namespace — the job must fail honestly when
+        the org the user picked no longer resolves (P2, PR #1792). Only the
+        SELECTOR path keeps the fallback. Only when /user/repos ALSO fails
+        (or the login cannot be resolved) does the fallback raise.
         """
         client = await self._get_client()
         for kind in ("orgs", "users"):
@@ -139,9 +167,60 @@ class GitHubIndexer:
                 client, f"{_GITHUB_API}/{kind}/{org}/repos?per_page=100")
             if r.status_code == 200:
                 return [repo["full_name"] for repo in r.json()]
+        if not allow_user_fallback:
+            raise GitHubFetchError(
+                f"GitHub org/user {org!r} not found or no access (non-200 on "
+                f"orgs/{org}/repos and users/{org}/repos)")
+        login = await self.current_login()
+        if login:
+            r = await self._get(
+                client, f"{_GITHUB_API}/user/repos?per_page=100")
+            if r.status_code == 200:
+                prefix = f"{login}/"
+                return [repo["full_name"] for repo in r.json()
+                        if repo.get("full_name", "").startswith(prefix)]
         raise GitHubFetchError(
             f"GitHub org/user {org!r} not found or no access (non-200 on "
-            f"both orgs/{org}/repos and users/{org}/repos)")
+            f"orgs/{org}/repos and users/{org}/repos; token login "
+            f"unresolvable or /user/repos failed)")
+
+    async def list_branches(self, repo: str) -> list[str]:
+        """List branch names for a repo (``GET /repos/{repo}/branches``).
+
+        Used by the #1845 source-scope selector's per-repo branch picker
+        and the docs "all branches" walk (server-side token — the client
+        never calls GitHub directly). Paginates through the Link header
+        (review: a >100-branch repo must not silently truncate the "all
+        branches" walk or the picker). A non-200 raises GitHubFetchError;
+        the endpoint layer catches and degrades to an empty list (the
+        selector still renders its default branch, never a 500).
+        """
+        client = await self._get_client()
+        branches: list[str] = []
+        url: str | None = (
+            f"{_GITHUB_API}/repos/{repo}/branches?per_page=100")
+        while url:
+            r = await self._get(client, url)
+            if r.status_code != 200:
+                raise GitHubFetchError(
+                    f"GitHub branch list failed for {repo} ({r.status_code})")
+            branches.extend(b.get("name") for b in r.json() if b.get("name"))
+            url = GitHubIndexer._link_header_urls(
+                r.headers.get("Link", "")).get("next")
+        return branches
+
+    async def default_branch(self, repo: str) -> str | None:
+        """The API-reported default branch (``GET /repos/{repo}``) — None on
+        failure. Review P2-4: lets the docs picker label/seed its default
+        option truthfully for repos whose default is neither main nor
+        master."""
+        client = await self._get_client()
+        r = await self._get(client, f"{_GITHUB_API}/repos/{repo}")
+        if r.status_code == 200:
+            data = r.json()
+            db = data.get("default_branch") if isinstance(data, dict) else None
+            return db if isinstance(db, str) and db else None
+        return None
 
     @staticmethod
     def _link_header_urls(link: str) -> dict[str, str]:
