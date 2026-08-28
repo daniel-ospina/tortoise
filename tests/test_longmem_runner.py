@@ -410,6 +410,11 @@ def test_outcomes_to_report_golden_shape():
         # the recovery counters, so they project as None.
         "ingest_retries": None,
         "whole_question_retries": None,
+        # #1785: graph-integrity gate reasons (phase-keyed) — o.get-based
+        # projection, absent on golden outcomes → None (pre-change
+        # checkpoints render; never a KeyError).
+        "gate_reasons": None,
+        "post_retrieval_reasons": None,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
