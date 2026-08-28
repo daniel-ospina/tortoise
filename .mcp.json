@@ -37,10 +37,19 @@
       }
     },
     "tortoise": {
-      "_comment": "HTTP transport — the DB target is resolved SERVER-SIDE by whichever process listens on localhost:8000 (hosted API via entrypoint.sh → FALKORDB_CLOUD_URI, or selfhost daemon via TORTOISE_DB_URI). The old stdio command+env pattern (python3 -m tortoise.mcp_server with TORTOISE_DB_URI in env) was replaced in feat/338 (commit 6ea920f). See how-to-use-tortoise skill §DB URI Reality for full env precedence.",
+      "_comment": "HTTP transport \u2014 the DB target is resolved SERVER-SIDE by whichever process listens on localhost:8000 (hosted API via entrypoint.sh \u2192 FALKORDB_CLOUD_URI, or selfhost daemon via TORTOISE_DB_URI). The old stdio command+env pattern (python3 -m tortoise.mcp_server with TORTOISE_DB_URI in env) was replaced in feat/338 (commit 6ea920f). See how-to-use-tortoise skill \u00a7DB URI Reality for full env precedence.",
       "type": "http",
       "url": "http://localhost:8000/mcp",
       "headers": {}
+    },
+    "search-console": {
+      "_comment": "Google Search Console + Bing + GA4 + AdSense via search-console-mcp (OAuth desktop flow \u2014 NO service account needed). One-time auth: run `npx search-console-mcp setup` in a terminal \u2192 browser login \u2192 token stored in macOS Keychain. Read-only (webmasters.readonly). Tools: search_analytics (up to 25k rows; query/page/country/device/date dimensions; regex filters; quick-wins), list_sites, url_inspection. Domain-property gotcha: siteUrl = sc-domain:tortoise.premiselabs.co. See issue #1862.",
+      "command": "npx",
+      "args": [
+        "-y",
+        "search-console-mcp"
+      ],
+      "env": {}
     }
   }
 }
