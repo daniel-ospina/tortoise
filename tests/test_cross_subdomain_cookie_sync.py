@@ -77,6 +77,29 @@ def _extract_helper(text: str, name: str) -> str:
     return text[start:end]
 
 
+def _extract_fn_body(text: str, name: str) -> str:
+    """Extract a named function/method body (any style: `name(key, value) {`,
+    `name: function (key, value) {`, `function name() {`) up to the matching
+    close brace, including the signature line."""
+    m = re.search(
+        rf"(?:function\s+)?{re.escape(name)}\s*(?::\s*function\s*)?\([^)]*\)\s*{{",
+        text,
+    )
+    assert m, f"missing function: {name}"
+    start = m.start()
+    depth = 0
+    i = m.end() - 1  # the '{'
+    while i < len(text):
+        if text[i] == "{":
+            depth += 1
+        elif text[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+        i += 1
+    raise AssertionError(f"unbalanced function body: {name}")
+
+
 def _normalize_helper(src: str) -> str:
     """Collapse a helper declaration to a comparable token stream so the ES5
     shared-bridge form (`var f = function () { return X; };`), the ES6
@@ -162,6 +185,50 @@ def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
     assert "setItem(key, value) {" in oauth_text
     assert "removeItem(key) {" in oauth_text
     assert "SIZE_GUARD" in oauth_text and "provider_token" in oauth_text
+
+
+def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
+    """#1857 (code-review P2-1/2/3): the host-conditional helpers must be wired
+    into EVERY cookie-writing template in EVERY adapter — not merely present in
+    the file. A partial revert of ONE template (e.g. setItem back to a hardcoded
+    `Domain=${COOKIE_DOMAIN}; Secure`) while another template keeps the
+    conditionals passes the helper-parity + file-wide presence checks but
+    silently recreates the exact bug this issue fixes (cookie dropped on
+    localhost/previews). Assert per-function: both helpers called, Path= +
+    SameSite=Lax present, no hardcoded `Domain=` / `; Secure` literal in the
+    template body (the only legal Domain/Secure come via domainAttr()/
+    secureAttr()), and the correct expiry token per kind (set→Expires=,
+    remove→Max-Age=0)."""
+    surfaces = [
+        # (adapter text, [(fn, kind)]) — kind 'set' requires Expires=,
+        # 'remove' requires Max-Age=0
+        (SHARED, [("setItem", "set"), ("removeItem", "remove")]),
+        (DASHBOARD, [
+            ("setItem", "set"),
+            ("removeItem", "remove"),
+            ("setClaimPendingMarker", "set"),
+            ("clearClaimPendingMarker", "remove"),
+        ]),
+        (OAUTH, [("setItem", "set"), ("removeItem", "remove")]),
+    ]
+    for path, fns in surfaces:
+        text = _read(path)
+        for fn, kind in fns:
+            body = _extract_fn_body(text, fn)
+            assert "domainAttr()" in body, f"{path.name}:{fn}: missing domainAttr() call"
+            assert "secureAttr()" in body, f"{path.name}:{fn}: missing secureAttr() call"
+            assert "Path=" in body, f"{path.name}:{fn}: missing Path="
+            assert "SameSite=Lax" in body, f"{path.name}:{fn}: missing SameSite=Lax"
+            assert "Domain=" not in body, (
+                f"{path.name}:{fn}: hardcoded Domain= in template — use domainAttr()"
+            )
+            assert "; Secure" not in body, (
+                f"{path.name}:{fn}: hardcoded Secure in template — use secureAttr()"
+            )
+            if kind == "set":
+                assert "Expires=" in body, f"{path.name}:{fn}: missing Expires="
+            else:
+                assert "Max-Age=0" in body, f"{path.name}:{fn}: missing Max-Age=0"
 
 
 def test_both_adapters_write_and_remove_cookie_with_same_attributes() -> None:

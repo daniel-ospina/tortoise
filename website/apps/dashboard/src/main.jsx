@@ -122,6 +122,9 @@ const supabaseStorage = {
     document.cookie = `${key}=${encoded}${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Expires=${expires}`
   },
   removeItem(key) {
+    // `=;` + domainAttr() yields `;;` when the Domain attribute is present
+    // (premiselabs hosts) — intentional, byte-matches supabase-session.js;
+    // the empty cookie-av is ignored per RFC 6265 §5.2.
     document.cookie = `${key}=;${domainAttr()}; Path=/; SameSite=Lax${secureAttr()}; Max-Age=0`
   },
 }
