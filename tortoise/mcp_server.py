@@ -2437,12 +2437,23 @@ def tortoise_onboarding_state() -> dict:
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
-    """Toggle automatic session recording for this team (Q3)."""
+    """Toggle automatic session recording for this team (Q3 / dashboard
+    Memory sources sessions toggle).
+
+    #1728 Slice 3 (single consent source): writes the SAME consent keys as
+    the wizard's sessions toggle — the enforced ``session_recording`` flag
+    (the data-plane consent gate, checked by POST /v1/sessions and
+    tortoise_session_capture) + ``capture_revised`` (a user-initiated
+    enable/disable is an explicit decision, so it always resolves the
+    exactly-once re-ask). A stdio/self-hosted user who declined can
+    re-enable here REGARDLESS of ``capture_revised`` — the write is never
+    skipped."""
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
     from tortoise.hosted_api import _update_onboarding_state
-    state = _update_onboarding_state(team_id, session_recording=enabled)
+    state = _update_onboarding_state(team_id, session_recording=enabled,
+                                     capture_revised=True)
     return {"onboarding": state}
 
 

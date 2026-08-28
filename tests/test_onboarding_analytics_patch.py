@@ -24,7 +24,6 @@ from tortoise import hosted_api
 from tortoise.hosted_api import app, get_current_team
 
 TEAM = {"team_id": "test-team-529", "tier": "free", "key_id": "k1"}
-AUTH = {"Authorization": "Bearer tt_test_key_529"}
 
 
 @pytest.fixture
@@ -66,7 +65,7 @@ def _events(client):
 def test_patch_harness_section_emits_event(client):
     """T5: valid pair → exactly one artifact_copied with exactly those props."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"harness": "cursor", "section": "config"}, headers=AUTH)
+                        json={"harness": "cursor", "section": "config"})
     assert resp.status_code == 200
     events = _events(client)
     assert len(events) == 1, f"expected exactly one event, got {events}"
@@ -85,7 +84,7 @@ def test_patch_harness_section_emits_event(client):
 def test_patch_section_both_is_valid(client):
     """T5 (enum member): section 'both' is part of #235's schema."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"harness": "cursor", "section": "both"}, headers=AUTH)
+                        json={"harness": "cursor", "section": "both"})
     assert resp.status_code == 200
     events = _events(client)
     assert len(events) == 1
@@ -95,7 +94,7 @@ def test_patch_section_both_is_valid(client):
 def test_patch_section_setup_is_valid(client):
     """T5 (enum member): welcome page one-click setup prompt attribution."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"harness": "pi", "section": "setup"}, headers=AUTH)
+                        json={"harness": "pi", "section": "setup"})
     assert resp.status_code == 200
     events = _events(client)
     assert len(events) == 1
@@ -109,7 +108,7 @@ def test_patch_section_setup_is_valid(client):
 ])
 def test_patch_invalid_harness_or_section_ignored(client, payload):
     """T6: invalid enum values → 200, no event, no state change."""
-    resp = client.patch("/v1/onboarding/state", json=payload, headers=AUTH)
+    resp = client.patch("/v1/onboarding/state", json=payload)
     assert resp.status_code == 200
     assert _events(client) == []
     # Nothing but the (empty) merge reached the state writer.
@@ -121,8 +120,7 @@ def test_patch_invalid_harness_or_section_ignored(client, payload):
 def test_patch_legit_state_fields_still_merge_alongside_beacon(client):
     """Beacon fields and real state fields can arrive together without leaking."""
     resp = client.patch("/v1/onboarding/state",
-                        json={"prompt_pasted": True, "harness": "pi", "section": "prompt"},
-                        headers=AUTH)
+                        json={"prompt_pasted": True, "harness": "pi", "section": "prompt"})
     assert resp.status_code == 200
     assert client._captured_kwargs.get("prompt_pasted") is True
     assert "harness" not in client._captured_kwargs

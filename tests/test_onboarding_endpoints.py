@@ -132,6 +132,207 @@ class TestSessionRecording:
         assert r.status_code == 200
         assert r.json()["onboarding"]["session_recording"] is False
 
+    def test_enable_writes_capture_revised(self, client):
+        """#1728 Slice 3 (single consent source): the session-recording
+        endpoint writes the SAME consent keys as the wizard's sessions toggle
+        — the enforced ``session_recording`` flag + ``capture_revised`` (a
+        user-initiated enable is an explicit decision, so it resolves the
+        exactly-once re-ask; the re-ask pane never re-shows for fresh
+        opt-ins)."""
+        r = client.post("/v1/onboarding/session-recording", json={"enabled": True})
+        assert r.status_code == 200, r.text
+        st = r.json()["onboarding"]
+        assert st["session_recording"] is True
+        assert st["capture_revised"] is True
+
+    def test_disable_writes_capture_revised(self, client):
+        """#1728: decline (Q3 no / wizard toggle-off) also writes
+        ``capture_revised`` — the decline branch clears the enforced consent
+        flag AND resolves the re-ask (mirrors the wizard/panel decline; same
+        keys)."""
+        r = client.post("/v1/onboarding/session-recording", json={"enabled": False})
+        assert r.status_code == 200, r.text
+        st = r.json()["onboarding"]
+        assert st["session_recording"] is False
+        assert st["capture_revised"] is True
+
+
+# ── #1728 Slice 3 (Task 18): Q3 prompt ↔ wizard single consent source ─────
+# The AGENT_ONBOARDING.md Q3 yes/no branches write the SAME consent keys as
+# the wizard's Memory-sources sessions toggle (one consent source — no
+# cross-surface divergence). The Q3 executor is the MCP tool
+# tortoise_onboarding_session_recording; the wizard rides the PATCH surface.
+# Both must produce the identical state shape, and a stdio user who declined
+# must be able to re-enable via the tool REGARDLESS of ``capture_revised``.
+
+
+def _invoke_session_recording_tool(tmp_path, team_id: str, enabled: bool):
+    """Invoke the MCP tool the way Q3 executes it (HTTP mode team context)
+    against an isolated temp SDK, returning (result, state_after)."""
+    from tortoise.mcp_auth import _current_team_id
+    from tortoise.mcp_server import tortoise_onboarding_session_recording
+    orig_init = TortoiseSDK.__init__
+
+    def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
+        orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
+                  namespace=namespace, **kw)
+
+    TortoiseSDK.__init__ = _patched
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
+    _FALLBACK_KEEPALIVE.clear()
+    from tortoise.hosted_api import _make_sdk, _get_onboarding_state
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": team_id, "st": "{}"},
+    )
+    tok = _current_team_id.set(team_id)
+    try:
+        result = tortoise_onboarding_session_recording(enabled=enabled)
+        state = _get_onboarding_state(team_id)
+    finally:
+        _current_team_id.reset(tok)
+        _FALLBACK_KEEPALIVE.clear()
+        TortoiseSDK.__init__ = orig_init
+    return result, state
+
+
+def test_q3_and_wizard_write_same_keys(tmp_path):
+    """#1728 (UX P1-b): Q3's yes-branch writes the SAME keys as the wizard's
+    sessions toggle-on — the enforced ``session_recording`` flag (the data-
+    plane consent) + ``capture_revised`` (re-ask resolution)."""
+    result, state = _invoke_session_recording_tool(tmp_path, "team-1728-q3", True)
+    assert "error" not in result, result
+    assert state["session_recording"] is True
+    assert state["capture_revised"] is True
+    # The wizard's sessions toggle-on PATCH produces the identical state
+    # shape (PATCH merge with the same two keys — the single consent source).
+    import json
+    from tortoise.hosted_api import app as _app, get_current_team
+    orig_init = TortoiseSDK.__init__
+
+    def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
+        orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
+                  namespace=namespace, **kw)
+
+    TortoiseSDK.__init__ = _patched
+    _app.dependency_overrides[get_current_team] = lambda: {
+        "team_id": "team-1728-q3", "tier": "free", "key_id": "k1",
+    }
+    try:
+        with TestClient(_app) as tc:
+            r = tc.patch("/v1/onboarding/state",
+                         json={"session_recording": True, "capture_revised": True})
+            assert r.status_code == 200, r.text
+            st = r.json()["onboarding"]
+    finally:
+        _app.dependency_overrides.clear()
+        TortoiseSDK.__init__ = orig_init
+    assert st["session_recording"] is True
+    assert st["capture_revised"] is True
+    # identical state shape — the wizard PATCH and the Q3 tool write the
+    # same two consent keys (single consent source)
+    assert st["session_recording"] == state["session_recording"]
+    assert st["capture_revised"] == state["capture_revised"]
+
+
+def test_q3_decline_then_reenable_consents(tmp_path):
+    """#1728 (cycle-4 P1-B): a stdio/self-hosted user who DECLINED (Q3 no /
+    re-ask NO — consent cleared + capture_revised set) can re-enable via
+    ``tortoise_onboarding_session_recording(enable=true)`` REGARDLESS of
+    ``capture_revised`` — the tool always re-sets the enforced consent flag
+    (a user-initiated enable never skips the write)."""
+    # decline first (Q3 no writes the same keys as the wizard/panel decline)
+    _, state = _invoke_session_recording_tool(tmp_path, "team-1728-re", False)
+    assert state["session_recording"] is False
+    assert state["capture_revised"] is True
+    # decline ⇒ capture POST is 403 (the enforced flag is the consent)
+    from tortoise.hosted_api import _get_onboarding_state
+    assert _get_onboarding_state("team-1728-re")["session_recording"] is False
+    # re-enable via the tool — consent re-set despite capture_revised=True
+    result, state2 = _invoke_session_recording_tool(tmp_path, "team-1728-re", True)
+    assert "error" not in result, result
+    assert state2["session_recording"] is True
+    assert state2["capture_revised"] is True
+
+
+def test_reask_gate_defaults_off(client):
+    """#1728: the re-ask gate (session_recording=True && !capture_revised &&
+    !capture_ask_shown) is OFF for a team that has never consented — fresh
+    teams are never misled-flagged. (The fixture's embedded DB is shared in
+    the carve-out lane, so the test resets its own state shape first.)"""
+    r0 = client.patch("/v1/onboarding/state", json={
+        "session_recording": False, "capture_revised": False,
+        "capture_ask_shown": False})
+    assert r0.status_code == 200, r0.text
+    r = client.get("/v1/onboarding/state")
+    assert r.status_code == 200
+    st = r.json()["onboarding"]
+    assert st["session_recording"] is False
+    assert st["capture_revised"] is False
+    assert st["capture_ask_shown"] is False
+    assert not (st["session_recording"] and not st["capture_revised"]
+                and not st["capture_ask_shown"])
+
+
+def test_capture_revised_dedup(client):
+    """#1728 (Journey 2): once ``capture_revised`` is set (any explicit
+    resolution — answer OR fresh opt-in), the re-ask gate reads false even
+    with the legacy consent flag still true: no cross-surface double-ask."""
+    # reset to a known shape, then set the legacy-misled shape: consent on,
+    # no resolution yet
+    client.patch("/v1/onboarding/state", json={
+        "session_recording": False, "capture_revised": False,
+        "capture_ask_shown": False})
+    r = client.patch("/v1/onboarding/state",
+                     json={"session_recording": True})
+    assert r.status_code == 200
+    st = r.json()["onboarding"]
+    assert st["session_recording"] is True
+    assert st["capture_revised"] is False
+    # the wizard's toggle-on PATCH resolves the re-ask in the same write
+    r2 = client.patch("/v1/onboarding/state",
+                      json={"session_recording": True, "capture_revised": True})
+    assert r2.status_code == 200
+    st2 = r2.json()["onboarding"]
+    assert st2["capture_revised"] is True
+    assert not (st2["session_recording"] and not st2["capture_revised"]
+                and not st2["capture_ask_shown"]), \
+        "resolved teams must never re-trigger the re-ask gate"
+    # a second visit (fresh GET) still reads gate-false — no re-ask re-fire
+    r3 = client.get("/v1/onboarding/state")
+    st3 = r3.json()["onboarding"]
+    assert not (st3["session_recording"] and not st3["capture_revised"]
+                and not st3["capture_ask_shown"])
+
+
+def test_decline_patch_clears_consent_keeps_receipts(client):
+    """#1728 (T1-P8 + T2-P2e): the decline PATCH (re-ask NO / toggle-off)
+    clears the enforced consent flag + sets capture_revised, but NEVER clears
+    probes or receipts — re-enable resolves receipt-authoritative."""
+    from tortoise.hosted_api import _make_sdk, _update_onboarding_state
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    _update_onboarding_state(
+        "test-team-1",
+        session_recording=True,
+        install_probe_claude="2026-08-25T00:00:00Z",
+        session_capture_receipt_claude="2026-08-25T00:00:00Z",
+    )
+    r = client.patch("/v1/onboarding/state", json={
+        "session_recording": False, "capture_revised": True,
+        "capture_ask_shown": True,
+    })
+    assert r.status_code == 200, r.text
+    st = r.json()["onboarding"]
+    assert st["session_recording"] is False
+    assert st["capture_revised"] is True
+    assert st["install_probe_claude"] == "2026-08-25T00:00:00Z", \
+        "decline must never clear install probes"
+    assert st["session_capture_receipt_claude"] == "2026-08-25T00:00:00Z", \
+        "decline must never clear receipts (re-enable is receipt-authoritative)"
+
 
 # ── Hosted team creation ────────────────────────────────────────
 
@@ -418,3 +619,38 @@ def test_install_probe_not_consent_gated(client):
                      json={"conversation": [
                          {"role": "user", "content": "hello"}]})
     assert r2.status_code == 403, r2.text
+
+
+def test_cross_surface_harness_vocab_contract():
+    """#1727 (Task 11, T2-P2d): the analytics harness values are a subset of
+    the SessionRequest harness Literal — one value set across surfaces (both
+    code comments in hosted_api.py pin this contract; this test enforces it).
+    Also asserts the dashboard's HARNESS_ORDER matches the analytics vocab, so
+    the UI rows and the server can never drift to different harness names.
+    """
+    from pathlib import Path
+    import re
+
+    from tortoise.hosted_api import (
+        _HARNESS_ANALYTICS_VALUES,
+        _SESSION_HARNESS_VALUES,
+    )
+
+    # 1. server-side subset contract (analytics ⊆ SessionRequest Literal).
+    assert _HARNESS_ANALYTICS_VALUES <= _SESSION_HARNESS_VALUES
+    # both surfaces are exactly the pinned 6-harness vocabulary.
+    assert set(_HARNESS_ANALYTICS_VALUES) == {
+        "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    }
+    assert _SESSION_HARNESS_VALUES == frozenset({
+        "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    })
+
+    # 2. the frontend harness set matches the analytics vocab (parse the
+    # dashboard constant — self-contained, no JS toolchain needed).
+    root = Path(__file__).resolve().parent.parent
+    harnesses_js = (root / "website/apps/dashboard/src/harnesses.js").read_text()
+    m = re.search(r"export const HARNESS_ORDER\s*=\s*\[([^\]]*)\]", harnesses_js)
+    assert m, "HARNESS_ORDER not found in website/apps/dashboard/src/harnesses.js"
+    frontend = {s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()}
+    assert frontend == set(_HARNESS_ANALYTICS_VALUES)
