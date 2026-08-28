@@ -65,6 +65,30 @@ def test_edge_function_writes_supabase_only():
     assert "lookupHash" in src, "Edge Function must compute lookup_hash"
 
 
+def test_demo_seed_logs_non_ok_responses():
+    """#1860 (P3-1): a non-2xx /internal/demo response must be LOGGED, not
+    silently swallowed. The old fire-and-forget `.catch()` covered only
+    transport/abort errors — an HTTP 500 body resolved 'successfully', so a
+    failed seed left the first-timer's graph silently missing demo data.
+    The response must be bound and checked with !ok (source contract)."""
+    src = EDGE_FN.read_text()
+    # the demo-seed fetch binds its response (not fire-and-forget)
+    assert "const demoRes = await fetch(`${fastApiUrl}/internal/demo`" in src, (
+        "demo-seed fetch must bind its response (demoRes) so !ok is checkable"
+    )
+    # transport/abort failures still log
+    assert 'console.error("Demo seed failed:", e)' in src
+    # HTTP errors (4xx/5xx) log the status — never silently pass
+    assert "!demoRes.ok" in src, (
+        "demo-seed must check !demoRes.ok — a 500 body resolving 'successfully' "
+        "is the #1860 P3-1 bug"
+    )
+    assert "demoRes.status" in src, "non-ok demo-seed log must include the status"
+    # the provision RPC has already committed — the failure must NOT fail the
+    # whole provisioning (the user can still be onboarded)
+    assert "return json(response, 201" in src
+
+
 def test_edge_function_uses_shared_lookup_mirror():
     """The TS mirror import must exist and stay pure (runs in Deno AND node —
     the parity test imports it; Deno-only APIs would break the parity run)."""

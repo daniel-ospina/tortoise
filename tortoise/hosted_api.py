@@ -1483,11 +1483,17 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         raise HTTPException(status_code=403, detail=_suspended_detail())
     from tortoise.pricing import tier_limits
     lim = tier_limits(row.get("tier") or "free")
+    # #1859 P3-2: honor the max_points column (points-cap override,
+    # migration 20260817000001) with graph_size_cap fallback — mirror the
+    # import_team precedence instead of reading graph_size_cap only.
+    _mp = row.get("max_points")
+    if _mp is None:
+        _mp = row.get("graph_size_cap")
     return {
         "team_id": team_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
-        "max_points": int(row.get("graph_size_cap")) if row.get("graph_size_cap") is not None else lim["max_graph_nodes"],
+        "max_points": int(_mp) if _mp is not None else lim["max_graph_nodes"],
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": DEFAULT_MAX_SESSIONS,
         "suspended_at": row.get("suspended_at"),
@@ -4594,7 +4600,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
         except QuotaCheckError as e:
             raise HTTPException(status_code=500, detail=f"Quota check failed: {e}")  # noqa: B904
-        max_points = team.get("max_points") or 1000
+        max_points = team.get("max_points")
+        if max_points is None:
+            # #1859 P3-2 review (P4): the dict builders now guarantee
+            # max_points; a legacy dict must fall back to the plan's node
+            # cap, never an arbitrary 1000 (which would mask an explicit 0
+            # override at enforce_team_limit).
+            from tortoise.pricing import tier_limits as _tl
+            max_points = _tl(team.get("tier") or "free").get("max_graph_nodes")
         if count + est > max_points:
             raise HTTPException(
                 status_code=402,
@@ -9418,7 +9431,17 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
             if max_keys is not None and len(active) >= max_keys:
                 # #750.10: never auto-revoke a key the current user created —
                 # recovery must not dead-end by killing the user's own key.
-                others = [r for r in active if r.get("created_by") != user_id]
+                # #1859 P3-1 (lane parity): exclude LEGACY keys (created_by
+                # IS NULL) from the others list — the registry predicate is
+                # `created_by <> $uid`, whose Cypher NULL semantics EXCLUDE
+                # unowned rows, so a legacy key must fall to the rotation
+                # branch (rotated=True), not be revoked via the others branch
+                # (rotated=False). Python's `None != user_id` is True, which
+                # inverted the semantics for exactly the teams where legacy
+                # keys exist (pre-created_by session credentials).
+                others = [r for r in active
+                          if r.get("created_by") is not None
+                          and r.get("created_by") != user_id]
                 others.sort(key=lambda r: r.get("created_at") or "")
                 if others:
                     revoke_api_key(cp, others[0]["id"], now)
@@ -9814,7 +9837,7 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
-async def set_session_recording(body: dict, team: dict = Depends(get_current_team)):  # noqa: B008
+async def set_session_recording(body: dict, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
 
     #1728 Slice 3 (single consent source): writes the SAME consent keys as
@@ -9822,7 +9845,13 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
     (the data-plane consent) + ``capture_revised`` (a user-initiated enable/
     disable is an explicit decision, so it resolves the exactly-once re-ask;
     fresh opt-ins never see the re-ask pane; a declined user can re-enable
-    here regardless of ``capture_revised``)."""
+    here regardless of ``capture_revised``).
+
+    #1859 P3-3: converted from get_current_team (key-only) to the same
+    non-gated dual-auth as GET/PATCH /v1/onboarding/state — the dashboard
+    was rewired by #1728 to PATCH /v1/onboarding/state (session JWT), while
+    the MCP tool registry (tortoise_onboarding_session_recording) still
+    drives this endpoint with a tt_ key; both must work."""
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=400, detail="'enabled' must be a boolean")

@@ -862,3 +862,47 @@ def test_run_marker_matches_manifest_marker():
             "must match the run's deselect set or every run reds on vanished "
             "nodeids — #1787)"
         )
+
+
+def test_sweep_team_strays_env_gated_iff_uri():
+    """#1886 (issue #1884): the journal-blind team_* stray-pass opt-in
+    (TORTOISE_TEST_SWEEP_TEAM_STRAYS) is set under the SAME full==true gate
+    as the docker URI on BOTH matrix jobs — the pass is safe ONLY on the
+    dedicated fresh-per-job container; a future edit that sets it on a
+    tier-2 embedded leg (or drops it from a docker leg) reds. Mirrors the
+    EXPECT_URI iff-gate pin (cycle-7 P2-1)."""
+    wf = _load_python_ci()
+    for job in ("test", "test-slow"):
+        steps = wf["jobs"][job]["steps"]
+        compute = next(s for s in steps
+                       if "Compute docker URI" in s.get("name", ""))
+        script = compute["run"]
+        gate = ('if [ "${{ needs.changes.outputs.full }}" = "true" ]; then')
+        assert gate in script, f"{job}: the docker gate must be full==true"
+        then_block = script.split("then", 1)[1].split("fi", 1)[0]
+        assert 'SWEEP_TEAM_STRAYS="1"' in then_block, \
+            f"{job}: opt-in must be set ONLY inside the full==true gate"
+        outside_then = script.split("then", 1)[1].split("fi", 1)[1]
+        assert 'SWEEP_TEAM_STRAYS="1"' not in outside_then, \
+            f"{job}: opt-in must never be set outside the full==true gate"
+        assert 'echo "SWEEP_TEAM_STRAYS=$SWEEP_TEAM_STRAYS" >> "$GITHUB_ENV"' \
+            in script, f"{job}: opt-in must be exported"
+        run = next(s for s in steps
+                   if s.get("name", "").startswith(
+                       "Run fast test suite" if job == "test"
+                       else "Run slow test suite"))
+        assert run["env"]["TORTOISE_TEST_SWEEP_TEAM_STRAYS"] \
+            == "${{ env.SWEEP_TEAM_STRAYS }}", \
+            f"{job}: pytest step must map the opt-in from the job env"
+
+
+def test_track_b_docker_lane_sets_team_stray_opt_in():
+    """#1886: test-track-b is a docker lane on a dedicated fresh-per-job
+    container (TORTOISE_DB_URI + EXPECT_URI set) — the team_* stray-pass
+    opt-in must be set there too, or the #1686 journal-blind closure is
+    silently inert on that lane."""
+    wf = _load_python_ci()
+    env = wf["jobs"]["test-track-b"].get("env", {})
+    assert env.get("TORTOISE_DB_URI", "").endswith("tortoise_test_matrix")
+    assert env.get("TORTOISE_TEST_SWEEP_TEAM_STRAYS") == "1", \
+        "test-track-b (dedicated docker lane) must set the team_* stray opt-in"

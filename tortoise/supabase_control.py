@@ -12,9 +12,10 @@ the read-side seam the hosted auth paths use AFTER the flip:
   a revoked ``api_keys`` twin REJECTS even when the matching
   ``team_memberships`` row is active.
 - Tier/quota come from the ``teams`` row (max_users/max_graphs/
-  graph_size_cap); fields the 0006 schema does not store (max_points →
-  graph_size_cap, max_api_keys/max_sessions) fall back to
-  ``tortoise.pricing.tier_limits`` defaults, mirroring the registry path.
+  graph_size_cap); max_points (the 20260817000001 points-cap override
+  column) takes precedence over graph_size_cap, which falls back to
+  ``tortoise.pricing.tier_limits`` defaults (max_api_keys/max_sessions
+  always fall back to pricing) — mirroring the registry path.
 - Invitations (plan Task 4): mint/accept/rescind live here too — pending
   invitations are redeemed by plaintext token via indexed lookup_hash
   (SHA-256(pepper + token)), accept creates the real team_memberships row
@@ -594,7 +595,12 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # reduced anon tier values — never leave free caps on an anon team.
     max_users = team_row.get("max_users")
     max_graphs = team_row.get("max_graphs")
-    graph_size_cap = team_row.get("graph_size_cap")
+    # #1859 P3-2: honor the max_points column (points-cap override,
+    # migration 20260817000001) with graph_size_cap fallback — mirror
+    # import_team's precedence instead of reading graph_size_cap only.
+    max_points = team_row.get("max_points")
+    if max_points is None:
+        max_points = team_row.get("graph_size_cap")
     # #1148: dashboard key-login acceptance — normalized BEFORE the dict so
     # a None (additive-read degrade, #1096) becomes the safe default True
     # (the column is NOT NULL DEFAULT true; a drifted schema must not 403
@@ -612,10 +618,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
                       else (max_users if max_users is not None else lim["max_users_per_team"])),
         "max_graphs": (lim["max_graphs_per_team"] if anon_override
                        else (max_graphs if max_graphs is not None else lim["max_graphs_per_team"])),
-        # points counter counts graph nodes → graph_size_cap (#310 GAP-B);
-        # anon tier forces the reduced node cap.
+        # points counter counts graph nodes → max_points override with
+        # graph_size_cap fallback (#310 GAP-B; #1859 P3-2); anon tier
+        # forces the reduced node cap.
         "max_points": (int(lim["max_graph_nodes"]) if anon_override
-                       else (int(graph_size_cap) if graph_size_cap is not None else lim["max_graph_nodes"])),
+                       else (int(max_points) if max_points is not None else lim["max_graph_nodes"])),
         # 0006 teams has no max_api_keys/max_sessions columns — pricing/defaults
         "max_api_keys": lim["max_api_keys"],
         "max_sessions": DEFAULT_MAX_SESSIONS,

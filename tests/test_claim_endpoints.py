@@ -629,6 +629,28 @@ class TestAnonCeiling:
         # No control plane → fail-open to stored tier
         assert derived_tier({"tier": "free", "id": "t-x"}) == "free"
 
+    def test_max_points_override_honored_by_resolve_team_limits(
+            self, client, fake, monkeypatch):
+        """#1859 P3-2: a teams.max_points override (migration
+        20260817000001) binds at resolve_team_limits (supabase lane) with
+        graph_size_cap fallback when NULL — mirroring import_team's
+        precedence; anon ceiling still wins (checked in
+        test_unclaimed_anon_team_resolves_anon_tier)."""
+        from tortoise.quota import resolve_team_limits
+        key, team_id = _provision_anon(client, fake)
+        user_id = str(uuid.uuid4())
+        _patch_verify(monkeypatch, _jwt(user_id, providers=["github"]))
+        r = client.post("/v1/claim", json={"api_key": key})
+        assert r.status_code == 200, r.text
+        # stored caps (free values) read-time override → 12345 wins
+        fake.tables["teams"][0]["max_points"] = 12345
+        lim = resolve_team_limits(team_id)
+        assert lim["max_points"] == 12345, lim
+        # NULL override → graph_size_cap fallback (GAP-B)
+        fake.tables["teams"][0]["max_points"] = None
+        lim = resolve_team_limits(team_id)
+        assert lim["max_points"] == fake.tables["teams"][0]["graph_size_cap"], lim
+
     def test_parity_claim_rpc_resolve_limits(self, client, fake, monkeypatch):
         """Parity: the claim RPC's is_anon_team predicate, resolve_api_key,
         and resolve_team_limits agree on the same fixture (anon then
