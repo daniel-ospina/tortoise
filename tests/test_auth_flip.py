@@ -765,3 +765,182 @@ class TestMcpAuthFlip:
             assert called == []
         finally:
             ma.TeamResolutionMiddleware._get_registry_sdk = orig
+
+
+# ── #1855: per-team mint lock (cap integrity under concurrency) ─────────────
+
+class TestSessionKeyMintConcurrency:
+    """#1855 — the session-key mint critical section (cap read → revoke →
+    recheck → insert) runs under a per-team in-process lock (_team_mint_lock
+    in hosted_api). The load-bearing pair is test_supabase_mint_blocks_while_
+    team_lock_held + the lock mechanics tests (they FAIL if the with-lock
+    wrapping is removed); the gather E2E tests are regression guards for the
+    cap invariant (an all-sync section serializes on one event loop with or
+    without the lock — they catch a future await being introduced into the
+    section)."""
+
+    @pytest.fixture
+    def authed_user(self):
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": _USER1}
+        yield
+        app.dependency_overrides.pop(get_current_user, None)
+
+    def test_team_mint_lock_serializes_same_team(self):
+        """The lock is mutually exclusive — a second mint for the SAME team
+        blocks until the first releases (deterministic: a non-blocking
+        acquire must fail while held and succeed after release)."""
+        import threading
+
+        from tortoise.hosted_api import _team_mint_lock
+
+        lock = _team_mint_lock("team-lock-same")
+        inside = threading.Event()
+        release = threading.Event()
+
+        def worker():
+            with lock:
+                inside.set()
+                release.wait(timeout=5)
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        assert inside.wait(timeout=5), "worker never entered the critical section"
+        assert not lock.acquire(blocking=False), \
+            "lock NOT held while worker is inside"
+        release.set()
+        t.join(timeout=5)
+        assert lock.acquire(blocking=False), \
+            "lock NOT released after worker exited"
+        lock.release()
+
+    def test_team_mint_lock_isolates_different_teams(self):
+        """Locks are per-TEAM — a mint for team A never blocks team B."""
+        from tortoise.hosted_api import _team_mint_lock
+
+        lock_a = _team_mint_lock("team-lock-iso-a")
+        lock_b = _team_mint_lock("team-lock-iso-b")
+        assert lock_a is not lock_b
+        with lock_a:
+            assert lock_b.acquire(blocking=False), \
+                "team B's mint blocked by team A's lock"
+            lock_b.release()
+        # cache is stable: same team → same lock object
+        assert _team_mint_lock("team-lock-iso-a") is lock_a
+
+    def test_supabase_mint_blocks_while_team_lock_held(self, monkeypatch,
+                                                       rest_client,
+                                                       authed_user):
+        """The SUPABASE mint actually wraps its critical section in the
+        per-team lock: a mint for a team whose lock is HELD by the test
+        blocks (cannot even reach the cap read) until the lock is released.
+        Fails if the with-lock wrapping is ever removed."""
+        import asyncio
+        import threading
+
+        import tortoise.hosted_api as ha
+        from tortoise.hosted_api import _team_mint_lock
+
+        async def _noop(*_a, **_k):
+            return None
+
+        _, fake = rest_client
+        tid = "team-free-001"
+        fake.seed("team_memberships",
+                  [_membership_row(user_id=_USER1, team_id=tid)])
+        # the mint's post-insert side effects run OUTSIDE the lock and need a
+        # real request object — no-op them (we drive the mint directly).
+        monkeypatch.setattr(ha, "_async_audit", _noop)
+        monkeypatch.setattr(ha, "_abuse_evaluate_keys", _noop)
+
+        lock = _team_mint_lock(tid)
+        lock.acquire()
+        done = threading.Event()
+        outcome = {}
+
+        def _mint():
+            try:
+                asyncio.run(ha._session_key_supabase(
+                    {"purpose": "recovery"}, None, {"user_id": _USER1}))
+                outcome["ok"] = True
+            except Exception as e:
+                outcome["err"] = repr(e)
+            done.set()
+
+        t = threading.Thread(target=_mint, daemon=True)
+        t.start()
+        assert not done.wait(timeout=0.75), \
+            f"mint proceeded while the team lock was held (wrapping missing?): {outcome}"
+        lock.release()
+        assert done.wait(timeout=10), "mint blocked forever after lock release"
+        assert outcome.get("ok") is True, f"mint failed after release: {outcome}"
+        assert len(fake.tables["api_keys"]) == 1
+
+    @pytest.mark.timeout(15)
+    @pytest.mark.timeout(15)
+    def test_lock_released_when_mint_fails_closed(self, rest_client,
+                                                  authed_user):
+        """A mint that fails CLOSED (402 at cap with nothing rotatable) must
+        release the team lock — the next mint (after a slot frees) succeeds
+        instead of deadlocking on a leaked lock (per-test timeout: a leaked
+        lock would otherwise hang the suite red instead of failing)."""
+        tc, fake = rest_client
+        tid = "team-free-001"
+        fake.seed("team_memberships",
+                  [_membership_row(user_id=_USER1, team_id=tid)])
+        # cap reached with ONLY the user's own PROVISIONED keys — #750.10 /
+        # #1828: provisioned keys are NEVER rotation candidates → 402.
+        fake.seed("api_keys", [
+            _key_row(id="own-1", created_via="provisioned", created_by=_USER1,
+                     lookup_hash="h1", created_at="2026-08-01T00:00:00Z"),
+            _key_row(id="own-2", created_via="provisioned", created_by=_USER1,
+                     lookup_hash="h2", created_at="2026-08-02T00:00:00Z"),
+        ])
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 402, r.text
+        # free a slot (admin revokes one of the user's own keys)
+        fake.tables["api_keys"][0]["revoked_at"] = "2026-08-03T00:00:00Z"
+        r = tc.post("/v1/session/key", json={"purpose": "recovery"})
+        assert r.status_code == 200, r.text
+
+    def test_concurrent_recovery_mints_stay_at_cap(self, rest_client,
+                                                   authed_user):
+        """Issue #1855 verification checklist: two CONCURRENT recovery mints
+        (real parallel HTTP dispatch via asyncio.gather) never overshoot
+        max_api_keys (free = 2). Regression guard — an all-sync section
+        serializes on one event loop regardless of the lock, so this catches
+        a future await entering the section (the lock then becomes
+        load-bearing), not today's interleaving."""
+        import asyncio
+
+        import httpx
+
+        from tortoise.hosted_api import app
+
+        _, fake = rest_client
+        tid = "team-free-001"
+        fake.seed("team_memberships",
+                  [_membership_row(user_id=_USER1, team_id=tid)])
+        # at cap-1: one OTHER user's recovery key occupies a slot
+        fake.seed("api_keys", [
+            _key_row(id="other-1", created_via="recovery", created_by=_USER2,
+                     lookup_hash="h-other", created_at="2026-08-01T00:00:00Z"),
+        ])
+
+        async def _run():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                async def _mint(_i):
+                    return await ac.post("/v1/session/key",
+                                         json={"purpose": "recovery"})
+
+                return await asyncio.gather(*(_mint(i) for i in range(2)))
+
+        results = asyncio.run(_run())
+        assert all(r.status_code == 200 for r in results), \
+            [r.text for r in results]
+        active = [k for k in fake.tables["api_keys"]
+                  if k.get("team_id") == tid and k.get("revoked_at") is None
+                  and k.get("created_via") != "bootstrap"]
+        assert len(active) <= 2, \
+            f"cap overshot: {len(active)} active non-bootstrap keys"
