@@ -911,6 +911,23 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1842 P1 (re-review): the post-welcome load sequence, shared by
+  // wizardComplete AND the welcome header's "Open dashboard →" button
+  // (which previously only setWelcomeMode(false), bypassing the loads —
+  // currentTeamId stayed null, the currentTeamId effect never fired
+  // loadMembers/loadGraphs, and Graphs/Users/Backups shimmered forever on
+  // the first-timer path). loadTeams' Round-8 fallback pins currentTeamId
+  // (firing that effect); AWAIT it first so loadBackups' staleness guard
+  // (teamIdRef at call time) matches, then load the key-scoped backups with
+  // the just-revealed key. Idempotent: the Round-8 pin guards on
+  // teamIdRef.current, so a call when currentTeamId is already set never
+  // re-fires the currentTeamId effect (no duplicated members/graphs loads);
+  // the setTeams refresh + loadBackups re-fetch are harmless.
+  async function finishWelcomeLoads() {
+    await loadTeams().catch(() => {})
+    loadBackups(welcomeKey || '').catch(() => {})
+  }
+
   async function wizardComplete() {
     setWizardDone(true)
     api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
@@ -921,12 +938,8 @@ function claimIntentInFlight() {
     // wizardComplete) never ran loadTeams/loadBackups — those fired only in
     // completeLogin/switchTeam (returning users). currentTeamId stayed null →
     // the currentTeamId effect never fired loadMembers/loadGraphs → Graphs/
-    // Users/Backups shimmered forever after "Open my dashboard →". loadTeams'
-    // Round-8 fallback pins currentTeamId (firing that effect); AWAIT it
-    // first so loadBackups' staleness guard (teamIdRef at call time) matches,
-    // then load the key-scoped backups with the just-revealed key.
-    await loadTeams().catch(() => {})
-    loadBackups(welcomeKey || '').catch(() => {})
+    // Users/Backups shimmered forever after "Open my dashboard →".
+    await finishWelcomeLoads()
   }
 
   // #1566: in-app first-time provisioning (ported from welcome.html).
@@ -2206,11 +2219,40 @@ function claimIntentInFlight() {
   // per-card shimmers still ran, and keying on the tab re-announced on every
   // switch back to Overview. Gate on data-completeness: the real card frame
   // is up (team) and every card source reached a terminal/loaded state.
+  // #1842 P2 (re-review): a REF latch never schedules a render, so the cue
+  // text stayed 'Loading overview…' forever unless another re-render
+  // happened — STATE, not a ref, so the announce fires via a real update.
   const overviewDataComplete = !!team && graphsStatus === 'ok' && membersStatus !== 'loading' && backupInfo !== null
-  const announcedOverviewRef = React.useRef(false)
+  const [overviewAnnounced, setOverviewAnnounced] = React.useState(false)
   React.useEffect(() => {
-    if (overviewDataComplete) announcedOverviewRef.current = true
-  }, [overviewDataComplete])
+    if (!overviewAnnounced && overviewDataComplete) setOverviewAnnounced(true)
+  }, [overviewDataComplete, overviewAnnounced])
+
+  // #1842 P1 (re-review, b): eternal-skeleton floor — if ANY overview
+  // skeleton has been showing for > STALE_LOADING_MS (e.g. loadTeams
+  // silently no-oped on !tok or a fetch failure, so currentTeamId never
+  // pinned and loadMembers/loadGraphs/loadBackups never ran), the card
+  // render flips the shimmer to '—' instead of spinning forever.
+  // frameStartRef records when the skeleton window began; a 1s interval
+  // ticks `now` ONLY while a skeleton is live on the Overview tab (team
+  // null, or any card source still loading), then clears itself. The clock
+  // resets when the window resolves (a completed frame sets a fresh start
+  // for the next skeleton window, e.g. a later team switch).
+  const STALE_LOADING_MS = 15000
+  const frameStartRef = React.useRef(null)
+  const [now, setNow] = React.useState(() => Date.now())
+  const overviewSkeletonLive = tab === 'overview' &&
+    (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupInfo === null)
+  const frameStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
+  React.useEffect(() => {
+    if (overviewSkeletonLive) {
+      if (frameStartRef.current === null) frameStartRef.current = Date.now()
+      const id = window.setInterval(() => setNow(Date.now()), 1000)
+      return () => window.clearInterval(id)
+    }
+    frameStartRef.current = null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overviewSkeletonLive])
 
   async function createKey() {
     // Round-17 (P3): capture the team AT CALL TIME — the previous guard compared
@@ -2789,7 +2831,7 @@ function claimIntentInFlight() {
           <nav />
           <button
             className="ghost small"
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false) }}
+            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); finishWelcomeLoads() }}
           >
             Open dashboard →
           </button>
@@ -3281,13 +3323,13 @@ function claimIntentInFlight() {
             role=status is implicitly aria-live=polite, so the transition
             (Loading overview… → Overview loaded) is announced without the
             shimmering frames (which are aria-hidden).
-            #1842 P2-3: the text keys on announcedOverviewRef (flipped when
-            the overview data actually completes), never on `team` alone
+            #1842 P2-3: the text keys on overviewAnnounced state (flipped
+            when the overview data actually completes), never on `team` alone
             (announced while per-card shimmers still ran) and never on the
             tab (a text change on tab-switch re-announced). Once flipped the
             text is stable, so the live region speaks exactly once. */}
         <p className="sr-only" role="status">
-          {announcedOverviewRef.current ? 'Overview loaded' : 'Loading overview…'}
+          {overviewAnnounced ? 'Overview loaded' : 'Loading overview…'}
         </p>
         {suspended && (
           <div className="error banner" role="alert">
@@ -3335,10 +3377,13 @@ function claimIntentInFlight() {
           // #1842 P2-5: a FAILED team switch (restore error) leaves team null
           // forever — render the real card frame with '—' values so it reads
           // as a load failure, not an eternal shimmer.
-          <section className="overview" aria-busy={!error}>
+          // #1842 P1 (re-review, b): frameStale — the same '—' frame after
+          // the 15s skeleton floor, covering the no-error eternal shimmer
+          // (loadTeams no-op / loader never ran).
+          <section className="overview" aria-busy={!error && !frameStale}>
             <h2>Overview</h2>
             <div className="cards">
-              {error
+              {error || frameStale
                 ? ['Data points', 'Graphs', 'Users', 'Backups', 'API Keys', 'Plan'].map((label) => (
                     <div className="card" key={label}>
                       <div className="card-val">—</div>
@@ -3435,9 +3480,9 @@ function claimIntentInFlight() {
             <h2>Overview</h2>
             <div className="cards">
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
-              <div className="card"><div className="card-val">{graphsStatus === 'ok' ? graphs.length : (graphsStatus === 'loading' ? <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /> : '—')}</div><div className="card-label">Graphs</div></div>
-              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : (membersStatus === 'loading' ? <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /> : '—')}</div><div className="card-label">Users</div></div>
-              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />}</div><div className="card-label">Backups</div></div>
+              <div className="card"><div className="card-val">{graphsStatus === 'ok' ? graphs.length : (graphsStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Graphs</div></div>
+              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : (membersStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Users</div></div>
+              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />)}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>
