@@ -180,7 +180,7 @@ def test_claim_paste_has_back_to_signin_escape(page: Page) -> None:
     expect(page.locator("a[href='https://tortoise.premiselabs.co/auth']")).to_be_visible()
 
 
-def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
+def test_mint_429_recoverable_banner_not_stuck_shell(page: Page) -> None:
     """#1559/#1830: a session-key mint 429 (the live global-IP-bucket bug) is
     now a RECOVERABLE mint failure — the dashboard loads (null key) with the
     agent-key banner, never the silent 'Redirecting to the sign-in page…'
@@ -230,26 +230,9 @@ def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
             # #1885 + #1830: a recoverable mint failure proceeds with a null
             # key — the remaining bootstrap reads must 200 so the dashboard
             # loads (the mint-429 banner is the assertion, not an error card).
-            if url.endswith("/v1/team/keys"):
-                route.fulfill(status=200, content_type="application/json", body="[]")
-                return
-            if url.endswith("/v1/sessions"):
-                route.fulfill(status=200, content_type="application/json", body="[]")
-                return
-            if url.endswith("/backups"):
-                route.fulfill(status=200, content_type="application/json",
-                              body=_json.dumps({"backups": []}))
-                return
-            if url.endswith("/v1/team"):
-                route.fulfill(status=200, content_type="application/json",
-                              body=_json.dumps({"team_id": "team_m429", "name": "M429",
-                                                "tier": "free", "anon": False}))
-                return
-            if "/members" in url:
-                route.fulfill(status=200, content_type="application/json", body="[]")
-                return
-            if url.endswith("/v1/graphs") or url.endswith("/v1/team/alerts"):
-                route.fulfill(status=200, content_type="application/json", body="[]")
+            # (review P2-3: graphs/alerts are query-pinned ?team_id= — use the
+            # query-tolerant helper, not endswith copies.)
+            if _mock_bootstrap_200(route, url, _json):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
@@ -276,7 +259,9 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     """#1566: a first-timer (valid session, NO teams) landing on the app is
     provisioned IN-APP — tenant-provision → membership poll → reveal — and
     the key is shown in the welcome card exactly once (A13). A returning
-    visit (key consumed) shows the ready card without re-revealing."""
+    visit (onboarding complete) lands on the dashboard's first-run card
+    with NO re-reveal (#1885: the welcome-card reveal only fires on the
+    provisioning path)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-welcome1566"
@@ -389,6 +374,8 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Welcome to your Tortoise graph", timeout=20_000)
     assert reveal_calls["n"] == 0, f"no re-reveal on the returning dashboard path, got {reveal_calls['n']}"
     expect(page.locator("body")).not_to_contain_text("copy it now")
+    # the returning mint succeeded — no recoverable-mint banner (review P2)
+    expect(page.locator("body")).not_to_contain_text("Couldn't create an agent key")
 
 
 def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
