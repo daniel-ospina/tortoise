@@ -1460,6 +1460,17 @@ TRACKED_GATE_REASONS: tuple[str, ...] = (
     GATE_REASON_EVIDENCE_MARK_CENSUS,
 )
 
+#: Data-availability classes (#1900) — a gate-red that flags a question the
+#: DATASET cannot resolve/grade (fail-closed exclusion from aggregates),
+#: NOT graph degradation. The watchdog must never abort a (re)validation
+#: run on these (a join failure says nothing about graph health — the
+#: reval3 false positive flagged HEALTHY pools at session@20=1.0); genuine
+#: degradation (census faults, truncation, absent answer sessions,
+#: evidence-mark loss, overflow) still aborts.
+DATA_AVAILABILITY_GATE_REASONS: tuple[str, ...] = (
+    GATE_REASON_DATASET_JOIN_ERROR,
+)
+
 
 def _gate_env_int(name: str, default: int) -> int:
     raw = (os.environ.get(name) or "").strip()
@@ -1730,11 +1741,21 @@ def resolve_answer_session_indices(question: dict) -> tuple[list[int], str | Non
     (``[]`` for the abstention exemption — EMPTY ``answer_session_ids``),
     or ``(None, GATE_REASON_DATASET_JOIN_ERROR)`` on a fail-closed join
     failure: an answer id absent from ``haystack_session_ids``, an
-    out-of-range index, a duplicated source-session id (uniqueness
-    unestablishable — never silent first-occurrence resolution), or an
-    empty ``haystack_session_ids``. ``answer_session_ids=None`` or a
-    key-absent field is NOT the abstention path — it fails closed (plan
-    P2-11: None/key-absent must not silently skip the presence check).
+    out-of-range index, or an empty ``haystack_session_ids``.
+    ``answer_session_ids=None`` or a key-absent field is NOT the
+    abstention path — it fails closed (plan P2-11: None/key-absent must
+    not silently skip the presence check).
+
+    A source-session id duplicated within ``haystack_session_ids`` is a
+    BENIGN dataset shape (#1900: 13/500 longmemeval_s_cleaned questions
+    repeat an UNRELATED transcript id — the SAME content at both
+    positions; the flagged reval3 questions' answer ids were uniquely
+    present, yet the old any-duplicate fail-closed check false-positived
+    HEALTHY pools). Only the ANSWER ids' resolution matters: a duplicate
+    unrelated to the answer is irrelevant; if an answer id itself repeats,
+    it maps to ALL of its positions and the gate's presence tier is
+    red-on-any across the mapped set — never a silent first-occurrence
+    pick (a genuine absent id still fails closed).
     """
     answer_ids = question.get("answer_session_ids")
     if answer_ids is None:
@@ -1747,23 +1768,23 @@ def resolve_answer_session_indices(question: dict) -> tuple[list[int], str | Non
     haystack = question.get("haystack_session_ids")
     if not isinstance(haystack, list) or not haystack:
         return None, GATE_REASON_DATASET_JOIN_ERROR
-    # duplicate source-session id → uniqueness unestablishable
-    seen: set[str] = set()
-    for h in haystack:
+    # id → ALL haystack positions (multi-index mapping — the answer
+    # session is present iff ANY mapped position has graph content).
+    positions: dict[str, list[int]] = {}
+    for i, h in enumerate(haystack):
         if not isinstance(h, str):
             return None, GATE_REASON_DATASET_JOIN_ERROR
-        if h in seen:
-            return None, GATE_REASON_DATASET_JOIN_ERROR
-        seen.add(h)
-    position = {sid: i for i, sid in enumerate(haystack)}
+        positions.setdefault(h, []).append(i)
+    n_sessions = len(question.get("haystack_sessions") or [])
     indices: list[int] = []
     for aid in answer_ids:
-        if aid not in position:
+        idxs = positions.get(aid)
+        if not idxs:
             return None, GATE_REASON_DATASET_JOIN_ERROR
-        idx = position[aid]
-        if idx >= len(question.get("haystack_sessions") or []):
-            return None, GATE_REASON_DATASET_JOIN_ERROR
-        indices.append(idx)
+        for idx in idxs:
+            if idx >= n_sessions:
+                return None, GATE_REASON_DATASET_JOIN_ERROR
+            indices.append(idx)
     return sorted(set(indices)), None
 
 

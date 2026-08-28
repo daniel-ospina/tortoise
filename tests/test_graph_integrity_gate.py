@@ -182,9 +182,56 @@ def test_resolve_answer_session_indices_absent_id_fails_closed():
     assert err == GATE_REASON_DATASET_JOIN_ERROR
 
 
-def test_resolve_answer_session_indices_duplicate_haystack_fails_closed():
+def test_resolve_answer_session_indices_duplicate_haystack_maps_all_indices():
+    """#1900: a source-session id duplicated in the haystack is a BENIGN
+    dataset shape (13/500 dataset questions repeat an unrelated transcript
+    id — the old any-duplicate fail-closed check false-positived healthy
+    pools, reval3: 1e043500/58bf7951 at pool 1442/1678, session@20=1.0).
+    Even an ANSWER id that itself repeats maps to ALL its positions
+    (presence is red-on-any across the mapped set, never a silent
+    first-occurrence pick)."""
     q = dict(_q("mini_ie_user_001"))
     q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"], ["s1"]]
+    idxs, err = resolve_answer_session_indices(q)
+    assert err is None
+    assert idxs == [1, 2]
+
+
+def test_resolve_answer_session_indices_duplicate_unrelated_id_still_joins():
+    """#1900: the REAL reval3 shape — a duplicate that does not involve
+    any answer id (58bf7951's ``07b7a667_1``, 1e043500's ``d5d1f9c4``) is
+    irrelevant to the join: the answer ids are uniquely present and only
+    they are mapped. The old any-duplicate check fail-closed these."""
+    q = dict(_q("mini_ie_user_001"))
+    q["haystack_session_ids"] = ["mini-s0", "mini-s0", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s0"], ["s1"]]
+    idxs, err = resolve_answer_session_indices(q)
+    assert err is None
+    assert idxs == [2]
+
+
+def test_resolve_answer_session_indices_duplicate_multi_session_joins():
+    """#1900: multi-session answers join to ALL indices across every
+    answer session (each answer id maps to every haystack position
+    carrying it) — the join is red-on-any on presence, exactly like the
+    single-index multi-session semantics."""
+    q = dict(_q("mini_ie_user_001"))
+    q["answer_session_ids"] = ["mini-s0", "mini-s1"]
+    q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"], ["s1"]]
+    idxs, err = resolve_answer_session_indices(q)
+    assert err is None
+    assert idxs == [0, 1, 2]
+
+
+def test_resolve_answer_session_indices_duplicate_out_of_range_fails_closed():
+    """#1900: the per-index range check still applies to EVERY mapped
+    position — a duplicated answer id whose last occurrence exceeds the
+    session list still fails closed (never a partial join)."""
+    q = dict(_q("mini_ie_user_001"))
+    q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"]]  # idx 2 out of range
     _, err = resolve_answer_session_indices(q)
     assert err == GATE_REASON_DATASET_JOIN_ERROR
 
@@ -218,6 +265,36 @@ def test_gate_green_healthy_v2():
                       "evidence_points": 1})
     assert res["reasons"] == []
     assert res["ratio"] == 1.0
+
+
+def test_gate_green_duplicate_haystack_answer_session():
+    """#1900: a question whose haystack repeats the answer session's id
+    at two positions (identical transcript — benign dataset shape, 13/500
+    of longmemeval_s_cleaned) gates GREEN on a healthy graph — the answer
+    session exists at BOTH mapped indices (the ingest writes each
+    position under its own ``lme_session_index``), and presence is
+    red-on-any across the mapped set. The old fail-closed join flagged
+    this as ``dataset_join_error`` with HEALTHY pools (reval3:
+    1e043500/58bf7951, session@20=1.0)."""
+    q = dict(_q("mini_ie_user_001"))
+    q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"], ["s1"]]
+    sdk = _fresh_sdk()
+    _seed_question(sdk._get_proj(), q["question_id"], {0: 3, 1: 3, 2: 3},
+                   marks={1: 1, 2: 1})
+    res = run_integrity_gate(
+        sdk._get_proj(), q, q["question_id"],
+        ingest_stats={"turns": 9, "chunks": 0, "points": 0,
+                      "evidence_points": 1})
+    assert res["reasons"] == []
+    assert res["ratio"] == 1.0
+    assert res["pool_size"] == 9
+    # folded membership is per-POINT — both mapped indices present, each
+    # carrying its evidence mark (presence red-on-any across the set).
+    assert len(res["members"]) == 6
+    assert sorted({si for si, _ in res["members"]}) == [1, 2]
+    assert all(any(has for si, has in res["members"] if si == target)
+               for target in (1, 2))
 
 
 def test_gate_green_healthy_legacy_no_points_key():
@@ -986,6 +1063,49 @@ def test_watchdog_revalidate_first_gate_red_aborts():
         qid="q", gate_reasons=[], post_retrieval_reasons=[],
         strategy_timeout=False, census_latency_ms=10.0,
         consec_census_error=0, legs_degraded=False) is None
+
+
+def test_watchdog_revalidate_dataset_join_error_does_not_abort():
+    """#1900: ``dataset_join_error`` is a DATA-AVAILABILITY signal (the
+    question's dataset cannot be joined — fail-closed exclusion from
+    aggregates), never graph degradation — the revalidate first-gate-red
+    arm must NOT abort on it (a healthy-pool false positive aborted reval3
+    at finalize). A genuine degradation gate-red still aborts."""
+    wd = _wd(revalidate=True)
+    for _ in range(5):
+        assert wd.record(
+            qid="q", gate_reasons=["dataset_join_error"],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False) is None
+    # genuine degradation still aborts on the first gate-red
+    assert wd.record(
+        qid="q2", gate_reasons=["graph_truncated"],
+        post_retrieval_reasons=[], strategy_timeout=False,
+        census_latency_ms=10.0, consec_census_error=0,
+        legs_degraded=False) == "gate_red"
+
+
+def test_watchdog_dataset_join_error_not_hard_census_abort():
+    """#1900: a ``dataset_join_error`` question is fail-closed EXCLUDED
+    from aggregates but is NOT a hard census class — the non-revalidate
+    hard-invalid arm must not abort a run whose only gate-reds are
+    data-availability. A real census fault still aborts."""
+    wd = _wd()
+    for _ in range(5):
+        assert wd.record(
+            qid="q", gate_reasons=["dataset_join_error"],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False) is None
+    assert wd._n_gated_total == 5  # still counted for the coverage bound
+    assert wd._n_hard_invalid == 0
+    # a real census fault still aborts
+    assert wd.record(
+        qid="q2", gate_reasons=["census_error"],
+        post_retrieval_reasons=[], strategy_timeout=False,
+        census_latency_ms=10.0, consec_census_error=0,
+        legs_degraded=False) == "census_error"
 
 
 def test_watchdog_revalidate_first_timeout_aborts():
