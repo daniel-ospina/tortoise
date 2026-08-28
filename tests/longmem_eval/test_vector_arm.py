@@ -1307,7 +1307,7 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
              expected="deepseek/deepseek-v4-flash"),
         dict(keys=("deepseek", "openrouter"), max_tokens=None,
              temperature=0.0, cls=RoutingModel,
-             expected=("routing:deepseek-direct:deepseek-chat"
+             expected=("routing:deepseek-direct:deepseek-v4-flash"
                        "+openrouter:deepseek/deepseek-v4-flash")),
         dict(provider="openrouter", keys=("deepseek", "openrouter"),
              max_tokens=None, temperature=0.0, cls=RoutingModel,
@@ -1315,10 +1315,10 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
              # the members (deepseek-direct < openrouter), changing this
              # literal — order IS effective config for RoutingModel
              expected=("routing:openrouter:deepseek/deepseek-v4-flash"
-                       "+deepseek-direct:deepseek-chat")),
+                       "+deepseek-direct:deepseek-v4-flash")),
         dict(keys=("deepseek", "openrouter", "venice"), max_tokens=None,
              temperature=0.0, cls=RotatingModel,
-             expected=("rotating:deepseek-direct:deepseek-chat"
+             expected=("rotating:deepseek-direct:deepseek-v4-flash"
                        "+openrouter:deepseek/deepseek-v4-flash"
                        "+venice:deepseek-v4-flash")),
         # tuning rides the wrapper composition too (member suffixes) — a
@@ -1401,17 +1401,17 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         # session_workers>1 + direct spec: the RESOLVED wire id is used — the
         # registry key is never a valid wire id; the _REGISTRY_KEY_TO_ID remap
         # gives every lane a valid id ('deepseek-flash-direct' →
-        # 'deepseek/deepseek-chat' — the OpenRouter lane needs the prefixed
-        # id; bare ids 404 there; 'solar-pro4' → its entry id
+        # 'deepseek/deepseek-v4-flash' — the OpenRouter lane needs the
+        # prefixed id; bare ids 404 there; 'solar-pro4' → its entry id
         # 'upstage/solar-pro4'). The lane set differs from session_workers=1
         # (direct-only DeepSeekDirectModel vs the router wrapper), so the
         # fingerprints legitimately DIFFER — a toggle is REFUSED (safe).
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=4))
-        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-chat"
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=1))
-        assert runner._model_id(adapters[-1]) == "deepseek-chat"
+        assert runner._model_id(adapters[-1]) == "deepseek-v4-flash"
         assert runner._model_id(adapters[-2]) != runner._model_id(adapters[-1])
         adapters.append(runner._build_cli_extractor_model(
             spec="solar-pro4", session_workers=4))
