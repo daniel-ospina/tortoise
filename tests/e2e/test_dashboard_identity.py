@@ -314,8 +314,6 @@ def test_billing_team_context_single_team(page: Page):
     expect(page.get_by_label("Billing team")).to_have_count(0)
 
 
-
-
 def test_recovery_banner_shows_and_routes_to_profile(page: Page):
     _seed(page)
     _wire(page, inv=_inventory(login_methods=1))
