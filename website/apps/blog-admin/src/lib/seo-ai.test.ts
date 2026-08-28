@@ -14,6 +14,7 @@ import { constraints } from '../../../../functions/blog/_shared/seo-constraints.
 import {
   META_TITLE_MAX, META_DESCRIPTION_MAX, EXCERPT_MAX, TAGS_MAX, TAG_LEN_MAX,
 } from '../../../../functions/blog/_shared/meta-contract.ts';
+import { SLUG_MAX } from '../../../../functions/blog/_shared/slug.ts';
 
 // Contract lock (#1866): the editor SPA's literals must equal the shared
 // server-side constants. If this fails, the editor and API have drifted.
@@ -21,6 +22,7 @@ const EDITOR_META_TITLE_MAX = 60; // PostEditor.tsx maxLength
 const EDITOR_META_DESCRIPTION_MAX = 155; // PostEditor.tsx maxLength
 const EDITOR_EXCERPT_MAX = 300; // PostEditor.tsx maxLength
 const EDITOR_MAX_TAGS = 10; // blog-api.ts MAX_TAGS
+const EDITOR_MAX_SLUG_LENGTH = 100; // blog-api.ts MAX_SLUG_LENGTH
 
 describe('meta contract (#1866) — single source of truth', () => {
   it('shared constants match the editor literals', () => {
@@ -29,6 +31,7 @@ describe('meta contract (#1866) — single source of truth', () => {
     expect(EXCERPT_MAX).toBe(EDITOR_EXCERPT_MAX);
     expect(TAGS_MAX).toBe(EDITOR_MAX_TAGS);
     expect(TAG_LEN_MAX).toBe(40);
+    expect(SLUG_MAX).toBe(EDITOR_MAX_SLUG_LENGTH);
   });
 });
 

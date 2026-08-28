@@ -17,12 +17,12 @@
 //     per-isolate; unit-tested at lowered thresholds).
 
 import {
-  type Env, SLUG_RE, validUrl, SITE_URL,
+  type Env, validUrl, SITE_URL,
 } from "../_lib.ts";
 import {
   META_TITLE_MAX, META_DESCRIPTION_MAX, EXCERPT_MAX, TAGS_MAX, TAG_LEN_MAX,
 } from "../_shared/meta-contract.ts";
-import { SLUG_MAX } from "../_shared/slug.ts";
+import { SLUG_MAX, SLUG_RE } from "../_shared/slug.ts";
 import { purgeUrl } from "../_shared/cloudflare-purge.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
@@ -450,6 +450,14 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
     patch.published_by = agent.agentName;
     patch.published_at = now;
     patch.hold_for_review = false; // explicit publish clears hold — no invisible limbo
+  } else if (v.value.status === "draft") {
+    // Unpublish: clear audit columns to match the editor path (unpublishPost /
+    // requestChangesPost null them) — the two write paths must produce the
+    // same row shape for the same transition.
+    patch.published_by = null;
+    patch.published_at = null;
+    patch.reviewed_by = null;
+    patch.reviewed_at = null;
   }
 
   // status=not.eq.archived guards the TOCTOU window (post archived between GET and PATCH)

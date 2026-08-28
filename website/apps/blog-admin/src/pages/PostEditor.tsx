@@ -492,6 +492,7 @@ export default function PostEditor() {
             value={form.title}
             onChange={e => updateField('title', e.target.value)}
             placeholder="Post title"
+            disabled={isArchived}
             className="text-xl font-semibold mb-4 h-12 bg-background/40"
           />
 
@@ -708,6 +709,7 @@ export default function PostEditor() {
               <Switch
                 id="hold"
                 checked={form.hold_for_review}
+                disabled={isArchived}
                 onCheckedChange={v => updateField('hold_for_review', v)}
               />
             </div>

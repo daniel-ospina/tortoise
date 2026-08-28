@@ -37,9 +37,14 @@ export function createSaveHandler(getState: GetSaveContext) {
     }
     if (!ctx.id) throw new Error('Missing post id');
     await updatePost(ctx.id, record);
-    // #1865: saving a published post as draft = unpublish → purge the edge
-    // cache (best-effort, fail-open) or a stale 200 survives the cache TTL.
-    if (mode === 'draft' && ctx.wasPublished && ctx.form.slug) {
+    // #1865: any save that moves a published post to a NON-public visibility
+    // must purge the edge cache (best-effort, fail-open) or a stale 200
+    // survives the TTL. Covers: draft-save (= unpublish) AND a published post
+    // saved with hold_for_review=true (the public fetch filters
+    // hold_for_review=eq.false — a third visibility axis that bypasses the
+    // status-based purge).
+    const holdHidesPublished = ctx.form.hold_for_review && ctx.wasPublished;
+    if ((mode === 'draft' && ctx.wasPublished || holdHidesPublished) && ctx.form.slug) {
       void purgePostCache(ctx.form.slug);
     }
     return ctx.id;

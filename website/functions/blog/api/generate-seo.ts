@@ -183,7 +183,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   const title = typeof input.title === "string" ? input.title.trim() : "";
   const body = typeof input.body === "string" ? input.body : "";
   const tags = Array.isArray(input.tags)
-    ? input.tags.filter((t): t is string => typeof t === "string")
+    ? input.tags.filter((t): t is string => typeof t === "string").slice(0, 10).map((t) => t.slice(0, 40))
     : [];
   if (!title) return json({ error: "validation", message: "title required" }, 400);
   if (!body.trim()) return json({ error: "validation", message: "body required" }, 400);
