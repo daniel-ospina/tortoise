@@ -521,3 +521,159 @@ def test_docs_single_flight_kind_scoped(provisioned, mock_github, ingest_base,
     for jid in (gh_job, docs_job):
         if jid in _INDEX_JOBS:
             _INDEX_JOBS[jid]["status"] = "completed"
+
+
+# ── #1845: multi-repo + per-repo branch scope ────────────────────
+
+
+def test_docs_job_multi_repo_scope(provisioned, mock_github, ingest_base):
+    """#1845: a {repos: [...]} list scopes the walk to EXACTLY those repos
+    (each default branch), instead of the org-wide resolve."""
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1"}]})
+    assert r.status_code == 200
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
+    assert body["repos_processed"] == 1
+    assert body["repos_total"] == 1
+    assert body["documents_indexed"] == 2  # repo1's 2 md files only
+    assert _docs_count(provisioned) == 2
+
+
+def test_docs_job_invalid_repo_scope_400(provisioned, mock_github,
+                                         ingest_base):
+    """#1845 (review P1 parity): a malicious repo short name inside the
+    scope list must be rejected (400) before reaching the GitHub URL."""
+    for bad in ("../victimorg/x", "a/b?q=1", "repo name"):
+        r = provisioned.tc.post("/v1/index/docs", json={
+            "org": "acme", "repos": [{"repo": bad}]})
+        assert r.status_code == 400, f"repo={bad!r} should 400"
+
+
+def test_docs_job_specific_branch_scope(provisioned, mock_github,
+                                        ingest_base):
+    """#1845: a repo scope with a SPECIFIC branch walks that branch (the\n    docs mock serves a 'dev' tree for repo1)."""
+    entries, blobs = _mk_files("docs/DEV.md")
+    mock_github.trees["acme/repo1"]["dev"] = {
+        "sha": "tree-dev", "entries": entries}
+    mock_github.blobs.update(blobs)
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1", "branch": "dev"}]})
+    assert r.status_code == 200
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
+    assert body["status"] == "completed"
+    assert body["documents_indexed"] == 1  # only docs/DEV.md
+    assert _docs_count(provisioned) == 1
+
+
+def test_docs_job_all_branches_scope(provisioned, mock_github, ingest_base):
+    """#1845: branch \"all\" walks EVERY branch of the repo — branch-qualified\n    corpus keeps doc ids BRANCH-UNIQUE (main + dev trees both staged)."""
+    entries_main, blobs_main = _mk_files("docs/README.md")
+    entries_dev, blobs_dev = _mk_files("docs/DEV.md")
+    mock_github.trees["acme/repo1"] = {
+        "main": {"sha": "tree-main", "entries": entries_main},
+        "dev": {"sha": "tree-dev", "entries": entries_dev},
+    }
+    mock_github.blobs.update(blobs_main)
+    mock_github.blobs.update(blobs_dev)
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1", "branch": "all"}]})
+    assert r.status_code == 200
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
+    assert body["status"] == "completed"
+    # 1 file on main + 1 file on dev — branch-unique doc ids, no collision
+    assert body["documents_indexed"] == 2
+    assert _docs_count(provisioned) == 2
+
+
+def test_docs_job_invalid_branch_scope_400(provisioned, mock_github,
+                                           ingest_base):
+    """#1845 review P1-1: a malicious branch inside a scope must be rejected
+    (400) — dot-segment traversal would escape the repo/org boundary via
+    httpx URL normalization. Git refs can never contain '..', so the
+    rejection is lossless."""
+    for bad in ("../../victimorg/git/trees/main", "..", "//", "a b",
+                "feature/x/../.."):
+        r = provisioned.tc.post("/v1/index/docs", json={
+            "org": "acme", "repos": [{"repo": "repo1", "branch": bad}]})
+        assert r.status_code == 400, f"branch={bad!r} should 400"
+
+
+def test_docs_job_default_then_all_no_duplicates(
+        provisioned, mock_github, ingest_base):
+    """#1845 review P2-2: the default walk and an 'all branches' re-index of
+    the SAME repo must NOT duplicate Documents. walk_repo branch-qualifies
+    by the RESOLVED branch (always), so the default main walk and the
+    'all' main walk share the SAME doc ids (main content under main/), and
+    dev content is additive under dev/."""
+    entries_main, blobs_main = _mk_files("docs/README.md")
+    entries_dev, blobs_dev = _mk_files("docs/DEV.md")
+    mock_github.trees["acme/repo1"] = {
+        "main": {"sha": "tree-main", "entries": entries_main},
+        "dev": {"sha": "tree-dev", "entries": entries_dev},
+    }
+    mock_github.blobs.update(blobs_main)
+    mock_github.blobs.update(blobs_dev)
+
+    # 1) default walk of repo1 (main) — 1 doc
+    r1 = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1"}]})
+    body1 = _poll_until(provisioned.tc, r1.json()["job_id"], "completed")
+    assert body1["documents_indexed"] == 1
+
+    # 2) 'all branches' — main (same doc id, 0 NEW) + dev (1 NEW)
+    r2 = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1", "branch": "all"}]})
+    body2 = _poll_until(provisioned.tc, r2.json()["job_id"], "completed")
+    assert body2["status"] == "completed"
+    # main's README is branch-qualified under main/ — SAME doc id as the
+    # default walk (which also resolved main), so it dedups; dev adds 1.
+    assert body2["documents_indexed"] == 1, \
+        "only the new dev doc should index (main dedups)"
+    assert _docs_count(provisioned) == 2, \
+        "main + dev = 2 unique docs, no duplicates from the re-index"
+
+
+def test_docs_job_empty_branch_means_default(provisioned, mock_github,
+                                             ingest_base):
+    """#1845 (review): a scope with branch '' (the client's default
+    contract) is the DEFAULT walk — not a 400 and not a scoped junk branch."""
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1", "branch": ""}]})
+    assert r.status_code == 200
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
+    assert body["status"] == "completed"
+    assert body["documents_indexed"] == 2  # repo1's main tree (default walk)
+
+
+def test_docs_job_non_string_branch_400(provisioned, mock_github,
+                                        ingest_base):
+    """#1845 (review): a non-string branch (e.g. a number) must 400, never
+    500 — the branch value reaches a GitHub URL path and must be typed."""
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1", "branch": 5}]})
+    assert r.status_code == 400, "non-string branch should 400, not 500"
+
+
+def test_legacy_unqualified_corpus_cleaned(provisioned, mock_github,
+                                           ingest_base):
+    """#1845 review (deep bug scan): a pre-#1845 UNQUALIFIED corpus
+    ({owner}/{repo}/docs/... + .manifest/{owner}/{name}.json) is removed on
+    the first new-layout walk — it would otherwise be ingested under the new
+    branch-qualified tree, duplicating every doc (same content, two ids)."""
+    from tortoise.indexer.github_docs import GitHubDocsIndexer
+    team_root = GitHubDocsIndexer.team_root(provisioned.team_id)
+    legacy_docs = team_root / "acme" / "repo1" / "docs"
+    legacy_docs.mkdir(parents=True, exist_ok=True)
+    (legacy_docs / "README.md").write_text("# legacy\n")
+    legacy_manifest = team_root / ".manifest" / "acme" / "repo1.json"
+    legacy_manifest.parent.mkdir(parents=True, exist_ok=True)
+    legacy_manifest.write_text('{"tree_sha":"legacy","branch":"main"}')
+
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme", "repos": [{"repo": "repo1"}]})
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "completed")
+    assert body["status"] == "completed"
+    assert not legacy_docs.exists(), \
+        "the legacy unqualified docs/ dir must be removed"
+    assert not legacy_manifest.exists(), \
+        "the legacy unqualified manifest must be removed"

@@ -11,7 +11,7 @@ JSONL is a tree-structured JSONL like codex's.
 """
 from __future__ import annotations
 
-from .parsers import (  # noqa: F401
+from .parsers import (
     PARSERS,
     parse_claude_desktop,
     parse_codex,
@@ -19,5 +19,10 @@ from .parsers import (  # noqa: F401
     parse_transcript,
 )
 
-__all__ = ["PARSERS", "parse_codex", "parse_claude_desktop", "parse_pi",
-           "parse_transcript"]
+__all__ = [
+    "PARSERS",
+    "parse_claude_desktop",
+    "parse_codex",
+    "parse_pi",
+    "parse_transcript",
+]

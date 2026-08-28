@@ -455,6 +455,85 @@ def test_resolve_repos_404_raises(sdk):
         loop.close()
 
 
+def test_resolve_repos_falls_back_to_user_repos(sdk):
+    """#1845: when orgs/ and users/ repo lookups 404 (unknown org / the
+    legacy team_id-as-org bug), resolve_repos falls back to the token's OWN
+    repos (/user/repos), BOUNDED to the token login's namespace (review
+    P2-1: never widens across the org boundary) — the selector lists what
+    the token can see, and org-wide walks still resolve. Only when
+    /user/repos ALSO fails does it raise (the 404-raises test above covers
+    that)."""
+    import httpx
+
+    from tortoise.indexer.github_indexer import GitHubIndexer
+
+    seen: list[str] = []
+
+    class _FallbackTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            url = str(request.url)
+            seen.append(url)
+            if "/user" in url and "/repos" not in url:
+                return httpx.Response(200, json={"login": "acme-user"},
+                                      request=request)
+            if "/user/repos" in url:
+                # includes a repo from ANOTHER owner — must be filtered out
+                # (review P2-1 org-boundary integrity)
+                return httpx.Response(
+                    200, json=[{"full_name": "acme-user/repo1"},
+                               {"full_name": "acme-user/repo2"},
+                               {"full_name": "other-org/victim"}],
+                    request=request)
+            return httpx.Response(404, json={}, request=request)
+
+    indexer = GitHubIndexer("fake-token",
+                            httpx_client=httpx.AsyncClient(
+                                transport=_FallbackTransport()))
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        repos = loop.run_until_complete(indexer.resolve_repos("ghost-org"))
+        assert repos == ["acme-user/repo1", "acme-user/repo2"]
+        assert any("/user/repos" in u for u in seen), \
+            "the fallback must hit /user/repos after the org/user 404s"
+        assert all("other-org" not in r for r in repos), \
+            "other-org repos must be filtered (P2-1 boundary)"
+    finally:
+        loop.run_until_complete(indexer._close())
+        loop.close()
+
+
+def test_list_branches_returns_names(sdk):
+    """#1845: list_branches returns the branch names for a repo (used by
+    the docs per-repo branch picker)."""
+    import httpx
+
+    from tortoise.indexer.github_indexer import GitHubIndexer
+
+    class _BranchesTransport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            url = str(request.url)
+            assert "/branches" in url
+            return httpx.Response(
+                200,
+                json=[{"name": "main"}, {"name": "dev"},
+                      {"name": "feature/x"}],
+                request=request)
+
+    indexer = GitHubIndexer("fake-token",
+                            httpx_client=httpx.AsyncClient(
+                                transport=_BranchesTransport()))
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        branches = loop.run_until_complete(
+            indexer.list_branches("acme/repo1"))
+        assert branches == ["main", "dev", "feature/x"]
+    finally:
+        loop.run_until_complete(indexer._close())
+        loop.close()
+
+
 def test_quota_break_stamps_truncated_cursor(sdk):
     """P2: a quota-interrupted run stamps the cursor `truncated` so the
     next run stays in DRAIN mode — the unprocessed tail is never silently
@@ -598,3 +677,31 @@ def test_pr_events_minted(sdk):
         "MATCH (e:Event {eventId:'github-pr-acme/repo1-7'}) RETURN e.eventKind"
     ).result_set
     assert [r[0] for r in rows] == ["github.pr.open"]
+
+
+def test_resolve_repos_404_raises_without_fallback(sdk):
+    """#1845 review (deep bug scan): the org-wide WALK path passes
+    allow_user_fallback=False — a 404 org RAISES (fail honestly) instead of
+    silently walking the token user's personal repos. The selector keeps
+    the fallback (default True)."""
+    import httpx
+
+    from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
+
+    class _Transport(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            # /user would succeed, but the walk path must not use it
+            return httpx.Response(404, json={}, request=request)
+
+    indexer = GitHubIndexer("fake-token",
+                            httpx_client=httpx.AsyncClient(
+                                transport=_Transport()))
+    import asyncio
+    loop = asyncio.new_event_loop()
+    try:
+        with pytest.raises(GitHubFetchError):
+            loop.run_until_complete(
+                indexer.resolve_repos("ghost-org", allow_user_fallback=False))
+    finally:
+        loop.run_until_complete(indexer._close())
+        loop.close()
