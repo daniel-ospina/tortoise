@@ -92,17 +92,19 @@ turn points) and filed to your team's graph.
 1. Call `tortoise_onboarding_session_recording(enabled=true)` — writes the
    SAME consent keys as the wizard's sessions toggle (the enforced
    `session_recording` flag + `capture_revised`). If `capture_revised` is
-   already set (you answered this before), SKIP the ask — but NEVER skip the
-   write: a user-initiated enable always re-sets consent, even after a prior
-   decline.
+   already set (you answered this before), SKIP the explanatory
+   re-confirmation — but NEVER skip the write: a user-initiated enable
+   always re-sets consent, even after a prior decline.
 2. Show: "✅ Session recording consented. Capture turns on per-tool once the
    mechanism is installed and the server confirms a file — see your
    dashboard's Memory sources panel for live per-tool status."
 3. If the tool errors (stdio/local mode — "No team context (HTTP mode
    required)"): "Session capture is hosted-only — it needs Tortoise Cloud to
-   receive session files. Your consent is recorded in the dashboard's Memory
-   sources panel instead. I'll skip ahead." (No local fallback: a stdio
-   agent must not silently bypass the consent/capture gates.)
+   receive session files. Enable it from your dashboard's Memory sources
+   panel (Agent sessions) if you use hosted Tortoise; on self-hosted,
+   session capture isn't available over stdio. I'll skip ahead." (No local
+   fallback: a stdio agent must not silently bypass the consent/capture
+   gates.)
 
 **If no:**
 1. Call `tortoise_onboarding_session_recording(enabled=false)` — clears the
@@ -297,7 +299,8 @@ specification with execution paths, state tracking, and error handling.
 **Fallback behavior:** If a tool fails, the agent follows the error recovery
 section above. GitHub tools require hosted (HTTP) mode — in stdio/local mode
 they return "No team context (HTTP mode required)" and the agent skips ahead
-to the dashboard. Everything else works in both modes.
+to the dashboard. Everything else works in both modes — except Q3 session
+recording, which is hosted-only (see the tool table).
 
 **Parity table** (#1714 — what a hosted team gets vs a self-hosted/stdio
 setup, named honestly so no surface over-promises):

@@ -619,3 +619,38 @@ def test_install_probe_not_consent_gated(client):
                      json={"conversation": [
                          {"role": "user", "content": "hello"}]})
     assert r2.status_code == 403, r2.text
+
+
+def test_cross_surface_harness_vocab_contract():
+    """#1727 (Task 11, T2-P2d): the analytics harness values are a subset of
+    the SessionRequest harness Literal — one value set across surfaces (both
+    code comments in hosted_api.py pin this contract; this test enforces it).
+    Also asserts the dashboard's HARNESS_ORDER matches the analytics vocab, so
+    the UI rows and the server can never drift to different harness names.
+    """
+    from pathlib import Path
+    import re
+
+    from tortoise.hosted_api import (
+        _HARNESS_ANALYTICS_VALUES,
+        _SESSION_HARNESS_VALUES,
+    )
+
+    # 1. server-side subset contract (analytics ⊆ SessionRequest Literal).
+    assert _HARNESS_ANALYTICS_VALUES <= _SESSION_HARNESS_VALUES
+    # both surfaces are exactly the pinned 6-harness vocabulary.
+    assert set(_HARNESS_ANALYTICS_VALUES) == {
+        "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    }
+    assert _SESSION_HARNESS_VALUES == frozenset({
+        "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
+    })
+
+    # 2. the frontend harness set matches the analytics vocab (parse the
+    # dashboard constant — self-contained, no JS toolchain needed).
+    root = Path(__file__).resolve().parent.parent
+    harnesses_js = (root / "website/apps/dashboard/src/harnesses.js").read_text()
+    m = re.search(r"export const HARNESS_ORDER\s*=\s*\[([^\]]*)\]", harnesses_js)
+    assert m, "HARNESS_ORDER not found in website/apps/dashboard/src/harnesses.js"
+    frontend = {s.strip().strip("'\"") for s in m.group(1).split(",") if s.strip()}
+    assert frontend == set(_HARNESS_ANALYTICS_VALUES)

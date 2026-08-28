@@ -229,6 +229,24 @@ function claimIntentInFlight() {
       setReaskOpen(true)
     }
   }, [reaskGate])
+  // #1728 (Task 17, review P2-4/P2-9): the re-ask pane renders at APP level
+  // (sibling above the tab content) so it shows on ANY tab / point-count — a
+  // 0-point team on Overview never mounted MemorySources, so a pane nested
+  // there was silently dropped while the gate ref was already consumed.
+  // Lite a11y: store the previously-focused element on open, focus the yes
+  // button, ESC dismisses, and focus is restored on close/answer.
+  const reaskYesRef = React.useRef(null)
+  const reaskPrevFocusRef = React.useRef(null)
+  const dismissReask = React.useCallback(() => { setReaskOpen(false); setReaskError('') }, [])
+  React.useEffect(() => {
+    if (reaskOpen) {
+      reaskPrevFocusRef.current = document.activeElement
+      if (reaskYesRef.current) reaskYesRef.current.focus()
+    } else if (reaskPrevFocusRef.current) {
+      reaskPrevFocusRef.current.focus()
+      reaskPrevFocusRef.current = null
+    }
+  }, [reaskOpen])
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
   const [wizardDone, setWizardDone] = React.useState(false)
@@ -239,10 +257,11 @@ function claimIntentInFlight() {
   function wizardCopyStep(text) {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
     setCopiedStep(text)
-    setTimeout(() => setCopiedStep(''), 1600)
+    setTimeout(() => { if (mountedRef.current) setCopiedStep('') }, 1600)  // review: mounted-guard the flash timer (setState after unmount)
   }
   const [wizardProject, setWizardProject] = React.useState('')
-  React.useEffect(() => () => { stopGithubPoll && stopGithubPoll(); stopBoundedPoll(indexPollRef); stopBoundedPoll(docsPollRef) }, [])  // unmount cleanup
+  const mountedRef = React.useRef(true)  // review: flash-timer guard — flipped false on unmount so late setState is skipped
+  React.useEffect(() => () => { mountedRef.current = false; stopGithubPoll && stopGithubPoll(); stopBoundedPoll(indexPollRef); stopBoundedPoll(docsPollRef) }, [])  // unmount cleanup
 
   // #1147: build the tier-cap notice. The server's 402 detail carries the
   // real limit ('Team api_keys limit reached (N). Upgrade your plan to
@@ -566,7 +585,7 @@ function claimIntentInFlight() {
       // 'I've set it up — Continue' affordance must persist after the user
       // copies and goes to paste/run it (the 1.6s flash timer would eat
       // it). It resets on harness-tab switch and on step change instead.
-      setTimeout(() => setWizardCopied(''), 1600)
+      setTimeout(() => { if (mountedRef.current) setWizardCopied('') }, 1600)  // review: mounted-guard the flash timer
     }
     api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
@@ -2798,13 +2817,7 @@ function claimIntentInFlight() {
                         docsJob={docsJob}
                         memoryBusy={memoryBusy}
                         memoryErrors={memoryErrors}
-                        reask={{
-                          open: reaskOpen,
-                          busy: reaskBusy,
-                          error: reaskError,
-                          onAnswer: answerReask,
-                          onDismiss: () => { setReaskOpen(false); setReaskError('') },
-                        }}
+                        reaskBusy={reaskBusy}
                         onToggleIssues={toggleIssues}
                         onToggleDocs={toggleDocs}
                         onToggleSessions={toggleSessionRecording}
@@ -2951,6 +2964,36 @@ function claimIntentInFlight() {
         <div className="banner" style={{ background: 'rgba(248,113,113,0.1)', borderBottom: '1px solid rgba(248,113,113,0.3)', color: 'var(--red,#f87171)', padding: '0.6rem 1.5rem', fontSize: 13, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
           <span role="alert">{claimError}</span>
           <button className="ghost small" onClick={() => { setClaimError(''); try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ } window.history.replaceState({}, '', window.location.pathname) }} aria-label="Dismiss">✕</button>
+        </div>
+      )}
+      {reaskOpen && (
+        // #1728 (Task 17, review P2-4/P2-9): APP-level re-ask pane — shows
+        // regardless of tab/point-count (a 0-point team on Overview never
+        // mounted MemorySources). role=alertdialog + initial focus on the
+        // yes button; ESC dismisses; focus returns to the trigger on close.
+        <div
+          className="reask-pane"
+          role="alertdialog"
+          aria-modal="true"
+          aria-label="Session recording needs your decision"
+          onKeyDown={(e) => { if (e.key === 'Escape' && !reaskBusy) dismissReask() }}
+        >
+          <h4>Session recording needs your decision</h4>
+          <p>
+            You previously enabled this — before this fix, recording never ran;
+            nothing was captured.
+          </p>
+          <p className="dim small">
+            Keep it on and new sessions will be captured per-harness once a
+            tool's capture mechanism is installed — or turn it off. Already-
+            captured sessions stay.
+          </p>
+          {reaskError && <p className="error" role="alert">{reaskError}</p>}
+          <div className="wizard-nav-actions">
+            <button type="button" ref={reaskYesRef} className="btn-primary" onClick={() => answerReask(true)} disabled={reaskBusy}>Yes, keep recording</button>
+            <button type="button" className="ghost" onClick={() => answerReask(false)} disabled={reaskBusy}>No, turn it off</button>
+            <button type="button" className="ghost" onClick={dismissReask} disabled={reaskBusy}>Not now</button>
+          </div>
         </div>
       )}
       <header>
@@ -3159,7 +3202,7 @@ function claimIntentInFlight() {
             <MemorySources
               state={onboarding}
               loading={onboardingLoading}
-              wizardHarness="claude"
+              wizardHarness={null}  // review P2-6: Overview never knows the user's harness — no spurious "current" highlight
               github={wizardGithub}
               issuesWantOn={issuesWantOn}
               docsWantOn={docsWantOn}
@@ -3167,13 +3210,7 @@ function claimIntentInFlight() {
               docsJob={docsJob}
               memoryBusy={memoryBusy}
               memoryErrors={memoryErrors}
-              reask={{
-                open: reaskOpen,
-                busy: reaskBusy,
-                error: reaskError,
-                onAnswer: answerReask,
-                onDismiss: () => { setReaskOpen(false); setReaskError('') },
-              }}
+              reaskBusy={reaskBusy}
               onToggleIssues={toggleIssues}
               onToggleDocs={toggleDocs}
               onToggleSessions={toggleSessionRecording}
@@ -3546,28 +3583,23 @@ function claimIntentInFlight() {
 // toggle set + state machine). Three opt-in toggles (issues / docs / sessions)
 // reuse role="switch"/aria-checked; row failures render under the row with
 // role="alert" (never the global 402-upgrade banner); status regions carry
-// aria-live="polite". The misled-user re-ask pane (role="alertdialog", initial
-// focus on the yes/no buttons) renders when reask.open — the parent enforces
-// the exactly-once gate (session_recording && !capture_revised &&
+// aria-live="polite". The misled-user re-ask pane renders at APP level (see
+// the App return — P2-9: it must show on any tab/point-count, and a 0-point
+// team on Overview never mounts this component), driven by the parent's
+// exactly-once gate (session_recording && !capture_revised &&
 // !capture_ask_shown); ANSWER sets capture_ask_shown (T2-P2f), dismissal never
-// consumes the ask.
+// consumes the ask. `reaskBusy` locks the sessions toggle while an answer is
+// in flight (review ISSUE 2).
 function MemorySources(props) {
   const {
     state, loading, wizardHarness, github,
     issuesWantOn, docsWantOn,
     indexJob, docsJob,
     memoryBusy, memoryErrors,
-    reask,
+    reaskBusy,
     onToggleIssues, onToggleDocs, onToggleSessions,
     onConnectGithub, onIndexDocs, onReindexGithub,
   } = props
-
-  // Re-ask pane initial focus (P2: role="alertdialog" + focus the yes/no
-  // buttons on open).
-  const reaskYesRef = React.useRef(null)
-  React.useEffect(() => {
-    if (reask && reask.open && reaskYesRef.current) reaskYesRef.current.focus()
-  }, [reask && reask.open])
 
   if (loading) {
     return <div className="memory-sources"><p className="dim">Loading memory sources…</p></div>
@@ -3593,27 +3625,6 @@ function MemorySources(props) {
 
   return (
     <div className="memory-sources">
-      {reask && reask.open && (
-        <div className="reask-pane" role="alertdialog" aria-modal="true" aria-label="Session recording needs your decision">
-          <h4>Session recording needs your decision</h4>
-          <p>
-            You previously enabled this — before this fix, recording never ran;
-            nothing was captured.
-          </p>
-          <p className="dim small">
-            Keep it on and new sessions will be captured per-harness once a
-            tool's capture mechanism is installed — or turn it off. Already-
-            captured sessions stay.
-          </p>
-          {reask.error && <p className="error" role="alert">{reask.error}</p>}
-          <div className="wizard-nav-actions">
-            <button type="button" ref={reaskYesRef} className="btn-primary" onClick={() => reask.onAnswer(true)} disabled={reask.busy}>Yes, keep recording</button>
-            <button type="button" className="ghost" onClick={() => reask.onAnswer(false)} disabled={reask.busy}>No, turn it off</button>
-            <button type="button" className="ghost" onClick={reask.onDismiss} disabled={reask.busy}>Not now</button>
-          </div>
-        </div>
-      )}
-
       {/* ── Issues toggle ── */}
       <div className="toggle-row">
         <button
@@ -3631,7 +3642,7 @@ function MemorySources(props) {
           <p>Issues become work items with a lifecycle record, plus claims extracted from their content.</p>
           {githubConnected ? (
             <p className="dim small" aria-live="polite">
-              Connected — {github.repos ?? 'N/A'} repos available.{' '}
+              {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}
               <button type="button" className="small" onClick={onReindexGithub} disabled={memoryBusy === 'issues' || (indexJob && indexJob.status === 'started')}>
                 {indexJob && indexJob.status === 'started' ? 'Indexing…' : 'Re-index'}
               </button>
@@ -3659,18 +3670,21 @@ function MemorySources(props) {
           data-on={docsOn ? 'true' : 'false'}
           aria-label="GitHub docs as a memory source"
           onClick={() => onToggleDocs(!docsOn)}
-          disabled={!githubConnected || memoryBusy === 'docs'}
+          disabled={!githubConnected || memoryBusy === 'docs' || docsIndexed}  // review P1-1: docs indexed ⇒ the switch is terminal (re-index refreshes, never un-indexes)
         />
         <div className="toggle-body">
           <h4>GitHub docs</h4>
           <p>Your repos' docs/ folders are fetched server-side and indexed as Sources.</p>
           {!githubConnected && <p className="dim small">Connect GitHub first to index docs.</p>}
-          {githubConnected && docsWantOn && !docsJob && (
+          {docsIndexed && githubConnected && (
+            <p className="dim small">Docs are indexed and active as a source. Use "Re-index docs" to refresh.</p>
+          )}
+          {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
             <p className="dim small">
               <button type="button" className="small" onClick={onIndexDocs} disabled={memoryBusy === 'docs'}>
                 {memoryBusy === 'docs' ? 'Indexing…' : docsIndexed ? 'Re-index docs' : 'Index docs'}
               </button>{' '}
-              to bring your repo docs in as memory sources.
+              {docsIndexed ? 'to refresh indexed docs.' : 'to bring your repo docs in as memory sources.'}
             </p>
           )}
           {docsJob && <DocsIndexStatus job={docsJob} />}
@@ -3688,21 +3702,26 @@ function MemorySources(props) {
           data-on={sessionsOn ? 'true' : 'false'}
           aria-label="Agent session recording"
           onClick={() => onToggleSessions(!sessionsOn)}
-          disabled={memoryBusy === 'sessions'}
+          disabled={memoryBusy === 'sessions' || reaskBusy}  // review ISSUE 2: the re-ask answer is in flight ⇒ toggle is locked too
         />
         <div className="toggle-body">
           <h4>Agent session recording</h4>
           <p>When on, sessions from tools with capture installed are filed to your graph as memory.</p>
           {memoryErrors.sessions && <p className="error" role="alert">{memoryErrors.sessions}</p>}
-          <div className="harness-statuses" aria-live="polite">
+          <div className="harness-statuses">
             {HARNESS_ORDER.map((h) => {
               const st = status(h)
               const supported = !!HARNESS_CAPTURE_SUPPORT[h]
               return (
-                <div key={h} className={`harness-status status-${st}${h === wizardHarness ? ' current' : ''}`}>
+                <div key={h} className={`harness-status status-${st}${wizardHarness && h === wizardHarness ? ' current' : ''}`}>
                   <div className="harness-status-head">
                     <strong>{HARNESS_NAMES[h]}</strong>
-                    <span className="capture-state">{HARNESS_CAPTURE_STATUS_LABEL[st]}</span>
+                    {/* review P2-5: aria-live lives on the PILL (the state word
+                        only) — the container-level region announced the whole
+                        multi-line snippet. review P2-3: unsupported harnesses
+                        render the REASON only, no pill (no install path exists
+                        for web/cursor — a pill would contradict it). */}
+                    {supported && <span className="capture-state" aria-live="polite">{HARNESS_CAPTURE_STATUS_LABEL[st]}</span>}
                   </div>
                   {!supported && <p className="dim small">{HARNESS_CAPTURE_REASON[h]}</p>}
                   {supported && st === 'install-pending' && sessionsOn && (
@@ -3725,7 +3744,9 @@ function MemorySources(props) {
 // loop); aria-live on the region.
 function GithubIndexStatus({ job }) {
   if (!job) return null
-  if (job.status === 'started') {
+  if (job.status === 'starting' || job.status === 'started') {
+    // review P2-10: 'starting' is the pre-POST state (job id not yet known) —
+    // render the same in-progress line so the ~2s gap isn't silent.
     return <p className="dim small" aria-live="polite">Indexing in progress…</p>
   }
   if (job.status === 'completed') {
@@ -3751,7 +3772,8 @@ function GithubIndexStatus({ job }) {
 // exhausted — distinct copy, never a retry loop) / "status expired — re-check".
 function DocsIndexStatus({ job }) {
   if (!job) return null
-  if (job.status === 'started') {
+  if (job.status === 'starting' || job.status === 'started') {
+    // review P2-10: 'starting' is the pre-POST state — same in-progress line.
     return <p className="dim small" aria-live="polite">Indexing docs in progress…</p>
   }
   if (job.status === 'completed') {

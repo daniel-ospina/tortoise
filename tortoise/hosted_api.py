@@ -8981,7 +8981,7 @@ def _update_onboarding_state(team_id: str, **fields) -> dict:
     return state
 
 
-class OnboardingStateResponse(BaseModel):  # noqa: F811
+class OnboardingStateResponse(BaseModel):
     onboarding: dict
     # E2E-5 (plan Task 6): the team email is read from the control plane
     # alongside onboarding state — additive, backward-compatible (None when
@@ -9004,7 +9004,7 @@ _PATCH_FIELD_TO_STATE_KEY: dict[str, str] = {
 }
 
 
-class OnboardingStatePatchRequest(BaseModel):  # noqa: F811
+class OnboardingStatePatchRequest(BaseModel):
     github_connected: bool | None = None
     github_indexed: bool | None = None
     demo_created: bool | None = None
