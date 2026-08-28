@@ -8,8 +8,7 @@ targets of the plan:
 - #1844 OBJECT-ONLY: issues → Object + lifecycle Events + Subjects, NO
   statement Points (the 1:1 issue↔statement write is removed from the
   default ingest path; the machinery is dormant for #1843)
-- re-run ⇒ 0 new nodes of ANY kind (objects/events/subjects) + no
-  updatedAt churn (P2-1 two-phase write is moot — no statements written)
+- re-run ⇒ 0 new nodes of ANY kind (objects/events/subjects)
 - close ⇒ Event `github.issue.closed` + Object.status=completed; reopen ⇒
   status open, no CORRECTS
 - first ingest of an already-closed issue ⇒ `-created` only
@@ -100,7 +99,6 @@ def test_index_creates_objects_and_events_only(sdk):
     proj = sdk._get_proj()
     rows = proj.g.query("MATCH (n:Point) RETURN n.pointKind").result_set
     assert rows == [], "the default ingest path must write NO statement points"
-    assert "observation" not in [r[0] for r in rows]
     # Object + Event + Subject nodes materialized (the object-only path).
     # Subject count is scoped to the mapper's github-user:* nodes — the
     # projection also mints an Event-derived Subject per lifecycle event.
@@ -193,6 +191,17 @@ def test_reopen_status_open_no_corrects(sdk):
     # object-only (#1844): no statement points exist, so reopen can never
     # CORRECTS anything
     assert proj.g.query("MATCH ()-[r:CORRECTS]->() RETURN count(r)").result_set[0][0] == 0
+    # re-poll after the reopen lifecycle transition: the diff sees no new
+    # state (still open), so it must mint ZERO new events — the transition
+    # events are NOT double-minted (no `-reopened-2`/`-closed-2`).
+    stats = _run(_indexer(t), sdk)
+    assert stats["events_minted"] == 0
+    rows = proj.g.query(
+        "MATCH (e:Event) WHERE e.eventId STARTS WITH 'github-issue-acme/repo1-1' "
+        "RETURN e.eventKind"
+    ).result_set
+    assert sorted(r[0] for r in rows) == [
+        "github.issue.closed", "github.issue.open", "github.issue.reopened"]
 
 
 def test_first_ingest_closed_issue_created_only(sdk):

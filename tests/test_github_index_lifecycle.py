@@ -33,7 +33,7 @@ from tortoise.hosted_api import (
     _start_index_job,
     app,
 )
-from tortoise.indexer.github_indexer import GitHubIndexer
+from tortoise.indexer.github_indexer import GitHubFetchError, GitHubIndexer
 from tortoise.sdk import TortoiseSDK
 
 _GRAPH_SCRIPTS = str(Path(__file__).resolve().parent.parent / "graph-scripts")
@@ -221,33 +221,6 @@ def test_state_keys_survive_patch_roundtrip(client, provisioned):
     body = r.json()
     assert body["onboarding"]["github_index_cursor"] == {
         "acme/repo1": {"updated_at": "x", "number": 1}}
-
-
-# ── Quota honest-fail (Task 4) ────────────────────────────────────
-
-def test_quota_honest_fail(client, tmp_path, monkeypatch):
-    """A team AT the points cap: the job fails honestly with the quota
-    message (402-equivalent) — zero writes, never a silent overshoot."""
-    # provision with max_points=0 → any point write is at/over cap
-    _provision(client.db_path, team_id=client.team_id, max_points=0)
-    t = MockGitHubTransport(issues=[gh_issue(1)])
-
-    async def _fake_get_client(self):
-        if self._client is None:
-            self._client = httpx.AsyncClient(transport=t)
-        return self._client
-
-    monkeypatch.setattr(GitHubIndexer, "_get_client", _fake_get_client)
-    r = client.tc.post("/v1/index/github", json={"org": "acme"})
-    assert r.status_code == 200
-    job_id = r.json()["job_id"]
-    body = _poll_until(client.tc, job_id, "failed")
-    assert "limit reached" in body["error"]
-    assert body["points_created"] == 0
-    state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
-    assert not state["github_indexed"], \
-        "a 0-repo quota-preflight failure must leave github_indexed UNSET — " \
-        "the next run keeps the ONE-repo bounded first-run pacing (P2, PR #1792)"
 
 
 # ── Single-flight (T2-P2 + cycle-3 P1-3) ──────────────────────────
@@ -451,12 +424,12 @@ def test_resolve_repos_404_fails_job(client, tmp_path, monkeypatch):
 def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
                                                       monkeypatch):
     """#1844: issue ingest is OBJECT-ONLY — no statement Points are written,
-    so the points quota gate never fires on a github index run (a 1-point
-    team ingests issues fine; the gate still guards any non-episodic point
-    write — it just never sees one from issues). Pre-change: each issue
-    consumed one statement point, so max_points=1 let exactly one issue
-    through and stamped the cursor truncated on the quota break."""
-    _provision(client.db_path, team_id=client.team_id, max_points=1)
+    so the points quota gate never fires on a github index run (a 0-point-cap
+    team still ingests issues fine; the old points-quota preflight would have
+    FAILED this job). Pre-change: each issue consumed one statement point, so
+    max_points=1 let exactly one issue through and stamped the cursor
+    truncated on the quota break."""
+    _provision(client.db_path, team_id=client.team_id, max_points=0)
     t = MockGitHubTransport(issues=[gh_issue(1), gh_issue(2)])
 
     async def _fake_get_client(self):
@@ -479,11 +452,14 @@ def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
         "a quota-free run ends with a clean window (no DRAIN flag)"
 
 
-def test_preflight_failure_preserves_persisted_cursors(client, tmp_path,
-                                                        monkeypatch):
-    """P2: a PRE-WALK failure (quota preflight) must not WIPE previously
-    persisted cursors — the finally persists the loaded state back (a
-    `cursors={}` blind write would silently drop the resume point)."""
+def test_resolve_repos_failure_preserves_persisted_cursors(client, tmp_path,
+                                                            monkeypatch):
+    """P2: a PRE-WALK failure (resolve_repos raising) must not WIPE
+    previously persisted cursors — the finally persists the loaded state back
+    (a `cursors={}` blind write would silently drop the resume point).
+    (Formerly the points-quota preflight failure; that gate is removed in
+    #1844 — the object-only job writes zero points — so the pre-walk failure
+    surface is now resolve_repos.)"""
     _provision(client.db_path, team_id=client.team_id, max_points=10000)
     t = MockGitHubTransport(issues=[gh_issue(1)])
 
@@ -499,23 +475,22 @@ def test_preflight_failure_preserves_persisted_cursors(client, tmp_path,
             "acme/repo1": {"updated_at": "2026-07-19T12:00:00Z",
                             "number": 7}},
         "github_indexed": True})
-    # drop the team to a 0-point cap → the preflight fails
-    reg_sdk = TortoiseSDK(db_path=client.db_path, namespace="registry")
-    reg_sdk._get_registry().query(
-        "MATCH (t:Team {id:$id}) SET t.max_points = 0",
-        params={"id": client.team_id})
-    reg_sdk.close()
+    # break the org resolution → the pre-walk resolve_repos fails
+    async def _boom(self, org):
+        raise GitHubFetchError("org not found")
+
+    monkeypatch.setattr(GitHubIndexer, "resolve_repos", _boom)
     r = client.tc.post("/v1/index/github", json={"org": "acme"})
     body = _poll_until(client.tc, r.json()["job_id"], "failed")
-    assert "limit reached" in body["error"]
+    assert "org not found" in body["error"]
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_index_cursor"] == {
         "acme/repo1": {"updated_at": "2026-07-19T12:00:00Z",
                         "number": 7}}, \
-        "preflight failure must not wipe persisted cursors"
+        "pre-walk failure must not wipe persisted cursors"
     assert state["github_indexed"] is True, \
         "an already-indexed team must NOT be downgraded to first-run by a " \
-        "0-repo preflight failure (github_indexed only flips on progress)"
+        "0-repo pre-walk failure (github_indexed only flips on progress)"
 
 
 def test_owner_token_eviction_aborts_stale_run(client, tmp_path, monkeypatch):
