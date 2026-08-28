@@ -454,10 +454,12 @@ function claimIntentInFlight() {
     if (opts.useSession && sessionTokenRef.current) {
       authHeaders = { Authorization: `Bearer ${sessionTokenRef.current}` }
     }
-    const res = await fetch(`${API_BASE}${path}`, {
-      ...opts,
-      headers: { ...authHeaders, ...(opts.headers || {}) },
-    })
+    // #1835: json-body calls (onboarding-state PATCHes, etc.) must send
+    // Content-Type: application/json or the server 422s on the body.
+    const hasBody = typeof opts.body === 'string'
+    const hdrs = { ...authHeaders, ...(opts.headers || {}) }
+    if (hasBody && !hdrs['Content-Type'] && !hdrs['content-type']) hdrs['Content-Type'] = 'application/json'
+    const res = await fetch(`${API_BASE}${path}`, { ...opts, headers: hdrs })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       // Round-11: attach the HTTP status — hosted_api.py returns detail strings
@@ -3792,12 +3794,21 @@ function MemorySources(props) {
           data-on={docsOn ? 'true' : 'false'}
           aria-label="GitHub docs as a memory source"
           onClick={() => onToggleDocs(!docsOn)}
-          disabled={!githubConnected || memoryBusy === 'docs' || docsIndexed}  // review P1-1: docs indexed ⇒ the switch is terminal (re-index refreshes, never un-indexes)
+          disabled={memoryBusy === 'docs' || docsIndexed}  // #1835: connect-inline like issues — not connected just reveals the CTA; review P1-1: docs indexed ⇒ the switch is terminal (re-index refreshes, never un-indexes)
         />
         <div className="toggle-body">
           <h4>GitHub docs</h4>
           <p>Your repos' docs/ folders are fetched server-side and indexed as Sources.</p>
-          {!githubConnected && <p className="dim small">Connect GitHub first to index docs.</p>}
+          {!githubConnected && docsWantOn ? (
+            <p className="dim small">
+              <button type="button" className="small" onClick={onConnectGithub} disabled={github.busy}>
+                {github.busy ? 'Connecting…' : 'Connect GitHub'}
+              </button>{' '}
+              to index docs/ as memory sources.
+            </p>
+          ) : !githubConnected ? (
+            <p className="dim small">Connect GitHub first to index docs.</p>
+          ) : null}
           {docsIndexed && githubConnected && (
             <p className="dim small">Docs are indexed and active as a source. Use "Re-index docs" to refresh.</p>
           )}
