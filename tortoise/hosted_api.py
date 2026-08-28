@@ -6537,6 +6537,10 @@ async def accept_invite(body: dict, request: Request,
         # #1880: the accepted_at write above ran BEFORE membership_create, so a
         # max_users 402 leaves a consumed invite + NO real membership — the fake
         # invite-{iid} row must still be deleted (permanent ghost otherwise).
+        # NOTE (second-model P2): this delete is coupled to the consumed-on-402
+        # ordering — if a future fix reorders membership_create BEFORE the
+        # accepted_at write (making 402 non-consuming/retryable), this except-path
+        # delete must be REMOVED (the pending placeholder would be legitimate).
         _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
         raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
     # #1880: drop the fake invite-{iid} membership row (ghost-members bug)
