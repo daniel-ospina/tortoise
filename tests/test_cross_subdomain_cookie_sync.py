@@ -189,6 +189,19 @@ def test_shared_adapter_declares_dashboard_cookie_identity() -> None:
     assert "SIZE_GUARD" in oauth_text and "provider_token" in oauth_text
 
 
+def test_adapters_escape_cookie_key_in_read_regex() -> None:
+    """#1860 (P3-3): the dashboard getItem cookie-read regex must escape the
+    key exactly like the shared bridge's readCookie. An unescaped key treats
+    regex metacharacters ([.*+?^${}()|\\]) as pattern — benign for today's
+    keys, latent drift. Both read paths must carry the same escape replace()
+    (mirrors readCookie's, KEEP IN SYNC)."""
+    shared = _read(SHARED)
+    dash = _read(DASHBOARD)
+    escape = "key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')"
+    assert escape in shared, "shared readCookie must escape the key"
+    assert escape in dash, "dashboard getItem must escape the key (drift from readCookie)"
+
+
 def test_cookie_write_templates_wire_conditionals_in_every_adapter() -> None:
     """#1857 (code-review P2-1/2/3): the host-conditional helpers must be wired
     into EVERY cookie-writing template in EVERY adapter — not merely present in
