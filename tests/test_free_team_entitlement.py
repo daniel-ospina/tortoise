@@ -321,6 +321,28 @@ class TestRegistryEntitlement:
         assert r.status_code == 409
         assert "already exists" in r.json()["detail"]
 
+    def test_create_membership_primed_by_team_create(self, reg_client):
+        """#1877 second-model P1: the owner Membership is created INSIDE
+        team_create (no post-hoc swallow) — so after a 0-team create, the
+        count is primed and a SECOND create 402s. A swallowed membership
+        failure would leave the team uncounted → unlimited free teams."""
+        tc, reg = reg_client
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _USER1, "email": "owner@example.com"}
+        try:
+            r1 = tc.post("/v1/teams", json={"name": "first"})
+            assert r1.status_code == 200, r1.text
+            # the owner membership landed (primed the gate)
+            rows = reg.query(
+                "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+                "RETURN count(m)", params={"uid": _USER1},
+            ).result_set
+            assert rows[0][0] == 1, "team_create must create the owner membership"
+            r2 = tc.post("/v1/teams", json={"name": "second"})
+            assert r2.status_code == 402
+        finally:
+            app.dependency_overrides.clear()
+
 
 @pytest.fixture
 def team_client_factory(client):

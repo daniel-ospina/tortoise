@@ -6081,18 +6081,20 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
             detail="Create another team requires a paid plan — upgrade an existing team first")
 
     try:
-        result = sdk.team_create(name)
+        result = sdk.team_create(name, owner_user_id=user["user_id"])
     except Exception as e:
         from tortoise.exceptions import ControlPlaneError
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
             raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
 
-    # Create the owner membership (registry) — the user owns this team
-    try:  # noqa: SIM105
-        sdk.membership_create(result["id"], user["user_id"], "owner")
-    except Exception:
-        pass  # membership_create may require a user node; registry best-effort
+    # #1877 second-model P1: the owner Membership is created INSIDE
+    # team_create (rollback-protected — a membership failure tears the Team
+    # down atomically, mirroring the onboarding lane). The old post-hoc
+    # membership_create swallow was a FAIL-OPEN: a swallowed membership
+    # failure left the team minted with no Membership, so neither the
+    # free-team entitlement count nor the 429 owner-membership rate limit
+    # ever saw it → unlimited free teams + orphans.
 
     return {"team_id": result["id"], "graph_name": result["graph_name"],
             "tier": "free", "name": name}
@@ -9933,6 +9935,11 @@ async def create_onboarding_team(body: dict,
             detail="A session user is required to create a sub-team — "
                    "sign in or mint a session key first",
         )
+    # NOTE (second-model P2, plan deviation): the plan's "reject non-UUID
+    # created_by" step is NOT applied — the test fixtures use non-UUID ids
+    # by design, and the provision RPC already maps a non-UUID uuid-column
+    # insert to a 400 (never a 500); the helper shape-gates internally so
+    # no new 500 path exists. Documented, not implemented.
     # #1877 (P0 fix): the onboarding lane had NO re-entry guard — a session
     # user could mint unlimited free sub-teams by calling this endpoint
     # repeatedly, bypassing POST /v1/teams. The wizard creates the sub-team
