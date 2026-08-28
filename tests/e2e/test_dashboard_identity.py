@@ -20,7 +20,7 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -37,7 +37,7 @@ def _session(user_id: str = "u-e2e-identity", display_name: str = "danielospinab
     """Supabase session JSON for the parent-domain cookie (mirrors
     test_dashboard_gate's _session). ``display_name=None`` omits
     user_metadata entirely — the email-prefix fallback branch."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     user = {
         "id": user_id,
         "aud": "authenticated",
@@ -85,7 +85,7 @@ def _inventory(login_methods: int = 1, linking: bool = True) -> dict:
         "linking_available": linking,
         "email": "identity-e2e@premise-labs.dev",
         "email_confirmed_at": "2026-08-01T00:00:00Z",
-        "last_sign_in_at": datetime.now(timezone.utc).isoformat(),
+        "last_sign_in_at": datetime.now(UTC).isoformat(),
         "reauth_required": False,
     }
 

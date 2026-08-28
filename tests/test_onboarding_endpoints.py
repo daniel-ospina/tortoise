@@ -180,7 +180,7 @@ def _invoke_session_recording_tool(tmp_path, team_id: str, enabled: bool):
     TortoiseSDK.__init__ = _patched
     from tortoise.hosted_api import _FALLBACK_KEEPALIVE
     _FALLBACK_KEEPALIVE.clear()
-    from tortoise.hosted_api import _make_sdk, _get_onboarding_state
+    from tortoise.hosted_api import _get_onboarding_state, _make_sdk
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
         params={"id": team_id, "st": "{}"},
@@ -206,8 +206,8 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
     assert state["capture_revised"] is True
     # The wizard's sessions toggle-on PATCH produces the identical state
     # shape (PATCH merge with the same two keys — the single consent source).
-    import json
-    from tortoise.hosted_api import app as _app, get_current_team
+    from tortoise.hosted_api import app as _app
+    from tortoise.hosted_api import get_current_team
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
@@ -500,10 +500,10 @@ def test_state_keys_registered_parametrized(client):
     PATCH model — a key added to the table without registering it anywhere
     fails here (the allowlist filter would silently drop it in production)."""
     from tortoise.hosted_api import (
-        DEFAULT_ONBOARDING_STATE,
-        OnboardingStatePatchRequest,
         _ALLOWED_STATE_KEYS,
         _ONBOARDING_DEFAULT_STATE,
+        DEFAULT_ONBOARDING_STATE,
+        OnboardingStatePatchRequest,
     )
     for state_key, patch_field in _STATE_KEY_TABLE.items():
         assert state_key in _ONBOARDING_DEFAULT_STATE, \
@@ -531,8 +531,8 @@ def test_capture_surface_keys_shared_across_defaults():
     surface — a key registered in one but not the other would diverge
     depending on whether the team was provisioned pre/post-registration."""
     from tortoise.hosted_api import (
-        DEFAULT_ONBOARDING_STATE,
         _ONBOARDING_DEFAULT_STATE,
+        DEFAULT_ONBOARDING_STATE,
     )
     capture_keys = {k for k in _STATE_KEY_TABLE}
     assert capture_keys <= set(_ONBOARDING_DEFAULT_STATE)
@@ -549,11 +549,10 @@ def test_install_probe_round_trip(client):
     install telemetry, so the dashboard can show install status before
     consent), but it IS get_current_team-gated (auth required — probes are
     per-team state)."""
-    from tortoise.hosted_api import _get_onboarding_state
-    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
     # Provision the Team node so state writes persist (the state writer is
     # MATCH...SET — a silent no-op without the node).
-    from tortoise.hosted_api import _make_sdk
+    from tortoise.hosted_api import _get_onboarding_state, _make_sdk
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
         params={"id": "test-team-1", "st": "{}"},
@@ -603,8 +602,7 @@ def test_install_probe_not_consent_gated(client):
     probe — the probe is unconditional install telemetry (harness + timestamp
     only), deliberately NOT consent-gated so the dashboard can show install
     status before consent. The capture POST itself remains 403-gated."""
-    from tortoise.hosted_api import _get_onboarding_state, _make_sdk
-    from tortoise.hosted_api import _update_onboarding_state
+    from tortoise.hosted_api import _get_onboarding_state, _make_sdk, _update_onboarding_state
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
         params={"id": "test-team-1", "st": "{}"},
@@ -628,8 +626,8 @@ def test_cross_surface_harness_vocab_contract():
     Also asserts the dashboard's HARNESS_ORDER matches the analytics vocab, so
     the UI rows and the server can never drift to different harness names.
     """
-    from pathlib import Path
     import re
+    from pathlib import Path
 
     from tortoise.hosted_api import (
         _HARNESS_ANALYTICS_VALUES,
@@ -642,9 +640,9 @@ def test_cross_surface_harness_vocab_contract():
     assert set(_HARNESS_ANALYTICS_VALUES) == {
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
     }
-    assert _SESSION_HARNESS_VALUES == frozenset({
+    assert frozenset({
         "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
-    })
+    }) == _SESSION_HARNESS_VALUES
 
     # 2. the frontend harness set matches the analytics vocab (parse the
     # dashboard constant — self-contained, no JS toolchain needed).

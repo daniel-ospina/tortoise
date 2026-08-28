@@ -2,6 +2,7 @@
 from __future__ import annotations  # noqa: I001
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -2569,10 +2570,8 @@ def tortoise_session_capture(conversation: list[dict],
         status = getattr(e, "status_code", 500)
         detail = getattr(e, "detail", str(e))
         if status >= 400:
-            try:
+            with contextlib.suppress(Exception):
                 _record_capture_last_error(team_id, harness, str(detail))
-            except Exception:
-                pass
         return {"error": str(detail), "status": status}
 
 
