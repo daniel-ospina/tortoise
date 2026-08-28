@@ -57,6 +57,13 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 // subdomains share it (plan §5.3 d2: PKCE + parent-domain cookie).
 const COOKIE_NAME = 'sb-tortoise-auth-token'
 const COOKIE_DOMAIN = '.premiselabs.co'
+// #1835: encoded-bytes cap for the 4096-byte cookie limit. Google OAuth
+// sessions (provider_token ~1200 chars + full identity) encode to ~5012
+// bytes — an oversized cookie is SILENTLY rejected by the browser →
+// getSession() returns null → the mount gate bounces to /auth (the GitHub
+// loop was never hit because its provider token is shorter). Mirrors
+// website/assets/supabase-session.js SIZE_GUARD exactly.
+const SIZE_GUARD = 3800
 
 const supabaseStorage = {
   getItem(key) {
@@ -67,8 +74,24 @@ const supabaseStorage = {
   },
   setItem(key, value) {
     if (!value) { this.removeItem(key); return }
+    let encoded = encodeURIComponent(value)
+    // Size guard (#1835, mirrors supabase-session.js): an OAuth session with
+    // provider tokens can exceed the 4096-byte cookie limit. provider tokens
+    // are only needed by the initiating flow — strip them first; if still
+    // over the cap, attempt the write anyway with a warning.
+    if (encoded.length > SIZE_GUARD) {
+      try {
+        const obj = JSON.parse(value)
+        delete obj.provider_token
+        delete obj.provider_refresh_token
+        encoded = encodeURIComponent(JSON.stringify(obj))
+      } catch { /* not JSON — leave as-is */ }
+      if (encoded.length > SIZE_GUARD + 100) {
+        console.warn(`${COOKIE_NAME} session exceeds cookie size cap (${encoded.length} bytes) — session may not bridge subdomains`)
+      }
+    }
     const expires = new Date(Date.now() + 7 * 24 * 3600 * 1000).toUTCString()
-    document.cookie = `${key}=${encodeURIComponent(value)}; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Expires=${expires}`
+    document.cookie = `${key}=${encoded}; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Expires=${expires}`
   },
   removeItem(key) {
     document.cookie = `${key}=; Domain=${COOKIE_DOMAIN}; Path=/; SameSite=Lax; Secure; Max-Age=0`

@@ -106,14 +106,30 @@ def test_shared_script_syntax() -> None:
     subprocess.run([node, "--check", str(SHARED)], check=True)
 
 
-def test_shared_adapter_handles_localhost_and_size_guard() -> None:
-    """The shared file must degrade safely off-premiselabs hosts and cap cookie
-    size (the two things the dashboard adapter never needed)."""
-    text = _read(SHARED)
-    assert "localhost" in text and "127.0.0.1" in text
-    assert "premiselabs.co" in text
+def test_adapters_share_size_guard_and_localhost_handling() -> None:
+    """Size-guard parity: BOTH adapters must strip provider tokens when the
+    cookie would exceed the 4096-byte cap. #1835: the dashboard adapter was
+    wrongly assumed to never need the guard — a Google OAuth session
+    (provider_token ~1200 chars + full identity, ~5012 encoded bytes) exceeds
+    the cap and is silently rejected, so the dashboard must strip provider
+    tokens exactly like the shared factory. (Localhost/off-premiselabs
+    degradation is shared-file-only — the dashboard hardcodes
+    .premiselabs.co.)"""
+    shared = _read(SHARED)
+    dash = _read(DASHBOARD)
+    assert "localhost" in shared and "127.0.0.1" in shared
+    assert "premiselabs.co" in shared
     # size guard strips provider tokens when the cookie would exceed the cap
-    assert "provider_token" in text and "SIZE_GUARD" in text
+    # — required in BOTH adapters (#1835 parity)
+    for path, text in ((SHARED, shared), (DASHBOARD, dash)):
+        assert "SIZE_GUARD" in text, f"{path}: missing SIZE_GUARD"
+        assert "provider_token" in text, f"{path}: size guard must strip provider_token"
+        assert "provider_refresh_token" in text, (
+            f"{path}: size guard must strip provider_refresh_token too"
+        )
+        assert "SIZE_GUARD + 100" in text, (
+            f"{path}: must warn only when still over SIZE_GUARD + 100"
+        )
 
 
 def test_all_tortoise_pages_wire_the_shared_bridge() -> None:
