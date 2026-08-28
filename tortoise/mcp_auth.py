@@ -215,6 +215,32 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>",
                     status=401,
                 )
+            # #1854 (review P2): best-effort #685 write-through on MCP
+            # resolution — a recovery key used ONLY via MCP (never REST)
+            # must still bump last_used_at, else NULL-first rotation treats
+            # a LIVE MCP credential as never-used and rotates it (the #1854
+            # bug class on the MCP surface). Mirrors the REST lanes'
+            # best-effort write; telemetry must NEVER gate auth, so a write
+            # failure is swallowed. OAuth tokens have no api_keys row
+            # (key_id None) → no write.
+            try:
+                _key_id = team.get("key_id")
+                if _key_id:
+                    from datetime import UTC, datetime
+                    if is_supabase_enabled():
+                        from tortoise.supabase_control import (  # noqa: I001
+                            get_control_plane, update_last_used,
+                        )
+                        update_last_used(get_control_plane(), _key_id)
+                    else:
+                        _sdk = await self._get_registry_sdk()
+                        _sdk._get_registry().query(
+                            "MATCH (k:APIKey {id: $id}) SET k.last_used_at = $now",
+                            params={"id": _key_id,
+                                    "now": datetime.now(UTC).isoformat()},
+                        )
+            except Exception:
+                pass  # telemetry — auth already succeeded
             # #308 (R5): durable suspension check — the sole rejection
             # authority. Pop the LRU entry so a re-resolution is required
             # after un-suspension; clear the signal when the fresh
