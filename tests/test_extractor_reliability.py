@@ -645,7 +645,7 @@ def _probe_filler(repeat: int = 6000):
 
 @pytest.mark.live
 def test_probe_max_tokens_above_8k():
-    """#1787 Task 1 — the V4 ceiling is 384K; the legacy alias must accept
+    """#1787 Task 1 — the V4 ceiling is 384K; the direct-API flash id must accept
     max_tokens=16000 without a 400 or a server-side clamp to 8192. The probe
     forces a LONG generation (calibrated JSON echo, ~12K tokens) and asserts
     the adapter recorded >8192 completion tokens; finish_reason is read per
@@ -661,7 +661,7 @@ def test_probe_max_tokens_above_8k():
         pytest.skip("no DEEPSEEK_API_KEY")
     from tortoise import extractor_v2 as v2
     from tortoise.model_adapters import DeepSeekDirectModel
-    m = DeepSeekDirectModel("deepseek-chat", max_tokens=None, temperature=0.0)
+    m = DeepSeekDirectModel("deepseek-v4-flash", max_tokens=None, temperature=0.0)
     payload, est_tokens, tokenizer_name = _probe_filler()
     print(f"probe calibrator: {tokenizer_name} — {est_tokens} tokens "
           f"(floor ≥ 10,500; worst-case real echo ≥ 8,925 > 8,192)")
@@ -702,15 +702,19 @@ def test_probe_max_tokens_above_8k():
 
 @pytest.mark.live
 def test_probe_v4_flash_non_thinking():
-    """#1787 Task 1 Step 3 — probe deepseek-v4-flash + non-thinking (the
-    migration-safe variant). Expected per the adapter docstring (pilot
-    #1549): api.deepseek.com's deepseek-v4-flash reasons by default and
-    collapses to empty output (all tokens spent reasoning, finish=length,
-    ZERO content) — that is exactly why the direct lane wires
-    `deepseek-chat`. This probe documents the collapse as a baseline; a
-    400/unknown-model on this wire id is itself DOCUMENTED (xfail), not a
-    hard failure. Routed through _complete's deadline machinery
-    (deadline_s=None → the scaled default) like the alias probe."""
+    """#1787 Task 1 Step 3 — probe deepseek-v4-flash with the production
+    config. Post-#1790 the adapter injects ``thinking: {"type": "disabled"}``
+    internally for deepseek-v4-flash (the legacy non-reasoning alias was
+    retired upstream 2026-07-24 and is still served during the transition),
+    so this probe
+    now verifies the PRODUCTION config returns content (anti-collapse
+    verification). A collapse under the production config — empty content
+    with finish=length (pilot #1549: all tokens spent reasoning unless the
+    adapter's thinking toggle is off) — IS the #1790 regression this probe
+    exists to prevent and now HARD FAILS, not xfails. A 400/unknown-model
+    on this wire id is itself DOCUMENTED (xfail), not a hard failure.
+    Routed through _complete's deadline machinery (deadline_s=None → the
+    scaled default) like the other probes."""
     import os
     if not os.environ.get("DEEPSEEK_API_KEY"):
         pytest.skip("no DEEPSEEK_API_KEY")
@@ -724,22 +728,20 @@ def test_probe_v4_flash_non_thinking():
         status = getattr(e, 'response', None) and getattr(e.response, 'status_code', None)
         if status == 400 or ('model' in str(e).lower() and 'unknown' in str(e).lower()):
             pytest.xfail("direct API does not serve deepseek-v4-flash (400 "
-                         "unknown-model on this wire id) — recorded on #1787 "
-                         "(P2-G); re-enable after the companion adapter "
-                         "migration (#1790) or when the direct API serves it")
+                         "unknown-model on this wire id)")
         raise  # genuine unexpected error — hard FAIL
-    # documented collapse — assert the SIGNATURE (finish=length: all
-    # tokens spent reasoning, zero content), not just emptiness. `not resp`
-    # covers BOTH the empty-string and content:null collapse forms
-    # (DeepSeek returns null content for a pure-reasoning response — the
-    # pilot #1549 "ZERO content" signature).
+    # post-#1790 the production config (adapter thinking-disable) MUST
+    # yield content — an empty response is the collapse regression this PR
+    # exists to prevent: HARD FAIL, not xfail. `not resp` covers BOTH the
+    # empty-string and content:null collapse forms (DeepSeek returns null
+    # content for a pure-reasoning response — the pilot #1549 "ZERO content"
+    # signature); the AssertionError fires on either.
     if not resp:
-        assert m.last_finish_reason == "length", (
-            f"v4-flash returned empty WITHOUT finish=length "
-            f"({m.last_finish_reason!r}) — not the documented collapse; "
-            f"update after adapter migration")
-        pytest.xfail("v4-flash reasons by default (pilot #1549) — pending "
-                     "companion adapter-migration (thinking toggle)")
+        assert resp, (
+            f"v4-flash collapsed under thinking:{{\"type\": \"disabled\"}} "
+            f"— the adapter's thinking-disable is not effective on the live "
+            f"API (finish={m.last_finish_reason!r}, empty content) — "
+            f"#1549 regression")
     # non-empty path — assert the response is real JSON (the user prompt
     # demanded a JSON value), not any truthy string.
     import json

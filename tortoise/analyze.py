@@ -245,7 +245,7 @@ def _extract_entity(question: str, trigger: str) -> str:
 # issued it. (The old code used `OPENAI_API_KEY or DEEPSEEK_API_KEY` and always
 # POSTed to api.deepseek.com — the OpenAI key was exfiltrated to DeepSeek.)
 _LLM_PROVIDERS: dict[str, tuple[str, str]] = {
-    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-chat"),
+    "DEEPSEEK_API_KEY": ("https://api.deepseek.com/v1/chat/completions", "deepseek-v4-flash"),
     "OPENAI_API_KEY": ("https://api.openai.com/v1/chat/completions", "gpt-4o-mini"),
 }
 # Priority order when multiple keys are set (deepseek first — historical default).
@@ -274,13 +274,22 @@ def llm_classify(question: str) -> tuple[str, dict] | None:
         return None  # fall back to keyword only
 
     try:
-        body = json.dumps({
+        body = {
             "model": provider_model,
             "temperature": 0,
             "response_format": {"type": "json_object"},
             "messages": [{"role": "system", "content": LLM_PROMPT},
                          {"role": "user", "content": question}],
-        }).encode()
+        }
+        # #1790: deepseek-v4-flash reasons by DEFAULT (thinking: high) and
+        # collapses into hidden reasoning tokens — disable thinking for the
+        # flash family ONLY (OpenAI would 400 on the unknown param). The
+        # gate is model-id based, mirroring the adapter's flash-family scope
+        # guard: a future pro entry in _LLM_PROVIDERS must NOT silently
+        # disable thinking.
+        if provider_model.rsplit("/", 1)[-1] == "deepseek-v4-flash":
+            body["thinking"] = {"type": "disabled"}
+        body = json.dumps(body).encode()
         req = urllib.request.Request(
             provider_url,
             data=body,

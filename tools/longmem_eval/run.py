@@ -938,7 +938,7 @@ def _upsert_failure(checkpoint: str | None, qid: str,
 # non-default — not None and != 0.0, mirroring the max_tokens check's
 # explicit structure; thinking_budget/disable_reasoning when truthy), so a
 # default-tuning adapter's fingerprint stays its bare wire id (the #1732
-# literal contract: DeepSeekDirectModel('deepseek-chat') → 'deepseek-chat').
+# literal contract: DeepSeekDirectModel('deepseek-v4-flash') → 'deepseek-v4-flash').
 _TUNING_FINGERPRINT_ATTRS = ("max_tokens", "temperature", "thinking_budget",
                              "disable_reasoning")
 
@@ -1001,8 +1001,9 @@ def _session_worker_spec_tuning(spec: str) -> tuple[str, int | None, float, str]
     entry's REAL wire id (never the registry key — ``solar-pro4``/``claude-opus-5`` are not
     valid wire ids) resolved through the ``REGISTRY_KEY_TO_ID`` remap so
     every lane gets a valid id (``deepseek-flash-direct`` →
-    ``deepseek/deepseek-chat``: the direct lane strips to the non-reasoning
-    ``deepseek-chat``, the OpenRouter lane keeps the prefixed id — bare ids
+    ``deepseek/deepseek-v4-flash``: the direct lane strips to the bare
+    ``deepseek-v4-flash`` (thinking disabled in the adapter), the OpenRouter
+    lane keeps the prefixed id — bare ids
     404 there). The 4th element is the pinned entry's OWN id (pre-lane-
     normalization) — the #1742 pin-rewrite warning in
     ``_build_cli_extractor_model`` compares it against what the router
@@ -1049,8 +1050,8 @@ def _served_wire_ids(model: Any) -> list[str]:
 def _warn_pin_rewrite(spec: str, pinned_id: str, built: Any) -> None:
     """LOUD warning when a pinned ``--extractor-model`` id is NOT served
     verbatim at ``session_workers > 1`` (review #1742): lane normalization
-    (#1549 ``_direct_wire_id`` — ``deepseek/deepseek-v4-flash`` →
-    ``deepseek-chat`` on the direct lane) can REWRITE the pin's wire id
+    (#1790 ``_direct_wire_id`` — ``deepseek/deepseek-v4-flash`` →
+    ``deepseek-v4-flash`` on the direct lane) can REWRITE the pin's wire id
     with no user-visible signal; the "REFUSED (safe direction)" framing
     only materializes at resume time. Compares WIRE IDS only (never
     tuning — the -pro/-xhigh/-noreason trio shares one id and must not
@@ -1061,8 +1062,8 @@ def _warn_pin_rewrite(spec: str, pinned_id: str, built: Any) -> None:
     warnings.warn(
         f"--extractor-model {spec!r} pinned wire id {pinned_id!r} is not "
         f"served verbatim at --session-workers > 1: lane normalization "
-        f"serves {sorted(set(served_ids))!r} instead (e.g. #1549 "
-        f"_direct_wire_id: deepseek/deepseek-v4-flash → deepseek-chat on "
+        f"serves {sorted(set(served_ids))!r} instead (e.g. #1790 "
+        f"_direct_wire_id: deepseek/deepseek-v4-flash → deepseek-v4-flash on "
         f"the direct lane) — the checkpoint fingerprints the SERVED id, so "
         f"a cross-lane/env resume is refused (safe direction); pin a "
         f"lane-neutral id or accept the substitution",
@@ -1249,8 +1250,9 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     matching the session_workers=1 owner decision). Registry entries the
     factory cannot express (thinking_budget/disable_reasoning) are refused
     loudly at session_workers>1. WIRE-ID
-    MUTABILITY: wire ids are API-facing and mutable (e.g. #1706 renamed
-    deepseek-v4-flash → deepseek-chat) — a rename loudly invalidates every
+    MUTABILITY: wire ids are API-facing and mutable (e.g. #1706, pre-#1790,
+    renamed deepseek-v4-flash → deepseek-chat; #1790 migrated back to
+    deepseek-v4-flash) — a rename loudly invalidates every
     existing checkpoint (CheckpointStaleError on ``extractor_model``): safe
     by design, expected on any future normalization change.
     ENV-DEPENDENCE (default path): with ``--extractor-model`` unset the

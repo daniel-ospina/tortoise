@@ -23,9 +23,12 @@ Routing env vars (documented here; ``.env.example`` entries deferred to P4):
     follow-up if the collapse class recurs.
   - ``TORTOISE_EXTRACT_MODEL`` — canonical family-prefixed model id
     (default ``deepseek/deepseek-v4-flash``); the direct route sends the
-    flash family's NON-reasoning id (``deepseek-chat``) on the wire (pilot
-    #1549 — ``deepseek-v4-flash`` reasons by default and collapses to empty
-    output), the openrouter route sends the spec unchanged (D6).
+    flash family's documented id (``deepseek-v4-flash``) with thinking
+    explicitly disabled on the wire (pilot #1549 — ``deepseek-v4-flash``
+    reasons by default and collapses to empty output; the legacy
+    non-reasoning chat alias was retired upstream 2026-07-24 (still
+    served during transition), #1790); the
+    openrouter route sends the spec unchanged (D6).
 
 Taxonomy contract (M2/M3 import these — do not fork):
   ``LlmErrorClass``, ``FATAL_STATUS_CODES``, ``FATAL_CONFIG_STATUS_CODES``,
@@ -158,14 +161,17 @@ class VeniceModel(OpenRouterModel):
 
 class DeepSeekDirectModel(OpenRouterModel):
     """Direct DeepSeek API adapter (api.deepseek.com) — no OpenRouter hop.
-    The flash family uses the NON-reasoning id ``deepseek-chat`` on the wire
-    (pilot #1549: api.deepseek.com's ``deepseek-v4-flash`` reasons by default
-    and collapses to empty output — 1500/1500 reasoning tokens, finish=length);
-    ``deepseek-v4-pro`` stays as-is (no collapse evidence — pending
-    verification). Used when DEEPSEEK_API_KEY is set and
-    TORTOISE_EXTRACTOR_PROVIDER != 'openrouter' (#1350 — the extractor's LLM
-    calls were hitting OpenRouter connection errors under load; the direct
-    API is the same model, different route)."""
+    The flash family runs NON-reasoning: ``deepseek-v4-flash`` with thinking
+    explicitly disabled (pilot #1549: api.deepseek.com's ``deepseek-v4-flash``
+    reasons by default — thinking defaults ON — and collapses to empty
+    output, 1500/1500 reasoning tokens, finish=length; the legacy
+    alias that used to provide non-reasoning chat was retired upstream
+    2026-07-24 (still served during transition), #1790);
+    ``deepseek-v4-pro`` stays as-is (no
+    collapse evidence — pending verification). Used when DEEPSEEK_API_KEY is
+    set and TORTOISE_EXTRACTOR_PROVIDER != 'openrouter' (#1350 — the
+    extractor's LLM calls were hitting OpenRouter connection errors under
+    load; the direct API is the same model, different route)."""
     provider = "deepseek-direct"
     base_url = "https://api.deepseek.com/v1/chat/completions"
     key_env = "DEEPSEEK_API_KEY"
@@ -202,6 +208,21 @@ class DeepSeekDirectModel(OpenRouterModel):
         # (the preflight probe / ping prompts lack it).
         if _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
+        # #1790: the flash family runs NON-reasoning. The legacy
+        # alias (routed to v4-flash non-thinking) was retired upstream
+        # 2026-07-24 (still served during transition); ``deepseek-v4-flash``
+        # reasons by
+        # DEFAULT (thinking: high) and collapses non-trivial prompts into
+        # hidden reasoning tokens (pilot #1549: 1500/1500 reasoning tokens,
+        # zero content). Disable thinking explicitly — the documented
+        # OpenAI-format toggle (api-docs.deepseek.com/guides/thinking_mode;
+        # live-verified 2026-08-28: zero reasoning_content, finish=stop,
+        # byte-identical usage to the retired alias). ``deepseek-v4-pro``
+        # keeps its default (no collapse evidence — pending verification).
+        # prefix-agnostic: a provider-prefixed id (e.g. "deepseek/deepseek-v4-flash")
+        # must not bypass the gate (gate ↔ MODELS drift would re-open #1549).
+        if self.id.rsplit("/", 1)[-1] == "deepseek-v4-flash":
+            body["thinking"] = {"type": "disabled"}
         r = self._session.post(
             self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}",
@@ -221,15 +242,20 @@ class DeepSeekDirectModel(OpenRouterModel):
 # re-exports this; the eval harness and tools reference the names).
 MODELS = {
     'deepseek-flash': lambda: OpenRouterModel('deepseek/deepseek-v4-flash', max_tokens=None, temperature=0.0),
-    # Pilot #1549 (50-Q run, 2026-08-25): the direct API id must be the
-    # NON-reasoning variant. api.deepseek.com's ``deepseek-v4-flash`` reasons
-    # by default and burns the whole max_tokens budget on hidden reasoning
-    # tokens for non-trivial prompts (observed: 1500/1500 reasoning tokens,
-    # finish_reason=length, ZERO output content) — S1 then returns an empty
-    # story, S2/S4 never run, and extraction silently produces no points.
-    # ``deepseek-chat`` is the direct API's non-reasoning chat model
-    # (empirically verified: full story output, finish_reason=stop).
-    'deepseek-flash-direct': lambda: DeepSeekDirectModel('deepseek-chat', max_tokens=None, temperature=0.0),
+    # Pilot #1549 (50-Q run, 2026-08-25) + #1790: the direct API id is the
+    # NON-reasoning flash variant. api.deepseek.com's ``deepseek-v4-flash``
+    # reasons by DEFAULT (thinking: high) and burns the whole max_tokens
+    # budget on hidden reasoning tokens for non-trivial prompts (observed:
+    # 1500/1500 reasoning tokens, finish_reason=length, ZERO output content)
+    # — S1 then returns an empty story, S2/S4 never run, and extraction
+    # silently produces no points. The legacy alias (routed to
+    # v4-flash non-thinking) was retired upstream 2026-07-24
+    # (still served during transition, #1790); the
+    # replacement is the documented id ``deepseek-v4-flash``
+    # WITH thinking explicitly disabled in ``DeepSeekDirectModel.complete``
+    # (live-verified 2026-08-28: full story output, finish_reason=stop,
+    # zero reasoning_content — byte-identical usage to the retired alias).
+    'deepseek-flash-direct': lambda: DeepSeekDirectModel('deepseek-v4-flash', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro-direct': lambda: DeepSeekDirectModel('deepseek-v4-pro', max_tokens=None, temperature=0.0),
     'deepseek-v4-pro': lambda: OpenRouterModel('deepseek/deepseek-v4-pro', max_tokens=500),
     'deepseek-r1-xhigh': lambda: OpenRouterModel('deepseek/deepseek-r1-0528', max_tokens=500, thinking_budget=2000),
@@ -535,23 +561,23 @@ def _should_send_json_mode(system: str | None, user: str | None) -> bool:
 
 
 def _strip_family_prefix(model_id: str) -> str:
-    """Direct-route wire normalization (D6): ``deepseek/deepseek-chat`` →
-    ``deepseek-chat``. Intermediate step feeding ``_direct_wire_id`` (which
-    then remaps the flash family onto its non-reasoning direct id)."""
+    """Direct-route wire normalization (D6): ``deepseek/deepseek-v4-flash`` →
+    ``deepseek-v4-flash``. Intermediate step feeding ``_direct_wire_id`` (the
+    direct lane's bare-id normalization)."""
     return model_id.rsplit("/", 1)[-1] if "/" in model_id else model_id
 
 
 def _direct_wire_id(model_id: str) -> str:
-    """Direct-API wire id (D6 + pilot #1549): api.deepseek.com's
-    ``deepseek-v4-flash`` reasons by DEFAULT and burns the whole max_tokens
-    budget on hidden reasoning for non-trivial prompts (observed 1500/1500
-    reasoning tokens, finish_reason=length, ZERO content) — S1 collapses to
-    an empty story and extraction silently produces no points. The direct
-    route therefore sends the non-reasoning ``deepseek-chat`` for the flash
-    family; ``deepseek-v4-pro`` is unchanged (no collapse evidence — out of
-    scope pending verification)."""
-    bare = _strip_family_prefix(model_id)
-    return "deepseek-chat" if bare in ("deepseek-v4-flash", "deepseek-chat") else bare
+    """Direct-API wire id (D6 + #1790): the direct lane sends BARE ids —
+    ``deepseek/deepseek-v4-flash`` → ``deepseek-v4-flash`` (the OpenRouter
+    lane keeps the family prefix). The flash family keeps its current
+    documented id ``deepseek-v4-flash``; non-reasoning behavior is achieved
+    by explicitly disabling thinking in ``DeepSeekDirectModel.complete``
+    (the legacy alias — routing to v4-flash non-thinking — was
+    retired upstream 2026-07-24 (still served during transition),
+    #1790). ``deepseek-v4-pro`` is
+    unchanged (no collapse evidence — out of scope pending verification)."""
+    return _strip_family_prefix(model_id)
 
 
 def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
@@ -560,15 +586,12 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
             _direct_wire_id(model_id),
             max_tokens=max_tokens, temperature=temperature)
     if provider == "venice":
-        # Venice's catalog serves the flash id (docstring); the non-reasoning
-        # 'deepseek-chat' id is unverified there — keep the documented id. A
+        # Venice's catalog serves the documented flash id (docstring). A
         # wrong id fails LOUD via preflight (config-4xx → fatal gate), never
-        # silently; verify the venice catalog before enabling the pool (#1549).
-        bare = _strip_family_prefix(model_id)
-        if bare == "deepseek-chat":
-            bare = "deepseek-v4-flash"
+        # silently; verify the venice catalog before enabling the pool
+        # (#1549).
         return VeniceModel(
-            bare,
+            _strip_family_prefix(model_id),
             max_tokens=max_tokens, temperature=temperature)
     return OpenRouterModel(model_id, max_tokens=max_tokens, temperature=temperature)
 
@@ -669,20 +692,23 @@ class RotatingModel:
 # pass through — they are not valid extractor specs on either provider.
 _REGISTRY_KEY_TO_ID = {
     "deepseek-flash": "deepseek/deepseek-v4-flash",
-    # Pilot #1549 (2026-08-25): the DIRECT-API flash id must be the
-    # non-reasoning variant. api.deepseek.com's ``deepseek-v4-flash`` reasons
-    # by default and burns the max_tokens budget on hidden reasoning for
-    # non-trivial prompts (1500/1500 reasoning tokens observed,
-    # finish_reason=length, ZERO content) — S1 collapses to an empty story
-    # and extraction silently produces no points. The key maps to the
-    # FAMILY-PREFIXED ``deepseek/deepseek-chat`` so every route gets a valid
-    # wire id: the direct lane strips to the non-reasoning ``deepseek-chat``
-    # (``_direct_wire_id``), the OpenRouter lane keeps the valid prefixed id,
-    # and the venice lane serves its documented catalog id. ``deepseek-v4-pro-direct``
-    # is unchanged (no collapse evidence for v4-pro — pending verification).
-    # The v4-pro keys are ALSO family-prefixed so the OpenRouter pool lane
-    # gets a valid id (bare ids 404 there → fatal → pool-kill, #1549 class).
-    "deepseek-flash-direct": "deepseek/deepseek-chat",
+    # Pilot #1549 (2026-08-25) + #1790: the DIRECT-API flash wire id is the
+    # current documented id ``deepseek-v4-flash``; non-reasoning behavior is
+    # achieved by disabling thinking explicitly in ``DeepSeekDirectModel.complete``
+    # (the legacy alias was retired upstream 2026-07-24 (still served
+    # during transition), #1790 — v4-flash reasons by default and burns
+    # the max_tokens budget on
+    # hidden reasoning for non-trivial prompts: 1500/1500 reasoning tokens
+    # observed, finish_reason=length, ZERO content — S1 collapses to an empty
+    # story and extraction silently produces no points). The key maps to the
+    # FAMILY-PREFIXED id so every route gets a valid wire id: the direct lane
+    # strips to the bare flash id (``_direct_wire_id``), the OpenRouter lane
+    # keeps the valid prefixed id, and the venice lane serves its documented
+    # catalog id. ``deepseek-v4-pro-direct`` is unchanged (no collapse
+    # evidence for v4-pro — pending verification). The v4-pro keys are ALSO
+    # family-prefixed so the OpenRouter pool lane gets a valid id (bare ids
+    # 404 there → fatal → pool-kill, #1549 class).
+    "deepseek-flash-direct": "deepseek/deepseek-v4-flash",
     "deepseek-v4-pro-direct": "deepseek/deepseek-v4-pro",
     "deepseek-v4-pro": "deepseek/deepseek-v4-pro",
     "deepseek-v4-pro-noreason": "deepseek/deepseek-v4-pro",
@@ -704,8 +730,8 @@ def build_extractor_model(model_id: str | None = None, *,
     Resolves (primary, fallback) via ``resolve_extractor_provider()`` and
     wraps them in a ``RoutingModel``. ``model_id`` defaults to
     ``TORTOISE_EXTRACT_MODEL`` (or ``deepseek/deepseek-v4-flash``; the
-    default's direct route sends the non-reasoning ``deepseek-chat`` on the
-    wire — pilot #1549). Builds
+    default's direct route sends ``deepseek-v4-flash`` with thinking
+    disabled on the wire — pilot #1549/#1790). Builds
     leniently — with NO keys at all it degrades to a single OpenRouter
     adapter (back-compat for direct callers / ``TestModelAdapterBounds``);
     fail-closed is enforced at the pipeline gates, not here. An explicit

@@ -1189,7 +1189,7 @@ def test_model_id_fingerprint_uses_wire_id_not_repr():
     if a later constructor raises."""
     specs = [
         (OpenRouterModel, "deepseek/deepseek-v4-flash"),
-        (DeepSeekDirectModel, "deepseek-chat"),
+        (DeepSeekDirectModel, "deepseek-v4-pro"),
         (VeniceModel, "deepseek-v4-flash"),
     ]
     adapters: list = []
@@ -1228,7 +1228,7 @@ def test_model_id_fingerprint_deterministic_at_composition_layer():
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # determinism twin
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))  # same class, different id
-        adapters.append(DeepSeekDirectModel("deepseek-chat"))  # different class
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))  # different class
         adapters.append(DeepSeekDirectModel("deepseek/deepseek-v4-flash"))  # diff class, SAME wire id
 
         fp1 = runner._build_fingerprint(extractor_model=adapters[0], **kw)
@@ -1243,7 +1243,7 @@ def test_model_id_fingerprint_deterministic_at_composition_layer():
         fp3 = runner._build_fingerprint(extractor_model=adapters[2], **kw)
         fp4 = runner._build_fingerprint(extractor_model=adapters[3], **kw)
         assert fp3["extractor_model"] == "deepseek/deepseek-v4-pro"
-        assert fp4["extractor_model"] == "deepseek-chat"
+        assert fp4["extractor_model"] == "deepseek-v4-pro"
         assert runner._fingerprint_diffs(fp1, fp3) == ["extractor_model"]
         assert runner._fingerprint_diffs(fp1, fp4) == ["extractor_model"]
 
@@ -1312,7 +1312,7 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
              expected="deepseek/deepseek-v4-flash"),
         dict(keys=("deepseek", "openrouter"), max_tokens=None,
              temperature=0.0, cls=RoutingModel,
-             expected=("routing:deepseek-direct:deepseek-chat"
+             expected=("routing:deepseek-direct:deepseek-v4-flash"
                        "+openrouter:deepseek/deepseek-v4-flash")),
         dict(provider="openrouter", keys=("deepseek", "openrouter"),
              max_tokens=None, temperature=0.0, cls=RoutingModel,
@@ -1320,10 +1320,10 @@ def test_model_id_wrapper_path_stable_no_address(monkeypatch):
              # the members (deepseek-direct < openrouter), changing this
              # literal — order IS effective config for RoutingModel
              expected=("routing:openrouter:deepseek/deepseek-v4-flash"
-                       "+deepseek-direct:deepseek-chat")),
+                       "+deepseek-direct:deepseek-v4-flash")),
         dict(keys=("deepseek", "openrouter", "venice"), max_tokens=None,
              temperature=0.0, cls=RotatingModel,
-             expected=("rotating:deepseek-direct:deepseek-chat"
+             expected=("rotating:deepseek-direct:deepseek-v4-flash"
                        "+openrouter:deepseek/deepseek-v4-flash"
                        "+venice:deepseek-v4-flash")),
         # tuning rides the wrapper composition too (member suffixes) — a
@@ -1406,17 +1406,17 @@ def test_build_cli_extractor_model_fingerprints_serving_config(monkeypatch):
         # session_workers>1 + direct spec: the RESOLVED wire id is used — the
         # registry key is never a valid wire id; the _REGISTRY_KEY_TO_ID remap
         # gives every lane a valid id ('deepseek-flash-direct' →
-        # 'deepseek/deepseek-chat' — the OpenRouter lane needs the prefixed
-        # id; bare ids 404 there; 'solar-pro4' → its entry id
+        # 'deepseek/deepseek-v4-flash' — the OpenRouter lane needs the
+        # prefixed id; bare ids 404 there; 'solar-pro4' → its entry id
         # 'upstage/solar-pro4'). The lane set differs from session_workers=1
         # (direct-only DeepSeekDirectModel vs the router wrapper), so the
         # fingerprints legitimately DIFFER — a toggle is REFUSED (safe).
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=4))
-        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-chat"
+        assert runner._model_id(adapters[-1]) == "deepseek/deepseek-v4-flash"
         adapters.append(runner._build_cli_extractor_model(
             spec="deepseek-flash-direct", session_workers=1))
-        assert runner._model_id(adapters[-1]) == "deepseek-chat"
+        assert runner._model_id(adapters[-1]) == "deepseek-v4-flash"
         assert runner._model_id(adapters[-2]) != runner._model_id(adapters[-1])
         adapters.append(runner._build_cli_extractor_model(
             spec="solar-pro4", session_workers=4))
@@ -1569,7 +1569,7 @@ def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
     adapters = []
     try:
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
-        adapters.append(DeepSeekDirectModel("deepseek-chat"))
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))
         a, b = adapters
         routing = RoutingModel(a, b)
         rotating = RotatingModel([a, b])
@@ -1577,9 +1577,9 @@ def test_model_id_wrapper_shape_discriminates_routing_vs_rotating():
         fp_rotating = runner._model_id(rotating)
         assert fp_routing == (
             "routing:openrouter:deepseek/deepseek-v4-flash"
-            "+deepseek-direct:deepseek-chat")
+            "+deepseek-direct:deepseek-v4-pro")
         assert fp_rotating == (
-            "rotating:deepseek-direct:deepseek-chat"
+            "rotating:deepseek-direct:deepseek-v4-pro"
             "+openrouter:deepseek/deepseek-v4-flash")
         assert fp_routing != fp_rotating
         # single-lane wrapper → bare member fingerprint
@@ -1677,7 +1677,7 @@ def test_checkpoint_resume_gate_accepts_same_model_fresh_instance(tmp_path):
     try:
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # a
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # b: fresh, same model
-        adapters.append(DeepSeekDirectModel("deepseek-chat"))  # c: different class
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))  # c: different class
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-pro"))  # d: same class, diff id
         adapters.append(DeepSeekDirectModel("deepseek/deepseek-v4-flash"))  # e: diff class, SAME wire id
         a, b, c, d, e = adapters
@@ -1925,7 +1925,7 @@ def test_run_evaluation_resume_accepts_fresh_same_model_extractor(tmp_path):
     try:
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))
         adapters.append(OpenRouterModel("deepseek/deepseek-v4-flash"))  # fresh, same model
-        adapters.append(DeepSeekDirectModel("deepseek-chat"))  # different model
+        adapters.append(DeepSeekDirectModel("deepseek-v4-pro"))  # different model
         a, b, c = adapters
 
         out1, _ = runner.run_evaluation(
