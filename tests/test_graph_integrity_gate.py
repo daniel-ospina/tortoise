@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -1139,6 +1140,47 @@ def test_watchdog_exactly_one_abort_record():
     assert r1 == "gate_red"  # first-wins
     assert r2 is None         # latched
     assert wd.record_failure() is None
+
+
+def test_gate_marker_guard_refuses_peer_cleanup(tmp_path):
+    """P1 pin (review): the 'never clobbered' guard — a LIVE foreign-pid
+    marker on the same namespace makes the fresh-run cleanup REFUSE (a peer
+    is mid-question); our marker is written ONLY after the guard passes
+    (check-before-write ordering), and the run-end clear is pid-aware."""
+    import os as _os
+
+    namespace = "m__q__qid"
+    marker = runner._marker_file(str(tmp_path), namespace)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "run_key": "k", "pid": _os.getpid() + 1,  # a LIVE peer
+        "heartbeat_utc": datetime.now(UTC).isoformat(),
+    }), encoding="utf-8")
+    assert not runner._namespace_cleanup_allowed(str(tmp_path), namespace, "k")
+    # our write does NOT overwrite the live foreign marker
+    runner._write_run_marker(str(tmp_path), namespace, "k")
+    data = json.loads(marker.read_text(encoding="utf-8"))
+    assert data["pid"] == _os.getpid() + 1  # peer marker untouched
+    # the run-end clear is pid-aware — a peer's marker is never unlinked
+    runner._clear_run_marker(str(tmp_path), namespace)
+    assert marker.exists()
+
+
+def test_gate_marker_guard_allows_own_marker_and_stale_clear(tmp_path):
+    import os as _os
+
+    namespace = "m__q__qid2"
+    marker = runner._marker_file(str(tmp_path), namespace)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({
+        "run_key": "k", "pid": _os.getpid(),
+        "heartbeat_utc": datetime.now(UTC).isoformat(),
+    }), encoding="utf-8")
+    # our OWN marker (resume continuation) never blocks the cleanup
+    assert runner._namespace_cleanup_allowed(str(tmp_path), namespace, "k")
+    # the run-end clear removes OUR marker
+    runner._clear_run_marker(str(tmp_path), namespace)
+    assert not marker.exists()
 
 
 def test_watchdog_aborts_run_end_to_end(tmp_path):

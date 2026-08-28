@@ -2417,11 +2417,23 @@ def _namespace_cleanup_allowed(work_dir: str | None, namespace: str,
 
 def _write_run_marker(work_dir: str | None, namespace: str | None,
                       run_key: str | None) -> None:
-    """Write/refresh the run's own marker for a namespace (heartbeat)."""
+    """Write/refresh the run's own marker for a namespace (heartbeat).
+
+    Refuses to OVERWRITE a LIVE foreign-pid marker (defense-in-depth on the
+    cleanup guard's check-before-write ordering — a peer mid-question on
+    the same namespace must never have its live marker clobbered by our
+    heartbeat refresh; plan cycle3-P2-33 / cycle4-P2-37)."""
     if not work_dir or not namespace:
         return
     path = _marker_file(work_dir, namespace)
     try:
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                data = {}
+            if (data.get("pid") != os.getpid() and _marker_live(path)):
+                return  # a live peer's marker — never clobber it
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
             "run_key": run_key,
@@ -2433,12 +2445,21 @@ def _write_run_marker(work_dir: str | None, namespace: str | None,
 
 
 def _clear_run_marker(work_dir: str | None, namespace: str | None) -> None:
+    """Decommission OUR OWN live marker (pid-checked) — a peer's live
+    marker on the same namespace is never unlinked (review P1: the run-end
+    clear is pid-blind otherwise and could delete a concurrent peer's
+    marker, resurrecting the clobber hazard)."""
     if not work_dir or not namespace:
         return
     path = _marker_file(work_dir, namespace)
     with contextlib.suppress(OSError):
-        if path.exists() and _marker_live(path):
-            path.unlink()
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                return
+            if data.get("pid") == os.getpid():
+                path.unlink()
 
 
 # ── checkpoint-persist retry (plan P2-10) ──────────────────────────────────
@@ -3204,12 +3225,6 @@ def run_evaluation(
                         work_dir=work_dir)
                     try:
                         _sdk_cleanup = cleanup
-                        # #1785: the run's own live marker (heartbeat) — a
-                        # peer's cleanup site sees it and refuses to clobber
-                        # this question's in-flight graph; cleared on
-                        # completion/abort (decommission, cycle4-P1-13(d)).
-                        if db_uri and not resumed_run:
-                            _write_run_marker(work_dir, namespace, run_key)
                         # #1785 (Task 1 Step 2): FRESH-run per-question
                         # namespace cleanup — the ratio denominator is only
                         # meaningful on a clean namespace (leftover nodes from
@@ -3221,11 +3236,17 @@ def run_evaluation(
                         # marker exists on the same namespace — never clobber
                         # a concurrent run's in-flight question graph (plan
                         # cycle3-P2-33 / cycle4-P2-37: 'never clobbered'
-                        # fallback, checked at the cleanup site so direct
-                        # ``run_evaluation`` callers are covered).
+                        # fallback). ORDERING PINNED (review P1): the guard is
+                        # checked BEFORE our own marker is written — a
+                        # write-before-check ordering would overwrite the
+                        # peer's LIVE marker with our pid and the cleanup
+                        # would proceed, clobbering the peer's in-flight
+                        # graph. Our marker is written only AFTER the guard
+                        # passes (heartbeats refresh it at the gate sites).
                         if (db_uri and not resumed_run
                                 and _namespace_cleanup_allowed(
                                     work_dir, namespace, run_key)):
+                            _write_run_marker(work_dir, namespace, run_key)
                             # TARGETED per-question wipe (not a bulk
                             # ``MATCH (n) DETACH DELETE n`` — the
                             # _GuardedGraph bulk-wipe guard refuses non-
