@@ -2458,7 +2458,7 @@ class CreateObjectRequest(BaseModel):
 
 @app.post("/v1/objects")
 async def create_object(body: CreateObjectRequest, request: Request,
-                        team: dict = Depends(get_current_team)):  # noqa: B008
+                        team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """#1643: create an Object in the team's graph (the STATE layer).
 
     Wraps sdk.create_object — deterministic id by name, idempotent (a repeat
@@ -2494,7 +2494,7 @@ class CreateSubjectRequest(BaseModel):
 
 @app.post("/v1/subjects")
 async def create_subject(body: CreateSubjectRequest, request: Request,
-                         team: dict = Depends(get_current_team)):  # noqa: B008
+                         team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """#1660: create a Subject in the team's graph (the STATE layer).
 
     Mirrors /v1/objects for the Subject node type — deterministic id by
@@ -2521,7 +2521,7 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 
 
 @app.post("/v1/points", response_model=PointResponse)
-async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
+async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Create a Point in the team's graph."""
     _check_team_limit(team, "points")
     sdk = _make_sdk(namespace=team["team_id"])
@@ -9952,7 +9952,7 @@ def _relink_sessions_after_index(team_id: str) -> None:
 
 
 @app.post("/v1/index/github")
-async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):  # noqa: B008
+async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Start a background GitHub indexing job (Q2). Returns job_id for polling.
 
     Per-team single-flight (T2-P2 + P1-1): an in-flight `started` job for
@@ -9978,7 +9978,7 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
 
 @app.post("/v1/index/github/re-poll")
 async def github_reindex(body: GitHubRepollRequest | None = None,
-                         team: dict = Depends(get_current_team)):  # noqa: B008
+                         team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Re-run the GitHub diff (diff-on-poll, amend 6) for the connected org.
 
     The ONLY route shape (T1-P2) — no query-param alternative. Reuses the
@@ -10020,7 +10020,7 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
 
 
 @app.get("/v1/index/github/{job_id}")
-async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):  # noqa: B008
+async def index_job_status(job_id: str, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Poll an indexing job's progress."""
     job = _INDEX_JOBS.get(job_id)
     if not job:
@@ -10224,7 +10224,7 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
 
 @app.post("/v1/index/docs")
 async def index_docs(body: DocsIndexRequest | None = None,
-                     team: dict = Depends(get_current_team)):  # noqa: B008
+                     team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Start a background GitHub-docs indexing job (#1726 Slice 1).
 
     Mirrors /v1/index/github: per-team single-flight (kind-scoped), returns
@@ -10251,7 +10251,7 @@ async def index_docs(body: DocsIndexRequest | None = None,
 
 @app.get("/v1/index/docs/{job_id}")
 async def docs_job_status(job_id: str,
-                          team: dict = Depends(get_current_team)):  # noqa: B008
+                          team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Poll a docs-indexing job's progress (team-scoped isolation)."""
     job = _INDEX_JOBS.get(job_id)
     if not job:
