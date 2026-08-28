@@ -209,7 +209,7 @@ def resolve_team_limits(team_id: str) -> dict:
         rows = get_control_plane().query(
             "teams",
             select=["tier", "max_users", "max_graphs", "graph_size_cap",
-                    "ops_allowance"],
+                    "max_points", "ops_allowance"],
             filters=[("id", "eq", team_id)],
         )
         if not rows:
@@ -237,7 +237,12 @@ def resolve_team_limits(team_id: str) -> dict:
         # (GAP-B); max_api_keys/max_sessions fall back to pricing/defaults.
         mu = row.get("max_users")
         mg = row.get("max_graphs")
-        mp = row.get("graph_size_cap")
+        # #1859 P3-2: max_points column (points-cap override, migration
+        # 20260817000001) takes precedence; graph_size_cap is the legacy
+        # fallback (GAP-B); pricing last — mirrors import_team.
+        mp = row.get("max_points")
+        if mp is None:
+            mp = row.get("graph_size_cap")
         return {
             "team_id": team_id, "tier": tier,
             "max_users": (lim["max_users_per_team"] if anon_override
