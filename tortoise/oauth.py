@@ -473,7 +473,7 @@ def _assert_team_usable(cp, team_id: str) -> None:
 
 # ── Token issuance / exchange (P2 + P4 + D5) ────────────────────────────────
 
-def _quota_fields(team_row: dict) -> dict:
+def _quota_fields(cp, team_row: dict) -> dict:
     """Quota shape shared with resolve_api_key so REST/MCP limits match
     (#329): preserve None (unlimited, Team tier), fall back to pricing."""
     from tortoise.pricing import tier_limits  # noqa: I001
@@ -497,8 +497,18 @@ def _quota_fields(team_row: dict) -> dict:
         "max_sessions": DEFAULT_MAX_SESSIONS,
         "suspended_at": team_row.get("suspended_at"),
         "flagged_at": team_row.get("flagged_at"),
-        "email": team_row.get("email"),
+        # #1765: prefer the owner's USER email (demotion — teams.email is a
+        # stale-prone contact field), fall back to the contact value.
+        "email": _owner_email_or(cp, team_row.get("id"), team_row.get("email")),
     }
+
+
+def _owner_email_or(cp, team_id: str, fallback) -> str | None:
+    from tortoise.supabase_control import owner_email
+    try:
+        return owner_email(cp, team_id) or fallback
+    except Exception:
+        return fallback
 
 
 def _team_row(cp, team_id: str) -> dict | None:
@@ -731,7 +741,7 @@ def resolve_oauth_access_token(cp, token: str) -> dict | None:
     team = _team_row(cp, row["team_id"])
     if team is None:
         return None
-    return _quota_fields(team)
+    return _quota_fields(cp, team)
 
 
 # ── Metadata (P1 — RFC 9728 PRM + RFC 8414 AS metadata) ────────────────────

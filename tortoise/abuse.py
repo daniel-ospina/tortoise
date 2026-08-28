@@ -419,7 +419,14 @@ class SupabaseAbuseStore:
         return self._team_field(team_id, "suspended_at") is not None
 
     def team_email(self, team_id: str) -> str | None:
-        return self._team_field(team_id, "email")
+        # #1765 demotion re-point: prefer the owner's USER email (teams.email
+        # is no longer synced by claim), fall back to the contact field.
+        from tortoise.supabase_control import owner_email
+        try:
+            owner = owner_email(self._cp, team_id)
+        except Exception:
+            owner = None
+        return owner or self._team_field(team_id, "email")
 
     def seen_countries(self, team_id: str) -> set[str]:
         rows = self._cp.query(

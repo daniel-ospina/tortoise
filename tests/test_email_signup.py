@@ -279,12 +279,13 @@ class TestEmailSignup:
 
 
 class TestEmailSignupClaim:
-    """#1082 PR1 — reg- identity teams: claim overwrites teams.email A→B.
+    """#1082 PR1 + #1765 demotion — reg- identity teams.
 
     A reg- team (registered with email at mint, identity anchor
     reg-<sha256(email)[:12]>, user_id NULL) is claimable exactly like an
-    anon team; the verified OAuth email overwrites the stored one
-    (P1-FIX-B — unconditional). Same key, same team.
+    anon team. #1765: claim NO LONGER writes teams.email — the mint-time
+    contact value survives (email is a user property now). Same key, same
+    team, memories intact.
     """
 
     @pytest.fixture(autouse=True)
@@ -306,9 +307,9 @@ class TestEmailSignupClaim:
         monkeypatch.setattr(ha_mod, "_gotrue_email_confirmed", _confirmed)
         return fake
 
-    def test_reg_claim_email_overwrite_a_to_b(self, client, monkeypatch):
-        """reg- claim email overwrite A→B: stored reg email replaced by the
-        verified OAuth email inside the claim txn."""
+    def test_reg_claim_email_not_overwritten(self, client, monkeypatch):
+        """#1765 demotion: claim never writes teams.email — the mint-time
+        contact value (reg-a@example.com) survives the claim."""
         import uuid as _uuid  # noqa: I001
         from tortoise.auth import lookup_hash as _lh, hash_api_key as _hash
         import tortoise.supabase_control as sc
@@ -342,9 +343,109 @@ class TestEmailSignupClaim:
         )
         assert r.status_code == 200, r.text
         team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
-        assert team_row["email"] == "verified-b@example.com", (
-            f"reg- email must be overwritten A→B, got {team_row['email']}")
+        assert team_row.get("email") == "reg-a@example.com", (
+            f"claim must NOT write teams.email — mint contact survives, "
+            f"got {team_row.get('email')}")
         mem = next(m for m in fake.tables["team_memberships"]
                    if m["team_id"] == team_id)
         assert mem["user_id"] == _U_REG_CLAIM
         assert mem["identity"] is None
+
+class TestRegisterIdempotencyReanchor:
+    """#1765: post-demotion register idempotency — the reg- identity row is
+    the authoritative unclaimed-owner key (uq_teams_email is gone). A second
+    register for the same email → 409 already_registered, never 500.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reg_env(self, monkeypatch):
+        from tests.fake_control_plane import FakeControlPlane  # noqa: I001
+        import tortoise.supabase_control as sc
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://regid.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-reg-id")
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        return fake
+
+    def test_second_register_same_email_409(self, client, monkeypatch):
+        """First register mints a reg- owner row; the second register (same
+        email, no Supabase user yet) must 409 on the reg- identity pre-check
+        — never a 500."""
+        import tortoise.hosted_api as ha_mod  # noqa: I001
+        from tortoise.supabase_control import membership_by_identity
+        import hashlib
+
+        email = "dup-reg@example.com"
+        # simulate the leftover from a first register: the reg- owner row
+        # exists but the graph mint was never completed / client never
+        # finished signup — the exact case team_by_email alone misses.
+        identity = "reg-" + hashlib.sha256(email.lower().encode()).hexdigest()[:12]
+        import uuid as _uuid
+
+        import tortoise.supabase_control as sc
+        from tortoise.auth import hash_api_key as _hash
+        from tortoise.auth import lookup_hash as _lh
+        fake = sc.get_control_plane()
+        sc.provision_team(fake, **{
+            "p_user_id": None, "p_identity": identity,
+            "p_team_id": f"team-regdup-{_uuid.uuid4().hex[:10]}",
+            "p_team_name": "RegDup", "p_api_key": f"tt_{_uuid.uuid4().hex}",
+            "p_key_hash": _hash("tt_x"), "p_lookup_hash": _lh("tt_x"),
+            "p_graph_name": "team_regdup", "p_email": email,
+            "p_key_prefix": "tt_regdup", "p_tier": "free",
+            "p_max_users": 1, "p_max_graphs": 1, "p_ops_allowance": 10000,
+            "p_graph_size_cap": 10000,
+        })
+        assert membership_by_identity(fake, identity) is not None
+
+        # the second register must hit the reg- identity pre-check → 409
+        from fastapi.testclient import TestClient
+        with TestClient(ha_mod.app) as c:
+            r = c.post("/v1/register", json={
+                "email": email, "password": "hunter22"})
+            assert r.status_code == 409, r.text
+            assert r.json()["detail"]["message"] == "already_registered"
+
+
+class TestRegisterRace:
+    """#1765 Task 3 Step 10: concurrent registers with the same email → one
+    200, one 409, never 500 (the reg- identity unique-index backstop)."""
+
+    @pytest.fixture(autouse=True)
+    def _race_env(self, monkeypatch):
+        from tests.fake_control_plane import FakeControlPlane  # noqa: I001
+        import tortoise.supabase_control as sc
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://racesupabase.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-race")
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        return fake
+
+    def test_concurrent_register_one_200_one_409(self, client, monkeypatch):
+        """Two threads POST /v1/register with the same email. The reg-
+        identity pre-check + fake uq_member_identity_active parity yield
+        exactly one 200 and one 409 — never a 500."""
+        import threading
+
+        email = "race@example.com"
+        statuses = []
+        lock = threading.Lock()
+
+        def register():
+            r = client.post("/v1/register", json={"email": email, "password": "hunter22"})
+            with lock:
+                statuses.append(r.status_code)
+
+        t1 = threading.Thread(target=register)
+        t2 = threading.Thread(target=register)
+        t1.start()
+        t2.start()
+        t1.join()
+        t2.join()
+        codes = sorted(statuses)
+        assert 500 not in codes, f"race must never 500, got {codes}"
+        assert codes == [200, 409], f"expected one 200 + one 409, got {codes}"

@@ -52,6 +52,12 @@ _TESTS_ROOT = Path(__file__).resolve().parent
 # The swept (renamed) sites are the test_-prefixed literals/constants the
 # guard passes on their own — the table documents the residual declarations.
 ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
+    # 2026-08-28 merge-reconciliation: #1785/#1816 files use the 'registry'
+    # literal (session/extraction tests) — routed so the markers gate passes
+    # repo-wide.
+    "test_capture_session.py": {"registry": "session-capture"},
+    "test_index_docs_api.py": {"registry": "index-docs"},
+    "test_session_extraction_modes.py": {"registry": "session-extraction"},
     "test_agent_signup.py": {"registry": "prod-coupled"},
     "test_agent_signup_idempotency.py": {"registry": "prod-coupled"},
     "test_billing.py": {"registry": "prod-coupled"},
@@ -358,6 +364,12 @@ def test_no_redirect_stems_registry_exact():
         "test_reaper_orphan",
         "test_redis_guard",
         "test_smoke_embedded",
+        # 2026-08-28 merge-reconciliation: #1785/#1816 added these three to
+        # TEST_NO_REDIRECT_STEMS (eval/graph-integrity carve-outs) — the pin
+        # test drifted; aligned here so the repo-wide markers gate passes.
+        "test_graph_integrity_gate",
+        "test_per_session_census",
+        "test_resume_gate_parity",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the 17 plan stems: "

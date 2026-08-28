@@ -11,7 +11,10 @@ import { captureStatusForHarness, lastErrorForHarness, shouldShowReAsk } from '.
 // #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
 // unit-tested); imported under an alias to avoid an ESM redeclaration collision
 // with the local isSessionKey wrapper below.
-import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js' 
+import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'
+// #1765: identity surface — pure predicates + presentational components
+import { bannerShow, shouldRefetchOnFocus } from './identity.js'
+import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
 
 const API_BASE = 'https://api.premiselabs.co'
 const KEY_STORAGE = 'tortoise_api_key'
@@ -154,6 +157,29 @@ function App() {
   // #1280 (P0, mirrored from fix/1280): banner state MUST live inside the
   // component — a module-top-level useState crashes the whole bundle.
   const [banner, setBanner] = React.useState('')
+  // #1765: identity inventory (login methods + banner) — session-gated
+  const [identityInv, setIdentityInv] = React.useState(null)
+  const [identityLoading, setIdentityLoading] = React.useState(false)
+  const [identityError, setIdentityError] = React.useState('')
+  const [profileBusy, setProfileBusy] = React.useState('') // '' | 'oauth' | 'email' | 'unlink' | 'resend'
+  const [profileError, setProfileError] = React.useState('')
+  const [reauthOpen, setReauthOpen] = React.useState(false)
+  const [reauthBusy, setReauthBusy] = React.useState(false)
+  const [reauthError, setReauthError] = React.useState('')
+  const [reauthPasswordMode, setReauthPasswordMode] = React.useState(false)
+  const [recoveryDismissed, setRecoveryDismissed] = React.useState(() => {
+    try { return localStorage.getItem('tt_recovery_dismissed') === '1' } catch { return false }
+  })
+  // pending action resumed after a re-auth round (change-email gate, #1765)
+  const pendingReauthRef = React.useRef(null)
+  // #1765 review P1: the pre-reauth session user id (verify the provider
+  // round-trip didn't switch accounts before resuming the pending action)
+  const beforeUidRef = React.useRef(null)
+  // #1765 review-fix: flips true once the session has been loaded (the link-
+  // flow commit effect must NOT run before sessionTokenRef is populated —
+  // it would silently never fire on the OAuth return)
+  const [sessionBooted, setSessionBooted] = React.useState(false)
+  const lastIdentityFetchRef = React.useRef(0)
   // #1148-ux: last auth method (login card "Last used" pills). The state
   // reads the legacy app-origin key; the shared helper (called on mount
   // below) performs the one-time migration to the parent-domain cookie so
@@ -497,6 +523,269 @@ function claimIntentInFlight() {
     }
     return res.json()
   }
+
+  // ── #1765 identity surface: inventory fetch + link/unlink/resend handlers ──
+  async function fetchIdentity() {
+    if (authMode !== 'session' || !sessionTokenRef.current) return
+    setIdentityLoading(true)
+    try {
+      const inv = await api('/v1/user/identity', { useSession: true })
+      setIdentityInv(inv)
+      setIdentityError('')
+    } catch (e) {
+      // fail-closed: no banner, error surfaced on the profile tab
+      setIdentityInv(null)
+      setIdentityError(e.message || 'Could not load login methods')
+    } finally {
+      setIdentityLoading(false)
+    }
+  }
+
+  async function handleAddOAuth(provider) {
+    setProfileBusy('oauth'); setProfileError('')
+    try {
+      const { intent_ref } = await api('/v1/user/identity/link-intent', {
+        method: 'POST', useSession: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider }),
+      })
+      // intent-ref contract: vendored supabase-js linkIdentity (REDIRECT
+      // flow — flowId is null under implicit, so the app's ?link_flow=
+      // search param + sessionStorage marker carry the ref; the mount
+      // effect POSTs link-commit on return).
+      try { sessionStorage.setItem('tt_link_flow', intent_ref) } catch { /* best-effort */ }
+      if (supabaseClient) {
+        const { error } = await supabaseClient.auth.linkIdentity({
+          provider,
+          options: {
+            redirectTo: `${window.location.origin}${window.location.pathname}?link_flow=${encodeURIComponent(intent_ref)}`,
+          },
+        })
+        if (error) throw new Error(error.message)
+      }
+    } catch (e) {
+      setProfileError(e.message || 'Could not start linking')
+    } finally {
+      setProfileBusy('')
+    }
+  }
+
+  async function handleAddEmail(email, password) {
+    setProfileError('')
+    if (!supabaseClient) { setProfileError('Auth is unavailable'); return }
+    if (identityInv && identityInv.email_confirmed_at) {
+      // confirmed email → updateUser({password}) only (#2085: creates no
+      // email identity row — has_password is the tracked signal)
+      setProfileBusy('email')
+      try {
+        const { error } = await supabaseClient.auth.updateUser({ password })
+        if (error) throw new Error(error.message)
+        await fetchIdentity()
+      } catch (e) { setProfileError(e.message || 'Could not add email login') }
+      finally { setProfileBusy('') }
+    } else {
+      // unconfirmed/absent email → change-email + confirmation + set-password,
+      // gated by the ReauthDialog (stolen-session ATO guardrail, plan-review
+      // P1-1 — never bypass double_confirm_changes). The pending action is
+      // DATA (not a closure) so it survives the provider OAuth round-trip.
+      pendingReauthRef.current = { email, password }
+      setReauthOpen(true)
+    }
+  }
+
+  async function doChangeEmail(email, password) {
+    if (!supabaseClient) throw new Error('Auth is unavailable')
+    const { error } = await supabaseClient.auth.updateUser({ email, password })
+    if (error) throw new Error(error.message)
+    await fetchIdentity()
+  }
+
+  async function handleUnlink(identityId) {
+    setProfileBusy('unlink'); setProfileError('')
+    try {
+      await api('/v1/user/identity/unlink', {
+        method: 'POST', useSession: true,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identity_id: identityId }),
+      })
+      await fetchIdentity()
+    } catch (e) {
+      setProfileError(e.message || 'Could not remove login method')
+    } finally {
+      setProfileBusy('')
+    }
+  }
+
+  async function handleResend() {
+    setProfileBusy('resend'); setProfileError('')
+    try {
+      await api('/v1/user/identity/resend-confirmation', { method: 'POST', useSession: true })
+      await fetchIdentity()
+    } catch (e) {
+      setProfileError(e.message || 'Could not resend confirmation')
+    } finally {
+      setProfileBusy('')
+    }
+  }
+
+  async function handleReauthPassword(password) {
+    setReauthBusy(true); setReauthError('')
+    try {
+      if (!supabaseClient) throw new Error('Auth is unavailable')
+      const { error } = await supabaseClient.auth.signInWithPassword({
+        email: (identityInv && identityInv.email) || '', password,
+      })
+      if (error) throw new Error(error.message)
+      setReauthOpen(false)
+      await fetchIdentity()
+      const pending = pendingReauthRef.current
+      pendingReauthRef.current = null
+      if (pending) {
+        if (pending.promptPassword) {
+          // #1765 review P1-2: in promptPassword mode the typed password IS
+          // the NEW password — apply it directly (never signInWithPassword,
+          // which would fail against the not-yet-set password)
+          setReauthPasswordMode(false)
+          await doChangeEmail(pending.email, password)
+          return
+        }
+        await doChangeEmail(pending.email, pending.password)
+      }
+    } catch (e) {
+      setReauthError(e.message || 'Sign-in failed')
+    } finally {
+      setReauthBusy(false)
+    }
+  }
+
+  async function handleReauthProvider(provider) {
+    setReauthBusy(true); setReauthError('')
+    // #1765 review P1: capture the pre-round-trip session uid — if the
+    // provider sign-in switches accounts, abort the pending change-email
+    try {
+      const { data: pre } = await supabaseClient.auth.getUser()
+      beforeUidRef.current = (pre && pre.user && pre.user.id) || null
+    } catch { beforeUidRef.current = null }
+    try {
+      if (!supabaseClient) throw new Error('Auth is unavailable')
+      // same-provider re-sign-in (a different provider with private email
+      // would auto-link a NEW user → account split); resume the pending
+      // action after the round-trip via the ?reauth=1 marker
+      const pending = pendingReauthRef.current
+      if (pending) {
+        // #1765 review P1: NEVER persist the new password — store {email}
+        // + the pre-round-trip uid (survives the full-page OAuth nav; the
+        // return effect compares against it to detect an account switch).
+        try {
+          sessionStorage.setItem('tt_reauth_pending', JSON.stringify({
+            email: pending.email, uid: beforeUidRef.current }))
+        } catch { /* best-effort */ }
+      }
+      const { error } = await supabaseClient.auth.signInWithOAuth({
+        provider,
+        options: { redirectTo: `${window.location.origin}${window.location.pathname}?reauth=1` },
+      })
+      if (error) throw new Error(error.message)
+      if (!pending) setReauthOpen(false)
+    } catch (e) {
+      setReauthError(e.message || 'Sign-in failed')
+      setReauthBusy(false)
+    }
+  }
+
+  // #1765: identity fetch on session + window-focus refetch (kills stale
+  // banner after confirm-in-another-tab / mutations)
+  React.useEffect(() => {
+    if (authMode !== 'session') return
+    if (!sessionBooted) return  // post-boot deterministic fetch (review-fix:
+                                // authMode never transitions for a session
+                                // holder — the [authMode]-only effect would
+                                // run pre-token and never again)
+    fetchIdentity()
+    lastIdentityFetchRef.current = Date.now()
+    // #1765 review: throttle the focus refetch (the server does an RPC +
+    // GoTrue admin GET per call — every alt-tab must not re-run both)
+    const onFocus = () => {
+      if (shouldRefetchOnFocus(lastIdentityFetchRef.current)) {
+        lastIdentityFetchRef.current = Date.now()
+        fetchIdentity()
+      }
+    }
+    window.addEventListener('focus', onFocus)
+    return () => window.removeEventListener('focus', onFocus)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [authMode, sessionBooted])
+
+  // #1765: OAuth-return intent-ref contract — POST link-commit on return
+  // (the server-authority gates must actually run), then land on Profile.
+  // Also resumes a re-auth-pending change-email after the provider round.
+  React.useEffect(() => {
+    if (!sessionBooted) return  // review-fix: the OAuth-return commit must
+                                // not fire before the session loads
+    const params = new URLSearchParams(window.location.search)
+    const linkFlow = params.get('link_flow')
+    const reauth = params.get('reauth')
+    if (!linkFlow && !reauth) return
+    ;(async () => {
+      if (linkFlow && sessionTokenRef.current) {
+        try {
+          const res = await api('/v1/user/identity/link-commit', {
+            method: 'POST', useSession: true,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ intent_ref: linkFlow }),
+          })
+          await fetchIdentity()
+          setTab('profile')
+          if (res.adoption_signal) {
+            setProfileError("This email is also used by another team — reach out if that's unexpected.")
+          }
+        } catch (e) {
+          setProfileError(e.message || 'Could not complete linking — refresh your profile')
+        } finally {
+          try { sessionStorage.removeItem('tt_link_flow') } catch { /* best-effort */ }
+          const u = new URL(window.location.href)
+          u.searchParams.delete('link_flow')
+          window.history.replaceState({}, '', u.pathname + u.search + u.hash)
+        }
+      } else if (reauth && sessionTokenRef.current) {
+        try {
+          // #1765 review P1: the provider round-trip must NOT have switched
+          // accounts (a different provider auto-links a new user). The uid
+          // is restored from tt_reauth_pending (a ref would reset on the
+          // full-page OAuth navigation — the app remounts on return).
+          let pending = pendingReauthRef.current
+          pendingReauthRef.current = null
+          if (!pending) {
+            try {
+              const raw = sessionStorage.getItem('tt_reauth_pending')
+              if (raw) pending = JSON.parse(raw)
+            } catch { /* best-effort */ }
+          }
+          await fetchIdentity()
+          const { data: sess } = await supabaseClient.auth.getSession()
+          const returnedUid = sess && sess.session && sess.session.user && sess.session.user.id
+          if (pending && pending.uid && returnedUid && returnedUid !== pending.uid) {
+            setProfileError("Signed in as a different account — sign out and retry.")
+            return
+          }
+          if (pending) {
+            // re-prompt the NEW password (never persisted across the round-trip)
+            pendingReauthRef.current = { email: pending.email, promptPassword: true }
+            setReauthOpen(true)
+            setReauthPasswordMode(true)
+          }
+        } catch (e) {
+          setProfileError(e.message || 'Could not finish the change')
+        } finally {
+          try { sessionStorage.removeItem('tt_reauth_pending') } catch { /* best-effort */ }
+          const u = new URL(window.location.href)
+          u.searchParams.delete('reauth')
+          window.history.replaceState({}, '', u.pathname + u.search + u.hash)
+        }
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionBooted])
 
   // ── Billing (#310 Task 9): upgrade CTA + manage billing ──
   const ACTIVE_STATUSES = ['active', 'past_due', 'trialing']
@@ -1255,6 +1544,7 @@ function claimIntentInFlight() {
           setChecking(false); return
         }
         sessionTokenRef.current = session.access_token
+        setSessionBooted(true)
         sessionMetaRef.current = (session && session.user) ? {
           display_name: (session.user.user_metadata && session.user.user_metadata.display_name) || '',
           email: session.user.email || '',
@@ -3279,6 +3569,18 @@ function claimIntentInFlight() {
           </div>
         </div>
       )}
+      {tab !== 'profile' && bannerShow(identityInv, { anon: team && team.anon, dismissed: recoveryDismissed }) && (
+        <RecoveryBanner
+          inv={identityInv}
+          onCta={() => setTab('profile')}
+          onDismiss={() => {
+            try { localStorage.setItem('tt_recovery_dismissed', '1') } catch { /* best-effort */ }
+            setRecoveryDismissed(true)
+          }}
+          onResend={handleResend}
+          resendBusy={profileBusy === 'resend'}
+        />
+      )}
       {claimError && (
         // #1511 (code-review r2, P2): a failed claim with a valid session
         // lands on the authed shell — the error must be visible, and the
@@ -3322,12 +3624,15 @@ function claimIntentInFlight() {
         <div className="logo">Tortoise</div>
         <nav>
           <button className={tab === 'overview' ? 'active' : ''} onClick={() => { setTab('overview'); setSelectedSessionId(null); setSessionDetail(null); }}>Overview</button>
-          <button className={tab === 'keys' ? 'active' : ''} onClick={() => { setTab('keys'); setSelectedSessionId(null); setSessionDetail(null); }}>API Keys</button>
+          <button className={tab === 'keys' ? 'active' : ''} data-tab="keys" onClick={() => { setTab('keys'); setSelectedSessionId(null); setSessionDetail(null); }}>API Keys</button>
           <button className={tab === 'graphs' ? 'active' : ''} onClick={() => setTab('graphs')}>Graphs</button>
           <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')}>Members</button>
           {/* #1623: Billing — plan, usage, upgrade/portal. Session-gated like
               the rest of the dashboard (anon teams get the Protect screen). */}
           <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
+          {/* #1765: user-scoped identity surface — 6th tab (placement DECIDED
+              in scoping cycle-2; data-tab for the ProfileTab keys-tier link) */}
+          <button className={tab === 'profile' ? 'active' : ''} data-tab="profile" onClick={() => setTab('profile')}>Profile</button>
         </nav>
         {/* #1689: always-visible — OUTSIDE the nav (which can overflow off
             narrow windows), fixed in the header's right side, on every tab.
@@ -3352,7 +3657,17 @@ function claimIntentInFlight() {
             <span className="account-name">{currentTeamName || 'No team'}</span>
             <span className="account-chevron" aria-hidden="true">▾</span>
           </button>
-          {accountMenuOpen && (
+          <ReauthDialog
+        open={reauthOpen}
+        busy={reauthBusy}
+        error={reauthError}
+        providers={(identityInv && identityInv.methods || []).map((x) => x.provider)}
+        passwordMode={reauthPasswordMode}
+        onClose={() => { setReauthOpen(false); pendingReauthRef.current = null; setReauthPasswordMode(false) }}
+        onPassword={handleReauthPassword}
+        onProvider={handleReauthProvider}
+      />
+      {accountMenuOpen && (
             /* P2-1 (a11y, cycle-2): drop role=menu/menuitem — the full APG
                menu pattern (arrow-key roving focus) isn't implemented, and a
                declared menu contract without arrow nav is worse than none.
@@ -3613,6 +3928,23 @@ function claimIntentInFlight() {
           </section>
         )}
 
+        {tab === 'profile' && (
+          <ProfileTab
+            inv={identityInv}
+            loading={identityLoading}
+            error={identityError}
+            onRetry={fetchIdentity}
+            onUnlink={handleUnlink}
+            unlinkBusy={profileBusy === 'unlink'}
+            onAddOAuth={handleAddOAuth}
+            onAddEmail={handleAddEmail}
+            addBusy={profileBusy === 'oauth' || profileBusy === 'email'}
+            addError={profileError}
+            onResend={handleResend}
+            resendBusy={profileBusy === 'resend'}
+            onOpenReauth={() => setReauthOpen(true)}
+          />
+        )}
         {tab === 'keys' && (
           <section>
             {/* #1148-ux review: graph selector restyled — page-scoped context

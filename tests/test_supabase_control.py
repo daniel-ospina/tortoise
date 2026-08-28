@@ -55,6 +55,9 @@ from tortoise.supabase_control import (
     update_onboarding_state,
     update_team_email,
     user_memberships,
+    user_identity_inventory,
+    reserve_unlink,
+    owner_user_id,
 )
 
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
@@ -1061,10 +1064,15 @@ class TestOnboardingState:
 
     def test_read_returns_merged_defaults_for_empty_state(self, fake):
         """A team row with empty onboarding_state reads as the full hosted
-        default shape (registry auto-initialize parity)."""
+        default shape (registry auto-initialize parity).
+
+        #1765-merge fix: asserted as a SUPERSET check, not exact equality —
+        the canonical default grows with every onboarding slice (#1725/
+        #1726/#1727 added capture_*/session_capture_*/github_docs_indexed
+        keys); an exact-equality dict drifts and blocks unrelated PRs."""
         self._set_state(fake, {})
         state = team_onboarding_state(fake, "team-free-001")
-        assert state == {
+        expected = {
             "github_connected": False, "github_indexed": False,
             "demo_created": False, "session_recording": False,
             "team_created": False, "prompt_pasted": False,
@@ -1073,7 +1081,13 @@ class TestOnboardingState:
             # _ONBOARDING_DEFAULT_STATE) — the test must match the canonical shape.
             "github_index_cursor": None,
             "github_legacy_backfill_done": False,
+            # #1726/#1727: canonical keys from the merged default
+            "github_docs_indexed": False,
+            "capture_revised": False,
+            "capture_ask_shown": False,
         }
+        assert expected.items() <= state.items(), (
+            f"merged default missing keys; got {sorted(state)}")
 
     def test_read_merges_partial_state_over_defaults(self, fake):
         self._set_state(fake, {"demo_created": True})
@@ -1767,12 +1781,14 @@ def _provision_anon_team(fake: FakeControlPlane, *, team_id: str, identity: str,
 
 
 class TestClaimSeam:
-    def test_claim_links_owner_clears_identity_overwrites_email(self, fake):
-        """link + clear-identity + email-overwrite (P1-FIX-B/P2-FIX-K): the
-        NULL-user_id owner row gets user_id + identity=NULL, and teams.email
-        is overwritten with the verified OAuth email — same key intact."""
+    def test_claim_links_owner_clears_identity_no_email_write(self, fake):
+        """link + clear-identity + created_by migration (#1765): the
+        NULL-user_id owner row gets user_id + identity=NULL; teams.email is
+        NEVER written by claim (demotion) — same key intact, anon-/reg- keys
+        attributed to the claimer."""
         _provision_anon_team(fake, team_id="team-claim-1",
                              identity="anon-claim-1", api_key="tt_claim_1")
+        fake.tables["api_keys"][0]["created_by"] = "anon-claim-1"
         claim_membership(fake, lookup_hash=lookup_hash("tt_claim_1"),
                          user_id=_U6, email="verified@example.com")
 
@@ -1784,7 +1800,9 @@ class TestClaimSeam:
         assert owner["status"] == "active"
         team = next(t for t in fake.tables["teams"]
                     if t["id"] == "team-claim-1")
-        assert team["email"] == "verified@example.com"
+        assert team.get("email") is None  # demotion: claim never writes teams.email
+        # created_by migration: anon- key attributed to the claimer
+        assert fake.tables["api_keys"][0]["created_by"] == _U6
         # same key still resolves (indicator 1) — api_keys row untouched
         assert resolve_api_key(fake, "tt_claim_1")["team_id"] == "team-claim-1"
         # anon predicate flips
@@ -1892,20 +1910,21 @@ class TestClaimSeam:
         assert ei.value.code == "key_not_found"
         assert ei.value.status == 404
 
-    def test_claim_email_in_use_on_cross_team_collision(self, fake):
-        """P3-FIX-S: uq_teams_email parity — a cross-team verified-email
-        collision rejects the claim (atomic rollback: owner stays anon)."""
+    def test_claim_shared_email_across_teams_succeeds(self, fake):
+        """#1765 demotion: claim never writes teams.email, so the same
+        email across teams is legal — the claim SUCCEEDS and links the owner
+        (uq_teams_email dropped; email_in_use is gone)."""
         _provision_anon_team(fake, team_id="team-e1", identity="anon-e1",
                              api_key="tt_e1", email="shared@example.com")
         _provision_anon_team(fake, team_id="team-e2", identity="anon-e2",
                              api_key="tt_e2")
-        with pytest.raises(ClaimError) as ei:
-            claim_membership(fake, lookup_hash=lookup_hash("tt_e2"),
-                             user_id=_U8, email="shared@example.com")
-        assert ei.value.code == "email_in_use"
+        claim_membership(fake, lookup_hash=lookup_hash("tt_e2"),
+                         user_id=_U8, email="shared@example.com")
         row = next(r for r in fake.tables["team_memberships"]
                    if r["team_id"] == "team-e2")
-        assert row["user_id"] is None  # txn rolled back
+        assert row["user_id"] == _U8  # linked — no collision
+        team2 = next(t for t in fake.tables["teams"] if t["id"] == "team-e2")
+        assert team2.get("email") is None  # claim never writes it
 
     def test_claim_drops_leftover_placeholder(self, fake):
         """P3-FIX-Q tail: the user's placeholder row (team_id='') is dropped
@@ -1931,3 +1950,97 @@ class TestClaimSeam:
                          user_id=_U8, email="reg@example.com")
         assert is_anon_team(fake, "team-anon-p") is False
         assert is_anon_team(fake, "no-such-team") is False
+class TestIdentitySeam:
+    """#1765 seam helpers: user_identity_inventory / reserve_unlink /
+    owner_user_id (migration 20260827000001 parity)."""
+
+    def _seed_auth(self, fake, *, uid, email=None, confirmed=False, enc=None,
+                   identities=()):
+        fake.auth_users.append({
+            "id": uid, "email": email,
+            "email_confirmed_at": "2026-01-01T00:00:00Z" if confirmed else None,
+            "encrypted_password": enc})
+        for (iid, provider, pid) in identities:
+            fake.auth_identities.append({
+                "id": iid, "user_id": uid, "provider": provider,
+                "provider_id": pid})
+
+    def test_inventory_login_method_shapes(self, fake):
+        # OAuth user, empty-string password (OAuth-created), unconfirmed
+        # email → 1 method; has_password FALSE ('' not counted)
+        self._seed_auth(fake, uid="u-oauth", email="a@x.com", enc="",
+                        identities=[("i-gh", "github", "gh1")])
+        inv = user_identity_inventory(fake, "u-oauth")
+        assert inv["login_methods"] == 1
+        assert inv["has_password"] is False
+
+        # confirmed-email user, no password → 1 method (email_method)
+        self._seed_auth(fake, uid="u-conf", email="b@x.com", confirmed=True)
+        inv = user_identity_inventory(fake, "u-conf")
+        assert inv["login_methods"] == 1
+
+        # OAuth + email identity row + password + confirmed email → 2, NOT 3
+        self._seed_auth(fake, uid="u-multi", email="c@x.com", confirmed=True,
+                        enc="pwd",
+                        identities=[("i-g1", "google", "g1"),
+                                    ("i-em", "email", "c@x.com")])
+        inv = user_identity_inventory(fake, "u-multi")
+        assert inv["login_methods"] == 2  # count-FILTER guard parity
+
+        # unknown user → 0, never an error
+        inv = user_identity_inventory(fake, "u-unknown")
+        assert inv["login_methods"] == 0
+
+    def test_inventory_keys_tier_excludes_agent_principals(self, fake):
+        self._seed_auth(fake, uid="u-keys", email="k@x.com", confirmed=True)
+        fake.seed("api_keys", [
+            {"id": "k1", "team_id": "t1", "created_by": "u-keys",
+             "revoked_at": None, "enabled": True},
+            {"id": "k2", "team_id": "t2", "created_by": "anon-agent",
+             "revoked_at": None, "enabled": True},
+            {"id": "k3", "team_id": "t3", "created_by": "u-keys",
+             "revoked_at": "2026-01-01T00:00:00Z", "enabled": True},
+        ])
+        inv = user_identity_inventory(fake, "u-keys")
+        assert inv["keys_tier"] == 1  # only the user-minted active key
+
+    def test_reserve_unlink_floor_and_invariant(self, fake):
+        # login_methods=3: two oauth + confirmed email
+        self._seed_auth(fake, uid="u-r", email="r@x.com", confirmed=True,
+                        identities=[("i-a", "github", "a"),
+                                    ("i-b", "google", "b")])
+        r = reserve_unlink(fake, "u-r", "i-a")
+        assert r["status"] == "permit_granted"
+        # second reserve → ClaimError (seam maps the RPC code, claim pattern)
+        with pytest.raises(ClaimError) as ei:
+            reserve_unlink(fake, "u-r", "i-b")
+        assert ei.value.code == "unlink_floor_violated"
+        assert ei.value.status == 409
+        # bad identity → identity_not_found
+        with pytest.raises(ClaimError) as ei2:
+            reserve_unlink(fake, "u-r", "i-missing")
+        assert ei2.value.code == "unlink_identity_not_found"
+        # consume → grant again
+        for p in fake.tables["user_unlink_permits"]:
+            p["consumed_at"] = "2026-01-02T00:00:00Z"
+        r = reserve_unlink(fake, "u-r", "i-b")
+        assert r["status"] == "permit_granted"
+
+    def test_reserve_unlink_floor_at_two(self, fake):
+        # single oauth + confirmed email = 2 methods → floor blocks (2-0-1 < 2)
+        self._seed_auth(fake, uid="u-f", email="f@x.com", confirmed=True,
+                        identities=[("i-1", "github", "g1")])
+        with pytest.raises(ClaimError) as ei:
+            reserve_unlink(fake, "u-f", "i-1")
+        assert ei.value.code == "unlink_floor_violated"
+
+    def test_owner_user_id_resolution(self, fake):
+        fake.seed("team_memberships", [
+            {"id": "m1", "team_id": "t-own", "user_id": "u-owner",
+             "role": "owner", "status": "active"},
+            {"id": "m2", "team_id": "t-anon", "user_id": None,
+             "role": "owner", "status": "active", "identity": "anon-1"},
+        ])
+        assert owner_user_id(fake, "t-own") == "u-owner"
+        assert owner_user_id(fake, "t-anon") is None  # anon owner → None
+        assert owner_user_id(fake, "t-none") is None  # zero-owner → None

@@ -335,9 +335,9 @@ class TestAgentSignupClaim:
         assert "pre-claim memory" in contents, (
             f"pre-claim memory lost after claim: {contents}")
 
-    def test_claim_email_overwrite_on_reg_team(self, client, monkeypatch):
-        """reg- identity teams (email set at mint) get the email overwritten
-        with the verified OAuth email on claim (P1-FIX-B, unconditional)."""
+    def test_claim_does_not_overwrite_reg_team_email(self, client, monkeypatch):
+        """#1765 demotion: claim never writes teams.email — the reg- mint
+        contact value (stale-reg@example.com) survives the claim."""
         r = client.post("/v1/agent/signup", json={})
         key = r.json()["key"]  # noqa: F841
         import tortoise.supabase_control as sc
@@ -366,8 +366,9 @@ class TestAgentSignupClaim:
         )
         assert r.status_code == 200, r.text
         team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
-        assert team_row["email"] == "fresh-verified@example.com", (
-            f"reg- email must be overwritten A→B, got {team_row['email']}")
+        assert team_row.get("email") == "stale-reg@example.com", (
+            f"claim must NOT write teams.email — mint contact survives, "
+            f"got {team_row.get('email')}")
 class TestIpv6Normalization:
     """#1081 review P4: IPv4-mapped IPv6 must share ONE bucket with the
     dotted-quad form — a dual-stack client cannot double its 2/24h budget

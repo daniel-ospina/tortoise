@@ -236,6 +236,8 @@ _ROUTED_FROM_URI_SITES: dict[str, list[str]] = {
         # module availability probe (env pre-set to a test-prefixed URI)
         r"from_uri\(\s*os\.environ\[.TORTOISE_DB_URI.\]",
         r'from_uri\(\s*"docker://:@localhost:16379/" \+ gname\)',
+        # #1695 extraction session: FTS-lane probe via a module-level helper
+        r"from_uri\(_FTS_LANE_URI\)",
     ],
 }
 

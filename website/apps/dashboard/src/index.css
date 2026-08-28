@@ -560,6 +560,52 @@ input::placeholder, textarea::placeholder {
   color: var(--text, #e2e8f0);
 }
 
+/* ── #1765: recovery banner (protect-banner family — persistent security
+      notice, NOT the transient green .banner) ─────────────────────────── */
+.recovery-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.8rem 1.5rem;
+  margin: 0.6rem 1.5rem;
+  border-left: 4px solid var(--accent, #06b6d4);
+  background: linear-gradient(90deg, rgba(6, 182, 212, 0.12), rgba(6, 182, 212, 0.03));
+  border-radius: 6px;
+  color: var(--text, #e2e8f0);
+  font-size: 14px;
+}
+.recovery-banner-copy { flex: 1 1 260px; line-height: 1.5; }
+.recovery-banner-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+/* ── #1765: re-auth dialog ─────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed; inset: 0;
+  background: rgba(2, 6, 23, 0.7);
+  display: flex; align-items: center; justify-content: center;
+  z-index: 60;
+}
+.modal {
+  background: var(--surface, #0d1a2d);
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  padding: 1.2rem 1.5rem;
+  max-width: 420px;
+  width: 92%;
+}
+.modal h2 { margin: 0 0 0.4rem; font-size: 16px; }
+.modal .claim-actions { justify-content: flex-start; }
+
+/* ── #1765: profile tab ────────────────────────────────────────────────── */
+.profile-tab h2 { font-size: 18px; margin: 0 0 0.3rem; }
+.profile-tab h3 { font-size: 15px; margin: 1.2rem 0 0.4rem; color: var(--text-dim, #94a3b8); }
+.profile-tab table { width: 100%; border-collapse: collapse; margin: 0.6rem 0; }
+.profile-tab th, .profile-tab td {
+  text-align: left; padding: 0.5rem 0.6rem;
+  border-bottom: 1px solid var(--border, #1e293b);
+  font-size: 14px;
+}
 /* #1728 Slice 3 (Tasks 16-17): Memory sources panel + misled-user re-ask pane.
    Shared by the wizard step-1 and the dashboard Overview — one component, one
    style block. The re-ask pane is role="alertdialog" (dark modal card); the
@@ -601,3 +647,4 @@ input::placeholder, textarea::placeholder {
 .harness-status.status-install-pending .capture-state { color: #facc15; border-color: rgba(196, 167, 60, 0.4); }
 .harness-status .snippet { margin-top: 8px; font-size: 12px; }
 .harness-status .error.small { margin-top: 6px; }
+

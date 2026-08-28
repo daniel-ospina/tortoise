@@ -4,7 +4,8 @@
 -- SECURITY DEFINER claim_membership RPC. This suite locks the FULL binding:
 --
 --   · catalog state (RPC, partial indexes, audit detail column, grants)
---   · link (anon owner row → user_id, identity cleared, teams.email set)
+--   · link (anon owner row → user_id, identity cleared; teams.email NOT
+--     written — demotion 20260827000001)
 --   · idempotent re-claim (owner by (team_id, user_id) → noop success)
 --   · second-claim-409 (first-claim-wins for a DIFFERENT user)
 --   · merge/promote (existing (user,team) row promoted to owner; identity
@@ -12,8 +13,8 @@
 --   · removed-row reactivation on promote (P4)
 --   · non-owner reject (anon non-owner row is never linked)
 --   · null-user-row untouched (non-owner anon rows on other teams intact)
---   · email overwrite A→B inside the claim txn; email_in_use on cross-team
---     collision (P3-FIX-S)
+--   · email is a USER property: claim never writes teams.email (demotion
+--     20260827000001); email_in_use is gone with uq_teams_email
 --   · bootstrap key rejected (advisory 1); expired key rejected (advisory 3)
 --   · RPC-grant: claim_membership REJECTED from authenticated
 --   · tamper: RPC signature accepts ONLY (p_lookup_hash, p_user_id,
@@ -80,9 +81,9 @@ DO $$ BEGIN
             AND indexname='uq_member_owner'),
     'partial unique uq_member_owner (owner ≤1) must exist');
   PERFORM tests.assert(
-    EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='teams'
-            AND indexname='uq_teams_email'),
-    'partial unique uq_teams_email must exist');
+    NOT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='teams'
+                  AND indexname='uq_teams_email'),
+    'partial unique uq_teams_email must NOT exist (demoted to contact field, 20260827000001)');
   PERFORM tests.assert(
     EXISTS (SELECT 1 FROM information_schema.columns
             WHERE table_schema='public' AND table_name='audit_events' AND column_name='detail'
@@ -144,9 +145,8 @@ DO $$ BEGIN
         AND user_id='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb01'::uuid) IS NULL,
     'claim: identity column cleared');
   PERFORM tests.assert(
-    (SELECT email FROM public.teams WHERE id='team-anon-1082')
-      = 'user-claim-a-1082test@example.com',
-    'claim: teams.email overwritten with verified OAuth email');
+    (SELECT email FROM public.teams WHERE id='team-anon-1082') IS NULL,
+    'claim: teams.email NOT written (demotion — email is a user property)');
   -- the api_keys row is UNTOUCHED → same key still authenticates (indicator 1)
   PERFORM tests.assert(
     (SELECT count(*) FROM public.api_keys
@@ -244,9 +244,8 @@ DO $$ BEGIN
         AND user_id='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb02'::uuid) = 'lkp-merge-1082-b',
     'merge: lookup_hash copied from identity row (same key continuity)');
   PERFORM tests.assert(
-    (SELECT email FROM public.teams WHERE id='team-merge-1082')
-      = 'user-claim-b-1082test@example.com',
-    'merge: teams.email overwritten');
+    (SELECT email FROM public.teams WHERE id='team-merge-1082') IS NULL,
+    'merge: teams.email NOT written (demotion)');
 END $$;
 
 -- ============================================================================
@@ -314,12 +313,16 @@ SELECT public.claim_membership(
 );
 
 DO $$ BEGIN
+  -- claim no longer writes teams.email: the provision-time contact value
+  -- (sanctioned allowlisted write) survives the claim untouched.
   PERFORM tests.assert(
-    (SELECT email FROM public.teams WHERE id='team-email-1082') = 'fresh-email-1082@example.com',
-    'email overwrite: stored email replaced by verified OAuth email (A→B)');
+    (SELECT email FROM public.teams WHERE id='team-email-1082') = 'stale-email-1082@example.com',
+    'claim must NOT write teams.email — provision contact value survives (A→B overwrite gone)');
 END $$;
 
--- cross-team email collision → email_in_use
+-- cross-team email collision → NO LONGER a thing: claim never writes
+-- teams.email, so the same email on two teams is legal (uq_teams_email
+-- dropped). The claim SUCCEEDS and links the owner.
 SELECT public.provision_team(
   p_user_id     => NULL,
   p_identity    => 'anon-1082test-e',
@@ -331,30 +334,21 @@ SELECT public.provision_team(
   p_graph_name  => 'team_team-email2-1082',
   p_key_prefix  => 'tt_plain'
 );
--- team-anon-1082 already holds fresh-email-1082@example.com? No — it holds
--- user-claim-a-1082test@example.com. Use THAT email for the collision.
 DO $$ BEGIN
-  BEGIN
-    PERFORM public.claim_membership(
-      p_lookup_hash => 'lkp-email2-1082-e',
-      p_user_id     => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb01'::uuid,
-      p_email       => 'user-claim-a-1082test@example.com'
-    );
-    RAISE EXCEPTION 'ASSERTION FAILED: cross-team email collision must raise email_in_use';
-  EXCEPTION WHEN OTHERS THEN
-    PERFORM tests.assert(SQLERRM LIKE '%email_in_use%',
-      'cross-team email collision must raise claim_membership:email_in_use, got: ' || SQLERRM);
-  END;
-  -- the claim txn rolled back: the owner row must still be anon-claimed-free
+  PERFORM public.claim_membership(
+    p_lookup_hash => 'lkp-email2-1082-e',
+    p_user_id     => 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb01'::uuid,
+    p_email       => 'user-claim-a-1082test@example.com'
+  );
+  -- no email_in_use: the claim succeeds and links the owner
   PERFORM tests.assert(
     (SELECT count(*) FROM public.team_memberships
-      WHERE team_id='team-email2-1082' AND user_id IS NULL AND role='owner'
-        AND identity='anon-1082test-e') = 1,
-    'email_in_use: txn rolled back — anon owner row intact');
+      WHERE team_id='team-email2-1082' AND user_id='bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb01'::uuid
+        AND role='owner' AND status='active') = 1,
+    'claim with a shared email must SUCCEED (no teams.email write → no collision)');
   PERFORM tests.assert(
-    (SELECT count(*) FROM public.team_memberships
-      WHERE team_id='team-email2-1082' AND user_id IS NOT NULL) = 0,
-    'email_in_use: no user linked (atomic rollback)');
+    (SELECT email FROM public.teams WHERE id='team-email2-1082') IS NULL,
+    'team-email2: teams.email stays NULL (claim never writes it)');
 END $$;
 
 -- ============================================================================
@@ -475,14 +469,15 @@ DO $$ BEGIN
 END $$;
 
 -- ============================================================================
--- SECTION 11 — uq_teams_email: cross-team duplicate verified email rejected
+-- SECTION 11 — teams.email demoted: cross-team duplicate email ALLOWED
+-- (uq_teams_email dropped by 20260827000001 — email is a user property)
 -- ============================================================================
 DO $$ BEGIN
-  BEGIN
-    UPDATE public.teams SET email='user-claim-a-1082test@example.com'
-     WHERE id='team-email2-1082';
-    RAISE EXCEPTION 'FAIL: uq_teams_email must reject a duplicate verified email';
-  EXCEPTION WHEN unique_violation THEN NULL; END;
+  UPDATE public.teams SET email='user-claim-a-1082test@example.com'
+   WHERE id='team-email2-1082';
+  PERFORM tests.assert(
+    (SELECT count(*) FROM public.teams WHERE id='team-email2-1082' AND email='user-claim-a-1082test@example.com') = 1,
+    'duplicate verified email across teams must be ALLOWED (uq_teams_email dropped)');
 END $$;
 
 -- ============================================================================
@@ -559,8 +554,8 @@ BEGIN
       'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbb01'::uuid,
     'race: first-claim-wins — owner stays user-01');
   PERFORM tests.assert(
-    (SELECT email FROM public.teams WHERE id=v_team) = 'race-a-1082test@example.com',
-    'race: teams.email stays the winning claimer');
+    (SELECT email FROM public.teams WHERE id=v_team) IS NULL,
+    'race: teams.email stays NULL — claim never writes it (demotion)');
 END $$;
 
 -- ============================================================================

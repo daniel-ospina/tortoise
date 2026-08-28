@@ -386,20 +386,23 @@ class TestClaimE2E:
         assert mems[0]["user_id"] == _U_CLAIM_A
         assert mems[0]["identity"] is None
         team_row = next(t for t in cp.tables["teams"] if t["id"] == team_id)
-        assert team_row["email"] == "claim-a@e2e.premise-labs.dev"
+        # #1765 demotion: claim never writes teams.email (mint contact only)
+        assert team_row.get("email") is None
 
     def test_claim_requires_session_jwt_and_key(self, claim_server):
         base = claim_server["base_url"]
         # no JWT → 401
         status, body = _post(base, "/v1/claim", body={"api_key": "tt_x"})
         assert status == 401, body
-        # password-only provider → 403 (provider-invariant fail-closed)
+        # #1765 demotion: password-only sessions may claim (provider gate
+        # lifted; the confirmed-email conjunct + key-possession remain) — a
+        # bogus key now reaches KEY RESOLUTION (401), not the old 403 gate
         jwt = claim_server["keys"].mint(claim_server["mock_url"], _U_PASS,
                                         "pass@e2e.premise-labs.dev", ["email"])
         status, body = _post(base, "/v1/claim",
                              headers={"Authorization": f"Bearer {jwt}"},
                              body={"api_key": "tt_x"})
-        assert status == 403, body
+        assert status == 401, body  # tt_x unresolvable → Invalid API key
         # email_confirmed_at conjunct fail-closed
         claim_server["cp"]  # noqa: B018, RUF100
         _SupabaseMockHandler.email_confirmed = False

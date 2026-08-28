@@ -9,8 +9,9 @@ email_confirmed_at conjunct gate the claim BEFORE the RPC.
 Covered here (all Supabase-mode via the FakeControlPlane):
 - bad/missing JWT → 401
 - null email → fail-closed 400
-- email+password-only session (providers=['email']) → 403 (must NOT claim
-  + overwrite teams.email — solution-verify P2-3)
+- #1765 demotion: email+password-only sessions MAY claim (the provider gate
+  is lifted; claim never writes teams.email — confirmed-email conjunct + key-
+  possession remain)
 - provider-invariant negatives: fresh password token / refreshed password
   token (amr='token_refresh', no github/google provider) → 403; an
   amr-LESS github token still passes (app_metadata survives refresh —
@@ -158,17 +159,21 @@ class TestClaimEndpoint:
         assert r.status_code == 400, r.text
         assert "email" in r.json()["detail"].lower()
 
-    def test_password_only_session_403(self, client, fake, monkeypatch):
-        """email+password-only session (providers=['email']) must NOT claim
-        + overwrite teams.email (solution-verify P2-3)."""
-        _patch_verify(monkeypatch, _jwt(_U_X, providers=["email"]))
+    def test_password_only_session_can_claim(self, client, fake, monkeypatch):
+        """#1765 demotion: the providers ∩ {github,google} gate is LIFTED —
+        claim no longer writes teams.email, so a confirmed email+password
+        session may claim (key-possession + confirmed-email + first-claim-
+        wins remain the security model)."""
+        key, team_id = _provision_anon(client, fake)  # noqa: RUF059
+        _patch_verify(monkeypatch, _jwt(_U_X, providers=["email"],
+                                        email="pw@example.com"))
+
         r = client.post(
             "/v1/claim",
             headers={"Authorization": "Bearer abc.def.ghi"},
-            json={"api_key": "tt_whatever"},
+            json={"api_key": key},
         )
-        assert r.status_code == 403, r.text
-        assert "GitHub or Google" in r.json()["detail"]
+        assert r.status_code == 200, r.text
 
     def test_password_token_on_linked_account_passes(self, client, fake,
                                                      monkeypatch):
@@ -190,12 +195,12 @@ class TestClaimEndpoint:
         ([{"method": "password", "timestamp": 1}], "fresh password token"),
         ([{"method": "token_refresh", "timestamp": 2}], "refreshed password token"),
     ])
-    def test_provider_invariant_negative_amr_never_used(self, client, fake,
-                                                        monkeypatch, amr,
-                                                        label):
-        """amr is NEVER the invariant source: a fresh/refreshed PASSWORD token
-        (amr without github/google) must NOT claim even when amr is present —
-        app_metadata.providers is the only assertion (cycle-3 refinement)."""
+    def test_password_token_amr_never_used(self, client, fake,
+                                           monkeypatch, amr, label):
+        """#1765 demotion: a PASSWORD session may claim (the provider gate is
+        lifted; amr remains irrelevant — app_metadata.providers is not the
+        gate anymore either). Kept parametrized to pin that amr presence or
+        absence never changes the outcome."""
         key, team_id = _provision_anon(client, fake)  # noqa: RUF059
         _patch_verify(monkeypatch, _jwt(_U_X, email="a@b.co",
                                         providers=["email"], amr=amr,
@@ -205,7 +210,7 @@ class TestClaimEndpoint:
             headers={"Authorization": "Bearer abc.def.ghi"},
             json={"api_key": key},
         )
-        assert r.status_code == 403, f"{label}: {r.text}"
+        assert r.status_code == 200, f"{label}: {r.text}"
 
     def test_amr_less_github_token_passes(self, client, fake, monkeypatch):
         """An amr-LESS github token still passes: app_metadata survives token
@@ -243,10 +248,10 @@ class TestClaimEndpoint:
         post = client.get("/v1/team", headers={"Authorization": f"Bearer {key}"})
         assert post.status_code == 200, post.text
         assert post.json()["team_id"] == team_id
-        # teams.email overwritten with the verified OAuth email
+        # #1765 demotion: claim never writes teams.email
         rows = fake.tables["teams"]
         team_row = next(t for t in rows if t["id"] == team_id)
-        assert team_row["email"] == "verified@example.com"
+        assert team_row.get("email") is None
         # owner membership linked + identity cleared
         mem = next(m for m in fake.tables["team_memberships"]
                    if m["team_id"] == team_id)
@@ -428,9 +433,10 @@ class TestClaimEndpoint:
         r = client.post("/v1/claim", json={"api_key": key})
         assert r.status_code == 200
         # The DURABLE write actually landed (the accepted-risk property):
-        # owner membership linked + identity cleared + teams.email overwritten.
+        # owner membership linked + identity cleared. #1765: teams.email
+        # is NEVER written by claim.
         team_row = next(t for t in fake.tables["teams"] if t["id"] == team_id)
-        assert team_row["email"] == "claim@example.com"
+        assert team_row.get("email") is None
         mem = next(m for m in fake.tables["team_memberships"]
                    if m["team_id"] == team_id)
         assert mem["user_id"] == _U_1
