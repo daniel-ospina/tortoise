@@ -630,7 +630,17 @@ function claimIntentInFlight() {
       }
       setOnboardingLoading(false)
       setMemoryErrors((e) => ({ ...e, __load: '' }))
-    } catch {
+    } catch (e) {
+      // #1847: first-timer mount race — this mount effect fires BEFORE the
+      // mount gate runs provisionInApp (which creates the team), so the GET
+      // 403s 'No team membership' and the MemorySources panel would render
+      // its error card until reload. Swallow ONLY that exact no-team 403
+      // (suspended teams return a dict detail → e.suspended is set, and
+      // cross-team 'No membership in team' has a different message — both
+      // fall through to the normal error state below): keeping the loading
+      // state leaves the panel in its initial state; finishWelcomeLoads()
+      // re-fires this after provisioning and is the authoritative load.
+      if (e && e.status === 403 && !e.suspended && e.message === 'No team membership') return
       setOnboardingLoading(false)  // best-effort — the surface renders its error state
     }
   }
@@ -926,6 +936,13 @@ function claimIntentInFlight() {
   async function finishWelcomeLoads() {
     await loadTeams().catch(() => {})
     loadBackups(welcomeKey || '').catch(() => {})
+    // #1847: re-fire the onboarding-state load NOW that the team exists —
+    // the mount-time refreshOnboarding() fired BEFORE provisioning (mount
+    // gate → provisionInApp) and 403'd 'No team membership' for first-timers,
+    // leaving the Overview MemorySources panel on its error card until
+    // reload. The team now exists → this fetch succeeds → the toggles render
+    // on the first view.
+    await refreshOnboarding().catch(() => {})
   }
 
   async function wizardComplete() {
