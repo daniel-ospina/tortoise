@@ -1510,10 +1510,11 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     human session). #1148 review P1-2.
 
     gate_key_login=False opts the KEY branch out of the #1148 dashboard-login
-    gate — used by the overview READS (see get_current_team_session_ungated)
-    so tt_ keys keep working on flag-off teams (agents + the dashboard's own
-    reads). The gate stays scoped to the #1148 management set
-    (mint/revoke/restore/billing)."""
+    gate — used by the non-management (data-plane) endpoints: overview reads
+    AND the #1852 graph seed writes / index actions (see
+    get_current_team_session_ungated) so tt_ keys keep working on flag-off
+    teams (agents + the dashboard's own session-driven calls). The gate stays
+    scoped to the #1148 management set (mint/revoke/restore/billing)."""
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer ") and not auth[7:].startswith("eyJ"):
         # API key (tt_) — the gate applies to real key-auth (unless the
@@ -1547,13 +1548,16 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
 
 
 async def get_current_team_session_ungated(request: Request) -> dict:
-    """#1828 review P1: dual-auth dependency for OVERVIEW READS — team_info,
-    list_api_keys, list_sessions, onboarding state/github. The KEY branch
-    skips the #1148 dashboard-login gate, so a tt_ key on a
-    dashboard_key_login=false team still 200s these reads (agents + the
-    dashboard's own session-driven reads). The gate stays scoped to the
-    #1148 management set (mint/revoke/restore/billing — those keep
-    get_current_team_session's default gate_key_login=True)."""
+    """#1828 review P1 / #1852: dual-auth dependency for the non-management
+    (data-plane) surface — overview READS (team_info, list_api_keys,
+    list_sessions, onboarding state/github) and the seed/index ACTION
+    endpoints (POST /v1/objects, /v1/subjects, /v1/points,
+    /v1/index/github*, /v1/index/docs*). The KEY branch skips the #1148
+    dashboard-login gate, so a tt_ key on a dashboard_key_login=false team
+    still 200s these (agents + the dashboard's own session-driven calls) —
+    the gate covers ACCOUNT management, never graph operations. The gate
+    stays scoped to the #1148 management set (mint/revoke/restore/billing —
+    those keep get_current_team_session's default gate_key_login=True)."""
     return await get_current_team_session(request, gate_key_login=False)
 
 
@@ -2458,7 +2462,7 @@ class CreateObjectRequest(BaseModel):
 
 @app.post("/v1/objects")
 async def create_object(body: CreateObjectRequest, request: Request,
-                        team: dict = Depends(get_current_team)):  # noqa: B008
+                        team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """#1643: create an Object in the team's graph (the STATE layer).
 
     Wraps sdk.create_object — deterministic id by name, idempotent (a repeat
@@ -2494,7 +2498,7 @@ class CreateSubjectRequest(BaseModel):
 
 @app.post("/v1/subjects")
 async def create_subject(body: CreateSubjectRequest, request: Request,
-                         team: dict = Depends(get_current_team)):  # noqa: B008
+                         team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """#1660: create a Subject in the team's graph (the STATE layer).
 
     Mirrors /v1/objects for the Subject node type — deterministic id by
@@ -2521,7 +2525,7 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 
 
 @app.post("/v1/points", response_model=PointResponse)
-async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
+async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Create a Point in the team's graph."""
     _check_team_limit(team, "points")
     sdk = _make_sdk(namespace=team["team_id"])
@@ -10449,7 +10453,7 @@ def _relink_sessions_after_index(team_id: str) -> None:
 
 
 @app.post("/v1/index/github")
-async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team)):  # noqa: B008
+async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Start a background GitHub indexing job (Q2). Returns job_id for polling.
 
     Per-team single-flight (T2-P2 + P1-1): an in-flight `started` job for
@@ -10475,7 +10479,7 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
 
 @app.post("/v1/index/github/re-poll")
 async def github_reindex(body: GitHubRepollRequest | None = None,
-                         team: dict = Depends(get_current_team)):  # noqa: B008
+                         team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Re-run the GitHub diff (diff-on-poll, amend 6) for the connected org.
 
     The ONLY route shape (T1-P2) — no query-param alternative. Reuses the
@@ -10517,7 +10521,7 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
 
 
 @app.get("/v1/index/github/{job_id}")
-async def index_job_status(job_id: str, team: dict = Depends(get_current_team)):  # noqa: B008
+async def index_job_status(job_id: str, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Poll an indexing job's progress."""
     job = _INDEX_JOBS.get(job_id)
     if not job:
@@ -10721,7 +10725,7 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
 
 @app.post("/v1/index/docs")
 async def index_docs(body: DocsIndexRequest | None = None,
-                     team: dict = Depends(get_current_team)):  # noqa: B008
+                     team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Start a background GitHub-docs indexing job (#1726 Slice 1).
 
     Mirrors /v1/index/github: per-team single-flight (kind-scoped), returns
@@ -10748,7 +10752,7 @@ async def index_docs(body: DocsIndexRequest | None = None,
 
 @app.get("/v1/index/docs/{job_id}")
 async def docs_job_status(job_id: str,
-                          team: dict = Depends(get_current_team)):  # noqa: B008
+                          team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Poll a docs-indexing job's progress (team-scoped isolation)."""
     job = _INDEX_JOBS.get(job_id)
     if not job:
