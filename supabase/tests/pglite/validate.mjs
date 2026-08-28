@@ -37,8 +37,19 @@ await db.exec(`
     email varchar(255) UNIQUE,
     encrypted_password varchar(255) DEFAULT '',
     email_confirmed_at timestamptz,
+    last_sign_in_at timestamptz,
     raw_app_meta_data jsonb DEFAULT '{}',
     raw_user_meta_data jsonb DEFAULT '{}'
+  );
+  CREATE TABLE auth.identities (
+    id uuid PRIMARY KEY,
+    user_id uuid NOT NULL,
+    provider text NOT NULL,
+    provider_id text NOT NULL,
+    email text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    last_sign_in_at timestamptz,
+    updated_at timestamptz NOT NULL DEFAULT now()
   );
   CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS
     $$ SELECT coalesce(nullif(current_setting('request.jwt.claim.sub', true), ''), '00000000-0000-0000-0000-000000000000')::uuid $$;
@@ -95,6 +106,7 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260825000001_api_key_names.sql',
                '20260825214233_provision_team_keyless.sql',
                '20260826000001_revoke_signup_token.sql',
+               '20260827000002_user_identity_profile.sql',
                '20260827000001_blog_cms.sql'];  // appended last: timestamp prefix sorts after the 2026 batch (fresh-DB safe)
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
@@ -119,6 +131,7 @@ const suites = [
   '20260814000001_agent_signup_tokens.sql',
   '20260826000001_revoke_signup_token.sql',
   '20260827000001_blog_cms.sql',
+  '20260827000002_user_identity_profile.sql',
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

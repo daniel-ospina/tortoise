@@ -22,7 +22,16 @@ surfaces:
   - test_billing.py
   - test_bridge_mcp.py
   - test_claim_endpoints.py
+  - test_user_identity_authority.py
+  - test_user_identity_inventory.py
   - test_claim_lifecycle.py
+  - test_integrity_gate_docker.py
+  - test_eval_retrieval_budget.py
+  - test_eval_resume_retry_failed.py
+  - test_eval_ingest_retry.py
+  - test_resume_gate_parity.py
+  - test_per_session_census.py
+  - test_graph_integrity_gate.py
   - test_cli_claim.py
   - test_cli_global_config.py
   - test_cli_context.py
@@ -463,6 +472,9 @@ slow_files:
 # Mirrors tests/_embedded.TEST_NO_REDIRECT_STEMS (pinned by test_ci_selection
 # + test_markers).
 carve_out:
+- test_graph_integrity_gate.py
+- test_per_session_census.py
+- test_resume_gate_parity.py
 - test_backup_e2e.py
 - test_config.py
 - test_embedded_concurrency.py

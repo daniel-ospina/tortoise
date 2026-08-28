@@ -24,6 +24,7 @@ mirroring the SQL semantics the real functions execute
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 from typing import Any
 
 # #1719 (Task 3): columns whose PostgREST filter values are cast to uuid —
@@ -74,10 +75,26 @@ class FakeControlPlane:
         # concurrency E2E).
         import threading
         self._recover_lock = threading.Lock()
+        # #1765: auth-side rows for user_identity_inventory/reserve_unlink
+        # emulations (mirror auth.users + auth.identities shapes).
+        self.auth_users: list[dict] = []
+        self.auth_identities: list[dict] = []
+        # #1765: serializes reserve_unlink check+insert (the real RPC's
+        # partial unique index is the READ-COMMITTED backstop; the fake must
+        # be atomic under the two-tab threading test).
+        self._identity_lock = threading.Lock()
 
     def seed(self, table: str, rows: list[dict]) -> "FakeControlPlane":  # noqa: UP037
         self.tables.setdefault(table, []).extend(rows)
         return self
+
+    def _claim_migrate_created_by(self, team_id: str, user_id: str) -> None:
+        """#1765: claim attributes anon-/reg- created_by keys in the team to
+        the claimer (parenthesized predicate parity — team-scoped)."""
+        for k in self.tables.get("api_keys", []):
+            cb = str(k.get("created_by") or "")
+            if k.get("team_id") == team_id and (cb.startswith("anon-") or cb.startswith("reg-")):
+                k["created_by"] = str(user_id)
 
     def rpc(self, fn: str, body: dict | None = None) -> dict | None:
         """Simulate provision_team (migration 0010) over the in-memory rows.
@@ -183,7 +200,7 @@ class FakeControlPlane:
             if any(m.get("team_id") == team_id and m.get("user_id") == user_id
                    and m.get("role") == "owner" and m.get("status") == "active"
                    for m in mem_rows):
-                self._claim_set_email(team_id, email)
+                self._claim_migrate_created_by(team_id, user_id)
                 return None
 
             owner = next((m for m in mem_rows
@@ -193,13 +210,6 @@ class FakeControlPlane:
                           and m.get("status") == "active"), None)
             if owner is None:
                 raise RuntimeError("claim_membership:already_claimed")
-
-            # uq_teams_email parity: verify the email is free BEFORE any
-            # mutation — the real RPC's unique violation rolls the whole
-            # transaction back (owner stays anon on email_in_use).
-            if any(t.get("id") != team_id and t.get("email") == email
-                   for t in self.tables.get("teams", [])):
-                raise RuntimeError("claim_membership:email_in_use")
 
             existing = next((m for m in mem_rows
                              if m.get("user_id") == user_id
@@ -221,11 +231,80 @@ class FakeControlPlane:
             mem_rows[:] = [m for m in mem_rows
                            if not (m.get("user_id") == user_id
                                    and m.get("team_id") == "")]
-            # email overwrite (collision already verified above)
-            for t in self.tables.get("teams", []):
-                if t.get("id") == team_id:
-                    t["email"] = email
+            # #1765: created_by migration — anon-/reg- keys in the claiming
+            # team are attributed to the claimer (teams.email is NEVER
+            # written by claim — demotion, migration 20260827000001).
+            self._claim_migrate_created_by(team_id, user_id)
             return None
+        if fn == "user_identity_inventory":
+            # #1765: mirror migration 20260827000001's SECURITY DEFINER RPC —
+            # login_methods = oauth_count + email_method where
+            # email_method := (email AND confirmed) OR has_password and
+            # has_password := encrypted_password IS NOT NULL AND <> ''.
+            p = body or {}
+            uid = p.get("p_user_id")
+            user = next((u for u in self.auth_users if u.get("id") == uid), None)
+            ids = [i for i in self.auth_identities if i.get("user_id") == uid]
+            if user is None and not ids:
+                return {"methods": [], "has_password": False,
+                        "email_method": False, "login_methods": 0,
+                        "keys_tier": 0, "banner": {"show": False}}
+            enc = (user or {}).get("encrypted_password")
+            has_pwd = enc is not None and enc != ""
+            email = (user or {}).get("email")
+            confirmed = (user or {}).get("email_confirmed_at") is not None
+            email_method = bool(email and confirmed) or has_pwd
+            oauth = [i for i in ids if i.get("provider") not in ("email",)]
+            login = len(oauth) + (1 if email_method else 0)
+            keys_tier = sum(1 for k in self.tables.get("api_keys", [])
+                            if k.get("created_by") == str(uid)
+                            and k.get("revoked_at") is None
+                            and k.get("enabled", True))
+            return {
+                "methods": [
+                    {"id": i.get("id"), "provider": i["provider"],
+                     "provider_id": i["provider_id"],
+                     "email_confirmed_at": (user or {}).get("email_confirmed_at")}
+                    for i in ids],
+                "has_password": has_pwd, "email_method": email_method,
+                "login_methods": login, "keys_tier": keys_tier,
+                "banner": {"show": login <= 1
+                           and not (email and confirmed and has_pwd)}}
+        if fn == "reserve_unlink":
+            # #1765: mirror reserve_unlink — TTL aging, ownership, floor
+            # (login_methods - pending - 1 >= 2), and the one-pending-permit
+            # invariant (partial unique index parity) with the SAME error
+            # strings as the real RPC (test_unlink_two_tab depends on it).
+            # The check+insert is ATOMIC under self._identity_lock (the real
+            # backstop is the DB unique index; the fake must not double-grant).
+            with self._identity_lock:
+                p = body or {}
+                uid = p.get("p_user_id")
+                iid = p.get("p_identity_id")
+                from datetime import datetime, timedelta, timezone
+                now = datetime.now(UTC)
+                permits = self.tables.setdefault("user_unlink_permits", [])
+                for perm in permits:
+                    if perm.get("user_id") == uid and perm.get("consumed_at") is None:
+                        created = perm.get("created_at")
+                        if created and created <= (now - timedelta(minutes=5)).isoformat():
+                            perm["consumed_at"] = now.isoformat()
+                if not any(i.get("id") == iid and i.get("user_id") == uid
+                           for i in self.auth_identities):
+                    raise RuntimeError("reserve_unlink:identity_not_found")
+                inv = self.rpc("user_identity_inventory", {"p_user_id": uid})
+                login = int(inv["login_methods"])
+                pending = sum(1 for p2 in permits
+                              if p2.get("user_id") == uid and p2.get("consumed_at") is None)
+                if login - pending - 1 < 2:
+                    raise RuntimeError("reserve_unlink:floor_violated")
+                if any(p2.get("user_id") == uid and p2.get("consumed_at") is None
+                       for p2 in permits):
+                    raise RuntimeError("reserve_unlink:floor_violated")
+                permits.append({"id": str(uuid.uuid4()), "user_id": uid,
+                                "identity_id": iid, "consumed_at": None,
+                                "created_at": now.isoformat()})
+                return {"status": "permit_granted", "identity_id": iid}
         if fn == "provision_team_with_token":
             # #1709 (20260814000001): the signup wrapper = provision_team + one
             # token row in the SAME emulated transaction. Unique-constraint
@@ -335,6 +414,29 @@ class FakeControlPlane:
             if row is not None and row.get("revoked_at") is None:
                 row["revoked_at"] = datetime.now(timezone.utc).isoformat()  # noqa: UP017
             return None
+        if fn == "provision_team":
+            # #1765: uq_member_identity_active parity — an UNCLAIMED owner row
+            # with the same identity must reject the second (the register race
+            # backstop). Mirrors the 20260827000001 partial unique index.
+            p = body or {}
+            identity = p.get("p_identity")
+            uid = p.get("p_user_id")
+            if uid is None and identity:
+                with self._identity_lock:  # atomic check+insert (register race)
+                    mem = self.tables.setdefault("team_memberships", [])
+                    # same (identity, team_id) row is an UPSERT (in-place);
+                    # only a DIFFERENT team with the same unclaimed owner
+                    # identity hits uq_member_identity_active
+                    team_id = p.get("p_team_id")
+                    if any(m.get("identity") == identity
+                           and m.get("role") == "owner"
+                           and m.get("status") == "active"
+                           and m.get("user_id") is None
+                           and m.get("team_id") != team_id
+                           for m in mem):
+                        raise RuntimeError(
+                            "duplicate key value violates unique constraint "
+                            "\"uq_member_identity_active\"")
         if fn != "provision_team":
             return None
         return self._provision_team_emulation(body or {})
@@ -439,15 +541,6 @@ class FakeControlPlane:
                                          "provisioned")
         return None
 
-    def _claim_set_email(self, team_id: str, email: str) -> None:
-        """uq_teams_email parity: teams.email overwrite, cross-team collision
-        → claim_membership:email_in_use (the fake mirrors the unique index)."""
-        for t in self.tables.get("teams", []):
-            if t.get("id") != team_id and t.get("email") == email:
-                raise RuntimeError("claim_membership:email_in_use")
-        for t in self.tables.get("teams", []):
-            if t.get("id") == team_id:
-                t["email"] = email
 
     def _trigger_key_create(self, team_id: str, key_id: str,
                             created_via: str | None) -> None:

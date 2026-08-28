@@ -50,7 +50,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Auth (single page) | `website/signup.html` served at `/auth` | Combined Log in / Sign up card — GitHub / Google / email+password (modal login + forgot-password) / API key; `/signin*` 301 → `/auth`; `/signup` is a redirect-free alias |
 | Welcome | `website/welcome.html` | Post-signup provisioning: team + API key (reveal-once), two-path chooser (one-click MCP prompt vs SDK quickstart), auto-redirect to dashboard |
 | Invite accept | `website/invite-accept.html` | Public team-invite accept page (`/invite-accept?token=…`), reads `/v1/invites/info` |
-| Dashboard | `website/apps/dashboard/` (React + Vite) | Session-gated app: Overview / API Keys / Graphs / Members, billing CTAs |
+| Dashboard | `website/apps/dashboard/` (React + Vite) | Session-gated app: Overview / API Keys / Graphs / Members / Billing / **Profile** (login methods + recovery banner, #1765) |
 | Legal | `privacy.html` `tos.html` `license.html` `dpa.html` `security.html` `aviso-privacidad.html` | Footer-linked compliance pages |
 
 ---
@@ -89,6 +89,13 @@ The dashboard renders a **combined login/signup card** when unauthenticated
 
 Session-gated teams that log in by API key get a full-page **Protect your
 account** screen (connect GitHub/Google for key rotation/recovery).
+
+The **Profile tab** (#1765) is the post-claim identity surface: login-method
+inventory (`GET /v1/user/identity`), add GitHub/Google/email+password
+(link-intent → vendored `linkIdentity` → link-commit), unlink (atomic
+never-below-2 floor), and a recovery banner for single-login-method users
+("your account is protected by only one login method…"). `teams.email` is
+demoted to a contact field — identity facts live on the Supabase user.
 
 ---
 

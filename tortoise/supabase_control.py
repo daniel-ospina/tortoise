@@ -1255,6 +1255,149 @@ def update_team_email(cp, team_id: str, email: str) -> None:
     )
 
 
+# ── #1765 identity seam (migration 20260827000001) ──────────────────────────
+_UNLINK_ERROR_CODES = {
+    "floor_violated": (409, "Removing this login method would leave fewer than "
+                            "two ways to sign in — add another first"),
+    "identity_not_found": (409, "This login method does not belong to your account"),
+}
+
+
+def user_identity_inventory(cp, user_id: str) -> dict:
+    """Call the user_identity_inventory SECURITY DEFINER RPC (20260827000001).
+
+    Returns the login-method inventory: methods (provider/provider_id list),
+    has_password, email_method, login_methods, keys_tier, banner.show.
+    Raises RuntimeError (fail-closed) on control-plane failure.
+    """
+    return cp.rpc("user_identity_inventory", {"p_user_id": user_id})
+
+
+def reserve_unlink(cp, user_id: str, identity_id: str) -> dict:
+    """Call the reserve_unlink SECURITY DEFINER RPC (20260827000001).
+
+    Atomically reserves an unlink permit iff (login_methods - pending - 1)
+    >= 2 (the partial unique index is the two-tab backstop). Raises
+    ClaimError (409) on floor violations / unknown identities; RuntimeError
+    (fail-closed) on control-plane failure.
+    """
+    try:
+        return cp.rpc("reserve_unlink", {
+            "p_user_id": user_id, "p_identity_id": identity_id})
+    except RuntimeError as e:
+        msg = str(e)
+        for code, (status, detail) in _UNLINK_ERROR_CODES.items():
+            if code in msg:
+                raise ClaimError(detail, status=status, code=f"unlink_{code}") from e
+        raise
+
+
+def store_link_intent(cp, *, nonce: str, user_id: str, provider: str,
+                     expires_at: str) -> None:
+    """Insert a link-intent row (20260827000001 link_intents table).
+
+    Called by hosted_api link-intent AFTER the signed ref is minted. The
+    row is the consumed-once + TTL + ownership backstop for link-commit.
+    """
+    cp.query("link_intents", method="POST", json_body={
+        "nonce": nonce, "user_id": user_id, "provider": provider,
+        "expires_at": expires_at,
+    })
+
+
+def consume_link_intent(cp, *, nonce: str, user_id: str,
+                       consumed_at: str) -> int:
+    """Guarded consume: mark an intent consumed iff it exists, is pending,
+    unexpired, and belongs to the user. Returns rows affected (0 = already
+    consumed / expired / wrong user — the caller rejects). SQL-level
+    consumed-once parity (migration 20260827000001 suite asserts the same
+    guarded-UPDATE semantics).
+    """
+    rows = cp.query(
+        "link_intents",
+        method="PATCH",
+        select=["nonce"],  # return=representation — both backends echo rows
+        filters=[("nonce", "eq", nonce),
+                 ("user_id", "eq", user_id),
+                 ("consumed_at", "is", None),
+                 ("expires_at", "gt", consumed_at)],  # #1765 review: parity with
+                                                     # the SQL guarded-UPDATE
+                                                     # (expired intents are NOT
+                                                     # consumed — the caller's
+                                                     # expired branch handles)
+        json_body={"consumed_at": consumed_at},
+    )
+    return len(rows)
+
+
+def consume_unlink_permit(cp, *, user_id: str, consumed_at: str) -> int:
+    """Mark a user's pending unlink permit consumed (unlink success OR
+    compensation on failure — the permit must never deadlock the unique
+    index). Returns rows affected."""
+    rows = cp.query(
+        "user_unlink_permits",
+        method="PATCH",
+        select=["id"],
+        filters=[("user_id", "eq", user_id), ("consumed_at", "is", None)],
+        json_body={"consumed_at": consumed_at},
+    )
+    return len(rows)
+
+
+def owner_email(cp, team_id: str) -> str | None:
+    """Resolve a team's owner email (#1765 abuse-notify re-point): the
+    ACTIVE owner's Supabase user email via the GoTrue admin API, falling
+    back to None on anon/zero-owner teams or any admin/transport error (the
+    caller falls back to teams.email, then the ops inbox). Never raises.
+    """
+    uid = owner_user_id(cp, team_id)
+    if not uid:
+        return None
+    import os as _os
+    url = _os.environ.get("SUPABASE_URL", "").rstrip("/")
+    key = _os.environ.get("SUPABASE_SERVICE_ROLE_KEY") or _os.environ.get("SUPABASE_SERVICE_KEY")
+    if not url or not key:
+        return None
+    import httpx as _httpx
+    try:
+        resp = _httpx.get(
+            f"{url}/auth/v1/admin/users/{uid}",
+            headers={"Authorization": f"Bearer {key}", "apikey": key},
+            timeout=10.0,
+        )
+    except Exception:
+        return None
+    if resp.status_code != 200:
+        return None
+    return (resp.json() or {}).get("email")
+
+
+def membership_by_identity(cp, identity: str) -> dict | None:
+    """Find an ACTIVE UNCLAIMED owner membership by its identity anchor
+    (reg-<hash> / anon-). The #1765 register idempotency re-anchor: a
+    leftover reg- owner row means the email was already registered."""
+    rows = cp.query(
+        "team_memberships",
+        select=["team_id"],
+        filters=[("identity", "eq", identity), ("role", "eq", "owner"),
+                 ("status", "eq", "active"), ("user_id", "is", None)],
+    )
+    return rows[0] if rows else None
+
+
+def owner_user_id(cp, team_id: str) -> str | None:
+    """Resolve a team's ACTIVE OWNER user_id (None for anon/zero-owner
+    teams). The abuse-notify re-point (#1765) composes this with the GoTrue
+    admin seam (hosted_api) to read the owner's email."""
+    rows = cp.query(
+        "team_memberships",
+        select=["user_id"],
+        filters=[("team_id", "eq", team_id), ("role", "eq", "owner"),
+                 ("status", "eq", "active")],
+    )
+    return rows[0]["user_id"] if rows else None
+
+
 def github_credentials(cp, team_id: str) -> dict:
     """Read the encrypted GitHub token + org from ``teams``.
 
@@ -1650,7 +1793,6 @@ _CLAIM_ERROR_CODES = {
     "key_not_claimable": (403, "This is a session key and cannot claim a team"),
     "key_expired": (403, "This key has expired"),
     "already_claimed": (409, "Team has already been claimed by another user"),
-    "email_in_use": (409, "This email is already in use by another team"),
 }
 
 
