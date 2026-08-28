@@ -3650,14 +3650,15 @@ function claimIntentInFlight() {
               the rest of the dashboard (anon teams get the Protect screen). */}
           <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
         </nav>
-        {/* #1689: always-visible — OUTSIDE the nav (which can overflow off
-            narrow windows), fixed in the header's right side, on every tab.
-            Reopens the wizard at step 0 (skills). */}
+        {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard at
+            step 0 (skills). (The nav wraps via flex-wrap on narrow windows
+            since #1874, so Setup is no longer displaced by nav overflow.) */}
         <button className="ghost small setup-header" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>Setup</button>
-        {/* #1148-ux: account blob — GitHub/Vercel/Linear pattern: current
-            workspace name + avatar top-right; dropdown switches team and
-            signs out. Replaces the bare team <select> (which read as "No
-            team" and gave no account context). */}
+        {/* #1148-ux + #1874: account blob — GitHub/Vercel/Linear pattern:
+            the avatar menu is the personal-account surface (identity block
+            + Profile entry + workspace switch + Log out); the trigger shows
+            the current workspace name. Replaces the bare team <select>
+            (which read as "No team" and gave no account context). */}
         <div className="account-blob" ref={accountBlobRef}>
           <button
             className="account-blob-btn"
