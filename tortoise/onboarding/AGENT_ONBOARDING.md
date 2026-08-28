@@ -60,14 +60,16 @@ Skip Q2.
 
 _(Only if Q1 was "yes")_
 
-**Ask:** "Index your GitHub issues and PRs into memory? This runs in the
+**Ask:** "Index your GitHub issues and PRs into memory? They become work
+items with a lifecycle record — no claim extraction. This runs in the
 background — you'll see results in your next session."
 
 **If yes:**
 1. Call `tortoise_onboarding_github_index(org=<org from Q1>)`. Returns a
    `job_id`.
-2. Show: "✅ Indexing started (job: [job_id]). Issues and PRs will appear in your
-   memory shortly. I'll continue with the next question."
+2. Show: "✅ Indexing started (job: [job_id]). Issues become work items
+   with a lifecycle record and will appear in your memory shortly.
+   I'll continue with the next question."
 3. If the tool errors: "Couldn't start indexing right now. You can index later
    from your dashboard."
 

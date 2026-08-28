@@ -9597,11 +9597,11 @@ async def github_callback(code: str | None = None, state: str | None = None,
             params={"id": team_id, "tok": encrypted, "org": st["org"]},
         )
     _update_onboarding_state(team_id, github_connected=True)
-    # Auto-index after connect (Task 5, amend 11): quota-gated background
-    # first-run (ONE repo — bounded, P2-4). The job is created under the
-    # team's single-flight guard; a quota-cap failure surfaces honestly via
-    # the job poll, never the redirect (the user lands on welcome.html
-    # either way). P1-1 (PR #1792): spawn the run ONLY when the job was
+    # Auto-index after connect (Task 5, amend 11): background first-run
+    # (ONE repo — bounded, P2-4). The job is created under the team's
+    # single-flight guard; an indexing failure surfaces honestly via the
+    # job poll, never the redirect (the user lands on welcome.html either
+    # way). P1-1 (PR #1792): spawn the run ONLY when the job was
     # freshly minted — a reused in-flight job is already being walked.
     job_id, is_new = _start_index_job(team_id)
     if is_new:
@@ -9756,13 +9756,15 @@ class GitHubRepollRequest(BaseModel):
 
 
 async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -> None:
-    """Background indexing job: GitHub issues/PRs → entities/events/statements.
+    """Background indexing job: GitHub issues/PRs → entities/events.
 
-    #1725 Slice 0 rework: quota-preflighted + per-batch re-checked (the old
-    job had ZERO quota calls), cursor-correct (composite (updated_at, number)
+    #1725 Slice 0 rework: cursor-correct (composite (updated_at, number)
     per-repo cursors persisted to onboarding jsonb), ONE-repo bounded first
     run, one-time legacy `-closed` backfill (marker-gated), honest status
     ("N issues beyond window", quota_hit, errors, partial completion).
+    #1844: OBJECT-ONLY — zero non-episodic :Point writes, so no points-quota
+    gate (see the pre-walk comment; the #1843 statement-write resurrection
+    would re-add it).
 
     P1-1 / P2 (PR #1792): every caller spawns this task ONLY when
     `_start_index_job` reports is_new; as a belt-and-suspenders guard this
@@ -9802,7 +9804,7 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
         _job(status="failed", error="Token undecryptable")
         return
     # State + cursors loaded BEFORE the walk try: the finally persists them
-    # back, so a pre-walk failure (quota preflight, resolve_repos 404) must
+    # back, so a pre-walk failure (resolve_repos 404, pre-walk raise) must
     # never WIPE previously-persisted cursors (P2, PR #1792).
     state = _get_onboarding_state(team_id)
     cursors: dict[str, dict] = state.get("github_index_cursor") or {}
@@ -9813,24 +9815,13 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
     try:
         team_sdk = _make_sdk(namespace=team_id)
 
-        # ── Quota preflight (Task 4): the index job gates like sessions do.
-        # Resolved BEFORE the first write; a team at/over cap fails honestly
-        # (402-equivalent "failed" status with the quota message), never
-        # silently overshooting max_points. ──
-        from tortoise.quota import (  # noqa: I001
-            QuotaCheckError, QuotaExceededError, enforce_team_limit,
-            resolve_team_limits,
-        )
-        limits = resolve_team_limits(team_id)
-        try:
-            enforce_team_limit(limits, "points", sdk=team_sdk)
-        except QuotaExceededError as e:
-            _job(status="failed", error=str(e))
-            return
-        except QuotaCheckError as e:
-            _job(status="failed", error=f"Quota check failed: {e}")
-            return
-
+        # #1844: the index job is OBJECT-ONLY — it writes zero non-episodic
+        # :Point nodes (the "points" quota resource counts ONLY
+        # `MATCH (n:Point) WHERE n.is_episodic IS NULL OR false`), so no
+        # points-quota preflight or per-batch re-check is needed. A team at
+        # its points cap must still be able to index issues. The #1843
+        # statement-write resurrection (point/statement mints) would re-add
+        # the points gate.
         indexer = GitHubIndexer(token)
 
         # ── One-time legacy `-closed` backfill (T1-P1 + T2-P3). Gated on the
@@ -9861,21 +9852,11 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
             if first_run:
                 repos = repos[:1]
 
-        def _quota_check() -> None:
-            enforce_team_limit(limits, "points", sdk=team_sdk)
-
         for repo_name in repos:
             if _INDEX_JOB_OWNERS.get(job_id) != owner:
                 break  # lost ownership (entry evicted/replaced) — abort
-            try:
-                _quota_check()  # per-batch re-check (before each repo)
-            except QuotaExceededError as e:
-                totals["quota_hit"] = True
-                totals["errors"].append(str(e))
-                break
             result = await indexer.index_repo(
-                team_sdk, repo_name, cursor=cursors.get(repo_name) or None,
-                quota_check=_quota_check)
+                team_sdk, repo_name, cursor=cursors.get(repo_name) or None)
             totals["points_created"] += result["points_created"]
             totals["statements_superseded"] += result["statements_superseded"]
             totals["events_minted"] += result["events_minted"]
@@ -9916,12 +9897,12 @@ async def _run_indexing(job_id: str, team_id: str, org: str, repo: str | None) -
         _job(status="failed", error=str(e))
     finally:
         # P2: persist per-repo cursors + github_indexed in a finally so
-        # PARTIAL runs (mid-walk raise, quota-interrupted) leave a
-        # resumable state — previously the accumulated cursors were lost on
+        # PARTIAL runs (mid-walk raise) leave a resumable state —
+        # previously the accumulated cursors were lost on
         # a mid-walk raise and the next run re-walked from the old cursor.
         # github_indexed flips True ONLY on real progress (>=1 repo
-        # processed): a 0-repo failure (quota preflight, resolve_repos
-        # 404) leaves it untouched so the next run keeps the ONE-repo
+        # processed): a 0-repo failure (resolve_repos 404, pre-walk raise)
+        # leaves it untouched so the next run keeps the ONE-repo
         # bounded first-run pacing (P2, PR #1792).
         updates: dict = {"github_index_cursor": cursors}
         if totals["repos_processed"] > 0:

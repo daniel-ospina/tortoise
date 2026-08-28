@@ -12,23 +12,28 @@ and the cursor is NOT advanced past unprocessed items (resume without
 gaps/dupes; idempotent writes make re-processing safe).
 
 Phase 2 (write): entities + lifecycle Events via ``sdk._get_proj().apply()``
-(the projection folds ``Object.status`` from lifecycle event kinds);
-statement Points via ``create_point(kind="statement", id=…, dedup=False)``
-TWO-PHASE (probe by externalId + status != terminal WITHOUT props → write
-props only on a genuine create — no updatedAt churn on re-runs, P2-1).
+(the projection folds ``Object.status`` from lifecycle event kinds).
+
+#1844 OBJECT-ONLY: issues no longer materialize as statement Points — the
+1:1 issue↔statement write is removed from the default ingest path (the
+statement was redundant with the Object, cost the points quota, and
+over-claimed "claims extracted"). The two-phase statement write
+(``_upsert_statement``: probe by externalId + status != terminal WITHOUT
+props → write props only on a genuine create — no updatedAt churn on
+re-runs, P2-1) is kept DORMANT, reserved for #1843 (issue impact
+analysis).
 
 Lifecycle decision table (THE rule):
 - close/reopen ON TRANSITION → Event (``github.issue.closed``/``reopened``)
-  + ``Object.status`` projection ONLY — statement points content/status-
-  UNTOUCHED; ``invalidate_point`` is NEVER called (it always writes
-  CORRECTS, sdk.py — the amnesia defect).
-- content edit → new statement + ``supersede_point`` (bi-temporal
-  validFrom/validTo, edge transfer).
+  + ``Object.status`` projection ONLY (object-only, #1844).
 - first ingest of an already-closed issue → ``-created`` ONLY (kind carries
   the closed state) — the one-time legacy backfill is the only other source
   of ``-closed`` events (marker-gated, T2-P3).
 
-Writes ``statement`` ONLY — never ``observation`` (removed kind, §5).
+The (dormant) statement machinery writes ``statement`` ONLY — never
+``observation`` (removed kind, §5). DORMANT since #1844: the default path
+writes NO statements; see ``_upsert_statement`` for the #1843-reserved
+machinery.
 """
 from __future__ import annotations
 
@@ -332,10 +337,12 @@ class GitHubIndexer:
         return f"{base_id}-{max_n + 1}"
 
     def _project_issue(self, sdk, proj, repo: str, issue: dict) -> dict:
-        """Project one issue: Object + Subjects + Events + statement.
+        """Project one issue: Object + Subjects + Events (object-only, #1844).
 
         Returns {"points_created", "statements_superseded", "events_minted"}
-        — the lifecycle decision table lives here.
+        — points_created/statements_superseded are ALWAYS 0 now (the
+        1:1 statement write is removed from the default path; the stats
+        keys stay for API-shape stability and are reserved for #1843).
         """
         stats = {"points_created": 0, "statements_superseded": 0,
                  "events_minted": 0}
@@ -398,10 +405,12 @@ class GitHubIndexer:
                 proj.apply(trans)
                 stats["events_minted"] += 1
 
-        # Statement point (content/status-untouched by lifecycle events).
-        s_stats = self._upsert_statement(sdk, proj, repo, issue)
-        stats["points_created"] += s_stats["points_created"]
-        stats["statements_superseded"] += s_stats["statements_superseded"]
+        # #1844 OBJECT-ONLY: NO statement write. The 1:1 issue↔statement
+        # Point is removed from the default ingest path (redundant with the
+        # Object, cost the points quota, over-claimed "claims extracted").
+        # The write machinery (_upsert_statement) is kept DORMANT, reserved
+        # for #1843 (issue impact analysis) — points_created /
+        # statements_superseded stay 0.
         return stats
 
     @staticmethod
@@ -423,6 +432,10 @@ class GitHubIndexer:
         with props only on a genuine miss. ``updatedAt`` byte-unchanged on
         re-runs of unchanged issues. Content edits → new statement +
         ``supersede_point`` (bi-temporal). NEVER ``invalidate_point``.
+
+        DORMANT since #1844 (object-only): the default ingest path no
+        longer calls this — it is reserved for #1843 (issue impact
+        analysis), which will re-wire it to the analyzer's real claims.
         """
         n = github_map._norm_issue(issue)
         eid = github_map.external_id(repo, n["number"])
@@ -476,7 +489,11 @@ class GitHubIndexer:
     def _next_version(proj, eid: str) -> int:
         """Monotonic per-issue version: count of ALL statements with the
         externalId (superseded included) + 1. A revert mints v+1 — never
-        reuses a terminal id (P1-2)."""
+        reuses a terminal id (P1-2).
+
+        DORMANT since #1844 — only reachable via ``_upsert_statement``
+        (reserved for #1843).
+        """
         rows = proj.g.query(
             "MATCH (n:Point {externalId:$eid}) RETURN count(n)",
             params={"eid": eid},
@@ -485,7 +502,11 @@ class GitHubIndexer:
 
     @staticmethod
     def _link_about_object(proj, point_id: str, repo: str, number: int) -> None:
-        """(Statement)-[:aboutObject]->(WorkItem Object) edge."""
+        """(Statement)-[:aboutObject]->(WorkItem Object) edge.
+
+        DORMANT since #1844 — only reachable via ``_upsert_statement``
+        (reserved for #1843).
+        """
         proj.g.query(
             "MATCH (p:Point {id:$pid}), (o:Object {id:$oid}) "
             "MERGE (p)-[:aboutObject]->(o)",

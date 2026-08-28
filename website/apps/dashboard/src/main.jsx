@@ -4030,7 +4030,7 @@ function MemorySources(props) {
         />
         <div className="toggle-body">
           <h4>GitHub issues</h4>
-          <p>Issues become work items with a lifecycle record, plus claims extracted from their content.</p>
+          <p>Issues become work items with a lifecycle record.</p>
           {githubConnected ? (
             <>
               <p className="dim small" aria-live="polite">
@@ -4206,7 +4206,7 @@ function GithubIndexStatus({ job }) {
     const repos = job.repos_processed != null ? ` across ${job.repos_processed} repos` : ''
     const beyond = job.issues_beyond_window ? `; ${job.issues_beyond_window} issues beyond window` : ''
     const quota = job.quota_hit ? ' (plan quota reached — index more later)' : ''
-    return <p className="dim small" aria-live="polite">Indexing complete — {job.points_created ?? 0} data points{repos}{beyond}{quota}.</p>
+    return <p className="dim small" aria-live="polite">Indexing complete{repos}{beyond}{quota}.</p>
   }
   if (job.status === 'failed') {
     return <p className="error small" role="alert">Indexing failed — {job.error || 'retry'}</p>
