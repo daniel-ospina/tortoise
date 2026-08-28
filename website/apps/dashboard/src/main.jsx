@@ -2620,12 +2620,16 @@ function claimIntentInFlight() {
   // #1858 (P3): staleFired LATCHES the floor. frameStale below is derived
   // from the clock (ref + now), so once the tick effect nulls frameStartRef
   // at firing time a later unrelated setState recomputes frameStale=false
-  // and resurrects the shimmer for another 15s. STATE, not a ref: the card
-  // render must see the latched value via a real update (same precedent as
-  // the #1842 P2 overviewAnnounced latch). The latch is per-LOAD — the reset
-  // effect below clears it on every team→null transition and the tick effect
-  // clears it when the window resolves, so a genuine new load gets a fresh
-  // 15s floor.
+  // and resurrects the shimmer for another 15s. STATE, not a ref: the load-
+  // site clears (switchTeam / revert / logout) must force a recompute render
+  // so the tick effect re-runs and stamps a fresh floor — a ref write
+  // schedules no render, so a switch that happened to change no other state
+  // would leave the '—' frame up with no clock behind it. (The effect-time
+  // set/clear happens to coincide with an already-scheduled render — the
+  // clock fire or the data landing — so those two writes add no render.)
+  // The latch is per-load: cleared on window resolve, on team→null, and at
+  // the three load-initiation sites (covers null→null from the terminal
+  // '—' state where the reset effect's team dep doesn't fire).
   const [staleFired, setStaleFired] = React.useState(false)
   // #1842 P2-1 (final review): the clock must NOT run (or stamp frameStart)
   // while the first-timer sits on the welcome screen — the Overview section
@@ -2634,7 +2638,13 @@ function claimIntentInFlight() {
   // with an already-stale frame (instant '—' instead of shimmer for a fast
   // load). Gate overviewSkeletonLive on !welcomeMode; the tick effect's else
   // branch keeps frameStart null while welcome is up.
-  const overviewSkeletonLive = tab === 'overview' && !welcomeMode &&
+  // #1858 (review A): also gate on authed — the checking/claim screens
+  // render via the early return at !authed, so the Overview skeleton is
+  // never visible pre-login. Without the gate, a slow session restore
+  // (> STALE_LOADING_MS under the checking screen) would fire the floor and
+  // latch staleFired while NO skeleton was ever on screen, then open the
+  // dashboard on '—' for a load that just started.
+  const overviewSkeletonLive = authed && tab === 'overview' && !welcomeMode &&
     (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupInfo === null)
   // clockStale: raw 15s check against the frame start. frameStale: what the
   // render reads — latched once the floor has ever fired for this load.
@@ -2644,8 +2654,12 @@ function claimIntentInFlight() {
   // mounts (team null + Overview tab + not welcome) so no stale stamp carries
   // over from the welcome screen. #1858: every team→null transition here is a
   // genuine new load (switchTeam, its revert path, logout) — clear the stale
-  // latch too, or the next team's skeleton would open on '—'. Declared BEFORE
-  // the tick effect so a fresh stamp in the same commit is never clobbered.
+  // latch too, or the next team's skeleton would open on '—'. (The window is
+  // PER-WINDOW: tab/welcome changes also clear the latch via the tick's
+  // !overviewSkeletonLive branch, so leaving Overview and returning re-arms
+  // a fresh 15s floor for the same stuck load — pre-fix behavior, accepted.)
+  // Declared BEFORE the tick effect so a fresh stamp in the same commit is
+  // never clobbered.
   React.useEffect(() => {
     if (tab === 'overview' && !welcomeMode && team === null) {
       frameStartRef.current = null
@@ -2660,7 +2674,10 @@ function claimIntentInFlight() {
   // switch, but neither overviewSkeletonLive nor frameStale change, so this
   // effect never re-runs — without the in-callback re-stamp the old interval
   // would tick with a null ref and frameStale could never become true. The
-  // callback restarts the 15s floor from the switch (per-load semantics).
+  // re-stamp fires only when the ref IS null (ref non-null ⟹ the window
+  // continues from its original stamp — e.g. a null→null switch mid-load
+  // keeps the pre-switch deadline, which is correct: the shimmer has been
+  // showing since the load began).
   React.useEffect(() => {
     if (overviewSkeletonLive && !frameStale) {
       if (frameStartRef.current === null) frameStartRef.current = Date.now()
