@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import os
 import urllib.parse
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -37,7 +37,7 @@ DASHBOARD_URL = os.environ.get("DASHBOARD_URL", "http://127.0.0.1:8790/")
 def _session(user_id: str = "u-e2e-identity") -> dict:
     """Supabase session JSON for the parent-domain cookie (mirrors
     test_dashboard_gate's _session)."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
         "access_token": "fake-access-token-e2e",
         "refresh_token": "fake-refresh-token",
@@ -79,7 +79,7 @@ def _inventory(login_methods: int = 1, linking: bool = True) -> dict:
         "linking_available": linking,
         "email": "identity-e2e@premise-labs.dev",
         "email_confirmed_at": "2026-08-01T00:00:00Z",
-        "last_sign_in_at": datetime.now(timezone.utc).isoformat(),
+        "last_sign_in_at": datetime.now(UTC).isoformat(),
         "reauth_required": False,
     }
 
@@ -202,7 +202,7 @@ def test_change_email_requires_reauth(page: Page):
     stale = _inventory(login_methods=1)
     stale["email_confirmed_at"] = None
     stale["reauth_required"] = True
-    stale["last_sign_in_at"] = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    stale["last_sign_in_at"] = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
     _wire(page, inv=stale)
     page.goto(DASHBOARD_URL)
     # Profile tab → Add email and password (unconfirmed email → change-email path)
@@ -227,7 +227,6 @@ def test_unlink_confirm_flow(page: Page):
     def _inv():
         return _inventory(login_methods=state["methods"])
 
-    orig = _wire
     _wire(page, inv=_inventory(login_methods=3), inv_factory=_inv)
     # re-route unlink to capture + decrement
     def handle(route):
