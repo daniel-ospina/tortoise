@@ -149,8 +149,9 @@ def test_direct_route_sends_nonreasoning_model_id(monkeypatch):
     assert url == "https://api.deepseek.com/v1/chat/completions"
     # #1790: the direct route sends the current documented flash id with
     # thinking explicitly disabled — 'deepseek-v4-flash' reasons by DEFAULT
-    # (thinking: high) and collapses to empty output; the retired
-    # legacy non-reasoning alias was removed upstream 2026-07-24.
+    # (thinking: high) and collapses to empty output; the legacy
+    # non-reasoning alias was retired upstream 2026-07-24 (still served
+    # during the transition).
     assert body["model"] == "deepseek-v4-flash"
     assert body["thinking"] == {"type": "disabled"}
     assert body["max_tokens"] == 4000
@@ -498,8 +499,8 @@ def test_default_build_uses_nonreasoning_direct_id(monkeypatch):
     TORTOISE_EXTRACT_MODEL unset → 'deepseek/deepseek-v4-flash' — must not
     collapse. The direct route sends 'deepseek-v4-flash' with thinking
     disabled on the wire (sdk._model_adapter and the eval CLI both land
-    here; the retired legacy alias was removed upstream
-    2026-07-24, #1790)."""
+    here; the legacy alias was retired upstream
+    2026-07-24 — still served during the transition, #1790)."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     model = build_extractor_model()
     assert model.provider == "deepseek-direct"
@@ -511,8 +512,8 @@ def test_three_provider_rotation_pool(monkeypatch):
     RotatingModel pool [deepseek-direct, openrouter, venice]. Each lane gets a
     VALID wire id for its provider: venice serves its documented catalog id,
     openrouter needs the family-prefixed id, the direct lane sends the flash
-    id with thinking disabled (#1790 — the retired legacy alias was
-    removed upstream 2026-07-24)."""
+    id with thinking disabled (#1790 — the legacy alias was
+    retired upstream 2026-07-24, still served during the transition)."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     monkeypatch.setenv("VENICE_API_KEY", "vz")

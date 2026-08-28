@@ -704,8 +704,9 @@ def test_probe_max_tokens_above_8k():
 def test_probe_v4_flash_non_thinking():
     """#1787 Task 1 Step 3 — probe deepseek-v4-flash with the production
     config. Post-#1790 the adapter injects ``thinking: {"type": "disabled"}``
-    internally for deepseek-v4-flash (the retired legacy non-reasoning
-    alias was removed upstream 2026-07-24), so this probe
+    internally for deepseek-v4-flash (the legacy non-reasoning alias was
+    retired upstream 2026-07-24 and is still served during the transition),
+    so this probe
     now verifies the PRODUCTION config returns content (anti-collapse
     verification). A collapse under the production config — empty content
     with finish=length (pilot #1549: all tokens spent reasoning unless the
@@ -736,7 +737,7 @@ def test_probe_v4_flash_non_thinking():
     # content for a pure-reasoning response — the pilot #1549 "ZERO content"
     # signature); the AssertionError fires on either.
     if not resp:
-        assert resp and m.last_finish_reason == "stop", (
+        assert resp, (
             f"v4-flash collapsed under thinking:{{\"type\": \"disabled\"}} "
             f"— the adapter's thinking-disable is not effective on the live "
             f"API (finish={m.last_finish_reason!r}, empty content) — "

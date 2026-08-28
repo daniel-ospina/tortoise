@@ -194,6 +194,7 @@ def _patch_urlopen(monkeypatch, captured):
         def __call__(self, req, *a, **kw):
             captured["url"] = getattr(req, "full_url", str(req))
             captured["headers"] = dict(getattr(req, "headers", {}))
+            captured["data"] = req.data
             return _FakeResponse("")
     monkeypatch.setattr(_ur, "urlopen", FakeUrlopen())
     return captured
@@ -210,6 +211,12 @@ def test_llm_classify_deepseek_key_goes_to_deepseek(monkeypatch):
     assert "api.deepseek.com" in captured["url"]
     auth = captured["headers"].get("Authorization", "")
     assert auth == "Bearer sk-deepseek-only"
+    # #1790 gate pin: the DeepSeek direct route must send the flash id with
+    # thinking explicitly disabled (a body-blind regression passes CI green).
+    import json
+    body = json.loads(captured["data"].decode())
+    assert body["model"] == "deepseek-v4-flash"
+    assert body["thinking"] == {"type": "disabled"}
 
 
 def test_llm_classify_openai_key_never_goes_to_deepseek(monkeypatch):
@@ -225,6 +232,12 @@ def test_llm_classify_openai_key_never_goes_to_deepseek(monkeypatch):
     auth = captured["headers"].get("Authorization", "")
     assert auth == "Bearer sk-openai-secret"
     assert "sk-openai-secret" in auth  # the OPENAI key went to OpenAI, nowhere else
+    # #1790 scope-guard pin: thinking-disable is flash-family ONLY — OpenAI
+    # must never receive the unknown thinking param (it would 400).
+    import json
+    body = json.loads(captured["data"].decode())
+    assert body["model"] == "gpt-4o-mini"
+    assert "thinking" not in body
 
 
 def test_llm_classify_both_keys_deepseek_priority(monkeypatch):
