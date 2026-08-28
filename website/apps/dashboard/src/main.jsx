@@ -3763,7 +3763,7 @@ function MemorySources(props) {
         />
         <div className="toggle-body">
           <h4>GitHub issues</h4>
-          <p>Issues become work items with a lifecycle record, plus claims extracted from their content.</p>
+          <p>Issues become work items with a lifecycle record.</p>
           {githubConnected ? (
             <p className="dim small" aria-live="polite">
               {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}

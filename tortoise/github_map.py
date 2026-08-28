@@ -25,6 +25,14 @@ Vocabulary (the #1155 normalization — never drift from this):
   id; the current-statement lookup is externalId + status != terminal,
   NEVER content-hash dedup).
 
+#1844 (object-only): the 1:1 issue↔statement materialization is REMOVED
+from the default ingest path — issues become Object + lifecycle Events +
+Source only (the statement was redundant with the Object, cost the points
+quota, and over-claimed "claims extracted"). ``issue_to_statements`` is a
+DORMANT helper reserved for #1843 (issue impact analysis) — it is no
+longer called by the indexer; the statement machinery (id scheme, props
+contract, versioning) is preserved for that work.
+
 Never emits ``observation`` (removed kind, ONTOLOGY §5) or
 ``github_state`` props (state lives exclusively on ``Object.status`` —
 P2-6 prop contract).
@@ -275,13 +283,17 @@ def issue_to_statements(issue: dict, repo: str, *, version: int = 1,
                         source_url: str | None = None) -> list[dict]:
     """Map a GitHub issue → statement Point records (1:1 issue↔statement).
 
+    DORMANT — reserved for #1843 (issue impact analysis). The default
+    ingest path is OBJECT-ONLY (#1844): the indexer no longer calls this;
+    the machinery is preserved as the basis for the future analyzer.
+
     Each record carries id/content/pointKind/props where props obey the
     P2-6 contract — {externalId, extractedFrom, source, github_repo,
     github_number, github_url} ONLY. Never ``github_state``.
 
-    The caller (indexer) decides the version from the graph (monotonic
-    count of statements with the externalId + 1) and performs the actual
-    SDK write (probe-without-props → create-with-props two-phase).
+    The caller decides the version from the graph (monotonic count of
+    statements with the externalId + 1) and performs the actual SDK write
+    (probe-without-props → create-with-props two-phase).
     """
     n = _norm_issue(issue)
     if not n["title"] or not n["number"]:

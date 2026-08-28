@@ -281,7 +281,8 @@ def test_in_flight_single_flight_reuses(provisioned, mock_github, monkeypatch):
     assert r2.status_code == 200
     assert r2.json()["job_id"] == job_id, "in-flight job must be reused"
     body = _poll_until(provisioned.tc, job_id, "completed")
-    assert body["points_created"] == 2
+    assert body["points_created"] == 0  # object-only (#1844)
+    assert body["events_minted"] == 2   # 2 issues × 1 created event
     assert len(calls) == 1, "concurrent POSTs must spawn exactly ONE run"
 
 
@@ -324,7 +325,8 @@ def test_first_run_single_repo(provisioned, mock_github):
     assert body["repos_total"] == 1
     assert body["repos_processed"] == 1
     # only the first resolved repo was walked (acme/repo1)
-    assert body["points_created"] == 2  # 2 issues × 1 statement
+    assert body["points_created"] == 0  # object-only (#1844): no statement points
+    assert body["events_minted"] == 2   # 2 issues × 1 created event
 
 
 def test_second_run_full_org_with_cursors(provisioned, mock_github):
@@ -339,6 +341,7 @@ def test_second_run_full_org_with_cursors(provisioned, mock_github):
     assert body["repos_processed"] == 2
     # the diff re-run produced 0 new points (cursor-stopped walk)
     assert body["points_created"] == 0
+    assert body["events_minted"] == 0
 
 
 # ── Auto-index after connect (Task 5) ─────────────────────────────
@@ -445,10 +448,14 @@ def test_resolve_repos_404_fails_job(client, tmp_path, monkeypatch):
         "run keeps the ONE-repo bounded first-run pacing (P2, PR #1792)"
 
 
-def test_quota_break_cursor_stamps_truncated(client, tmp_path, monkeypatch):
-    """P2: a quota-interrupted run stamps the persisted cursor `truncated`
-    so the next run stays in DRAIN mode — the unprocessed tail is never
-    silently dropped (a quota break is not a clean window end)."""
+def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
+                                                      monkeypatch):
+    """#1844: issue ingest is OBJECT-ONLY — no statement Points are written,
+    so the points quota gate never fires on a github index run (a 1-point
+    team ingests issues fine; the gate still guards any non-episodic point
+    write — it just never sees one from issues). Pre-change: each issue
+    consumed one statement point, so max_points=1 let exactly one issue
+    through and stamped the cursor truncated on the quota break."""
     _provision(client.db_path, team_id=client.team_id, max_points=1)
     t = MockGitHubTransport(issues=[gh_issue(1), gh_issue(2)])
 
@@ -461,12 +468,15 @@ def test_quota_break_cursor_stamps_truncated(client, tmp_path, monkeypatch):
     r = client.tc.post("/v1/index/github", json={"org": "acme"})
     job_id = r.json()["job_id"]
     body = _poll_until(client.tc, job_id, "completed")
-    assert body["quota_hit"] is True
-    assert body["points_created"] == 1
+    assert body["quota_hit"] is False, \
+        "object-only ingest must not trip the points quota"
+    assert body["points_created"] == 0
+    assert body["events_minted"] == 2, "both issues' lifecycle events minted"
+    assert body["repos_processed"] == 1
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     cursor = state["github_index_cursor"]["acme/repo1"]
-    assert cursor["truncated"] is True, \
-        "quota-break cursor must stay in DRAIN mode"
+    assert "truncated" not in cursor, \
+        "a quota-free run ends with a clean window (no DRAIN flag)"
 
 
 def test_preflight_failure_preserves_persisted_cursors(client, tmp_path,

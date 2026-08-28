@@ -5,12 +5,14 @@ embedded SDK (per-test tmp-path store; server-redirected on the docker
 lane) with a mock GitHub REST transport, and assert the falsification
 targets of the plan:
 
-- re-run ⇒ 0 new nodes + `updatedAt` byte-unchanged (P2-1 two-phase write)
-- edit ⇒ supersede (CORRECTS, bi-temporal validFrom/validTo)
-- close ⇒ Event `github.issue.closed` + Object.status=completed, NO point
-  mutation; reopen ⇒ status open, no CORRECTS
+- #1844 OBJECT-ONLY: issues → Object + lifecycle Events + Subjects, NO
+  statement Points (the 1:1 issue↔statement write is removed from the
+  default ingest path; the machinery is dormant for #1843)
+- re-run ⇒ 0 new nodes of ANY kind (objects/events/subjects) + no
+  updatedAt churn (P2-1 two-phase write is moot — no statements written)
+- close ⇒ Event `github.issue.closed` + Object.status=completed; reopen ⇒
+  status open, no CORRECTS
 - first ingest of an already-closed issue ⇒ `-created` only
-- edit→supersede→revert ⇒ v3 current, no error (P1-2)
 - one-time legacy `-closed` backfill: no double-mint on fresh first-runs
 - `observation` NEVER written (removed kind, ONTOLOGY §5)
 """
@@ -85,124 +87,64 @@ def test_fetch_pins_sort_updated_desc(sdk):
     assert params[0]["state"] == "all"
 
 
-# ── Phase 2: statement writes ─────────────────────────────────────
+# ── Phase 2: object-only writes (#1844) ──────────────────────────
 
-def test_index_creates_statement_points_not_observations(sdk):
+def test_index_creates_objects_and_events_only(sdk):
+    """#1844: issues → Object + lifecycle Event + Subjects, NO statement
+    Points (the 1:1 statement write is gone from the default ingest path;
+    the mapper helper stays dormant for #1843)."""
     t = MockGitHubTransport(issues=[gh_issue(1), gh_issue(2)])
     stats = _run(_indexer(t), sdk)
-    assert stats["points_created"] == 2
-    rows = sdk._get_proj().g.query(
-        "MATCH (n:Point) RETURN n.pointKind"
-    ).result_set
-    kinds = {r[0] for r in rows}
-    assert kinds == {"statement"}
-    assert "observation" not in kinds
-    # statement props contract: externalId present, github_state absent
-    rows = sdk._get_proj().g.query(
-        "MATCH (n:Point {externalId:'github:issue:acme/repo1#1'}) "
-        "RETURN n.github_state, n.extractedFrom"
-    ).result_set
-    assert rows and rows[0][0] is None
-    assert rows[0][1] == "https://github.com/acme/repo1/issues/1"
+    assert stats["points_created"] == 0
+    assert stats["statements_superseded"] == 0
+    proj = sdk._get_proj()
+    rows = proj.g.query("MATCH (n:Point) RETURN n.pointKind").result_set
+    assert rows == [], "the default ingest path must write NO statement points"
+    assert "observation" not in [r[0] for r in rows]
+    # Object + Event + Subject nodes materialized (the object-only path).
+    # Subject count is scoped to the mapper's github-user:* nodes — the
+    # projection also mints an Event-derived Subject per lifecycle event.
+    assert proj.g.query("MATCH (o:Object) RETURN count(o)").result_set[0][0] == 2
+    assert proj.g.query("MATCH (e:Event) RETURN count(e)").result_set[0][0] == 2
+    rows = proj.g.query("MATCH (s:Subject) RETURN s.id").result_set
+    assert sorted(r[0] for r in rows
+                  if str(r[0]).startswith("github-user:")) == [
+        "github-user:user1", "github-user:user2"]
 
 
-def test_rerun_zero_new_nodes_and_no_updatedat_churn(sdk):
-    """Falsification (a) + P2-1: unchanged re-run ⇒ 0 new nodes AND the
-    existing statement's updatedAt is byte-unchanged."""
+def test_rerun_zero_new_nodes(sdk):
+    """Falsification (a) + #1844: unchanged re-run ⇒ 0 NEW nodes of any
+    kind — no statement points (never written) and no duplicate
+    objects/events/subjects."""
     t = MockGitHubTransport(issues=[gh_issue(1)])
     stats1 = _run(_indexer(t), sdk)
-    assert stats1["points_created"] == 1
+    assert stats1["points_created"] == 0
     proj = sdk._get_proj()
-    updated_before = proj.g.query(
-        "MATCH (n:Point {externalId:'github:issue:acme/repo1#1'}) "
-        "RETURN n.updatedAt"
-    ).result_set[0][0]
+
+    def _counts():
+        return (
+            proj.g.query("MATCH (n:Object) RETURN count(n)").result_set[0][0],
+            proj.g.query("MATCH (n:Event) RETURN count(n)").result_set[0][0],
+            proj.g.query("MATCH (n:Subject) RETURN count(n)").result_set[0][0],
+            proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0],
+        )
+
+    before = _counts()
     stats2 = _run(_indexer(t), sdk)
     assert stats2["points_created"] == 0
     assert stats2["statements_superseded"] == 0
-    assert sdk._get_proj().g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 1
-    updated_after = proj.g.query(
-        "MATCH (n:Point {externalId:'github:issue:acme/repo1#1'}) "
-        "RETURN n.updatedAt"
-    ).result_set[0][0]
-    assert updated_after == updated_before, "updatedAt must be byte-unchanged on re-run"
-
-
-def test_edit_supersedes_with_corrects_and_bitemporal(sdk):
-    t = MockGitHubTransport(issues=[gh_issue(1)])
-    _run(_indexer(t), sdk)
-    # edit: same issue, changed body
-    t.issues_by_repo["acme/repo1"] = [gh_issue(1, body="The bug moved to the lexer.")]
-    stats = _run(_indexer(t), sdk)
-    assert stats["points_created"] == 1
-    assert stats["statements_superseded"] == 1
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (n:Point {pointKind:'statement'}) "
-        "WHERE n.externalId = 'github:issue:acme/repo1#1' "
-        "RETURN n.id, n.status ORDER BY n.createdAt"
-    ).result_set
-    assert len(rows) == 2
-    v1_id, v1_status = rows[0]
-    v2_id, v2_status = rows[1]
-    assert v1_id.endswith("_1") and v2_id.endswith("_2")
-    assert v1_status == "superseded"
-    assert v2_status not in ("superseded", "retracted", "archived"), \
-        "the successor must be the current (non-terminal) statement"
-    # CORRECTS edge: (v2)-[:CORRECTS]->(v1)
-    rows = proj.g.query(
-        "MATCH (a:Point {id:$new})-[:CORRECTS]->(b:Point {id:$old}) "
-        "RETURN b.validTo, a.validFrom, b.outdated",
-        params={"new": v2_id, "old": v1_id},
-    ).result_set
-    assert rows, "CORRECTS edge missing"
-    valid_to, valid_from, outdated = rows[0]
-    assert valid_to is not None and valid_from is not None
-    assert outdated is True
-
-
-def test_edit_supersede_revert_v3_current(sdk):
-    """P1-2: edit→supersede→revert ⇒ v3 current, no error — a revert NEVER
-    reuses the superseded v1 id."""
-    t = MockGitHubTransport(issues=[gh_issue(1)])
-    _run(_indexer(t), sdk)
-    edited = gh_issue(1, body="Edited body.")
-    t.issues_by_repo["acme/repo1"] = [edited]
-    _run(_indexer(t), sdk)
-    # revert to the original content
-    t.issues_by_repo["acme/repo1"] = [gh_issue(1)]
-    stats = _run(_indexer(t), sdk)
-    assert stats["points_created"] == 1
-    assert stats["statements_superseded"] == 1
-    proj = sdk._get_proj()
-    rows = proj.g.query(
-        "MATCH (n:Point) WHERE n.externalId = 'github:issue:acme/repo1#1' "
-        "RETURN n.id, n.status ORDER BY n.createdAt"
-    ).result_set
-    assert [r[1] for r in rows] == ["superseded", "superseded",
-                                    "draft"], "v3 is current (draft, non-terminal)"
-    assert [r[0][-1] for r in rows] == ["1", "2", "3"], "v3 must be current"
-    # current truth = v3 (content-identical to v1 but a fresh id)
-    current = proj.g.query(
-        "MATCH (n:Point {externalId:'github:issue:acme/repo1#1'}) "
-        "WHERE n.status IS NULL OR NOT (n.status IN ['superseded','retracted','archived']) "
-        "RETURN n.id"
-    ).result_set
-    assert [r[0] for r in current] == [rows[2][0]]
+    assert _counts() == before, "re-run must create 0 new nodes of any kind"
 
 
 # ── Lifecycle decision table ──────────────────────────────────────
 
-def test_close_event_no_point_mutation(sdk):
+def test_close_event_and_object_status(sdk):
     """close ⇒ Event github.issue.closed + Object.status=completed; the
-    statement point is content/status-UNTOUCHED (no CORRECTS, no mutation)."""
+    #1844 object-only path writes NO statement points (nothing to mutate,
+    no CORRECTS)."""
     t = MockGitHubTransport(issues=[gh_issue(1)])
     _run(_indexer(t), sdk)
     proj = sdk._get_proj()
-    stmt_before = proj.g.query(
-        "MATCH (n:Point {externalId:'github:issue:acme/repo1#1'}) "
-        "RETURN n.id, n.content, n.status, n.updatedAt"
-    ).result_set[0]
     # close the issue
     closed = gh_issue(1, state="closed", closed_at="2026-07-20T08:00:00Z",
                       updated_at="2026-07-20T08:00:00Z")
@@ -217,16 +159,12 @@ def test_close_event_no_point_mutation(sdk):
     ).result_set
     assert [tuple(r) for r in rows] == [
         ("github-issue-acme/repo1-1-closed", "github.issue.closed")]
-    # Object.status projection ONLY — point untouched
+    # Object.status projection ONLY — no points exist to mutate
     status = proj.g.query(
         "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.status"
     ).result_set[0][0]
     assert status == "completed"
-    stmt_after = proj.g.query(
-        "MATCH (n:Point {externalId:'github:issue:acme/repo1#1'}) "
-        "RETURN n.id, n.content, n.status, n.updatedAt"
-    ).result_set[0]
-    assert stmt_after == stmt_before, "close must NOT mutate the statement point"
+    assert proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
 
 
 def test_reopen_status_open_no_corrects(sdk):
@@ -252,7 +190,8 @@ def test_reopen_status_open_no_corrects(sdk):
         "MATCH (o:Object {id:'github-issue-acme/repo1-1'}) RETURN o.status"
     ).result_set[0][0]
     assert status == "in_progress"
-    # reopen must never CORRECTS a statement point
+    # object-only (#1844): no statement points exist, so reopen can never
+    # CORRECTS anything
     assert proj.g.query("MATCH ()-[r:CORRECTS]->() RETURN count(r)").result_set[0][0] == 0
 
 
@@ -474,17 +413,19 @@ def test_drain_mode_drains_backlog_across_runs(sdk):
     # remaining 100 (the pre-fix oscillation never reached them)
     stats2 = _run(_indexer(t), sdk, cursor=stats1["cursor"], cap=500)
     assert stats2["processed"] == 100
-    assert stats2["points_created"] == 100
+    assert stats2["points_created"] == 0  # object-only (#1844): no statement points
     assert stats2["cursor"].get("truncated") is None  # clean window end
-    # the FULL backlog is indexed across the two runs
+    # the FULL backlog is indexed across the two runs (Objects + Events)
     assert sdk._get_proj().g.query(
-        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 600
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 600
+    assert sdk._get_proj().g.query(
+        "MATCH (e:Event) RETURN count(e)").result_set[0][0] == 600
     # run 3 (DIFF): idempotent — nothing NEW (re-fetched boundary items
     # are probes, zero writes)
     stats3 = _run(_indexer(t), sdk, cursor=stats2["cursor"], cap=500)
     assert stats3["points_created"] == 0
     assert sdk._get_proj().g.query(
-        "MATCH (n:Point) RETURN count(n)").result_set[0][0] == 600
+        "MATCH (n:Object) RETURN count(n)").result_set[0][0] == 600
 
 
 # ── P2 (PR #1792): indexer-level honesty ─────────────────────────────
@@ -578,11 +519,11 @@ def test_cursor_same_second_boundary(sdk):
     # the cursor-pinned one (same second, ≤ number) must be skipped.
     stats2 = _run(_indexer(t), sdk, cursor=stats1["cursor"], cap=1)
     assert stats2["processed"] == 1
-    assert sdk._get_proj().g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 2
+    assert sdk._get_proj().g.query("MATCH (n:Object) RETURN count(n)").result_set[0][0] == 2
     # run 3: nothing left — the boundary was indexed exactly once each
     stats3 = _run(_indexer(t), sdk, cursor=stats2["cursor"])
     assert stats3["processed"] == 0
-    assert sdk._get_proj().g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 2
+    assert sdk._get_proj().g.query("MATCH (n:Object) RETURN count(n)").result_set[0][0] == 2
 
 
 def test_truncation_reports_issues_beyond_window(sdk):
@@ -607,7 +548,10 @@ def test_mid_walk_401_honest_fail(sdk):
     assert "401" in str(ei.value)
     assert "auth failed" in str(ei.value).lower()
     # nothing was written (the walk failed on the first request)
-    assert sdk._get_proj().g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
+    proj = sdk._get_proj()
+    assert proj.g.query("MATCH (n:Object) RETURN count(n)").result_set[0][0] == 0
+    assert proj.g.query("MATCH (n:Event) RETURN count(n)").result_set[0][0] == 0
+    assert proj.g.query("MATCH (n:Point) RETURN count(n)").result_set[0][0] == 0
 
 
 def test_fetch_error_raises_for_transport(monkeypatch):
@@ -639,7 +583,7 @@ def test_fetch_error_raises_for_transport(monkeypatch):
 def test_pr_events_minted(sdk):
     t = MockGitHubTransport(issues=[gh_issue(1), gh_pr(7)])
     stats = _run(_indexer(t), sdk)
-    assert stats["points_created"] == 1  # PRs get events only, no statements
+    assert stats["points_created"] == 0  # object-only (#1844): no statement points
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (e:Event {eventId:'github-pr-acme/repo1-7'}) RETURN e.eventKind"

@@ -4,6 +4,11 @@ Pure unit tests — no DB, no SDK. Pins the SINGLE eventId/eventKind
 vocabulary (the #1155 normalization), the statement prop contract
 (P2-6: never ``github_state``), monotonic version ids (P1-2), and
 gh-CLI/REST shape equivalence.
+
+#1844 (object-only): the statement tests below pin the mapper helper that
+is now DORMANT — ``issue_to_statements`` is reserved for #1843 (issue
+impact analysis) and is no longer called by the default ingest path. The
+unit tests stay as the contract for the future analyzer.
 """
 from __future__ import annotations
 
@@ -125,7 +130,11 @@ def test_issue_to_subjects_null_author_ok():
     assert about_ids == []
 
 
-# ── Statements ─────────────────────────────────────────────────────
+# ── Statements (DORMANT — reserved for #1843) ─────────────────────
+# #1844 object-only: the default ingest path no longer writes statement
+# Points; ``issue_to_statements`` is kept as the dormant basis for #1843
+# (issue impact analysis). These unit tests pin that helper's contract
+# (id scheme, props contract, versioning) for the future analyzer.
 
 def test_statement_external_id_unique_per_issue():
     s1 = gm.issue_to_statements(REST_ISSUE, "test/repo", version=1)
