@@ -88,6 +88,9 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_writer_inventory.py": {"registry": "prod-coupled"},
     "test_session_key_http.py": {"registry": "prod-coupled"},
     "test_signup_token_revoke.py": {"registry": "prod-coupled"},
+    "test_suspension_parity.py": {
+        "registry": "prod-coupled", "reg-team-1": "team-identity",
+    },
     "test_billing_upgrade.py": {"registry": "prod-coupled"},
     # e2e-900 (cycle-4 P2-7 / cycle-5 P1-5): the SHARED non-test team_e2e-900
     # graph of the index suite — routed by REDIRECT DERIVATION, not rename:
