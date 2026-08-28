@@ -352,13 +352,18 @@ class TestGitHubBranches:
         async def fake_list(self, repo):
             return ["main", "dev", "feature/x"]
 
+        async def fake_default(self, repo):
+            return "main"
+
         monkeypatch.setattr(GitHubIndexer, "list_branches", fake_list)
+        monkeypatch.setattr(GitHubIndexer, "default_branch", fake_default)
         r = client.get("/v1/onboarding/github/branches?repo=repo1")
         assert r.status_code == 200
         body = r.json()
         assert body["connected"] is True
         assert body["repo"] == "repo1"
         assert body["branches"] == ["main", "dev", "feature/x"]
+        assert body["default_branch"] == "main"
 
     def test_branches_failure_is_empty_not_500(self, client, monkeypatch):
         """A branch-list failure degrades to an EMPTY list (the picker
@@ -373,7 +378,12 @@ class TestGitHubBranches:
         async def fake_list(self, repo):
             raise GitHubFetchError("boom")
 
+        async def fake_default(self, repo):
+            return "main"
+
         monkeypatch.setattr(GitHubIndexer, "list_branches", fake_list)
+        monkeypatch.setattr(GitHubIndexer, "default_branch", fake_default)
         r = client.get("/v1/onboarding/github/branches?repo=repo1")
         assert r.status_code == 200
         assert r.json()["branches"] == []
+        assert r.json()["default_branch"] == "main"
