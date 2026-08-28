@@ -18,7 +18,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useEditor, EditorContent } from '@tiptap/react';
-import { Save, Loader2, ArrowLeft, ExternalLink, Upload, X, MessageSquareWarning } from 'lucide-react';
+import { Save, Loader2, ArrowLeft, ExternalLink, Upload, X, MessageSquareWarning, Sparkles, ImageIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
@@ -37,7 +37,7 @@ import { useHashRoute, navigate } from '@/hooks/useHashRoute';
 import { wasAbandoned, resetAbandoned } from '@/lib/unsaved-guard';
 import {
   getPost, uploadBlogImage, deleteBlogImage, updatePost,
-  isValidSlug, tagsError,
+  isValidSlug, tagsError, parseTags, generateSeo, generateCover,
   type BlogPostRow,
 } from '@/lib/blog-api';
 import { createSaveHandler } from '@/lib/save';
@@ -66,6 +66,13 @@ const INITIAL_FORM: PostFormData = {
   meta_description: '',
   hold_for_review: false,
 };
+
+/** Human-readable cost for generation toasts (e.g. "~$0.001"). */
+function formatCost(cost: number): string {
+  if (!cost || cost <= 0) return '~$0.00';
+  if (cost < 0.01) return `~$${cost.toFixed(4)}`;
+  return `~$${cost.toFixed(3)}`;
+}
 
 function slugify(text: string): string {
   return text
@@ -256,6 +263,8 @@ export default function PostEditor() {
         userId: session.user.id,
         isNew,
         id,
+        // #1865: draft-save on a published post = unpublish → purge edge cache
+        wasPublished: existingPost?.status === 'published',
       }))(mode);
     },
     onSuccess: (savedId) => {
@@ -337,6 +346,57 @@ export default function PostEditor() {
       toast.success('Review note cleared');
     },
     onError: () => toast.error('Failed to clear review note'),
+  });
+
+  // ── AI generation (#1861 SEO fields, #1863 cover) ───────────────────────
+  // Fields ARE the review surface (owner decision 2026-08-28): generation
+  // fills the editable form fields in-place; the user reviews there before
+  // publishing. No blocking dialog. Generation never blocks save.
+  const generateSeoMutation = useMutation({
+    mutationFn: async () => {
+      const body = editorRef.current ? editorToMarkdown(editorRef.current) : '';
+      return generateSeo({
+        title: formRef.current.title,
+        body,
+        tags: parseTags(formRef.current.tags),
+      });
+    },
+    onSuccess: (result) => {
+      // slug: only fill on NEW posts and only if the user hasn't typed one
+      if (isNew && !slugTouched.current) {
+        updateField('slug', result.slug);
+        slugTouched.current = true;
+      }
+      updateField('excerpt', result.excerpt);
+      updateField('tags', result.tags.join(', '));
+      updateField('meta_title', result.meta_title);
+      updateField('meta_description', result.meta_description);
+      setDirty(true);
+      toast.success(`SEO fields generated (${formatCost(result.cost_estimate)})`);
+    },
+    onError: (err) => {
+      toast.error(`SEO generation failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    },
+  });
+
+  const [coverMode, setCoverMode] = useState<'founder' | 'abstract'>('founder');
+  const generateCoverMutation = useMutation({
+    mutationFn: async () => {
+      return generateCover({
+        title: formRef.current.title,
+        tags: parseTags(formRef.current.tags),
+        mode: coverMode,
+        slug: formRef.current.slug || undefined,
+      });
+    },
+    onSuccess: (result) => {
+      updateField('cover_image_url', result.image_url);
+      setDirty(true);
+      toast.success(`Cover generated (${result.mode}, ${formatCost(result.cost_estimate)})`);
+    },
+    onError: (err) => {
+      toast.error(`Cover generation failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    },
   });
 
   if (loadingPost) {
@@ -485,6 +545,26 @@ export default function PostEditor() {
               <span className="text-xs text-muted-foreground">Overrides default title/description</span>
             </div>
             <div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full"
+                disabled={generateSeoMutation.isPending || isArchived}
+                onClick={() => generateSeoMutation.mutate()}
+              >
+                {generateSeoMutation.isPending ? (
+                  <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5 mr-1" />
+                )}
+                {generateSeoMutation.isPending ? 'Generating…' : 'Generate SEO fields'}
+              </Button>
+              <p className="text-xs text-muted-foreground mt-1">
+                AI fills slug (new posts), excerpt, tags, meta title & description from the article. Review and edit here before publishing.
+              </p>
+            </div>
+            <div>
               <Label htmlFor="meta_title">Meta Title</Label>
               <Input
                 id="meta_title"
@@ -553,6 +633,44 @@ export default function PostEditor() {
                 {uploadingCover ? 'Uploading...' : 'Upload cover'}
               </Button>
               <p className="text-xs text-muted-foreground mt-1">JPEG/PNG/WebP, max 5MB. Used as OG image.</p>
+            </div>
+            <div className="pt-1 border-t border-border">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-xs text-muted-foreground">Style</span>
+                <div className="flex rounded-md border border-border overflow-hidden text-xs">
+                  <button
+                    type="button"
+                    onClick={() => setCoverMode('founder')}
+                    disabled={isArchived || generateCoverMutation.isPending}
+                    className={`px-2 py-1 ${coverMode === 'founder' ? 'bg-primary text-primary-foreground' : 'hover:bg-secondary'}`}
+                  >
+                    Founder
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCoverMode('abstract')}
+                    disabled={isArchived || generateCoverMutation.isPending}
+                    className={`px-2 py-1 ${coverMode === 'abstract' ? 'bg-primary text-primary-foreground' : 'hover:bg-secondary'}`}
+                  >
+                    Abstract
+                  </button>
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="w-full"
+                disabled={generateCoverMutation.isPending || isArchived}
+                onClick={() => generateCoverMutation.mutate()}
+              >
+                {generateCoverMutation.isPending ? (
+                  <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                ) : (
+                  <ImageIcon className="w-3.5 h-3.5 mr-1" />
+                )}
+                {generateCoverMutation.isPending ? 'Generating…' : form.cover_image_url ? 'Regenerate cover' : 'Generate cover'}
+              </Button>
             </div>
           </Card>
 
