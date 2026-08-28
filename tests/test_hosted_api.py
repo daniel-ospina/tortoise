@@ -131,7 +131,26 @@ def _restore_tortoise_sdk_init(original_init):
     # this, a stale anchor bound to this test's temp DB leaks into the next
     # test file's run (dead socket / stale rows) — the #1497 pattern from
     # test_writer_inventory.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
+    #
+    # #1950: clearing ALONE leaked the anchored SDKs — the redislite daemon
+    # stays alive until its last connection is GC'd (nondeterministic), so a
+    # later test whose tempdir reuses the same path hits EmbeddedStoreBusyError
+    # and a mid-test anchor eviction can tear the daemon down between a
+    # consent seed and the gate read (intermittent 403). Close the anchors
+    # deterministically (redislite SHUTDOWN SAVE) before dropping the dict.
+    _close_keepalive_anchors(ha_mod)
+
+
+def _close_keepalive_anchors(ha_mod) -> None:
+    """Close every _FALLBACK_KEEPALIVE anchor, then drop the dict."""
+    keepalive = ha_mod._FALLBACK_KEEPALIVE
+    for ns in list(keepalive):
+        anchor = keepalive.pop(ns, None)
+        if anchor is not None:
+            try:  # noqa: SIM105
+                anchor.close()
+            except Exception:
+                pass
 
 
 @pytest.fixture
@@ -153,6 +172,12 @@ def client():
 
         # Patch SDK to use temp DB file
         _orig_init = _patch_tortoise_sdk_init(db_path)
+        # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+        # forces, so _make_sdk's keepalive anchor path matches and the anchor
+        # is REUSED instead of evicted + closed on every registry access (each
+        # eviction shut the redislite daemon down mid-test, losing the consent
+        # seed between this fixture's write and the gate read → 403).
+        os.environ["TORTOISE_DB_PATH"] = db_path
         import tortoise.hosted_api as ha_mod
         # #1727 (Slice 2, Task 11): provision the Team node first (the state
         # writer is MATCH...SET — a silent no-op without it), then opt the
@@ -161,12 +186,21 @@ def client():
             "CREATE (t:Team {id:$id, onboarding_state:$st})",
             params={"id": TEST_TEAM_ID, "st": "{}"},
         )
-        ha_mod._update_onboarding_state(TEST_TEAM_ID, session_recording=True)
+        state = ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=True)
+        # #1950: self-verify the consent seed — if the write silently no-ops,
+        # every session-capture test 403s downstream; fail loud HERE with the
+        # actual persisted state instead.
+        assert state.get("session_recording") is True, state
+        assert ha_mod._get_onboarding_state(TEST_TEAM_ID).get(
+            "session_recording") is True, \
+            "consent seed not visible to the gate read"
 
         try:
             with TestClient(app) as tc:
                 yield tc
         finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
 

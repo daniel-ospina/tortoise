@@ -1721,6 +1721,25 @@ def _patch_sdk_to_temp(tmp_path):
     return orig_init
 
 
+def _close_keepalive_anchors() -> None:
+    """#1950: close every _FALLBACK_KEEPALIVE anchor, then drop the dict.
+
+    Clearing the dict ALONE leaked the anchored SDKs — the redislite daemon
+    keeps running until its last connection is GC'd (nondeterministic), so a
+    later test whose tempdir reuses the same path hits EmbeddedStoreBusyError
+    and, worse, a mid-test anchor eviction can tear the daemon down between a
+    consent seed and the gate read. Closing here makes shutdown deterministic
+    (redislite SHUTDOWN SAVE) before the next test starts.
+    """
+    for ns in list(_ha._FALLBACK_KEEPALIVE):
+        anchor = _ha._FALLBACK_KEEPALIVE.pop(ns, None)
+        if anchor is not None:
+            try:  # noqa: SIM105
+                anchor.close()
+            except Exception:
+                pass
+
+
 @pytest.fixture()
 def consent_client(tmp_path, monkeypatch):
     """Hosted TestClient for the consent/harness/receipt surface.
@@ -1735,6 +1754,12 @@ def consent_client(tmp_path, monkeypatch):
     _ha._FALLBACK_KEEPALIVE.clear()
     app.dependency_overrides[get_current_team] = lambda: dict(_CONSENT_TEAM)
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+    # forces, so _make_sdk's keepalive anchor path matches and the anchor is
+    # REUSED instead of evicted + closed on every registry access (each
+    # eviction shut the redislite daemon down mid-test, losing the consent
+    # write between seed and gate read → intermittent 403).
+    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "c.db"))
     _provision_team(_CONSENT_TEAM["team_id"])
     try:
         with TestClient(app) as tc:
@@ -1742,6 +1767,7 @@ def consent_client(tmp_path, monkeypatch):
     finally:
         app.dependency_overrides.clear()
         _ha.TortoiseSDK.__init__ = orig_init
+        _close_keepalive_anchors()
         _ha._FALLBACK_KEEPALIVE.clear()
 
 
@@ -1755,6 +1781,14 @@ def _provision_team(team_id: str) -> None:
 
 def _opt_in(team_id: str = _CONSENT_TEAM["team_id"], enabled: bool = True):
     _ha._update_onboarding_state(team_id, session_recording=enabled)
+    # #1950: self-verify — read back through the same registry path the
+    # consent gate uses. A silently-no-op seed would surface as a confusing
+    # 403 downstream; fail loud HERE with the actual persisted state.
+    readback = _ha._get_onboarding_state(team_id)
+    assert readback.get("session_recording") is enabled, (
+        f"consent seed not visible to gate read (team={team_id}): {readback}"
+    )
+    return readback
 
 
 def _state(team_id: str = _CONSENT_TEAM["team_id"]) -> dict:
