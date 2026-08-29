@@ -128,6 +128,15 @@ def _wire(page: Page, *, inv: dict | None = None,
         if "api.premiselabs.co" not in url:
             route.continue_()
             return
+        if path.endswith("/v1/onboarding/state") and method == "GET":
+            # #1877/#1885: the shell calls this FIRST (re-fired per #1847).
+            # Returning test users are ONBOARDED — onboarding_complete:true
+            # keeps the shell in the normal dashboard state (a falsy
+            # onboarding dict re-triggers the setup wizard, no dashboard
+            # mint, blob "No team").
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+            return
         if path.endswith("/v1/user/identity") and method == "GET":
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps(inventory_payload()))
@@ -451,3 +460,154 @@ def test_unlink_confirm_flow(page: Page):
     # post-refetch: 2 methods → 2 Remove buttons (the drop is observable)
     expect(page.get_by_role("button", name="Remove", exact=True)).to_have_count(2)
     assert len(unlink_calls) == 1, "unlink POST must fire after confirm"
+
+
+def test_create_team_success(page: Page):
+    """#1877: the menu entry is visible for a SINGLE-team user; the dialog
+    creates a team and the dashboard switches to it."""
+    _seed(page)
+    teams = [{"team_id": "team_e2e", "team_name": "E2E", "tier": "free"}]
+    _wire(page, inv=_inventory(login_methods=1), teams=teams)
+
+    def handle_create(route):
+        # Tight path match (the loadTeams GET + the create POST); NEVER
+        # continue_() — the handler-chain fall-through hangs in this
+        # Playwright build (the #1874 gotcha). /v1/teams/{id}/members etc.
+        # don't match the exact path and fall to _wire directly.
+        path = route.request.url.split("?", 1)[0]
+        if path.endswith("/v1/teams"):
+            if route.request.method == "POST":
+                name = (json.loads(route.request.post_data or "{}").get("name") or "newteam")
+                teams.append({"team_id": "team_new", "team_name": name, "tier": "free"})
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"team_id": "team_new", "graph_name": "team_new",
+                                               "tier": "free", "name": name}))
+            else:
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(teams))
+            return
+        route.continue_()
+    page.route("**/v1/teams", handle_create)
+
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    menu = page.locator(".account-menu")
+    expect(menu.get_by_role("button", name="+ Create new team")).to_be_visible()
+    expect(menu.get_by_text("Switch team")).to_have_count(0)  # single-team: no switch label
+    menu.get_by_role("button", name="+ Create new team").click(force=True)  # menu closes + dialog opens → unmounts
+    expect(page.get_by_role("dialog", name="Create a new team")).to_be_visible()
+    # validation mirrors the API (spaces rejected) — inline error, no POST
+    page.get_by_label("Team name").fill("bad name")
+    page.locator(".modal .btn-primary").click(force=True)
+    expect(page.locator(".modal")).to_contain_text("Invalid team name", timeout=10000)
+    page.get_by_label("Team name").fill("newteam")
+    page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render detaches the name-changed button
+    # the dashboard switches to the new team (the blob shows its name)
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("newteam", timeout=15000)
+
+
+def test_create_team_free_capped_gate(page: Page):
+    """#1877: a 402 from POST /v1/teams surfaces the gated-on-click upgrade
+    UX in the dialog (message + Upgrade CTA landing on Billing)."""
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+
+    def handle_create(route):
+        # Same tight-path + no-continue pattern as test_create_team_success
+        # (the handler-chain fall-through hangs in this Playwright build).
+        path = route.request.url.split("?", 1)[0]
+        if path.endswith("/v1/teams"):
+            if route.request.method == "POST":
+                route.fulfill(status=402, content_type="application/json",
+                              body=json.dumps({"detail": "Create another team requires a "
+                                                         "paid plan — upgrade an existing team first"}))
+            else:
+                # default single-team fixture shape (this test uses _wire's default)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([{"team_id": "team_e2e", "team_name": "E2E",
+                                                "tier": "free"}]))
+            return
+        route.continue_()
+    page.route("**/v1/teams", handle_create)
+
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    page.locator(".account-menu").get_by_role("button", name="+ Create new team").click(force=True)  # menu closes → unmounts
+    page.get_by_label("Team name").fill("blocked")
+    page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render
+    dialog = page.get_by_role("dialog", name="Create a new team")
+    expect(dialog).to_contain_text("upgrade an existing team", timeout=15000)
+    expect(dialog.get_by_role("button", name="Upgrade")).to_be_visible()
+    dialog.get_by_role("button", name="Upgrade").click()
+    expect(page.get_by_role("heading", name="Billing")).to_be_visible()
+
+
+def test_pending_invites_accept_lands_on_team(page: Page):
+    """#1875 review P2: accept-from-list lands on the team (switchTeam)."""
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+    invites = [{"invitation_id": "inv-1", "team_id": "team_e2e", "team_name": "Bravo",
+                "role": "member", "inviter_email": "owner@example.com", "expires_at": None}]
+
+    def handle(route):
+        url = route.request.url
+        path = url.split("?", 1)[0]
+        if path.endswith("/v1/invites/pending") and route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"invites": invites}))
+            return
+        if "/accept" in path and route.request.method == "POST":
+            invites.clear()
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"team_id": "team_e2e", "role": "member"}))
+            return
+        route.continue_()
+    page.route("**/v1/invites/pending**", handle)
+
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    page.locator(".account-menu").get_by_role("button", name="Accept").click()
+    # the dashboard switches to the invited team (the blob shows E2E) and the
+    # menu closes (account-menu no longer visible)
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("E2E", timeout=15000)
+    expect(page.locator(".account-menu")).to_have_count(0)
+
+
+def test_pending_invites_in_menu(page: Page):
+    """#1875: pending invites render in the account menu; Decline removes
+    them; empty state hides the section."""
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+    invites = [{"invitation_id": "inv-1", "team_id": "team_e2e", "team_name": "Bravo",
+                "role": "member", "inviter_email": "owner@example.com", "expires_at": None}]
+
+    def handle(route):
+        url = route.request.url
+        path = url.split("?", 1)[0]
+        if path.endswith("/v1/invites/pending") and route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"invites": invites}))
+            return
+        if "/accept" in path and route.request.method == "POST":
+            invites.clear()  # consumed
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"team_id": "team_e2e", "role": "member"}))
+            return
+        if path.endswith("/v1/invites/pending") is False and \
+                "/v1/invites/pending/" in path and route.request.method == "DELETE":
+            invites.clear()
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"revoked": True}))
+            return
+        route.continue_()
+    page.route("**/v1/invites/pending**", handle)
+
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    menu = page.locator(".account-menu")
+    expect(menu).to_contain_text("Invites")
+    expect(menu).to_contain_text("Bravo")
+    # Decline removes the invite + the section hides
+    menu.get_by_role("button", name="Decline").click()
+    expect(menu.get_by_text("Invites")).to_have_count(0)
+    expect(menu.get_by_text("Bravo")).to_have_count(0)

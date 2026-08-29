@@ -2441,14 +2441,11 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     """Toggle automatic session recording for this team (Q3 / dashboard
     Memory sources sessions toggle).
 
-    #1728 Slice 3 (single consent source): writes the SAME consent keys as
-    the wizard's sessions toggle — the enforced ``session_recording`` flag
-    (the data-plane consent gate, checked by POST /v1/sessions and
-    tortoise_session_capture) + ``capture_revised`` (a user-initiated
-    enable/disable is an explicit decision, so it always resolves the
-    exactly-once re-ask). A stdio/self-hosted user who declined can
-    re-enable here REGARDLESS of ``capture_revised`` — the write is never
-    skipped."""
+    #1927: session_recording is the OPTIONAL OFF-SWITCH (default ON,
+    ToS-covered) — not a consent gate. The write flips the flag the capture
+    pipeline checks (409 when off); ``capture_revised`` is written for
+    backward-compatibility with the registered state keys (the exactly-once
+    re-ask machinery it fed was removed with the gate)."""
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
@@ -2519,10 +2516,10 @@ def tortoise_onboarding_github_status() -> dict:
 # Claude Web (and every harness with an MCP surface) files sessions through
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
-# gate order: server-enforced consent 403 FIRST → empty 422 → provider 503 →
+# gate order: session_recording opt-out 409 FIRST → empty 422 → provider 503 →
 # quota 402. Stdio/self-host returns an honest "requires hosted mode" error —
-# there is deliberately NO local fallback that bypasses the consent gate
-# (P0: a prompt-injection exfiltration surface must not exist).
+# there is deliberately NO local fallback that bypasses the capture pipeline
+# (a prompt-injection exfiltration surface must not exist).
 
 
 def tortoise_session_capture(conversation: list[dict],
@@ -2531,21 +2528,21 @@ def tortoise_session_capture(conversation: list[dict],
     """File an agent session into the graph (T3 workflows prompt surface).
 
     Server-enforced gates (identical to POST /v1/sessions): the team's
-    ``session_recording`` consent flag is checked FIRST (403 when not
-    enabled), then the provider 503 / quota 402 / empty-422 gates. Returns
-    the capture result on success, or an honest error dict on failure (the
-    per-harness last-error state key is recorded on non-2xx, cleared on 2xx
-    — same receipt semantics as the REST path).
+    ``session_recording`` opt-out flag is checked FIRST (409 when disabled),
+    then the provider 503 / quota 402 / empty-422 gates. Returns the capture
+    result on success, or an honest error dict on failure (the per-harness
+    last-error state key is recorded on non-2xx, cleared on 2xx — same
+    receipt semantics as the REST path).
     """
     from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits  # noqa: I001
     team_id = _current_team_id.get()
     if not team_id or team_id == SELFHOST_TEAM_ID:
-        # stdio / self-host HTTP: no tenant consent plane, no receipts — the
+        # stdio / self-host HTTP: no hosted state plane, no receipts — the
         # honest error (matching the onboarding-tool precedent), never a
-        # local fallback that bypasses the 403/402/503 gates.
+        # local fallback that bypasses the 409/402/503 gates.
         return {"error": "session capture requires hosted mode — the "
                           "tortoise_session_capture tool files to Tortoise "
-                          "Cloud (server-enforced consent + receipts); "
+                          "Cloud (server-enforced recording + receipts); "
                           "self-hosted stdio capture is not available."}
     from tortoise.hosted_api import (
         SessionRequest,

@@ -81,37 +81,39 @@ background — you'll see results in your next session."
 means:
 - **What's recorded:** session turns are extracted into memory (Session +
 turn points) and filed to your team's graph.
-- **When it actually happens:** capture only runs when (a) your team has this
-  enabled, (b) the tool's capture mechanism is installed (Claude Code hooks
-  / the Pi extension), and (c) the server accepts the file (a 2xx receipt) —
-  "enabled" means CONSENTED, not necessarily "active yet".
+- **Default:** recording is ON by default — covered by the ToS you accepted
+  at signup. Capture runs when (a) your team hasn't switched it off, (b)
+  the tool's capture mechanism is installed (Claude Code hooks / the Pi
+  extension), and (c) the server accepts the file (a 2xx receipt) —
+  "enabled" is the default, not necessarily "active yet".
 - **Install beacon:** on session start the hook sends a tiny probe (tool +
   timestamp only — no content) so your dashboard shows per-tool capture
   status honestly (installed / waiting / active).
-- **Opt-out:** already-captured sessions stay; new capture is blocked."
+- **Opt-out:** switching recording off blocks new capture (the server
+  rejects session files with a 409 while disabled); already-captured
+  sessions stay."
 
 **If yes:**
 1. Call `tortoise_onboarding_session_recording(enabled=true)` — writes the
-   SAME consent keys as the wizard's sessions toggle (the enforced
-   `session_recording` flag + `capture_revised`). If `capture_revised` is
-   already set (you answered this before), SKIP the explanatory
-   re-confirmation — but NEVER skip the write: a user-initiated enable
-   always re-sets consent, even after a prior decline.
-2. Show: "✅ Session recording consented. Capture turns on per-tool once the
-   mechanism is installed and the server confirms a file — see your
-   dashboard's Memory sources panel for live per-tool status."
+   `session_recording` flag (the same key the dashboard's Memory sources
+   off-switch reads — one source of truth). The flag defaults ON; if it's
+   already on, this call is a no-op confirmation. No consent logic.
+2. Show: "✅ Session recording is on (default — covered by ToS). Capture
+   turns on per-tool once the mechanism is installed and the server
+   confirms a file — see your dashboard's Memory sources panel for live
+   per-tool status."
 3. If the tool errors (stdio/local mode — "No team context (HTTP mode
    required)"): "Session capture is hosted-only — it needs Tortoise Cloud to
-   receive session files. Enable it from your dashboard's Memory sources
+   receive session files. Switch it off from your dashboard's Memory sources
    panel (Agent sessions) if you use hosted Tortoise; on self-hosted,
    session capture isn't available over stdio. I'll skip ahead." (No local
-   fallback: a stdio agent must not silently bypass the consent/capture
-   gates.)
+   fallback: a stdio agent must not silently bypass the capture gate.)
 
 **If no:**
-1. Call `tortoise_onboarding_session_recording(enabled=false)` — clears the
-   enforced consent flag AND sets `capture_revised` (the same keys the
-   wizard/panel decline writes — one consent source).
+1. Call `tortoise_onboarding_session_recording(enabled=false)` — writes the
+   off-switch flag (`session_recording=false`) the same way the dashboard's
+   Memory sources toggle does — one source of truth. Quiet off-switch: no
+   re-confirmation/consent logic.
 2. Show: "Skipping session recording — new sessions won't be captured.
    Already-captured sessions stay. You can re-enable anytime from the
    dashboard (Memory sources > Agent sessions) or by re-answering yes here."
@@ -292,7 +294,7 @@ specification with execution paths, state tracking, and error handling.
 | Q1 (GitHub connect) | `tortoise_onboarding_github_connect` | ✅ Live (HTTP) | unavailable (dashboard) |
 | Q1 (GitHub status) | `tortoise_onboarding_github_status` | ✅ Live (HTTP) | unavailable (dashboard) |
 | Q2 (GitHub index) | `tortoise_onboarding_github_index` | ✅ Live (HTTP) | unavailable (dashboard) |
-| Q3 (Session recording) | `tortoise_onboarding_session_recording` | ✅ Live (HTTP) — consent only; capture is mechanism-gated per tool | unavailable (hosted-only — no stdio fallback) |
+| Q3 (Session recording) | `tortoise_onboarding_session_recording` | ✅ Live (HTTP) — off-switch only; recording is default-ON (ToS-covered), capture is mechanism-gated per tool | unavailable (hosted-only — no stdio fallback) |
 | Q4 (Demo graph) | `tortoise_onboarding_demo_create` | ✅ Live (HTTP) | `tortoise_create_point` ×5 |
 | Q5 (Docs ingestion) | `tortoise_ingest_corpus` | ⚠️ Stdio-only | `tortoise serve` locally |
 | Q5b (Transcript mining) | `tortoise_mine_conversations` | ⚠️ Stdio-only (#1090 fs-walk) | `tortoise mine-conversation` CLI + `tests/sample_transcript.txt` |
@@ -311,7 +313,7 @@ setup, named honestly so no surface over-promises):
 |------------|---------------|-------------------|
 | GitHub issues indexing | ✅ dashboard + `tortoise_onboarding_github_index` | ✅ same (needs its own GitHub token) |
 | GitHub remote docs (`/v1/index/docs`) | ✅ dashboard "Index docs" action (server-owned sandbox) | ❌ not available over stdio — clone locally + `tortoise_ingest_corpus` (see Q5) |
-| Session capture | ✅ consent (Q3/dashboard) + per-tool mechanism (Claude hooks / Pi extension) + server receipt | ❌ hosted-only (stdio agent must not bypass the capture gate) |
+| Session capture | ✅ default-ON (ToS-covered) with off-switch (Q3/dashboard — Memory sources > Agent sessions) + per-tool mechanism (Claude hooks / Pi extension) + server receipt (409 when disabled) | ❌ hosted-only (stdio agent must not bypass the capture gate — the server 409s new session files while disabled) |
 | Webhook transitions (`-closed` / `-reopened` ids) | ⚠️ webhook-only gap — no webhook consumer ships; poll-path eventIds are `-created`/byte-identical (deleted/transferred are not observed) | ⚠️ same gap |
 | `tortoise_ingest_corpus` (local dir) | ❌ hosted-only unavailable | ✅ same |
 | `tortoise_mine_conversations` | ❌ hosted-only unavailable (#1090 fs-walk) | ✅ same |
