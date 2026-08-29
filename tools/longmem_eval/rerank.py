@@ -9,6 +9,32 @@ untouched — this is the eval-layer measured surface (S11).
 MMR: MMR(d) = lambda_*rel(d) - (1-lambda_)*max_sim(d, selected), greedy, with a
 hard per-session cap (E2E-10: one session can't monopolize the context).
 """
+# ═════════════════════════════════════════════════════════════════════════
+# ══ HARNESS PURPOSE — READ THIS FIRST ════════════════════════════════════
+# tools/longmem_eval/ is a THIN MEASUREMENT LAYER over the product
+# (tortoise/): the eval calls the product's OWN engine and measures it.
+# Quality improvements belong IN tortoise/ (that is what ships to
+# customers). THIS MODULE IS ENTIRELY EVAL-SIDE — see the PRODUCT-PARITY
+# NOTE below; the product has no cross-encoder/MMR rerank (recency /
+# GraphRanker only). See docs/audit/2026-08-29-product-cohesion.md.
+# ═════════════════════════════════════════════════════════════════════════
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: no cross-encoder/MMR rerank — product re-ranking is
+#       limited to the optional recency re-rank (R5 #1544,
+#       tortoise/sdk.py:9582-9586) and GraphRanker (structural) inside
+#       tortoise_fts_query; there is no MMR diversity stage (R6 #1545).
+#   Why eval-only:   R6 is a benchmarked rerank stage over the eval pool
+#       (off by default even in the eval, ``TORTOISE_LME_RERANK``);
+#       production search is intentionally untouched (S11, module
+#       docstring). Landed eval-side only.
+#   Ship-to-product: open product decision — a product rerank stage
+#       would be a NEW feature (serving a cross-encoder / MMR pass inside
+#       tortoise_fts_query); no tracking issue filed.
+#   Rationale:       the harness exists to IMPROVE the product; rerank
+#       is a candidate product quality feature, not a harness invention.
+# ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
 import logging

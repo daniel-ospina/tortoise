@@ -12,6 +12,16 @@ P2 alignment rule: when the P2 taxonomy changes, ``classify_eval_error``
 delegates to it for the coarse class — this module never forks the
 status-code table.
 """
+# ═════════════════════════════════════════════════════════════════════════
+# ══ HARNESS PURPOSE — READ THIS FIRST ════════════════════════════════════
+# tools/longmem_eval/ is a THIN MEASUREMENT LAYER over the product
+# (tortoise/): the eval calls the product's OWN engine and measures it.
+# Quality improvements belong IN tortoise/ (that is what ships to
+# customers). The retry machinery in this module (write-stage retries,
+# #1806) is EVAL-ONLY — see the PRODUCT-PARITY NOTE at
+# ``retryable_transient``; the product SDK write path has no bounded
+# retry (idempotency-only). See docs/audit/2026-08-29-product-cohesion.md.
+# ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
 import errno
@@ -88,6 +98,29 @@ class WriteStageRetriesExhausted(Exception):
         super().__init__(f"write-stage retries exhausted: {original!r}")
 
 
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: NO bounded retry — SDK _post_commit is a single POST
+#       with no retry (tortoise/sdk.py:15240-15252) and product graph
+#       writes are un-retried; robustness = idempotent MERGE keys +
+#       client_commit_id replay (sdk.py:1849-1857) + server-side
+#       CommitRecordStore dedup + fail-closed error surfacing. Hosted
+#       /v1/sessions/commit documents "retry-once" only for L1 validation
+#       (hosted_api.py:5478-5490).
+#   Why eval-only:   #1806 landed eval-side only (commit 0289fcb6 touched
+#       only tools/longmem_eval/ + docker-compose.yml + tests): the eval's
+#       write-stage retries (this predicate + ``call_with_predicate``,
+#       consumed by ingest_v2.py) protect a ~25-min re-ingest from a redis
+#       timeout one write in. The product chose idempotency over retry by
+#       design.
+#   Ship-to-product: candidate fix — the retry predicate is a REUSABLE
+#       module (P2-1) that could be ported into the SDK's commit/capture
+#       writes (audit G8); no tracking issue filed.
+#   Rationale:       the harness exists to IMPROVE the product; bounded
+#       write-retry is a candidate product resilience feature, not a
+#       harness invention.
+# ═════════════════════════════════════════════════════════════════════════
 def retryable_transient(exc: BaseException) -> bool:
     """True ONLY for transport-class transients the eval write/retry path
     may retry — never for parse/structural/fatal-class errors.

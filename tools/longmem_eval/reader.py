@@ -28,6 +28,16 @@ two-phase decision (presence-commit first, abstention only on genuine
 absence) so partial evidence with the value present commits instead of
 hedging (the reval3 class).
 """
+# ═════════════════════════════════════════════════════════════════════════
+# ══ HARNESS PURPOSE — READ THIS FIRST ════════════════════════════════════
+# tools/longmem_eval/ is a THIN MEASUREMENT LAYER over the product
+# (tortoise/): the eval calls the product's OWN engine and measures it.
+# Quality improvements belong IN tortoise/ (that is what ships to
+# customers). The READER (this module) is the single largest eval-only
+# surface — see the PRODUCT-PARITY NOTE at ``build_reader``; the product
+# has no LLM reader/QA path at all (audit G1, the biggest cohesion gap).
+# See docs/audit/2026-08-29-product-cohesion.md for the full audit.
+# ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
 import logging
@@ -188,6 +198,12 @@ _MULTI_SESSION_FRAGMENT = (
 # follow-up the #1768 review gate tracked). Run.py-owned recording gap —
 # reader_prompt_source()/hash still do not cover the A1 clause (tracked in
 # #1773).
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# The A1 two-phase presence-commit/abstention clause (#1775) is EVAL-ONLY
+# prompt engineering: the product has no reader/answer surface for it
+# (see the full note at ``build_reader``). Not shipped; tracked under the
+# open reader/QA product decision (audit G1).
+# ═════════════════════════════════════════════════════════════════════════
 _ABSTRACTION_FRAGMENT = (
     "\n\nPARTIAL-KNOWLEDGE ABSTENTION: decide in two phases — presence "
     "first, abstention only when the asked value is absent.\n"
@@ -416,6 +432,30 @@ def _parse_model_spec(spec: str) -> tuple[str | None, str]:
     return None, spec
 
 
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: NO reader/QA surface at all — the product's "answer"
+#       surfaces are retrieval-only (tortoise_search / tortoise_recall /
+#       hosted /v1/search return ranked graph content with EP annotation,
+#       no synthesis), template-based tortoise_analyze (tortoise/analyze.py),
+#       and EP-structural topic_summarize (hosted_api.py:2801-2860). A
+#       grep of tortoise/ finds no LLM retrieve-then-read path (audit G1 —
+#       the biggest cohesion gap: the benchmarked pipeline is
+#       capture→extract→store→retrieve→read→judge; the product ships
+#       capture→extract→store→retrieve).
+#   Why eval-only:   #1775 (the A1 two-phase presence-commit/abstention
+#       clause, below) is eval prompt engineering; commit aeb163ab touched
+#       only tools/longmem_eval/reader.py. It feeds the eval's judge — the
+#       product has no consumer for a reader answer.
+#   Ship-to-product: OPEN product decision — hosted /v1/ask (porting
+#       reader.py's prompt/commit discipline over the product's RRF pool)
+#       vs explicitly scoping the product as retrieval-only; being
+#       researched against competitors (audit G1).
+#   Rationale:       the harness exists to IMPROVE the product; the
+#       reader is the candidate product QA/answer surface, not a harness
+#       invention.
+# ═════════════════════════════════════════════════════════════════════════
 def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
     """Build the reader from env/config. ``mock=True`` returns MockReader.
 

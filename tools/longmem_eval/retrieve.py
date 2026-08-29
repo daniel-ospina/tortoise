@@ -67,6 +67,18 @@ additionally emits the HONEST answer-availability metric per outcome
 (``answer_string_evidence_recall@k`` — mark (d), over the effective pool)
 that report.py aggregates alongside the legacy evidence_recall@k.
 """
+# ═════════════════════════════════════════════════════════════════════════
+# ══ HARNESS PURPOSE — READ THIS FIRST ════════════════════════════════════
+# tools/longmem_eval/ is a THIN MEASUREMENT LAYER over the product
+# (tortoise/): the eval calls the product's OWN engine
+# (TortoiseSDK.tortoise_fts_query, extractor_v2, model_adapters) and
+# measures it — there is no parallel eval retrieval stack. Quality
+# improvements therefore belong IN tortoise/ (that is what ships to
+# customers). Eval-only quality knobs are DOCUMENTED DEBT: each carries a
+# PRODUCT-PARITY NOTE at its site naming the product default (with
+# file:line), why it is eval-only, and the tracking issue for shipping it.
+# See docs/audit/2026-08-29-product-cohesion.md for the full audit.
+# ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
 import math
@@ -170,6 +182,22 @@ VECTOR_TIMEOUT_MS = 5000
 #: stays 500 ms (``tests/bench/test_degradation_chain.py`` untouched). The
 #: VECTOR arm is deliberately 3.3x more permissive (``VECTOR_TIMEOUT_MS``,
 #: ``retrieve.py:150-153`` precedent) and is UNAFFECTED by this budget.
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: 500 ms degradation cap — sdk.tortoise_fts_query
+#       applies ``timeout_ms=int(_elevated_timeout_ms or 500)``
+#       (tortoise/sdk.py:9771); the ``_elevated_timeout_ms`` seam is
+#       PRIVATE, benchmark-only (#316).
+#   Why eval-only:   #1786 (R5) lifts the eval's hybrid-arm budget to
+#       1500 ms (p95 ≤ 2 s target) so deep-pool retrieval isn't truncated
+#       by the product's interactive-latency cap. The product keeps
+#       500 ms by design.
+#   Ship-to-product: not applicable — a product budget change is a
+#       latency decision, not a parity gap; no tracking issue filed.
+#   Rationale:       eval-only measurement budget — the harness measures
+#       the product as-is plus eval elevation, never silently.
+# ═════════════════════════════════════════════════════════════════════════
 EVAL_RETRIEVAL_BUDGET_MS = 1500
 #: The SDK-default collective cap (sdk.py ``_elevated_timeout_ms or 500``)
 #: — recorded in the report methodology when the eval does not elevate.
@@ -265,6 +293,25 @@ DEFAULT_CONTEXT_ITEM_CAP = 40
 #: mark. Knobs: ``TORTOISE_LME_EVIDENCE_BOOST_ANSWER_STRING`` /
 #: ``TORTOISE_LME_EVIDENCE_BOOST_VERBATIM`` /
 #: ``TORTOISE_LME_EVIDENCE_BOOST_SOURCE``.
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: no boost — product ranking is content-similarity-only
+#       (RRF fusion in tortoise_fts_query); marks never influence ranking
+#       (H2) in either codebase. Even in the eval this is OFF by default
+#       (env ``TORTOISE_LME_EVIDENCE_BOOST`` / explicit ``evidence_boost``
+#       flag) — #1945/#1745 C2, landed eval-side only (commit 6b36d5fe).
+#   Why eval-only:   the boost re-ranks marked hits so the pool-based
+#       evidence_recall@k measures the boosted pool — a benchmark
+#       measurement device. The gold-answer marks it boosts on (#1763,
+#       mark (d)) are eval-time truths the product never computes.
+#   Ship-to-product: not filed — the boost is inseparable from the
+#       evidence-marking machinery, itself eval-only; a product port
+#       would be a new feature (evidence-grounded reranking).
+#   Rationale:       the harness exists to IMPROVE the product; an
+#       evidence-aware rerank is a candidate product feature, not a
+#       harness invention.
+# ═════════════════════════════════════════════════════════════════════════
 DEFAULT_EVIDENCE_BOOST_ANSWER_STRING = 2.0
 DEFAULT_EVIDENCE_BOOST_VERBATIM = 1.5
 DEFAULT_EVIDENCE_BOOST_SOURCE = 1.15
@@ -285,6 +332,25 @@ DEFAULT_CONTEXT_TOKEN_CAP = 8000
 #: = 40`` (old and new depth coincide there at 120); external callers
 #: porting R1 semantics should raise ``pool_size`` explicitly for deeper
 #: recall horizons.
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: pool = ``limit * 2`` (20 items at the hosted/MCP
+#       default limit=10) with a DELIBERATE env-only opt-in floor
+#       (``TORTOISE_POOL_FLOOR``, unset → behaves exactly as pre-#1348) —
+#       tortoise/sdk.py:9662-9686 ("NO BAKED DEFAULT FLOOR").
+#   Why eval-only:   #1947 deepened the eval pool 60→120 (reval3: 66% of
+#       marked evidence never entered the 60-item pool, so the C2 boost
+#       had no material) and landed eval-side only (commit ba986f8b
+#       touched only tools/longmem_eval/). Shipping the depth is a
+#       PRODUCT decision (audit G2: raising the default is the single
+#       highest-leverage retrieval change); the harness cannot make it.
+#   Ship-to-product: open product decision (audit G2) — no tracking
+#       issue filed; tracked as the G2 cohesion gap.
+#   Rationale:       the harness exists to IMPROVE the product; the deep
+#       pool is a candidate product feature (recall depth), not a
+#       harness invention.
+# ═════════════════════════════════════════════════════════════════════════
 DEFAULT_POOL_SIZE = 120
 
 #: R5 (#1544): TR top_k cap (20→12) — the transcript-flood control for
@@ -868,6 +934,26 @@ def _render_block(h: dict) -> str:
     return f"{prefix} {h.get('content', '')}"
 
 
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: NO context builder exists — MCP/SDK consumers
+#       (tortoise_search / tortoise_recall / hosted /v1/search) get raw
+#       ranked lists from tortoise_fts_query; nothing assembles a
+#       budget-capped, rank-interleaved reader context (#1745 landed
+#       eval-side only, commit 6b36d5fe).
+#   Why eval-only:   the context exists to feed the EVAL reader (also
+#       eval-only — see the reader.py parity note). Shipping it to the
+#       product = a NEW product feature (a context/answer surface, audit
+#       G7 — the missing bridge between retrieval and any future
+#       answer/agent-use surface).
+#   Ship-to-product: open product decision — tracked under the reader
+#       decision (hosted /v1/ask vs retrieval-only scope; audit G1/G7);
+#       no separate tracking issue filed.
+#   Rationale:       the harness exists to IMPROVE the product; the
+#       rank-interleaved context is the candidate product context/answer
+#       surface, not a harness invention.
+# ═════════════════════════════════════════════════════════════════════════
 def _assemble_context(pool: list[dict], *, top_k: int,
                       max_context_tokens: int,
                       question_date: str | None = None,
@@ -1559,6 +1645,14 @@ def retrieve_for_question(
     # same for every k; the @k suffix keeps the report shape parallel);
     # N/A (None) on empty denominators (M6 #1526, mirroring
     # evidence_recall@k). ──
+    # ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════
+    # #1948's reader_surface@k is a benchmark metric BY NATURE: it
+    # measures what the eval's reader context delivered to the (eval-only)
+    # reader. The product has no reader surface (see the reader.py parity
+    # note), so there is nothing for this metric to measure in tortoise/ —
+    # intentionally harness-only. No tracking issue (a metric is not a
+    # product feature).
+    # ═════════════════════════════════════════════════════════════════════
     reader_surface: dict[str, float | None] = {}
     reader_surface_denom = evidence_point_count + chunk_evidence_point_count
     ctx_evidence_ids = {h["id"] for h in context_points
@@ -2098,6 +2192,24 @@ def evidence_mark_count(proj: Any, qid: str, *,
 
 
 # ── the shared gate-predicate callable ─────────────────────────────────────
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: a MANUAL equivalent only — MCP tortoise_check_structure
+#       (tortoise/mcp_server.py:793) + chain_enforcer.validate_chains
+#       (warn-only residual backstop, tortoise/chain_enforcer.py:51); not
+#       auto-wired into the capture path.
+#   Why eval-only:   #1785's gate runs per question to keep a truncated/
+#       degraded graph from certifying benchmark numbers (census read-
+#       verify protocol + fail-closed reasons). Landed eval-side only
+#       (commit 1864d4fd touched only tools/longmem_eval/).
+#   Ship-to-product: candidate feature — auto-wiring integrity checks
+#       into the product capture path is unassigned; no tracking issue
+#       filed.
+#   Rationale:       the harness exists to IMPROVE the product; automatic
+#       graph-integrity gating is a candidate product feature, not a
+#       harness invention.
+# ═════════════════════════════════════════════════════════════════════════
 def run_integrity_gate(
     proj: Any, question: dict, qid: str, *,
     ingest_stats: dict | None = None,

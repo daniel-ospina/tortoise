@@ -989,6 +989,12 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         # counters are approximate (attempt-1 items now in the graph but
         # skipped by the re-probe are NOT re-counted). Recall@k is computed
         # from live graph queries, so outcomes are UNAFFECTED.
+        # ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════
+        # Write-stage retries (#1806) are EVAL-ONLY — the product SDK
+        # write path has NO bounded retry (idempotency-only). Full note at
+        # errors.py::retryable_transient. Not shipped; candidate port
+        # (audit G8).
+        # ═════════════════════════════════════════════════════════════════
         _phase_a = call_with_predicate(
             partial(_write_v2_phase_a, sdk, qid=qid, si=si, sid=sid,
                     s_node=s_node, session=session,
