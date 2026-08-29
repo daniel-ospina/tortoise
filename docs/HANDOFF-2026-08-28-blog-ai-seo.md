@@ -11,7 +11,7 @@ status: ACTIVE — resume point
 
 > Read this first in a new session. **Start pi in the tortoise repo** (`/Users/danielospina/Documents/GitHub/tortoise`) — that checkout now has the `search-console` MCP server in its `.mcp.json`.
 
-> **STATUS (2026-08-28): #1862 is DONE — committed, reviewed (6-agent + second-model gate, 0 findings), merged to main (PR #1942, squash `1207529c`), issue auto-closed. Artifacts live on main: `docs/research/2026-08-28-tortoise-blog-keywords/research.md` + `website/functions/blog/_shared/seo-keywords.ts` (147 injection-ready keywords, `keywordsFor()` lookup). Worktree `feat/1862-blog-keywords` removed. Next per issue map: #1861 (generator, consumes the module), #1863/#1864 (scoped), #1865/#1866 (filed-not-scoped).**
+> **STATUS (2026-08-28): ALL 6 ISSUES DONE.** #1862 (keyword research) merged PR #1942. #1861/#1863/#1864/#1865/#1866 (AI SEO suite) merged PR #1958 (squash `b988bd2b`) — all closed. Suite: generate-seo.ts + generate-cover.ts (admin-gated, OpenRouter, keyword injection, founder/abstract), purge.ts + cloudflare-purge.ts (edge purge on both write paths), meta-contract.ts (60/155 single source), admin-auth.ts (shared gate), robots/x-robots hardening, lifecycle E2E. Ops steps remaining (documented in epic README + deploy-pages.yml): set Pages Function env `OPENROUTER_API_KEY`, `CF_API_TOKEN`, `CF_ZONE_ID`; set repo secret `BLOG_E2E_AGENT_KEY` + provision `blog-e2e` agent key in `blog_agent_keys`; verify 0 blog_posts rows exceed 60/155. Next: blog content, or the dashboard/backlog issues.**
 
 ## 1. Immediate next step (do this first)
 

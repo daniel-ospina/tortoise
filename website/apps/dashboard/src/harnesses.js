@@ -104,9 +104,10 @@ export const HARNESS_INSTALL = {
   claude: (key) =>
     `claude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${key}"
 
-# Session capture (#1727 T1): the hooks file every session to Tortoise Cloud
-# (only when your team has enabled it in the dashboard — Memory sources >
-# Agent sessions; the server enforces a 403 otherwise). Install from your
+# Session capture (#1727 T1): recording is on by default (ToS-covered); the
+# hooks file every session to Tortoise Cloud unless your team switches it
+# off (Memory sources > Agent sessions — the server returns a 409 while
+# disabled). Install from your
 # Tortoise checkout (github.com/daniel-ospina/tortoise):
 mkdir -p .claude/hooks
 cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
@@ -121,7 +122,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
     // The session-filing paragraph is gated on HARNESS_CAPTURE_SUPPORT — the
     // single source of truth (web is currently false: disabled-with-reason).
     const filing = HARNESS_CAPTURE_SUPPORT['claude-web']
-      ? `\n\n4) Session filing — ONLY if your team has enabled session capture (Memory sources > Agent sessions in the dashboard): at the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. Capture only runs when you call it; nothing is recorded otherwise. If the call fails (not enabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
+      ? `\n\n4) Session filing — recording is on by default (ToS-covered); if your team switched it off (Memory sources > Agent sessions in the dashboard), the server returns a 409. At the end of a conversation, call tortoise_session_capture(conversation=<this conversation>, harness='claude-web') to file it. Capture only runs when you call it; nothing is recorded otherwise. If the call fails (disabled, quota, or provider limits), tell me it wasn't filed and don't retry.`
       : ''
     return base + filing
   },
@@ -130,7 +131,7 @@ chmod +x .claude/hooks/session-start.sh .claude/hooks/session-end.sh
   cursor: () =>
     `${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}`,
   pi: (key) =>
-    `Set up Tortoise for this project:\n1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).\n2. Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi\n4. Verify the Tortoise MCP server is configured and the three skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) are installed, then tell me what you did.\n5. Session capture (#1727 T1): enable session capture in the Pi extension settings (Memory sources > Agent sessions must also be enabled in the dashboard — the server enforces a 403 otherwise). The extension fires an install-probe on load (harness + timestamp only, no content) and files sessions to Tortoise Cloud when capture is enabled. Backfill past sessions with: tortoise sessions import --harness pi --file <session.jsonl> (local receipt written only on a 2xx).`,
+    `Set up Tortoise for this project:\n1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).\n2. Create or merge .mcp.json in this project with:\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi\n4. Verify the Tortoise MCP server is configured and the three skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) are installed, then tell me what you did.\n5. Session capture (#1727 T1): recording is on by default (ToS-covered) — switch it off anytime from the dashboard (Memory sources > Agent sessions; the server returns a 409 while disabled). The extension fires an install-probe on load (harness + timestamp only, no content) and files sessions to Tortoise Cloud when capture is enabled. Backfill past sessions with: tortoise sessions import --harness pi --file <session.jsonl> (local receipt written only on a 2xx).`,
 }
 
 // #1643: the official skill installer — served from the product site (the
@@ -173,9 +174,10 @@ export const HARNESS_CONTINUE_LABEL = {
 // HARNESS_INSTALL so the row shows only the capture step, not the full MCP
 // setup). claude = in-repo hooks install; pi = extension copy-install.
 export const HARNESS_CAPTURE_INSTALL = {
-  claude: `# Session capture (#1727 T1): the hooks file every session to Tortoise
-# Cloud (only when your team has enabled it — the server enforces a 403
-# otherwise). Install from your Tortoise checkout:
+  claude: `# Session capture (#1727 T1): recording is on by default (ToS-covered); the
+# hooks file every session to Tortoise Cloud unless switched off (Memory
+# sources > Agent sessions — the server returns a 409 while disabled).
+# Install from your Tortoise checkout:
 mkdir -p .claude/hooks
 cp <path-to-tortoise>/tortoise/claude-hooks/session-start.sh .claude/hooks/session-start.sh
 cp <path-to-tortoise>/tortoise/claude-hooks/session-end.sh .claude/hooks/session-end.sh
