@@ -73,22 +73,32 @@ def _shared_embedded_sdk() -> TortoiseSDK:
     question in this module (issue #1988)."""
     global _embedded_shared
     if _embedded_shared is None or not _shared_alive(_embedded_shared[0]):
-        # #1988 (self-heal): the redislite-hygiene reaper kills long-lived
-        # IDLE embedded servers mid-suite (it classifies them as orphans) —
-        # if the shared server died, tear it down and rebuild.
+        # #1988 (self-heal): if the shared embedded server died (mid-suite
+        # kills / lifecycle races), tear it down and rebuild — with a retry:
+        # the first rebuild can race the old process's teardown.
         _discard_shared()
-        td = tempfile.TemporaryDirectory(prefix="lme-shared-")
-        sdk = TortoiseSDK(os.path.join(td.name, "lme.db"))
-        sdk.close = _noop_close  # type: ignore[method-assign]
-        # Eager server start at the quietest point (SDK creation), with the
-        # #1944 60s start budget — a lazy first start inside a loaded
-        # run_evaluation can exceed the vendored 10s default on this host.
+        import time as _t
+
         import redislite.client as _rc
         if _rc.Redis.start_timeout < 60:
             _rc.Redis.start_timeout = 60
-        with contextlib.suppress(Exception):
-            sdk._get_proj().g.query("RETURN 1 AS one")
-        _embedded_shared = (sdk, td)
+        last = None
+        for _attempt in range(3):
+            td = tempfile.TemporaryDirectory(prefix="lme-shared-")
+            try:
+                sdk = TortoiseSDK(os.path.join(td.name, "lme.db"))
+            except Exception as _e:
+                last = _e
+                with contextlib.suppress(Exception):
+                    td.cleanup()
+                _t.sleep(1.5)
+                continue
+            sdk.close = _noop_close  # type: ignore[method-assign]
+            with contextlib.suppress(Exception):
+                sdk._get_proj().g.query("RETURN 1 AS one")
+            _embedded_shared = (sdk, td)
+            return sdk
+        raise RuntimeError(f"shared embedded server could not start after 3 attempts: {last!r}")
     return _embedded_shared[0]
 
 

@@ -1402,6 +1402,7 @@ jobs:
               echo "HEARTBEAT: carve-out pytest still running — $p passed, $f failed so far"
             done ) &
           HB_PID=$!
+          ulimit -n 65536 || true  # #1988: fd headroom for the embedded suites
           timeout -s INT -k 10 75m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live' --maxfail=20 -r fEs --durations=15 --junitxml=/tmp/junit.xml -o junit_family=xunit1 > /tmp/pytest.log 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
