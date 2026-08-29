@@ -547,6 +547,80 @@ class TestReingest:
         assert res2["created"]["points"] == 0
         assert _point_count(sdk) == 3  # 2 bundle + 1 unrelated
 
+    def test_gated_draft_reingest_returns_duplicate_no_crash(self, sdk):
+        """Issue #1905 — gated re-ingest of a draft item must return a clean
+        duplicate result, never a raw ValueError.
+
+        Regression: the dedup-hit branch forwarded the caller's status:'draft'
+        (the only status gated promotion permits explicitly) into
+        update_point(), which rejects any non-'live' status — so the second
+        ingest of the same draft item raised a raw ValueError mid-batch.
+        """
+        bundle = {"points": [
+            {"ref": "p1", "kind": "statement",
+             "content": "#1905 gated draft re-ingest.", "status": "draft"},
+        ]}
+        first = sdk.ingest(bundle, promotion_policy="gated")
+        assert first["created"]["points"] == 1
+        assert sdk.get_point(first["ids"]["points"][0])["status"] == "draft"
+        # second call: dedup hit must NOT crash; returns a clean duplicate
+        second = sdk.ingest(bundle, promotion_policy="gated")
+        assert second["created"]["points"] == 0
+        assert second["deduped"]["points"] == 1
+        assert second["ids"]["points"] == first["ids"]["points"]
+        assert second.get("batch_id") is not None
+        assert _point_count(sdk) == 1
+
+    def test_gated_nested_props_status_reingest_no_crash(self, sdk):
+        """Issue #1905 — same regression through the nested props= form
+        (flattened by _coerce_props; status still reaches the dedup branch)."""
+        bundle = {"points": [
+            {"ref": "p1", "kind": "statement",
+             "content": "#1905 nested status re-ingest.",
+             "props": {"status": "draft", "note": "x"}},
+        ]}
+        first = sdk.ingest(bundle, promotion_policy="gated")
+        second = sdk.ingest(bundle, promotion_policy="gated")
+        assert second["created"]["points"] == 0
+        assert second["deduped"]["points"] == 1
+        assert second["ids"]["points"] == first["ids"]["points"]
+        assert second.get("batch_id") is not None
+
+    def test_gated_reingest_mid_bundle_no_partial_commit(self, sdk):
+        """Issue #1905 — batch integrity: a dedup hit mid-bundle must not
+        crash the batch and strand earlier items as committed.
+
+        Points 1+2 are pre-existing; the re-ingest bundle re-submits them
+        (dedup hits), then re-submits a draft point 3 (the #1905 crash
+        trigger — a mid-bundle dedup hit that carries status:'draft') and a
+        NEW point 4. The whole batch must commit: no raw ValueError, points
+        3+4 created, points 1+2+3 deduped.
+        """
+        seed = {"points": [
+            {"ref": "p1", "kind": "statement", "content": "#1905 batch A."},
+            {"ref": "p2", "kind": "statement", "content": "#1905 batch B."},
+            {"ref": "p3", "kind": "statement", "content": "#1905 batch C.",
+             "status": "draft"},
+        ]}
+        sdk.ingest(seed, promotion_policy="gated")
+        bundle = {"points": [
+            {"ref": "p1", "kind": "statement", "content": "#1905 batch A."},
+            {"ref": "p2", "kind": "statement", "content": "#1905 batch B."},
+            {"ref": "p3", "kind": "statement", "content": "#1905 batch C.",
+             "status": "draft"},
+            {"ref": "p4", "kind": "statement", "content": "#1905 batch D."},
+        ]}
+        res = sdk.ingest(bundle, promotion_policy="gated")
+        assert res["created"]["points"] == 1
+        assert res["deduped"]["points"] == 3
+        assert len(res["ids"]["points"]) == 4
+        assert res.get("batch_id") is not None
+        # no partial commit: the post-dedup items landed too
+        assert _point_count(sdk) == 4
+        p4 = sdk.get_point(res["ids"]["points"][-1])
+        assert p4["content"] == "#1905 batch D."
+        assert p4["status"] == "draft"
+
 
 # ── local ref resolution ────────────────────────────────────────────
 

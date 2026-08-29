@@ -117,3 +117,52 @@ class TestCrossContextDedup:
         assert len(ids) == 1, (
             "Context isolation was removed (#49) — all wings must share one point"
         )
+
+
+class TestDedupHitDropsCallerStatus:
+    """Issue #1905 — the dedup-hit branch must drop caller-passed status
+    before update_point. update_point rejects any non-'live' status, so a
+    dedup hit carrying status='draft' (gated promotion's only explicit
+    status) used to raise a raw ValueError mid-batch."""
+
+    def test_dedup_hit_with_draft_status_no_crash(self, sdk):
+        """Second create_point with status='draft' dedups to the same point."""
+        content = "#1905 draft status dedup hit"
+        p1 = sdk.create_point("statement", content, dedup=True, status="draft")
+        p2 = sdk.create_point("statement", content, dedup=True, status="draft")
+        assert p1["id"] == p2["id"]
+        assert p2["status"] == "draft"
+
+    def test_dedup_hit_does_not_mutate_existing_lifecycle(self, sdk):
+        """The existing point's status survives a dedup hit unchanged — the
+        hit only applies non-lifecycle props (updatedAt), never status."""
+        content = "#1905 lifecycle preservation"
+        p1 = sdk.create_point("statement", content, dedup=True, status="draft")
+        sdk.update_point(p1["id"], status="live")
+        # dedup hit with status='draft' must NOT demote the live point
+        p2 = sdk.create_point("statement", content, dedup=True, status="draft")
+        assert p1["id"] == p2["id"]
+        assert p2["status"] == "live"
+
+    def test_dedup_hit_live_status_does_not_promote_draft(self, sdk):
+        """A dedup hit with status='live' must NOT promote an existing draft
+        point — lifecycle transitions stay explicit (update_point / ingest
+        auto-policy), never implicit on a dedup hit (#1905 contract)."""
+        content = "#1905 no implicit promotion"
+        p1 = sdk.create_point("statement", content, dedup=True, status="draft")
+        assert p1["status"] == "draft"
+        # pre-#1905 this raised ValueError (update_point rejects non-'live')
+        # for the draft→live case it used to promote; both are now a no-op
+        p2 = sdk.create_point("statement", content, dedup=True, status="live")
+        assert p1["id"] == p2["id"]
+        assert p2["status"] == "draft"
+
+    def test_dedup_hit_invalid_status_still_raises(self, sdk):
+        """Vocabulary validation is uniform on BOTH paths: an invalid status
+        raises even when the point already exists (no silent-ignore on dedup
+        hits — status is validated before the branch, #1905)."""
+        content = "#1905 uniform validation"
+        sdk.create_point("statement", content, dedup=True)
+        with pytest.raises(ValueError) as exc:
+            sdk.create_point("statement", content, dedup=True, status="bogus")
+        assert "Invalid status" in str(exc.value)
