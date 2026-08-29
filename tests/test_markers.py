@@ -374,6 +374,11 @@ def test_no_redirect_stems_registry_exact():
         "test_graph_integrity_gate",
         "test_per_session_census",
         "test_resume_gate_parity",
+        # #1928/#1944: the embedded-only eval retry suites (no db_uri) belong
+        # in the carve-out lane — the docker fast-matrix process exhausts
+        # redislite servers as the suite grows (RedisLiteServerStartError).
+        "test_eval_ingest_retry",
+        "test_eval_resume_retry_failed",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the 17 plan stems: "

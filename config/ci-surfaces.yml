@@ -480,6 +480,8 @@ carve_out:
 - test_graph_integrity_gate.py
 - test_per_session_census.py
 - test_resume_gate_parity.py
+- test_eval_ingest_retry.py
+- test_eval_resume_retry_failed.py
 - test_backup_e2e.py
 - test_config.py
 - test_embedded_concurrency.py
