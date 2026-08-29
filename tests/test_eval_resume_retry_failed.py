@@ -16,9 +16,11 @@ mocked reader/judge) — no docker container required.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sys
+import tempfile
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -34,6 +36,7 @@ import tortoise.projection as proj_mod
 from tools.longmem_eval import run as runner
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
+from tortoise.sdk import TortoiseSDK
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 
@@ -44,6 +47,80 @@ _ORIGINAL_QUERY = proj_mod._GuardedGraph.query
 
 def _mini() -> list[dict]:
     return json.loads(MINI.read_text(encoding="utf-8"))
+
+
+# ── #1988: one embedded server per pytest process (not per question) ────────
+# run_evaluation calls runner._make_question_sdk(db_uri=None) PER QUESTION —
+# a fresh embedded redislite server each time. In the PR fast-matrix process
+# (hundreds of embedded servers already spawned before this suite runs late
+# in the leg) the server process can no longer start →
+# RedisLiteServerStartError → every question fails with zero outcomes. The
+# resume rigs hand the pipeline this shared module-level SDK instead (one
+# server per process). The pipeline closes the per-question SDK after every
+# question (run.py finally: sdk.close()), so the shared instance's close()
+# is a no-op and _embedded_shared_teardown owns the real teardown at module
+# end.
+_embedded_shared: tuple[TortoiseSDK, tempfile.TemporaryDirectory] | None = None
+
+
+def _noop_close() -> None:
+    """No-op close for the shared SDK — see the #1988 note above."""
+    return None
+
+
+def _shared_embedded_sdk() -> TortoiseSDK:
+    """Lazily create the one embedded SDK shared by every run_evaluation
+    question in this module (issue #1988)."""
+    global _embedded_shared
+    if _embedded_shared is None:
+        td = tempfile.TemporaryDirectory(prefix="lme-shared-")
+        sdk = TortoiseSDK(os.path.join(td.name, "lme.db"))
+        sdk.close = _noop_close  # type: ignore[method-assign]
+        # Eager server start at the quietest point (SDK creation), with the
+        # #1944 60s start budget — a lazy first start inside a loaded
+        # run_evaluation can exceed the vendored 10s default on this host.
+        import redislite.client as _rc
+        if _rc.Redis.start_timeout < 60:
+            _rc.Redis.start_timeout = 60
+        with contextlib.suppress(Exception):
+            sdk._get_proj().g.query("RETURN 1 AS one")
+        _embedded_shared = (sdk, td)
+    return _embedded_shared[0]
+
+
+def _reset_shared_graph(instances) -> None:
+    """Restore the per-question fresh-namespace semantics the census gate
+    relies on: the shared embedded graph is wiped of every instance qid's
+    nodes BEFORE each run (the db_uri path performs the same per-question
+    wipe — the embedded path relied on fresh tempdirs, which a shared
+    server cannot provide; a dirty re-ingest of the same qid trips the
+    watchdog's hard-invalid census arm)."""
+    if not instances:
+        return
+    sdk = _shared_embedded_sdk()
+    proj = sdk._get_proj()
+    for inst in instances:
+        with contextlib.suppress(Exception):
+            proj.g.query(
+                "MATCH (n) WHERE n.lme_question_id = $q DETACH DELETE n",
+                params={"q": inst["question_id"]})
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _embedded_shared_teardown():
+    """Real teardown of the shared embedded SDK at module end (the pipeline's
+    per-question close() is neutralized above; the redislite atexit cleanup
+    would kill the server anyway, this also removes the tempdir)."""
+    yield
+    if _embedded_shared is not None:
+        sdk, td = _embedded_shared
+        try:
+            del sdk.close  # restore the real close for the teardown
+            with contextlib.suppress(Exception):
+                sdk.close()
+        finally:
+            with contextlib.suppress(Exception):
+                td.cleanup()
 
 
 @pytest.fixture(autouse=True)
@@ -163,10 +240,14 @@ def _run(tmp_path, monkeypatch, *, retry_failed=False, fail_writes=False,
 
     def _counting_make(*a, **k):
         sdk_creations["n"] += 1
+        # #1988: shared embedded server (see the module note above).
+        if k.get("db_uri") is None:
+            return _shared_embedded_sdk(), _noop_close
         return real_make(*a, **k)
 
     monkeypatch.setattr(runner, "_make_question_sdk", _counting_make)
     cp = tmp_path / "cp.json"
+    _reset_shared_graph(_mini()[:1])  # #1988: fresh qid namespace per run
     outcomes, report = runner.run_evaluation(
         _mini()[:1], reader=reader, judge=judge, ks=(5,), top_k=5,
         split="s", work_dir=str(tmp_path), checkpoint=str(cp),
@@ -617,10 +698,14 @@ def test_resume_reattempt_limiter_caps_inflight(tmp_path, monkeypatch):
 
     def _slow_make(*a, **k):
         threading.Event().wait(0.05)
+        # #1988: shared embedded server (see the module note above).
+        if k.get("db_uri") is None:
+            return _shared_embedded_sdk(), _noop_close
         return real_make(*a, **k)
 
     monkeypatch.setattr(runner, "_make_question_sdk", _slow_make)
 
+    _reset_shared_graph(_mini()[:4])  # #1988: fresh qid namespace per run
     reader = MockReader()
     judge = MockJudge()
     outcomes, report = runner.run_evaluation(
