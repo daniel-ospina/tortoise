@@ -1,15 +1,16 @@
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation —
 // canonical names `off → install-pending → waiting → active`, probe-driven
-// (Task 16 creates the component; Task 17's panel + re-ask reuse it). Pure
-// (no React), node --test unit-tested (mirrors sessionKey.js).
+// (Task 16 creates the component; Task 17's panel reuses it). Pure (no React),
+// node --test unit-tested (mirrors sessionKey.js). #1927: the re-ask gate
+// predicate was removed with the consent gate (default-ON, ToS-covered).
 
 // Canonical state vocabulary (Task 16): the SAME names the wizard step-1,
 // the dashboard panel, and the harness copy reference verbatim.
 export const CAPTURE_STATES = Object.freeze(['off', 'install-pending', 'waiting', 'active'])
 
 // Per-harness capture status from onboarding state:
-// - off            — the team's enforced session_recording consent is not set
-// - install-pending — consent on, NO server-visible install probe yet (the
+// - off            — the team's session_recording off-switch is not set
+// - install-pending — recording on, NO server-visible install probe yet (the
 //                     install steps render inline)
 // - waiting        — install probe seen (install confirmed server-side), no
 //                    capture receipt yet (waiting shown only after a probe)
@@ -24,21 +25,11 @@ export function captureStatusForHarness(state, harness) {
   return 'install-pending'
 }
 
-// #1728 (Task 17): per-harness last-attempt failure sub-line — reads the
-// REGISTERED server-written key (session_capture_last_error_{harness},
-// cleared on 2xx), never client state.
+// #1927: the misled-user re-ask gate predicate (shouldShowReAsk) was removed
+// with the consent gate — session_recording is default-ON (ToS-covered) and
+// the dashboard toggle is a quiet off-switch, so there is no exactly-once
+// re-ask to compute.
 export function lastErrorForHarness(state, harness) {
   if (!state) return null
   return state[`session_capture_last_error_${harness}`] || null
-}
-
-// #1728 (Task 17): the misled-user re-ask gate — fires when the legacy
-// consent flag is set and the exactly-once re-ask is UNRESOLVED. Reads
-// `capture_ask_shown` (the key is READ, not write-only): the pane shows when
-// session_recording=True && !capture_revised && !capture_ask_shown. Answering
-// sets capture_ask_shown + capture_revised; DISMISSAL never consumes the ask
-// (ask_shown stays false → the pane re-shows next visit until resolved).
-export function shouldShowReAsk(state) {
-  return !!(state && state.session_recording === true &&
-            !state.capture_revised && !state.capture_ask_shown)
 }
