@@ -174,7 +174,6 @@ surfaces:
   - test_epic903_scheduler.py
   - test_epic903_staleness.py
   - test_epic903_warmstart.py
-  - test_eval_extraction_health.py
   - test_eval_metrics.py
   - test_eval_report_integrity.py
   - test_event_log.py

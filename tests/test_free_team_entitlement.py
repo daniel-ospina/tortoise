@@ -14,14 +14,14 @@ from __future__ import annotations
 
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tortoise.hosted_api import app, get_current_user
 from tests.fake_control_plane import FakeControlPlane
-from tests.test_supabase_control import FREE_TEAM, _membership_row  # noqa: F401
+from tests.test_supabase_control import FREE_TEAM, _membership_row
+from tortoise.hosted_api import app, get_current_user
 
 _USER1 = "9f2c1a40-0000-4a00-8000-000000000001"
 _UPGRADE_MSG = "Create another team requires a paid plan"
@@ -31,6 +31,7 @@ def _count_free(user_id: str) -> int:
     """#1954: the entitlement helper is async (the TOCTOU read window) —
     sync test callers wrap it in asyncio.run."""
     import asyncio as _a
+
     from tortoise.hosted_api import _count_active_free_memberships
     return _a.run(_count_active_free_memberships(user_id))
 
@@ -147,7 +148,7 @@ class TestCountActiveFreeMemberships:
 
 class TestCreateTeamEntitlement:
     def test_zero_teams_200(self, user_client):
-        tc, fake = user_client
+        tc, _fake = user_client
         r = tc.post("/v1/teams", json={"name": "first"})
         assert r.status_code == 200, r.text
 
@@ -191,7 +192,7 @@ class TestCreateTeamEntitlement:
 
     def test_rate_limit_429_first(self, user_client):
         tc, fake = user_client
-        since = (datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat()
+        since = (datetime.now(UTC) - timedelta(minutes=30)).isoformat()
         for i in range(3):
             _seed_team(fake, f"team-{i}")
             fake.seed("team_memberships", [
@@ -204,9 +205,8 @@ class TestCreateTeamEntitlement:
         """#1877 security P1: the re-entry guard is SERVER-authoritative —
         a PATCH resetting team_created:false must not re-open the
         unlimited-free-sub-team bypass."""
-        from tortoise.hosted_api import get_current_team_session, \
-            get_current_team_session_ungated
-        tc, fake = team_client_factory
+        from tortoise.hosted_api import get_current_team_session, get_current_team_session_ungated
+        tc, _fake = team_client_factory
         dep = dict(FREE_TEAM, team_id="team-free-001", tier="free",
                    session_user_id=_USER1)
         app.dependency_overrides[get_current_team_session] = lambda: dict(dep)
@@ -226,7 +226,7 @@ class TestCreateTeamEntitlement:
         carries it) reads the PERSISTED team_created state and 409s — no
         unlimited free sub-team minting via this endpoint."""
         from tortoise.hosted_api import get_current_team_session
-        tc, fake = team_client_factory
+        tc, _fake = team_client_factory
         app.dependency_overrides[get_current_team_session] = lambda: dict(
             FREE_TEAM, team_id="team-free-001", tier="free",
             session_user_id=_USER1)
@@ -284,13 +284,13 @@ def _reg_member(reg, team_id: str, user_id: str = _USER1):
 
 class TestRegistryEntitlement:
     def test_helper_tier_free_counted(self, reg_client):
-        tc, reg = reg_client
+        _tc, reg = reg_client
         _reg_seed(reg, "team-free-r")
         _reg_member(reg, "team-free-r")
         assert _count_free(_USER1) == 1
 
     def test_helper_tier_pro_not_counted(self, reg_client):
-        tc, reg = reg_client
+        _tc, reg = reg_client
         _reg_seed(reg, "team-pro-r", tier="pro")
         _reg_member(reg, "team-pro-r")
         assert _count_free(_USER1) == 0
