@@ -1545,6 +1545,26 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
+        # Points enter as draft, go live when first edge is created (#131).
+        # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
+        # hit must never forward the caller's status into update_point (which
+        # rejects any non-'live' status — a gated re-ingest of the same draft
+        # item raised a raw ValueError mid-batch, stranding earlier bundle
+        # items as committed). Popping up front also keeps vocabulary
+        # validation uniform for both paths: an invalid status raises even
+        # when the point already exists (no silent-ignore asymmetry).
+        status = props.pop("status", "draft")
+        # Fail-closed vocabulary validation (mirrors update_point): a
+        # non-canonical status (case variant, junk, non-str, typo) would
+        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
+        # (which excludes only exact 'draft') — a silent-promotion hole
+        # (PR #1073 review P0/P1). isinstance guard keeps the error a
+        # ValueError for unhashable values (list/dict) too.
+        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
+            raise ValueError(
+                f"Invalid status {status!r}. Valid statuses: "
+                f"{sorted(POINT_STATUS_VALUES)}"
+            )
         if dedup:
             ch = _content_hash(content)
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is no longer written)
@@ -1610,19 +1630,6 @@ class TortoiseSDK:
             pid = explicit_id
         else:
             pid = ulid()
-        # Points enter as draft, go live when first edge is created (#131)
-        status = props.pop("status", "draft")
-        # Fail-closed vocabulary validation (mirrors update_point): a
-        # non-canonical status (case variant, junk, non-str, typo) would
-        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
-        # (which excludes only exact 'draft') — a silent-promotion hole
-        # (PR #1073 review P0/P1). isinstance guard keeps the error a
-        # ValueError for unhashable values (list/dict) too.
-        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
-            raise ValueError(
-                f"Invalid status {status!r}. Valid statuses: "
-                f"{sorted(POINT_STATUS_VALUES)}"
-            )
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
