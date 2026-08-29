@@ -641,7 +641,7 @@ def test_blank_app_exit_2():
 
 
 class _StubHandler(http.server.BaseHTTPRequestHandler):
-    def do_GET(self):  # noqa: N802 (http.server API)
+    def do_GET(self):  # http.server API
         # Stateful: consume one (status, body) response per request.
         responses = getattr(self.server, "responses", None)
         if responses:

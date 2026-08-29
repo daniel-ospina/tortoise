@@ -414,7 +414,7 @@ def main() -> int:
         except GuardError as e:
             _err(f"cannot determine machines state: {e}")
             return 2
-        except Exception as e:  # noqa: BLE001 — fail-closed catch-all (plan §Task 1)
+        except Exception as e:  # fail-closed catch-all (plan §Task 1)
             _err(
                 f"cannot determine machines state: machine "
                 f"{_clean(str(machine.get('id') or '?'))}: {e}"
