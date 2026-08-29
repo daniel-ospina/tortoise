@@ -1939,7 +1939,8 @@ DEFAULT_ONBOARDING_STATE = {
     # _ONBOARDING_DEFAULT_STATE for the full table; capture receipts,
     # last-attempt failures, re-ask flags, install probes).
     "capture_revised": False,   # backward-compat write (#1927 re-ask machinery removed)
-    "capture_ask_shown": False,  # backward-compat write (#1927 re-ask machinery removed)    "session_capture_receipt": None,
+    "capture_ask_shown": False,  # backward-compat write (#1927 re-ask machinery removed)
+    "session_capture_receipt": None,
     "session_capture_receipt_claude": None,
     "session_capture_receipt_claude-desktop": None,
     "session_capture_receipt_claude-web": None,
