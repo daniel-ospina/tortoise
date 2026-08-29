@@ -19,11 +19,14 @@ stamp) found in the retrieved hits — a deterministic stand-in proving the
 retrieval actually delivered the evidence, with zero network and no keys
 (CI smoke).
 
-A1 (#1546 + #1762): the universal partial-knowledge abstention clause
-(``_ABSTRACTION_FRAGMENT``) lets the reader derive unanswerability from the
-evidence — the ``_abs`` question_id marker never crosses into the reader
-path. #1762 tightens the clause so the reader commits whenever the asked
-value is present in context and abstains only on genuine evidence gaps.
+A1 (#1546 + #1762 + #1775): the universal partial-knowledge abstention
+clause (``_ABSTRACTION_FRAGMENT``) lets the reader derive unanswerability
+from the evidence — the ``_abs`` question_id marker never crosses into the
+reader path. #1762 tightened the clause so the reader commits whenever the
+asked value is present in context; #1775 restructures it into an explicit
+two-phase decision (presence-commit first, abstention only on genuine
+absence) so partial evidence with the value present commits instead of
+hedging (the reval3 class).
 """
 from __future__ import annotations
 
@@ -148,14 +151,14 @@ _MULTI_SESSION_FRAGMENT = (
     "know rather than guessing."
 )
 
-# A1 (#1546 + #1762): the universal partial-knowledge abstention clause —
-# appended to EVERY question's system prompt (abstention questions are
-# indistinguishable by question_type: the _abs marker lives only in the
-# question_id, which never reaches the reader). It lets the reader derive
-# unanswerability from the evidence: state what IS present, explicitly
-# state the asked info is absent, never commit to a near-miss decoy. The
-# commit-side guard keeps the #1366 fix (answer directly when the asked
-# fact IS present — never abstain on present evidence).
+# A1 (#1546 + #1762 + #1775): the universal partial-knowledge abstention
+# clause — appended to EVERY question's system prompt (abstention
+# questions are indistinguishable by question_type: the _abs marker lives
+# only in the question_id, which never reaches the reader). It lets the
+# reader derive unanswerability from the evidence: state what IS present,
+# explicitly state the asked info is absent, never commit to a near-miss
+# decoy. The commit-side guard keeps the #1366 fix (answer directly when
+# the asked fact IS present — never abstain on present evidence).
 #
 # #1762 (V3 pilot finding #3): the pre-#1762 wording read the commit test
 # as a literal-match requirement ("EXACT information" + "do NOT commit to
@@ -163,47 +166,72 @@ _MULTI_SESSION_FRAGMENT = (
 # was downgraded to "related information" and the reader over-abstained on
 # FULL evidence — 4/4 fresh pilot failures were reader-side (6f9b354f:
 # evidence_recall@20 = 1.0 yet "does not mention repainting…"; 8a137a7f:
-# the gold string "Philips LED bulb" sat inside the hedge). The clause now
-# commits whenever the asked VALUE is stated as the fact in any phrasing,
-# forbids the "mentions X but does not contain the asked information"
-# formulation when X is the answer, and reserves abstention for genuinely
-# absent asked values — empty, unrelated, OR near-miss contexts (code
-# review #1768: the first #1762 draft licensed abstention only for full
-# vacuity, which deadlocked the commit/abstain decision on same-attribute
-# near-miss decoys; the #1546 evidence-backed abstention branch, its
-# 'do not mention the context' override, and its judge-scorable exemplar
-# are restored). Known oscillation risk: three prompt-side re-tunings of
-# this commit/abstain balance in 8 days (#1366 → #1546 → #1762) — a
-# structural two-phase decision is a recognized limitation (follow-up not
-# yet tracked). Run.py-owned recording gap — reader_prompt_source()/hash
-# also do not cover the A1 clause (pre-existing; tracked in #1773).
+# the gold string "Philips LED bulb" sat inside the hedge).
+#
+# #1775 (reval3, 2026-08-28): the #1762 calibration reduced but did NOT
+# eliminate over-abstention on the hedge class — 4 of 6 reval3 wrongs had
+# the gold string VERBATIM in a top-10 context item yet the reader
+# abstained/hedged (b86304ba 'worth triple what I paid', 75499fd8 'Golden
+# Retrievers like Max', ec81a493, 51a45a95). Root: the clause was a single
+# pass where the abstention branch fired on PARTIAL evidence (value
+# present, other details missing — "does not mention any painting of a
+# sunset, nor the amount paid" while 'worth triple what I paid' sat in
+# context). #1775 restructures the clause into an explicit, ORDERED
+# two-phase decision: PHASE 1 (PRESENCE COMMIT) commits whenever the asked
+# value is stated as the fact in any phrasing — even amid noise or with
+# other details of the question missing; PHASE 2 (ABSTENTION) runs ONLY
+# when Phase 1 finds no affirmative statement of the value (genuine
+# absence, near-miss, decoy). The same-instance scoping keeps the
+# different-value guard from licensing abstention on present same-instance
+# evidence (review-gate observation on #1768). Oscillation history:
+# #1366 → #1546 → #1762 → #1775 (this structural restructure is the
+# follow-up the #1768 review gate tracked). Run.py-owned recording gap —
+# reader_prompt_source()/hash still do not cover the A1 clause (tracked in
+# #1773).
 _ABSTRACTION_FRAGMENT = (
-    "\n\nPARTIAL-KNOWLEDGE ABSTENTION: the context can contain related "
-    "information that does NOT actually answer the question. First decide "
-    "whether the context contains the asked fact — the concrete value "
-    "the question asks for — not whether it echoes the question's "
-    "wording. If the asked value is stated as the fact the question asks "
-    "about, in any phrasing, it IS the answer: answer directly and "
-    "concretely with it. Do NOT abstain, do not hedge, and do not weaken "
-    "your answer with unrelated material. A mere mention is not the "
-    "answer: a negated, rejected, or hypothetical mention, or a different "
-    "value for the asked attribute, does not answer the question and must "
-    "not be committed to. Abstain when the asked value is genuinely "
-    "absent — whether the context is empty, unrelated, or holds related "
-    "or near-miss information (a different value for the asked attribute "
-    "is not the answer). Then do NOT guess, do NOT infer, and do NOT "
-    "commit to a near-miss decoy; instead state what related information "
-    "IS present (briefly), then explicitly state that the asked "
-    "information is absent. When you must abstain, you are expected to "
-    "mention the related facts found in the memory — this overrides the "
-    "'do not mention the context' instruction for abstention answers. "
-    "Never frame the answer value as merely related information: the "
-    "'mentions X but does not contain the asked information' formulation "
-    "is forbidden when X is the answer. If the context contains nothing "
-    "related, simply state that the asked information is absent. Example "
-    "— here the bicycle is NOT the answer, so this form is correct: "
-    "'The memory mentions a new bicycle, but it does not contain the "
-    "asked favorite color.'"
+    "\n\nPARTIAL-KNOWLEDGE ABSTENTION: decide in two phases — presence "
+    "first, abstention only when the asked value is absent.\n"
+    "PHASE 1 — PRESENCE COMMIT: First decide whether the context contains "
+    "the asked fact — the concrete value the question asks for — not "
+    "whether it echoes the question's wording. If the asked value is "
+    "stated as the fact the question asks about, in any phrasing, it IS "
+    "the answer: answer directly and concretely with it. The value need "
+    "not be the sentence's subject: a value predicated of the asked "
+    "subject or instance in any grammatical role — subject, object, "
+    "complement, or apposition — is the answer. Example: 'Golden "
+    "Retrievers like Max' predicates the breed on Max — answer the "
+    "breed, do not call it a general statement. Do NOT abstain, do not "
+    "hedge, and do not weaken your answer with unrelated material. "
+    "Partial evidence is still presence: when the context states the "
+    "asked value but omits other details of the question (who, when, why, "
+    "how), or carries it amid noise, the answer is in the context — "
+    "commit to the value; never abstain because other details are "
+    "missing. A value stated for the same subject or instance the "
+    "question asks about IS the answer; a value merely mentioned "
+    "for a different instance or in passing is not the answer. A "
+    "mere mention is not the "
+
+    "answer: a negated, rejected, or hypothetical mention, or a "
+    "different value for the asked attribute, does not answer the "
+    "question and must not be committed to. Never frame the answer value "
+    "as merely related information: the 'mentions X but does not contain "
+    "the asked information' formulation is forbidden when X is the "
+    "answer.\n"
+    "PHASE 2 — ABSTENTION (only when Phase 1 found no affirmative "
+    "statement of the asked value): Abstain when the asked value is "
+    "genuinely absent — whether the context is empty, unrelated, or "
+    "holds related or near-miss information (a different value for the "
+    "asked attribute is not the answer). Then do NOT guess, do NOT "
+    "infer, and do NOT commit to a near-miss decoy; instead state what "
+    "related information IS present (briefly), then explicitly state "
+    "that the asked information is absent. When you must abstain, you "
+    "are expected to mention the related facts found in the memory — "
+    "this overrides the 'do not mention the context' instruction for "
+    "abstention answers. If the context contains nothing related, simply "
+    "state that the asked information is absent. Example — here the "
+    "bicycle is NOT the answer, so this form is correct: 'The memory "
+    "mentions a new bicycle, but it does not contain the asked favorite "
+    "color.'"
 )
 
 # question_type → the fragment that unlocks correct reasoning for it.
@@ -238,12 +266,14 @@ def system_prompt_for(question_type: str | None) -> str:
     Unknown/absent types get the hardened generic prompt; temporal-reasoning,
     single-session-preference (issue #1366), knowledge-update and
     multi-session (A2 #1547) append their reasoning instructions. A1
-    (#1546 + #1762): the partial-knowledge abstention clause is appended
-    UNIVERSALLY —
+    (#1546 + #1762 + #1775): the partial-knowledge abstention clause is
+    appended UNIVERSALLY —
     abstention questions are indistinguishable by question_type (the _abs
     marker lives only in the question_id, which never reaches the reader), so
     the reader must derive unanswerability from the evidence, never from a
-    flag.
+    flag. The clause is a two-phase decision (#1775): PHASE 1 commits
+    whenever the asked value is stated in the context (partial evidence is
+    still presence); PHASE 2 abstains only on genuine absence.
     """
     return (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
             + _TYPE_FRAGMENTS.get(question_type, ""))

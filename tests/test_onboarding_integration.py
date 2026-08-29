@@ -84,7 +84,7 @@ class TestOnboardingJourney:
         assert r.status_code == 200
         onboarding = r.json()["onboarding"]
         assert onboarding["demo_created"] is False
-        assert onboarding["session_recording"] is False
+        assert onboarding["session_recording"] is True  # #1927: default-ON (ToS-covered)
         assert onboarding["github_connected"] is False
 
     def test_e2e_demo_graph_creates_content(self, client):
@@ -139,16 +139,15 @@ class TestOnboardingJourney:
         assert "github.com/login/oauth/authorize" in r.json()["auth_url"]
 
 
-class TestMisledUserReAsk:
-    """#1728 Slice 3 (Task 17, Journey 2): the misled-user re-ask. Legacy
-    ``session_recording=True`` teams (set before the capture mechanism was
-    honest) are re-asked exactly once per visit until RESOLVED — the gate is
-    ``session_recording=True && !capture_revised && !capture_ask_shown``;
-    ``capture_ask_shown`` is set on ANSWER only (dismissal never consumes the
-    ask); decline clears consent + sets capture_revised but never clears
-    probes/receipts."""
+class TestReAskStateKeyCompat:
+    """#1927: the re-ask machinery (Slice 3) was removed — `capture_revised`
+    and `capture_ask_shown` survive as backward-compat state keys (still
+    written by the off-switch PATCH + the session-recording endpoint) but are
+    INERT: no dashboard re-ask pane reads them and no gate derives from them.
+    These tests pin the keys as plain state keys that round-trip through the
+    allowlisted GET/PATCH surface."""
 
-    def _set_legacy_state(self, client, **extra):
+    def _set_state(self, client, **extra):
         from tortoise.hosted_api import _make_sdk, _update_onboarding_state
         sdk = _make_sdk(namespace="registry")
         # the fixture seeds the team via team_create (ULID id) — resolve the
@@ -161,66 +160,42 @@ class TestMisledUserReAsk:
             "MATCH (t:Team {id:$id}) SET t.onboarding_state = $st",
             params={"id": team_id, "st": "{}"},
         )
-        _update_onboarding_state(team_id, session_recording=True, **extra)
+        _update_onboarding_state(team_id, **extra)
 
-    def _gate(self, st: dict) -> bool:
-        return bool(st["session_recording"] and not st["capture_revised"]
-                    and not st["capture_ask_shown"])
-
-    def test_misled_user_reask_once(self, client):
-        """Journey 2: a misled returning user (session_recording=True,
-        nothing resolved) sees the re-ask gate on their first visit; answering
-        (capture_ask_shown set) resolves it; a second visit never re-fires."""
-        self._set_legacy_state(client)
-        # visit 1 — the gate is live (the dashboard re-ask pane renders)
+    def test_reask_keys_roundtrip(self, client):
+        """The backward-compat keys persist through the allowlisted state
+        surface (write via PATCH, read back via GET) as inert keys."""
+        self._set_state(client, session_recording=True,
+                        capture_revised=True, capture_ask_shown=True)
         r = client.get("/v1/onboarding/state")
         st = r.json()["onboarding"]
-        assert self._gate(st) is True
-        # the user ANSWERS (the re-ask answer PATCH — ANSWER only sets
-        # capture_ask_shown; dismissal never does)
-        r2 = client.patch("/v1/onboarding/state", json={
-            "session_recording": True, "capture_revised": True,
-            "capture_ask_shown": True,
-        })
-        assert r2.status_code == 200, r2.text
-        # visit 2 — resolved: no re-ask (capture_revised + ask_shown both set)
-        r3 = client.get("/v1/onboarding/state")
-        assert self._gate(r3.json()["onboarding"]) is False
+        assert st["session_recording"] is True
+        assert st["capture_revised"] is True
+        assert st["capture_ask_shown"] is True
 
-    def test_reask_dismissal_does_not_consume(self, client):
-        """T2-P2f: dismissal NEVER consumes the ask — a dismissed (not
-        answered) user sees the gate again on the next visit (capture_ask_shown
-        stays False)."""
-        self._set_legacy_state(client)
-        # dismissal = the client does NOT patch capture_ask_shown; the pane is
-        # merely closed client-side for this visit. A fresh visit re-reads the
-        # same gate inputs.
-        r = client.get("/v1/onboarding/state")
-        assert self._gate(r.json()["onboarding"]) is True
-        r2 = client.get("/v1/onboarding/state")
-        assert self._gate(r2.json()["onboarding"]) is True, \
-            "dismissal must not consume the exactly-once ask"
-
-    def test_reask_decline_then_reenable(self, client):
-        """Decline (NO) clears consent + sets capture_revised + ask_shown;
-        re-enabling later re-sets consent — the wizard's sessions toggle-on
-        PATCH writes consent + capture_revised together (single consent
-        source), and the re-ask stays resolved."""
-        self._set_legacy_state(client)
-        # decline
-        r = client.patch("/v1/onboarding/state", json={
-            "session_recording": False, "capture_revised": True,
-            "capture_ask_shown": True,
-        })
+    def test_off_switch_writes_compat_keys_no_reask_gate(self, client):
+        """Toggle-off via the session-recording endpoint is a plain state
+        write (session_recording=False + capture_revised) — no re-ask gate
+        fires on the next read, and re-enable round-trips clean."""
+        self._set_state(client, session_recording=True)
+        r = client.post("/v1/onboarding/session-recording", json={"enabled": False})
         assert r.status_code == 200, r.text
         st = r.json()["onboarding"]
         assert st["session_recording"] is False
-        assert self._gate(st) is False
-        # later opt-in via the wizard toggle-on PATCH (same keys as Q3 yes)
-        r2 = client.patch("/v1/onboarding/state", json={
-            "session_recording": True, "capture_revised": True})
+        assert st["capture_revised"] is True
+        # no gate derives from the inert keys
+        r2 = client.post("/v1/onboarding/session-recording", json={"enabled": True})
         assert r2.status_code == 200, r2.text
-        st2 = r2.json()["onboarding"]
-        assert st2["session_recording"] is True
-        assert self._gate(st2) is False, \
-            "re-enable must not re-trigger the re-ask (already resolved)"
+        assert r2.json()["onboarding"]["session_recording"] is True
+
+    def test_compat_key_patch_has_no_capture_effect(self, client):
+        """Patching the compat keys directly changes only those keys — the
+        capture surface (session_recording) is untouched."""
+        self._set_state(client, session_recording=True,
+                        capture_revised=True, capture_ask_shown=True)
+        r = client.patch("/v1/onboarding/state", json={"capture_ask_shown": False})
+        assert r.status_code == 200, r.text
+        st = r.json()["onboarding"]
+        assert st["capture_ask_shown"] is False
+        assert st["capture_revised"] is True
+        assert st["session_recording"] is True

@@ -208,9 +208,10 @@ def client(monkeypatch):
         }
         _orig_init = _patch_tortoise_sdk_init(db_path)
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-        # #1727 (Task 11): the consent gate 403s un-opted teams FIRST — opt
-        # this team in so the gate-order tests (503/422/200) reach their gates.
-        # Provision the Team node first (the state writer is MATCH...SET).
+        # #1927: session_recording defaults ON (no consent gate) — the
+        # explicit opt-in below keeps the gate-order tests (503/422/200)
+        # deterministic regardless of default drift. Provision the Team node
+        # first (the state writer is MATCH...SET).
         ha_mod._make_sdk(namespace="registry")._get_registry().query(
             "CREATE (t:Team {id:$id, onboarding_state:$st})",
             params={"id": "test-team-722", "st": "{}"},
