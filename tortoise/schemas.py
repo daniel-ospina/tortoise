@@ -25,8 +25,8 @@ ASK_QUESTION_TYPES: tuple[str | None, ...] = (
 #: leap-year aware) is enforced by ``validate_ask_question_date``.
 _ASK_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 
-import re as _re  # noqa: E402
 import datetime as _dt  # noqa: E402
+import re as _re  # noqa: E402
 
 _ASK_DATE_PATTERN = _re.compile(_ASK_DATE_RE)
 
@@ -56,6 +56,25 @@ def ask_question_has_control_chars(question: str) -> bool:
     if not stripped:
         return False  # empty handled by the caller (invalid_question)
     return all(ch in ("\u200b", "\u00a0") for ch in stripped)
+
+
+_PUNCT_CATEGORIES = frozenset(("Pc", "Pd", "Pe", "Pf", "Pi", "Po", "Ps"))
+
+
+def ask_question_is_punctuation_only(question: str) -> bool:
+    """Punctuation-only question → 400 ``invalid_question`` (P2-20): after
+    strip, every remaining char is a Unicode punctuation category or
+    whitespace (so ".", "?!", "…" reject; "a.", digits-only, and
+    emoji/Symbol questions pass). Empty-after-strip is the caller's empty
+    case — not flagged here."""
+    import unicodedata as _ud
+    stripped = question.strip()
+    if not stripped:
+        return False
+    return all(
+        ch.isspace() or _ud.category(ch) in _PUNCT_CATEGORIES
+        for ch in stripped
+    )
 
 
 # ── Canonical error-code vocabulary (10 codes — one vocabulary, two ────────
@@ -97,7 +116,7 @@ def valid_question_types() -> str:
 
 # ── SDK typed exception re-export (one import surface for Tasks 9/11) ──────
 
-from tortoise.exceptions import (  # noqa: E402, F401
+from tortoise.exceptions import (  # noqa: E402
     AskInFlightLimit,
     AskQuotaExceeded,
     AskReaderUnavailable,
@@ -107,24 +126,40 @@ from tortoise.exceptions import (  # noqa: E402, F401
 )
 
 __all__ = [
-    "MAX_ASK_QUESTION_CHARS", "ASK_QUESTION_TYPES", "ASK_ERROR_CODES",
-    "CODE_UNAUTHORIZED", "CODE_QUOTA_EXCEEDED", "CODE_IN_FLIGHT_LIMIT",
-    "CODE_READER_UNAVAILABLE", "CODE_RETRIEVAL_UNAVAILABLE", "CODE_TIMEOUT",
-    "CODE_INVALID_QUESTION", "CODE_INVALID_QUESTION_TYPE",
-    "CODE_INVALID_QUESTION_DATE", "CODE_QUESTION_TOO_LONG",
-    "VALIDATION_CODE_EMPTY", "VALIDATION_CODE_OVERSIZE",
-    "VALIDATION_CODE_BAD_TYPE", "VALIDATION_CODE_BAD_DATE",
-    "validate_ask_question_date", "ask_question_has_control_chars",
+    "ASK_ERROR_CODES",
+    "ASK_QUESTION_TYPES",
+    "CODE_INVALID_QUESTION",
+    "CODE_INVALID_QUESTION_DATE",
+    "CODE_INVALID_QUESTION_TYPE",
+    "CODE_IN_FLIGHT_LIMIT",
+    "CODE_QUESTION_TOO_LONG",
+    "CODE_QUOTA_EXCEEDED",
+    "CODE_READER_UNAVAILABLE",
+    "CODE_RETRIEVAL_UNAVAILABLE",
+    "CODE_TIMEOUT",
+    "CODE_UNAUTHORIZED",
+    "MAX_ASK_QUESTION_CHARS",
+    "VALIDATION_CODE_BAD_DATE",
+    "VALIDATION_CODE_BAD_TYPE",
+    "VALIDATION_CODE_EMPTY",
+    "VALIDATION_CODE_OVERSIZE",
+    "AskInFlightLimit",
+    "AskQuotaExceeded",
+    "AskReaderUnavailable",
+    "AskRetrievalUnavailable",
+    "AskTimeout",
+    "AskValidationError",
+    "ask_question_has_control_chars",
+    "ask_question_is_punctuation_only",
     "valid_question_types",
-    "AskInFlightLimit", "AskQuotaExceeded", "AskReaderUnavailable",
-    "AskRetrievalUnavailable", "AskTimeout", "AskValidationError",
+    "validate_ask_question_date",
 ]
 
 
 # ── AskRequest (Task 7 — extends the Task-5 constant layer) ────────────────
 
-from pydantic import BaseModel, field_validator, model_validator  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
+from pydantic import BaseModel, field_validator, model_validator  # noqa: E402
 
 
 class AskRequest(BaseModel):
@@ -170,6 +205,9 @@ class AskRequest(BaseModel):
             raise HTTPException(status_code=400,
                                 detail=CODE_INVALID_QUESTION)
         if ask_question_has_control_chars(v):
+            raise HTTPException(status_code=400,
+                                detail=CODE_INVALID_QUESTION)
+        if ask_question_is_punctuation_only(v):
             raise HTTPException(status_code=400,
                                 detail=CODE_INVALID_QUESTION)
         if len(v) > MAX_ASK_QUESTION_CHARS:

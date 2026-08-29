@@ -32,6 +32,11 @@ from test_hosted_api import (  # noqa: E402, RUF100
 )
 
 from tortoise import hosted_api as ha_mod  # noqa: E402
+from fastapi import Request as _AskRequest  # noqa: E402 — module-level so the
+# `_suspended(request: _AskRequest)` override annotation resolves under
+# ``from __future__ import annotations`` (a local import inside the test fn
+# would leave 'Request' unresolvable in the fn's module globals → FastAPI
+# treats it as a required query param → spurious 400 invalid_question).
 from tortoise.quota import (  # noqa: E402
     _reset_ask_budget_for_tests,
     _reset_ask_loop_state_for_tests,
@@ -71,7 +76,8 @@ class _FakeReaderFactory:
         def _factory():
             self.instances += 1
             class _R:
-                def __init__(self):
+                def __init__(self, reply):
+                    self.reply = reply
                     self.last_completion_tokens = 12
 
                 def complete(self, *, system, user):
@@ -80,7 +86,7 @@ class _FakeReaderFactory:
 
                 def close(self):
                     pass
-            return _R()
+            return _R(self.reply)
         monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _factory)
         return calls
 
@@ -138,7 +144,7 @@ def test_suspended_team_403_passthrough(client):
     from fastapi import HTTPException
     from tortoise.hosted_api import _suspended_detail
 
-    def _suspended(_request):
+    def _suspended(request: _AskRequest):
         raise HTTPException(status_code=403, detail=_suspended_detail())
     ha_mod.app.dependency_overrides[ha_mod.get_current_team] = _suspended
     try:

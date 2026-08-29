@@ -25,6 +25,8 @@ from .projection import FalkorProjection
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
+import collections
+from datetime import UTC
 
 # ── Ask-lane reader-model cache (#1987 Task 5) ─────────────────────────────
 # Per-namespace cache (keyed by team/namespace — NEVER a module-global
@@ -38,12 +40,12 @@ import threading
 ASK_SDK_TIMEOUT_S = 75  # > the server's _ASK_TIMEOUT_S (60) — its 504 is always receivable
 _ASK_READER_CACHE_MAX = 64
 _ASK_READER_CACHE_LOCK = threading.Lock()
-_ask_reader_cache_store: "collections.OrderedDict" = None  # type: ignore[assignment]
+_ask_reader_cache_store: collections.OrderedDict = None  # type: ignore[assignment]
 _ask_build_locks: dict[str, threading.Lock] = {}
 
 
-def _ask_reader_cache() -> "collections.OrderedDict":
-    import collections  # noqa: I001
+def _ask_reader_cache() -> collections.OrderedDict:
+    import collections
     global _ask_reader_cache_store
     if _ask_reader_cache_store is None:
         _ask_reader_cache_store = collections.OrderedDict()
@@ -10413,6 +10415,7 @@ class TortoiseSDK:
             VALIDATION_CODE_EMPTY,
             VALIDATION_CODE_OVERSIZE,
             ask_question_has_control_chars,
+            ask_question_is_punctuation_only,
             validate_ask_question_date,
         )
         from tortoise.exceptions import AskValidationError
@@ -10424,6 +10427,10 @@ class TortoiseSDK:
         if ask_question_has_control_chars(q):
             raise AskValidationError(
                 "question contains control/zero-width characters",
+                code=VALIDATION_CODE_EMPTY)
+        if ask_question_is_punctuation_only(q):
+            raise AskValidationError(
+                "question is punctuation-only",
                 code=VALIDATION_CODE_EMPTY)
         if len(q) > MAX_ASK_QUESTION_CHARS:
             raise AskValidationError(
@@ -10474,8 +10481,8 @@ class TortoiseSDK:
         (the reader failed with no surviving lane).
         """
         import time as _time  # noqa: I001
-        from datetime import datetime as _dt2, timezone as _tz  # noqa: I001
-        from tortoise.retrieval import (  # noqa: I001
+        from datetime import datetime as _dt2
+        from tortoise.retrieval import (
             DEFAULT_CONTEXT_ITEM_CAP,
             DEFAULT_CONTEXT_TOKEN_CAP,
             DEFAULT_MAX_CHUNKS_PER_SESSION,
@@ -10484,17 +10491,16 @@ class TortoiseSDK:
             estimate_tokens_ask,
             render_context,
         )
-        from tortoise.metering import estimate_ask_cost_usd  # noqa: I001
-        from tortoise.reader import (  # noqa: I001
+        from tortoise.metering import estimate_ask_cost_usd
+        from tortoise.reader import (
             NO_EVIDENCE_TEXT,
             _looks_abstained,
             detect_question_type,
             system_prompt_for,
         )
-        from tortoise.exceptions import (  # noqa: I001
+        from tortoise.exceptions import (
             AskReaderUnavailable,
             AskRetrievalUnavailable,
-            AskValidationError,
         )
 
         if os.environ.get("TORTOISE_API_URL"):
@@ -10506,7 +10512,7 @@ class TortoiseSDK:
         #    calls for invalid inputs.
         self._ask_validate(question, question_type, question_date)
         if question_date is None:
-            question_date = _dt2.now(_tz.utc).strftime("%Y-%m-%d")
+            question_date = _dt2.now(UTC).strftime("%Y-%m-%d")
 
         # 2. Retrieval (whole-retrieval raises → AskRetrievalUnavailable).
         leg_trace: list[dict] = []
@@ -10582,7 +10588,7 @@ class TortoiseSDK:
         # 7. Metering (best-effort; ONLY with an explicit team_id).
         if team_id:
             try:
-                from tortoise.metering import record_ask_usage  # noqa: I001
+                from tortoise.metering import record_ask_usage
                 input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
                                 + estimate_tokens_ask(evidence))
                 out_tokens = getattr(model, "last_completion_tokens", 0) \
@@ -10633,11 +10639,11 @@ class TortoiseSDK:
         ``retrieval_degraded=True`` (never a silent success)."""
         from tortoise.search_engine import TERMINAL_EXCLUDED_STATUSES
         for h in hits:
-            if (h.get("status") or "") in TERMINAL_EXCLUDED_STATUSES:
-                if not (h.get("superseded_by") or h.get("supersedes")
-                        or h.get("valid_from") or h.get("valid_to")
-                        or h.get("expired_at")):
-                    return True
+            if ((h.get("status") or "") in TERMINAL_EXCLUDED_STATUSES
+                    and not (h.get("superseded_by") or h.get("supersedes")
+                             or h.get("valid_from") or h.get("valid_to")
+                             or h.get("expired_at"))):
+                return True
         return False
 
     # ── Per-namespace reader-model cache (#1987 Task 5) ────────────────────
@@ -10697,13 +10703,10 @@ class TortoiseSDK:
             CODE_INVALID_QUESTION_DATE,
             CODE_INVALID_QUESTION_TYPE,
             CODE_QUESTION_TOO_LONG,
-            CODE_QUOTA_EXCEEDED,
-            CODE_READER_UNAVAILABLE,
             CODE_RETRIEVAL_UNAVAILABLE,
-            CODE_TIMEOUT,
             CODE_UNAUTHORIZED,
         )
-        from tortoise.exceptions import (  # noqa: I001
+        from tortoise.exceptions import (
             AskInFlightLimit,
             AskQuotaExceeded,
             AskReaderUnavailable,
@@ -10711,7 +10714,7 @@ class TortoiseSDK:
             AskTimeout,
             AskValidationError,
         )
-        import requests as _requests  # noqa: I001
+        import requests as _requests
         base = os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
         key = os.environ.get("TORTOISE_API_KEY", "")
         payload = {"question": question}
@@ -10771,7 +10774,7 @@ class TortoiseSDK:
             # a code-less 402 is a SERVER-side provider-billing condition —
             # never mislabeled invalid_question (P2-3).
             raise AskReaderUnavailable(
-                f"provider billing 402 (status retained)",
+                "provider billing 402 (status retained)",
                 status_code=status)
         if 400 <= status < 500:
             if code in (CODE_INVALID_QUESTION, CODE_QUESTION_TOO_LONG,

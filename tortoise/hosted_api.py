@@ -54,7 +54,7 @@ from tortoise.projection import (
 from tortoise.quota import (
     DEFAULT_MAX_SESSIONS,  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
 )
-from tortoise.schemas import AskRequest  # noqa: E402 — the /v1/ask body (#1987 Task 7)
+from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     TortoiseSDK,
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
@@ -508,7 +508,7 @@ async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
     EVERYTHING else (incl. the 403 suspended-team passthrough — the
     ``_suspended_detail()`` DICT) → the captured default handler's response
     with ``exc.headers`` preserved."""
-    from tortoise.schemas import ASK_ERROR_CODES  # noqa: I001
+    from tortoise.schemas import ASK_ERROR_CODES
     if request.url.path == "/v1/ask":
         status = exc.status_code
         detail = exc.detail
@@ -2875,7 +2875,7 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
 
 
 @app.post("/v1/ask", response_model=None)
-async def ask_question(body: AskRequest,  # noqa: B008
+async def ask_question(body: AskRequest,
                        team: dict = Depends(get_current_team)):  # noqa: B008
     """Team-scoped answer surface (#1987 Task 7): one bounded RAG pass over
     the team's memory — retrieval → annotation → dedup → context assembly →
@@ -2895,22 +2895,22 @@ async def ask_question(body: AskRequest,  # noqa: B008
     records when the reader/retrieval call FAILS (honest metering).
     """
     import logging as _ask_log  # noqa: I001
-    from datetime import datetime as _dt2, timezone as _tz  # noqa: I001
-    from tortoise.quota import (  # noqa: I001
+    from datetime import datetime as _dt2
+    from tortoise.quota import (
         AskBoundedTimeoutError,
         AskInFlightLimitError,
         ask_budget_retry_after,
         ask_llm_budget_available,
         run_ask_bounded,
     )
-    from tortoise.schemas import (  # noqa: I001
+    from tortoise.schemas import (
         CODE_IN_FLIGHT_LIMIT,
         CODE_QUOTA_EXCEEDED,
         CODE_READER_UNAVAILABLE,
         CODE_RETRIEVAL_UNAVAILABLE,
         CODE_TIMEOUT,
     )
-    from tortoise.exceptions import (  # noqa: I001
+    from tortoise.exceptions import (
         AskQuotaExceeded,
         AskReaderUnavailable,
         AskRetrievalUnavailable,
@@ -2923,7 +2923,7 @@ async def ask_question(body: AskRequest,  # noqa: B008
         raise HTTPException(
             status_code=429, detail=CODE_QUOTA_EXCEEDED,
             headers={"Retry-After": str(int(ask_budget_retry_after(team_id)))})
-    t0 = _dt2.now(_tz.utc)
+    t0 = _dt2.now(UTC)
     sdk = _make_sdk(namespace=team_id)
     try:
         result = await run_ask_bounded(
@@ -2956,7 +2956,7 @@ async def ask_question(body: AskRequest,  # noqa: B008
     finally:
         sdk.close()
     # ``duration_ms`` = hosted wall-clock from request receipt to response.
-    result["duration_ms"] = max(0, int((_dt2.now(_tz.utc) - t0).total_seconds() * 1000))
+    result["duration_ms"] = max(0, int((_dt2.now(UTC) - t0).total_seconds() * 1000))
     return result
 
 

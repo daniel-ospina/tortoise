@@ -532,12 +532,13 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
 # reactivated team starts clean (P2-15).
 
 import collections  # noqa: E402
+import contextlib  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 
 _ASK_BUDGET_TTL_S = 300.0       # idle team bucket expiry
 _ASK_BUDGET_MAX_TEAMS = 1024    # LRU bound on the bucket dict
-_ask_llm_budget: "collections.OrderedDict[str, list[float]]" = \
+_ask_llm_budget: collections.OrderedDict[str, list[float]] = \
     collections.OrderedDict()
 _ask_budget_lock = threading.Lock()
 
@@ -630,19 +631,21 @@ _ASK_TEAM_IN_FLIGHT_CAP = 4
 #: cleanly; the size bound is one entry per live loop). Never a module-level
 #: ``asyncio.Semaphore`` bound to the first loop it is awaited in (the
 #: mcp_server.py hazard, P1-8/P2-8).
-_ask_loop_state: "weakref.WeakKeyDictionary" = None  # type: ignore[assignment]
+import weakref  # noqa: E402 — the state helpers import it lazily too
+
+_ask_loop_state: weakref.WeakKeyDictionary = None  # type: ignore[assignment]
 _ask_loop_state_lock = threading.Lock()
 
 
 def _ask_state_for_loop(loop):
-    import weakref  # noqa: I001
+    import weakref
     global _ask_loop_state
     if _ask_loop_state is None:
         _ask_loop_state = weakref.WeakKeyDictionary()
     with _ask_loop_state_lock:
         st = _ask_loop_state.get(loop)
         if st is None:
-            import asyncio  # noqa: I001
+            import asyncio
             st = {"sem": asyncio.Semaphore(_ASK_GLOBAL_SEMAPHORE_SIZE),
                   "in_flight": collections.Counter()}
             _ask_loop_state[loop] = st
@@ -651,7 +654,7 @@ def _ask_state_for_loop(loop):
 
 def _reset_ask_loop_state_for_tests() -> None:
     """Test seam — drops the loop-keyed semaphore/in-flight state."""
-    import weakref  # noqa: I001
+    import weakref
     global _ask_loop_state
     with _ask_loop_state_lock:
         _ask_loop_state = weakref.WeakKeyDictionary()
@@ -686,7 +689,7 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
     Raises ``AskInFlightLimitError`` (per-team cap), ``AskBoundedTimeoutError``
     (504), or the underlying exception from ``fn``.
     """
-    import asyncio  # noqa: I001
+    import asyncio
     loop = asyncio.get_running_loop()
     st = _ask_state_for_loop(loop)
     sem = st["sem"]
@@ -709,7 +712,7 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
     try:
         try:
             await asyncio.wait_for(sem.acquire(), timeout=_ASK_TIMEOUT_S)
-        except (asyncio.TimeoutError, asyncio.CancelledError) as e:
+        except (TimeoutError, asyncio.CancelledError) as e:
             # wait_for fired during the queue wait — no future exists; the
             # counter decrements here (never a leaked counter).
             if team_id:
@@ -721,10 +724,8 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
         future = loop.run_in_executor(None, _call_sync, fn, args, fn_kwargs)
 
         def _release(_fut) -> None:
-            try:
+            with contextlib.suppress(Exception):  # best-effort release — never blocks
                 sem.release()
-            except Exception:  # noqa: BLE001, RUF100 — best-effort release
-                pass
             if team_id:
                 inflight[team_id] -= 1
 
@@ -732,7 +733,7 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
         try:
             return await asyncio.wait_for(asyncio.shield(future),
                                           timeout=_ASK_TIMEOUT_S)
-        except asyncio.TimeoutError as e:
+        except TimeoutError as e:
             raise AskBoundedTimeoutError(
                 f"ask exceeded {_ASK_TIMEOUT_S}s") from e
     except AskInFlightLimitError:

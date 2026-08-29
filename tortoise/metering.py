@@ -91,6 +91,7 @@ _logger = logging.getLogger(__name__)
 #: with a per-team lock (cross-process races remain possible and are
 #: documented best-effort, mirroring the per-process budget bucket).
 import threading as _threading  # noqa: E402
+
 _ask_meter_locks: dict[str, _threading.Lock] = {}
 _ask_meter_locks_guard = _threading.Lock()
 

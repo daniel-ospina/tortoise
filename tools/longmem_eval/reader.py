@@ -36,32 +36,44 @@ import os
 import sys
 
 from tortoise.ingest import _PROVIDERS
-from tortoise.sdk import _SESSION_LLM_PROVIDER_PRIORITY
+
 # The product owns the reader (prompt constants + LLMReader + protocol +
 # PROBE_SYSTEM). Re-exported verbatim — the private prompt constants are
 # part of the eval-test contract (tests/test_longmem_reader_prompting.py,
 # tests/test_longmem_reader_aggregation.py, tests/test_longmem_reader_pinning.py
 # import them directly).
-from tortoise.reader import (  # noqa: F401
-    DEFAULT_READER_MAX_TOKENS,
-    LLMReader,
-    PROBE_SYSTEM,
-    Reader,
+from tortoise.reader import (
     _ABSTRACTION_FRAGMENT,
     _KNOWLEDGE_UPDATE_FRAGMENT,
     _MULTI_SESSION_FRAGMENT,
     _SYSTEM_PROMPT,
     _TYPE_FRAGMENTS,
+    DEFAULT_READER_MAX_TOKENS,
+    PROBE_SYSTEM,
+    LLMReader,
+    Reader,
     reader_prompt_constants,
     system_prompt_for,
 )
+from tortoise.sdk import _SESSION_LLM_PROVIDER_PRIORITY
 
 __all__ = [
-    "DEFAULT_READER_MAX_TOKENS", "LLMReader", "PROBE_SYSTEM", "Reader",
-    "READER_MODEL", "MockReader", "build_reader", "_resolve_provider",
-    "_parse_model_spec", "_SYSTEM_PROMPT", "_TYPE_FRAGMENTS",
-    "_KNOWLEDGE_UPDATE_FRAGMENT", "_MULTI_SESSION_FRAGMENT",
-    "_ABSTRACTION_FRAGMENT", "reader_prompt_constants", "system_prompt_for",
+    "DEFAULT_READER_MAX_TOKENS",
+    "PROBE_SYSTEM",
+    "READER_MODEL",
+    "_ABSTRACTION_FRAGMENT",
+    "_KNOWLEDGE_UPDATE_FRAGMENT",
+    "_MULTI_SESSION_FRAGMENT",
+    "_SYSTEM_PROMPT",
+    "_TYPE_FRAGMENTS",
+    "LLMReader",
+    "MockReader",
+    "Reader",
+    "_parse_model_spec",
+    "_resolve_provider",
+    "build_reader",
+    "reader_prompt_constants",
+    "system_prompt_for",
 ]
 
 # Pinned reader identity for the run (M5 #1525). The V2 runs were confounded
