@@ -1344,12 +1344,14 @@ jobs:
     # enforcement from failing the carve-out). The skip-guard's manifest mode
     # covers the set (the carve-out's redislite-availability skips are the
     # exempt reason family — E2E-4 row: "skip-guard exempts them").
-    # Gated on full==true (review finding #3): the E2E-4 gate is verified on
-    # the full lane; tier-2 PRs keep carve-out coverage via surface selection
-    # (carve-out files ride the tier-2 legs embedded — no URI on tier-2) and
-    # are spared the full 342-test run on every PR's critical path.
+    # #1988: previously gated on full==true (review finding #3) with tier-2
+    # PRs running the carve-out files embedded in the fast-matrix legs — but
+    # the tier-2 process exhausts its redislite spawn budget before the late
+    # embedded suites (RedisLiteServerStartError). The carve-out job now runs
+    # on PRs too (fresh process) and ci_selection excludes carve-out files
+    # from the tier-2 legs, so the embedded files always run here.
     needs: changes
-    if: needs.changes.outputs.full == 'true'
+    if: always() && needs.changes.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
