@@ -2342,6 +2342,13 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
                 },
             )
     except Exception as e:
+        # P2 (second-model): compensating rollback — the token twin restores
+        # the invite to pending on a membership-write failure; the by-id
+        # accept must NOT permanently burn the invite on a transient error.
+        cp.query(
+            "invitations", method="PATCH", filters=[("id", "eq", inv["id"])],
+            json_body={"status": "pending", "accepted_at": None},
+        )
         raise InvitationError(f"Could not create membership: {e}",
                               status=402) from e
     return {"team_id": inv["team_id"], "role": inv["role"]}

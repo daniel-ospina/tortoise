@@ -6397,7 +6397,7 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
         pending = reg.query(
             "MATCH (i:Invitation {team_id:$tid}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
-            "AND i.expires_at > $now RETURN count(i)",
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) RETURN count(i)",
             params={"tid": team_id, "now": now},
         ).result_set[0][0]
         if active + pending >= 2:  # Pro max_users=2
@@ -6752,7 +6752,7 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
     rows = reg.query(
         "MATCH (i:Invitation {email:$email}) "
         "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
-        "AND i.expires_at > $now "
+        "AND (i.expires_at IS NULL OR i.expires_at > $now) "
         "MATCH (t:Team {id:i.team_id}) "
         "RETURN i.id, i.team_id, t.name, i.role, i.inviter_email, i.expires_at",
         params={"email": email, "now": now},
@@ -6791,7 +6791,10 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     if expires_at and expires_at < datetime.now(UTC).isoformat():
         raise HTTPException(status_code=400, detail="Invite token expired")
     user_email = (user.get("email") or "").lower()
-    if user_email and user_email != (invite_email or "").lower():
+    # P1 (second-model): fail CLOSED — an email-less session cannot accept
+    # by id (email is the ONLY authz on this token-less endpoint; mirror
+    # the supabase twin).
+    if not user_email or user_email != (invite_email or "").lower():
         raise HTTPException(status_code=404, detail="Invitation not found")
     existing = reg.query(
         "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
