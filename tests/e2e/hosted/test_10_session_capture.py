@@ -29,8 +29,11 @@ def _enable_session_recording(api, tenant: dict) -> None:
     """Seed the tenant's session_recording flag (explicit for determinism;
     the default is ON — #1927)."""
     h = {"Authorization": f"Bearer {tenant['api_key']}"}
+    # #1885-class: `api` is a Playwright APIRequestContext — it takes `data=`,
+    # not `json=` (APIRequestContext.patch() has no json kwarg; the old call
+    # TypeError'd the suite). Playwright serializes dicts as JSON.
     r = api.patch("/v1/onboarding/state", headers=h,
-                  json={"session_recording": True})
+                  data={"session_recording": True})
     assert r.status == 200, f"enable session_recording: {r.status} {r.text()}"
     # Self-verifying: the seed must actually stick — a silently dropped
     # PATCH would 409 the capture POSTs below (loud), but asserting the
