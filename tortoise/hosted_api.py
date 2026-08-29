@@ -1931,7 +1931,7 @@ DEFAULT_ONBOARDING_STATE = {
     "github_index_cursor": None,          # #1725: per-repo composite (updated_at, number) diff cursor
     "github_legacy_backfill_done": False,  # #1725: one-time legacy `-closed` backfill marker
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
-    "session_recording": False,
+    "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "demo_created": False,
     "team_created": False,
     "completed_at": None,
@@ -4368,8 +4368,8 @@ async def toggle_api_key_enabled(
 # SINGLE cross-surface harness value set. Contract (pinned by the plan's
 # cross-surface vocab test): _HARNESS_ANALYTICS_VALUES ⊆ this Literal, and
 # receipt keys are derived per Literal member. Invalid harness values fail
-# Pydantic validation with 422 (tested on an OPTED team — a rejected harness
-# must not confuse the consent gate).
+# Pydantic validation with 422 (tested on a recording team — a rejected harness
+# must not confuse the off-switch).
 _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
 })
@@ -4448,9 +4448,8 @@ def _llm_provider_available() -> bool:
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
     """Capture an agent session and extract turns as episodic Points.
 
-    #1727 Slice 2 (Task 11): the server-enforced consent gate + per-harness
-    receipts. The consent 403 is checked FIRST in the gate stack (before the
-    provider 503 / quota 402) so un-opted teams do no quota work at all; any
+    #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
+    the provider 503 / quota 402) so disabled teams do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) and 2xx records
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
@@ -4500,20 +4499,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         QuotaCheckError,
     )
 
-    # #1727 Slice 2 (Task 11, P0): the ENFORCED session_recording flag IS the
-    # consent — checked FIRST in the gate stack, before provider/quota work.
-    # Closes the prompt-injection exfiltration hole: a team that never opted
-    # in can not have conversations uploaded (POST /v1/sessions or the MCP
-    # tool), no matter what a prompt says. Legacy session_recording=True is
-    # grandfathered as consent (re-ask surface in Slice 3).
+    # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
+    # not an enforced consent gate. The flag stays readable/settable as the
+    # dashboard's quiet off-switch: a team that disabled it gets a clear 409
+    # (state-conflict: recording policy off — NOT the old 403 consent error),
+    # capture stops (no Session write, no receipt), and the per-harness
+    # last-error surfaces the message on the dashboard row.
     state = _get_onboarding_state(team["team_id"])
     if not state.get("session_recording"):
         raise HTTPException(
-            status_code=403,
-            detail="Session capture is not enabled for this team. Enable it "
+            status_code=409,
+            detail="Session recording is disabled for this team. Enable it "
                    "in the dashboard (Memory sources > Agent sessions) or via "
-                   "tortoise_onboarding_session_recording before filing "
-                   "sessions.",
+                   "tortoise_onboarding_session_recording to capture sessions.",
         )
 
     # #822: LLM extraction is the default (and only) capture extraction —
@@ -4560,7 +4558,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # session_existed runs BEFORE the quota estimate — a re-POST of an
     # existing session_id writes ZERO non-episodic points (the replay path
     # below skips extraction) and must never be 402-blocked by an as-if-fresh
-    # estimate. The consent 403 above stays FIRST in the gate stack; the
+    # estimate. The opt-out check above stays FIRST in the gate stack; the
     # sessions-limit gate below still counts Session nodes.
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
@@ -4957,9 +4955,10 @@ def _record_capture_last_error(team_id: str, harness: str | None,
 # active (receipt authoritative over probe).
 #
 # The probe is UNCONDITIONAL install telemetry (harness + timestamp ONLY —
-# zero conversation content), NOT consent-gated: a team that hasn't opted in
-# still reports that a hook was installed, so the dashboard can show install
-# status before consent exists. It IS get_current_team-gated (auth required
+# zero conversation content), NOT gated on session_recording: a team with
+# recording disabled still reports that a hook was installed, so the dashboard
+# can show install status independently of the off-switch. It IS
+# get_current_team-gated (auth required
 # — probes are per-team state). Clients MUST target the configured
 # TORTOISE_API_URL (never a hardcoded hosted host — self-hosted routing pin):
 # the `tortoise session probe` CLI resolves it from the .tortoise config the
@@ -4993,10 +4992,10 @@ async def session_install_probe(body: InstallProbeRequest,
                                 team: dict = Depends(get_current_team)):  # noqa: B008
     """Record a harness install probe (Task 14, T2-P1).
 
-    Consent-gating decision (pinned): the probe is UNCONDITIONAL install
+    Opt-out decision (pinned): the probe is UNCONDITIONAL install
     telemetry — harness + timestamp only, no content — so it is NOT gated on
-    session_recording (an un-opted team still reports the hook installed,
-    which is what lets the dashboard show install status pre-consent). Auth
+    session_recording (a team with recording disabled still reports the hook
+    installed, which is what lets the dashboard show install status). Auth
     (get_current_team) IS required: probes are per-team onboarding state.
     """
     now = datetime.now(UTC).isoformat()
@@ -5499,11 +5498,10 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
     500 fail-closed, redacted.
     """
-    # #1727 follow-up (review PR #1827): commit_session is a session-content
-    # write surface not yet consent-gated — the derived-commit receiver
-    # materializes session-derived content WITHOUT the session_recording
-    # consent check. PRE-EXISTING endpoint (epic #909) outside this PR's
-    # diff — track the gate in the epic #909 slice that owns the commit path.
+    # #1927: commit_session is a session-content write surface that needs NO
+    # consent gate — session_recording is default-ON (ToS-covered) with an
+    # optional off-switch, so there is no gate to bypass (#1910 resolved by
+    # the gate removal; the off-switch lives in _capture_session_impl only).
     from tortoise.commit_idempotency import CommitRecordStore
     from tortoise.commit_schema import (
         plan_commit,
@@ -9586,7 +9584,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "github_indexed": False,
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
     "demo_created": False,
-    "session_recording": False,
+    "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "team_created": False,
     "prompt_pasted": False,
     "onboarding_complete": False,
@@ -9840,12 +9838,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 async def set_session_recording(body: dict, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
 
-    #1728 Slice 3 (single consent source): writes the SAME consent keys as
-    the wizard's sessions toggle — the enforced ``session_recording`` flag
-    (the data-plane consent) + ``capture_revised`` (a user-initiated enable/
-    disable is an explicit decision, so it resolves the exactly-once re-ask;
-    fresh opt-ins never see the re-ask pane; a declined user can re-enable
-    here regardless of ``capture_revised``).
+    #1927: session_recording is the OPTIONAL OFF-SWITCH (default ON,
+    ToS-covered) — not a consent gate. Writing ``enabled`` here flips the
+    flag the capture pipeline checks (409 when off); ``capture_revised`` is
+    written for backward-compatibility with the registered state keys (the
+    exactly-once re-ask machinery it fed was removed with the gate).
 
     #1859 P3-3: converted from get_current_team (key-only) to the same
     non-gated dual-auth as GET/PATCH /v1/onboarding/state — the dashboard
