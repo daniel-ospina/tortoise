@@ -21,9 +21,9 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
     The same source the prompts and the enforcer validate against."""
     from tortoise.pack_registry import PackRegistry  # noqa: I001
+    from tortoise.pack_registry import default_packs_dir
     import yaml
-    packs_dir = Path(packs_dir) if packs_dir else \
-        Path(__file__).resolve().parent.parent / "packs"
+    packs_dir = Path(packs_dir) if packs_dir else default_packs_dir()
     reg = PackRegistry(packs_dir)
     reg.load_all()
     ns_files = {}
@@ -111,9 +111,10 @@ def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:
     custom-dir call never poisons the default-dir memo and vice versa —
     cycle-3 P2 unkeyed memo)."""
     import copy
+
+    from tortoise.pack_registry import default_packs_dir
     global _KIND_SPEC_CACHE
-    packs_dir = (Path(packs_dir) if packs_dir else
-                 Path(__file__).resolve().parent.parent / "packs").resolve()
+    packs_dir = (Path(packs_dir) if packs_dir else default_packs_dir()).resolve()
     cached = _KIND_SPEC_CACHE.get(str(packs_dir))
     if cached is not None:
         # deep copy — callers must never mutate the shared cache (the

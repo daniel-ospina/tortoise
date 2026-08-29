@@ -12,10 +12,13 @@ Design:
 from __future__ import annotations
 
 import dataclasses
+import logging
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+log = logging.getLogger(__name__)
 
 # ── Canonical kind vocabularies (ONTOLOGY_v2.5 §1.1) ──────────────────────
 
@@ -264,6 +267,44 @@ class PackManifest:
 
 
 # ── Registry ──────────────────────────────────────────────────────────────
+
+
+def default_packs_dir() -> Path:
+    """Resolve the default packs directory (packaged → repo root).
+
+    The resolution order (epic #1891 plan §5; #1930 adds the
+    TORTOISE_PACKS_DIR env leg in front):
+
+    1. Packaged default — ``<package>/packs`` (``site-packages/tortoise/packs``
+       on a wheel install, where package-data ships the catalog). Chosen ONLY
+       when it actually contains manifests: the source tree's
+       ``tortoise/packs/`` holds the discovery stub (no yamls), so in dev and
+       in the Docker build context this leg falls through.
+    2. Repo root — ``<package>/../packs`` (dev/editable installs, and the
+       Docker image's ``COPY packs/ packs/`` at ``/app``).
+
+    All registry consumers resolve the catalog through this single primitive
+    (previously each hardcoded ``Path(__file__).parent.parent / "packs"`` —
+    which on a wheel install resolves ``site-packages/packs`` → zero packs,
+    the silent empty-registry defect G1, #1929).
+    """
+    packaged = Path(__file__).resolve().parent / "packs"
+    if any(packaged.glob("*/manifest.yaml")):
+        return packaged
+    repo_root = Path(__file__).resolve().parent.parent / "packs"
+    if packaged.is_dir() and not repo_root.exists():
+        # A packaged layout that ships ZERO manifests (package-data /
+        # MANIFEST.in regression) falls back to a nonexistent repo-root leg —
+        # the silent empty-registry defect class (G1). Keep the fallback
+        # (dev/Docker must not break) but say it out loud; the publish
+        # smokes are the hard gate.
+        log.warning(
+            "packaged packs dir %s contains no manifests and repo-root "
+            "fallback %s does not exist — registry will load 0 packs",
+            packaged, repo_root,
+        )
+    return repo_root
+
 
 class PackRegistry:
     """Catalog of all installed expansion packs.
@@ -1164,7 +1205,7 @@ class PackRegistry:
 if __name__ == "__main__":
     import sys
 
-    packs_dir = Path(__file__).resolve().parent.parent / "packs"
+    packs_dir = default_packs_dir()
     registry = PackRegistry(packs_dir)
     loaded = registry.load_all()
 
