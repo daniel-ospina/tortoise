@@ -256,7 +256,8 @@ def _machine_config(machine) -> tuple[dict | None, dict | None]:
 def process_group(machine: dict, config: dict) -> str:
     """flyctl ProcessGroup(): fly_process_group → process_group → ''."""
     metadata = config.get("metadata") or {}
-    return metadata.get("fly_process_group") or metadata.get("process_group") or ""
+    group = metadata.get("fly_process_group") or metadata.get("process_group") or ""
+    return str(group)
 
 
 def crash_loop_verdict(machine: dict) -> bool | None:
@@ -350,22 +351,19 @@ def main() -> int:
     warnings: list[str] = []
     active = 0
     for machine in machines:
-        if not isinstance(machine, dict):
-            _err("cannot determine machines state: machines list entry is not a JSON object")
-            return 2
-        state = machine.get("state")
-        if state is not None and not isinstance(state, str):
-            _err(
-                f"cannot determine machines state: machine "
-                f"{_clean(str(machine.get('id') or '?'))}: 'state' is not a string"
-            )
-            return 2
-        if state in INACTIVE_STATES:
-            continue  # flyctl IsActive(): already gone, no remediation possible
         try:
+            if not isinstance(machine, dict):
+                raise GuardError("machines list entry is not a JSON object")
+            state = machine.get("state")
+            if state is not None and not isinstance(state, str):
+                raise GuardError(
+                    f"machine {_clean(str(machine.get('id') or '?'))}: "
+                    "'state' is not a string"
+                )
+            if state in INACTIVE_STATES:
+                continue  # flyctl IsActive(): already gone, no remediation possible
             config, incomplete = _machine_config(machine)
             mid = _clean(str(machine.get("id") or machine.get("name") or "?"))
-            mid = _clean(mid)
             using_incomplete = config is None
             cfg = config if config is not None else incomplete
             group = process_group(machine, cfg) if cfg is not None else ""
