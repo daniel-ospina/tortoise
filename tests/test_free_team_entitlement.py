@@ -348,3 +348,172 @@ class TestRegistryEntitlement:
 def team_client_factory(client):
     tc, fake = client
     return tc, fake
+
+
+# ── #1954: concurrent TOCTOU tests ─────────────────────────────────────────
+
+
+class TestConcurrentTeamCreationTOCTOU:
+    """#1954 — the "one free team" check+provision is read-then-write:
+    concurrent POST /v1/teams (or /v1/onboarding/team) requests can all
+    read count==0 (and the 429 owner-membership count sees 0 too) then all
+    provision → multiple free teams. The fix is an in-process per-user
+    asyncio lock (_team_create_lock) around the check+provision in every
+    create_team lane + the onboarding re-entry guard. These tests dispatch
+    REAL parallel HTTP (asyncio.gather over an ASGI transport — the same
+    pattern as test_agent_signup_idempotency.py's concurrency E2E) and
+    assert the invariant: exactly one team minted, the second call gets the
+    402/409."""
+
+    def test_concurrent_create_team_one_minted(self, user_client):
+        _tc, fake = user_client
+        import asyncio
+
+        import httpx
+
+        async def _burst():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                r1, r2 = await asyncio.gather(
+                    ac.post("/v1/teams", json={"name": "alpha"}),
+                    ac.post("/v1/teams", json={"name": "beta"}),
+                )
+                return r1, r2
+
+        r1, r2 = asyncio.run(_burst())
+        statuses = sorted((r1.status_code, r2.status_code))
+        assert statuses == [200, 402], (r1.text, r2.text)
+        denied = r1 if r1.status_code == 402 else r2
+        assert _UPGRADE_MSG in denied.json()["detail"]
+        # exactly one team minted + exactly one owner membership (the gate
+        # is primed — a third sequential create would 402 too)
+        teams = fake.query("teams")
+        minted = [t for t in teams if t.get("name") in ("alpha", "beta")]
+        assert len(minted) == 1, f"expected exactly one minted team: {minted}"
+        mems = fake.query("team_memberships",
+                          filters=[("user_id", "eq", _USER1)])
+        assert len(mems) == 1, "exactly one owner membership must exist"
+
+    def test_concurrent_create_team_one_minted_registry(self, reg_client):
+        """Registry (selfhost) lane — same invariant. NOTE: the registry
+        lane may run MULTI-PROCESS; the in-process lock is the single-
+        process guard, DB-level enforcement is the multi-process backstop
+        (documented in _team_create_lock)."""
+        _tc, reg = reg_client
+        import asyncio
+
+        import httpx
+
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _USER1, "email": "owner@example.com"}
+        try:
+            async def _burst():
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport,
+                                             base_url="http://test") as ac:
+                    r1, r2 = await asyncio.gather(
+                        ac.post("/v1/teams", json={"name": "gamma"}),
+                        ac.post("/v1/teams", json={"name": "delta"}),
+                    )
+                    return r1, r2
+
+            r1, r2 = asyncio.run(_burst())
+        finally:
+            app.dependency_overrides.clear()
+        statuses = sorted((r1.status_code, r2.status_code))
+        assert statuses == [200, 402], (r1.text, r2.text)
+        denied = r1 if r1.status_code == 402 else r2
+        assert _UPGRADE_MSG in denied.json()["detail"]
+        rows = reg.query(
+            "MATCH (t:Team) WHERE t.name IN ['gamma','delta'] RETURN count(t)"
+        ).result_set
+        assert rows[0][0] == 1, "exactly one Team node must be minted"
+        rows = reg.query(
+            "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+            "RETURN count(m)", params={"uid": _USER1},
+        ).result_set
+        assert rows[0][0] == 1, "exactly one owner membership must exist"
+
+    def test_concurrent_onboarding_sub_team_one_minted(self, team_client_factory):
+        """The onboarding re-entry guard is read-then-write too: a
+        concurrent double-call must mint exactly ONE sub-team (second gets
+        the 409 "Sub-team already created" — different names so the
+        duplicate-name 409 cannot mask the guard)."""
+        from tortoise.hosted_api import get_current_team_session
+        _tc, fake = team_client_factory
+        app.dependency_overrides[get_current_team_session] = lambda: dict(
+            FREE_TEAM, team_id="team-free-001", tier="free",
+            session_user_id=_USER1)
+        import asyncio
+
+        import httpx
+
+        try:
+            async def _burst():
+                transport = httpx.ASGITransport(app=app)
+                async with httpx.AsyncClient(transport=transport,
+                                             base_url="http://test") as ac:
+                    r1, r2 = await asyncio.gather(
+                        ac.post("/v1/onboarding/team",
+                                json={"name": "subalpha"}),
+                        ac.post("/v1/onboarding/team",
+                                json={"name": "subbeta"}),
+                    )
+                    return r1, r2
+
+            r1, r2 = asyncio.run(_burst())
+        finally:
+            app.dependency_overrides.clear()
+        statuses = sorted((r1.status_code, r2.status_code))
+        assert statuses == [200, 409], (r1.text, r2.text)
+        denied = r1 if r1.status_code == 409 else r2
+        assert "already created" in denied.json()["detail"]
+        # exactly one sub-team minted (main team-free-001 + one sub-team row)
+        teams = fake.query("teams")
+        minted = [t for t in teams
+                  if t.get("name") in ("subalpha", "subbeta")]
+        assert len(minted) == 1, f"expected exactly one sub-team: {minted}"
+
+    def test_lock_is_per_user(self):
+        """#1954 throughput decision: the lock is keyed by user_id — the
+        same user's concurrent check+provision calls serialize; different
+        users do NOT share a lock (a single global lock would serialize
+        every tenant's team creation)."""
+        from tortoise.hosted_api import _team_create_lock
+        same_a = _team_create_lock("user-a")
+        same_b = _team_create_lock("user-a")
+        other = _team_create_lock("user-b")
+        assert same_a is same_b, "same user must share the lock"
+        assert same_a is not other, "different users must not share a lock"
+
+    def test_lock_serializes_same_user_critical_sections(self):
+        """#1954 mechanism: the per-user lock actually serializes two
+        overlapping critical sections for the same user (the second waits
+        for the first to release). This is the red-without-lock
+        discriminator: a no-op/removed lock lets the second section enter
+        while the first is still inside, and the strict ordering fails."""
+        import asyncio
+
+        from tortoise.hosted_api import _team_create_lock
+
+        async def _run():
+            lock = _team_create_lock(_USER1)
+            order = []
+
+            async def holder():
+                async with lock:
+                    order.append("a-enter")
+                    await asyncio.sleep(0.02)
+                    order.append("a-exit")
+
+            async def waiter():
+                async with lock:
+                    order.append("b-enter")
+
+            await asyncio.gather(holder(), waiter())
+            return order
+
+        order = asyncio.run(_run())
+        assert order == ["a-enter", "a-exit", "b-enter"], \
+            f"critical sections did not serialize: {order}"
