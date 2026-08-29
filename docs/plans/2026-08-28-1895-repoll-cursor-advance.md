@@ -376,11 +376,11 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
 
 ```bash
 # 1. Local quick check (URI-less carve-out lane — validated working on this machine):
-TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_github_indexer.py -q          # pre-change baseline 24 → 29 with new tests
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_github_indexer.py -q          # pre-change baseline 24 → 30 with new tests
 
 # 2. Docker lane (default; FalkorDB container is up: `docker ps` → falkordb:6379):
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
-  uv run pytest tests/test_github_indexer.py tests/test_github_index_lifecycle.py -v   # pre-change baseline 49 → 55 with new tests
+  uv run pytest tests/test_github_indexer.py tests/test_github_index_lifecycle.py -v   # pre-change baseline 49 → 56 with new tests
 
 # 3. New tests specifically:
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
