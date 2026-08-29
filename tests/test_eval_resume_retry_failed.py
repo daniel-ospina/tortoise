@@ -145,6 +145,17 @@ def _reset_shared_graph(instances) -> None:
                 params={"q": inst["question_id"]})
 
 
+@pytest.fixture(autouse=True)
+def _fresh_shared_per_test():
+    """#1988: one shared server PER TEST, discarded after — the R2 write-fault
+    rig's injected redis TimeoutError poisons the server's connection state;
+    a reused (poisoned) server fails every later question with
+    RedisLiteServerStartError on rebuild. A fresh server per test sidesteps
+    the carryover (spawn count is still ~1/test vs per-question)."""
+    yield
+    _discard_shared()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _embedded_shared_teardown():
     """Real teardown of the shared embedded SDK at module end (the pipeline's
