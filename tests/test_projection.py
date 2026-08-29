@@ -540,9 +540,9 @@ def test_falkor_nand_operator():
 
 
 def test_falkor_unknown_operator_type():
+    """Unknown operator type defaults to :INPUT edges (source → operator)."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
-    """Unknown operator type defaults to :INPUT edges."""
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -550,10 +550,52 @@ def test_falkor_unknown_operator_type():
         proj.apply({"type": "OperatorAdded",
                      "point": {"id": "op1", "content": "XOR(a)", "context": "ctx",
                                "operator": {"op_type": "XOR", "inputs": ["a"]}}})
-        edges = proj.query(
+        # Correct convention: exactly one (s)-[:INPUT]->(o) edge.
+        correct = proj.query(
+            "MATCH (s:Point {id:'a'})-[r:INPUT]->(o:Point {id:'op1'}) RETURN count(r)"
+        ).result_set
+        assert correct[0][0] == 1, correct
+        # #1917: no inverted (o)-[:INPUT]->(s) edge.
+        inverted = proj.query(
             "MATCH (o:Point {id:'op1'})-[r:INPUT]->(s:Point) RETURN count(r)"
         ).result_set
-        assert edges[0][0] == 1
+        assert inverted[0][0] == 0, inverted
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_long_id_input_missing_warns(caplog):
+    """#1917: unresolvable long-id (>= 20 chars) input warns instead of
+    silently matching nothing in the MERGE."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "a", "content": "A", "context": "ctx"}})
+        long_id = "0" * 26  # ULID-length id with no matching Point
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection.edges"):
+            proj.apply({"type": "OperatorAdded",
+                         "point": {"id": "op1", "content": "IMPL(a, missing)",
+                                   "context": "ctx",
+                                   "operator": {"op_type": "IMPL",
+                                                "inputs": ["a", long_id]}}})
+        assert any(long_id in r.message for r in caplog.records), caplog.records
+        # The resolvable input still gets its edges; the missing one is skipped.
+        impl_edges = proj.query(
+            "MATCH (o:Point {id:'op1'})-[r:IMPL]->(s:Point) RETURN s.id"
+        ).result_set
+        assert sorted(r[0] for r in impl_edges) == ["a"], impl_edges
+        inputs = proj.query(
+            "MATCH (s:Point)-[:INPUT]->(o:Point {id:'op1'}) RETURN s.id"
+        ).result_set
+        assert sorted(r[0] for r in inputs) == ["a"], inputs
+        # No stub auto-created for the long-id source (#1917).
+        stub = proj.g.query(
+            "MATCH (n:Point {id:$sid}) RETURN count(n)", params={"sid": long_id}
+        ).result_set
+        assert stub[0][0] == 0, stub
     finally:
         pass  # shared session projection — module helper owns close
 
