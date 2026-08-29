@@ -5941,9 +5941,11 @@ def _count_active_free_memberships(user_id: str) -> int:
     as the no-sub proxy. The supabase twin shape-gates user_id and skips
     dangling memberships — never a 500."""
     from tortoise.supabase_control import (
+        count_active_free_memberships as _sb_count,
+    )
+    from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
-        count_active_free_memberships as _sb_count,
     )
     if is_supabase_enabled():
         return _sb_count(get_control_plane(), user_id)
