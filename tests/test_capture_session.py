@@ -1742,12 +1742,14 @@ def _close_keepalive_anchors() -> None:
 
 @pytest.fixture()
 def consent_client(tmp_path, monkeypatch):
-    """Hosted TestClient for the consent/harness/receipt surface.
+    """Hosted TestClient for the session-recording/harness/receipt surface.
 
-    The team starts UN-OPTED (consent off — the fixture does not seed
-    session_recording); tests opt in via seeding state directly. The Team
-    node is PROVISIONED first — the registry state writer is a MATCH...SET
-    (silent no-op without the node), mirroring the production provision path.
+    The team starts DEFAULT-ON (session_recording defaults to True via the
+    read-time merge — #1927, no consent gate; the fixture does not seed the
+    flag). Tests that need the off-switch seed session_recording=False via
+    _update_onboarding_state. The Team node is PROVISIONED first — the
+    registry state writer is a MATCH...SET (silent no-op without the node),
+    mirroring the production provision path.
     TORTOISE_SESSION_LLM_MOCK=1 satisfies the provider gate.
     """
     orig_init = _patch_sdk_to_temp(tmp_path)
@@ -1810,14 +1812,31 @@ _CONV = [{"role": "user", "content": "we decided to ship the memory capture slic
          {"role": "user", "content": "ok"}]
 
 
-def test_unopted_403_valid_harness(consent_client):
-    """Task 11: un-opted team POST with a VALID harness → 403, checked FIRST
-    (before provider/quota), and NO Session node is written."""
+def test_fresh_team_captures_by_default(consent_client):
+    """#1927: session_recording defaults to TRUE — a fresh team (never
+    toggled) POSTs a session with NO gate and gets a 200 + Session write.
+    The read-time default merge provides the flag; no opt-in required."""
     r = consent_client.post("/v1/sessions",
                             json={"conversation": _CONV, "harness": "claude"})
-    assert r.status_code == 403, r.text
-    assert "not enabled" in r.json()["detail"]
-    assert _session_count() == 0, "no write for an un-opted team"
+    assert r.status_code == 200, r.text
+    assert _session_count() == 1, "default-on team must capture"
+
+
+def test_off_switch_stops_capture_409(consent_client):
+    """#1927: the off-switch (session_recording=False) STOPS ingestion with
+    a clear 409 (NOT the old 403 consent error) — no Session write, no
+    receipt, per-harness last-error recorded so the dashboard row shows why."""
+    _opt_in(enabled=False)
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude"})
+    assert r.status_code == 409, r.text
+    assert "disabled" in r.json()["detail"]
+    assert _session_count() == 0, "off-switch must not write a Session"
+    st = _state()
+    assert st.get("session_capture_last_error_claude"), \
+        "409 must record the per-harness last error"
+    assert st.get("session_capture_receipt_claude") is None, \
+        "409 must not record a receipt"
 
 
 def test_opted_200_and_harness_persisted(consent_client):
@@ -1959,30 +1978,61 @@ def test_receipt_2xx_only_and_last_error_lifecycle(consent_client, monkeypatch):
         "2xx must clear the per-harness last error"
 
 
-def test_decline_clears_consent_403(consent_client):
-    """Task 11 (T1-P8 + T2-P2e): after a decline (session_recording=False),
-    POST → 403 while EXISTING Sessions stay untouched."""
+def test_off_switch_keeps_existing_sessions(consent_client):
+    """#1927: after the off-switch (session_recording=False), POST → 409
+    while EXISTING Sessions stay untouched — and the blocked POST uses a
+    FRESH session_id so an errant write would surface (count grows)."""
     _opt_in()
     r1 = consent_client.post("/v1/sessions",
                              json={"conversation": _CONV,
                                    "session_id": "s-decline-1727"})
     assert r1.status_code == 200, r1.text
     assert _session_count() == 1
-    # decline (re-ask NO / Q3 no writes the same keys)
+    # off-switch (toggle-off writes the same key)
     _opt_in(enabled=False)
     r2 = consent_client.post("/v1/sessions",
                              json={"conversation": _CONV,
-                                   "session_id": "s-decline-1727"})
-    assert r2.status_code == 403, r2.text
-    # existing Sessions untouched — the decline must not delete captures
+                                   "session_id": "s-off-1927-fresh"})
+    assert r2.status_code == 409, r2.text
+    assert "disabled" in r2.json()["detail"]
+    # existing Sessions untouched AND no new node from the blocked POST
     assert _session_count() == 1, \
-        "decline must never remove already-captured sessions"
+        "off-switch must never remove already-captured sessions nor write"
 
 
-def test_legacy_true_grandfathered_200(consent_client):
-    """Task 11: legacy session_recording=True (pre-resolution teams) is
-    GRANDFATHERED as consent — the gate reads the flag, so a legacy-True team
-    captures fine until the re-ask resolves (Slice 3)."""
+def test_off_switch_409_first_before_provider_gate(consent_client, monkeypatch):
+    """#1927 (review P2): the 409 opt-out check is FIRST in the gate stack —
+    a disabled team with NO provider key gets 409, not the provider 503."""
+    _opt_in(enabled=False)
+    monkeypatch.delenv("TORTOISE_SESSION_LLM_MOCK", raising=False)
+    for k in ("OPENROUTER_API_KEY", "DEEPSEEK_API_KEY", "OPENAI_API_KEY",
+              "GEMINI_API_KEY", "ANTHROPIC_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude"})
+    assert r.status_code == 409, r.text
+    assert "disabled" in r.json()["detail"]
+
+
+def test_off_switch_409_first_before_quota_gate(consent_client):
+    """#1927 (review P2): a disabled team OVER quota gets 409, not the
+    quota 402 — the opt-out check precedes the points-estimate gate."""
+    _opt_in(enabled=False)
+    # push the estimate astronomically high so any quota gate would 402
+    orig = _ha._session_extraction_estimate
+    _ha._session_extraction_estimate = lambda w: 10**9
+    try:
+        r = consent_client.post("/v1/sessions",
+                                json={"conversation": _CONV, "harness": "claude"})
+    finally:
+        _ha._session_extraction_estimate = orig
+    assert r.status_code == 409, r.text
+    assert "disabled" in r.json()["detail"]
+
+
+def test_legacy_true_team_captures_200(consent_client):
+    """#1927: a team with session_recording=True (the previous consent flag
+    — now the default) captures fine; the flag still reads as the off-switch."""
     _opt_in(enabled=True)  # same flag a legacy team would carry
     r = consent_client.post("/v1/sessions",
                             json={"conversation": _CONV})
@@ -2149,9 +2199,14 @@ def test_session_links_resolve_after_index(consent_client):
 # #1727 Slice 2 (Task 13) — tortoise_session_capture MCP tool.
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp"):
-    """Set the MCP auth ContextVars (hosted-tenant shape) + provision/opt the
-    team, so the tool's hosted pipeline runs against the temp DB."""
+def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
+                       seed_recording: bool = True):
+    """Set the MCP auth ContextVars (hosted-tenant shape) + provision the
+    team, so the tool's hosted pipeline runs against the temp DB.
+    ``seed_recording`` controls whether the session_recording flag is
+    explicitly seeded (True = the default for the consent-era tests; False =
+    provision-only so the test exercises the read-time default-ON merge —
+    #1927)."""
     from contextlib import contextmanager
 
     @contextmanager
@@ -2161,7 +2216,8 @@ def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp"):
         orig_init = _patch_sdk_to_temp(tmp_path)
         _ha._FALLBACK_KEEPALIVE.clear()
         _provision_team(team_id)
-        _ha._update_onboarding_state(team_id, session_recording=True)
+        if seed_recording:
+            _ha._update_onboarding_state(team_id, session_recording=True)
         tok_t = _current_team_id.set(team_id)
         tok_l = _current_team_limits.set(
             {"team_id": team_id, "tier": "free", "max_points": 100000})
@@ -2194,15 +2250,34 @@ def test_session_capture_tool_registered_and_invokeable(tmp_path, monkeypatch):
         "MCP capture must set the per-harness receipt"
 
 
-def test_session_capture_tool_unopted_403(tmp_path, monkeypatch):
-    """Task 13: the MCP tool carries the SAME consent gate — an un-opted
-    team gets the honest 403-style error, never a silent capture."""
+def test_session_capture_tool_fresh_team_captures(tmp_path, monkeypatch):
+    """#1927: the MCP tool has NO consent gate — a fresh (default-on,
+    provision-only — NO explicit flag seed) team captures through the MCP
+    surface (Session + receipt), proving the read-time default merge."""
+    from tortoise.mcp_server import tortoise_session_capture
+    with _mcp_team_context(tmp_path, monkeypatch, seed_recording=False):
+        result = tortoise_session_capture(
+            conversation=_CONV, harness="claude", session_id="s-mcp-1927-default")
+        st = _ha._get_onboarding_state("team-1727-mcp")
+    assert st.get("session_recording") is True, "read-time default must be ON"
+    assert result.get("session_id") == "s-mcp-1927-default", result
+    assert "error" not in result, result
+    assert result.get("turns") == len(_CONV)
+    assert st.get("session_capture_receipt_claude"), \
+        "MCP capture must set the per-harness receipt"
+
+
+def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
+    """Task 13 + #1927: the MCP tool carries the SAME off-switch as the REST
+    path — a team with recording disabled gets the clear 409-style error
+    (stops ingestion), never a silent capture or the old 403."""
     from tortoise.mcp_auth import _current_team_id, _current_team_limits
     from tortoise.mcp_server import tortoise_session_capture
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     orig_init = _patch_sdk_to_temp(tmp_path)
     _ha._FALLBACK_KEEPALIVE.clear()
-    _provision_team("team-1727-mcp-opt")  # provisioned but NOT opted in
+    _provision_team("team-1727-mcp-opt")
+    _ha._update_onboarding_state("team-1727-mcp-opt", session_recording=False)
     tok_t = _current_team_id.set("team-1727-mcp-opt")
     tok_l = _current_team_limits.set(
         {"team_id": "team-1727-mcp-opt", "tier": "free", "max_points": 100000})
@@ -2214,10 +2289,10 @@ def test_session_capture_tool_unopted_403(tmp_path, monkeypatch):
         _current_team_limits.reset(tok_l)
         _ha.TortoiseSDK.__init__ = orig_init
         _ha._FALLBACK_KEEPALIVE.clear()
-    assert result.get("status") == 403, result
-    assert "not enabled" in result.get("error", ""), result
+    assert result.get("status") == 409, result
+    assert "disabled" in result.get("error", ""), result
     assert st.get("session_capture_last_error_pi"), \
-        "un-opted MCP attempt must record the per-harness last error"
+        "off-switch MCP attempt must record the per-harness last error"
     assert st.get("session_capture_receipt_pi") is None
 
 

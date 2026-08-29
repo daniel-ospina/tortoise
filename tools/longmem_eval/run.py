@@ -3578,6 +3578,10 @@ def run_evaluation(
                         # C4 (#1745): the reader-surface evidence metric
                         # (context-level; the metric C1 actually moves).
                         "reader_evidence@k": ret.get("reader_evidence@k"),
+                        # #1948: the reader-surface metric (evidence-bearing
+                        # points AND chunks in the FULL reader context) —
+                        # wired end-to-end alongside reader_evidence@k.
+                        "reader_surface@k": ret.get("reader_surface@k"),
                         # Task 0 (#1745): ranked ids + evidence-turn matches
                         # populated for BOTH arms (the pilot's context composition
                         # was unreconstructable — 0/50); ranked_ids_pre_boost is
@@ -4061,6 +4065,11 @@ def outcomes_to_report(
                 # them).
                 "reader_evidence@k", "ranked_ids_pre_boost",
                 "evidence_boost",
+                # #1948: the reader-surface metric rides the projection
+                # alongside reader_evidence@k (absent until the outcome
+                # carries it — pre-#1948 checkpoints resume without
+                # KeyError).
+                "reader_surface@k",
                 # M8 (#1528, D6): the live graph point count rides the
                 # projection — the flip-list zero-point flag consumes it.
                 "context_point_count",
@@ -4267,6 +4276,38 @@ def _print_summary(report: dict[str, Any]) -> None:
         print("error census: no errors")
     for c in integ.get("checks") or []:
         print(f"  check: {c}")
+    # #1946: the extraction-health gate readout — printed BEFORE the score
+    # so the healthy/degraded split is seen before the blended accuracy
+    # (reval3: 33/50 questions ingested 0 semantic points yet the 0.880
+    # blended healthy 0.824 + degraded 0.909 into one headline).
+    eh = report.get("extraction_health")
+    if eh:
+        print("── extraction health ──")
+        flag = "⚠ DEGRADED" if eh.get("status") == "degraded" else "healthy"
+        print(f"status: {flag}  (healthy {eh.get('healthy_n')} / degraded "
+              f"{eh.get('degraded_n')}, degraded_fraction "
+              f"{eh.get('degraded_fraction')} >= threshold "
+              f"{eh.get('threshold')}; min_points {eh.get('min_points')})")
+        pop = eh.get("per_population_accuracy")
+        if pop:
+            for label, d in (("healthy", pop.get("healthy") or {}),
+                             ("degraded", pop.get("degraded") or {})):
+                acc = d.get("accuracy")
+                print(f"  {label:<9} accuracy "
+                      f"{acc if acc is not None else 'n/a'} (n={d.get('n')})")
+            if eh.get("status") == "degraded":
+                if eh.get("degraded_n"):
+                    print("  ⚠ degraded population present — the overall "
+                          "accuracy blends two populations; read the "
+                          "per-population numbers above")
+                else:
+                    # the flag fired on the run census alone (no degraded
+                    # question outcomes) — surface the deciding term,
+                    # mirroring the integrity block's "invalidity decided
+                    # by" line.
+                    print("  ⚠ run flagged by census: fatal_402_billing / "
+                          "empty_embed_list present in the error census "
+                          "(above) — extraction was billing/embedding-limited")
     print("── score ──")
     acc = report["accuracy"]
     print(f"overall accuracy:        {acc['overall']}")

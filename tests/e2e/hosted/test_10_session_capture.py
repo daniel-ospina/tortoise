@@ -7,14 +7,16 @@ on the E2E server) turns conversation sentences into Points.
 
 Negatives: turn cap (MAX_SESSION_TURNS=500) → 400; oversized turn content
 (>5000 chars) → accepted + truncated to the stored window (the old 422 is
-removed — #1532 D1, SDK truncation parity); unauthenticated → 401; un-opted
-tenant (never enabled session_recording) → 403 consent gate (#1727).
+removed — #1532 D1, SDK truncation parity); unauthenticated → 401; a team
+that disabled session_recording (default is ON — #1927) → 409
+state-conflict.
 
-Consent: #1727 Task 11 (P0) made session_recording the ENFORCED capture
-consent — a fresh team (session_recording=False) gets 403 on POST
-/v1/sessions until it opts in via the public PATCH /v1/onboarding/state
-surface (the same call the dashboard's Memory sources > Agent sessions
-toggle makes). The suite opts each tenant in before exercising capture.
+Consent: #1927 removed the ENFORCED capture consent — session_recording is
+now DEFAULT-ON (ToS-covered) with an optional off-switch: a fresh team
+(session_recording unset) captures on POST /v1/sessions with no gate; a team
+that disables it (PATCH /v1/onboarding/state, the dashboard's Memory sources
+> Agent sessions toggle) gets a clear 409. The suite seeds the flag
+per-tenant to stay explicit about the exercised path.
 """
 from __future__ import annotations
 
@@ -27,7 +29,8 @@ skip_unless_hosted_e2e()
 
 
 def _enable_session_recording(api, tenant: dict) -> None:
-    """Opt the tenant into session capture (the #1727 enforced consent)."""
+    """Seed the tenant's session_recording flag (explicit for determinism;
+    the default is ON — #1927)."""
     h = {"Authorization": f"Bearer {tenant['api_key']}"}
     # playwright-python's APIRequestContext takes `data` (dict → JSON body),
     # not `json` (#1928 — #1892's review-fix commit 24126090 swapped the
@@ -36,9 +39,9 @@ def _enable_session_recording(api, tenant: dict) -> None:
     r = api.patch("/v1/onboarding/state", headers=h,
                   data={"session_recording": True})
     assert r.status == 200, f"enable session_recording: {r.status} {r.text()}"
-    # Self-verifying: the opt-in must actually stick — a silently dropped
-    # PATCH would 403 the capture POSTs below (loud), but asserting the
-    # echoed state here makes the consent precondition explicit.
+    # Self-verifying: the seed must actually stick — a silently dropped
+    # PATCH would 409 the capture POSTs below (loud), but asserting the
+    # echoed state here makes the off-switch state explicit.
     assert r.json()["onboarding"]["session_recording"] is True, r.text()
 
 
@@ -118,20 +121,33 @@ def test_session_oversized_turn_truncates(api, tenant_factory):
         f"got {len(user_turn['content'])} chars")
 
 
-@pytest.mark.skipif(is_remote_mode(), reason="consent gate needs a fresh un-opted tenant (remote pool shares 3)")
-def test_session_consent_gate_403(api, tenant_factory):
-    """#1727 (P0) enforced consent: a fresh team that never opted in gets 403
-    on POST /v1/sessions — the prompt-injection exfiltration hole stays closed.
-    The capture tests above opt in; this one pins the gate itself."""
+@pytest.mark.skipif(is_remote_mode(), reason="gate test needs a fresh tenant (remote pool shares 3)")
+def test_session_recording_gate_409_on_disabled(api, tenant_factory):
+    """#1927 consent rework (merged from main): session_recording is DEFAULT-ON
+    (ToS-covered, opt-out) — the old #1727 enforced 403 consent gate is gone.
+    A fresh team that never touched the flag captures with NO gate; a team
+    that explicitly disables it (dashboard off-switch) gets a clear 409
+    state-conflict on POST /v1/sessions."""
     t = tenant_factory("session-noconsent")
     h = {"Authorization": f"Bearer {t['api_key']}"}
-    # A non-blank conversation (else the 422 empty-conversation gate fires
-    # before the consent gate).
+    # Fresh tenant, flag unset → default ON → no gate: capture succeeds.
     r = api.post("/v1/sessions", headers=h,
                  data={"conversation": [{"role": "user",
                                           "content": "ship the migration this week"}]})
-    assert r.status == 403, f"un-opted team must 403, got {r.status} {r.text()}"
-    assert "not enabled" in r.text().lower(), r.text()
+    assert r.status == 200, f"default-on team must capture with no gate, got {r.status} {r.text()}"
+
+    # Explicitly disable (dashboard Memory sources > Agent sessions toggle).
+    r = api.patch("/v1/onboarding/state", headers=h,
+                  data={"session_recording": False})
+    assert r.status == 200, f"disable session_recording: {r.status} {r.text()}"
+    assert r.json()["onboarding"]["session_recording"] is False, r.text()
+
+    # Disabled → clear 409 state-conflict (NOT the old 403 consent error).
+    r = api.post("/v1/sessions", headers=h,
+                 data={"conversation": [{"role": "user",
+                                          "content": "ship the migration this week"}]})
+    assert r.status == 409, f"disabled team must 409, got {r.status} {r.text()}"
+    assert "disabled" in r.text().lower(), r.text()
 
 
 def test_session_unauthenticated_401(api):

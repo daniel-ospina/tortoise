@@ -75,6 +75,7 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     "test_embedded_lifecycle_fast_close",
     "test_eval_ingest_retry",
     "test_eval_resume_retry_failed",
+    "test_eval_extraction_health",
     "test_flip_gate",
     "test_graph_integrity_gate",
     "test_guard",

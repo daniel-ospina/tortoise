@@ -33,6 +33,7 @@ from playwright.sync_api import Page, expect
 from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
+    _proxy_body,
     _session_json,
     _wire_prod_domains,
 )
@@ -89,9 +90,10 @@ def _wire_auth_intercept(page: Page) -> None:
         if url.startswith((AUTH_TARGET, "https://tortoise.premiselabs.co/")):
             local = AUTH_LOCAL + url[len(AUTH_TARGET):]
             try:
-                resp = page.request.get(local)
-                route.fulfill(status=resp.status, content_type="text/html",
-                              body=resp.text())
+                # #1941: content-type-aware fulfillment — resp.text() decodes
+                # as UTF-8 and throws UnicodeDecodeError on binary assets
+                # (PNG favicon/og:image).
+                _proxy_body(route, local, page)
             except Exception:
                 route.fulfill(status=200, content_type="text/html",
                               body="<html><body>auth</body></html>")
@@ -195,12 +197,6 @@ def test_mint_429_recoverable_banner_not_stuck_shell(page: Page) -> None:
     page.context.add_cookies([{"name": "sb-tortoise-auth-token",
                                "value": _up.quote(_json.dumps(sess)),
                                "domain": ".premiselabs.co", "path": "/"}])
-    from tests.e2e.test_session_login_flow import (
-        AUTH_ORIGIN,
-        DASHBOARD_URL,
-        _proxy_body,
-    )
-
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
@@ -319,17 +315,12 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                           body=json.dumps("tt_welcome_key_1234567890abcdef"))
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
             local = AUTH_ORIGIN + url[len(AUTH_HOST):]
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 
@@ -409,16 +400,12 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
                           body=json.dumps({"error": "boom"}))
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 
@@ -461,16 +448,12 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
                           body=json.dumps({"error": "Unauthorized"}))
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 
@@ -530,16 +513,12 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
     page.route("**/*", handle)
@@ -611,16 +590,12 @@ def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(AUTH_HOST):
-            from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
-            from tests.e2e.test_session_login_flow import DASHBOARD_URL
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
-            ctype = "application/javascript" if local.endswith(".js") else ("text/css" if local.endswith(".css") else "text/html")
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type=ctype, body=resp.body())
+            _proxy_body(route, local, page)
             return
         route.continue_()
 

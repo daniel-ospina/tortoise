@@ -30,6 +30,7 @@ surfaces:
   - test_eval_retrieval_budget.py
   - test_eval_resume_retry_failed.py
   - test_eval_ingest_retry.py
+  - test_eval_extraction_health.py
   - test_resume_gate_parity.py
   - test_per_session_census.py
   - test_graph_integrity_gate.py
@@ -56,6 +57,7 @@ surfaces:
   - test_export_cli.py
   - test_failure_contract.py
   - test_fake_control_plane.py
+  - test_free_team_entitlement.py   # main-side drift unblock (#1929): committed on main (entitlement gate work) but never added to selection — the --integrity gate fails every PR without it
   - test_fallback_snapshot.py
   - test_free_team_entitlement.py
   - test_hosted_api.py
@@ -254,6 +256,8 @@ surfaces:
   - test_pack_content_v3.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  - test_pack_shipping.py
+  - test_pack_shipping_wheel.py
   - test_pack_state.py
   - test_pipeline_cli.py
   - test_postmerge_verdict.py
@@ -460,6 +464,7 @@ slow_files:
 - test_ingest_validation.py
 - test_mcp_http.py
 - test_migrate_db.py
+- test_pack_shipping_wheel.py
 - test_projection.py
 - test_projection_lifecycle.py
 - test_reaper.py
@@ -482,6 +487,7 @@ carve_out:
 - test_resume_gate_parity.py
 - test_eval_ingest_retry.py
 - test_eval_resume_retry_failed.py
+- test_eval_extraction_health.py
 - test_backup_e2e.py
 - test_config.py
 - test_embedded_concurrency.py

@@ -65,7 +65,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_commit_endpoint.py": {"registry": "prod-coupled"},
     "test_dr_endpoints.py": {"registry": "prod-coupled"},
     "test_export_delete.py": {"registry": "prod-coupled"},
-    "test_free_team_entitlement.py": {"registry": "prod-coupled"},
+    "test_free_team_entitlement.py": {"registry": "entitlement-gate"},   # added with ci-surfaces drift fix (#1929) — file now runs in selection
     "test_github_index_lifecycle.py": {"registry": "prod-coupled"},
     "test_hosted_api.py": {"registry": "prod-coupled",
                            "team-002": "team-identity"},
@@ -374,11 +374,13 @@ def test_no_redirect_stems_registry_exact():
         "test_graph_integrity_gate",
         "test_per_session_census",
         "test_resume_gate_parity",
-        # #1928/#1944: the embedded-only eval retry suites (no db_uri) belong
-        # in the carve-out lane — the docker fast-matrix process exhausts
-        # redislite servers as the suite grows (RedisLiteServerStartError).
+        # #1928/#1944: the embedded-only eval retry + health suites (no
+        # db_uri) belong in the carve-out lane — the docker fast-matrix
+        # process exhausts redislite servers as the suite grows
+        # (RedisLiteServerStartError).
         "test_eval_ingest_retry",
         "test_eval_resume_retry_failed",
+        "test_eval_extraction_health",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the 17 plan stems: "

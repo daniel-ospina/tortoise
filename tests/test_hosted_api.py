@@ -159,10 +159,9 @@ def client():
 
     All /v1/* endpoints receive TEST_TEAM as the authenticated team.
     All TortoiseSDK instances use the same temp embedded DB.
-    #1727 (Slice 2, Task 11): the team's onboarding state is seeded with
-    session_recording=True — the server-enforced consent gate 403s un-opted
-    teams FIRST, so the session-capture tests must opt the team in (the
-    consent-negative tests seed their own state).
+    # #1927: the team's onboarding state is seeded with session_recording=True
+    # (the default) so the session-capture tests exercise the pipeline gates
+    # deterministically; the off-switch tests seed their own state.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
@@ -179,9 +178,9 @@ def client():
         # seed between this fixture's write and the gate read → 403).
         os.environ["TORTOISE_DB_PATH"] = db_path
         import tortoise.hosted_api as ha_mod
-        # #1727 (Slice 2, Task 11): provision the Team node first (the state
-        # writer is MATCH...SET — a silent no-op without it), then opt the
-        # team in so the session-capture tests pass the consent gate.
+        # #1927: provision the Team node first (the state writer is
+        # MATCH...SET — a silent no-op without it), then seed the flag so the
+        # session-capture tests run deterministically.
         ha_mod._make_sdk(namespace="registry")._get_registry().query(
             "CREATE (t:Team {id:$id, onboarding_state:$st})",
             params={"id": TEST_TEAM_ID, "st": "{}"},
