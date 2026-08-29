@@ -57,6 +57,7 @@ surfaces:
   - test_failure_contract.py
   - test_fake_control_plane.py
   - test_fallback_snapshot.py
+  - test_free_team_entitlement.py
   - test_hosted_api.py
   - test_hosted_auth.py
   - test_hosted_backup.py
