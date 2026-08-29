@@ -188,6 +188,50 @@ jobs:
       - name: Acceptance gate (clean venv, client only)
         run: bash client/verify_client.sh
 
+  packaging-smoke:
+    # #1929 (epic #1891 slice 1): per-PR G1 regression guard — the built
+    # wheel must ship the pack catalog (surface 1) and a clean-venv install
+    # must load the full starter set from the installed location. The
+    # publish-time smokes (publish-pypi / publish-selfhost / deploy-hosted)
+    # are the REQUIRED publish gates; this job gives fast PR feedback.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build tooling
+        run: pip install build==1.6.0   # pinned (#1685 convention — a build-frontend
+        # bump must not silently change the wheel content this job asserts on)
+      - name: Build wheel + sdist
+        run: python -m build
+      - name: Wheel content check — tortoise/packs shipped
+        run: |
+          MANIFEST_COUNT="$(unzip -Z1 dist/*.whl | grep -cE '^tortoise/packs/[^/]+/manifest\.yaml$' || true)"
+          [ "$MANIFEST_COUNT" -ge 1 ] || { echo "::error::wheel ships no pack manifests"; unzip -Z1 dist/*.whl | grep tortoise/packs || true; exit 1; }
+          tar tzf dist/*.tar.gz | grep -q 'tortoise/packs/__init__.py' \
+            || { echo "::error::sdist missing tortoise/packs/__init__.py (MANIFEST.in)"; exit 1; }
+          echo "wheel/sdist pack content OK"
+      - name: Clean-venv pack smoke (bound derived from installed constant)
+        run: |
+          python -m venv /tmp/packsmoke
+          /tmp/packsmoke/bin/pip install dist/*.whl --quiet
+          cd /tmp && /tmp/packsmoke/bin/python - <<'EOF'
+          from pathlib import Path
+          import tortoise
+          from tortoise.pack_registry import PackRegistry
+          from tortoise.pack_state import DEFAULT_STARTER_PACKS
+          packaged = Path(tortoise.__file__).resolve().parent / "packs"
+          reg = PackRegistry(packaged)
+          n = reg.load_all()
+          bound = len(DEFAULT_STARTER_PACKS)
+          assert n >= bound, f"wheel ships {n} packs < starter {bound}"
+          assert set(reg.packs) >= set(DEFAULT_STARTER_PACKS), "wrong pack set"
+          t = Path(tortoise.__file__).resolve().parent.parent / "tests" / "sample_transcript.txt"
+          assert t.exists(), "sample transcript missing"
+          print(f"per-PR wheel pack smoke OK: {n} >= {bound}")
+          EOF
+
   welcome-e2e:
     runs-on: ubuntu-latest
     # Mocked welcome-page suite (#541) — secret-free per-PR coverage against

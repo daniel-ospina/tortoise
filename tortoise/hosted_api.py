@@ -1931,16 +1931,15 @@ DEFAULT_ONBOARDING_STATE = {
     "github_index_cursor": None,          # #1725: per-repo composite (updated_at, number) diff cursor
     "github_legacy_backfill_done": False,  # #1725: one-time legacy `-closed` backfill marker
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
-    "session_recording": False,
+    "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "demo_created": False,
     "team_created": False,
     "completed_at": None,
     # #1727 Slice 2 (Task 11) — registration-table members (see
     # _ONBOARDING_DEFAULT_STATE for the full table; capture receipts,
     # last-attempt failures, re-ask flags, install probes).
-    "capture_revised": False,
-    "capture_ask_shown": False,
-    "session_capture_receipt": None,
+    "capture_revised": False,   # backward-compat write (#1927 re-ask machinery removed)
+    "capture_ask_shown": False,  # backward-compat write (#1927 re-ask machinery removed)    "session_capture_receipt": None,
     "session_capture_receipt_claude": None,
     "session_capture_receipt_claude-desktop": None,
     "session_capture_receipt_claude-web": None,
@@ -4368,8 +4367,8 @@ async def toggle_api_key_enabled(
 # SINGLE cross-surface harness value set. Contract (pinned by the plan's
 # cross-surface vocab test): _HARNESS_ANALYTICS_VALUES ⊆ this Literal, and
 # receipt keys are derived per Literal member. Invalid harness values fail
-# Pydantic validation with 422 (tested on an OPTED team — a rejected harness
-# must not confuse the consent gate).
+# Pydantic validation with 422 (tested on a recording team — a rejected harness
+# must not confuse the off-switch).
 _SESSION_HARNESS_VALUES = frozenset({
     "claude", "claude-desktop", "claude-web", "codex", "cursor", "pi",
 })
@@ -4448,9 +4447,8 @@ def _llm_provider_available() -> bool:
 async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
     """Capture an agent session and extract turns as episodic Points.
 
-    #1727 Slice 2 (Task 11): the server-enforced consent gate + per-harness
-    receipts. The consent 403 is checked FIRST in the gate stack (before the
-    provider 503 / quota 402) so un-opted teams do no quota work at all; any
+    #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
+    the provider 503 / quota 402) so disabled teams do no quota work at all; any
     non-2xx failure records ``session_capture_last_error_{harness}`` (the
     dashboard failure sub-line reads this, NOT client state) and 2xx records
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
@@ -4500,20 +4498,19 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         QuotaCheckError,
     )
 
-    # #1727 Slice 2 (Task 11, P0): the ENFORCED session_recording flag IS the
-    # consent — checked FIRST in the gate stack, before provider/quota work.
-    # Closes the prompt-injection exfiltration hole: a team that never opted
-    # in can not have conversations uploaded (POST /v1/sessions or the MCP
-    # tool), no matter what a prompt says. Legacy session_recording=True is
-    # grandfathered as consent (re-ask surface in Slice 3).
+    # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
+    # not an enforced consent gate. The flag stays readable/settable as the
+    # dashboard's quiet off-switch: a team that disabled it gets a clear 409
+    # (state-conflict: recording policy off — NOT the old 403 consent error),
+    # capture stops (no Session write, no receipt), and the per-harness
+    # last-error surfaces the message on the dashboard row.
     state = _get_onboarding_state(team["team_id"])
     if not state.get("session_recording"):
         raise HTTPException(
-            status_code=403,
-            detail="Session capture is not enabled for this team. Enable it "
+            status_code=409,
+            detail="Session recording is disabled for this team. Enable it "
                    "in the dashboard (Memory sources > Agent sessions) or via "
-                   "tortoise_onboarding_session_recording before filing "
-                   "sessions.",
+                   "tortoise_onboarding_session_recording to capture sessions.",
         )
 
     # #822: LLM extraction is the default (and only) capture extraction —
@@ -4560,7 +4557,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # session_existed runs BEFORE the quota estimate — a re-POST of an
     # existing session_id writes ZERO non-episodic points (the replay path
     # below skips extraction) and must never be 402-blocked by an as-if-fresh
-    # estimate. The consent 403 above stays FIRST in the gate stack; the
+    # estimate. The opt-out check above stays FIRST in the gate stack; the
     # sessions-limit gate below still counts Session nodes.
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
@@ -4957,9 +4954,10 @@ def _record_capture_last_error(team_id: str, harness: str | None,
 # active (receipt authoritative over probe).
 #
 # The probe is UNCONDITIONAL install telemetry (harness + timestamp ONLY —
-# zero conversation content), NOT consent-gated: a team that hasn't opted in
-# still reports that a hook was installed, so the dashboard can show install
-# status before consent exists. It IS get_current_team-gated (auth required
+# zero conversation content), NOT gated on session_recording: a team with
+# recording disabled still reports that a hook was installed, so the dashboard
+# can show install status independently of the off-switch. It IS
+# get_current_team-gated (auth required
 # — probes are per-team state). Clients MUST target the configured
 # TORTOISE_API_URL (never a hardcoded hosted host — self-hosted routing pin):
 # the `tortoise session probe` CLI resolves it from the .tortoise config the
@@ -4993,10 +4991,10 @@ async def session_install_probe(body: InstallProbeRequest,
                                 team: dict = Depends(get_current_team)):  # noqa: B008
     """Record a harness install probe (Task 14, T2-P1).
 
-    Consent-gating decision (pinned): the probe is UNCONDITIONAL install
+    Opt-out decision (pinned): the probe is UNCONDITIONAL install
     telemetry — harness + timestamp only, no content — so it is NOT gated on
-    session_recording (an un-opted team still reports the hook installed,
-    which is what lets the dashboard show install status pre-consent). Auth
+    session_recording (a team with recording disabled still reports the hook
+    installed, which is what lets the dashboard show install status). Auth
     (get_current_team) IS required: probes are per-team onboarding state.
     """
     now = datetime.now(UTC).isoformat()
@@ -5499,11 +5497,10 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     commit_id_mismatch) · 429 dedicated 300/min/key bucket (R-13) ·
     500 fail-closed, redacted.
     """
-    # #1727 follow-up (review PR #1827): commit_session is a session-content
-    # write surface not yet consent-gated — the derived-commit receiver
-    # materializes session-derived content WITHOUT the session_recording
-    # consent check. PRE-EXISTING endpoint (epic #909) outside this PR's
-    # diff — track the gate in the epic #909 slice that owns the commit path.
+    # #1927: commit_session is a session-content write surface that needs NO
+    # consent gate — session_recording is default-ON (ToS-covered) with an
+    # optional off-switch, so there is no gate to bypass (#1910 resolved by
+    # the gate removal; the off-switch lives in _capture_session_impl only).
     from tortoise.commit_idempotency import CommitRecordStore
     from tortoise.commit_schema import (
         plan_commit,
@@ -5934,6 +5931,34 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
     return out
 
 
+def _count_active_free_memberships(user_id: str) -> int:
+    """#1877: active memberships in teams WITHOUT an active paid subscription
+    (the per-person "one free team" entitlement). Mode-aware: supabase reads
+    subscription_status; selfhost (no subscription model) uses tier='free'
+    as the no-sub proxy. The supabase twin shape-gates user_id and skips
+    dangling memberships — never a 500."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        count_active_free_memberships as _sb_count,
+    )
+    if is_supabase_enabled():
+        return _sb_count(get_control_plane(), user_id)
+    reg = _make_sdk(namespace="registry")._get_registry()
+    rows = reg.query(
+        "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+        "WHERE m.team_id <> '' "
+        "MATCH (t:Team {id:m.team_id}) "
+        "WHERE t.tier='free' OR t.tier IS NULL "
+        "RETURN count(m)",
+        params={"uid": user_id},
+    ).result_set
+    # review P2: `tier IS NULL` fail-closes the same shape as the supabase
+    # twin (a missing subscription_status counts as free → 402) — a legacy/
+    # manual tier-less Team node must not grant an extra free slot.
+    return rows[0][0] if rows else 0
+
+
 @app.post("/v1/teams")
 async def create_team(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
     """E2 — create a team (zero-teams state). Tier defaults Free; team
@@ -5985,6 +6010,16 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
         # pre-check is the friendly fast-path, the RPC 409 is authoritative).
         if team_by_name(cp, name):
             raise HTTPException(status_code=409, detail="Team name already exists")
+        # #1877: per-person entitlement — one free team. Any active
+        # membership in a team without an active paid subscription blocks
+        # creating another (the new team would start Free → 2 free teams).
+        # Order pinned: 429 → 409 → 402 (a free-capped user creating a
+        # duplicate name gets 409, not 402). STRING detail (the dashboard
+        # fetch layer string-handles details).
+        if _count_active_free_memberships(user["user_id"]) >= 1:
+            raise HTTPException(
+                status_code=402,
+                detail="Create another team requires a paid plan — upgrade an existing team first")
 
         team_id = str(_uuid.uuid4().hex[:26])
         graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
@@ -6038,19 +6073,38 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
         raise HTTPException(status_code=429,
                             detail="Too many teams created — try again later")
 
+    # #1877 ordering parity: the registry 409 currently surfaces only from
+    # team_create's exception handler — add a dup-name pre-check BEFORE the
+    # 402 so a free-capped user creating a duplicate name gets 409, not 402
+    # (pinned 429 → 409 → 402).
+    dup = reg.query(
+        "MATCH (t:Team {name:$name}) RETURN count(t)",
+        params={"name": name},
+    ).result_set[0][0]
+    if dup:
+        raise HTTPException(status_code=409, detail="Team name already exists")
+    # #1877: per-person entitlement — one free team (tier='free' proxy;
+    # selfhost has no subscription model). STRING detail.
+    if _count_active_free_memberships(user["user_id"]) >= 1:
+        raise HTTPException(
+            status_code=402,
+            detail="Create another team requires a paid plan — upgrade an existing team first")
+
     try:
-        result = sdk.team_create(name)
+        result = sdk.team_create(name, owner_user_id=user["user_id"])
     except Exception as e:
         from tortoise.exceptions import ControlPlaneError
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
             raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
 
-    # Create the owner membership (registry) — the user owns this team
-    try:  # noqa: SIM105
-        sdk.membership_create(result["id"], user["user_id"], "owner")
-    except Exception:
-        pass  # membership_create may require a user node; registry best-effort
+    # #1877 second-model P1: the owner Membership is created INSIDE
+    # team_create (rollback-protected — a membership failure tears the Team
+    # down atomically, mirroring the onboarding lane). The old post-hoc
+    # membership_create swallow was a FAIL-OPEN: a swallowed membership
+    # failure left the team minted with no Membership, so neither the
+    # free-team entitlement count nor the 429 owner-membership rate limit
+    # ever saw it → unlimited free teams + orphans.
 
     return {"team_id": result["id"], "graph_name": result["graph_name"],
             "tier": "free", "name": name}
@@ -6253,7 +6307,9 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
         get_control_plane,
         invitation_mint,
         is_supabase_enabled,
+        pending_invitations,
         team_by_id,
+        team_members,
     )
     if is_supabase_enabled():
         try:
@@ -6261,8 +6317,25 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             team = team_by_id(get_control_plane(), team_id)
             if team is None:
                 raise HTTPException(status_code=404, detail="Unknown team")
-            if (team.get("tier") or "free") != "team":
-                raise HTTPException(status_code=402, detail="Invites require the Team tier")
+            # #1875: tier gate matches pricing (free=1, solo=1, pro=2,
+            # team=∞). Pro capacity = active members + PENDING invitations
+            # (the authoritative invitations source — never
+            # team_memberships(status='invited'), which supabase never
+            # writes).
+            tier = team.get("tier") or "free"
+            if tier in ("free", "solo"):
+                raise HTTPException(status_code=402,
+                                    detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+            if tier == "pro":
+                from datetime import datetime as _dt, timezone as _tz
+                active = [m for m in team_members(get_control_plane(), team_id)
+                          if m.get("status") == "active"]
+                now = _dt.now(_tz.utc).isoformat()
+                pending = [i for i in pending_invitations(get_control_plane(), team_id)
+                           if not i.get("expires_at") or i["expires_at"] > now]
+                if len(active) + len(pending) >= 2:  # Pro max_users=2
+                    raise HTTPException(status_code=402,
+                                        detail="Team member limit reached — upgrade to invite more")
             inv = invitation_mint(get_control_plane(), team_id, email, role,
                                   invited_by=user["user_id"],
                                   inviter_email=(user.get("email") or None))
@@ -6302,12 +6375,31 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
         raise HTTPException(status_code=404, detail="Unknown team")
     team_node = team_row[0][0]
     tier = team_node.get("tier", "free")
-    if tier != "team":
-        raise HTTPException(status_code=402, detail="Invites require the Team tier")
-
-    # #683: max_users gate via centralized fail-closed quota (Team tier = unlimited)
-    limits = _team_limits_from_node(team_node)
-    _check_team_limit(limits, "users")
+    # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Pro →
+    # capacity = active members + PENDING invitations (authoritative
+    # Invitation nodes — not the fake invite-{iid} membership rows, which
+    # are never cleaned); Team → unlimited (None-skip). Replaces the old
+    # active-only `_check_team_limit(limits, "users")` for Pro (cycle-2 P2:
+    # active-only under-counted pending seats).
+    if tier in ("free", "solo"):
+        raise HTTPException(status_code=402,
+                            detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+    if tier == "pro":
+        from datetime import datetime as _pdt, timezone as _ptz
+        active = reg.query(
+            "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
+            params={"tid": team_id},
+        ).result_set[0][0]
+        now = _pdt.now(_ptz.utc).isoformat()
+        pending = reg.query(
+            "MATCH (i:Invitation {team_id:$tid}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+            "AND (i.expires_at IS NULL OR i.expires_at > $now) RETURN count(i)",
+            params={"tid": team_id, "now": now},
+        ).result_set[0][0]
+        if active + pending >= 2:  # Pro max_users=2
+            raise HTTPException(status_code=402,
+                                detail="Team member limit reached — upgrade to invite more")
 
     # Invitation node via SDK (token returned once); roles admin/member allowed here
     import uuid as _uuid
@@ -6537,6 +6629,18 @@ async def accept_invite(body: dict, request: Request,
     # #1853: a suspended team must not mint memberships (registry path —
     # mirrors the deleted_at kill-switch in invitation_accept).
     _ensure_not_suspended(await _team_node(invite["team_id"]))
+    # #1875/#1877 (P1 cycle-2): join-side free-cap on the TOKEN entry point
+    # too — a free-capped invitee must not join a free (or downgraded-window)
+    # team via the email link. Non-consuming (before the accepted_at write).
+    _team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)",
+        params={"id": invite["team_id"]},
+    ).result_set
+    _team_tier = (_team_row[0][0].get("tier") if _team_row else None) or "free"
+    if _team_tier == "free" and _count_active_free_memberships(user["user_id"]) >= 1:
+        raise HTTPException(
+            status_code=402,
+            detail="You already have a free team — this team requires a paid plan to join")
 
     # Token single-use: mark accepted
     reg.query(
@@ -6619,6 +6723,181 @@ async def list_invites(team_id: str, user: dict = Depends(get_current_user)):  #
     return [i for i in sdk.invitation_list(team_id)
             if i.get("status") in (None, "pending")
             and i.get("accepted_at") is None]
+
+
+@app.get("/v1/invites/pending")
+async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  # noqa: B008
+    """#1875: invitee-side pending-invites list (account-menu surface).
+    Reads the AUTHORITATIVE invitations source (never team_memberships
+    status='invited' — supabase never writes those; registry leaves stale
+    fakes). Session-only; scoped to the user's verified email."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        pending_invitations_for_email,
+    )
+    email = (user.get("email") or "").lower()
+    if not email:
+        return {"invites": []}
+    if is_supabase_enabled():
+        return {"invites": pending_invitations_for_email(
+            get_control_plane(), email)}
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    from datetime import datetime as _dt, timezone as _tz
+    now = _dt.now(_tz.utc).isoformat()
+    rows = reg.query(
+        "MATCH (i:Invitation {email:$email}) "
+        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+        "AND (i.expires_at IS NULL OR i.expires_at > $now) "
+        "MATCH (t:Team {id:i.team_id}) "
+        "RETURN i.id, i.team_id, t.name, i.role, i.inviter_email, i.expires_at",
+        params={"email": email, "now": now},
+    ).result_set
+    return {"invites": [{
+        "invitation_id": r[0], "team_id": r[1],
+        "team_name": r[2] or r[1], "role": r[3],
+        "inviter_email": r[4], "expires_at": r[5],
+    } for r in rows]}
+
+
+async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
+    """#1875: token-less by-id accept (registry lane). Mirrors the token
+    branch's checks — pending/expiry/email-match/existing-membership 409 /
+    suspended-team — PLUS the #1877 free-team entitlement: when the target
+    team is free-tier (no subscription model) and the invitee already holds
+    a free team, blocked BEFORE the accepted_at write (NON-consuming — the
+    invitee can leave their free team and re-accept; documented divergence
+    from the token branch's consumed-on-402). Also deletes the fake
+    invite-{iid} membership row (#1880) on success and on the 402 path."""
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation {id:$id}) "
+        "RETURN i.id, i.team_id, i.email, i.role, i.expires_at, i.status, i.accepted_at",
+        params={"id": invitation_id},
+    ).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    iid, team_id, invite_email, role, expires_at, status, accepted_at = rows[0]
+    # P1 (cycle-2): pending-status rejection — a declined/consumed invite
+    # must not be re-acceptable (the decline endpoint is otherwise a no-op).
+    if accepted_at is not None:
+        raise HTTPException(status_code=409, detail="Invitation has already been accepted")
+    if status == "revoked":
+        raise HTTPException(status_code=409, detail="Invitation has been revoked")
+    if expires_at and expires_at < datetime.now(UTC).isoformat():
+        raise HTTPException(status_code=400, detail="Invite token expired")
+    user_email = (user.get("email") or "").lower()
+    # P1 (second-model): fail CLOSED — an email-less session cannot accept
+    # by id (email is the ONLY authz on this token-less endpoint; mirror
+    # the supabase twin).
+    if not user_email or user_email != (invite_email or "").lower():
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    existing = reg.query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
+        params={"tid": team_id, "uid": user["user_id"]},
+    ).result_set[0][0]
+    if existing:
+        raise HTTPException(status_code=409, detail="Already a member of this team")
+    _ensure_not_suspended(await _team_node(team_id))
+    # #1877 free-cap (join side): free-tier target + free-capped invitee →
+    # blocked BEFORE the accepted_at write (non-consuming).
+    team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": team_id},
+    ).result_set
+    team_tier = (team_row[0][0].get("tier") if team_row else None) or "free"
+    if team_tier == "free" and _count_active_free_memberships(user["user_id"]) >= 1:
+        raise HTTPException(
+            status_code=402,
+            detail="You already have a free team — this team requires a paid plan to join")
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
+        params={"id": iid, "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
+    )
+    try:
+        sdk.membership_create(team_id, user["user_id"], role)
+    except Exception as e:
+        _delete_fake_invite_membership(sdk, team_id, iid)
+        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
+    _delete_fake_invite_membership(sdk, team_id, iid)  # #1880 ghost cleanup
+    return {"team_id": team_id, "role": role}
+
+
+@app.post("/v1/invites/pending/{invitation_id}/accept")
+async def accept_invite_by_id(invitation_id: str,
+                              user: dict = Depends(get_current_user)):  # noqa: B008
+    """#1875: token-less accept from the pending list (email-match authz).
+    NOT the registry sdk.invitation_accept (it lacks the email guard)."""
+    from tortoise.supabase_control import (
+        InvitationError,
+        get_control_plane,
+        invitation_accept_by_id,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        try:
+            return invitation_accept_by_id(
+                get_control_plane(), invitation_id, user["user_id"],
+                user.get("email"))
+        except InvitationError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+    sdk = _make_sdk(namespace="registry")
+    return await _registry_accept_by_id(sdk, invitation_id, user)
+
+
+@app.delete("/v1/invites/pending/{invitation_id}")
+async def decline_invite(invitation_id: str,
+                         user: dict = Depends(get_current_user)):  # noqa: B008
+    """#1875: invitee-side decline (email-match authz; idempotent). The
+    registry lane also deletes the fake invite-{iid} membership row
+    (#1880 ghost cleanup — the third terminal state)."""
+    from tortoise.supabase_control import (
+        InvitationError,
+        decline_invitation_by_email,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    email = (user.get("email") or "").lower()
+    if is_supabase_enabled():
+        try:
+            return decline_invitation_by_email(
+                get_control_plane(), invitation_id, email)
+        except InvitationError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation {id:$id}) RETURN i.email, i.team_id, i.status, i.accepted_at",
+        params={"id": invitation_id},
+    ).result_set
+    if not rows:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    invite_email, team_id, status, accepted_at = rows[0]
+    if (invite_email or "").lower() != email:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    # #864 class (review P2): registry accept leaves status='pending' but
+    # sets accepted_at — check BOTH signals, mirroring rescind_invite.
+    if status == "accepted" or accepted_at is not None:
+        raise HTTPException(status_code=409,
+                            detail="Invitation already accepted — cannot decline")
+    if status == "revoked":
+        return {"revoked": True, "already": True, "invitation_id": invitation_id}
+    # Conditional write (still-pending guard): a concurrent accept must win.
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) "
+        "WHERE i.status IS NULL OR i.status = 'pending' "
+        "SET i.status = 'revoked'",
+        params={"id": invitation_id},
+    )
+    recheck = reg.query(
+        "MATCH (i:Invitation {id:$id}) RETURN i.status, i.accepted_at",
+        params={"id": invitation_id},
+    ).result_set[0]
+    if recheck[1] is not None:
+        raise HTTPException(status_code=409,
+                            detail="Invitation already accepted — cannot decline")
+    _delete_fake_invite_membership(sdk, team_id, invitation_id)  # #1880
+    return {"revoked": True, "invitation_id": invitation_id}
 
 
 @app.delete("/v1/invites/{invitation_id}")
@@ -9619,7 +9898,7 @@ _ONBOARDING_DEFAULT_STATE = {
     "github_indexed": False,
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
     "demo_created": False,
-    "session_recording": False,
+    "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "team_created": False,
     "prompt_pasted": False,
     "onboarding_complete": False,
@@ -9635,8 +9914,8 @@ _ONBOARDING_DEFAULT_STATE = {
     # test_state_keys_registered_parametrized). Unregistered keys are silently
     # dropped by the allowlist filter — these are the capture surface the
     # dashboard reads (receipts / last-attempt failures / install probes).
-    "capture_revised": False,              # exactly-once re-ask resolution (Slice 3)
-    "capture_ask_shown": False,            # re-ask pane answered (ANSWER only, T2-P2f)
+    "capture_revised": False,   # backward-compat write (#1927 re-ask machinery removed)
+    "capture_ask_shown": False,  # backward-compat write (#1927 re-ask machinery removed)
     "session_capture_receipt": None,       # bare legacy no-harness receipt
     "session_capture_receipt_claude": None,
     "session_capture_receipt_claude-desktop": None,
@@ -9847,6 +10126,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
         if field in updates:
             updates[state_key] = updates.pop(field)
     email = updates.pop("email", None)  # state keys only — email is a teams column
+    # #1877 (security P1): team_created is SERVER-authoritative — the
+    # create_onboarding_team re-entry guard reads it, so the client must
+    # never reset it via this PATCH surface (a reset would re-open the
+    # unlimited-free-sub-team bypass). Stripped here, like email.
+    updates.pop("team_created", None)
     # Epic #529 copy-attribution beacon: analytics-only fields — pop before
     # the state merge (email pattern) and emit artifact_copied for enum-valid
     # pairs; invalid values are ignored (no event, no error) so a stale or
@@ -9873,12 +10157,11 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
 async def set_session_recording(body: dict, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
 
-    #1728 Slice 3 (single consent source): writes the SAME consent keys as
-    the wizard's sessions toggle — the enforced ``session_recording`` flag
-    (the data-plane consent) + ``capture_revised`` (a user-initiated enable/
-    disable is an explicit decision, so it resolves the exactly-once re-ask;
-    fresh opt-ins never see the re-ask pane; a declined user can re-enable
-    here regardless of ``capture_revised``).
+    #1927: session_recording is the OPTIONAL OFF-SWITCH (default ON,
+    ToS-covered) — not a consent gate. Writing ``enabled`` here flips the
+    flag the capture pipeline checks (409 when off); ``capture_revised`` is
+    written for backward-compatibility with the registered state keys (the
+    exactly-once re-ask machinery it fed was removed with the gate).
 
     #1859 P3-3: converted from get_current_team (key-only) to the same
     non-gated dual-auth as GET/PATCH /v1/onboarding/state — the dashboard
@@ -9891,6 +10174,9 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
     state = _update_onboarding_state(team["team_id"],
                                      session_recording=enabled,
                                      capture_revised=True)
+    # #1927 semantic drift: the off-switch fires question_answered for
+    # continuity with existing analytics — toggle-off is NOT a consent
+    # answer (the consent/re-ask machinery was removed).
     _track_onboarding_event(team, "question_answered",
                             question_id="session_recording",
                             answer="yes" if enabled else "no")
@@ -9935,6 +10221,24 @@ async def create_onboarding_team(body: dict,
             detail="A session user is required to create a sub-team — "
                    "sign in or mint a session key first",
         )
+    # NOTE (second-model P2, plan deviation): the plan's "reject non-UUID
+    # created_by" step is NOT applied — the test fixtures use non-UUID ids
+    # by design, and the provision RPC already maps a non-UUID uuid-column
+    # insert to a 400 (never a 500); the helper shape-gates internally so
+    # no new 500 path exists. Documented, not implemented.
+    # #1877 (P0 fix): the onboarding lane had NO re-entry guard — a session
+    # user could mint unlimited free sub-teams by calling this endpoint
+    # repeatedly, bypassing POST /v1/teams. The wizard creates the sub-team
+    # ONCE (team_created=True in the MAIN team's PERSISTED onboarding
+    # state); a second call is blocked (409). Read the persisted state
+    # (teams.onboarding_state jsonb / Team node) — the dependency dict's
+    # onboarding_state key is never populated by any production auth path
+    # (review P0: reading the dict left the guard inert). The free-team
+    # entitlement is enforced at POST /v1/teams + this one-shot state, NOT
+    # here (the onboarding sub-team is a sanctioned second team for Q5).
+    onboarding_state = _get_onboarding_state(team["team_id"])
+    if onboarding_state.get("team_created"):
+        raise HTTPException(status_code=409, detail="Sub-team already created")
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
