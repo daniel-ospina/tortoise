@@ -33,6 +33,7 @@ from playwright.sync_api import Page, expect
 from tests.e2e.test_session_login_flow import (
     APP_HOST,
     AUTH_HOST,
+    _proxy_body,
     _session_json,
     _wire_prod_domains,
 )
@@ -321,8 +322,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
         if url.startswith(AUTH_HOST):
             from tests.e2e.test_session_login_flow import AUTH_ORIGIN
             local = AUTH_ORIGIN + url[len(AUTH_HOST):]
-            resp = page.request.get(local)
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, local, page)
             return
         if url.startswith(APP_HOST):
             from tests.e2e.test_session_login_flow import DASHBOARD_URL
@@ -410,8 +410,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
             return
         if url.startswith(AUTH_HOST):
             from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, AUTH_ORIGIN + url[len(AUTH_HOST):], page)
             return
         if url.startswith(APP_HOST):
             from tests.e2e.test_session_login_flow import DASHBOARD_URL
@@ -462,8 +461,7 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
             return
         if url.startswith(AUTH_HOST):
             from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, AUTH_ORIGIN + url[len(AUTH_HOST):], page)
             return
         if url.startswith(APP_HOST):
             from tests.e2e.test_session_login_flow import DASHBOARD_URL
@@ -531,8 +529,7 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
             return
         if url.startswith(AUTH_HOST):
             from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, AUTH_ORIGIN + url[len(AUTH_HOST):], page)
             return
         if url.startswith(APP_HOST):
             from tests.e2e.test_session_login_flow import DASHBOARD_URL
@@ -612,8 +609,7 @@ def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
             return
         if url.startswith(AUTH_HOST):
             from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, AUTH_ORIGIN + url[len(AUTH_HOST):], page)
             return
         if url.startswith(APP_HOST):
             from tests.e2e.test_session_login_flow import DASHBOARD_URL
