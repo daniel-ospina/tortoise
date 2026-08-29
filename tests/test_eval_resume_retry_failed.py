@@ -72,7 +72,11 @@ def _shared_embedded_sdk() -> TortoiseSDK:
     """Lazily create the one embedded SDK shared by every run_evaluation
     question in this module (issue #1988)."""
     global _embedded_shared
-    if _embedded_shared is None:
+    if _embedded_shared is None or not _shared_alive(_embedded_shared[0]):
+        # #1988 (self-heal): the redislite-hygiene reaper kills long-lived
+        # IDLE embedded servers mid-suite (it classifies them as orphans) —
+        # if the shared server died, tear it down and rebuild.
+        _discard_shared()
         td = tempfile.TemporaryDirectory(prefix="lme-shared-")
         sdk = TortoiseSDK(os.path.join(td.name, "lme.db"))
         sdk.close = _noop_close  # type: ignore[method-assign]
@@ -86,6 +90,31 @@ def _shared_embedded_sdk() -> TortoiseSDK:
             sdk._get_proj().g.query("RETURN 1 AS one")
         _embedded_shared = (sdk, td)
     return _embedded_shared[0]
+
+
+def _shared_alive(sdk) -> bool:
+    """True if the shared embedded server still answers (the reaper can kill
+    idle servers mid-suite — #1988 self-heal)."""
+    try:
+        sdk._get_proj().g.query("RETURN 1 AS one")
+        return True
+    except Exception:
+        return False
+
+
+def _discard_shared() -> None:
+    global _embedded_shared
+    if _embedded_shared is not None:
+        sdk, td = _embedded_shared
+        try:
+            with contextlib.suppress(Exception):
+                del sdk.close  # restore the real close (was no-op'd)
+            with contextlib.suppress(Exception):
+                sdk.close()
+        finally:
+            with contextlib.suppress(Exception):
+                td.cleanup()
+        _embedded_shared = None
 
 
 def _reset_shared_graph(instances) -> None:
