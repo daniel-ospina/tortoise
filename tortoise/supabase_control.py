@@ -2246,9 +2246,11 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
     if exp is not None and exp <= now:
         raise InvitationError("Invite token expired")
 
-    if user_email and user_email.strip().lower() != (inv.get("email") or "").lower():
+    if not user_email or user_email.strip().lower() != (inv.get("email") or "").lower():
+        # security P2 (cycle-2): fail CLOSED — an email-less session cannot
+        # act on invites by id.
         raise InvitationError("Invite email does not match this account",
-                              status=403)
+                              status=404)
 
     existing = cp.query(
         "team_memberships",

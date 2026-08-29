@@ -6867,23 +6867,35 @@ async def decline_invite(invitation_id: str,
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
     rows = reg.query(
-        "MATCH (i:Invitation {id:$id}) RETURN i.email, i.team_id, i.status",
+        "MATCH (i:Invitation {id:$id}) RETURN i.email, i.team_id, i.status, i.accepted_at",
         params={"id": invitation_id},
     ).result_set
     if not rows:
         raise HTTPException(status_code=404, detail="Invitation not found")
-    invite_email, team_id, status = rows[0]
+    invite_email, team_id, status, accepted_at = rows[0]
     if (invite_email or "").lower() != email:
         raise HTTPException(status_code=404, detail="Invitation not found")
-    if status == "accepted":
+    # #864 class (review P2): registry accept leaves status='pending' but
+    # sets accepted_at — check BOTH signals, mirroring rescind_invite.
+    if status == "accepted" or accepted_at is not None:
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot decline")
     if status == "revoked":
         return {"revoked": True, "already": True, "invitation_id": invitation_id}
+    # Conditional write (still-pending guard): a concurrent accept must win.
     reg.query(
-        "MATCH (i:Invitation {id:$id}) SET i.status = 'revoked'",
+        "MATCH (i:Invitation {id:$id}) "
+        "WHERE i.status IS NULL OR i.status = 'pending' "
+        "SET i.status = 'revoked'",
         params={"id": invitation_id},
     )
+    recheck = reg.query(
+        "MATCH (i:Invitation {id:$id}) RETURN i.status, i.accepted_at",
+        params={"id": invitation_id},
+    ).result_set[0]
+    if recheck[1] is not None:
+        raise HTTPException(status_code=409,
+                            detail="Invitation already accepted — cannot decline")
     _delete_fake_invite_membership(sdk, team_id, invitation_id)  # #1880
     return {"revoked": True, "invitation_id": invitation_id}
 

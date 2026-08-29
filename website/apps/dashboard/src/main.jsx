@@ -2380,7 +2380,11 @@ function claimIntentInFlight() {
     try {
       const res = await api('/v1/invites/pending', { useSession: true })
       setPendingInvites((res && res.invites) || [])
-    } catch { setPendingInvites([]) }  // best-effort — never blocks the menu
+    } catch {
+      // #1875 review P2: a transient load failure must NOT collapse to the
+      // empty state (which hides real invites) — surface a retryable error.
+      setPendingInvites((prev) => (prev && prev.length ? prev : [{ _loadError: 'Could not load invites — reopen the menu to retry' }]))
+    }
   }
 
   async function acceptPendingInvite(inv) {
@@ -3996,6 +4000,11 @@ function claimIntentInFlight() {
                   workspace-switcher precedent). Renders only when there are
                   pending invites; Accept lands on the team, Decline removes. */}
               {pendingInvites && pendingInvites.length > 0 && (
+                pendingInvites[0] && pendingInvites[0]._loadError ? (
+                  <div className="account-invite" role="alert">
+                    <span className="dim small">{pendingInvites[0]._loadError}</span>
+                  </div>
+                ) : (
                 <>
                   <div className="account-menu-label">Invites</div>
                   {pendingInvites.map((inv) => (
@@ -4023,9 +4032,8 @@ function claimIntentInFlight() {
                       </div>
                     </div>
                   ))}
-                  <div className="account-menu-divider" />
-                </>
-              )}
+                  </>
+              ))}
               <div className="account-menu-divider" />
               <button className="account-menu-logout" onClick={logout}>
                 Log out
