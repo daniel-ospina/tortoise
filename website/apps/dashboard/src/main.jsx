@@ -4677,7 +4677,7 @@ function MemorySources(props) {
         </div>
       </div>
 
-      {/* ── Sessions toggle (ONE team-level consent; per-harness status) ── */}
+      {/* ── Sessions toggle (off-switch; default ON per ToS — per-harness status) ── */}
       <div className="toggle-row">
         <button
           type="button"

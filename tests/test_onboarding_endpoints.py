@@ -321,7 +321,7 @@ def test_off_switch_patch_stops_capture_409(client, monkeypatch):
     assert r5.status_code == 200, r5.text
 
 
-def test_decline_patch_clears_consent_keeps_receipts(client):
+def test_patch_off_switch_keeps_receipts(client):
     """#1927 (T1-P8 + T2-P2e): the off-switch PATCH (toggle-off) clears the
     session_recording flag + sets capture_revised, but NEVER clears probes
     or receipts — re-enable resolves receipt-authoritative."""

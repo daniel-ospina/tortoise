@@ -1938,9 +1938,8 @@ DEFAULT_ONBOARDING_STATE = {
     # #1727 Slice 2 (Task 11) — registration-table members (see
     # _ONBOARDING_DEFAULT_STATE for the full table; capture receipts,
     # last-attempt failures, re-ask flags, install probes).
-    "capture_revised": False,
-    "capture_ask_shown": False,
-    "session_capture_receipt": None,
+    "capture_revised": False,   # backward-compat write (#1927 re-ask machinery removed)
+    "capture_ask_shown": False,  # backward-compat write (#1927 re-ask machinery removed)    "session_capture_receipt": None,
     "session_capture_receipt_claude": None,
     "session_capture_receipt_claude-desktop": None,
     "session_capture_receipt_claude-web": None,
@@ -9600,8 +9599,8 @@ _ONBOARDING_DEFAULT_STATE = {
     # test_state_keys_registered_parametrized). Unregistered keys are silently
     # dropped by the allowlist filter — these are the capture surface the
     # dashboard reads (receipts / last-attempt failures / install probes).
-    "capture_revised": False,              # exactly-once re-ask resolution (Slice 3)
-    "capture_ask_shown": False,            # re-ask pane answered (ANSWER only, T2-P2f)
+    "capture_revised": False,   # backward-compat write (#1927 re-ask machinery removed)
+    "capture_ask_shown": False,  # backward-compat write (#1927 re-ask machinery removed)
     "session_capture_receipt": None,       # bare legacy no-harness receipt
     "session_capture_receipt_claude": None,
     "session_capture_receipt_claude-desktop": None,
@@ -9855,6 +9854,9 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
     state = _update_onboarding_state(team["team_id"],
                                      session_recording=enabled,
                                      capture_revised=True)
+    # #1927 semantic drift: the off-switch fires question_answered for
+    # continuity with existing analytics — toggle-off is NOT a consent
+    # answer (the consent/re-ask machinery was removed).
     _track_onboarding_event(team, "question_answered",
                             question_id="session_recording",
                             answer="yes" if enabled else "no")
