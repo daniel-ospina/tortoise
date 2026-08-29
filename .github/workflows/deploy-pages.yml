@@ -310,12 +310,14 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install e2e deps
-        # conftest.py imports playwright at collection time (top-level import)
-        # even for requests-only suites — install it (no browser download
-        # needed; test_blog.py never launches a browser). numpy is needed by
-        # tests/conftest.py → tortoise.projection (FalkorProjection import).
+        # conftest.py imports the tortoise package at collection time (top-level
+        # import) even for requests-only suites — install it (no browser
+        # download needed; test_blog.py never launches a browser). pip install
+        # -e . pulls the declared deps (numpy, scipy, pyyaml, fastapi...) that
+        # tortoise.projection / tortoise.sdk need at import time.
         run: |
-          pip install pytest requests playwright pytest-playwright numpy
+          pip install pytest requests playwright pytest-playwright
+          pip install -e .
       - name: Run blog E2E suite against production
         env:
           RUN_BLOG_E2E: '1'
