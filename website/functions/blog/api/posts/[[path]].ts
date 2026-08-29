@@ -398,7 +398,9 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   const agent = auth.identity;
   if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
 
-  const slug = (params.slug as string) ?? "";
+  // [[path]] catch-all: params.path = [] for /blog/api/posts (create),
+  // [slug] for /blog/api/posts/{slug} (PATCH). Only the PATCH surface reads it.
+  const slug = ((params.path as string[] | undefined) ?? [])[0] ?? "";
   if (!SLUG_RE.test(slug)) return err(400, "validation", "invalid slug");
 
   const contentLength = Number(request.headers.get("content-length") ?? "0");
