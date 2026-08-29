@@ -439,7 +439,7 @@ class TestHealthyTeamControl:
     def test_list_my_teams_no_memberships_200(self, sb_client, as_user):
         """#1912 guard edge: zero memberships → 200 [] (the all-suspended
         403 must not fire on an empty list — all() of [] is True)."""
-        tc, fake, _ = sb_client
+        tc, _, _ = sb_client
         as_user()
         r = tc.get("/v1/teams")
         assert r.status_code == 200, r.text
