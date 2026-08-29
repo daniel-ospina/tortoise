@@ -18,6 +18,7 @@ from .domain_loader import known_kinds, register_kind
 from .cross_lens import DEFAULT_THRESHOLD
 from .ids import ulid
 from .embedded_lifecycle import atexit_fast_close  # #1371: registers the batch flush
+from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
@@ -9527,12 +9528,15 @@ class TortoiseSDK:
         BASE retrieval; pass True to surface them (audit/history queries).
 
         pool_size: EXACT per-strategy retrieval depth override (benchmark/tests).
-        Precedence: pool_size > TORTOISE_POOL_FLOOR env > limit*2 (the historical
-        default). pool_size/floor only raise the candidate window (str_limit);
-        the RETURNED limit is unchanged — truncation at result_ids[:limit]
-        precedes EP decoration, so a deeper pool has zero decoration cost.
-        pool_size is an EXACT override: a value below limit*2 LOWERS the pool
-        to pool_size (the env floor only raises — max(limit*2, floor)). #1348.
+        Precedence: pool_size > TORTOISE_POOL_FLOOR env > the baked floor
+        (the product's DEFAULT_POOL_SIZE = 120, #1947/G2). pool_size/floor
+        only raise the candidate window (str_limit); the RETURNED limit is
+        unchanged — truncation at result_ids[:limit] precedes EP
+        decoration, so a deeper pool has zero decoration cost. pool_size
+        is an EXACT override: a value below limit*2 LOWERS the pool to
+        pool_size (the env floor only raises — max(limit*2, floor)).
+        #1348. Resolution is the product's
+        (tortoise/retrieval.py::resolve_pool_size).
 
         Point results annotated with EP breakdown (confidence_mean + evidence + contention).
         Non-Point entities skip EP annotation.
@@ -9659,28 +9663,29 @@ class TortoiseSDK:
         # 3. Run retrieval with degradation
         is_embedded = getattr(proj, '_is_embedded', True)
         # Full-scan mode: no truncation — return ALL Points in context (#7811 completeness)
-        # #1348 pool floor: pool_size exact override > TORTOISE_POOL_FLOOR env >
-        # limit*2 historical default. NO BAKED DEFAULT FLOOR: the depth finding
-        # (Task 0, delta(20,50)=0.14 pts < 1.0) was CEILING-CAPPED, so the floor
-        # is env-only opt-in — unset env behaves exactly as pre-#1348 (limit*2).
-        # pool_size is validated up front (any mode, incl. full-scan) for
-        # consistency with the limit validation bound (code-review P2 fix).
+        # #1947 (audit G2): the product OWNS the pool-depth number. The floor
+        # now BAKES the product's ``DEFAULT_POOL_SIZE`` (120) instead of the
+        # historical limit*2 (20 at limit=10): the LongMemEval depth finding
+        # (66% of marked evidence never entered a 60-item pool) applies
+        # equally to the product's default 20-item window, and the deepened
+        # candidate window is the single highest-leverage retrieval change.
+        # Resolution is delegated to ``tortoise.retrieval.resolve_pool_size``:
+        # pool_size exact override > TORTOISE_POOL_FLOOR env > the baked
+        # 120 floor (limit*2 stays the per-call lower bound). pool_size is
+        # validated up front (any mode, incl. full-scan) for consistency
+        # with the limit validation bound (code-review P2 fix).
         if pool_size is not None and (pool_size < 1 or pool_size > 10000):
             raise ValueError(f"pool_size must be 1-10000, got {pool_size}")
         if is_full_scan:
             str_limit = 100000
-        elif pool_size is not None:
-            str_limit = pool_size
         else:
-            pool_floor = 0  # env unset → historical limit*2 (no baked default, #1348)
-            raw = os.environ.get("TORTOISE_POOL_FLOOR", "")
-            if raw.strip():
-                try:  # noqa: SIM105
-                    pool_floor = int(raw)
-                except (TypeError, ValueError):
-                    pass  # garbage → default (TORTOISE_EMBEDDING_REPAIR_BACKOFF_HOURS pattern)
-                pool_floor = max(1, min(pool_floor, 10000))  # clamp per limit validation bound
-            str_limit = max(limit * 2, pool_floor)
+            str_limit = resolve_pool_size(
+                limit * 2,
+                pool_size=pool_size,
+                env_name="TORTOISE_POOL_FLOOR",
+                default=DEFAULT_POOL_SIZE,
+                exact=True,
+            )
         # R4 (#1543): the structural strategy's kind — an explicit override
         # that does NOT trigger the post-retrieval kind filter below (the
         # eval's pool mixes kinds: turn points + raw transcripts + extracted
@@ -11736,23 +11741,106 @@ class TortoiseSDK:
         return {"revoked": True, "invitation_id": invitation_id}
 
     def cleanup_expired_invitations(self) -> dict:
-        """Mark expired invitations as 'expired' status.
+        """Mark expired invitations as 'expired' status AND delete the fake
+        invite-{iid} Membership row for each (#1908) — an expired invite
+        must not leave a permanent ghost in registry list_members (pre-#1880
+        ghosts are swept by sweep_invite_ghost_memberships).
 
-        Returns count of cleaned invitations.
+        Order matters (#1908 review P2): the ghost rows are deleted BEFORE
+        the 'expired' stamp so a failed delete is retried on the next run
+        (a stamp-first ordering would strand the ghost forever — the
+        re-run predicate skips already-expired invites). Deletes are
+        best-effort, mirroring _delete_fake_invite_membership (#1902 P2).
+
+        Returns counts: ``cleaned`` invitations marked expired and
+        ``ghosts_deleted`` fake membership rows removed.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        reg = self._get_registry()
+        pending = reg.query(
+            "MATCH (i:Invitation) "
+            "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'expired') "
+            "RETURN i.id, i.team_id",
+            params={"now": now},
+        ).result_set
+        deleted = 0
+        for iid, team_id in pending:
+            try:
+                reg.query(
+                    "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
+                    params={"tid": team_id, "fake": f"invite-{iid}"},
+                )
+                deleted += 1
+            except Exception as _e:
+                _logger.warning(
+                    "invite ghost-cleanup failed for %s on %s (%s)",
+                    iid, team_id, _e)
+        reg.query(
+            "MATCH (i:Invitation) "
+            "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'expired') "
+            "SET i.status = 'expired'",
+            params={"now": now},
+        )
+        return {"cleaned": len(pending), "ghosts_deleted": deleted}
+
+    def sweep_invite_ghost_memberships(self, *, dry_run: bool = False) -> dict:
+        """#1908: one-time backfill sweep for pre-#1880 invite-{iid} ghosts.
+
+        Deletes Membership rows whose user_id matches 'invite-*' when the
+        backing Invitation node is TERMINAL — consumed (accepted_at set),
+        expired (expires_at past or status='expired'), revoked
+        (status='revoked' / 'accepted'), or MISSING (orphaned fake row with
+        no Invitation node). Rows backing a still-pending, unexpired invite
+        are kept (they are the legit 'invited' placeholder in list_members).
+
+        Idempotent — re-running after a sweep finds nothing. With
+        ``dry_run=True`` reports the ghost count without writing (the
+        graph-script's --dry-run mode).
+
+        Returns {"found", "ghosts", "deleted"} — found = invite-* rows
+        examined, ghosts = rows qualifying for deletion, deleted = rows
+        actually removed (0 under dry_run).
         """
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (i:Invitation) "
-            "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
-            "AND (i.status IS NULL OR i.status <> 'expired') "
-            "SET i.status = 'expired' "
-            "RETURN count(i)",
-            params={"now": now},
+            "MATCH (m:Membership) WHERE m.user_id STARTS WITH 'invite-' "
+            "OPTIONAL MATCH (i:Invitation {id: substring(m.user_id, 7)}) "
+            "RETURN m.user_id, m.team_id, properties(i)",
         ).result_set
-        count = rows[0][0] if rows else 0
-        return {"cleaned": count}
+        ghosts: list[tuple[str, str]] = []
+        for fake_uid, team_id, inv_props in rows:
+            if inv_props is None:
+                ghosts.append((fake_uid, team_id))  # orphaned fake row
+                continue
+            node = dict(inv_props)
+            consumed = node.get("accepted_at") is not None \
+                or node.get("status") in ("accepted", "revoked", "expired")
+            expired = node.get("expires_at") is not None \
+                and node["expires_at"] < now
+            if consumed or expired:
+                ghosts.append((fake_uid, team_id))
+        failed = 0
+        if not dry_run:
+            for fake_uid, team_id in ghosts:
+                try:
+                    reg.query(
+                        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) DELETE m",
+                        params={"tid": team_id, "uid": fake_uid},
+                    )
+                except Exception as _e:
+                    # best-effort, mirroring _delete_fake_invite_membership
+                    # (#1902 P2) — a transient failure is retried by a re-run.
+                    failed += 1
+                    _logger.warning(
+                        "invite ghost-cleanup failed for %s on %s (%s)",
+                        fake_uid, team_id, _e)
+        return {"found": len(rows), "ghosts": len(ghosts),
+                "deleted": 0 if dry_run else len(ghosts) - failed}
 
     # ── Helpers ───────────────────────────────────────────────────
 

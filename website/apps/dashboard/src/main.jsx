@@ -1495,7 +1495,11 @@ function claimIntentInFlight() {
         if (sessionTokenRef.current !== tok) throw new Error('No session')
         if (list.length) {
           setTeams(list)
-          mintedTeamId = list[0].team_id
+          // #1912: a suspended membership must not be auto-selected for the
+          // mint retry — pick the first healthy team (the all-suspended case
+          // 403s the list server-side, so a selectable team always exists
+          // here; fall back to list[0] defensively).
+          mintedTeamId = (list.find((t) => !t.suspended_at) || list[0]).team_id
           res = await maybeRecoveryFallback(await mint(mintedTeamId), mintedTeamId)
         }
       }
@@ -1809,7 +1813,10 @@ function claimIntentInFlight() {
         // flip the live switched session to the error card.
         const teamAtMountMint = teamIdRef.current
         if (!key) {
-          const firstTeamId = teamsList.length ? teamsList[0].team_id : null
+          // #1912: skip suspended rows when auto-selecting — a suspended
+          // membership must not bounce the fresh session to the appeal banner.
+          const firstSelectable = teamsList.find((t) => !t.suspended_at) || teamsList[0]
+          const firstTeamId = firstSelectable ? firstSelectable.team_id : null
           try {
             const minted = await mintSessionKey('bootstrap', firstTeamId)
             key = minted.key
@@ -2322,9 +2329,13 @@ function claimIntentInFlight() {
         // Round-8: guard on teamIdRef (sync write, no render-closure race) —
         // the stored-key bootstrap path already set it for the key's team, so
         // a multi-team reload must NOT clobber it with the first team.
-        if (list.length > 0 && !teamIdRef.current) {
-          setCurrentTeamId(list[0].team_id)
-          teamIdRef.current = list[0].team_id
+        // #1912: skip suspended rows when auto-selecting — a suspended
+        // membership must not become the default team (healthy teams stay
+        // selectable).
+        const firstSelectable = list.find((t) => !t.suspended_at)
+        if (firstSelectable && !teamIdRef.current) {
+          setCurrentTeamId(firstSelectable.team_id)
+          teamIdRef.current = firstSelectable.team_id
         }
       }
     } catch { /* best-effort */ }
@@ -3076,11 +3087,14 @@ function claimIntentInFlight() {
           if (sessionTokenRef.current !== tok) return
           if (list.length) {
             setTeams(list)
-            fallbackTeamIdRef.current = list[0].team_id
+            // #1912: skip suspended rows when auto-selecting — a suspended
+            // membership must not trigger the recovery mint (it 403s).
+            const firstSelectable = list.find((t) => !t.suspended_at) || list[0]
+            fallbackTeamIdRef.current = firstSelectable.team_id
             res = await fetch(`${API_BASE}/v1/session/key`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-              body: JSON.stringify({ purpose: 'recovery', team_id: list[0].team_id }),
+              body: JSON.stringify({ purpose: 'recovery', team_id: firstSelectable.team_id }),
             })
           }
         }

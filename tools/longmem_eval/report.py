@@ -212,6 +212,26 @@ def _outcome_grade(o: dict[str, Any]) -> str:
     return "hard" if not flag else "clean"
 
 
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: liveness/readiness/security endpoints only — /health,
+#       /health/ready, /health/security (tortoise/hosted_api.py:1076-1185)
+#       and /health + /health/ready with deep DB probe
+#       (tortoise/selfhost.py:118-184); NO extraction-health gating of
+#       capture quality.
+#   Why eval-only:   #1946's gate classifies per-question extraction
+#       health + splits the report into healthy/degraded populations so a
+#       billing-degraded run (reval3: 33/50 questions ingested ZERO
+#       semantic points yet the run 'completed' at 0.880, 66% raw-
+#       fallback) is visible, never silent. Landed eval-side only (commit
+#       ad23cd71 — report.py population split + run.py).
+#   Ship-to-product: candidate feature — extraction-health gating of
+#       capture quality is unassigned; no tracking issue filed.
+#   Rationale:       the harness exists to IMPROVE the product;
+#       capture-quality health signals are candidate product features,
+#       not a harness invention.
+# ═════════════════════════════════════════════════════════════════════════
 def _outcome_extraction_health(o: dict[str, Any]) -> str:
     """#1946: classify one COMPLETED outcome's extraction health.
 

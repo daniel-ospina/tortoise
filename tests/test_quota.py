@@ -324,12 +324,14 @@ class TestSessionsQuota:
             for i in range(8):
                 tenant.create_point("statement", f"filler point {i}")
             assert count_team_usage(tid, "sessions", sdk=tenant) == 1
-            # 10 = 1 plain + 8 fillers + 1 v2-extracted value point (the
-            # deterministic _V2SessionMock extracts one point from "ok";
-            # extracted value points are non-episodic and count against the
-            # points quota by design — the capture estimate 2×Σ accounts for
-            # them, #1350/#1486). Turn points stay episodic (not counted).
-            assert count_team_usage(tid, "points", sdk=tenant) == 10
+            # 11 = 1 plain + 8 fillers + 1 v2-extracted value point + 1
+            # v2-minted Object entity (the deterministic _V2SessionMock
+            # extracts one point and one entity from "ok"); extracted value
+            # points AND minted entities are non-episodic and count against
+            # the quota by design — the capture estimate 3×Σ accounts for
+            # both, #1350/#1486/#1911). Turn points stay episodic (not
+            # counted).
+            assert count_team_usage(tid, "points", sdk=tenant) == 11
         finally:
             tenant.close()
 
@@ -405,6 +407,118 @@ class TestDocumentsQuota:
             self._seed_doc(tenant, 9, kind="brief")
             with pytest.raises(QuotaExceededError, match="documents limit reached"):
                 enforce_team_limit(limits, "documents", sdk=tenant)
+        finally:
+            tenant.close()
+
+
+# ── #1911: object/subject writes count against the quota cap ──────────────
+
+class TestObjectSubjectQuota:
+    """#1911 (bug-hunt 2026-08-28 server P2-1): /v1/objects + /v1/subjects
+    gate on ``_check_team_limit(team, "points")``, but the points count
+    used to count ONLY ``:Point`` nodes — Object/Subject nodes carry only
+    their own labels (projection/entities.py) and were never counted, so a
+    free team could write unbounded objects/subjects without ever 402ing.
+    The points count now includes Object+Subject nodes (max_points IS the
+    pricing max_graph_nodes node cap)."""
+
+    def _tenant(self, reg_sdk, tmp_path):
+        from tortoise.sdk import TortoiseSDK  # noqa: I001
+        import os
+        return TortoiseSDK(
+            os.path.join(tmp_path, "quota.db"),
+            namespace=_find_team_id(reg_sdk))
+
+    def test_points_count_includes_objects_and_subjects(self, reg_sdk, tmp_path):
+        """Indicator (1): the quota count includes Object+Subject nodes."""
+        tid = _find_team_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_point("statement", "a plain point")
+            tenant.create_object("acme", objectKind="org")
+            tenant.create_object("globex", objectKind="org")
+            tenant.create_subject("alice", subjectKind="person")
+            assert count_team_usage(tid, "points", sdk=tenant) == 4
+        finally:
+            tenant.close()
+
+    def test_object_write_402_at_cap(self, reg_sdk, tmp_path):
+        """Indicator (2): an object write 402s at the cap (pre-fix the
+        points count could never see Object nodes → no 402)."""
+        tid = _find_team_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_object("o1", objectKind="org")
+            limits = {"team_id": tid, "max_points": 1}
+            with pytest.raises(QuotaExceededError, match="points limit reached"):
+                enforce_team_limit(limits, "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_subject_write_402_at_cap(self, reg_sdk, tmp_path):
+        """Indicator (2): a subject write 402s at the cap."""
+        tid = _find_team_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_subject("s1", subjectKind="person")
+            limits = {"team_id": tid, "max_points": 1}
+            with pytest.raises(QuotaExceededError, match="points limit reached"):
+                enforce_team_limit(limits, "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_object_subject_mix_402_at_cap(self, reg_sdk, tmp_path):
+        """Mixed object+subject nodes consume the cap together."""
+        tid = _find_team_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_object("o1", objectKind="org")
+            tenant.create_subject("s1", subjectKind="person")
+            # 2 nodes → at/over a cap of 2 → 402
+            with pytest.raises(QuotaExceededError, match="points limit reached"):
+                enforce_team_limit({"team_id": tid, "max_points": 2},
+                                   "points", sdk=tenant)
+            # 2 nodes below a cap of 3 → passes
+            enforce_team_limit({"team_id": tid, "max_points": 3},
+                               "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_point_quota_unchanged_for_point_only_graph(
+            self, reg_sdk, tmp_path):
+        """Regression: the Point predicate is untouched — a pure-point
+        graph counts exactly as before (#1911 must not move the points cap
+        for existing point-only usage)."""
+        tid = _find_team_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.create_point("statement", "one")
+            tenant.create_point("statement", "two")
+            tenant.create_point("statement", "three")
+            assert count_team_usage(tid, "points", sdk=tenant) == 3
+            # at/over cap → 402; below cap → passes (unchanged semantics)
+            with pytest.raises(QuotaExceededError, match="points limit reached"):
+                enforce_team_limit({"team_id": tid, "max_points": 3},
+                                   "points", sdk=tenant)
+            enforce_team_limit({"team_id": tid, "max_points": 4},
+                               "points", sdk=tenant)
+        finally:
+            tenant.close()
+
+    def test_capture_minted_object_counts_against_quota(
+            self, reg_sdk, tmp_path):
+        """#1911 + capture interplay: the deterministic _V2SessionMock mints
+        a non-episodic Object entity ('the strategy') alongside the extracted
+        value point — the Object now counts against the quota too (pre-fix
+        the Points-only count saw the value point but never the entity)."""
+        tid = _find_team_id(reg_sdk)
+        tenant = self._tenant(reg_sdk, tmp_path)
+        try:
+            tenant.capture_session(
+                [{"role": "user", "content": "okay"}], session_id="cap_s1")
+            # 1 value point + 1 minted Object = 2 (the Session/turn Point/
+            # Event/Source nodes stay episodic and are excluded)
+            assert count_team_usage(tid, "points", sdk=tenant) == 2
         finally:
             tenant.close()
 
@@ -496,9 +610,12 @@ class TestIsEpisodicBackfill:
             # is_episodic at creation; _link_source stamps session refs, #1486).
             assert run_backfill(proj) == {"matched": 0, "updated": 0}
             # The turn Point is episodic; the ONE v2-extracted value point
-            # (deterministic _V2SessionMock, non-episodic by design) is the
-            # only point counted against the quota (#1350/#1486).
-            assert count_team_usage(tid, "points", sdk=tenant) == 1
+            # (deterministic _V2SessionMock, non-episodic by design) plus the
+            # v2-minted Object entity ('the strategy') are counted against
+            # the quota (#1350/#1486; the entity count is #1911 — capture-
+            # minted entities are non-episodic and previously invisible to
+            # the Points-only count).
+            assert count_team_usage(tid, "points", sdk=tenant) == 2
             # Session counted by the sessions branch
             assert count_team_usage(tid, "sessions", sdk=tenant) == 1
         finally:
