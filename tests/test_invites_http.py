@@ -24,13 +24,15 @@ FalkorDBLite DB).
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone  # noqa: F401
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -46,6 +48,7 @@ _U2 = "9f2c1a40-0000-4a00-8000-000000000002"
 _U3 = "9f2c1a40-0000-4a00-8000-000000000003"
 _U_BOB = "9f2c1a40-0000-4a00-8000-00000000000e"
 _U_ALICE = "9f2c1a40-0000-4a00-8000-00000000000f"
+_U_CAROL = "9f2c1a40-0000-4a00-8000-000000000010"
 _U_GHOST = "9f2c1a40-0000-4a00-8000-0000000000ab"
 
 
@@ -224,6 +227,46 @@ class TestInviteCreate:
         r2 = client.post("/v1/invites",
                          json={"team_id": "team-pro3", "email": "carol@example.com"})
         assert r2.status_code == 200, r2.text
+
+    def test_pro_capacity_concurrent_invites_only_allowed_minted(self, client, reg):
+        """#1965: the per-team lock closes the count-then-mint TOCTOU —
+        three CONCURRENT invites on a Pro team (owner + 2 seats) mint at
+        most the allowed count (1): exactly one 200, the rest hit the 402
+        capacity gate, and pending + active never exceeds max_users=2.
+        The registry lane's critical section is currently synchronous
+        (atomic per coroutine), so this guards the OUTCOME invariant and
+        the lock guarantees correctness if an await is ever introduced
+        into the check+mint path."""
+        _seed_team_with_owner(reg, "team-pro-race", tier="pro")
+
+        async def _burst():
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await asyncio.gather(*(
+                    ac.post("/v1/invites", json={"team_id": "team-pro-race",
+                                                  "email": email})
+                    for email in ("bob@example.com", "carol@example.com",
+                                  "dave@example.com")
+                ))
+
+        results = asyncio.run(_burst())
+        codes = sorted(r.status_code for r in results)
+        assert codes == [200, 402, 402], [r.text for r in results]
+        body = next(r for r in results if r.status_code == 402).json()
+        assert "member limit" in body["detail"]
+        # exactly one Invitation node was minted — pending + active == 2
+        # (owner + 1 invite), never 3.
+        rows = reg.query(
+            "MATCH (i:Invitation {team_id:'team-pro-race'}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+            "RETURN count(i)",
+        ).result_set[0][0]
+        assert rows == 1, f"expected 1 minted invite, got {rows}"
+        active = reg.query(
+            "MATCH (m:Membership {team_id:'team-pro-race', status:'active'}) RETURN count(m)",
+        ).result_set[0][0]
+        assert active + rows <= 2
 
     def test_team_tier_unlimited(self, client, reg):
         """#1875: Team tier invites unlimited (max_users None → skip)."""
@@ -414,6 +457,111 @@ class TestInviteAccept:
         r = client.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 400
         assert "expired" in r.json()["detail"]
+
+    def test_concurrent_accepts_losing_accept_non_consuming(self, client, reg):
+        """#1965: a losing CONCURRENT accept is NON-consuming. Two pending
+        invites on a Pro team at full capacity (owner + 1 free seat) are
+        accepted concurrently by two invitees — the per-team lock
+        serializes the capacity pre-check + accepted_at write + membership
+        create, so the loser re-reads the active count AFTER the winner's
+        membership_create committed, hits the max_users gate BEFORE writing
+        accepted_at, and its invite stays pending (retryable). Pre-#1965
+        the loser wrote accepted_at first → consumed-with-402
+        (non-retryable). Proves the lock: without it, both pre-checks run
+        against active=1 and the loser consumes before the 402."""
+        import contextvars
+
+        from tortoise.auth import hash_api_key
+
+        reg.query(
+            "CREATE (t:Team {id:'team-race-accept', name:'team-race-accept', "
+            "tier:'pro', max_users:2})",
+        )
+        reg.query(
+            "CREATE (m:Membership {user_id:$uid, team_id:'team-race-accept', "
+            "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
+            params={"uid": _U1},
+        )
+        _exp = (datetime.now(timezone.utc) + timedelta(days=7)).isoformat()  # noqa: UP017
+        _ca = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        for iid, email, token in (
+            ("inv-race-a", "bob@example.com", "bob-token-race"),
+            ("inv-race-b", "carol@example.com", "carol-token-race"),
+        ):
+            reg.query(
+                "CREATE (i:Invitation {id:$id, team_id:'team-race-accept', "
+                "email:$email, role:'member', token_hash:$th, "
+                "created_by:'user-1', created_at:$ca, expires_at:$exp, "
+                "accepted_at:null, status:'pending'})",
+                params={"id": iid, "email": email, "th": hash_api_key(token),
+                        "ca": _ca, "exp": _exp},
+            )
+
+        # Per-request user identity: the get_current_user override is
+        # resolved inside each request's task context, so a contextvar set
+        # per gather-task lets the two concurrent accepts act as two users.
+        _actor = contextvars.ContextVar("invite_actor", default=None)
+
+        def _override():
+            return _actor.get() or {"user_id": _U1, "email": "owner@example.com"}
+
+        app.dependency_overrides[get_current_user] = _override
+
+        async def _accept_as(uid, email, token):
+            _actor.set({"user_id": uid, "email": email})
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.post("/v1/invites/accept",
+                                     json={"token": token})
+
+        async def _run_race():
+            return await asyncio.gather(
+                _accept_as(_U_BOB, "bob@example.com", "bob-token-race"),
+                _accept_as(_U_CAROL, "carol@example.com", "carol-token-race"),
+            )
+
+        results = asyncio.run(_run_race())
+        bob_status, carol_status = results[0].status_code, results[1].status_code
+        assert sorted([bob_status, carol_status]) == [200, 402], \
+            [r.text for r in results]
+        loser_id = "inv-race-a" if bob_status == 402 else "inv-race-b"
+        winner_id = "inv-race-b" if bob_status == 402 else "inv-race-a"
+        loser_uid = _U_BOB if bob_status == 402 else _U_CAROL
+        loser_email = ("bob@example.com" if bob_status == 402
+                       else "carol@example.com")
+        loser_token = ("bob-token-race" if bob_status == 402
+                       else "carol-token-race")
+
+        # exactly 2 active members (owner + winner) — never 3
+        active = reg.query(
+            "MATCH (m:Membership {team_id:'team-race-accept', status:'active'}) RETURN count(m)",
+        ).result_set[0][0]
+        assert active == 2
+        # the losing accept did NOT consume its invite (accepted_at NULL)
+        loser_row = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at, i.accepted_by",
+            params={"id": loser_id},
+        ).result_set[0]
+        assert loser_row[0] is None, f"loser invite consumed: {loser_row}"
+        winner_row = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at",
+            params={"id": winner_id},
+        ).result_set[0]
+        assert winner_row[0] is not None  # the winner's invite IS consumed
+        assert loser_uid not in _active_roles(reg, "team-race-accept")
+
+        # non-consuming ⇒ retryable: free a seat (drop the winner's
+        # membership) and the loser's invite accepts cleanly.
+        winner_uid = _U_CAROL if loser_uid == _U_BOB else _U_BOB
+        reg.query(
+            "MATCH (m:Membership {team_id:'team-race-accept', user_id:$uid, "
+            "status:'active'}) DELETE m",
+            params={"uid": winner_uid},
+        )
+        retry = asyncio.run(_accept_as(loser_uid, loser_email, loser_token))
+        assert retry.status_code == 200, retry.text
+        assert loser_uid in _active_roles(reg, "team-race-accept")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -616,10 +764,15 @@ class TestMembersRbac:
         _as_user(_U1, "owner@example.com")  # members list is owner/admin-only
         assert self._ghost_rows(client) == [], "ghost invite row survives accept"
 
-    def test_accept_max_users_402_removes_fake_invite_row(self, client, reg):
-        """#1880 + pre-existing ordering bug: accepted_at is written BEFORE
-        membership_create, so an accept-time max_users 402 consumes the invite
-        with NO real membership — the fake row must still be deleted."""
+    def test_accept_max_users_402_non_consuming_invite_stays_pending(self, client, reg):
+        """#1965: the accept-side capacity pre-check (mirroring
+        membership_create's max_users gate) runs BEFORE the accepted_at
+        write — an accept past the seat cap is a NON-consuming 402: the
+        invite stays pending (accepted_at NULL), the fake invite-{iid}
+        placeholder row is legitimate and survives, and the same invite is
+        retryable once a seat frees. Pre-#1965 the accepted_at write ran
+        first → consumed-with-402 (non-retryable) and the ghost row had to
+        be force-deleted (#1880)."""
         # team with room for 2: mint the invite while capacity exists
         reg.query(
             "CREATE (t:Team {id:'team-full', name:'team-full', tier:'team', "
@@ -640,11 +793,72 @@ class TestMembersRbac:
         _as_user(_U_BOB, "bob@example.com")
         r = client.post("/v1/invites/accept", json={"token": token})
         assert r.status_code == 402  # max_users gate at accept
-        # hardening (review c2 P3): the invite is consumed with NO real membership
+        # non-consuming: the invite is NOT burned (accepted_at NULL) and no
+        # membership was minted — the pending placeholder row is legitimate.
+        rows = reg.query(
+            "MATCH (i:Invitation {team_id:'team-full', email:'bob@example.com'}) "
+            "RETURN i.accepted_at, i.status",
+        ).result_set
+        assert rows and rows[0][0] is None, f"invite consumed on 402: {rows}"
+        assert rows[0][1] == "pending"
         assert _U_BOB not in _active_roles(reg, "team-full")
         _as_user(_U1, "owner@example.com")  # members list is owner/admin-only
+        assert len(self._ghost_rows(client, "team-full")) == 1, \
+            "pending placeholder row must survive a NON-consuming 402"
+        # retryable: free a seat (remove the extra member) → the SAME invite
+        # accepts cleanly and the ghost row is cleaned (#1880).
+        reg.query(
+            "MATCH (m:Membership {team_id:'team-full', user_id:$uid, "
+            "status:'active'}) DELETE m",
+            params={"uid": _U2},
+        )
+        _as_user(_U_BOB, "bob@example.com")
+        r = client.post("/v1/invites/accept", json={"token": token})
+        assert r.status_code == 200, r.text
+        assert _U_BOB in _active_roles(reg, "team-full")
+        _as_user(_U1, "owner@example.com")
         assert self._ghost_rows(client, "team-full") == [], \
-            "ghost invite row survives a max_users 402"
+            "ghost invite row survives a successful re-accept"
+
+    def test_by_id_accept_max_users_402_non_consuming(self, client, reg):
+        """#1965: the by-id accept branch has the SAME non-consuming
+        capacity semantics as the token branch — an accept past the seat
+        cap 402s before the accepted_at write; the invite stays pending
+        (retryable) and the pending placeholder row survives."""
+        reg.query(
+            "CREATE (t:Team {id:'team-byid-full', name:'team-byid-full', "
+            "tier:'pro', max_users:2})",
+        )
+        reg.query(
+            "CREATE (m:Membership {user_id:$uid, team_id:'team-byid-full', "
+            "role:'owner', status:'active', created_at:'2026-08-01T00:00:00+00:00'})",
+            params={"uid": _U1},
+        )
+        r = client.post("/v1/invites",
+                        json={"team_id": "team-byid-full", "email": "bob@example.com"})
+        assert r.status_code == 200, r.text
+        iid = r.json()["invite_id"]
+        # fill the team → by-id accept hits the max_users gate
+        _seed_membership(reg, "team-byid-full", _U2, "member")
+        _as_user(_U_BOB, "bob@example.com")
+        r = client.post(f"/v1/invites/pending/{iid}/accept")
+        assert r.status_code == 402
+        rows = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at",
+            params={"id": iid},
+        ).result_set
+        assert rows and rows[0][0] is None, "by-id loser invite consumed on 402"
+        assert _U_BOB not in _active_roles(reg, "team-byid-full")
+        # retryable after a seat frees
+        reg.query(
+            "MATCH (m:Membership {team_id:'team-byid-full', user_id:$uid, "
+            "status:'active'}) DELETE m",
+            params={"uid": _U2},
+        )
+        r = client.post(f"/v1/invites/pending/{iid}/accept")
+        assert r.status_code == 200, r.text
+        assert _U_BOB in _active_roles(reg, "team-byid-full")
+
 
     def test_rescind_removes_fake_invite_row(self, client, reg):
         """#1880: owner revoking an invite deletes the fake row."""
