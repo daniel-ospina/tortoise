@@ -408,6 +408,7 @@ surfaces:
   - test_backfill_embeddings_force.py
   - test_calibrate_thresholds.py
   - test_embedder_probe.py
+  - test_eval_extraction_health.py
   - test_labeled_pairs_schema.py
   - test_lme_ingest_v2_supersession.py
   - test_load_test.py
