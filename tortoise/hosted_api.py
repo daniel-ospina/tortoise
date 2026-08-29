@@ -6332,10 +6332,10 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
                 raise HTTPException(status_code=402,
                                     detail="Invites require the Pro or Team tier — upgrade to invite teammates")
             if tier == "pro":
-                from datetime import datetime as _dt, timezone as _tz
+                from datetime import datetime as _dt
                 active = [m for m in team_members(get_control_plane(), team_id)
                           if m.get("status") == "active"]
-                now = _dt.now(_tz.utc).isoformat()
+                now = _dt.now(UTC).isoformat()
                 pending = [i for i in pending_invitations(get_control_plane(), team_id)
                            if not i.get("expires_at") or i["expires_at"] > now]
                 if len(active) + len(pending) >= 2:  # Pro max_users=2
@@ -6390,12 +6390,12 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
         raise HTTPException(status_code=402,
                             detail="Invites require the Pro or Team tier — upgrade to invite teammates")
     if tier == "pro":
-        from datetime import datetime as _pdt, timezone as _ptz
+        from datetime import datetime as _pdt
         active = reg.query(
             "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
             params={"tid": team_id},
         ).result_set[0][0]
-        now = _pdt.now(_ptz.utc).isoformat()
+        now = _pdt.now(UTC).isoformat()
         pending = reg.query(
             "MATCH (i:Invitation {team_id:$tid}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
@@ -6749,8 +6749,8 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
             get_control_plane(), email)}
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    from datetime import datetime as _dt, timezone as _tz
-    now = _dt.now(_tz.utc).isoformat()
+    from datetime import datetime as _dt
+    now = _dt.now(UTC).isoformat()
     rows = reg.query(
         "MATCH (i:Invitation {email:$email}) "
         "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "

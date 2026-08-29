@@ -2223,7 +2223,7 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
     the accept is blocked BEFORE the single-use PATCH (NON-consuming — the
     invitee can leave their free team and re-accept).
     """
-    import uuid  # noqa: I001
+    import uuid
 
     now = datetime.now(timezone.utc)  # noqa: UP017
     rows = cp.query(
@@ -2359,7 +2359,7 @@ def pending_invitations_for_email(cp, email: str) -> list[dict]:
     list). Returns team name + inviter for the dashboard surface; excludes
     consumed/revoked/expired invites."""
     import datetime as _dt
-    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    now = _dt.datetime.now(_dt.UTC).isoformat()
     rows = cp.query(
         "invitations",
         select=["id", "team_id", "email", "role", "status",
