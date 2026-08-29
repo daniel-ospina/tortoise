@@ -6611,6 +6611,10 @@ async def accept_invite(body: dict, request: Request,
     if not invite:
         raise HTTPException(status_code=400, detail="Invalid or expired invite token")
     if invite["expires_at"] and invite["expires_at"] < datetime.now(UTC).isoformat():
+        # #1908: the expiry 400 fired BEFORE the ghost cleanup — an expired
+        # invite kept its fake invite-{iid} membership row forever (pre-#1880
+        # ghosts are swept by the one-time backfill). Delete before raising.
+        _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
         raise HTTPException(status_code=400, detail="Invite token expired")
 
     # Email match guard (invitee must be the invitee's account)
@@ -6786,6 +6790,9 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     if status == "revoked":
         raise HTTPException(status_code=409, detail="Invitation has been revoked")
     if expires_at and expires_at < datetime.now(UTC).isoformat():
+        # #1908: same pre-delete 400 ordering bug as the token branch — the
+        # fake invite-{iid} membership row must die with the expired invite.
+        _delete_fake_invite_membership(sdk, team_id, iid)
         raise HTTPException(status_code=400, detail="Invite token expired")
     user_email = (user.get("email") or "").lower()
     # P1 (second-model): fail CLOSED — an email-less session cannot accept

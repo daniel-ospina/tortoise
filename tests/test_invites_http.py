@@ -878,3 +878,152 @@ class TestAcceptFreeCap:
         _as_user(_U_BOB, "bob@example.com")
         r = client.post(f"/v1/invites/pending/{iid}/accept")
         assert r.status_code == 200, r.text
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# #1908 — expired-invite ghost-membership cleanup (expiry path + backfill)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestExpiredInviteGhostCleanup:
+    """#1908: an expired invite must not leave a permanent invite-{iid}
+    ghost in list_members. Covers the accept expiry path (token + by-id),
+    the cleanup_expired_invitations sweep, and the one-time backfill sweep
+    for pre-#1880 ghosts (idempotent, dry-run safe)."""
+
+    def _ghost_rows(self, client, team_id="team-t"):
+        r = client.get(f"/v1/teams/{team_id}/members")
+        assert r.status_code == 200, r.text
+        return [m for m in r.json() if m["user_id"].startswith("invite-")]
+
+    def _mint(self, client, reg, team_id="team-t", email="bob@example.com"):
+        _seed_team_with_owner(reg, team_id)
+        r = client.post("/v1/invites",
+                        json={"team_id": team_id, "email": email})
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def _expire(self, reg, iid):
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.expires_at = $exp",
+            params={"id": iid, "exp": "2020-01-01T00:00:00+00:00"},
+        )
+
+    def test_token_accept_expired_cleans_ghost(self, client, reg):
+        """#1908: the token-branch expiry 400 must delete the fake row —
+        previously the 400 fired BEFORE _delete_fake_invite_membership, so
+        the ghost survived forever."""
+        inv = self._mint(client, reg)
+        assert len(self._ghost_rows(client)) == 1  # pending placeholder
+        self._expire(reg, inv["invite_id"])
+        _as_user(_U_BOB, "bob@example.com")
+        r = client.post("/v1/invites/accept", json={"token": inv["token"]})
+        assert r.status_code == 400
+        assert "expired" in r.json()["detail"]
+        _as_user(_U1, "owner@example.com")  # members list is owner/admin-only
+        assert self._ghost_rows(client) == [], \
+            "expired token accept must clean the ghost row"
+
+    def test_by_id_accept_expired_cleans_ghost(self, client, reg):
+        """#1908: _registry_accept_by_id's expiry 400 must also delete the
+        fake row (same pre-delete 400 ordering bug as the token branch)."""
+        inv = self._mint(client, reg)
+        assert len(self._ghost_rows(client)) == 1
+        self._expire(reg, inv["invite_id"])
+        _as_user(_U_BOB, "bob@example.com")
+        r = client.post(f"/v1/invites/pending/{inv['invite_id']}/accept")
+        assert r.status_code == 400
+        assert "expired" in r.json()["detail"]
+        _as_user(_U1, "owner@example.com")
+        assert self._ghost_rows(client) == [], \
+            "expired by-id accept must clean the ghost row"
+
+    def test_cleanup_expired_invitations_sweeps_ghost(self, client, reg):
+        """#1908 (sweep): mint → advance expiry → cleanup_expired_invitations
+        → the invite is marked expired AND its fake membership row is gone.
+        Previously the SDK sweep only stamped status='expired' on the
+        Invitation node, leaving the ghost row behind."""
+        inv = self._mint(client, reg)
+        assert len(self._ghost_rows(client)) == 1
+        self._expire(reg, inv["invite_id"])
+        sdk = TortoiseSDK(namespace="registry")
+        result = sdk.cleanup_expired_invitations()
+        assert result["cleaned"] >= 1
+        assert result["ghosts_deleted"] >= 1
+        rows = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.status, i.accepted_at",
+            params={"id": inv["invite_id"]},
+        ).result_set
+        assert rows[0][0] == "expired"
+        _as_user(_U1, "owner@example.com")
+        assert self._ghost_rows(client) == [], \
+            "expiry sweep must clean the ghost row"
+
+    def _seed_pre_1880_ghost(self, reg, iid, email, **inv_props):
+        """Pre-#1880 fake row + backing Invitation node (no live cleanup
+        path — the ghost is permanent without the backfill sweep).
+        inv_props are extra Invitation properties (e.g. accepted_at/status)."""
+        props = ", ".join(f"{k}:'{v}'" for k, v in inv_props.items())
+        reg.query(
+            f"CREATE (i:Invitation {{id:'{iid}', team_id:'team-t', "
+            f"email:'{email}', role:'member', "
+            f"expires_at:'2099-01-01T00:00:00+00:00'"
+            + (f", {props}" if props else "") + "})",
+        )
+        _seed_membership(reg, "team-t", f"invite-{iid}", "member",
+                         status="invited")
+
+    def test_backfill_sweep_clears_pre_existing_ghosts(self, client, reg):
+        """#1908 (backfill): the one-time sweep deletes pre-#1880 invite-*
+        Membership rows whose Invitation is consumed (accepted_at set),
+        expired, or revoked — and orphaned rows with no Invitation node —
+        while keeping the legit pending placeholder. Idempotent: a second
+        run finds nothing to delete."""
+        minted = self._mint(client, reg)  # seeds team-t + legit pending → survives
+        # consumed (accepted_at set, unexpired — only the consumed signal catches it)
+        self._seed_pre_1880_ghost(
+            reg, "inv-consumed", "a@example.com", accepted_at="2020-01-01T00:00:00+00:00")
+        # expired (expires_at past, still pending)
+        reg.query(
+            "CREATE (i:Invitation {id:'inv-expired', team_id:'team-t', "
+            "email:'b@example.com', role:'member', accepted_at:null, "
+            "status:'pending', expires_at:'2020-01-01T00:00:00+00:00'})",
+        )
+        _seed_membership(reg, "team-t", "invite-inv-expired", "member",
+                         status="invited")
+        # revoked
+        self._seed_pre_1880_ghost(reg, "inv-revoked", "c@example.com",
+                                  status="revoked")
+        # orphaned fake row (no Invitation node)
+        _seed_membership(reg, "team-t", "invite-inv-orphan", "member",
+                         status="invited")
+        assert len(self._ghost_rows(client)) == 5  # 4 ghosts + 1 placeholder
+        sdk = TortoiseSDK(namespace="registry")
+        result = sdk.sweep_invite_ghost_memberships()
+        assert result["found"] == 5
+        assert result["ghosts"] == 4
+        assert result["deleted"] == 4
+        _as_user(_U1, "owner@example.com")
+        rows = self._ghost_rows(client)
+        assert len(rows) == 1, "pending placeholder must survive the sweep"
+        assert rows[0]["user_id"] == f"invite-{minted['invite_id']}"
+        # idempotent
+        result2 = sdk.sweep_invite_ghost_memberships()
+        assert result2["found"] == 1
+        assert result2["ghosts"] == 0
+        assert result2["deleted"] == 0
+
+    def test_backfill_sweep_dry_run_no_writes(self, client, reg):
+        """#1908: --dry-run equivalent reports ghosts without deleting."""
+        _seed_team_with_owner(reg, "team-t")
+        self._seed_pre_1880_ghost(
+            reg, "inv-consumed", "a@example.com", accepted_at="2020-01-01T00:00:00+00:00")
+        sdk = TortoiseSDK(namespace="registry")
+        result = sdk.sweep_invite_ghost_memberships(dry_run=True)
+        assert result["ghosts"] == 1
+        assert result["deleted"] == 0
+        _as_user(_U1, "owner@example.com")
+        assert len(self._ghost_rows(client)) == 1, "dry-run must not write"
+        # a real sweep then clears it
+        sdk.sweep_invite_ghost_memberships()
+        assert self._ghost_rows(client) == []
