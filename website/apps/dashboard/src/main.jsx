@@ -1291,6 +1291,13 @@ function claimIntentInFlight() {
         body: JSON.stringify({ content: `${subjectName} is building ${projectName}`, kind: 'statement',
                                about_object: proj.id, tags: ['onboarding'], dedup: true }) })
       setWizardSeedDone(!!(subj && subj.id && proj && proj.id && p && p.id))
+      // #1906: the seeded point must land on the Overview without waiting
+      // for reload — team.point_count was captured at provisioning (0).
+      // Load-bearing for the header-exit race ('Open dashboard →' is
+      // available on every wizard step): finishWelcomeLoads' refreshTeam
+      // can snapshot 0 while the seed commit is in flight; this post-seed
+      // refire lands the correct count.
+      refreshTeam(welcomeKey || '').catch(() => {})
       // #1691: reflect the subject in the account username (display_name)
       // — best-effort; the graph Subject is the source of truth.
       if (subj && subj.id && supabaseClient) {
@@ -1320,6 +1327,17 @@ function claimIntentInFlight() {
   async function finishWelcomeLoads() {
     await loadTeams().catch(() => {})
     loadBackups(welcomeKey || '').catch(() => {})
+    // #1906: the first-timer path never ran loadAll (keys+sessions) — the
+    // Overview 'API Keys' card stayed 0 until reload. loadTeams just
+    // pinned currentTeamId (Round-8), so loadAll's ?team_id= targets the
+    // new team. Fire-and-forget like completeLogin's card loads; each
+    // loader carries its own staleness guard.
+    loadAll(welcomeKey || '').catch(() => {})
+    // #1906: refetch the team so the Overview 'Data points' card reflects
+    // the seeded graph — team.point_count was captured at provisioning
+    // (pre-seed, 0). Also covers the header-exit-without-seed case (0
+    // stays 0 — honest).
+    refreshTeam(welcomeKey || '').catch(() => {})
     // #1847: re-fire the onboarding-state load NOW that the team exists —
     // the mount-time refreshOnboarding() fired BEFORE provisioning (mount
     // gate → provisionInApp) and 403'd 'No team membership' for first-timers,
@@ -1751,6 +1769,20 @@ function claimIntentInFlight() {
               setWelcomeKey(provisioned.api_key)
               setWelcomeTeamName(provisioned.team_name)
               setWelcomeGraphName(provisioned.graph_name || '')
+              // #1906: persist the shown-once key NOW — a reload (even
+              // mid-wizard, before any dashboard exit) must keep it; the
+              // mint path would otherwise mint a DIFFERENT bootstrap key
+              // and the revealed key is gone forever (atomic reveal+null,
+              // A13 — the plaintext exists only here). Guard truthy: the
+              // consumed-reveal path returns api_key '' (already revealed
+              // elsewhere), and a falsy value must never land in
+              // localStorage (mint-path convention, #1830). try/catch:
+              // private-mode storage throws.
+              if (provisioned.api_key) {
+                try { localStorage.setItem(KEY_STORAGE, provisioned.api_key) } catch { /* best-effort */ }
+                setApiKey(provisioned.api_key)
+                apiKeyRef.current = provisioned.api_key
+              }
               // #1660: prefill the seed step — the Subject from the OAuth
               // identity (name or email prefix), the Project from the team.
               {
