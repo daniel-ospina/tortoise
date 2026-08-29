@@ -585,6 +585,15 @@ def test_state_keys_registered_parametrized(client):
         _ONBOARDING_DEFAULT_STATE,
         DEFAULT_ONBOARDING_STATE,
         OnboardingStatePatchRequest,
+        _make_sdk,
+    )
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
+    # Provision the Team node so the round-trip asserts REAL persistence
+    # (the state writer is MATCH...SET — a silent no-op without the node;
+    # mirrors the #1893 scope tests).
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
     )
     for state_key, (patch_field, patch_value) in _STATE_KEY_TABLE.items():
         assert state_key in _ONBOARDING_DEFAULT_STATE, \
@@ -596,13 +605,17 @@ def test_state_keys_registered_parametrized(client):
         assert patch_field in OnboardingStatePatchRequest.model_fields, \
             f"{state_key} missing from the live PATCH model (field {patch_field})"
         # PATCH round-trip: the type-aware sample value must survive the
-        # merge and read back (bool keys take True; timestamp keys take an
-        # ISO string; scope keys take a small non-empty sample).
+        # merge (bool keys take True; timestamp keys take an ISO string;
+        # scope keys take a small non-empty sample) AND read back via GET
+        # (the node is provisioned, so this is a real persisted round-trip).
         r = client.patch("/v1/onboarding/state",
                          json={patch_field: patch_value})
         assert r.status_code == 200, r.text
         assert r.json()["onboarding"][state_key] == patch_value, \
             f"{state_key} did not round-trip through PATCH"
+        r = client.get("/v1/onboarding/state")
+        assert r.json()["onboarding"][state_key] == patch_value, \
+            f"{state_key} did not read back through GET"
 
 
 def test_capture_surface_keys_shared_across_defaults():

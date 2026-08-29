@@ -544,7 +544,15 @@ function claimIntentInFlight() {
       persistScope({ github_issues_scope: serializeIssuesScope(issuesScopeRef.current) })
     }
     if (!scopeTouchedRef.current.docs) {
-      setDocsScope(reconcileDocsScope(onboarding.github_docs_scope, reposList))
+      const seeded = reconcileDocsScope(onboarding.github_docs_scope, reposList)
+      setDocsScope(seeded)
+      // code-review P2: hydration must load each seeded repo's branch
+      // options — loadBranches fires only from the checkbox onChange, so
+      // seeded repos would otherwise render a picker with only the
+      // [default, all] options and shouldResetBranch could never heal a
+      // stale persisted branch (it trusts values while no options are
+      // loaded). The branchLists effect then reconciles + heals on load.
+      seeded.repos.forEach((r) => loadBranches(r))
     } else {
       persistScope({ github_docs_scope: serializeDocsScope(docsScopeRef.current) })
     }
@@ -1186,22 +1194,27 @@ function claimIntentInFlight() {
       prev.repos.forEach((r) => {
         if (!Object.prototype.hasOwnProperty.call(branchLists, r)) return
         const info = branchLists[r]
+        // #1893: a persisted branch that no longer exists on GitHub must
+        // not stick a blank picker + fail the docs job. Runs BEFORE the
+        // default fill so a reset lands on the repo's API default option
+        // (deterministic — the fill is skipped for a truthy stale branch;
+        // '' and 'all' are always-valid markers).
+        if (shouldResetBranch(branches[r], info)) {
+          branches[r] = info.defaultBranch || ''
+          changed = true
+        }
         if (info && info.defaultBranch && !branches[r]) {
           branches[r] = info.defaultBranch
           changed = true
         }
-        // #1893: a persisted branch that no longer exists on GitHub must
-        // not stick a blank picker + fail the docs job — once the picker
-        // HAS loaded this repo's options and the persisted branch is not
-        // among them, reset to the default (''). ('' and 'all' are always
-        // valid; may race the defaultBranch fill above — either outcome is
-        // safe and consistent.)
-        if (shouldResetBranch(branches[r], info)) {
-          branches[r] = ''
-          changed = true
-        }
       })
-      return changed ? { ...prev, branches } : prev
+      const next = changed ? { ...prev, branches } : prev
+      // code-review P2: mirror the ref — the hydration touched-branch
+      // serializes docsScopeRef.current (never the effect closure), so a
+      // healed/reset value must be visible there or a team-switch persist
+      // could re-persist the stale branch it just healed.
+      if (changed) docsScopeRef.current = next
+      return next
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branchLists])
@@ -1312,6 +1325,10 @@ function claimIntentInFlight() {
         const gs = await api('/v1/onboarding/github/status', { useSession: true })
         org = gs && gs.org
       } catch { /* org stays undefined — the server 400s "org is required" and the row error surfaces it */ }
+      // #1845: per-repo scope list — each selected repo carries its own
+      // branch ('' = default main/master fallback, 'all' = every branch).
+      // Empty repos = ALL repos (org-wide, default branch). #1893: pure
+      // builder (sourceScope.js) — omit-empty contract node-tested.
       const payload = buildDocsJobBody(docsScope, org)
       const res = await api('/v1/index/docs', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
@@ -2451,6 +2468,19 @@ function claimIntentInFlight() {
     setCurrentTeamId(null)
     setCurrentGraphId(null)
     setTeams([])                       // Round-4: drop the previous session's teams
+    // #1893 (code-review P2): a fresh login is a NEW team session — reset
+    // the hydration latch + persist gate + scope state so the next session
+    // re-hydrates from the server (a change made on another device must be
+    // picked up; the stale in-memory scope must never overwrite the server
+    // value on the first toggle).
+    hydratedTeamIdRef.current = null
+    scopeReadyRef.current = false
+    scopeTouchedRef.current = { issues: false, docs: false }
+    setReposLoadFailed(false)
+    setReposLoaded(false)
+    setReposList([])
+    setDocsScope({ repos: [], branches: {} })
+    setIssuesScope({ repos: [] })
     sessionTokenRef.current = null      // Round-4: never reuse the previous user's JWT
     setError('')                        // Round-4: stale error banner must not survive
     setBackupInfo(null)                 // Round-5: no cross-session backup data leak

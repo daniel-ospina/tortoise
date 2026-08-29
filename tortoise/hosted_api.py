@@ -10473,12 +10473,6 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_last_error_pi: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
-    # #1893: persisted GitHub source-scope keys — registered so the keys
-    # round-trip through the PATCH surface (parametrized registration test)
-    # and the dashboard can persist + rehydrate the scope selectors.
-    # [] = explicit clear (all repos) — a VALID value, never dropped.
-    github_issues_scope: list[str] | None = None
-    github_docs_scope: list[dict] | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so
     # the key round-trips through the PATCH surface.
     github_docs_indexed: bool | None = None
@@ -10490,6 +10484,13 @@ class OnboardingStatePatchRequest(BaseModel):
     # #235's artifact_copied schema verbatim (align cycle-3 conformance).
     harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
     section: str | None = None   # "config"|"prompt"|"both"|"setup"
+    # #1893: persisted GitHub source-scope keys — registered so the keys
+    # round-trip through the PATCH surface (parametrized registration test)
+    # and the dashboard can persist + rehydrate the scope selectors.
+    # [] = explicit clear (all repos) — a VALID value, never dropped.
+    # (appended at class end for #1894 merge hygiene — keep append-only)
+    github_issues_scope: list[str] | None = None
+    github_docs_scope: list[dict] | None = None
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -11391,6 +11392,13 @@ class GitHubRepollRequest(BaseModel):
     repo: str | None = None
 
 
+# #1893: the SHORT-repo-name charset is shared between the persisted-scope
+# validator and _validate_repo_scope — legacy inline copies also exist at
+# other index-surface call sites; new validators MUST use this constant
+# (keep-in-sync — a charset change lands in ALL copies).
+_SHORT_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
 def _validate_scope_payload(updates: dict) -> dict:
     """#1893: PATCH-boundary validation for the persisted source-scope keys
     (github_issues_scope / github_docs_scope). Same conservative surface as
@@ -11414,7 +11422,7 @@ def _validate_scope_payload(updates: dict) -> dict:
             if not isinstance(s, dict) or not isinstance(s.get("repo"), str):
                 raise HTTPException(status_code=400, detail="Invalid repo scope")
             repo = s["repo"].strip()
-            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
+            if not _SHORT_REPO_NAME_RE.match(repo):
                 raise HTTPException(status_code=400, detail="Invalid repo name")
             branch = s.get("branch")
             if branch == "" or branch is None:
@@ -11448,7 +11456,7 @@ def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
         r = r.strip()
         if not r:
             raise HTTPException(status_code=400, detail="Invalid repo name")
-        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", r):
+        if not _SHORT_REPO_NAME_RE.match(r):
             raise HTTPException(status_code=400, detail="Invalid repo name")
         if r not in out:
             out.append(r)

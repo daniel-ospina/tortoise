@@ -483,7 +483,7 @@ export function shouldResetBranch(branch, branchInfo) {
 
 **Step 4: Run to verify GREEN.**
 Run: `cd website/apps/dashboard && node --test src/sourceScope.test.js`
-Expected: PASS (16 tests — 10 derivation + 6 gating/reset predicates).
+Expected: PASS (19 tests — 13 derivation + 6 gating/reset predicates).
 
 ## Task 4: Dashboard wiring — wrapped setters, persist queue, one-shot hydration
 
@@ -637,7 +637,7 @@ Expected: PASS (all onboarding tests, incl. the 3 new scope tests + extended reg
 
 **Step 2: Node tests.**
 Run: `cd website/apps/dashboard && node --test src/sourceScope.test.js`
-Expected: PASS (16 tests — 10 derivation + 6 gating/reset predicate tests).
+Expected: PASS (19 tests — 13 derivation + 6 gating/reset predicate tests).
 
 **Step 3: Dashboard build + dist.**
 Run: `cd website/apps/dashboard && npm run build`
@@ -705,3 +705,4 @@ Two parallel plan verifiers reviewed this plan against the rebased branch (origi
   - `test_scope_keys_invalid_400` seeds a valid scope first, then asserts the 400s leave the valid seed intact via GET (pins "nothing stored", non-vacuous).
 - **[P2] Docs-scope dedupe at the PATCH boundary.** `_validate_scope_payload`'s docs loop dedupes `repo` entries via a `seen` set (mirrors `_validate_repo_scope`) so `[{a},{a}]` can never persist duplicated — theoretical (client serializes unique repos + `reconcileDocsScope` dedupes), cheap to make robust.
 - **[P2, cosmetic] New pytest tests live at module level** (like `test_install_probe_round_trip`), not inside `TestOnboardingState` — pytest collects both fine; the `-k 'scope'` selector covers them.
+- **[P2] Node-suite growth (test-review cycle-1):** the pure-node suite grew from 16 → 19 tests (13 derivation + 6 gating) with mixed/corrupt persisted-shape reconcile cases, null-branch docs entries, serialize/build guard cases, and `shouldResetBranch` empty-options coverage. Acceptance counts updated accordingly (Task 3 Step 4 / Task 5 Step 2).
