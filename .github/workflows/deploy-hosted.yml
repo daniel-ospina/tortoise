@@ -49,6 +49,7 @@ on:
     paths:
       - 'tortoise/**'
       - 'packs/**'          # #1929: pack content changes must redeploy (G1 gate)
+      - 'tests/sample_transcript.txt'  # #1929: the image copies it (mine-conversation example)
       - 'fly.toml'
       - 'Dockerfile.hosted'
       - 'entrypoint.sh'
@@ -72,7 +73,9 @@ on:
       # #1929: incident-fix deploys must not be blocked by a packaging-gate
       # flake (the smoke builds Dockerfile.hosted locally, incl. the HF
       # model bake). Mirrors skip-db-health-gate; a skipped gate emits a
-      # warning — never silent.
+      # warning — never silent. Incident-window convention: set
+      # vars.SKIP_PACK_SMOKE=true during packaging incidents, clear it after
+      # (same runbook as SKIP_DB_HEALTH_GATE).
       skip-pack-smoke:
         description: 'Skip the pack-catalog smoke (incident-fix deploys)'
         required: false
@@ -112,8 +115,11 @@ jobs:
           # daemon and the `docker run` assertion below cannot find it.
           load: true
           tags: tortoise-hosted:smoke
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # Scoped cache keys: the torch-based image's multi-GB layers must
+          # not collide with the python CI's gha-cache keys in the shared
+          # repo-wide 10GB cache (code-review P2).
+          cache-from: type=gha,scope=deploy-pack-smoke
+          cache-to: type=gha,scope=deploy-pack-smoke,mode=max
       - name: In-container pack assertion (no boot, no secrets)
         run: |
           docker run --rm --entrypoint python tortoise-hosted:smoke -c '

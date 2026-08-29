@@ -201,13 +201,14 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install build tooling
-        run: pip install build
+        run: pip install build==1.6.0   # pinned (#1685 convention — a build-frontend
+        # bump must not silently change the wheel content this job asserts on)
       - name: Build wheel + sdist
         run: python -m build
       - name: Wheel content check — tortoise/packs shipped
         run: |
-          MISSING="$(unzip -Z1 dist/*.whl | grep -cE '^tortoise/packs/[^/]+/manifest\.yaml$' || true)"
-          [ "$MISSING" -ge 1 ] || { echo "::error::wheel ships no pack manifests"; unzip -Z1 dist/*.whl | grep tortoise/packs || true; exit 1; }
+          MANIFEST_COUNT="$(unzip -Z1 dist/*.whl | grep -cE '^tortoise/packs/[^/]+/manifest\.yaml$' || true)"
+          [ "$MANIFEST_COUNT" -ge 1 ] || { echo "::error::wheel ships no pack manifests"; unzip -Z1 dist/*.whl | grep tortoise/packs || true; exit 1; }
           tar tzf dist/*.tar.gz | grep -q 'tortoise/packs/__init__.py' \
             || { echo "::error::sdist missing tortoise/packs/__init__.py (MANIFEST.in)"; exit 1; }
           echo "wheel/sdist pack content OK"

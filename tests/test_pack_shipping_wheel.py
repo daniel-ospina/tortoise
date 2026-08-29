@@ -30,17 +30,24 @@ pytestmark = pytest.mark.slow
 
 
 def _build_backend(dist_dir: Path) -> list[str]:
-    """Pick the first available builder invocation or raise for skip.
+    """Pick the first available builder invocation or fail in CI.
 
     Probes `python -m build --version` rather than importlib: a stray
     ``build/`` directory in CWD (a leftover build artifact) imports as a
-    namespace package and would make find_spec() lie."""
+    namespace package and would make find_spec() lie. In CI a missing
+    builder is a FAILURE, not a skip — this test is the sdist-rebuild
+    gate (MANIFEST.in regression class) and silently dropping it would
+    leave the G1 defect unguarded (code-review P2)."""
+    import os
     import shutil
     if subprocess.run([sys.executable, "-m", "build", "--version"],
                       capture_output=True).returncode == 0:
         return [sys.executable, "-m", "build"]
     if shutil.which("uv"):
         return ["uv", "run", "--with", "build", "python", "-m", "build"]
+    if os.environ.get("CI"):
+        pytest.fail("no wheel builder available in CI (build module or uv) — "
+                    "the sdist-rebuild pack gate must not silently skip")
     pytest.skip("no wheel builder available (build module or uv) — "
                 "CI publish smoke is the authoritative gate")
 

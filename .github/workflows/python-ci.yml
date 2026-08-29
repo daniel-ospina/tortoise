@@ -793,7 +793,11 @@ jobs:
         with:
           python-version: '3.12'   # pyproject requires-python >= 3.12
       - name: Install package + test extras
-        run: pip install -e '.[test,embeddings]'
+        run: pip install -e '.[test,embeddings]' build==1.6.0
+        # build pinned (#1929 code-review P2): test_pack_shipping_wheel.py's
+        # sdist-rebuild gate uses `python -m build` as its primary builder —
+        # the [test] extra does not pull it, and a missing builder would
+        # pytest.skip the wheel gate out of CI with a green run.
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
         # Leaky shared runners accumulate redislite tempdirs from every
         # failed embedded-redis run — discover() then skips its stale-socket

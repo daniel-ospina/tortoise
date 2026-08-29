@@ -32,7 +32,7 @@ jobs:
           python-version: "3.12"
       - name: Build wheel + sdist
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip build==1.6.0
           python -m build
       - name: Smoke-test the wheel in a clean venv
         run: |
@@ -43,7 +43,6 @@ jobs:
           # ship the starter pack catalog + the sample transcript, and the
           # packaged default resolution must load it. Bound derived from the
           # INSTALLED constant (4 today, 5 once #1933 merges — never hardcoded).
-          import sys
           from pathlib import Path
           import tortoise
           from tortoise.pack_registry import PackRegistry, default_packs_dir

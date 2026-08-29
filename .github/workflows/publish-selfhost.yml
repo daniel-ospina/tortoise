@@ -54,6 +54,11 @@ jobs:
 
   build-and-publish:
     runs-on: ubuntu-latest
+    # Hard gate (intentional): a publish path never ships unverified — the
+    # selfhost image smoke must pass before push. Unlike deploy-hosted (which
+    # has skip-pack-smoke for incident-fix deploys), a publish flake is
+    # re-dispatchable at the operator's discretion; no silent bypass exists
+    # here by design (code-review P2).
     needs: packaging-smoke
     permissions:
       contents: read
