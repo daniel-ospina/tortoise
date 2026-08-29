@@ -50,6 +50,37 @@ AUTH_TARGET = "https://tortoise.premiselabs.co/auth"
 AUTH_LOCAL = AUTH_ORIGIN + "/auth"
 
 
+def _mock_bootstrap_200(route, url: str, json_mod, team: dict | None = None) -> bool:
+    """#1885: mock the post-mint dashboard bootstrap reads with 200s so the
+    shell loads instead of 401-ing into the generic error card. Returns True
+    if the request was handled. ``json_mod`` is the caller's json module
+    (each handle imports its own); ``team`` overrides the /v1/team payload.
+    #1828: the shell pins ?team_id= on these reads — match query-tolerant."""
+    path = url.split("?", 1)[0]
+    if path.endswith("/v1/team/keys"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    if path.endswith("/v1/sessions"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    if path.endswith("/backups"):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps({"backups": []}))
+        return True
+    if path.endswith("/v1/team"):
+        t = team or {"team_id": "team_m429", "name": "M429", "tier": "free", "anon": False}
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps(t))
+        return True
+    if "/members" in path:
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    if path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    return False
+
+
 def _wire_auth_intercept(page: Page) -> None:
     """Intercept the absolute /auth target and serve the local auth page."""
 
@@ -149,11 +180,11 @@ def test_claim_paste_has_back_to_signin_escape(page: Page) -> None:
     expect(page.locator("a[href='https://tortoise.premiselabs.co/auth']")).to_be_visible()
 
 
-def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
-    """#1559: a session-key mint 429 (the live global-IP-bucket bug) must
-    render an actionable error card with a retry — never the silent
-    'Redirecting to the sign-in page…' shell (which does NOT navigate and
-    stranded every new user after OAuth)."""
+def test_mint_429_recoverable_banner_not_stuck_shell(page: Page) -> None:
+    """#1559/#1830: a session-key mint 429 (the live global-IP-bucket bug) is
+    now a RECOVERABLE mint failure — the dashboard loads (null key) with the
+    agent-key banner, never the silent 'Redirecting to the sign-in page…'
+    shell (which does NOT navigate and stranded every new user after OAuth)."""
     import json as _json
     import time as _time
     import urllib.parse as _up
@@ -184,6 +215,25 @@ def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
                 route.fulfill(status=200, content_type="application/json",
                               body=_json.dumps([{"team_id": "team_m429", "name": "M429"}]))
                 return
+            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # #1885: the shell calls this FIRST (re-fired per #1847) — a
+                # 401 catch-all shows the generic error card before the mint 429.
+                route.fulfill(status=200, content_type="application/json",
+                              body=_json.dumps({"onboarding": {}}))
+                return
+            if url.endswith("/v1/user/identity") and route.request.method == "GET":
+                # #1885: post-#1765 bootstrap also reads the identity inventory.
+                route.fulfill(status=200, content_type="application/json",
+                              body=_json.dumps({"methods": [], "login_methods": 0,
+                                                "keys_tier": 0, "banner": {"show": False}}))
+                return
+            # #1885 + #1830: a recoverable mint failure proceeds with a null
+            # key — the remaining bootstrap reads must 200 so the dashboard
+            # loads (the mint-429 banner is the assertion, not an error card).
+            # (review P2-3: graphs/alerts are query-pinned ?team_id= — use the
+            # query-tolerant helper, not endswith copies.)
+            if _mock_bootstrap_200(route, url, _json):
+                return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
         if url.startswith(AUTH_HOST):
@@ -198,15 +248,23 @@ def test_mint_429_shows_error_card_not_stuck_shell(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Too many requests from this network", timeout=20_000)
+    # #1830 recoverable-mint behavior: the dashboard loads with the agent-key
+    # banner — never the silent redirect shell, never a stuck error card.
+    # (second-model P2: the banner renders BEFORE the overview hydrates, so pin
+    # a loaded-chrome marker too — a /v1/team 5xx would otherwise pass.)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    expect(page.locator("body")).to_contain_text("Wait for expiry", timeout=20_000)
     expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
+    expect(page.locator("body")).not_to_contain_text("HTTP 401")
 
 
 def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     """#1566: a first-timer (valid session, NO teams) landing on the app is
     provisioned IN-APP — tenant-provision → membership poll → reveal — and
     the key is shown in the welcome card exactly once (A13). A returning
-    visit (key consumed) shows the ready card without re-revealing."""
+    visit (onboarding complete) lands on the dashboard's first-run card
+    with NO re-reveal (#1885: the welcome-card reveal only fires on the
+    provisioning path)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-welcome1566"
@@ -226,6 +284,22 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             if url.endswith("/v1/teams"):
                 # First-timer: no teams → the app provisions.
                 route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # #1885: the shell calls this FIRST (re-fired per #1847) — a
+                # 401 catch-all shows the generic error card before the flow.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
+                return
+            if url.endswith("/v1/user/identity") and route.request.method == "GET":
+                # #1885: post-#1765 bootstrap also reads the identity inventory.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                               "keys_tier": 0, "banner": {"show": False}}))
+                return
+            if _mock_bootstrap_200(route, url, json,
+                                   team={"team_id": "team_w", "team_name": "Welcome Team",
+                                         "tier": "free", "anon": False}):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
@@ -274,11 +348,37 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             reveal_calls["n"] += 1
             route.fulfill(status=200, content_type="application/json", body=json.dumps("pending"))
             return
+        if url.endswith("/v1/session/key") and route.request.method == "POST":
+            # #1885: the returning visit needs a SUCCESSFUL mint (the shared
+            # handle 401s it → the recoverable-mint banner instead of the
+            # ready card).
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"key": "tt_ret_key", "team_id": "team_w"}))
+            return
+        if url.endswith("/v1/teams"):
+            # #1885: returning visit — the team EXISTS now; the shared handle
+            # mocks teams→[] (first-timer), which would re-trigger provisioning.
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps([{"team_id": "team_w", "team_name": "Welcome Team",
+                                            "tier": "free"}]))
+            return
+        if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+            # #1885: returning visit — onboarding is COMPLETE (the shared handle
+            # returns an empty onboarding dict → the setup wizard re-appears).
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+            return
         handle(route)
     page.route("**/*", handle_returning)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Welcome back", timeout=20_000)
-    assert reveal_calls["n"] == 1, "returning visit reveals once (pending), no re-reveal"
+    # #1885: a returning user (onboarding complete) lands on the dashboard's
+    # first-run card — the key is NEVER re-revealed (reveal_calls stays 0;
+    # the welcome-card reveal only fires on the provisioning path).
+    expect(page.locator("body")).to_contain_text("Welcome to your Tortoise graph", timeout=20_000)
+    assert reveal_calls["n"] == 0, f"no re-reveal on the returning dashboard path, got {reveal_calls['n']}"
+    expect(page.locator("body")).not_to_contain_text("copy it now")
+    # the returning mint succeeded — no recoverable-mint banner (review P2)
+    expect(page.locator("body")).not_to_contain_text("Couldn't create an agent key")
 
 
 def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
@@ -348,6 +448,11 @@ def test_welcome_mode_provision_401_clears_session_and_redirects(page: Page) -> 
         if "api.premiselabs.co" in url:
             if url.endswith("/v1/teams"):
                 route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # #1885: the shell calls this FIRST (re-fired per #1847).
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return

@@ -433,6 +433,15 @@ function claimIntentInFlight() {
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
   const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
+  // #1877: create-team dialog state (gated-on-click upgrade UX)
+  const [createTeamOpen, setCreateTeamOpen] = React.useState(false)
+  const [createTeamName, setCreateTeamName] = React.useState('')
+  const [createTeamBusy, setCreateTeamBusy] = React.useState(false)
+  const [createTeamError, setCreateTeamError] = React.useState('')
+  const [createTeamUpgrade, setCreateTeamUpgrade] = React.useState(false)
+  // #1875: invitee-side pending invites (account-menu surface)
+  const [pendingInvites, setPendingInvites] = React.useState(null)  // null = not loaded
+  const [pendingInvitesBusy, setPendingInvitesBusy] = React.useState('')  // '' | invitation_id
   const accountBlobRef = React.useRef(null) // #1148-ux review P2-4/P3-1: outside-click + Escape close
   React.useEffect(() => {
     if (!accountMenuOpen) return
@@ -2314,6 +2323,85 @@ function claimIntentInFlight() {
     } catch { /* best-effort */ }
   }
 
+  // #1875: fetch the invitee's pending invites when the account menu opens.
+  async function loadPendingInvites() {
+    if (!sessionTokenRef.current) return
+    try {
+      const res = await api('/v1/invites/pending', { useSession: true })
+      setPendingInvites((res && res.invites) || [])
+    } catch {
+      // #1875 review P2: a transient load failure must NOT collapse to the
+      // empty state (which hides real invites) — surface a retryable error.
+      setPendingInvites((prev) => (prev && prev.length ? prev : [{ _loadError: 'Could not load invites — reopen the menu to retry' }]))
+    }
+  }
+
+  async function acceptPendingInvite(inv) {
+    setPendingInvitesBusy(inv.invitation_id)
+    try {
+      const res = await api(`/v1/invites/pending/${encodeURIComponent(inv.invitation_id)}/accept`, {
+        method: 'POST', useSession: true,
+      })
+      setPendingInvites((prev) => (prev || []).filter((x) => x.invitation_id !== inv.invitation_id))
+      setAccountMenuOpen(false)
+      if (res?.team_id) { await loadTeams(); switchTeam(res.team_id) }
+    } catch (e) {
+      // #1875 review P2-1: a failed accept (free-cap / at-capacity / expired)
+      // keeps the invite in the list and surfaces the API detail — it must
+      // not silently vanish.
+      setPendingInvites((prev) => (prev || []).map((x) =>
+        x.invitation_id === inv.invitation_id ? { ...x, error: e?.message || 'Could not accept' } : x))
+    } finally {
+      setPendingInvitesBusy('')
+    }
+  }
+
+  async function declinePendingInvite(inv) {
+    setPendingInvitesBusy(inv.invitation_id)
+    try {
+      await api(`/v1/invites/pending/${encodeURIComponent(inv.invitation_id)}`, {
+        method: 'DELETE', useSession: true,
+      })
+    } catch { /* best-effort — remove locally regardless */ }
+    setPendingInvites((prev) => (prev || []).filter((x) => x.invitation_id !== inv.invitation_id))
+    setPendingInvitesBusy('')
+  }
+
+  async function handleCreateTeam() {
+    // #1877: create-team dialog submit — validation mirrors POST /v1/teams
+    // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
+    // upgrade UX (the dialog explains "upgrade a team, then create" — the
+    // new team doesn't exist until the gate passes).
+    const name = createTeamName.trim()
+    if (!name) { setCreateTeamError('Team name required'); return }
+    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
+      setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
+      return
+    }
+    setCreateTeamBusy(true)
+    setCreateTeamError('')
+    setCreateTeamUpgrade(false)
+    try {
+      const res = await api('/v1/teams', {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ name }),
+      })
+      setCreateTeamOpen(false)
+      setCreateTeamName('')
+      await loadTeams()
+      if (res?.team_id) switchTeam(res.team_id)
+    } catch (e) {
+      if (e?.status === 402) {
+        setCreateTeamError(e.message || 'Create another team requires a paid plan')
+        setCreateTeamUpgrade(true)
+      } else {
+        setCreateTeamError(e?.message || 'Could not create the team')
+      }
+    } finally {
+      setCreateTeamBusy(false)
+    }
+  }
+
   async function switchTeam(teamId) {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
@@ -2528,7 +2616,8 @@ function claimIntentInFlight() {
       if (!res.ok) {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
-          setError('Invites require the Team tier — upgrade to invite teammates.')
+          // #1875: render the API's detail (upgrade vs at-capacity)
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite teammates.')
           setBusy(false)
           return
         }
@@ -3734,7 +3823,11 @@ function claimIntentInFlight() {
         <div className="account-blob" ref={accountBlobRef}>
           <button
             className="account-blob-btn"
-            onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+            onClick={() => {
+              const opening = !accountMenuOpen
+              setAccountMenuOpen(opening)
+              if (opening) loadPendingInvites()  // #1875: refresh on open
+            }}
             onKeyDown={(e) => { if (e.key === 'Escape') setAccountMenuOpen(false) }}
             aria-expanded={accountMenuOpen}
             aria-label={`Account menu — ${currentTeamName || 'No team'}`}
@@ -3815,6 +3908,50 @@ function claimIntentInFlight() {
                   ))}
                 </>
               )}
+              {/* #1877: create-team entry — UNCONDITIONAL (it's the sole
+                  entry for single-team users; the switch label above stays
+                  hidden for teams.length ≤ 1). */}
+              <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false) }}>
+                + Create new team
+              </button>
+              {/* #1875: invitee-side pending invites (Slack/GitHub/Notion
+                  workspace-switcher precedent). Renders only when there are
+                  pending invites; Accept lands on the team, Decline removes. */}
+              {pendingInvites && pendingInvites.length > 0 && (
+                pendingInvites[0] && pendingInvites[0]._loadError ? (
+                  <div className="account-invite" role="alert">
+                    <span className="dim small">{pendingInvites[0]._loadError}</span>
+                  </div>
+                ) : (
+                <>
+                  <div className="account-menu-label">Invites</div>
+                  {pendingInvites.map((inv) => (
+                    <div key={inv.invitation_id} className="account-invite">
+                      <div className="account-invite-text">
+                        <span className="account-invite-team">{inv.team_name}</span>
+                        <span className="dim small">{inv.inviter_email ? `by ${inv.inviter_email}` : ''}</span>
+                        {inv.error && <span className="account-invite-error" role="alert">{inv.error}</span>}
+                      </div>
+                      <div className="account-invite-actions">
+                        <button
+                          className="ghost small"
+                          disabled={pendingInvitesBusy !== ''}
+                          onClick={() => acceptPendingInvite(inv)}
+                        >
+                          {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
+                        </button>
+                        <button
+                          className="ghost small"
+                          disabled={pendingInvitesBusy !== ''}
+                          onClick={() => declinePendingInvite(inv)}
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  </>
+              ))}
               <div className="account-menu-divider" />
               <button className="account-menu-logout" onClick={logout}>
                 Log out
@@ -3822,6 +3959,50 @@ function claimIntentInFlight() {
             </div>
           )}
         </div>
+        {/* #1877: create-team dialog — gated-on-click upgrade UX. The 402
+            state explains "upgrade a team, then create" (the new team
+            doesn't exist until the gate passes); the CTA lands on Billing
+            (#1876's team selector). */}
+        {createTeamOpen && (
+          <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) setCreateTeamOpen(false) }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new team"
+                 onClick={(e) => e.stopPropagation()}
+                 onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) setCreateTeamOpen(false) }}>
+              {createTeamUpgrade ? (
+                <>
+                  <h3>Create a new team</h3>
+                  <p className="error" role="alert">{createTeamError}</p>
+                  <p className="dim">The free plan includes one team. Upgrade an existing team to create more.</p>
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button className="btn-primary" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false); setTab('billing') }}>
+                      Upgrade
+                    </button>
+                    <button className="ghost" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false) }}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h3>Create a new team</h3>
+                  <input
+                    aria-label="Team name"
+                    placeholder="Team name"
+                    autoFocus
+                    value={createTeamName}
+                    onChange={(e) => setCreateTeamName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !createTeamBusy) handleCreateTeam() }}
+                  />
+                  {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button className="btn-primary" onClick={handleCreateTeam} disabled={createTeamBusy}>
+                      {createTeamBusy ? 'Creating…' : 'Create team'}
+                    </button>
+                    <button className="ghost" onClick={() => setCreateTeamOpen(false)} disabled={createTeamBusy}>Cancel</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
             {team.tier || 'free'} tier · Upgrade
@@ -4280,8 +4461,11 @@ function claimIntentInFlight() {
             {!isOwnerAdmin && (
               <p className="dim small">Only owners and admins can manage members.</p>
             )}
-            {team && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
+            {/* #1875: Pro CAN invite up to capacity — the notice is only
+                for Free/Solo (the old copy rendered for Pro too and
+                contradicted the working invite form). */}
+            {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
+              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
