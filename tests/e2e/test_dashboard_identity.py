@@ -540,3 +540,43 @@ def test_create_team_free_capped_gate(page: Page):
     expect(dialog.get_by_role("button", name="Upgrade")).to_be_visible()
     dialog.get_by_role("button", name="Upgrade").click()
     expect(page.get_by_role("heading", name="Billing")).to_be_visible()
+
+
+def test_pending_invites_in_menu(page: Page):
+    """#1875: pending invites render in the account menu; Decline removes
+    them; empty state hides the section."""
+    _seed(page)
+    _wire(page, inv=_inventory(login_methods=1))
+    invites = [{"invitation_id": "inv-1", "team_id": "team_e2e", "team_name": "Bravo",
+                "role": "member", "inviter_email": "owner@example.com", "expires_at": None}]
+
+    def handle(route):
+        url = route.request.url
+        path = url.split("?", 1)[0]
+        if path.endswith("/v1/invites/pending") and route.request.method == "GET":
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"invites": invites}))
+            return
+        if "/accept" in path and route.request.method == "POST":
+            invites.clear()  # consumed
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"team_id": "team_e2e", "role": "member"}))
+            return
+        if path.endswith("/v1/invites/pending") is False and \
+                "/v1/invites/pending/" in path and route.request.method == "DELETE":
+            invites.clear()
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"revoked": True}))
+            return
+        route.continue_()
+    page.route("**/v1/invites/pending**", handle)
+
+    page.goto(DASHBOARD_URL)
+    _open_account_menu(page)
+    menu = page.locator(".account-menu")
+    expect(menu).to_contain_text("Invites")
+    expect(menu).to_contain_text("Bravo")
+    # Decline removes the invite + the section hides
+    menu.get_by_role("button", name="Decline").click()
+    expect(menu.get_by_text("Invites")).to_have_count(0)
+    expect(menu.get_by_text("Bravo")).to_have_count(0)
