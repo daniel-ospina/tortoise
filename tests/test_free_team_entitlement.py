@@ -27,6 +27,14 @@ _USER1 = "9f2c1a40-0000-4a00-8000-000000000001"
 _UPGRADE_MSG = "Create another team requires a paid plan"
 
 
+def _count_free(user_id: str) -> int:
+    """#1954: the entitlement helper is async (the TOCTOU read window) —
+    sync test callers wrap it in asyncio.run."""
+    import asyncio as _a
+    from tortoise.hosted_api import _count_active_free_memberships
+    return _a.run(_count_active_free_memberships(user_id))
+
+
 # ── Supabase lane ───────────────────────────────────────────────────────────
 
 
@@ -279,15 +287,13 @@ class TestRegistryEntitlement:
         tc, reg = reg_client
         _reg_seed(reg, "team-free-r")
         _reg_member(reg, "team-free-r")
-        from tortoise.hosted_api import _count_active_free_memberships
-        assert _count_active_free_memberships(_USER1) == 1
+        assert _count_free(_USER1) == 1
 
     def test_helper_tier_pro_not_counted(self, reg_client):
         tc, reg = reg_client
         _reg_seed(reg, "team-pro-r", tier="pro")
         _reg_member(reg, "team-pro-r")
-        from tortoise.hosted_api import _count_active_free_memberships
-        assert _count_active_free_memberships(_USER1) == 0
+        assert _count_free(_USER1) == 0
 
     def test_create_free_capped_402_no_team_minted(self, reg_client):
         """The gate fires BEFORE team_create — assert no Team node exists."""
@@ -353,17 +359,34 @@ def team_client_factory(client):
 # ── #1954: concurrent TOCTOU tests ─────────────────────────────────────────
 
 
+@pytest.fixture(autouse=True)
+def _clear_locks():
+    """#1954 review P2: the memoized asyncio locks bind to the event loop
+    on first CONTENDED acquisition — tests run the app under fresh
+    asyncio.run loops, so clear them between tests to avoid cross-loop
+    RuntimeError."""
+    import tortoise.hosted_api as _ha
+    _ha._TEAM_CREATE_LOCKS.clear()
+    yield
+    _ha._TEAM_CREATE_LOCKS.clear()
+
+
 class TestConcurrentTeamCreationTOCTOU:
     """#1954 — the "one free team" check+provision is read-then-write:
     concurrent POST /v1/teams (or /v1/onboarding/team) requests can all
     read count==0 (and the 429 owner-membership count sees 0 too) then all
     provision → multiple free teams. The fix is an in-process per-user
     asyncio lock (_team_create_lock) around the check+provision in every
-    create_team lane + the onboarding re-entry guard. These tests dispatch
-    REAL parallel HTTP (asyncio.gather over an ASGI transport — the same
-    pattern as test_agent_signup_idempotency.py's concurrency E2E) and
-    assert the invariant: exactly one team minted, the second call gets the
-    402/409."""
+    create_team lane + the onboarding re-entry guard.
+
+    NOTE (review P1, honest framing): the single-process hosted lane's
+    check+provision is ATOMIC today (sync control-plane calls — the
+    count helper is async with an explicit yield, so the window becomes
+    real the moment any await enters the lane). These tests are therefore
+    OUTCOME-INVARIANT regression guards under concurrent dispatch
+    (exactly one minted / the rest gated) rather than race reproducers;
+    the multi-worker gap (per-process locks) is filed as a separate
+    DB-constraint follow-up."""
 
     def test_concurrent_create_team_one_minted(self, user_client):
         _tc, fake = user_client

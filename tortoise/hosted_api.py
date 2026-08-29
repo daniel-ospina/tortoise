@@ -5966,7 +5966,7 @@ def _team_create_lock(user_id: str) -> asyncio.Lock:
     return lock
 
 
-def _count_active_free_memberships(user_id: str) -> int:
+async def _count_active_free_memberships(user_id: str) -> int:
     """#1877: active memberships in teams WITHOUT an active paid subscription
     (the per-person "one free team" entitlement). Mode-aware: supabase reads
     subscription_status; selfhost (no subscription model) uses tier='free'
@@ -5978,7 +5978,10 @@ def _count_active_free_memberships(user_id: str) -> int:
         count_active_free_memberships as _sb_count,
     )
     if is_supabase_enabled():
-        return _sb_count(get_control_plane(), user_id)
+        import asyncio as _asyncio
+        count = _sb_count(get_control_plane(), user_id)
+        await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
+        return count
     reg = _make_sdk(namespace="registry")._get_registry()
     rows = reg.query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -5991,6 +5994,8 @@ def _count_active_free_memberships(user_id: str) -> int:
     # review P2: `tier IS NULL` fail-closes the same shape as the supabase
     # twin (a missing subscription_status counts as free → 402) — a legacy/
     # manual tier-less Team node must not grant an extra free slot.
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
     return rows[0][0] if rows else 0
 
 
@@ -6027,13 +6032,13 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     if is_supabase_enabled():
         cp = get_control_plane()
         async with _team_create_lock(user["user_id"]):
-            return _create_team_supabase_lane(cp, name, user)
+            return await _create_team_supabase_lane(cp, name, user)
     sdk = _make_sdk(namespace="registry")
     async with _team_create_lock(user["user_id"]):
-        return _create_team_registry_lane(sdk, name, user)
+        return await _create_team_registry_lane(sdk, name, user)
 
 
-def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
+async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     """#1954: the Supabase create_team lane — 429 → 409 → 402 gates + the
     atomic provision_team write. MUST be called holding the caller's
     _team_create_lock (the gates are read-then-write; the lock is what makes
@@ -6069,7 +6074,7 @@ def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     # Order pinned: 429 → 409 → 402 (a free-capped user creating a
     # duplicate name gets 409, not 402). STRING detail (the dashboard
     # fetch layer string-handles details).
-    if _count_active_free_memberships(user["user_id"]) >= 1:
+    if await _count_active_free_memberships(user["user_id"]) >= 1:
         raise HTTPException(
             status_code=402,
             detail="Create another team requires a paid plan — upgrade an existing team first")
@@ -6112,7 +6117,7 @@ def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
             "tier": "free", "name": name}
 
 
-def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
+async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
     """#1954: the registry (selfhost) create_team lane — 429 → 409 → 402
     gates + sdk.team_create. MUST be called holding the caller's
     _team_create_lock. NOTE (documented): the registry lane may run
@@ -6149,7 +6154,7 @@ def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
         raise HTTPException(status_code=409, detail="Team name already exists")
     # #1877: per-person entitlement — one free team (tier='free' proxy;
     # selfhost has no subscription model). STRING detail.
-    if _count_active_free_memberships(user["user_id"]) >= 1:
+    if await _count_active_free_memberships(user["user_id"]) >= 1:
         raise HTTPException(
             status_code=402,
             detail="Create another team requires a paid plan — upgrade an existing team first")
@@ -6711,7 +6716,7 @@ async def accept_invite(body: dict, request: Request,
             params={"id": invite["team_id"]},
         ).result_set
         _team_tier = (_team_row[0][0].get("tier") if _team_row else None) or "free"
-        if _team_tier == "free" and _count_active_free_memberships(user["user_id"]) >= 1:
+        if _team_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
                 detail="You already have a free team — this team requires a paid plan to join")
@@ -6885,7 +6890,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
             "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": team_id},
         ).result_set
         team_tier = (team_row[0][0].get("tier") if team_row else None) or "free"
-        if team_tier == "free" and _count_active_free_memberships(user["user_id"]) >= 1:
+        if team_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
             raise HTTPException(
                 status_code=402,
                 detail="You already have a free team — this team requires a paid plan to join")
