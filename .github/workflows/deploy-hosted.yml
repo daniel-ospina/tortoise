@@ -15,6 +15,10 @@
 #      gate before deploy — the operator waits for step 2's apply to go
 #      GREEN, then dispatches this workflow; the gate blocks the deploy if
 #      repo migrations are still ahead of prod.
+#      Since #1896, the deploy is also gated on Fly fleet health — a
+#      fail-closed orphan + crash-loop machine check runs before the secrets
+#      step (destroyed machines can't be recreated by the workflow; the
+#      incident orphan was destroyed manually).
 #   4. Post-flip verification incl. E2E-7 (#766, the next issue).
 #   5. Registry delete (point of no return, owner informed):
 #      TORTOISE_DB_URI=... .github/scripts/delete-registry --confirm
@@ -78,6 +82,18 @@ on:
       # (same runbook as SKIP_DB_HEALTH_GATE).
       skip-pack-smoke:
         description: 'Skip the pack-catalog smoke (incident-fix deploys)'
+        required: false
+        default: 'false'
+        type: boolean
+      # #1896: incident-fix deploys must not be blocked by the Fly machine
+      # guard when the flagged machine IS the broken one (e.g. OOM crash-loop
+      # on the volume-backed app machine — the deploy replaces it). Mirrors
+      # skip-db-health-gate/skip-pack-smoke; a skipped gate emits a warning —
+      # never silent. Bypasses ONLY the exit-1 violation check — exit-2
+      # (could-not-determine: missing token / API error) is never bypassable
+      # for missing FLY_API_TOKEN (hard-required in Verify secrets).
+      skip-fly-machines-guard:
+        description: 'Skip the Fly machine fleet guard (incident-fix deploys)'
         required: false
         default: 'false'
         type: boolean
@@ -183,6 +199,14 @@ jobs:
             echo "::error::SUPABASE_ACCESS_TOKEN must be set in GitHub secrets (migration drift gate, #1095)"
             exit 1
           fi
+          # Fly machine guard (#1896): FLY_API_TOKEN is hard-required so the
+          # guard stays ARMED even when skipped by skip-fly-machines-guard —
+          # a missing token must fail the deploy, never silently disarm the
+          # fleet check.
+          if [ -z "${{ secrets.FLY_API_TOKEN }}" ]; then
+            echo "::error::FLY_API_TOKEN must be set in GitHub secrets (Fly machine guard, #1896)"
+            exit 1
+          fi
           # Stripe billing (#310): the two keys are hard-required so a deploy
           # never ships with billing silently dead. STRIPE_PRICE_IDS / Resend /
           # BILLING_* are warn-only — they degrade lazily at runtime (billing
@@ -242,6 +266,26 @@ jobs:
         run: bash .github/scripts/check-migration-drift
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      # Fly machine guard (#1896): fail-closed check that no orphan or
+      # crash-looping machine serves production traffic. The 2026-08-28
+      # incident: orphan 080d6e1a0d2928 (empty process group — NOT part of
+      # Fly Launch) crash-looped (exit 127, max restart count of 3) → 10-15s
+      # dashboard hangs. The flag's remediation (fly machines destroy) is
+      # safe: a crash-looping machine is not serving traffic, and the deploy
+      # creates replacements. Incident-fix bypass: skip-fly-machines-guard
+      # input / SKIP_FLY_MACHINES_GUARD var (mirrors skip-db-health-gate
+      # #1719) — exit-2 via missing FLY_API_TOKEN is never bypassable (token
+      # hard-required in Verify secrets).
+      - name: Check Fly machines (orphan + crash-loop guard, fail-closed)
+        if: ${{ ! (inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true') }}
+        run: python3 .github/scripts/check-fly-machines-guard.py
+        env:
+          FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
+          FLY_APP: tortoise-y4mjjq
+      - name: Warn when Fly machine guard bypassed (#1896)
+        if: ${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}
+        run: |
+          echo "::warning::Fly machine guard SKIPPED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Exit-2 via missing FLY_API_TOKEN can never be bypassed (token hard-required in Verify secrets); an API-error exit-2 IS bypassed by this skip, same accepted risk as skip-db-health-gate (#1719)."
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
           ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
