@@ -466,9 +466,12 @@ class TestInviteAccept:
         create, so the loser re-reads the active count AFTER the winner's
         membership_create committed, hits the max_users gate BEFORE writing
         accepted_at, and its invite stays pending (retryable). Pre-#1965
-        the loser wrote accepted_at first → consumed-with-402
-        (non-retryable). Proves the lock: without it, both pre-checks run
-        against active=1 and the loser consumes before the 402."""
+        the accepted_at write ran before any capacity gate → the loser was
+        consumed-with-402 (non-retryable). The lock is defense-in-depth
+        (the critical section is currently synchronous, so this guards the
+        ordering/semantics: pre-check before the accepted_at write — the
+        test fails if the accepted_at write ever moves ahead of the
+        capacity gate)."""
         import contextvars
 
         from tortoise.auth import hash_api_key
