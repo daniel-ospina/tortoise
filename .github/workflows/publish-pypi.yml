@@ -32,17 +32,50 @@ jobs:
           python-version: "3.12"
       - name: Build wheel + sdist
         run: |
-          python -m pip install --upgrade pip build
+          python -m pip install --upgrade pip build==1.6.0
           python -m build
       - name: Smoke-test the wheel in a clean venv
         run: |
           python -m venv /tmp/wheelcheck
           /tmp/wheelcheck/bin/pip install dist/*.whl --quiet
-          cd /tmp && /tmp/wheelcheck/bin/python -c \
-            "import tortoise; print('import OK:', tortoise.__file__)" && \
-            test -f "/tmp/wheelcheck/lib/python3.12/site-packages/tortoise/__init__.py"
+          cd /tmp && /tmp/wheelcheck/bin/python - <<'EOF'
+          # #1929 pack shipping smoke (G1 gate, surface 1): the wheel must
+          # ship the starter pack catalog + the sample transcript, and the
+          # packaged default resolution must load it. Bound derived from the
+          # INSTALLED constant (4 today, 5 once #1933 merges — never hardcoded).
+          from pathlib import Path
+          import tortoise
+          from tortoise.pack_registry import PackRegistry, default_packs_dir
+          from tortoise.pack_state import DEFAULT_STARTER_PACKS
+          from tortoise.domain_loader import _get_registry
+
+          packaged = Path(tortoise.__file__).resolve().parent / "packs"
+          assert packaged.is_dir(), f"packaged packs dir missing: {packaged}"
+          reg = PackRegistry(packaged)
+          n = reg.load_all()
+          bound = len(DEFAULT_STARTER_PACKS)
+          assert n >= bound, f"wheel ships {n} packs < starter {bound}"
+          assert set(reg.packs) >= set(DEFAULT_STARTER_PACKS), (
+              f"wrong pack set: {sorted(reg.packs)} vs {sorted(DEFAULT_STARTER_PACKS)}")
+          assert default_packs_dir() == packaged, f"resolver picked {default_packs_dir()}"
+          r = _get_registry()
+          assert r is not None and len(r.packs) >= bound, "domain_loader empty on wheel install"
+          t = Path(tortoise.__file__).resolve().parent.parent / "tests" / "sample_transcript.txt"
+          assert t.exists(), f"sample transcript missing: {t}"
+          print(f"wheel pack smoke OK: {n} >= {bound}; transcript at {t}")
+          EOF
           /tmp/wheelcheck/bin/tortoise --help >/dev/null 2>&1 \
             && echo "CLI entrypoint OK"
+      - name: sdist presence check (#1929)
+        # sdist must carry the catalog (MANIFEST.in stub include) — a wheel
+        # rebuilt from it must still ship packs (verified by the slow suite;
+        # here a cheap structural check).
+        run: |
+          tar tzf dist/*.tar.gz | grep -q 'tortoise/packs/__init__.py' \
+            || { echo "::error::sdist missing tortoise/packs/__init__.py (MANIFEST.in regression)"; exit 1; }
+          tar tzf dist/*.tar.gz | grep -qE 'packs/[^/]+/manifest\.yaml' \
+            || { echo "::error::sdist missing pack manifests"; exit 1; }
+          echo "sdist pack presence OK"
       - uses: actions/upload-artifact@v4
         with:
           name: dist
