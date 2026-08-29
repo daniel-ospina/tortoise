@@ -56,11 +56,16 @@ marked item enter the k-prefix, so ``reader_evidence@k`` can exceed it) —
 C2 (#1745): the evidence-mark boost (``_apply_evidence_boost``) re-ranks
 marked hits up by a stable rank offset BEFORE ``_recall_metrics`` so the
 pool-based ``evidence_recall@k`` honestly measures the boosted pool;
-marks are recomputed at read time (``evidence.mark_for``) so verbatim/
-raw-chunk marks get the full boost while source-session-only marks get a
-reduced one. OFF by default in code (env ``TORTOISE_LME_EVIDENCE_BOOST``
+marks are recomputed at read time (``evidence.mark_for``) so the
+#1763 answer-string marks (the point carries the GOLD ANSWER — the
+strongest, answer-precise class, #1945) get the highest boost, verbatim/
+raw-chunk marks the full boost, and source-session-only marks a reduced
+one. OFF by default in code (env ``TORTOISE_LME_EVIDENCE_BOOST``
 or the explicit ``evidence_boost`` flag enables it) — the plan's default
-decision: ON only for the re-validation run.
+decision: ON only for the re-validation run. #1945: the retrieval leg
+additionally emits the HONEST answer-availability metric per outcome
+(``answer_string_evidence_recall@k`` — mark (d), over the effective pool)
+that report.py aggregates alongside the legacy evidence_recall@k.
 """
 from __future__ import annotations
 
@@ -78,7 +83,7 @@ from tortoise import search_engine
 from tortoise.embeddings import EmbeddingModel
 from tortoise.sdk import TortoiseSDK
 
-from . import encode_cache
+from . import encode_cache, evidence
 from .ingest import EXTRACTION_POINT_KIND, event_props_for_hits, point_props_for_hits
 
 # ── #1349 vector arm: exceptions, nDCG/P metrics, vector_search ────────────
@@ -250,11 +255,17 @@ DEFAULT_MAX_CHUNKS_PER_SESSION = 3
 #: research, plan §3). TR questions ignore it — ``tr_top_k`` stays the
 #: pinned TR item cap (R5 #1544 flood control).
 DEFAULT_CONTEXT_ITEM_CAP = 40
-#: C2 (#1745): evidence-mark boost rank-offset multipliers — verbatim/
-#: raw-chunk marks (the precise ones) get the full boost, source-session-
-#: only points a reduced one (marks never influence RRF ranking — H2).
-#: Knobs: ``TORTOISE_LME_EVIDENCE_BOOST_VERBATIM`` /
+#: C2 (#1745): evidence-mark boost rank-offset multipliers — the answer-
+#: string mark (d, #1763 — the point's content carries the GOLD ANSWER, the
+#: strongest/answer-precise signal) gets the highest multiplier, verbatim/
+#: raw-chunk marks (the precise ones) the full boost, source-session-only
+#: points a reduced one (marks never influence RRF ranking — H2). #1945:
+#: the answer_string class is new — the reval3 census is 65% source_session
+#: / 34% answer_string / 1.1% verbatim, and C2 had no class for the honest
+#: mark. Knobs: ``TORTOISE_LME_EVIDENCE_BOOST_ANSWER_STRING`` /
+#: ``TORTOISE_LME_EVIDENCE_BOOST_VERBATIM`` /
 #: ``TORTOISE_LME_EVIDENCE_BOOST_SOURCE``.
+DEFAULT_EVIDENCE_BOOST_ANSWER_STRING = 2.0
 DEFAULT_EVIDENCE_BOOST_VERBATIM = 1.5
 DEFAULT_EVIDENCE_BOOST_SOURCE = 1.15
 #: R1 (#1540): reader context token budget (≈ the pre-v2 baseline context
@@ -537,6 +548,7 @@ def _apply_evidence_boost(
     question: dict | None = None,
     evidence_sessions: set[str] | None = None,
     answer_turn_contents: list[str] | None = None,
+    boost_answer_string: float = DEFAULT_EVIDENCE_BOOST_ANSWER_STRING,
     boost_verbatim: float = DEFAULT_EVIDENCE_BOOST_VERBATIM,
     boost_source: float = DEFAULT_EVIDENCE_BOOST_SOURCE,
 ) -> tuple[list[dict], dict[str, Any]]:
@@ -549,7 +561,8 @@ def _apply_evidence_boost(
     ``scores.rrf`` — there is no score to multiply): ``scaled_rank =
     original_index / factor`` with factor 1.0 unmarked, ``boost_source``
     for source-session-only marks, ``boost_verbatim`` for verbatim /
-    raw-chunk marks. Placement is position-ceiling promotion (Horn's
+    raw-chunk marks, ``boost_answer_string`` for the #1763 answer-string
+    mark (d). Placement is position-ceiling promotion (Horn's
     greedy, review F2): hits are processed in descending scaled-priority
     order and each takes the LARGEST free position <= its ceiling, where
     the ceiling is the ORIGINAL pool index for marked hits and
@@ -561,14 +574,20 @@ def _apply_evidence_boost(
         and never reorders unmarked hits (relative order preserved),
       * bounded — no negative ranks, every hit lands in [0, n).
 
+    #1945: the answer_string mark (d) is a FIRST-CLASS boost class with
+    the STRONGEST multiplier (>= verbatim's) — it is the honest
+    "this point contains the gold answer" signal, computed at eval time
+    from the question's gold ``answer`` (the extractor never sees it).
+    Class priority: answer_string (strongest) > verbatim/raw_chunk >
+    source_session > unmarked. A stored ``has_answer`` hit with no
+    read-time mark still falls back to the source class (conservative).
+
     The verbatim-vs-source split is recomputed at READ TIME via
     ``evidence.mark_for`` (verifier P1-4: the OR'd ``has_answer`` prop
     cannot express the split) — the annotated hits already carry
     ``content``/``quote``/``session_id`` and the question carries
-    ``haystack_sessions``, so no graph change is needed. A stored
-    ``has_answer`` hit whose read-time recompute finds no mark is treated
-    as source-class (conservative — never a full boost on ambiguous
-    provenance).
+    ``haystack_sessions`` + the gold ``answer``, so no graph change is
+    needed.
 
     Placement contract: the caller applies this BEFORE ``_recall_metrics``
     so post-fix ``evidence_recall@k`` is honestly "evidence recall over the
@@ -586,12 +605,15 @@ def _apply_evidence_boost(
     # sort key; inf would zero every key and make the boost a silent
     # no-op). Reject loudly at the function boundary (the
     # env/CLI layers clamp >= 1.0 independently; this is the last line).
-    if not (math.isfinite(boost_verbatim) and boost_verbatim >= 1.0) \
+    if not (math.isfinite(boost_answer_string)
+            and boost_answer_string >= 1.0) \
+            or not (math.isfinite(boost_verbatim) and boost_verbatim >= 1.0) \
             or not (math.isfinite(boost_source) and boost_source >= 1.0):
         raise ValueError(
             "evidence-boost multipliers must be >= 1.0 and finite (a "
-            "rank-scaling division), got verbatim="
-            f"{boost_verbatim!r} source={boost_source!r}")
+            "rank-scaling division), got answer_string="
+            f"{boost_answer_string!r} verbatim={boost_verbatim!r} "
+            f"source={boost_source!r}")
     if evidence_sessions is None:
         evidence_sessions = (ev.evidence_sessions(question)
                              if question else set())
@@ -601,18 +623,29 @@ def _apply_evidence_boost(
             for s in ((question or {}).get("haystack_sessions") or [])
             for t in s if t.get("has_answer")
         ]
-    census = {"source_session": 0, "verbatim": 0, "raw_chunk": 0}
+    # #1945: the gold answer (mark (d)) is a benchmark truth the dataset
+    # question carries — empty when absent (None question / no answer),
+    # in which case answer_string never fires and the class is inert.
+    gold_answer = str((question or {}).get("answer") or "")
+    census = {"source_session": 0, "verbatim": 0, "raw_chunk": 0,
+              "answer_string": 0}
     scored: list[tuple[dict, float, int]] = []
     marked_by_idx: dict[int, bool] = {}
     for i, h in enumerate(pool):
         marks = ev.mark_for(
             h, session_id=h.get("session_id"),
             evidence_sessions=evidence_sessions,
-            answer_turn_contents=answer_turn_contents)["marks"]
+            answer_turn_contents=answer_turn_contents,
+            gold_answer=gold_answer)["marks"]
         for mk in census:
             if marks.get(mk):
                 census[mk] += 1
-        if marks.get("verbatim") or marks.get("raw_chunk"):
+        # #1945: the answer-string class is the strongest signal (the
+        # point carries the GOLD ANSWER) and takes priority over the
+        # verbatim/raw-chunk provenance classes.
+        if marks.get("answer_string"):
+            factor = boost_answer_string
+        elif marks.get("verbatim") or marks.get("raw_chunk"):
             factor = boost_verbatim
         elif marks.get("source_session") or h.get("has_answer"):
             factor = boost_source
@@ -646,6 +679,7 @@ def _apply_evidence_boost(
     scored = [placement[p] for p in range(n)]
     stats: dict[str, Any] = {
         "applied": True,
+        "boost_answer_string": boost_answer_string,
         "boost_verbatim": boost_verbatim,
         "boost_source": boost_source,
         "marks_census": census,
@@ -1096,11 +1130,14 @@ def retrieve_for_question(
     # default decision: ON only for the re-validation run via
     # ``TORTOISE_LME_EVIDENCE_BOOST`` or ``evidence_boost=True``).
     # Tri-state: True/False explicit, None = env (only 1/true/yes/on
-    # enables). ``evidence_boost_verbatim`` / ``evidence_boost_source``
-    # override the per-class rank-offset multipliers (env fallbacks
+    # enables). ``evidence_boost_answer_string`` / ``evidence_boost_verbatim``
+    # / ``evidence_boost_source`` override the per-class rank-offset
+    # multipliers (env fallbacks
+    # ``TORTOISE_LME_EVIDENCE_BOOST_ANSWER_STRING`` /
     # ``TORTOISE_LME_EVIDENCE_BOOST_VERBATIM`` /
     # ``TORTOISE_LME_EVIDENCE_BOOST_SOURCE``).
     evidence_boost: bool | None = None,
+    evidence_boost_answer_string: float | None = None,
     evidence_boost_verbatim: float | None = None,
     evidence_boost_source: float | None = None,
     # #1786 (R5): the hybrid-arm collective retrieval deadline (ms) — the
@@ -1132,8 +1169,14 @@ def retrieve_for_question(
     C2 (#1745): ``evidence_boost`` (OFF by default in code — env
     ``TORTOISE_LME_EVIDENCE_BOOST`` or the explicit flag enables it)
     re-ranks marked hits by a stable rank offset BEFORE ``_recall_metrics``
-    via read-time ``mark_for`` recompute; ``evidence_boost_verbatim`` /
-    ``evidence_boost_source`` set the per-class multipliers. Task 0
+    via read-time ``mark_for`` recompute;
+    ``evidence_boost_answer_string`` / ``evidence_boost_verbatim`` /
+    ``evidence_boost_source`` set the per-class multipliers (the #1763
+    answer-string class — #1945 — carries the highest one). #1945: the
+    outcome ALSO carries the honest answer-availability metric
+    (``answer_string_evidence_recall@k`` — mark (d), over the effective
+    pool) that report.py aggregates as
+    ``retrieval.answer_string_evidence_recall@k``. Task 0
     (#1745): ``ranked_ids`` / ``evidence_turn_matches`` /
     ``ranked_ids_pre_boost`` are populated so the context composition is
     reconstructable.
@@ -1321,6 +1364,10 @@ def retrieve_for_question(
         boost_on = boost_env.strip().lower() in _TRUTHY
     if boost_on:
         from .rerank import _env_boost_float
+        bas = (evidence_boost_answer_string
+               if evidence_boost_answer_string is not None
+               else _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_ANSWER_STRING",
+                                     DEFAULT_EVIDENCE_BOOST_ANSWER_STRING))
         bv = (evidence_boost_verbatim if evidence_boost_verbatim is not None
               else _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_VERBATIM",
                                     DEFAULT_EVIDENCE_BOOST_VERBATIM))
@@ -1328,7 +1375,8 @@ def retrieve_for_question(
               else _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
                                     DEFAULT_EVIDENCE_BOOST_SOURCE))
         pool, evidence_boost_stats = _apply_evidence_boost(
-            pool, question=question, boost_verbatim=bv, boost_source=bs)
+            pool, question=question, boost_answer_string=bas,
+            boost_verbatim=bv, boost_source=bs)
     else:
         evidence_boost_stats = {
             "applied": False,
@@ -1483,6 +1531,22 @@ def retrieve_for_question(
         "turn_recall@k": turn_recall,
         "evidence_recall@k": _evidence_recall,
         "chunk_evidence_recall@k": chunk_evidence_recall,
+        # #1945: the honest answer-availability denominator — mark (d)
+        # (#1763), gold-answer string contained in the point's
+        # content/quote/search_keys, computed at eval time over the
+        # EFFECTIVE pool (boosted when C2 is on — the same surface the
+        # legacy evidence_recall@k measures, C2 placement). The legacy
+        # source-session-inflated denominator (65% of the reval3 census)
+        # measures "fraction of the answer session's points surfaced"; this
+        # measures "fraction of answer-bearing points surfaced". N/A
+        # (None) when no answer-string-marked point exists in the pool
+        # (evidence.answer_string_recall_at_k semantics — the same seam
+        # report.py aggregates as ``answer_string_evidence_recall@k``,
+        # absent-key -> None, never fabricated).
+        "answer_string_evidence_recall@k": {
+            str(k): evidence.answer_string_recall_at_k(
+                pool, str(question.get("answer") or ""), k)
+            for k in ks},
         # M7 (#1527, D2/D4): leg-mix over what the reader saw (context_points)
         # + per-k over the deduped pool; evidence_retrieved@k = the turn_recall
         # numerator (has_answer non-chunk hits in pool[:k]) — persisted so the
