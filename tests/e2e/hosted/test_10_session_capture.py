@@ -125,8 +125,11 @@ def test_session_consent_gate_403(api, tenant_factory):
     The capture tests above opt in; this one pins the gate itself."""
     t = tenant_factory("session-noconsent")
     h = {"Authorization": f"Bearer {t['api_key']}"}
+    # A non-blank conversation (else the 422 empty-conversation gate fires
+    # before the consent gate).
     r = api.post("/v1/sessions", headers=h,
-                 data={"conversation": [{"role": "user", "content": "hi"}]})
+                 data={"conversation": [{"role": "user",
+                                          "content": "ship the migration this week"}]})
     assert r.status == 403, f"un-opted team must 403, got {r.status} {r.text()}"
     assert "not enabled" in r.text().lower(), r.text()
 
