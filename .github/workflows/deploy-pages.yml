@@ -322,6 +322,9 @@ jobs:
         env:
           RUN_BLOG_E2E: '1'
           ALLOW_PROD: '1'
+          # carve-out: this suite is requests-only (no embedded DB server);
+          # without it the session-start fixture fails on the P4 URI gate.
+          TORTOISE_TEST_CARVE_OUT: '1'
           BASE_URL: https://premiselabs.co
           TORTISE_HOST: https://tortoise.premiselabs.co
           BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
