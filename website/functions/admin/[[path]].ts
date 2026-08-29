@@ -92,19 +92,23 @@ async function serveShell(env: Env, request: Request): Promise<Response> {
   if (assetRes.status !== 404) return assetRes;
 
   // Client route → serve the shell (built SPA index.html when #1798 lands;
-  // placeholder until then).
+  // placeholder until then). #1864: every admin-shell response carries
+  // X-Robots-Tag: noindex, nofollow (the built SPA index.html also has
+  // <meta name="robots" content="noindex"> — belt and braces).
+  const NOINDEX = { "X-Robots-Tag": "noindex, nofollow" };
   const origin = new URL(request.url).origin;
   const res = await env.ASSETS.fetch(`${origin}/admin/index.html`);
   if (res.status === 200 && (res.headers.get("content-type") ?? "").includes("text/html")) {
     return new Response(res.body, {
       status: 200,
-      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...HSTS },
+      headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...NOINDEX, ...HSTS },
     });
   }
   // Placeholder shell (before #1798 lands)
   const shell = `<!DOCTYPE html>
 <html lang="en">
 <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="robots" content="noindex, nofollow">
 <title>Tortoise Blog Admin</title>
 <style>body{background:#060b14;color:#cbd5e1;font-family:monospace;display:flex;align-items:center;justify-content:center;height:100vh;margin:0}
 .card{text-align:center;border:1px solid #1e293b;border-radius:12px;padding:40px;background:#0b1220}
@@ -113,7 +117,7 @@ a{color:#06b6d4}</style></head>
 <p><a href="/blog">← Back to the blog</a></p></div></body></html>`;
   return new Response(shell, {
     status: 200,
-    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...HSTS },
+    headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", ...NOINDEX, ...HSTS },
   });
 }
 
