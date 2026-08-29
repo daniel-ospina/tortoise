@@ -1,0 +1,22 @@
+{
+  "completion": "Yes \u2014 the decision was to go with the apartment near the park.",
+  "expect_superseded_markers": false,
+  "expected_abstained": false,
+  "fixture": "vacuity-answer",
+  "prompt_hash": "be5d35a34d4a1a4fa62cfc1dc9268912658ca2d8cd8ae9125c928d41c22981ea",
+  "qtype": null,
+  "question": "did we decide on the apartment near the park?",
+  "question_date": "2026-08-29",
+  "seeds": [
+    {
+      "content": "I think we should go with the apartment near the park \u2014 it's closer to the office and the rent fits the budget.",
+      "session_date": "2026-08-20"
+    },
+    {
+      "content": "Yes, and if the commute is under 30 minutes, I'm ready to sign.",
+      "session_date": "2026-08-20"
+    }
+  ],
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-20) I think we should go with the apartment near the park \u2014 it's closer to the office and the rent fits the budget.\n\nQuestion: did we decide on the apartment near the park?\n\nAnswer:",
+  "user_message_hash": "d3c04628bf7ee6df88cddfdf79d2d53507ba82ffda573a49943a2d20aae1e888"
+}

@@ -2208,6 +2208,47 @@ def metering_increment(cp, team_id: str, period: str, n: int = 1,
         return n
 
 
+def metering_get_usage(cp, team_id: str, period: str) -> dict:
+    """Ask usage for a team/period from the metering_records row (#1987 Task
+    6) — the supabase-mode READ path for ``get_ask_usage``. Returns the
+    ask_* columns as a dict (all ZEROS when the row is absent — the MERGE
+    only creates the record on the first write). Deliberately SEPARATE from
+    ``metering_get`` (which stays int-returning write_ops — its int
+    consumers: metering.py arithmetic, the metering_increment read-back, and
+    test_supabase_control.py == 0/3 must not break)."""
+    rows = cp.query(
+        "metering_records",
+        select=["ask_calls", "ask_tokens_in", "ask_tokens_out",
+                "ask_cost_usd"],
+        filters=[("team_id", "eq", team_id), ("period", "eq", period)],
+    )
+    if not rows:
+        return {"ask_calls": 0, "ask_tokens_in": 0, "ask_tokens_out": 0,
+                "ask_cost_usd": 0.0}
+    row = rows[0]
+    return {
+        "ask_calls": int(row.get("ask_calls") or 0),
+        "ask_tokens_in": int(row.get("ask_tokens_in") or 0),
+        "ask_tokens_out": int(row.get("ask_tokens_out") or 0),
+        "ask_cost_usd": float(row.get("ask_cost_usd") or 0.0),
+    }
+
+
+def metering_increment_ask(cp, team_id: str, period: str, *, calls: int = 1,
+                           tokens_in: int = 0, tokens_out: int = 0,
+                           cost_usd: float = 0.0) -> None:
+    """Increment the team's ask-usage counters for the period (#1987 Task 6)
+    via the ``metering_increment_ask`` SQL RPC (20260829000001) — the
+    ask-side mirror of ``metering_increment`` (atomic under Postgres row
+    locking; best-effort by contract — the caller swallows exceptions)."""
+    cp.rpc(
+        "metering_increment_ask",
+        {"p_team_id": team_id, "p_period": period, "p_calls": calls,
+         "p_tokens_in": tokens_in, "p_tokens_out": tokens_out,
+         "p_cost_usd": cost_usd},
+    )
+
+
 # ── #1875: invitee-side pending/accept/decline (by-id, email-scoped) ────────
 
 

@@ -1010,6 +1010,77 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                  traversal_path=traversal_path)
 
 
+async def tortoise_ask(question: str, question_type: str | None = None,
+                       question_date: str | None = None) -> dict:
+    """Answer a question about captured memory (#1987 Task 8) — ONE bounded
+    RAG pass (retrieval → annotation → context assembly → ONE LLM reader
+    call) returning an ANSWER (not ranked hits), with the full ask response
+    shape: {answer, abstained, question_type, question_date, evidence,
+    context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
+    retrieval_degraded}.
+
+    COST PROFILE (group="memory" co-curation, #523): unlike tortoise_search
+    (LLM-free), tortoise_ask consumes LLM tokens against the team's
+    per-minute ask budget (60/min) — budget-exhausted calls return the
+    structured error {"error": {"code": "quota_exceeded", "retry_after": …}}
+    and are NEVER an unbounded call. Read-classified (never counted as a
+    write; NOT in _QUOTA_GATED/WRITE_TOOL_NAMES). Budget/in-flight/timeout
+    bounds are the SAME shared structures as the REST surface
+    (tortoise/quota.py run_ask_bounded — Semaphore(8) + 60s + per-team
+    in-flight cap 4); stdio/selfhost contexts are unbudgeted AND unmetered.
+    On the hosted path the MCP handler meters through the SAME single call
+    site as HTTP (``sdk.ask(team_id=_current_team_id.get())``); stdio
+    (team_id=None) and the selfhost transport (the ``_selfhost_transport``
+    flag) record nothing.
+
+    Invalid inputs (empty/oversize/bad type/bad date) surface as a
+    STRUCTURED tool error {"error": {"code": …}} with ZERO LLM calls.
+    """
+    from tortoise.exceptions import (  # noqa: I001
+        AskQuotaExceeded,
+        AskReaderUnavailable,
+        AskRetrievalUnavailable,
+        AskValidationError,
+    )
+    from tortoise.quota import (  # noqa: I001
+        AskBoundedTimeoutError,
+        AskInFlightLimitError,
+        ask_budget_retry_after,
+        ask_llm_budget_available,
+        run_ask_bounded,
+    )
+    team_id = _current_team_id.get()
+    # Budget gate (the ONE shared bucket helper — stdio/selfhost exempt).
+    if not ask_llm_budget_available(team_id):
+        return {"error": {"code": "quota_exceeded",
+                          "retry_after": ask_budget_retry_after(team_id)}}
+    sdk = _get_team_sdk()
+    # Local-lane validation FIRST (structured error, ZERO complete() calls).
+    try:
+        sdk._ask_validate(question, question_type, question_date)
+    except AskValidationError as e:
+        return {"error": {"code": e.code}}
+    try:
+        return await run_ask_bounded(
+            sdk.ask, team_id, question,
+            question_type=question_type, question_date=question_date,
+            _sdk_team_id=team_id,
+        )
+    except AskValidationError as e:
+        return {"error": {"code": e.code}}
+    except AskQuotaExceeded as e:
+        return {"error": {"code": "quota_exceeded",
+                          "retry_after": e.retry_after}}
+    except AskInFlightLimitError:
+        return {"error": {"code": "in_flight_limit"}}
+    except AskBoundedTimeoutError:
+        return {"error": {"code": "timeout"}}
+    except AskReaderUnavailable:
+        return {"error": {"code": "reader_unavailable"}}
+    except AskRetrievalUnavailable:
+        return {"error": {"code": "retrieval_unavailable"}}
+
+
 def tortoise_expand_relationships(point_id: str) -> list[dict]:
     """Full relationship payload for ONE Point, incl. each related point's content.
 

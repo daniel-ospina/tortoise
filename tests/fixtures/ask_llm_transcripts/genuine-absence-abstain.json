@@ -1,0 +1,18 @@
+{
+  "completion": "The memory mentions a new bicycle, but it does not contain the asked color.",
+  "expect_superseded_markers": false,
+  "expected_abstained": true,
+  "fixture": "genuine-absence-abstain",
+  "prompt_hash": "be5d35a34d4a1a4fa62cfc1dc9268912658ca2d8cd8ae9125c928d41c22981ea",
+  "qtype": null,
+  "question": "what color is the new bicycle?",
+  "question_date": "2026-08-29",
+  "seeds": [
+    {
+      "content": "I bought a new bicycle yesterday.",
+      "session_date": "2026-08-25"
+    }
+  ],
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-25) I bought a new bicycle yesterday.\n\nQuestion: what color is the new bicycle?\n\nAnswer:",
+  "user_message_hash": "cd460cf4834a55c7d0885ddf5fb7eb788910722ea954db99587ad6d2dc02fe55"
+}

@@ -101,3 +101,86 @@ class Phase2Error(ValueError):
     def __init__(self, message: str, batch_id: str | None = None):
         self.batch_id = batch_id
         super().__init__(message)
+
+
+# ── Ask-lane typed SDK exceptions (#1987 Task 5) ───────────────────────────
+# The SDK hosted-mode ``_post_ask`` maps server statuses/body codes to these;
+# each carries a ``code`` class attribute matching the canonical vocabulary
+# constants in ``tortoise/schemas.py`` (one vocabulary, two surfaces).
+
+class AskValidationError(ValueError):
+    """Client-input validation failure (local lane) OR a 400/401/403/422
+    response with a canonical/code-less body (hosted lane). Carries the
+    canonical ``code`` (``invalid_question``/``question_too_long``/
+    ``invalid_question_type``/``invalid_question_date``/``unauthorized``)
+    and, for hosted mappings, the HTTP status."""
+
+    code = "invalid_question"
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 status_code: int | None = None):
+        self.status_code = status_code
+        if code is not None:
+            self.code = code
+        super().__init__(message)
+
+
+class AskQuotaExceeded(RuntimeError):
+    """429 ``quota_exceeded`` — the team's per-minute ask budget is spent.
+    Carries ``retry_after`` (seconds) when the server provided one."""
+
+    code = "quota_exceeded"
+
+    def __init__(self, message: str, *, retry_after: float | None = None,
+                 status_code: int | None = 429):
+        self.retry_after = retry_after
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskInFlightLimit(RuntimeError):
+    """429 ``in_flight_limit`` — the per-team in-flight ask cap is full."""
+
+    code = "in_flight_limit"
+
+    def __init__(self, message: str, *, status_code: int | None = 429):
+        self.retry_after = None
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskReaderUnavailable(RuntimeError):
+    """502 ``reader_unavailable`` — the LLM reader failed with no surviving
+    lane (also used for a code-less 402 — a SERVER-side provider-billing
+    condition, never mislabeled ``invalid_question``, P2-3)."""
+
+    code = "reader_unavailable"
+
+    def __init__(self, message: str, *, status_code: int | None = 502):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskRetrievalUnavailable(RuntimeError):
+    """502 ``retrieval_unavailable`` — retrieval/annotation/context
+    assembly failed wholesale (never an untyped 500 on the ask surface)."""
+
+    code = "retrieval_unavailable"
+
+    def __init__(self, message: str, *, status_code: int | None = 502):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskTimeout(RuntimeError):
+    """504 ``timeout`` — the bounded ask section exceeded the server's
+    ``_ASK_TIMEOUT_S`` (server-504-fired) OR the SDK client-side timeout
+    fired (wire connect/read timeout — ``source`` marks which)."""
+
+    code = "timeout"
+
+    def __init__(self, message: str, *, source: str = "server",
+                 status_code: int | None = 504):
+        self.source = source  # "server" (received 504 body) | "client"
+        self.status_code = status_code
+        super().__init__(message)

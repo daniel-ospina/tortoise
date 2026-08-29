@@ -126,6 +126,54 @@ app.add_middleware(
 )
 
 
+# ── #1987 Task 9: path-scoped /v1/ask exception handlers on selfhost.app ──
+# Mirrors the hosted mechanism (P1-3/P1-6): capture the STARLETTE-keyed
+# default handlers BEFORE the overrides; /v1/ask gets the canonical
+# {"error": …} body (401 STATUS-derived — ``_require_key``'s detail is
+# non-canonical; 400/502/504 detail-keyed when canonical); every other path
+# keeps FastAPI's default {"detail": …} via the captured default (awaited —
+# the default handler is a coroutine; never re-raised; ``exc.headers``
+# preserved). Registered on the APP (``fastapi.APIRouter`` has no
+# exception_handler — P1-6). The 8 existing selfhost error bodies are
+# untouched by construction (path-scoped).
+import starlette.exceptions as _starlette_exceptions  # noqa: E402
+from fastapi.exceptions import RequestValidationError as _RequestValidationError  # noqa: E402
+
+_selfhost_default_http_exc = app.exception_handlers[
+    _starlette_exceptions.HTTPException]
+_selfhost_default_validation = app.exception_handlers.get(
+    _RequestValidationError)
+
+
+@app.exception_handler(_starlette_exceptions.HTTPException)
+async def _selfhost_ask_http_handler(request, exc):
+    from tortoise.schemas import ASK_ERROR_CODES  # noqa: I001
+    if request.url.path == "/v1/ask":
+        status = exc.status_code
+        detail = exc.detail
+        if status == 401:
+            return JSONResponse({"error": {"code": "unauthorized"}},
+                                status_code=401, headers=exc.headers)
+        if (status in (400, 502, 504)
+                and isinstance(detail, str) and detail in ASK_ERROR_CODES):
+            return JSONResponse({"error": {"code": detail}},
+                                status_code=status, headers=exc.headers)
+    return await _selfhost_default_http_exc(request, exc)
+
+
+@app.exception_handler(_RequestValidationError)
+async def _selfhost_ask_validation_handler(request, exc):
+    """Malformed JSON on /v1/ask → 400 ``invalid_question`` (parity with
+    hosted, P1-3); other paths keep FastAPI's default 422."""
+    if request.url.path == "/v1/ask":
+        return JSONResponse({"error": {"code": "invalid_question"}},
+                            status_code=400)
+    if _selfhost_default_validation is not None:
+        return await _selfhost_default_validation(request, exc)
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
+
+
+
 @app.get("/health")
 async def health():
     """Liveness — process up (+ deep DB probe, #1384).

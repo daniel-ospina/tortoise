@@ -609,6 +609,12 @@ jobs:
           # enforcement (CARVE_OUT=1 when full=false — the tier-2 embedded
           # shape). Full docker legs set URI, so CARVE_OUT is empty there.
           TORTOISE_TEST_CARVE_OUT: ${{ env.CARVE_OUT }}
+          # #1987 Task 12 (P2-7/P2-9): the ask-LLM regression module runs in
+          # FIXTURE mode (committed recorded-transport transcripts; no keys)
+          # on the docker lane — the pre-merge check
+          # (scripts/check-ask-premerge.cjs) asserts it passed in fixture
+          # mode before the answer-surface merge.
+          TORTOISE_ASK_LLM_REGRESSION: "1"
           # #1886: dedicated fresh-per-job docker container — keep the
           # journal-blind team_* stray pass live in CI (opt-in only; the
           # shared dev container never sets it — issue #1884).

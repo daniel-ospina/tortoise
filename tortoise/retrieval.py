@@ -156,21 +156,36 @@ def is_raw_chunk(h: dict) -> bool:
 
 
 def dedup_pool(annotated: list[dict], *,
-               max_chunks_per_session: int) -> list[dict]:
+               max_chunks_per_session: int,
+               session_key: Callable[[dict], str] | None = None) -> list[dict]:
     """Per-session chunk cap (rank order): at most ``max_chunks_per_session``
     raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
     the hit's session_id when present, else its lme_session_index —
     distinct sessions NEVER share a bucket (no ``-1`` collapse).
     Points/turn points are never capped (compact epistemic surface, D3).
+
+    ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.
+    Default None = the historical bucket key (session_id / lme index). The
+    ASK lane passes a key extractor preferring the ANNOTATED session
+    identifier (``session_date`` from the Event join, falling back to
+    ``session_id``) — the dedup then groups by the annotated key, so hits
+    that lack ``sessionId`` but share an Event-derived session date are
+    capped together (pre-annotation dedup could not group them).
     """
     if max_chunks_per_session < 1:
         raise ValueError("max_chunks_per_session must be >= 1, got "
                          f"{max_chunks_per_session!r}")
+    if session_key is None:
+        def _key(h: dict) -> str:
+            return (h.get("session_id") or
+                    f"idx:{h.get('lme_session_index', -1)}")
+    else:
+        _key = session_key
     seen: dict[str, int] = {}
     pool: list[dict] = []
     for h in annotated:
         if is_raw_chunk(h):
-            key = h.get("session_id") or f"idx:{h.get('lme_session_index', -1)}"
+            key = _key(h)
             if seen.get(key, 0) >= max_chunks_per_session:
                 continue
             seen[key] = seen.get(key, 0) + 1
@@ -185,6 +200,49 @@ def estimate_tokens(text: str) -> int:
     equals the assembly's ``context_tokens`` exactly (no per-block int
     drift — the alignment invariant, R1 #1540)."""
     return int(len(text.split()) * 1.1)
+
+
+_NON_WHITESPACE_RUN = re.compile(r"\S+")
+
+#: #1987 Task 6 (P2-1): the ask lane's conservative token estimate for
+#: NON-whitespace-delimited runs (CJK/emoji) — ~0.6-0.7 token/char,
+#: OVER-estimated versus the DeepSeek rate the meter cites, so the meter can
+#: never under-count and the per-query cost stays honestly bounded.
+_ASK_CJK_TOKENS_PER_CHAR = 0.65
+
+
+def estimate_tokens_ask(text: str) -> int:
+    """The ask lane's conservative token estimator (#1987 Task 6, P2-1).
+
+    The historical ``estimate_tokens`` is whitespace-based
+    (``int(len(text.split()) * 1.1)``) and under-counts unspaced CJK/emoji
+    runs to ~0 words. The ask lane uses this conservative per-char
+    multiplier for non-whitespace-delimited runs — pinned at ~0.6-0.7
+    token/char (OVER-estimated versus the DeepSeek rate, so the meter can
+    never under-count). Because the multiplier is conservative, on
+    CJK-heavy pools the 32 KiB BYTE cap binds FIRST (32 KiB ≈ 10.9K chars ≈
+    ~6.5-7.6K estimated tokens < 8000).
+
+    This is a conservative ESTIMATE, never an exact bill; it is the source
+    of the response field ``context_tokens`` (the RENDERED-CONTEXT tokens
+    only) and the metering input ``input_tokens``.
+    """
+    if not text:
+        return 0
+    # whitespace-delimited words: the standard estimate + markup (identical
+    # to ``estimate_tokens`` for plain whitespace text)
+    base = int(len(text.split()) * 1.1)
+    surcharge = 0
+    for run in _NON_WHITESPACE_RUN.findall(text):
+        if len(run) >= 4 and any(ord(ch) > 127 for ch in run):
+            # A long unspaced NON-ASCII run is almost certainly CJK/emoji —
+            # charge the conservative per-char rate (never under-count); the
+            # run already counted as one whitespace token in ``base``, so the
+            # surcharge is the per-char overage beyond that. Pure-ASCII runs
+            # (normal words) keep the standard whitespace estimate.
+            char_est = max(1, int(len(run) * _ASK_CJK_TOKENS_PER_CHAR))
+            surcharge += max(0, char_est - 1)
+    return base + surcharge
 
 
 _ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
@@ -270,6 +328,7 @@ def assemble_context(
     max_context_tokens: int,
     question_date: str | None = None,
     context_item_cap: int | None = None,
+    byte_cap: int | None = None,
 ) -> list[dict]:
     """Budget-capped, rank-interleaved reader context (C1 #1745).
 
@@ -283,6 +342,17 @@ def assemble_context(
     pure-function callers — the retrieval path passes the resolved
     ``context_item_cap``). ``top_k`` stays "the max number of context
     items" at the default cap.
+
+    ``byte_cap`` (#1987 Task 5, P1-2): keyword-only, default None = unchanged
+    behavior (the extraction/search AND eval lanes are unaffected — the eval
+    re-export ``assemble_context as _assemble_context`` never passes it). The
+    ASK lane passes ``byte_cap=32768``: the assembled evidence is enforced to
+    BOTH the 8000-token estimate cap AND a 32 KiB UTF-8 byte cap
+    independently, by the SAME mechanism as the token cap — WHOLE-HIT DROP
+    (lowest-ranked hits dropped until under budget, never mid-hit character
+    truncation), so decoding the evidence never splits a character
+    (P2-18) and ``len(evidence.encode("utf-8")) <= 32768`` is a hard output
+    invariant by construction.
 
     Token accounting (the alignment invariant): raw whitespace words
     accumulate per block (question_date-independent) + the once-prepended
@@ -299,16 +369,29 @@ def assemble_context(
     if item_bound < 1:
         raise ValueError("context_item_cap must be >= 1, got "
                          f"{item_bound!r}")
+    if byte_cap is not None and byte_cap < 1:
+        raise ValueError("byte_cap must be >= 1, got "
+                         f"{byte_cap!r}")
     header_words = (len(f"Current Date: {question_date}".split())
                     if question_date else 0)
     selected: list[dict] = []
     words = header_words
+    bytes_used = len(f"Current Date: {question_date}".encode("utf-8")) \
+        if question_date else 0
     for h in pool:
         if len(selected) >= item_bound:
             break
-        cost = len(_render_block(h).split())
+        block = _render_block(h)
+        cost = len(block.split())
         if int((words + cost) * 1.1) > max_context_tokens:
             continue  # skip this hit; keep later ones (no starvation)
+        if byte_cap is not None:
+            # whole-hit drop under the byte cap — a hit is fully in or fully
+            # out; the skip keeps later (lower-ranked) hits' chance like the
+            # token cap (no starvation), mirroring the token-budget behavior.
+            if bytes_used + len(block.encode("utf-8")) > byte_cap:
+                continue
+            bytes_used += len(block.encode("utf-8"))
         selected.append(h)
         words += cost
     return selected

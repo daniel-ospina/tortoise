@@ -26,6 +26,132 @@ from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
 
+# ── Ask-lane reader-model cache (#1987 Task 5) ─────────────────────────────
+# Per-namespace cache (keyed by team/namespace — NEVER a module-global
+# model): LRU bound (≤ N entries), in-flight entries NEVER evicted (an LRU
+# eviction can never race an in-flight ask), closed clients on eviction,
+# failed builds never cached, per-key build single-flight. The cache holds
+# the LOCKED WRAPPER — the per-instance lock lives INSIDE the cached object
+# (complete() + usage capture under it), so the shared cached wrapper IS the
+# locked object (P2-6).
+
+ASK_SDK_TIMEOUT_S = 75  # > the server's _ASK_TIMEOUT_S (60) — its 504 is always receivable
+_ASK_READER_CACHE_MAX = 64
+_ASK_READER_CACHE_LOCK = threading.Lock()
+_ask_reader_cache_store: "collections.OrderedDict" = None  # type: ignore[assignment]
+_ask_build_locks: dict[str, threading.Lock] = {}
+
+
+def _ask_reader_cache() -> "collections.OrderedDict":
+    import collections  # noqa: I001
+    global _ask_reader_cache_store
+    if _ask_reader_cache_store is None:
+        _ask_reader_cache_store = collections.OrderedDict()
+    return _ask_reader_cache_store
+
+
+def _ask_build_lock(key: str) -> threading.Lock:
+    with _ASK_READER_CACHE_LOCK:
+        return _ask_build_locks.setdefault(key, threading.Lock())
+
+
+def _prune_ask_reader_cache(cache) -> None:
+    """LRU bound: evict IDLE entries only (never in-flight), closing their
+    clients (no leaked sockets). In-flight entries are never evicted (P1-6)."""
+    while len(cache) > _ASK_READER_CACHE_MAX:
+        for key, entry in list(cache.items()):
+            if entry.inflight() == 0:
+                cache.pop(key, None)
+                entry.close()
+                break
+        else:
+            break  # all entries in-flight — stop evicting
+
+
+def _default_ask_reader_factory():
+    """The production ask-lane reader factory — monkeypatched in tests to
+    inject fake readers/transports."""
+    from tortoise.model_adapters import build_reader_model
+    return build_reader_model()
+
+
+def _reset_ask_reader_cache_for_tests() -> None:
+    """Test seam — drop the cache + build locks (closes cached clients)."""
+    global _ask_reader_cache_store, _ask_build_locks
+    with _ASK_READER_CACHE_LOCK:
+        cache = _ask_reader_cache()
+        for entry in cache.values():
+            entry.close()
+        _ask_reader_cache_store = None
+        _ask_build_locks = {}
+
+
+class _LockedReader:
+    """The CACHED ask-lane reader wrapper (P2-6): serializes the inner
+    ``complete()`` + usage capture under a per-instance ``threading.Lock`` —
+    the mutable ``last_completion_tokens`` write at the end of the inner
+    adapter's ``complete()`` is closed against cross-thread read-after-write
+    (contention bounded by the per-team in-flight cap 4). Forwards
+    ``model``/``provider``/``route``/``last_route``/``last_prompt_tokens``/
+    ``last_completion_tokens``/``last_finish_reason`` and ``close()``.
+    """
+
+    def __init__(self, model):
+        self._model = model
+        self._lock = threading.Lock()
+        self._inflight = 0
+
+    def complete(self, *, system: str, user: str) -> str:
+        with self._lock:
+            self._inflight += 1
+            try:
+                out = self._model.complete(system=system, user=user)
+                # same-frame capture — atomic with the call under the lock
+                self.last_prompt_tokens = getattr(
+                    self._model, "last_prompt_tokens", 0)
+                self.last_completion_tokens = getattr(
+                    self._model, "last_completion_tokens", 0)
+                return out
+            finally:
+                self._inflight -= 1
+
+    def close(self) -> None:
+        close = getattr(self._model, "close", None)
+        if close is not None:
+            try:  # noqa: SIM105
+                close()
+            except Exception:
+                pass
+
+    def failed(self) -> bool:
+        return False
+
+    def incr_inflight(self) -> None:
+        self._inflight += 1
+
+    def decr_inflight(self) -> None:
+        if self._inflight > 0:
+            self._inflight -= 1
+
+    def inflight(self) -> int:
+        return self._inflight
+
+    @property
+    def model(self):
+        return getattr(self._model, "model", None)
+
+    @property
+    def provider(self):
+        return getattr(self._model, "provider", None)
+
+    @property
+    def route(self):
+        return getattr(self._model, "route", None)
+
+    @property
+    def last_route(self):
+        return getattr(self._model, "last_route", None)
+
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
 register_kind("checkpoint-item")
@@ -9547,6 +9673,86 @@ class TortoiseSDK:
         c_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall((hit.get("content") or "").lower()))
         return len(q_tokens & c_tokens) >= self._ISSUE_INSIGHT_MIN_SHARED_TOKENS
 
+    # ── Ask-path hit annotation (#1987 Task 4) ──────────────────
+
+    def annotate_ask_hits(self, hits: list[dict]) -> list[dict]:
+        """Ask-path-local hit annotation: close the ``SearchResult.to_dict()``
+        gap (sessionId present, ``session_date``/``speaker`` absent) so
+        ``render_context``'s date markers + speaker decoration and the
+        temporal/KU fragments function on the ask path (#1987 Task 4).
+
+        One BATCH Cypher over the returned hits' ids (never N+1): a join to
+        the ``:Event`` node (``eventId``) for ``startedAt`` and to the source
+        turn ``:Point`` (``source_turn_id``) for ``speaker``. Produces ADDITIVE
+        keys only — undated hits render byte-identical:
+
+          * ``session_date`` — ``startedAt[:10]`` from the Event join;
+          * ``speaker`` — the hit's own ``speaker`` prop, else the source
+            turn's ``speaker``, else "" (the ``_render_block`` role-bracket
+            guard suppresses double-attribution);
+          * ``session_id`` — the Event's ``sessionId`` when the join yields
+            one (hits lacking ``sessionId`` but sharing an Event join group
+            together for the per-session dedup — P2-20), else the hit's own
+            value unchanged.
+
+        D8 supersession/validity keys are ALREADY attached to point hits by
+        ``tortoise_fts_query`` via ``fetch_point_epistemic_state`` — this
+        method MUST NOT re-fetch them; they ride through untouched (no drift
+        risk, no duplicate join). ``has_answer`` and every other passthrough
+        key survive unchanged. The annotation covers the full returned set
+        (the ask lane retrieves with ``limit=DEFAULT_CONTEXT_ITEM_CAP``).
+        """
+        if not hits:
+            return hits
+        proj = self._get_proj()
+        ids = [str(h.get("id")) for h in hits if h.get("id")]
+        if not ids:
+            return hits
+        try:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "OPTIONAL MATCH (ev:Event) WHERE ev.eventId = n.eventId "
+                "OPTIONAL MATCH (t:Point) WHERE t.id = n.source_turn_id "
+                "RETURN n.id, ev.startedAt, n.speaker, t.speaker, "
+                "ev.sessionId, n.sessionId",
+                params={"ids": ids},
+            ).result_set
+        except Exception:
+            # A whole-batch annotation raise maps to 502 retrieval_unavailable
+            # upstream (the ask lane); the hits are returned untouched so the
+            # caller's error map is the single authority.
+            raise
+        joined: dict[str, dict] = {}
+        for row in rows:
+            pid = row[0]
+            ev_started = (row[1] or "") if len(row) > 1 else ""
+            own_speaker = (row[2] or "") if len(row) > 2 else ""
+            turn_speaker = (row[3] or "") if len(row) > 3 else ""
+            ev_session = (row[4] or "") if len(row) > 4 else ""
+            n_session = (row[5] or "") if len(row) > 5 else ""
+            joined[pid] = {
+                "session_date": (str(ev_started)[:10]
+                                 if ev_started else ""),
+                "speaker": own_speaker or turn_speaker or "",
+                "session_id": ev_session or n_session,
+            }
+        out = []
+        for h in hits:
+            ann = joined.get(str(h.get("id")))
+            if ann is None:
+                # null-join hit (no Event node / no source turn): additive
+                # keys stay absent — byte-identical rendering, no crash.
+                out.append(h)
+                continue
+            enriched = dict(h)
+            # additive keys only — never overwrite existing values
+            enriched.setdefault("session_date", ann["session_date"])
+            enriched.setdefault("speaker", ann["speaker"])
+            if ann["session_id"]:
+                enriched.setdefault("session_id", ann["session_id"])
+            out.append(enriched)
+        return out
+
     # ── Hybrid Search (Phase 0, #7748) ───────────────────────────
 
     def tortoise_fts_query(
@@ -10190,6 +10396,396 @@ class TortoiseSDK:
         # Default: RRF relevance order (already in fused order)
 
         return [r.to_dict() for r in results[:limit]]
+
+    # ── Ask lane (#1987 Task 5): the SDK answer surface ─────────────────────
+
+    def _ask_validate(self, question: str, question_type: str | None,
+                      question_date: str | None) -> None:
+        """Local-lane validation — the FIRST pipeline stage (P2-8: invalid
+        inputs never reach retrieval — zero model calls AND zero retrieval
+        calls). Raises ``AskValidationError`` with the pinned canonical
+        instance codes (matching the wire codes — P2-14)."""
+        from tortoise.schemas import (  # noqa: I001
+            MAX_ASK_QUESTION_CHARS,
+            ASK_QUESTION_TYPES,
+            VALIDATION_CODE_BAD_DATE,
+            VALIDATION_CODE_BAD_TYPE,
+            VALIDATION_CODE_EMPTY,
+            VALIDATION_CODE_OVERSIZE,
+            ask_question_has_control_chars,
+            validate_ask_question_date,
+        )
+        from tortoise.exceptions import AskValidationError
+        if question is None or not str(question).strip():
+            raise AskValidationError(
+                "question must be a non-empty string",
+                code=VALIDATION_CODE_EMPTY)
+        q = str(question)
+        if ask_question_has_control_chars(q):
+            raise AskValidationError(
+                "question contains control/zero-width characters",
+                code=VALIDATION_CODE_EMPTY)
+        if len(q) > MAX_ASK_QUESTION_CHARS:
+            raise AskValidationError(
+                f"question exceeds {MAX_ASK_QUESTION_CHARS} chars",
+                code=VALIDATION_CODE_OVERSIZE)
+        if question_type is not None and question_type not in ASK_QUESTION_TYPES:
+            raise AskValidationError(
+                f"unknown question_type {question_type!r}; valid: "
+                f"temporal-reasoning|knowledge-update|multi-session|"
+                f"single-session-preference",
+                code=VALIDATION_CODE_BAD_TYPE)
+        if question_date is not None and not validate_ask_question_date(question_date):
+            raise AskValidationError(
+                f"invalid question_date {question_date!r} (expected "
+                f"YYYY-MM-DD, real calendar date)",
+                code=VALIDATION_CODE_BAD_DATE)
+
+    def ask(self, question: str, *, question_type: str | None = None,
+            question_date: str | None = None, team_id: str | None = None,
+            _reader_factory=None) -> dict:
+        """Answer a question about captured memory (#1987 Task 5) — ONE
+        bounded RAG pass locally (or a POST to hosted ``/v1/ask`` when
+        ``TORTOISE_API_URL`` is set).
+
+        Local lane pipeline: validation FIRST (``AskValidationError``, zero
+        model calls) → ``tortoise_fts_query`` (``include_terminal=True`` —
+        the D8 supersession markers reach the reader; cost-bounded by the
+        same 8k/40 caps) → ask-path annotation (session-date join + speaker)
+        → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
+        → ``assemble_context`` (8000-token estimate cap AND 32 KiB byte cap,
+        whole-hit drop) → ``detect_question_type`` (or caller override) →
+        ONE ``LLMReader.answer`` via ``build_reader_model()`` (never an
+        LLM-skip pre-gate — exactly one model call incl. empty context) →
+        ``_looks_abstained`` (blank → ``NO_EVIDENCE_TEXT``) → best-effort
+        ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
+        None → no-op).
+
+        Returns the 12-field response shape: ``{answer, abstained,
+        question_type, question_date, evidence, context_tokens, model,
+        provider, route, cost_estimate_usd, duration_ms,
+        retrieval_degraded}``. ``question_date`` is ALWAYS the RESOLVED value
+        (server-now-UTC ``YYYY-MM-DD`` default when omitted; the caller
+        override when provided). No retrieval time-travel v1 — the pool stays
+        the live graph.
+
+        Raises: ``AskValidationError`` (input), ``AskRetrievalUnavailable``
+        (retrieval/annotation/assembly raise), ``AskReaderUnavailable``
+        (the reader failed with no surviving lane).
+        """
+        import time as _time  # noqa: I001
+        from datetime import datetime as _dt2, timezone as _tz  # noqa: I001
+        from tortoise.retrieval import (  # noqa: I001
+            DEFAULT_CONTEXT_ITEM_CAP,
+            DEFAULT_CONTEXT_TOKEN_CAP,
+            DEFAULT_MAX_CHUNKS_PER_SESSION,
+            assemble_context,
+            dedup_pool,
+            estimate_tokens_ask,
+            render_context,
+        )
+        from tortoise.metering import estimate_ask_cost_usd  # noqa: I001
+        from tortoise.reader import (  # noqa: I001
+            NO_EVIDENCE_TEXT,
+            _looks_abstained,
+            detect_question_type,
+            system_prompt_for,
+        )
+        from tortoise.exceptions import (  # noqa: I001
+            AskReaderUnavailable,
+            AskRetrievalUnavailable,
+            AskValidationError,
+        )
+
+        if os.environ.get("TORTOISE_API_URL"):
+            return self._post_ask(question, question_type=question_type,
+                                  question_date=question_date)
+
+        t0 = _time.monotonic()
+        # 1. Validation FIRST (P2-8): zero model calls AND zero retrieval
+        #    calls for invalid inputs.
+        self._ask_validate(question, question_type, question_date)
+        if question_date is None:
+            question_date = _dt2.now(_tz.utc).strftime("%Y-%m-%d")
+
+        # 2. Retrieval (whole-retrieval raises → AskRetrievalUnavailable).
+        leg_trace: list[dict] = []
+        try:
+            hits = self.tortoise_fts_query(
+                question, limit=DEFAULT_CONTEXT_ITEM_CAP,
+                pool_size=DEFAULT_POOL_SIZE, include_terminal=True,
+                leg_trace=leg_trace)
+        except AskRetrievalUnavailable:
+            raise
+        except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
+            raise AskRetrievalUnavailable(
+                f"retrieval unavailable: {type(e).__name__}") from e
+
+        # 3. Annotation (batch raise → AskRetrievalUnavailable).
+        try:
+            annotated = self.annotate_ask_hits(hits)
+        except AskRetrievalUnavailable:
+            raise
+        except Exception as e:  # noqa: BLE001, RUF100
+            raise AskRetrievalUnavailable(
+                f"annotation unavailable: {type(e).__name__}") from e
+
+        # 4. Dedup (annotated session key — P2-20) + assembly (8k/40/32KiB).
+        try:
+            def _ask_session_key(h: dict) -> str:
+                return (h.get("session_date")
+                        or h.get("session_id")
+                        or f"idx:{h.get('lme_session_index', -1)}")
+
+            deduped = dedup_pool(
+                annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
+                session_key=_ask_session_key)
+            assembled = assemble_context(
+                deduped, top_k=DEFAULT_CONTEXT_ITEM_CAP,
+                max_context_tokens=DEFAULT_CONTEXT_TOKEN_CAP,
+                question_date=question_date,
+                context_item_cap=DEFAULT_CONTEXT_ITEM_CAP,
+                byte_cap=32768)
+        except Exception as e:  # noqa: BLE001, RUF100
+            raise AskRetrievalUnavailable(
+                f"context assembly unavailable: {type(e).__name__}") from e
+
+        # 5. Question type (deterministic detector or caller override).
+        qtype = question_type if question_type is not None \
+            else detect_question_type(question)
+
+        # 6. ONE reader call via the per-namespace cached model.
+        evidence = render_context(assembled, question_date=question_date)
+        try:
+            model = self._ask_reader_model(_reader_factory)
+        except Exception as e:  # noqa: BLE001, RUF100 — a build failure is a reader failure
+            raise AskReaderUnavailable(
+                f"reader unavailable (build): {type(e).__name__}") from e
+        try:
+            raw = model.complete(
+                system=system_prompt_for(qtype),
+                user=(f"Memory context:\n{evidence}\n\n"
+                      f"Question: {question}\n\nAnswer:"))
+        except Exception as e:  # noqa: BLE001, RUF100
+            raise AskReaderUnavailable(
+                f"reader unavailable: {type(e).__name__}") from e
+        finally:
+            decr = getattr(model, "decr_inflight", None)
+            if decr is not None:
+                decr()
+        context_tokens = estimate_tokens_ask(evidence)
+        answer = (raw or "").strip()
+        abstained = _looks_abstained(answer)
+        if abstained and not answer:
+            answer = NO_EVIDENCE_TEXT
+
+        # 7. Metering (best-effort; ONLY with an explicit team_id).
+        if team_id:
+            try:
+                from tortoise.metering import record_ask_usage  # noqa: I001
+                input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
+                                + estimate_tokens_ask(evidence))
+                out_tokens = getattr(model, "last_completion_tokens", 0) \
+                    or 500
+                record_ask_usage(
+                    team_id,
+                    tokens_in=input_tokens, tokens_out=out_tokens,
+                    cost_usd=estimate_ask_cost_usd(input_tokens, out_tokens))
+            except Exception:  # noqa: BLE001, RUF100 — metering never blocks
+                pass
+
+        # 8. Degradation signal (leg_trace + D8-decoration-unavailable).
+        degraded = any(bool(leg.get("degraded")) for leg in leg_trace)
+        if not degraded:
+            degraded = self._ask_d8_decoration_unavailable(hits)
+
+        serving = getattr(model, "last_route", None) or \
+            getattr(model, "route", None)
+        duration_ms = int((_time.monotonic() - t0) * 1000)
+        try:
+            cost_estimate = estimate_ask_cost_usd(
+                estimate_tokens_ask(system_prompt_for(qtype))
+                + estimate_tokens_ask(evidence),
+                getattr(model, "last_completion_tokens", 0) or 500)
+        except Exception:  # noqa: BLE001, RUF100
+            cost_estimate = 0.0
+        return {
+            "answer": answer,
+            "abstained": abstained,
+            "question_type": qtype,
+            "question_date": question_date,
+            "evidence": evidence,
+            "context_tokens": context_tokens,
+            "model": getattr(model, "model", None),
+            "provider": serving,
+            "route": serving,
+            "cost_estimate_usd": cost_estimate,
+            "duration_ms": duration_ms,
+            "retrieval_degraded": degraded,
+        }
+
+    @staticmethod
+    def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:
+        """D8-decoration-unavailable detection (P1-13/P1-5): terminal-status
+        hits returned WITHOUT supersession keys when ``include_terminal=True``
+        — the decoration silently failed to attach the markers, so the
+        evidence would render superseded content as current. 200 +
+        ``retrieval_degraded=True`` (never a silent success)."""
+        from tortoise.search_engine import TERMINAL_EXCLUDED_STATUSES
+        for h in hits:
+            if (h.get("status") or "") in TERMINAL_EXCLUDED_STATUSES:
+                if not (h.get("superseded_by") or h.get("supersedes")
+                        or h.get("valid_from") or h.get("valid_to")
+                        or h.get("expired_at")):
+                    return True
+        return False
+
+    # ── Per-namespace reader-model cache (#1987 Task 5) ────────────────────
+
+    def _ask_reader_model(self, factory=None):
+        """Resolve the ask-lane reader model for THIS SDK's namespace from the
+        per-namespace cache (never module-global): LRU bound, in-flight
+        entries never evicted, failed builds never cached, per-key build
+        single-flight, closed clients on eviction."""
+        namespace = getattr(self, "_namespace", None) or "default"
+        key = f"ask:{namespace}"
+        cache = _ask_reader_cache()
+        with _ASK_READER_CACHE_LOCK:
+            entry = cache.get(key)
+            if entry is not None and not entry.failed():
+                cache.move_to_end(key)
+                entry.incr_inflight()
+                return entry
+        # Build path — per-key single-flight (P2-16): two simultaneous FIRST
+        # asks for the same namespace produce ONE build.
+        build_lock = _ask_build_lock(key)
+        with build_lock:
+            with _ASK_READER_CACHE_LOCK:
+                entry = cache.get(key)
+                if entry is not None and not entry.failed():
+                    cache.move_to_end(key)
+                    entry.incr_inflight()
+                    return entry
+            try:
+                builder = factory if factory is not None \
+                    else _default_ask_reader_factory()
+                model = builder() if callable(builder) else builder
+                locked = _LockedReader(model)
+            except Exception:
+                # Failed builds are NEVER cached (P2-21) — the key stays
+                # absent so a subsequent ask rebuilds and succeeds.
+                raise
+            with _ASK_READER_CACHE_LOCK:
+                cache[key] = locked
+                cache.move_to_end(key)
+                locked.incr_inflight()
+                _prune_ask_reader_cache(cache)
+            return locked
+
+    def _post_ask(self, question: str, *, question_type: str | None = None,
+                  question_date: str | None = None) -> dict:
+        """Hosted-mode POST to ``TORTOISE_API_URL`` ``/v1/ask`` (Task 5) —
+        mirrors ``_post_commit``'s pattern (auth header, NO auto-retry v1).
+        The SDK-side timeout (75s) is STRICTLY GREATER than the server's
+        ``_ASK_TIMEOUT_S`` (60s) so the server's 504 is always receivable and
+        mapped to ``AskTimeout`` reliably. Maps statuses/body codes to the
+        typed SDK exceptions (exceptions.py) per the pinned vocabulary.
+        """
+        from tortoise.schemas import (  # noqa: I001
+            CODE_IN_FLIGHT_LIMIT,
+            CODE_INVALID_QUESTION,
+            CODE_INVALID_QUESTION_DATE,
+            CODE_INVALID_QUESTION_TYPE,
+            CODE_QUESTION_TOO_LONG,
+            CODE_QUOTA_EXCEEDED,
+            CODE_READER_UNAVAILABLE,
+            CODE_RETRIEVAL_UNAVAILABLE,
+            CODE_TIMEOUT,
+            CODE_UNAUTHORIZED,
+        )
+        from tortoise.exceptions import (  # noqa: I001
+            AskInFlightLimit,
+            AskQuotaExceeded,
+            AskReaderUnavailable,
+            AskRetrievalUnavailable,
+            AskTimeout,
+            AskValidationError,
+        )
+        import requests as _requests  # noqa: I001
+        base = os.environ.get("TORTOISE_API_URL", "http://localhost:8000")
+        key = os.environ.get("TORTOISE_API_KEY", "")
+        payload = {"question": question}
+        if question_type is not None:
+            payload["question_type"] = question_type
+        if question_date is not None:
+            payload["question_date"] = question_date
+        try:
+            r = _requests.post(
+                f"{base.rstrip('/')}/v1/ask",
+                headers={"Authorization": f"Bearer {key}"},
+                json=payload, timeout=ASK_SDK_TIMEOUT_S)
+        except _requests.exceptions.Timeout:
+            raise AskTimeout("client-side timeout awaiting /v1/ask",
+                             source="client") from None
+        except _requests.exceptions.ConnectionError:
+            raise AskReaderUnavailable(
+                "cannot reach the hosted ask server (connection refused)",
+                status_code=None) from None
+        body: dict = {}
+        try:
+            body = r.json()
+        except ValueError:
+            body = {}
+        err = body.get("error") or {}
+        code = err.get("code") if isinstance(err, dict) else None
+        status = r.status_code
+
+        def _val_err(default_code: str, message: str) -> AskValidationError:
+            return AskValidationError(message, code=code or default_code,
+                                      status_code=status)
+
+        if status == 429:
+            if code == CODE_IN_FLIGHT_LIMIT:
+                raise AskInFlightLimit("in-flight ask limit",
+                                       status_code=status)
+            # 429-is-quota: a code-less 429 → AskQuotaExceeded
+            # (retry_after=None — NEVER AskValidationError, P2-15).
+            retry_after = err.get("retry_after") if isinstance(err, dict) else None
+            try:
+                retry_after = float(retry_after) if retry_after is not None else None
+            except (TypeError, ValueError):
+                retry_after = None
+            raise AskQuotaExceeded("ask quota exceeded",
+                                   retry_after=retry_after,
+                                   status_code=status)
+        if status == 502:
+            if code == CODE_RETRIEVAL_UNAVAILABLE:
+                raise AskRetrievalUnavailable("retrieval unavailable",
+                                              status_code=status)
+            raise AskReaderUnavailable("reader unavailable",
+                                       status_code=status)
+        if status == 504:
+            raise AskTimeout("server timeout", source="server",
+                             status_code=status)
+        if status == 402:
+            # a code-less 402 is a SERVER-side provider-billing condition —
+            # never mislabeled invalid_question (P2-3).
+            raise AskReaderUnavailable(
+                f"provider billing 402 (status retained)",
+                status_code=status)
+        if 400 <= status < 500:
+            if code in (CODE_INVALID_QUESTION, CODE_QUESTION_TOO_LONG,
+                        CODE_INVALID_QUESTION_TYPE, CODE_INVALID_QUESTION_DATE,
+                        CODE_UNAUTHORIZED):
+                raise _val_err(code, f"ask rejected: {code}")
+            # code-less 4xx → the status-derived documented default
+            defaults = {400: CODE_INVALID_QUESTION, 401: CODE_UNAUTHORIZED,
+                        403: CODE_UNAUTHORIZED, 422: CODE_INVALID_QUESTION}
+            default_code = defaults.get(status, CODE_INVALID_QUESTION)
+            raise _val_err(default_code, f"ask rejected (HTTP {status})")
+        r.raise_for_status()
+        return body
+
 
     def expand_relationships(self, point_id: str) -> list[dict]:
         """Full relationship payload for a single Point, incl. related_content (#1353 D14).

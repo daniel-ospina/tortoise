@@ -1,0 +1,26 @@
+{
+  "completion": "The office hours policy is 9am to 5pm.",
+  "expect_superseded_markers": false,
+  "expected_abstained": false,
+  "fixture": "gold-verbatim-commit",
+  "prompt_hash": "be5d35a34d4a1a4fa62cfc1dc9268912658ca2d8cd8ae9125c928d41c22981ea",
+  "qtype": null,
+  "question": "what is the office hours policy?",
+  "question_date": "2026-08-29",
+  "seeds": [
+    {
+      "content": "I finally switched my phone plan to the cheaper carrier and saved $30 a month.",
+      "session_date": "2026-08-10"
+    },
+    {
+      "content": "The new office hours policy is 9am to 5pm, approved at the August meeting.",
+      "session_date": "2026-08-15"
+    },
+    {
+      "content": "Max needs a new collar before winter.",
+      "session_date": "2026-08-18"
+    }
+  ],
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-15) The new office hours policy is 9am to 5pm, approved at the August meeting.\n\nQuestion: what is the office hours policy?\n\nAnswer:",
+  "user_message_hash": "b5e2275d8448ea53ea4f128c062b8920edaeeaabdd6745c5fd76cdb6658e60a6"
+}
