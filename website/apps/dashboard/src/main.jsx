@@ -1294,7 +1294,7 @@ function claimIntentInFlight() {
       setWizardSeedDone(!!(subj && subj.id && proj && proj.id && p && p.id))
       // #1906: the seeded point must land on the Overview without waiting
       // for reload — team.point_count was captured at provisioning (0).
-      // Load-bearing for the header-exit race ('Open dashboard →' is
+      // Load-bearing for the header-exit race ('Open my dashboard →' is
       // available on every wizard step): finishWelcomeLoads' refreshTeam
       // can snapshot 0 while the seed commit is in flight; this post-seed
       // refire lands the correct count. Bump the refresh seq so any
@@ -1316,7 +1316,7 @@ function claimIntentInFlight() {
   }
 
   // #1842 P1 (re-review): the post-welcome load sequence, shared by
-  // wizardComplete AND the welcome header's "Open dashboard →" button
+  // wizardComplete AND the welcome header's "Open my dashboard →" button
   // (which previously only setWelcomeMode(false), bypassing the loads —
   // currentTeamId stayed null, the currentTeamId effect never fired
   // loadMembers/loadGraphs, and Graphs/Users/Backups shimmered forever on
@@ -1808,7 +1808,7 @@ function claimIntentInFlight() {
               // The provisioned team_id comes from the refreshTeam response
               // (the team row just created). No double-fire: completeLogin
               // never runs on this path.
-              refreshTeam(provisioned.api_key)
+              refreshTeam(provisioned.api_key, undefined, teamRefreshSeqRef.current)
                 .then((t) => {
                   if (t && t.team_id) {
                     // #1906 (code-review P1): record the revealed key in the
@@ -3485,13 +3485,15 @@ function claimIntentInFlight() {
         <header>
           <div className="logo">Tortoise</div>
           <nav />
-          {/* #1906 (code-review P1): disabled while provisioning — exiting
-              before the team row exists fires finishWelcomeLoads against
-              nothing (no teamIdRef pin → loadAll 403 → 'API Keys 0' + a
-              false error banner until reload). */}
+          {/* #1906 (code-review P1): disabled while provisioning OR on the
+              terminal error/claim cards — exiting fires finishWelcomeLoads
+              against nothing (no teamIdRef pin → loadAll 403 → 'API Keys 0'
+              + a false error banner until reload). The spinner window is
+              transient; the error/claim cards' own CTAs (Try again / Go
+              claim my team) own the recovery. */}
           <button
             className="ghost small"
-            disabled={welcomeProvisioning}
+            disabled={welcomeProvisioning || welcomeProvisionError}
             onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); finishWelcomeLoads() }}
           >
             Open my dashboard →
@@ -3815,7 +3817,7 @@ function claimIntentInFlight() {
                                     {p.limits.map((l) => <li key={l}>{l}</li>)}
                                   </ul>
                                   {p.tier === 'free' ? (
-                                    // #1856: same as the header "Open dashboard →" button — this
+                                    // #1856: same as the header "Open my dashboard →" button — this
                                     // first-timer exit (completeLogin never runs) must still fire
                                     // finishWelcomeLoads() or currentTeamId/teams/apiKey stay unset
                                     // (account blob "No team", Members "Loading…" forever). The plans
