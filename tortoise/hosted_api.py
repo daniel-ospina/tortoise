@@ -5904,6 +5904,12 @@ def _team_limits_from_node(team_node: dict) -> dict:
 async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
     """E6 — list my memberships (team switcher). Placeholder rows excluded.
 
+    #1912: per-row suspended_at — a suspended membership no longer 403s the
+    whole switcher. Healthy teams stay listable; the suspended team itself
+    is blocked from selection (suspended_at stamp, no graph resolution).
+    When EVERY membership is suspended there is nothing healthy to list →
+    403 SUSPENDED with the appeal detail (#1853 lockdown preserved).
+
     #765 (plan Task 8 reader inventory): graph_list resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
     registry → Graph nodes), so this endpoint never touches the registry in
@@ -5914,12 +5920,13 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
         team = await _team_node(m["team_id"])
         if team is None:
             continue
-        # #1853: a suspended membership 403s the switcher (locked down —
-        # the detail carries the appeal link; mixed healthy/suspended
-        # memberships are blocked as a whole so the suspended state is
-        # never silently hidden).
-        _ensure_not_suspended(team)
-        graphs = _make_sdk(namespace="registry").graph_list(m["team_id"])
+        suspended_at = team.get("suspended_at")
+        graphs = []
+        if suspended_at is None:
+            # Suspended rows are excluded from graph resolution — they
+            # cannot be selected anyway, and graph_list must not observe
+            # the suspension stamp.
+            graphs = _make_sdk(namespace="registry").graph_list(m["team_id"])
         out.append({
             "team_id": m["team_id"],
             "team_name": team.get("name", m["team_id"]),
@@ -5927,7 +5934,13 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
             "role": m["role"],
             "graph_count": len(graphs),
             "default_graph_id": next((g["graph_id"] for g in graphs if g["kind"] == "default"), None),
+            "suspended_at": suspended_at,
         })
+    if out and all(t["suspended_at"] is not None for t in out):
+        # No healthy team to switch to — every membership is suspended.
+        # 403 with the appeal detail (the user must see why and how to
+        # appeal); a mixed list returns per-row suspended_at instead.
+        raise HTTPException(status_code=403, detail=_suspended_detail())
     return out
 
 
