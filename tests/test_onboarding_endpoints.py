@@ -432,10 +432,34 @@ class TestOnboardingTeam:
         ).result_set[0][0]
         assert n_keys == 0
         # session-key mint (registry lane) — resolves the owner membership.
-        # Explicit team_id: the test registry is shared across tests in a
-        # session (earlier tests' sub-teams leave user-1 memberships), so
-        # the mint must disambiguate — exactly the production multi-team
-        # shape (a user with several memberships passes team_id).
+        # #1970 coverage preservation: under per-test isolation the registry
+        # is FRESH, so user-1 has exactly ONE membership — the mint's
+        # >1-membership disambiguation branch (the production multi-team
+        # shape: a user with several memberships passes team_id) would go
+        # silently dead. Seed a deterministic SECOND active owner membership
+        # on another team so the branch is exercised, not inherited from
+        # shared-session leftovers.
+        import uuid
+        seed_team_id = f"seed-team-{uuid.uuid4().hex[:8]}"
+        assert seed_team_id != sub_team_id
+        reg.query(
+            "CREATE (t:Team {id:$tid, name:'seed-other', tier:'free'})",
+            params={"tid": seed_team_id},
+        )
+        reg.query(
+            "CREATE (m:Membership {team_id:$tid, user_id:'user-1', "
+            "role:'owner', status:'active'})",
+            params={"tid": seed_team_id},
+        )
+        # self-verifying precondition: the seed must be LIVE (the mint filters
+        # user_id + status:'active' + team_id <> '' — a wrong shape silently
+        # reverts to the single-membership branch, defeating the coverage
+        # intent).
+        n_active = reg.query(
+            "MATCH (m:Membership {user_id:'user-1', status:'active'}) "
+            "WHERE m.team_id <> '' RETURN count(m)",
+        ).result_set[0][0]
+        assert n_active == 2, "multi-team disambiguation seed must be active"
         app.dependency_overrides[get_current_user] = lambda: {
             "user_id": "user-1", "email": "user-1@example.com"}
         r2 = client.post("/v1/session/key", json={
@@ -475,6 +499,28 @@ class TestOnboardingTeam:
         assert reg.query(
             "MATCH (t:Team {name:'orphan'}) RETURN count(t)",
         ).result_set[0][0] == 0
+
+    def test_create_team_reentry_409(self, client):
+        """#1970 falsification pin: the #1877 one-shot guard is production-
+        intended, not a regression. A second sub-team create on the SAME
+        team must 409 ("Sub-team already created") — the wizard creates the
+        sub-team ONCE. NOTE: the guard reads the MAIN team's PERSISTED
+        onboarding state and `_write_onboarding_state` is a MATCH...SET that
+        silently no-ops when the parent Team node is absent (`team_create`
+        provisions only the SUB-team node) — so the test seeds the parent
+        node first; without the seed both POSTs 200 and the guard never
+        fires."""
+        _make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (t:Team {id:$id, onboarding_state:$st})",
+            params={"id": "test-team-1", "st": "{}"},
+        )
+        r1 = client.post("/v1/onboarding/team", json={"name": "reentry-1"})
+        assert r1.status_code == 200, r1.text
+        # name validation runs BEFORE the guard — a valid name is required
+        # to reach the 409 (an invalid/empty name would 400 instead).
+        r2 = client.post("/v1/onboarding/team", json={"name": "reentry-2"})
+        assert r2.status_code == 409, r2.text
+        assert r2.json()["detail"] == "Sub-team already created"
 
 
 # ── Register (self-service provisioning) ────────────────────────

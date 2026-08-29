@@ -1489,7 +1489,7 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     _mp = row.get("max_points")
     if _mp is None:
         _mp = row.get("graph_size_cap")
-    return {
+    team = {
         "team_id": team_id, "tier": row.get("tier") or "free",
         "max_users": row.get("max_users") or lim["max_users_per_team"],
         "max_graphs": row.get("max_graphs") or lim["max_graphs_per_team"],
@@ -1506,6 +1506,13 @@ async def _session_user_team(request: Request, user: dict) -> dict:
         # session always passes the dashboard-login gate
         "dashboard_key_login": True,
     }
+    # #1913: post-auth abuse evaluation — the session-JWT lane was the
+    # abuse-blind hole (key lanes call _abuse_post_auth in get_current_team /
+    # _get_current_team_supabase; session-driven REST calls never recorded an
+    # auth_ip event or counted toward R3 read velocity). Same best-effort
+    # semantics as the key lanes — abuse telemetry never breaks auth.
+    await _abuse_post_auth(request, team)
+    return team
 
 
 async def get_current_team_session(request: Request, gate_key_login: bool = True) -> dict:

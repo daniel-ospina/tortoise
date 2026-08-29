@@ -12,6 +12,7 @@ Failure modes per the issue body:
 Plus: REST 403 SUSPENDED shape, MCP -32006 + warm-cache immediacy + restore,
 R4 geo on both request classes, session-key mint gate, session-authed alerts
 endpoint, Turnstile 400 on the signup endpoint, weighted R1 introspection.
+#1913: the session-JWT REST lane runs the post-auth abuse hooks (R3 + R4).
 
 Pattern: TestClient + FakeControlPlane (migration 0015 trigger/RPC emulation)
 via monkeypatched get_control_plane / is_supabase_enabled / get_abuse_store —
@@ -19,6 +20,7 @@ the same seam pattern as test_hosted_api.py / test_flip_gate.py.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import sys
 import tempfile
@@ -401,6 +403,63 @@ class TestGeo:
 
 
 # ── MCP transport ───────────────────────────────────────────────────────────
+
+class TestSessionLane:
+    """#1913: the session-JWT REST lane runs the same post-auth abuse
+    evaluation as the key lanes (R3 read velocity + R4 geo). The key lanes
+    call _abuse_post_auth (get_current_team / _get_current_team_supabase);
+    _session_user_team — the session lane — never did: session-driven GETs
+    from a new country recorded no auth_ip event and didn't count toward R3.
+    """
+
+    def _seed_membership(self, fake):
+        fake.seed("team_memberships", [{
+            "user_id": _U1, "team_id": TEAM, "role": "owner",
+            "status": "active", "team_name": "abuse-team"}])
+
+    def _ip_events(self, fake):
+        return [e for e in fake.tables["abuse_events"]
+                if e["event_type"] == "auth_ip"]
+
+    def test_session_get_records_auth_ip_and_read(self, env):
+        """A session-lane GET from a new country records an auth_ip event
+        (R4) and counts toward R3 team read velocity."""
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        from tortoise.hosted_api import _session_user_team
+        fake = env["fake"]
+        self._seed_membership(fake)
+        # Direct unit call — the exact function the #1913 fix touches. A
+        # full-stack session JWT would need JWKS machinery; get_current_team_
+        # session calls get_current_user directly (no DI override), so the
+        # session resolver is the precise seam.
+        request = Request({
+            "type": "http", "method": "GET", "path": "/v1/team/keys",
+            "query_string": b"",
+            "headers": Headers({"cf-ipcountry": "MX"}).raw,
+        })
+        team = asyncio.run(_session_user_team(request, {"user_id": _U1}))
+        assert team["team_id"] == TEAM
+        # R4: the new-country session request recorded auth_ip + notified
+        assert {e["country"] for e in self._ip_events(fake)} == {"MX"}
+        geo = [c for c in env["notified"] if c[0] == "abuse_new_ip"]
+        assert len(geo) == 1 and geo[0][2]["country"] == "MX"
+        # R3: the session GET counted toward team read velocity
+        assert len(abuse.READ_TRACKER._by_team[TEAM]) == 1
+
+    def test_key_lane_unchanged(self, env):
+        """Regression: the key lane still records auth_ip (R4) + R3 reads
+        after the session-lane fix — behavior unchanged."""
+        fake = env["fake"]
+        with TestClient(env["app"]) as tc:
+            r = tc.get("/v1/team/keys",
+                       headers={**_auth(), "CF-IPCountry": "CL"})
+            assert r.status_code == 200
+        assert {e["country"] for e in self._ip_events(fake)} == {"CL"}
+        assert [c[0] for c in env["notified"]] == ["abuse_new_ip"]
+        assert len(abuse.READ_TRACKER._by_team[TEAM]) == 1
+
 
 class TestMcp:
     def _mcp_client(self):
