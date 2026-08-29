@@ -86,7 +86,8 @@ def _get_registry() -> PackRegistry | None:
     degrades to the base/registered kinds only (ponytail).
     """
     global _registry
-    packs_dir = _PACKS_DIR or (Path(__file__).resolve().parent.parent / "packs")
+    from tortoise.pack_registry import default_packs_dir
+    packs_dir = _PACKS_DIR or default_packs_dir()
     if _registry is None or _registry.packs_dir != packs_dir:
         with _registry_lock:
             if _registry is None or _registry.packs_dir != packs_dir:

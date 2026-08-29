@@ -2288,7 +2288,8 @@ def _cmd_session_probe(args, api_key: str, api_url: str) -> int:
 
     POST /v1/sessions/install-probe with the harness name. The payload is
     UNCONDITIONAL install telemetry (harness + timestamp only, no content) —
-    NOT consent-gated, but auth-gated (the .tortoise config key). The server
+    not gated on session_recording, but auth-gated (the .tortoise config
+    key). The server
     records install_probe_{harness} on the team's onboarding state — the
     dashboard's server-visible install signal (the browser cannot stat the
     user's filesystem). The CLI resolves api_url from the .tortoise config

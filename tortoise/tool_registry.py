@@ -553,14 +553,15 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         description="File an agent session into the graph (epic #909 capture path): "
                     "turns become episodic Points, the conversation is LLM-extracted into "
                     "epistemic Points, and the Session links to subject/project entities. "
-                    "#1727 Slice 2: server-enforced consent — returns 403 when the team has "
-                    "not enabled session capture; 402 at quota; 503 without an LLM provider; "
+                    "#1927: session_recording is default-ON (ToS-covered) with an "
+                    "optional off-switch — returns 409 when the team disabled capture; "
+                    "402 at quota; 503 without an LLM provider; "
                     "422 for an invalid harness. session_id is the idempotency key (re-filing "
                     "the same id mints zero new nodes). Only call this when the team has "
-                    "enabled session capture (the dashboard 'Memory sources > Agent sessions' "
+                    "session recording enabled (the dashboard 'Memory sources > Agent sessions' "
                     "toggle); if the call fails, tell the user it wasn't filed and do NOT "
                     "retry. Requires hosted mode — stdio/self-hosted returns an honest error "
-                    "(no local fallback that bypasses the consent gate).",
+                    "(no local fallback that bypasses the capture pipeline).",
         annotations=_rw(),
         http_policy=True,
         # Custom handler in mcp_server.py — the REST /v1/sessions route stays

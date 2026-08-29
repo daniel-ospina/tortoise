@@ -133,12 +133,10 @@ class TestSessionRecording:
         assert r.json()["onboarding"]["session_recording"] is False
 
     def test_enable_writes_capture_revised(self, client):
-        """#1728 Slice 3 (single consent source): the session-recording
-        endpoint writes the SAME consent keys as the wizard's sessions toggle
-        — the enforced ``session_recording`` flag + ``capture_revised`` (a
-        user-initiated enable is an explicit decision, so it resolves the
-        exactly-once re-ask; the re-ask pane never re-shows for fresh
-        opt-ins)."""
+        """#1927: the session-recording endpoint writes the OFF-SWITCH flag
+        (default ON, ToS-covered) + ``capture_revised`` (kept for
+        backward-compat with the registered state keys — the re-ask
+        machinery it fed was removed)."""
         r = client.post("/v1/onboarding/session-recording", json={"enabled": True})
         assert r.status_code == 200, r.text
         st = r.json()["onboarding"]
@@ -146,10 +144,8 @@ class TestSessionRecording:
         assert st["capture_revised"] is True
 
     def test_disable_writes_capture_revised(self, client):
-        """#1728: decline (Q3 no / wizard toggle-off) also writes
-        ``capture_revised`` — the decline branch clears the enforced consent
-        flag AND resolves the re-ask (mirrors the wizard/panel decline; same
-        keys)."""
+        """#1927: toggle-off (the quiet off-switch) writes the flag False
+        + ``capture_revised`` (backward-compat write)."""
         r = client.post("/v1/onboarding/session-recording", json={"enabled": False})
         assert r.status_code == 200, r.text
         st = r.json()["onboarding"]
@@ -245,70 +241,90 @@ def test_q3_decline_then_reenable_consents(tmp_path):
     _, state = _invoke_session_recording_tool(tmp_path, "team-1728-re", False)
     assert state["session_recording"] is False
     assert state["capture_revised"] is True
-    # decline ⇒ capture POST is 403 (the enforced flag is the consent)
+    # decline writes the off-switch flag (capture stops with a 409)
     from tortoise.hosted_api import _get_onboarding_state
     assert _get_onboarding_state("team-1728-re")["session_recording"] is False
-    # re-enable via the tool — consent re-set despite capture_revised=True
+    # re-enable via the tool — the flag re-sets despite capture_revised=True
     result, state2 = _invoke_session_recording_tool(tmp_path, "team-1728-re", True)
     assert "error" not in result, result
     assert state2["session_recording"] is True
     assert state2["capture_revised"] is True
 
 
-def test_reask_gate_defaults_off(client):
-    """#1728: the re-ask gate (session_recording=True && !capture_revised &&
-    !capture_ask_shown) is OFF for a team that has never consented — fresh
-    teams are never misled-flagged. (The fixture's embedded DB is shared in
-    the carve-out lane, so the test resets its own state shape first.)"""
-    r0 = client.patch("/v1/onboarding/state", json={
-        "session_recording": False, "capture_revised": False,
-        "capture_ask_shown": False})
-    assert r0.status_code == 200, r0.text
-    r = client.get("/v1/onboarding/state")
-    assert r.status_code == 200
-    st = r.json()["onboarding"]
-    assert st["session_recording"] is False
-    assert st["capture_revised"] is False
-    assert st["capture_ask_shown"] is False
-    assert not (st["session_recording"] and not st["capture_revised"]
-                and not st["capture_ask_shown"])
+def test_fresh_team_defaults_to_recording_on(client):
+    """#1927: a FRESH team (no stored flag) reads session_recording=True
+    from the default merge — capture works out of the box, no consent gate.
+    (The carve-out lane's embedded DB is shared across tests, so the team id
+    is unique per run to prove the default rather than inherited state.)"""
+    import uuid
 
-
-def test_capture_revised_dedup(client):
-    """#1728 (Journey 2): once ``capture_revised`` is set (any explicit
-    resolution — answer OR fresh opt-in), the re-ask gate reads false even
-    with the legacy consent flag still true: no cross-surface double-ask."""
-    # reset to a known shape, then set the legacy-misled shape: consent on,
-    # no resolution yet
-    client.patch("/v1/onboarding/state", json={
-        "session_recording": False, "capture_revised": False,
-        "capture_ask_shown": False})
-    r = client.patch("/v1/onboarding/state",
-                     json={"session_recording": True})
-    assert r.status_code == 200
-    st = r.json()["onboarding"]
+    from tortoise.hosted_api import _get_onboarding_state, _make_sdk
+    team_id = f"test-team-1927-default-{uuid.uuid4().hex[:8]}"
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": team_id, "st": "{}"},
+    )
+    st = _get_onboarding_state(team_id)
     assert st["session_recording"] is True
     assert st["capture_revised"] is False
-    # the wizard's toggle-on PATCH resolves the re-ask in the same write
-    r2 = client.patch("/v1/onboarding/state",
-                      json={"session_recording": True, "capture_revised": True})
-    assert r2.status_code == 200
-    st2 = r2.json()["onboarding"]
-    assert st2["capture_revised"] is True
-    assert not (st2["session_recording"] and not st2["capture_revised"]
-                and not st2["capture_ask_shown"]), \
-        "resolved teams must never re-trigger the re-ask gate"
-    # a second visit (fresh GET) still reads gate-false — no re-ask re-fire
-    r3 = client.get("/v1/onboarding/state")
-    st3 = r3.json()["onboarding"]
-    assert not (st3["session_recording"] and not st3["capture_revised"]
-                and not st3["capture_ask_shown"])
 
 
-def test_decline_patch_clears_consent_keeps_receipts(client):
-    """#1728 (T1-P8 + T2-P2e): the decline PATCH (re-ask NO / toggle-off)
-    clears the enforced consent flag + sets capture_revised, but NEVER clears
-    probes or receipts — re-enable resolves receipt-authoritative."""
+def test_off_switch_patch_stops_capture_409(client, monkeypatch):
+    """#1927: disabling session_recording via the PATCH surface stops
+    ingestion — a capture POST returns the clear 409 (not the old 403),
+    writes NO Session node and NO receipt, and re-enabling restores capture.
+    (The carve-out lane's embedded DB is shared across tests, so the test
+    resets its own state shape first, and the registry state writer is a
+    MATCH...SET — the Team node must exist.)"""
+    from tortoise.hosted_api import _make_sdk
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    # reset to a known on state, then capture works
+    r0 = client.patch("/v1/onboarding/state", json={"session_recording": True})
+    assert r0.status_code == 200, r0.text
+    conv = [{"role": "user", "content": "we decided to ship the memory capture slice"},
+            {"role": "assistant", "content": "agreed — capture is default-on now"}]
+    r1 = client.post("/v1/sessions", json={"conversation": conv})
+    assert r1.status_code == 200, r1.text
+    sessions_after_on = _make_sdk(namespace="test-team-1")._get_proj().g.query(
+        "MATCH (s:Session) RETURN count(s)").result_set[0][0]
+    receipts_after_on = {
+        k: v for k, v in client.get("/v1/onboarding/state")
+        .json()["onboarding"].items()
+        if k.startswith("session_capture_receipt") and v
+    }
+    # off-switch: capture stops with a clear 409
+    r2 = client.patch("/v1/onboarding/state", json={"session_recording": False})
+    assert r2.status_code == 200, r2.text
+    r3 = client.post("/v1/sessions", json={"conversation": conv})
+    assert r3.status_code == 409, r3.text
+    assert "disabled" in r3.json()["detail"]
+    # negative side-effects: 409 must NOT write a NEW Session node or a receipt
+    st = r3.json()
+    assert "session_id" not in st
+    g = _make_sdk(namespace="test-team-1")._get_proj().g
+    rows = g.query("MATCH (s:Session) RETURN count(s)").result_set
+    assert int(rows[0][0]) == int(sessions_after_on), \
+        "409 must not write a Session node"
+    st2 = client.get("/v1/onboarding/state").json()["onboarding"]
+    receipts_after_409 = {k: v for k, v in st2.items()
+                          if k.startswith("session_capture_receipt") and v}
+    assert receipts_after_409 == receipts_after_on, \
+        "409 must not record a new receipt"
+    # re-enable: capture works again
+    r4 = client.patch("/v1/onboarding/state", json={"session_recording": True})
+    assert r4.status_code == 200, r4.text
+    r5 = client.post("/v1/sessions", json={"conversation": conv})
+    assert r5.status_code == 200, r5.text
+
+
+def test_patch_off_switch_keeps_receipts(client):
+    """#1927 (T1-P8 + T2-P2e): the off-switch PATCH (toggle-off) clears the
+    session_recording flag + sets capture_revised, but NEVER clears probes
+    or receipts — re-enable resolves receipt-authoritative."""
     from tortoise.hosted_api import _make_sdk, _update_onboarding_state
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
@@ -597,11 +613,12 @@ def test_install_probe_requires_auth(unauth_client):
     assert r.status_code == 401, r.text
 
 
-def test_install_probe_not_consent_gated(client):
-    """Task 14: an UN-OPTED team (session_recording=False) still records the
-    probe — the probe is unconditional install telemetry (harness + timestamp
-    only), deliberately NOT consent-gated so the dashboard can show install
-    status before consent. The capture POST itself remains 403-gated."""
+def test_install_probe_not_gated_by_off_switch(client):
+    """#1927: a team with recording DISABLED (session_recording=False)
+    still records the probe — the probe is unconditional install telemetry
+    (harness + timestamp only), deliberately NOT gated on the off-switch so
+    the dashboard can show install status. The capture POST itself returns
+    the off-switch 409."""
     from tortoise.hosted_api import _get_onboarding_state, _make_sdk, _update_onboarding_state
     _make_sdk(namespace="registry")._get_registry().query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
@@ -612,11 +629,12 @@ def test_install_probe_not_consent_gated(client):
                     json={"harness": "claude"})
     assert r.status_code == 200, r.text
     assert _get_onboarding_state("test-team-1").get("install_probe_claude")
-    # the consent gate is untouched: an un-opted capture POST is still 403.
+    # the off-switch is untouched: a disabled capture POST is a clear 409.
     r2 = client.post("/v1/sessions",
                      json={"conversation": [
                          {"role": "user", "content": "hello"}]})
-    assert r2.status_code == 403, r2.text
+    assert r2.status_code == 409, r2.text
+    assert "disabled" in r2.json()["detail"]
 
 
 def test_cross_surface_harness_vocab_contract():
