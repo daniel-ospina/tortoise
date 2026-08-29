@@ -291,9 +291,14 @@ jobs:
   # ── Post-deploy blog E2E (warn-only — #1800) ─────────────────────────
   # Runs the blog verification suite against production after deploy.
   # REQUIRES the Pages Function env bindings on the premise-labs project:
-  #   SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY
+  #   SUPABASE_URL, SUPABASE_ANON_KEY, SUPABASE_SERVICE_ROLE_KEY,
+  #   OPENROUTER_API_KEY (generate-seo #1861 / generate-cover #1863),
+  #   CF_API_TOKEN + CF_ZONE_ID (edge-cache purge #1865)
   # (no SUPABASE_JWT_SECRET — the admin gate validates sessions via
   # Supabase /auth/v1/user; ops step documented in the epic README).
+  # The lifecycle/meta E2E tests need BLOG_E2E_AGENT_KEY (a valid agent key
+  # provisioned in blog_agent_keys as agent_name='blog-e2e') — without it
+  # those tests SKIP. Set it as a GitHub Actions secret.
   # continue-on-error: warn-only — the deploy is already live.
   verify-blog:
     runs-on: ubuntu-latest
@@ -311,7 +316,11 @@ jobs:
         run: |
           pip install pytest requests playwright pytest-playwright
       - name: Run blog E2E suite against production
+        env:
+          RUN_BLOG_E2E: '1'
+          ALLOW_PROD: '1'
+          BASE_URL: https://premiselabs.co
+          TORTISE_HOST: https://tortoise.premiselabs.co
+          BLOG_E2E_AGENT_KEY: ${{ secrets.BLOG_E2E_AGENT_KEY }}
         run: |
-          RUN_BLOG_E2E=1 ALLOW_PROD=1 BASE_URL=https://premiselabs.co \
-            TORTISE_HOST=https://tortoise.premiselabs.co \
-            python3 -m pytest tests/e2e/test_blog.py -v
+          python3 -m pytest tests/e2e/test_blog.py -v

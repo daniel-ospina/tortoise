@@ -25,7 +25,8 @@ from tortoise.model_adapters import (
 def _clean_env(monkeypatch):
     _reset_failover_cooldown()
     for k in ("TORTOISE_EXTRACTOR_PROVIDER", "DEEPSEEK_API_KEY",
-              "OPENROUTER_API_KEY", "TORTOISE_EXTRACT_MODEL",
+              "OPENROUTER_API_KEY", "VENICE_API_KEY",
+              "TORTOISE_EXTRACT_MODEL",
               "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN"):
         monkeypatch.delenv(k, raising=False)
     yield
@@ -595,3 +596,249 @@ def test_rotation_round_robin_and_cooldown(monkeypatch):
 
 def pool3_out(pool):
     return pool.complete(system="s", user="u")
+
+
+# ── RotatingModel 402-billing rotation (#1951) ──────────────────────────────
+
+def _http_error(status: int) -> requests.HTTPError:
+    """requests.HTTPError duck-carrying an HTTP status — the classifier's
+    ``_http_status`` reads ``response.status_code``."""
+    err = requests.HTTPError(f"HTTP {status}")
+    err.response = type("R", (), {"status_code": status})()
+    return err
+
+
+def _rotating_rng(monkeypatch, values):
+    """Deterministically force ``RotatingModel._pick`` outcomes: patch
+    ``random.random`` with a CYCLIC sequence so under-consumption (a pick
+    that lands on a cooldowned provider → ``continue``, or an extra retry
+    iteration) never raises ``StopIteration`` — a broken test then fails
+    with a descriptive assertion, not a raw traceback. Restored by the
+    caller's ``finally`` (the patched value is returned for that)."""
+    import itertools
+    import random as _random
+
+    _orig = _random.random
+    _cycle = itertools.cycle(values)
+    monkeypatch.setattr(_random, "random", lambda: next(_cycle))
+    return _orig
+
+
+class _RotatingStub:
+    """RotatingModel adapter stub: raises a scripted HTTP error for the
+    first ``fails`` calls, then returns ``ok-<provider>`` (mirrors
+    _StubAdapter's counter + scripted-exc shape)."""
+    def __init__(self, provider: str, fail_status: int | None = None,
+                 fails: int = 1):
+        self.provider = provider
+        self.fail_status = fail_status
+        self.fails = fails
+        self.calls = 0
+        self.last_finish_reason = None
+
+    def complete(self, *, system, user, max_tokens: int | None = None):
+        self.calls += 1
+        if self.fail_status is not None and self.calls <= self.fails:
+            raise _http_error(self.fail_status)
+        return f"ok-{self.provider}"
+
+
+def test_rotation_on_402_billing_cooldowns_and_uses_alternative(monkeypatch):
+    """#1951 target 1: HTTP 402 (billing exhausted) on provider A → cooldown
+    A and rotate to B; B's success is returned — the run continues, not
+    dead. A is never re-tried while in its cooldown window."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # A picked first → B answers
+    try:
+        pool = RotatingModel([a, b], cooldown_s=300)
+        out = pool.complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert out == "ok-b"
+    assert a.calls == 1, "402ing provider must not be retried in cooldown"
+    assert b.calls == 1
+    assert "a" in pool._cooldowns, "402 must cooldown that provider"
+    assert pool.route == "b"
+    assert pool.errors and "HTTPError" in pool.errors[0]
+
+
+@pytest.mark.timeout(10)  # an unbounded-loop regression must fail fast, not hang CI
+def test_402_cooldown_skips_provider_on_next_call(monkeypatch):
+    """#1951: the cooldown written by a 402 is respected on a SUBSEQUENT
+    call — the second call's first pick lands on A again (still inside the
+    300s window) and the cooldown-skip branch fires: A is skipped outright
+    and B keeps serving. Deleting the skip branch makes ``a.calls`` 2."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b")
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # picks: A(402)→B, then A(skip)→B
+    try:
+        pool = RotatingModel([a, b], cooldown_s=300)
+        assert pool.complete(system="s", user="u") == "ok-b"   # A 402s → B
+        assert pool.complete(system="s", user="u") == "ok-b"   # A in cooldown → B
+    finally:
+        _random.random = _orig
+    assert a.calls == 1, "A must never be re-tried inside its 402 cooldown"
+    assert b.calls == 2
+
+
+def test_auth_and_config_4xx_still_fatal_no_rotation(monkeypatch):
+    """#1951: auth AND config failures stay fatal — 401/403 (credentials)
+    and config 4xx (400/404/422, request-shape bugs) re-raise immediately;
+    the alternative provider is NEVER tried and no cooldown is written
+    (rotation would retry the same config bug on every lane)."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    for status in (400, 401, 403, 404, 422):
+        a = _RotatingStub("a", fail_status=status)
+        b = _RotatingStub("b")
+        _orig = _rotating_rng(monkeypatch, [0.1])  # A always picked first
+        try:
+            pool = RotatingModel([a, b], cooldown_s=300)
+            with pytest.raises(requests.HTTPError):
+                pool.complete(system="s", user="u")
+        finally:
+            _random.random = _orig
+        assert b.calls == 0, f"no rotation on {status}"
+        assert not pool._cooldowns, f"no cooldown written on {status}"
+
+
+@pytest.mark.timeout(10)  # an unbounded-loop regression must fail fast, not hang CI
+def test_402_single_provider_raises_loud(monkeypatch):
+    """#1951 target 3: a 402 with NO alternative provider fails loudly —
+    immediate raise, no cooldown written, no infinite rotation loop. The
+    SECOND call must re-raise the HTTPError (the provider is tried again
+    after the fail-fast), NOT the all-in-cooldown RuntimeError — pins the
+    ``n == 1`` early raise (deleting the guard turns call 2 into
+    ``RuntimeError`` and writes a cooldown on call 1)."""
+    from tortoise.model_adapters import RotatingModel
+
+    a = _RotatingStub("a", fail_status=402, fails=10)  # keeps 402ing across calls
+    pool = RotatingModel([a], cooldown_s=300)
+    with pytest.raises(requests.HTTPError):
+        pool.complete(system="s", user="u")
+    assert a.calls == 1, "single provider: one attempt, then raise — no retry loop"
+    assert not pool._cooldowns, "fail-fast: no cooldown written on the immediate raise"
+    with pytest.raises(requests.HTTPError):
+        pool.complete(system="s", user="u")
+    assert a.calls == 2, "a fresh call re-attempts the single provider (no stale cooldown)"
+
+
+@pytest.mark.timeout(10)  # an unbounded-loop regression must fail fast, not hang CI
+def test_402_all_providers_dead_raises_bounded(monkeypatch):
+    """#1951 no-infinite-loop bound, n≥2: BOTH providers 402 → the bounded
+    n*3 loop cooldowns each once, spends the rest of its attempts skipping
+    cooldowned lanes, and re-raises the last 402 loudly. Total real
+    attempts = 2 (≤ 6 bound) — no retry storm, no hang. A SECOND call with
+    both lanes still cooldowned raises the all-in-cooldown RuntimeError
+    (bounded, no hang) — the retry-continuity contract."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b", fail_status=402)
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # A(402)→B(402)→skips…
+    try:
+        pool = RotatingModel([a, b], cooldown_s=300)
+        with pytest.raises(requests.HTTPError):
+            pool.complete(system="s", user="u")
+        with pytest.raises(RuntimeError, match="all 2 providers in cooldown"):
+            pool.complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert a.calls == 1, "each provider 402s at most once per call"
+    assert b.calls == 1
+
+
+def test_fatal_after_billing_rotation_preserves_cooldown(monkeypatch):
+    """#1951 ordering invariant: once a 402 has cooldowned A and rotation
+    lands on B, a FATAL error on B re-raises immediately — the fatal raise
+    happens BEFORE any cooldown write, so B is not cooldowned, A's earlier
+    cooldown is preserved, and only A's 402 is recorded (B's fatal adds no
+    error entry). A regression that moved the cooldown write above the
+    fatal check fails this."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    a = _RotatingStub("a", fail_status=402)
+    b = _RotatingStub("b", fail_status=401)
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # A(402→cooldown), then B(401→fatal)
+    try:
+        pool = RotatingModel([a, b], cooldown_s=300)
+        with pytest.raises(requests.HTTPError):
+            pool.complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert a.calls == 1 and b.calls == 1
+    assert "a" in pool._cooldowns, "A's 402 cooldown survives the fatal raise"
+    assert "b" not in pool._cooldowns, "fatal on B must not write a cooldown"
+    assert len(pool.errors) == 1, "only A's 402 is recorded — fatal adds no entry"
+    assert "a" in pool.errors[0]
+
+
+def test_build_extractor_pool_survives_provider_402(monkeypatch):
+    """#1951 integration: the production 3-provider pool (venice/openrouter/
+    deepseek-direct) survives a 402 on one lane — the 402ing lane is
+    cooldowned, a healthy lane answers, and the call RETURNS content. A
+    SECOND call in the same run keeps serving the healthy lane (venice
+    still in cooldown, never re-tried) — the run survives a mid-run 402.
+    The pre-fix policy raised on the first 402 and killed the extraction
+    run (reval3: 33/50 questions lost to fatal_402_billing)."""
+    import random as _random
+
+    from tortoise.model_adapters import RotatingModel
+
+    venice_calls: list[str] = []
+
+    class _Resp:
+        def __init__(self, url):
+            self._url = url
+
+        def raise_for_status(self):
+            if "venice" in self._url:
+                venice_calls.append(self._url)
+                raise _http_error(402)
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok-rotated"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+    def _fake_post(session, url, *args, **kwargs):
+        return _Resp(url)
+
+    monkeypatch.setattr(requests.sessions.Session, "post", _fake_post)
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("VENICE_API_KEY", "vz")
+    pool = build_extractor_model("deepseek-flash-direct")
+    assert isinstance(pool, RotatingModel)
+    assert [p.provider for p in pool.providers] == [
+        "venice", "openrouter", "deepseek-direct"]
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])
+    try:
+        # venice (weight 0.5) picked first → 402 → cooldown; the retry lands
+        # on deepseek-direct (weights 0.5/0.35/0.15, r=0.9 → lane 2). The
+        # second call's first pick is venice again → cooldown-skip → the
+        # healthy lane answers: same-run continuity through the real pool.
+        out1 = pool.complete(system="s", user="u")
+        out2 = pool.complete(system="s", user="u")
+    finally:
+        _random.random = _orig
+    assert out1 == out2 == "ok-rotated"
+    assert "venice" in pool._cooldowns
+    assert pool.route == "deepseek-direct"
+    assert len(venice_calls) == 1, "venice 402s once, then stays cooldowned"
+    assert [p.provider for p in pool.providers] == [
+        "venice", "openrouter", "deepseek-direct"]  # pool membership unchanged

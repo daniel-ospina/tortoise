@@ -135,7 +135,8 @@ def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
     extraction sourceTypes.
     """
     if packs_dir is None:
-        packs_dir = Path(__file__).resolve().parent.parent / "packs"
+        from tortoise.pack_registry import default_packs_dir
+        packs_dir = default_packs_dir()
     registry = PackRegistry(packs_dir)
     registry.load_all()
     pack_point: set[str] = set()

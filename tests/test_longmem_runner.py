@@ -257,7 +257,8 @@ def test_outcomes_to_report_golden_shape():
     assert set(report) == {
         "benchmark", "dataset", "split", "n_questions", "n_excluded",
         "accuracy", "retrieval", "latency_ms", "methodology", "failures",
-        "n_failed", "outcomes", "integrity", "leg_mix", "pool_size",
+        "n_failed", "outcomes", "integrity", "extraction_health",
+        "leg_mix", "pool_size",
         "evidence",
     }
     assert report["benchmark"] == "LongMemEval"

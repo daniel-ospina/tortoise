@@ -104,8 +104,8 @@ def _collect_known_kinds() -> list[str]:
             CANONICAL_POINT_KINDS,
             CANONICAL_OBJECT_KINDS,
         )
-        from pathlib import Path as _Path
-        packs_dir = _Path(__file__).resolve().parent.parent / "packs"
+        from .pack_registry import default_packs_dir
+        packs_dir = default_packs_dir()
         registry = PackRegistry(packs_dir)
         registry.load_all()
         kinds: list[str] = []

@@ -359,6 +359,21 @@ def is_fatal(exc: BaseException) -> bool:
     return classify_llm_error(exc) in (LlmErrorClass.FATAL, LlmErrorClass.FATAL_CONFIG)
 
 
+def is_billing_exhausted(exc: BaseException) -> bool:
+    """True → HTTP 402 (Payment Required) — the provider's credits ran out.
+
+    The one 'fatal' class that is PROVIDER-specific (a balance emptied
+    mid-run), not config-inherent: auth (401/403) means the credential is
+    wrong everywhere, config 4xx means the request shape is wrong everywhere
+    — rotation would just retry the same bug. A 402 is a runtime condition
+    of THAT provider; ``RotatingModel`` cooldowns it and rotates to an
+    alternative so the run continues (#1951). Deliberately NOT part of the
+    M2/M3 taxonomy export contract — ``is_fatal``/``classify_llm_error``
+    semantics are unchanged for the retry/abort consumers (run.py M3,
+    extractor_v2); only the rotation pool consults this hook."""
+    return _http_status(exc) == 402
+
+
 # ── Provider routing (D2) ──────────────────────────────────────────────────
 
 _PROVIDER_NAMES = ("deepseek-direct", "openrouter")
@@ -604,9 +619,13 @@ class RotatingModel:
 
     ``complete()`` routes each call to the next healthy provider in the
     rotation; a transient failure puts that provider in cooldown (skipped
-    for ``cooldown_s``) and the next provider is tried; fatal errors
-    (401/402/403 + config 4xx, P2 taxonomy) re-raise immediately — no
-    rotation on auth/billing failures. Exposes the capture-meta contract:
+    for ``cooldown_s``) and the next provider is tried. Auth (401/403) and
+    config 4xx (P2 taxonomy) re-raise immediately — no rotation on
+    credential/request-shape bugs. HTTP 402 (billing exhausted) is
+    rotation-eligible (#1951): cooldown THAT provider and continue on an
+    alternative — the run proceeds slower, not dead — raising only when
+    there is no alternative provider (fail loud, no infinite loop). Exposes
+    the capture-meta contract:
     ``provider``/``route`` (active provider), ``errors``, ``last_finish_reason``
     (the truncation signal — read from the serving adapter), ``close()``
     (interrupt a hung read — the #1655 fix, applied to the active adapter)."""
@@ -650,8 +669,11 @@ class RotatingModel:
                 return out
             except Exception as e:
                 last_err = e
-                if is_fatal(e):
-                    raise  # never rotate on auth/billing/config failures
+                billing = is_billing_exhausted(e)
+                if is_fatal(e) and not billing:
+                    raise  # auth (401/403) + config 4xx — never rotate (#1951)
+                if billing and n == 1:
+                    raise  # no alternative provider — fail loud, no infinite loop
                 self._cooldowns[p.provider] = now + self.cooldown_s
                 self.errors.append(f"{p.provider}: {type(e).__name__}: {e}")
         raise last_err if last_err is not None else RuntimeError(

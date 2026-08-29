@@ -914,8 +914,8 @@ def _get_kind_expander():
         with _registry_lock:
             if _registry_cache is None:
                 from .pack_registry import PackRegistry  # noqa: I001
-                from pathlib import Path as _Path
-                packs_dir = _Path(__file__).resolve().parent.parent / "packs"
+                from .pack_registry import default_packs_dir
+                packs_dir = default_packs_dir()
                 _registry_cache = PackRegistry(packs_dir)
                 _registry_cache.load_all()
     return _registry_cache
