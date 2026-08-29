@@ -546,6 +546,7 @@ function claimIntentInFlight() {
     if (!scopeTouchedRef.current.docs) {
       const seeded = reconcileDocsScope(onboarding.github_docs_scope, reposList)
       setDocsScope(seeded)
+      docsScopeRef.current = seeded  // mirror the ref (see the heal effect)
       // code-review P2: hydration must load each seeded repo's branch
       // options — loadBranches fires only from the checkbox onChange, so
       // seeded repos would otherwise render a picker with only the
@@ -1198,10 +1199,15 @@ function claimIntentInFlight() {
         // not stick a blank picker + fail the docs job. Runs BEFORE the
         // default fill so a reset lands on the repo's API default option
         // (deterministic — the fill is skipped for a truthy stale branch;
-        // '' and 'all' are always-valid markers).
+        // '' and 'all' are always-valid markers). Idempotent guard: if the
+        // API default itself is not among the options, the heal target is
+        // already set — stop (no re-trigger loop under the docsScope dep).
         if (shouldResetBranch(branches[r], info)) {
-          branches[r] = info.defaultBranch || ''
-          changed = true
+          const heal = info.defaultBranch || ''
+          if (branches[r] !== heal) {
+            branches[r] = heal
+            changed = true
+          }
         }
         if (info && info.defaultBranch && !branches[r]) {
           branches[r] = info.defaultBranch
@@ -1217,7 +1223,7 @@ function claimIntentInFlight() {
       return next
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [branchLists])
+  }, [branchLists, docsScope])
   // Load once when the team is connected (re-connect/rotation re-loads via the
   // connected-flip guard below). reposLoaded marks the attempt so a failed load
   // doesn't retry on every render.
