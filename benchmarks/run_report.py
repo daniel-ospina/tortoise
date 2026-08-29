@@ -617,9 +617,13 @@ def _run_with_sdk(args, sdk) -> dict:
     # measures the valid e2e@new-floor minus retrieval@new-floor decomposition;
     # pre-floor comparator (depth 20) recorded in provenance.
     e2e_limit = getattr(args, "e2e_limit", 10)
-    # #1348: NO baked default floor — the depth finding was CEILING-CAPPED;
-    # env-only opt-in. Unset → historical e2e_limit*2 semantics. Keep the
-    # parse in sync with sdk.py tortoise_fts_query (clamp 1..10000).
+    # #1348 pool floor (benchmark's own arm-depth default): env-only opt-in;
+    # unset → historical e2e_limit*2 semantics for the ARM depth. NOTE: the
+    # SDK now BAKES the product's pool floor (DEFAULT_POOL_SIZE = 120,
+    # #1947/G2) — the benchmark's per-strategy fetch is max(arm_limit*2, 120)
+    # in the SDK regardless of this local default; the env override still
+    # raises it. Keep the parse in sync with sdk.py tortoise_fts_query
+    # (clamp 1..10000).
     pool_floor = 0
     raw_floor = os.environ.get("TORTOISE_POOL_FLOOR", "")
     if raw_floor.strip():

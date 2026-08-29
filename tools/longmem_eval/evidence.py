@@ -50,6 +50,7 @@ graph, no LLM keys.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from typing import Any
 
 # (b) n-gram fallback threshold — the run-protocol step-2 calibration knob.
@@ -261,6 +262,39 @@ def mark_for(point: dict, *, session_id: Any,
     return {"has_answer": any(
         marks[m] for m in ("source_session", "verbatim", "raw_chunk")),
         "marks": marks}
+
+
+def mark_for_question(question: dict | None) -> Callable[[dict], dict[str, bool]]:
+    """Build the read-time mark provider for a dataset question — the eval
+    adapter that binds the eval's mark computation into the PRODUCT's
+    ``tortoise.retrieval.apply_evidence_boost`` (the product inversion:
+    the boost transform ships in tortoise/, the dataset-derived marks stay
+    eval-instrumentation).
+
+    The returned callable maps an annotated hit to its four marks
+    (``{"source_session", "verbatim", "raw_chunk", "answer_string"}``)
+    via :func:`mark_for`, using the question's evidence sessions, answer
+    turns and gold answer — the C2 (#1745) read-time recompute (the OR'd
+    ``has_answer`` prop cannot express the verbatim-vs-source split). The
+    gold answer (mark (d), #1763/#1945) is empty when the question carries
+    none, in which case the answer_string class is inert.
+    """
+    sessions = evidence_sessions(question) if question else set()
+    answer_turn_contents = [
+        (t.get("content") or "")
+        for s in ((question or {}).get("haystack_sessions") or [])
+        for t in s if t.get("has_answer")
+    ]
+    gold_answer = str((question or {}).get("answer") or "")
+
+    def _marks(h: dict) -> dict[str, bool]:
+        return mark_for(
+            h, session_id=h.get("session_id"),
+            evidence_sessions=sessions,
+            answer_turn_contents=answer_turn_contents,
+            gold_answer=gold_answer)["marks"]
+
+    return _marks
 
 
 def anchor_quote(point_content: str, turns: list[Any]) -> str:

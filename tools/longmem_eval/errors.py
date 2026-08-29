@@ -12,19 +12,29 @@ P2 alignment rule: when the P2 taxonomy changes, ``classify_eval_error``
 delegates to it for the coarse class — this module never forks the
 status-code table.
 """
+# ═════════════════════════════════════════════════════════════════════════
+# ══ HARNESS PURPOSE — READ THIS FIRST ════════════════════════════════════
+# tools/longmem_eval/ is a THIN MEASUREMENT LAYER over the product
+# (tortoise/): the eval calls the product's OWN engine and measures it.
+# Quality improvements belong IN tortoise/ (that is what ships to
+# customers). The retry machinery in this module (write-stage retries,
+# #1806) is now WIRED — ``retryable_transient`` / ``call_with_predicate`` /
+# ``WriteStageRetriesExhausted`` ship in ``tortoise/retry.py`` (product
+# inversion) and are RE-EXPORTED here unchanged. The eval still owns its
+# run knobs (``INGEST_WRITE_RETRIES`` etc.). See
+# docs/audit/2026-08-29-product-cohesion.md.
+# ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
-import errno
 import logging
-import random
-import re
-import socket
-import time
 from collections import Counter
-from collections.abc import Callable
-from typing import Any  # re-exported for convenience (used in call_with_predicate)
 
 from tortoise.model_adapters import classify_llm_error
+from tortoise.retry import (  # noqa: F401  — re-exported for the eval harness
+    WriteStageRetriesExhausted,
+    call_with_predicate,
+    retryable_transient,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,143 +63,23 @@ INGEST_QUESTION_RETRIES = 1
 #: the first attempt).
 RESUME_ATTEMPTS_CAP = 2
 
-#: Network errno set the write-stage retry predicate trusts as transport
-#: evidence on a bare ``OSError`` (P2-1 narrowing — a deterministic-bug
-#: FileNotFoundError/ENOENT or PermissionError/EACCES is never retried).
-_NETWORK_ERRNOS = frozenset({
-    errno.ECONNRESET, errno.ETIMEDOUT, errno.EHOSTUNREACH,
-    errno.ENETUNREACH, errno.EPIPE, errno.ECONNREFUSED,
-    errno.ECONNABORTED, errno.ENETDOWN,
-})
-
-#: MISCONF / AOF-fsync / disk-full write refusals redis surfaces as
-#: ``ResponseError`` — retried (bounded) because the recovery under disk
-#: pressure IS the retry; unrelated ResponseErrors (WRONGTYPE, ...) are not.
-_MISCONF_RE = re.compile(r"MISCONF|Can't persist")
-
-
-class WriteStageRetriesExhausted(Exception):
-    """Write-stage retry sentinel (R1, #1786/#1806).
-
-    Raised by :func:`call_with_predicate` ONLY when the predicate-true
-    retries exhaust — the inner exception is exposed via ``.original`` and
-    ``__cause__`` so the run.py handler can unwrap FIRST and derive
-    ``error``/``error_class``/``retryable`` from the INNER exception (never
-    from the sentinel itself — evaluating the predicate on the sentinel
-    would persist ``retryable=False`` and permanently lose the question).
-
-    Never constructed for a predicate-FALSE exception: the loop re-raises
-    the ORIGINAL exception unchanged, unwrapped (no sentinel, no marker),
-    so a fatal-class inner can never reach the handler sentinel-wrapped.
-    """
-
-    def __init__(self, original: BaseException):
-        self.original = original
-        super().__init__(f"write-stage retries exhausted: {original!r}")
-
-
-def retryable_transient(exc: BaseException) -> bool:
-    """True ONLY for transport-class transients the eval write/retry path
-    may retry — never for parse/structural/fatal-class errors.
-
-    Pinned matrix (#1786 Task 1 Step 2 / #1806 indicator 1):
-    - redis ``TimeoutError`` / ``ConnectionError`` (redis-py 8.x: NOT the
-      builtin classes, reprs ``network:TimeoutError`` / ``network:ConnectionError``)
-      → True — the verified write-path loss mechanism.
-    - redis ``ResponseError`` matching ``/MISCONF|Can't persist/`` (AOF
-      fsync / disk-full write refusal) → True; unrelated ResponseErrors → False.
-    - ``requests``/``urllib`` provider-network errors (ingest-site LLM
-      provider transients) → True.
-    - ``OSError`` narrowed to transport errnos (ECONNRESET/ETIMEDOUT/
-      EHOSTUNREACH/ENETUNREACH/EPIPE/ECONNREFUSED/ECONNABORTED/ENETDOWN)
-      or a socket.timeout cause → True; a deterministic-bug OSError
-      (ENOENT/EACCES/...) → False.
-    - builtin ``TimeoutError`` (≡ ``socket.timeout`` on 3.10+, where it
-      subclasses ``OSError`` — the OSError branch below consumes it) → True
-      ONLY with a socket-origin cause (``isinstance(exc.__cause__,
-      socket.timeout)``) or a network errno; a BARE local timeout (no
-      cause, no errno) → False (P1-7 — a direct ``socket.timeout`` without
-      a cause/errno is deliberately NOT retried; drivers wrap socket
-      timeouts into the classes above, and the conservative rule protects
-      local concurrent.futures/asyncio deadline timeouts).
-    - ``urllib.error.HTTPError`` / ``requests.HTTPError`` are EXCLUDED
-      FIRST (HTTPError IS-A URLError IS-A OSError on 3.12) — deterministic
-      status responses are never retryable.
-    """
-    import urllib.error
-
-    import redis.exceptions as _re
-    import requests
-
-    # HTTPError classes first — they subclass URLError which subclasses
-    # OSError (Python 3.12), so they must be excluded before either branch.
-    if isinstance(exc, (urllib.error.HTTPError, requests.HTTPError)):
-        return False
-    if isinstance(exc, _re.TimeoutError):
-        return True
-    if isinstance(exc, _re.ConnectionError):
-        return True
-    if isinstance(exc, _re.ResponseError) and _MISCONF_RE.search(str(exc)):
-        return True
-    if isinstance(exc, requests.exceptions.Timeout):
-        return True
-    if isinstance(exc, requests.exceptions.ConnectionError):
-        return True
-    if isinstance(exc, urllib.error.URLError):
-        return True
-    if isinstance(exc, OSError):
-        if exc.errno in _NETWORK_ERRNOS:
-            return True
-        # socket-origin context (on 3.10+ builtin TimeoutError IS-A OSError,
-        # so every TimeoutError lands here — bare local timeouts have no
-        # cause/errno and correctly resolve False per P1-7).
-        return isinstance(exc.__cause__, socket.timeout)
-    return False
-
-
-def call_with_predicate(fn: Callable[[], Any], *, predicate: Callable[[BaseException], bool],
-                        retries: int, what: str, base: float = 2.0,
-                        cap: float = 30.0, marker_armed: bool = True,
-                        on_retry: Callable[[BaseException], None] | None = None) -> Any:
-    """Bounded jittered retry of ``fn`` gated by ``predicate`` (R1, #1786).
-
-    Shared single-source retry helper BOTH ``run.py`` and ``ingest_v2.py``
-    import (P2-1 — the write-stage loop MUST NOT use run.py's
-    ``_call_with_backoff``, whose default retries ANY non-fatal exception
-    and would violate the "parse/structural/fatal are never retried"
-    acceptance).
-
-    - predicate-FALSE exception → re-raised IMMEDIATELY, unchanged,
-      unwrapped (never a sentinel).
-    - predicate-true transients → retried with half-jitter
-      ``(0.5 + rand/2) * 2**attempt`` (the same spread family as the
-      reader/judge backoff); when the budget exhausts the loop raises
-      ``WriteStageRetriesExhausted(inner) from inner`` — the R2 marker.
-    - ``marker_armed=False`` (a ``--retry-failed`` resume re-attempt): the
-      exhausted re-raise is the ORIGINAL exception, unwrapped — no
-      sentinel, no R2 marker (P1-1: no resume-internal whole-question
-      retry gets a second budget).
-    - ``on_retry`` (optional): called with the exception before each
-      retry sleep — the eval's ``ingest_retries`` per-question counter
-      (Task 1 Step 5, #1786).
-    """
-    for attempt in range(1, retries + 2):
-        try:
-            return fn()
-        except Exception as e:  # noqa: BLE001, RUF100
-            if not predicate(e):
-                raise
-            if attempt > retries:
-                if marker_armed:
-                    raise WriteStageRetriesExhausted(e) from e
-                raise
-            wait = min(base ** attempt, cap) * (0.5 + random.random() / 2)
-            if on_retry is not None:
-                on_retry(e)
-            logger.warning("%s failed (attempt %d/%d): %s; retrying in ~%.1fs",
-                           what, attempt, retries, e, wait)
-            time.sleep(wait)
-    raise AssertionError("unreachable")  # pragma: no cover
+# ══ PRODUCT-PARITY NOTE (WIRED — shipped to product in this PR) ══════════
+# The write-stage retry machinery below (``retryable_transient`` /
+# ``call_with_predicate`` / ``WriteStageRetriesExhausted``) now lives in
+# the PRODUCT: tortoise/retry.py (product inversion,
+# fix/invert-retrieval-to-product) — this module RE-EXPORTS it unchanged,
+# so the eval's ingest write path behaves identically while the product
+# owns the capability.
+#   Product default: NO bounded retry on the SDK write path yet —
+#       ``_post_commit`` is a single POST (tortoise/sdk.py:15240-15252) and
+#       graph writes are un-retried; robustness = idempotent MERGE keys +
+#       client_commit_id replay (sdk.py:1849-1857) + server-side
+#       CommitRecordStore dedup + fail-closed error surfacing. The retry
+#       PRIMITIVE is now a product module.
+#   Follow-up (NOT this PR): wiring ``tortoise.retry`` into the SDK write
+#       path (commit/capture writes) is the audit G8 candidate — the
+#       module is the reusable bounded-retry primitive for that decision.
+# ═════════════════════════════════════════════════════════════════════════
 
 
 def classify_eval_error(exc: BaseException, *, site: str) -> str:

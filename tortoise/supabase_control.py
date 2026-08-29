@@ -61,7 +61,7 @@ from __future__ import annotations
 import logging
 import os
 import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 
 _logger = logging.getLogger(__name__)
 
@@ -509,7 +509,7 @@ def resolve_api_key(cp, token: str) -> dict | None:
     from tortoise.auth import lookup_hash
     from tortoise.quota import DEFAULT_MAX_SESSIONS
 
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    now = datetime.now(UTC)
     h = lookup_hash(token)
     team_id = key_id = created_via = created_by = key_prefix = None
 
@@ -791,7 +791,7 @@ def active_api_keys(cp, team_id: str, *, created_via: str | None = None,
                 "expires_at", "revoked_at"],
         filters=filters,
     )
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    now = datetime.now(UTC)
     return [
         r for r in rows
         if (exp := _parse_ts(r.get("expires_at"))) is None or exp > now
@@ -889,8 +889,9 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
     Role: 0008 CHECK closes the enum to 'admin' | 'member' (owner is not
     invitable — single-owner model, D7 #574).
     """
-    import uuid  # noqa: I001
+    import uuid
     from datetime import datetime, timedelta
+
     from tortoise.auth import lookup_hash as _lookup_hash
 
     role = (role or "member").strip().lower()
@@ -914,7 +915,7 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
 
     token = str(uuid.uuid4())
     iid = uuid.uuid4().hex[:26]
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    now = datetime.now(UTC)
     expires_at = (now + timedelta(days=expires_days)).isoformat()
     try:
         cp.query(
@@ -967,10 +968,11 @@ def invitation_accept(cp, token: str, user_id: str,
     resurrected in place (registry MERGE semantics) rather than INSERTed —
     uq_member_team (user_id, team_id) would reject a duplicate row.
     """
-    import uuid  # noqa: I001
+    import uuid
+
     from tortoise.auth import lookup_hash as _lookup_hash
 
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    now = datetime.now(UTC)
     h = _lookup_hash(token)
     rows = cp.query(
         "invitations",
@@ -2225,7 +2227,7 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
     """
     import uuid
 
-    now = datetime.now(timezone.utc)  # noqa: UP017
+    now = datetime.now(UTC)
     rows = cp.query(
         "invitations",
         select=["id", "team_id", "email", "role", "status", "expires_at"],

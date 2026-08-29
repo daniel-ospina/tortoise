@@ -12,8 +12,12 @@ The fix wires `_ensure_not_suspended(team_row)` into the enforcement seams:
   (invites, members, key toggle, dashboard-login) — checked AFTER role
   authz (no existence-oracle change), so every owner/admin endpoint
   inherits parity
-- create_graph / list_graphs / list_my_teams (on the team node they
-  already fetch — _membership_team itself stays pure)
+- create_graph / list_graphs (on the team node they already
+  fetch — _membership_team itself stays pure)
+- list_my_teams: #1912 replaced the whole-list suspension 403 with a
+  per-row suspended_at field — healthy teams stay listable, and the 403
+  survives only when EVERY membership is suspended (nothing healthy to
+  switch to)
 - rescind_invite's Supabase branch (delegates RBAC to invitation_rescind,
   which has no suspension check)
 
@@ -144,9 +148,19 @@ def _seed_pending_invite(fake, token: str = "tok-1"):
     )
 
 
-def _seed_registry(db_path: str, *, suspended: bool = False, team_id: str = "reg-team-1"):
+# Keep seeded registry SDKs alive for the module lifetime: a TortoiseSDK
+# destructor SHUTDOWN NOSAVEs the process-shared embedded server when it
+# is the last reference — letting the _seed_registry local be GC'd mid-
+# suite can lose the just-seeded Team/Membership (flaky registry-mode
+# 403s). Anchoring the seed SDKs removes the race deterministically.
+_SEED_SDKS: list[TortoiseSDK] = []
+
+
+def _seed_registry(db_path: str, *, suspended: bool = False, team_id: str = "reg-team-1",
+                   m_id: str = "m-1"):
     """Seed a registry Team + owner Membership (+ optional suspended_at)."""
     sdk = TortoiseSDK(db_path, namespace="registry")
+    _SEED_SDKS.append(sdk)
     reg = sdk._get_registry()
     props = {"id": team_id, "name": team_id, "tier": "free"}
     if suspended:
@@ -158,9 +172,9 @@ def _seed_registry(db_path: str, *, suspended: bool = False, team_id: str = "reg
         params=props,
     )
     reg.query(
-        "CREATE (m:Membership {id:'m-1', user_id:$uid, team_id:$tid, "
+        "CREATE (m:Membership {id:$id, user_id:$uid, team_id:$tid, "
         "role:'owner', status:'active', joined_at:'2026-08-01T00:00:00Z'})",
-        params={"uid": OWNER, "tid": team_id},
+        params={"id": m_id, "uid": OWNER, "tid": team_id},
     )
 
 
@@ -204,11 +218,20 @@ class TestSuspendedTeamLockdown:
         _assert_suspended(r)
 
     def test_list_my_teams_403(self, sb_client, as_user):
-        """The switcher must not silently hide the suspended team — 403 with
-        the appeal detail (mixed healthy/suspended memberships are blocked
-        as a whole so the suspended state is never hidden)."""
+        """#1912 regression: EVERY membership suspended → nothing healthy to
+        list — still 403 SUSPENDED with the appeal detail."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
+        as_user()
+        r = tc.get("/v1/teams")
+        _assert_suspended(r)
+
+    def test_list_my_teams_all_suspended_403(self, sb_client, as_user):
+        """#1912: multiple suspended memberships (no healthy team) still 403
+        as a whole — the per-row suspended_at only unblocks MIXED lists."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        _seed_team(fake, suspended=True, team_id=_TEAM2)
         as_user()
         r = tc.get("/v1/teams")
         _assert_suspended(r)
@@ -308,26 +331,44 @@ class TestSuspendedTeamLockdown:
         assert r.status_code == 200, r.text
         assert r.json()["team_id"] == TEAM_ID
 
-    def test_list_my_teams_mixed_blocked_as_whole(self, sb_client, as_user):
-        """A user with one healthy + one suspended membership is blocked as
-        a whole (the suspended state is never silently hidden — the appeal
-        detail tells them why). Healthy teams stay reachable via explicit
-        team_id paths."""
+    def test_list_my_teams_mixed_healthy_listable(self, sb_client, as_user):
+        """#1912: a suspended membership must not 403 the whole switcher.
+        Mixed healthy/suspended memberships list BOTH rows — the suspended
+        one carries suspended_at (auto-selection skips it; manual selection
+        403s with the appeal detail) and the healthy team stays listable.
+        The suspended row also skips graph resolution: it has a default
+        graph on the teams row, yet graph_count stays 0."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=True)
         _seed_team(fake, suspended=False, team_id=_TEAM2)
+        # a graph_name would make graph_list return 1 graph — the skip must
+        # still yield graph_count 0 / default_graph_id None for the row.
+        fake.tables["teams"][0]["graph_name"] = "default"
+        # mirror: the HEALTHY row in the same mixed response must still
+        # resolve its default graph.
+        fake.tables["teams"][1]["graph_name"] = "default"
         as_user()
         r = tc.get("/v1/teams")
-        _assert_suspended(r)
+        assert r.status_code == 200, r.text
+        by_id = {t["team_id"]: t for t in r.json()}
+        assert set(by_id) == {TEAM_ID, _TEAM2}
+        assert by_id[TEAM_ID]["suspended_at"] == "2026-08-01T00:00:00Z"
+        assert by_id[TEAM_ID]["graph_count"] == 0  # resolution skipped
+        assert by_id[TEAM_ID]["default_graph_id"] is None
+        assert by_id[_TEAM2]["suspended_at"] is None
+        assert by_id[_TEAM2]["graph_count"] == 1
+        assert by_id[_TEAM2]["default_graph_id"] == "default"
 
     def test_list_my_teams_healthy_only_200(self, sb_client, as_user):
-        """Control: no suspended memberships → switcher unaffected."""
+        """Control: no suspended memberships → switcher unaffected (per-row
+        suspended_at is None)."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False)
         as_user()
         r = tc.get("/v1/teams")
         assert r.status_code == 200, r.text
         assert len(r.json()) == 1
+        assert r.json()[0]["suspended_at"] is None
 
 
 class TestSuspendedTeamLockdownRegistry:
@@ -347,6 +388,20 @@ class TestSuspendedTeamLockdownRegistry:
         as_user()
         r = tc.get("/v1/teams/reg-team-1/export")
         _assert_suspended(r)
+
+    def test_list_my_teams_mixed_healthy_listable(self, reg_client, as_user):
+        """#1912 registry branch: per-row suspended_at via properties(t) —
+        mixed memberships list both rows, suspended carries the stamp."""
+        tc, db_path = reg_client
+        _seed_registry(db_path, suspended=True, team_id="reg-team-1")
+        _seed_registry(db_path, suspended=False, team_id="reg-team-2", m_id="m-2")
+        as_user()
+        r = tc.get("/v1/teams")
+        assert r.status_code == 200, r.text
+        by_id = {t["team_id"]: t for t in r.json()}
+        assert set(by_id) == {"reg-team-1", "reg-team-2"}
+        assert by_id["reg-team-1"]["suspended_at"] == "2026-08-01T00:00:00Z"
+        assert by_id["reg-team-2"]["suspended_at"] is None
 
     def test_export_healthy_control(self, reg_client, as_user):
         tc, db_path = reg_client
@@ -380,6 +435,15 @@ class TestHealthyTeamControl:
         r = tc.get("/v1/teams")
         assert r.status_code == 200, r.text
         assert r.json()[0]["team_id"] == TEAM_ID
+
+    def test_list_my_teams_no_memberships_200(self, sb_client, as_user):
+        """#1912 guard edge: zero memberships → 200 [] (the all-suspended
+        403 must not fire on an empty list — all() of [] is True)."""
+        tc, _, _ = sb_client
+        as_user()
+        r = tc.get("/v1/teams")
+        assert r.status_code == 200, r.text
+        assert r.json() == []
 
     def test_invite_admin_still_works_but_member_403(self, sb_client, as_user):
         """Role authz unchanged on healthy teams: owner passes (Team tier

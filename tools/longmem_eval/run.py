@@ -1509,6 +1509,22 @@ def _retriever_from_checkpoint(data: dict,
     return "hybrid", "default"
 
 
+# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
+# This is a QUALITY knob that lives in the eval harness and is NOT wired
+# into the product (tortoise/) path.
+#   Product default: no analog — the product has no long-running batch
+#       resumption surface (capture/search are request-scoped), so no
+#       checkpoint-quality gate exists or is needed.
+#   Why eval-only:   #1764's gate refuses to resume retrieval-dead
+#       checkpointed outcomes (the pilot's 0.74 baseline was a two-
+#       population blend: 20 dead-FTS-leg resumed outcomes at 0.55 + 30
+#       fresh at 0.867). Landed eval-side only (commit 9aae30c2).
+#   Ship-to-product: not applicable — the gate only exists where
+#       checkpoint-resume exists (the eval runner); no tracking issue
+#       filed.
+#   Rationale:       eval-runner integrity for reproducible benchmarks —
+#       the product has no batch-resumption surface to port into.
+# ═════════════════════════════════════════════════════════════════════════
 def resume_gate_reject_reason(outcome: dict) -> str | None:
     """#1764 resume-quality gate: why a checkpointed outcome is NOT
     resumable, or None when it passes.

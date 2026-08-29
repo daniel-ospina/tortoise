@@ -43,7 +43,7 @@ embeddings = ["sentence-transformers>=3,<6", "scikit-learn>=1.0"]
 quadrature = ["jax>=0.4"]
 postgres = ["psycopg2-binary>=2.9"]
 backups = ["boto3>=1.34", "cryptography>=42"]
-test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "playwright>=1.40", "pytest-playwright>=0.5", "cryptography>=42"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460)
+test = ["pytest>=8", "pytest-timeout", "pytest-asyncio>=0.23", "playwright>=1.40", "pytest-playwright>=0.9", "cryptography>=42"]  # cryptography: hosted E2E JWKS/ES256 session mint (#303, #1460)
 
 # Canonical dev/test tooling (#492, #493) — installed via `uv sync --group dev`.
 # The `test` extra above is the CI/live E2E path (pip install -e '.[test]').
@@ -62,7 +62,13 @@ dev = [
     "requests>=2.31",
     "jax>=0.4",
     "playwright>=1.40",
-    "pytest-playwright>=0.5",
+    # #1940: pytest-playwright floor bumped 0.5 → 0.9 — the lock had
+    # drifted from what CI's `pip install -e '.[test]'` resolves (0.9.0),
+    # so local uv.lock and the CI install disagreed. The teardown error
+    # tracked in #1940 was a harness bug (tests/e2e/* route handlers), fixed
+    # separately; this floor just pins the plugin at the current release
+    # alongside the 1.62 driver.
+    "pytest-playwright>=0.9",
     "ruff==0.16.4",  # #1685: pin ruff (CI lint-command + local `uv run ruff`
     # align — the unpinned agent-infra job install was the drift vector).
     "tiktoken>=0.14.0",

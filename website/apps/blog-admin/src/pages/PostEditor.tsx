@@ -379,6 +379,29 @@ export default function PostEditor() {
     },
   });
 
+  // Scoped AI generation for the excerpt/tags card (#1866 follow-up): same
+  // server call, but only excerpt + tags are applied — slug/meta fields you
+  // may have already hand-tuned stay untouched.
+  const generateExcerptTagsMutation = useMutation({
+    mutationFn: async () => {
+      const body = editorRef.current ? editorToMarkdown(editorRef.current) : '';
+      return generateSeo({
+        title: formRef.current.title,
+        body,
+        tags: parseTags(formRef.current.tags),
+      });
+    },
+    onSuccess: (result) => {
+      updateField('excerpt', result.excerpt);
+      updateField('tags', result.tags.join(', '));
+      setDirty(true);
+      toast.success(`Excerpt & tags generated${result.cost_estimate ? ` (${formatCost(result.cost_estimate)})` : ''}`);
+    },
+    onError: (err) => {
+      toast.error(`Generation failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    },
+  });
+
   const [coverMode, setCoverMode] = useState<'founder' | 'abstract'>('founder');
   const generateCoverMutation = useMutation({
     mutationFn: async () => {
@@ -406,7 +429,7 @@ export default function PostEditor() {
   });
 
   // Derived flag AFTER both mutations — disables save while generating.
-  const generating = generateSeoMutation.isPending || generateCoverMutation.isPending;
+  const generating = generateSeoMutation.isPending || generateExcerptTagsMutation.isPending || generateCoverMutation.isPending;
 
   if (loadingPost) {
     return (
@@ -508,22 +531,24 @@ export default function PostEditor() {
         {/* Sidebar: Metadata */}
         <div className="space-y-4">
           <Card className="p-4 space-y-4 rounded-xl">
-            <div>
-              <Label htmlFor="slug">Slug</Label>
-              <Input
-                id="slug"
-                value={form.slug}
-                disabled={!isNew}
-                onChange={e => { slugTouched.current = true; updateField('slug', e.target.value); }}
-                placeholder="tortoise-memory-engine"
-                className={!isNew ? 'opacity-60 cursor-not-allowed' : ''}
-              />
-              <p className="text-xs text-muted-foreground mt-1">
-                {isNew ? '/blog/' : 'Immutable after create — /blog/'}
-                <span className="text-primary">{form.slug || '...'}</span>
-              </p>
+            <div className="flex items-center justify-between">
+              <h3 className="font-semibold text-sm">Excerpt &amp; tags</h3>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 px-2 text-xs"
+                disabled={generateExcerptTagsMutation.isPending || generating || saving || isArchived}
+                onClick={() => generateExcerptTagsMutation.mutate()}
+              >
+                {generateExcerptTagsMutation.isPending ? (
+                  <Loader2 className="w-3.5 h-3.5 mr-1 animate-spin" />
+                ) : (
+                  <Sparkles className="w-3.5 h-3.5 mr-1" />
+                )}
+                {generateExcerptTagsMutation.isPending ? 'Generating…' : 'Generate with AI'}
+              </Button>
             </div>
-
             <div>
               <Label htmlFor="excerpt">Excerpt</Label>
               <Textarea
@@ -550,7 +575,6 @@ export default function PostEditor() {
               <p className="text-xs text-muted-foreground mt-1">Comma-separated (max 10)</p>
             </div>
           </Card>
-
           <Card className="p-4 space-y-4 rounded-xl">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-sm">SEO</h3>

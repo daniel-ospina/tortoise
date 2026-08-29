@@ -31,6 +31,7 @@ from tools.longmem_eval.judge import (  # noqa: E402, RUF100
     get_anscheck_prompt, grade_label, is_abstention,
 )
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
+from tools.longmem_eval.evidence import mark_for_question  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, _apply_evidence_boost, _assemble_context, _dedup_pool,
     _estimate_tokens, _is_raw_chunk, _recall_metrics, hybrid_search,
@@ -3145,7 +3146,7 @@ def test_evidence_boost_promotes_marked_hits():
     pre = _assemble_context(pool, top_k=20, max_context_tokens=10**6)
     assert "evidence-pt" not in [h["id"] for h in pre]
     # post-boost: read-time verbatim recompute -> full boost -> top-20
-    boosted, stats = _apply_evidence_boost(pool, question=_boost_question())
+    boosted, stats = _apply_evidence_boost(pool, mark_for=mark_for_question(_boost_question()))
     assert stats["applied"] is True
     assert stats["marks_census"]["verbatim"] == 1
     assert stats["marks_census"]["source_session"] == 1
@@ -3186,7 +3187,7 @@ def test_evidence_boost_precision_guard_recomputed():
                  "lme_session_index": 1, "session_date": "2025-06-14",
                  "quote": "I painted the wall a light gray",
                  "has_answer": True})
-    boosted, stats = _apply_evidence_boost(pool, question=question)
+    boosted, stats = _apply_evidence_boost(pool, mark_for=mark_for_question(question))
     assert stats["marks_census"]["verbatim"] == 1
     assert stats["marks_census"]["source_session"] == 2  # both marked
     # #1945: the verbatim fixture's content carries the gold "light gray"
@@ -3265,8 +3266,7 @@ def test_evidence_boost_answer_string_class_is_strongest():
     # design contract: the answer-precise class is the strongest (>= verbatim)
     assert DEFAULT_EVIDENCE_BOOST_ANSWER_STRING >= DEFAULT_EVIDENCE_BOOST_VERBATIM
     pool = _answer_string_pool()
-    boosted, stats = _apply_evidence_boost(pool,
-                                           question=_answer_string_question())
+    boosted, stats = _apply_evidence_boost(pool, mark_for=mark_for_question(_answer_string_question()))
     # read-time census: the answer-string mark counts its own class
     assert stats["marks_census"]["answer_string"] == 1
     assert stats["marks_census"]["verbatim"] == 1
@@ -3288,7 +3288,8 @@ def test_evidence_boost_answer_string_knob_honored():
     farther (still position-ceiling bounded)."""
     pool = _answer_string_pool()
     boosted, stats = _apply_evidence_boost(
-        pool, question=_answer_string_question(), boost_answer_string=4.0)
+        pool, mark_for=mark_for_question(_answer_string_question()),
+        boost_answer_string=4.0)
     assert stats["boost_answer_string"] == 4.0
     a_pos = [h["id"] for h in boosted].index("answer-pt")
     # 21 / 4.0 = 5.25 scaled priority -> lands strictly above the default
@@ -3322,7 +3323,7 @@ def test_evidence_boost_no_marked_point_displacement():
                      "lme_session_index": 1, "session_date": "2025-06-14",
                      "quote": "I painted the wall a light gray",
                      "has_answer": True})
-    boosted, stats = _apply_evidence_boost(pool, question=question)
+    boosted, stats = _apply_evidence_boost(pool, mark_for=mark_for_question(question))
     # read-time census: 15 source-only points + 10 verbatim/raw chunks
     assert stats["marks_census"]["source_session"] == 25
     assert stats["marks_census"]["verbatim"] == 10
@@ -3374,7 +3375,7 @@ def test_evidence_boost_boundary_point_not_displaced():
                      "has_answer": True})
     # pre-boost: the source point IS in top-20 (index 19)
     assert pool[19]["id"] == "source-pt"
-    boosted, stats = _apply_evidence_boost(pool, question=question)
+    boosted, stats = _apply_evidence_boost(pool, mark_for=mark_for_question(question))
     assert stats["marks_census"]["verbatim"] == 5
     assert stats["marks_census"]["source_session"] == 6
     # #1945: the chunk fixtures carry the gold "light gray" -> the
@@ -3422,7 +3423,7 @@ def test_evidence_boost_stored_mark_fallback_source_class():
                  "session_id": "b-s0", "point_kind": "statement",
                  "lme_session_index": 0, "session_date": "2025-06-10",
                  "quote": "", "has_answer": False})
-    boosted, stats = _apply_evidence_boost(pool, question=question)
+    boosted, stats = _apply_evidence_boost(pool, mark_for=mark_for_question(question))
     # read-time recompute found NOTHING (b-s0 is not an evidence session;
     # no quote; content does not contain the answer turn; no gold answer
     # string in content/quote/search_keys)
@@ -3570,23 +3571,23 @@ def test_evidence_boost_rejects_invalid_multipliers():
     inf zeroes every key) — review F9 pins the isfinite guard."""
     pool = _boost_pool(5)
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
-        _apply_evidence_boost(pool, question=_boost_question(),
+        _apply_evidence_boost(pool, mark_for=mark_for_question(_boost_question()),
                               boost_verbatim=0.0)
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
-        _apply_evidence_boost(pool, question=_boost_question(),
+        _apply_evidence_boost(pool, mark_for=mark_for_question(_boost_question()),
                               boost_source=-1.0)
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
-        _apply_evidence_boost(pool, question=_boost_question(),
+        _apply_evidence_boost(pool, mark_for=mark_for_question(_boost_question()),
                               boost_verbatim=float("nan"))
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
-        _apply_evidence_boost(pool, question=_boost_question(),
+        _apply_evidence_boost(pool, mark_for=mark_for_question(_boost_question()),
                               boost_source=float("inf"))
     # #1945: the answer-string class gets the same boundary guard
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
-        _apply_evidence_boost(pool, question=_boost_question(),
+        _apply_evidence_boost(pool, mark_for=mark_for_question(_boost_question()),
                               boost_answer_string=0.0)
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
-        _apply_evidence_boost(pool, question=_boost_question(),
+        _apply_evidence_boost(pool, mark_for=mark_for_question(_boost_question()),
                               boost_answer_string=float("nan"))
     # env multipliers outside [0,1] are honored (the rerank._env_float
     # MMR-lambda clamp must NOT swallow the 1.5/1.15 defaults)

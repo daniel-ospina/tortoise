@@ -366,9 +366,9 @@ def _clear_locks():
     asyncio.run loops, so clear them between tests to avoid cross-loop
     RuntimeError."""
     import tortoise.hosted_api as _ha
-    _ha._TEAM_MINT_LOCKS.clear()
+    _ha._TEAM_CREATE_LOCKS.clear()
     yield
-    _ha._TEAM_MINT_LOCKS.clear()
+    _ha._TEAM_CREATE_LOCKS.clear()
 
 
 class TestConcurrentTeamCreationTOCTOU:

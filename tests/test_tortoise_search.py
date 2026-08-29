@@ -251,7 +251,8 @@ def test_sdk_fts_query_env_floor_raises_pool(sdk=None):
         os.environ["TORTOISE_POOL_FLOOR"] = "80"
         results = sdk.tortoise_fts_query("quantum", limit=5)
         assert len(results) == 5
-        # Garbage env value falls back to the default (0 → historical limit*2).
+        # Garbage env value falls back to the product's baked floor (120,
+        # #1947/G2) — the returned list is still the caller's limit.
         os.environ["TORTOISE_POOL_FLOOR"] = "not-a-number"
         results = sdk.tortoise_fts_query("quantum", limit=5)
         assert len(results) == 5
@@ -259,10 +260,13 @@ def test_sdk_fts_query_env_floor_raises_pool(sdk=None):
         _env_clear_floor()
 
 
-def test_sdk_fts_query_no_env_default_is_historical(sdk=None):
-    """#1348 NO BAKED DEFAULT FLOOR: with TORTOISE_POOL_FLOOR unset, str_limit
-    is the historical limit*2 (the depth finding was CEILING-CAPPED — floor is
-    env-only opt-in). pool_size below limit*2 is an EXACT override (lowers).
+def test_sdk_fts_query_no_env_default_is_baked_120(sdk=None):
+    """#1947 (audit G2): the PRODUCT owns the pool-depth number — with
+    TORTOISE_POOL_FLOOR unset, the candidate window (str_limit) is
+    max(limit*2, 120), the baked floor (the historical "no baked default"
+    semantics — limit*2 — were inverted into the product by
+    fix/invert-retrieval-to-product). The RETURNED list is still the
+    caller's limit; pool_size below limit*2 is an EXACT override (lowers).
 
     R3 (#1542) Task 5: pinned to the SPARSE leg (see
     test_sdk_fts_query_pool_size_exact_override — RRF union vs pool_size)."""
@@ -273,8 +277,8 @@ def test_sdk_fts_query_no_env_default_is_historical(sdk=None):
         _env_clear_floor()
         for i in range(20):
             sdk.create_point("statement", f"quantum topic number {i}")
-        # No env → historical limit*2 semantics (pool 10 at limit=5) — the
-        # returned list is still the caller's limit.
+        # No env → baked floor 120 candidate window (limit*2 = 10 at
+        # limit=5 is below it); the returned list is still the caller's limit.
         results = sdk.tortoise_fts_query("quantum", limit=5)
         assert len(results) == 5
         # pool_size exact override below limit*2 LOWERS the pool (exact, not floor)
@@ -283,6 +287,48 @@ def test_sdk_fts_query_no_env_default_is_historical(sdk=None):
         assert len(results) == 4
     finally:
         _restore_embedder_get(_orig)
+
+
+def test_sdk_fts_query_baked_floor_candidate_window(sdk=None):
+    """#1947 (audit G2): the baked floor 120 raises the candidate window
+    (str_limit) to max(limit*2, 120) — at the hosted/MCP default limit=10
+    the fusion window is 120 candidates, not the historical 20. The floor
+    is the product's ``tortoise.retrieval.DEFAULT_POOL_SIZE``; the env
+    override (TORTOISE_POOL_FLOOR) still raises it, and pool_size remains
+    an exact override. The returned list is always the caller's limit
+    (measured via the captured degradation_chain limit)."""
+    if sdk is None:
+        sdk = _new_sdk()
+    from tortoise import search_engine
+    captured: dict[str, int] = {}
+    orig = search_engine.degradation_chain
+
+    def _fake(graph, query, struct_kind, query_vec, strategies, *, limit=None,
+              **kw):
+        captured["limit"] = limit
+        return []
+
+    search_engine.degradation_chain = _fake
+    try:
+        _env_clear_floor()
+        # unset env → baked floor 120: max(limit*2, 120)
+        sdk.tortoise_fts_query("quantum", limit=10)
+        assert captured["limit"] == 120
+        sdk.tortoise_fts_query("quantum", limit=50)
+        assert captured["limit"] == 120
+        # limit*2 above the floor wins
+        sdk.tortoise_fts_query("quantum", limit=100)
+        assert captured["limit"] == 200
+        # env override still raises (and can exceed the baked floor)
+        os.environ["TORTOISE_POOL_FLOOR"] = "300"
+        sdk.tortoise_fts_query("quantum", limit=10)
+        assert captured["limit"] == 300
+        # pool_size remains an EXACT override (lowers below the floor)
+        sdk.tortoise_fts_query("quantum", limit=10, pool_size=4)
+        assert captured["limit"] == 4
+    finally:
+        search_engine.degradation_chain = orig
+        _env_clear_floor()
 
 
 def test_sdk_fts_query_full_scan_exempts_floor(sdk=None):
