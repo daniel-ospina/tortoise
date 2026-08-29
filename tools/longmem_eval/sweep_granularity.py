@@ -36,7 +36,7 @@ from .reader import MockReader, build_reader
 from .retrieve import (
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_MAX_CHUNKS_PER_SESSION,
-    DEFAULT_POOL_MULTIPLIER,
+    DEFAULT_POOL_SIZE,
 )
 from .run import _positive_int, run_evaluation
 
@@ -123,7 +123,7 @@ def _print_table(results: list[dict], *, ingest_mode: str,
           f"ingest_mode={ingest_mode}")
     print(f"context_token_cap={context_cap}  "
           f"max_chunks_per_session={max_chunks_per_session}  "
-          f"pool_depth=max(k)*{DEFAULT_POOL_MULTIPLIER}")
+          f"pool_depth={DEFAULT_POOL_SIZE} (knob TORTOISE_LME_POOL_SIZE)")
     print("=" * 88)
     header = (f"{'chunk_turns':>11}  {'ev_recall@10':>13}  "
               f"{'chunk_ev@10':>12}  {'sess_rec@10':>12}  "
@@ -252,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         "ingest_mode": ingest_mode,
         "context_token_cap": args.context_cap,
         "max_chunks_per_session": args.max_chunks_per_session,
-        "pool_depth_multiplier": DEFAULT_POOL_MULTIPLIER,
+        "pool_depth": DEFAULT_POOL_SIZE,
         "results": results,
         "winner": winner,
         "note": ("winner None in deterministic mode (D2: knob-insensitive) or "

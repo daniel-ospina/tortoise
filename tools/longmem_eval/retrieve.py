@@ -31,10 +31,12 @@ Reported per question:
     markup allowance; the estimator is recorded in report provenance),
   * retrieval latency ms.
 
-R1 #1540 (epic #1509): candidates are fetched at ``max(ks) * 3`` depth
-(pool-depth headroom so a monopolizing session's points cannot crowd other
-sessions out BEFORE dedup runs), the pool is deduped per-session
-(``max_chunks_per_session`` raw chunks per session, rank order — E2E-1).
+R1 #1540 (epic #1509): candidates are fetched at the ``pool_size`` depth
+(default 120, knob ``TORTOISE_LME_POOL_SIZE`` — #1947: deepened from R1's
+``max(ks) * 3`` = 60 so marked evidence points ranked below rank 60 can
+enter the pool; the deepest recall horizon ``max(ks)`` is always the
+floor), the pool is deduped per-session (``max_chunks_per_session`` raw
+chunks per session, rank order — E2E-1).
 
 #1745 (epic #1509): ``_assemble_context`` builds the budget-capped,
 RANK-INTERLEAVED context (C1 — replaces R1's points-first UX decision 3,
@@ -259,9 +261,20 @@ DEFAULT_EVIDENCE_BOOST_SOURCE = 1.15
 #: size — a 4.4x reduction from the measured 35k whole-session flood;
 #: LightMem: compact evidence wins under tight budgets).
 DEFAULT_CONTEXT_TOKEN_CAP = 8000
-#: R1 (#1540): candidate-depth headroom — one session's points must not
-#: crowd other sessions out BEFORE dedup runs.
-DEFAULT_POOL_MULTIPLIER = 3
+#: #1947: pool fetch depth for the baseline hybrid arm — deepened 60→120
+#: (reval3: 66% of marked evidence points never entered the 60-item pool,
+#: so the C2 boost had no material to work with; the vector leg already
+#: returns 120 hits/question). Knob ``TORTOISE_LME_POOL_SIZE``; the
+#: deepest recall horizon ``max(ks)`` is always the floor (recall@k is
+#: computed over the deduped pool). Replaces R1 #1540's ``max(ks) * 3``
+#: candidate-depth headroom — depth also serves the R1 contract (one
+#: session's points must not crowd other sessions out BEFORE dedup runs).
+#: The headroom is now FLAT-capped at the configured depth (previously
+#: proportional ``max(ks) * 3``) — in-repo callers never exceed ``max(ks)
+#: = 40`` (old and new depth coincide there at 120); external callers
+#: porting R1 semantics should raise ``pool_size`` explicitly for deeper
+#: recall horizons.
+DEFAULT_POOL_SIZE = 120
 
 #: R5 (#1544): TR top_k cap (20→12) — the transcript-flood control for
 #: temporal-reasoning questions (9/18 TR losses were reader refusals under
@@ -496,6 +509,26 @@ def _dedup_pool(annotated: list[dict], *,
             seen[key] = seen.get(key, 0) + 1
         pool.append(h)
     return pool
+
+
+def _mark_bands(ranks: list[int]) -> dict[str, int]:
+    """#1947: marked-hit rank bands over the deduped pool — the
+    ``pool_depth`` diagnostic's histogram. Bands are the semantically
+    meaningful windows: ``top-20`` (the recall@k horizon), ``21-40`` (the
+    reader-context window beyond top-20), ``41-120`` (the deepened pool's
+    headroom), ``121+`` (beyond the default pool depth — only reachable
+    when ``pool_size`` is raised above the default)."""
+    counts = {"top-20": 0, "21-40": 0, "41-120": 0, "121+": 0}
+    for r in ranks:
+        if r < 20:
+            counts["top-20"] += 1
+        elif r < 40:
+            counts["21-40"] += 1
+        elif r < 120:
+            counts["41-120"] += 1
+        else:
+            counts["121+"] += 1
+    return counts
 
 
 def _apply_evidence_boost(
@@ -1027,6 +1060,13 @@ def retrieve_for_question(
     # P@5 + ranked ids + evidence-turn matches in the outcome.
     retriever: str = "hybrid",
     max_chunks_per_session: int = DEFAULT_MAX_CHUNKS_PER_SESSION,
+    # #1947: pool fetch depth for the baseline hybrid arm — explicit arg
+    # > env ``TORTOISE_LME_POOL_SIZE`` > default ``DEFAULT_POOL_SIZE``
+    # (120, up from R1's ``max(ks) * 3`` = 60); ``max(ks)`` is always the
+    # floor (recall@k is computed over the deduped pool — a knob below the
+    # deepest recall horizon cannot silently truncate the measured
+    # surface). Rerank arms keep their own pool resolution (R6 D4).
+    pool_size: int | None = None,
     max_context_tokens: int = DEFAULT_CONTEXT_TOKEN_CAP,
     # R5 (#1544): TR knobs — temporal-reasoning questions get the events
     # union pool, the engine recency weight, the TR-constraint window
@@ -1073,9 +1113,12 @@ def retrieve_for_question(
 
     ``top_k`` is the design-locked context depth (default 20 — recall is
     reported at every k in ``ks``).
-    R1 #1540: candidates are fetched at ``max(ks) * DEFAULT_POOL_MULTIPLIER``
-    depth, the pool is deduped per-session (``max_chunks_per_session`` raw
-    chunks per session), recall@k is computed over the DEDUPED pool
+    #1947: candidates are fetched at the ``pool_size`` depth (default 120,
+    knob ``TORTOISE_LME_POOL_SIZE`` — deepened from R1's ``max(ks)*3`` =
+    60: reval3 showed 66% of marked evidence points never entered the
+    60-item pool, so the C2 boost had no material; ``max(ks)`` is always
+    the floor), the pool is deduped per-session (``max_chunks_per_session``
+    raw chunks per session), recall@k is computed over the DEDUPED pool
     (``ret["hits"]`` == the pool — pinned contract).
     C1 (#1745): the reader's context is the budget-capped RANK-INTERLEAVED
     ``_assemble_context`` output (``context_points`` — points and chunks
@@ -1159,8 +1202,14 @@ def retrieve_for_question(
         # pool, baseline ordering, hits truncated to top_k (OQ5)
         pool_limit = max(rerank_pool, max(ks))
     else:
-        # baseline / degraded / off — the exact current fetch depth
-        pool_limit = max(ks) * DEFAULT_POOL_MULTIPLIER
+        # baseline / degraded / off — #1947: the deepened fetch depth
+        # (default 120, knob TORTOISE_LME_POOL_SIZE; explicit arg wins);
+        # max(ks) floor so the deepest recall horizon never measures a
+        # truncated pool (recall@k is computed over the deduped pool).
+        pool_limit = max(
+            (pool_size if pool_size is not None
+             else _env_int("TORTOISE_LME_POOL_SIZE", DEFAULT_POOL_SIZE)),
+            max(ks))
 
     # ── R3 (#1542) D4: per-leg trace (E2E-1 never-null leg-mix). The
     # retrieval records into ``legs`` at the engine (tortoise_fts_query) and
@@ -1242,6 +1291,18 @@ def retrieve_for_question(
     pool = _dedup_pool(annotated, max_chunks_per_session=max_chunks_per_session)
     n_chunks_retrieved = sum(1 for h in annotated if _is_raw_chunk(h))
     n_chunks_pool = sum(1 for h in pool if _is_raw_chunk(h))
+    # ── #1947: pool-depth diagnostic snapshot — captured pre-boost/pre-
+    # rerank so marked-point membership reflects the FETCH depth (the C2
+    # boost re-orders within the pool, never membership; rerank selection
+    # truncates it). Emitted in the ``pool_depth`` outcome block. The D5
+    # numerator (has_answer AND not raw chunk) matches evidence_recall@k;
+    # marked chunks are the chunk-evidence view. ──
+    depth_pool_size = len(pool)
+    depth_marked_ranks = [
+        i for i, h in enumerate(pool)
+        if h["has_answer"] and not _is_raw_chunk(h)]
+    depth_marked_chunk_ranks = [
+        i for i, h in enumerate(pool) if h["has_answer"] and _is_raw_chunk(h)]
 
     # ── C2 (#1745): evidence-mark boost — applied to the DEDUPED pool
     # BEFORE ``_recall_metrics`` (the only pool-metric mover: C1 cannot
@@ -1479,6 +1540,22 @@ def retrieve_for_question(
             "chunks_retrieved": n_chunks_retrieved,
             "chunks_capped": n_chunks_retrieved - n_chunks_pool,
             "pool_depth_requested": pool_limit,
+        },
+        # #1947: pool-depth diagnostic — the C2 evidence-mark boost is a
+        # rank offset over the DEDUPED pool, so whether marked points can
+        # enter the reader context is governed by pool DEPTH, not the
+        # multiplier (reval3: 66% of marked points sat beyond the 60-item
+        # pool → the boost moved 0/17 questions). Reports how many marked
+        # points enter the pool at the deepened fetch depth, banded by
+        # pool rank. The snapshot is pre-boost/pre-rerank by construction
+        # (membership at fetch depth is the honest depth signal).
+        "pool_depth": {
+            "requested": pool_limit,
+            "pool_size": depth_pool_size,
+            "marked_points_total": evidence_point_count,
+            "marked_points_in_pool": len(depth_marked_ranks),
+            "marked_points_bands": _mark_bands(depth_marked_ranks),
+            "marked_chunks_in_pool": len(depth_marked_chunk_ranks),
         },
         "retrieval_latency_ms": round(latency_ms + rerank_ms, 2),
     }

@@ -2670,14 +2670,19 @@ def test_dedup_missing_session_index_no_collapse():
 
 
 def test_session_crowded_out_still_surfaces(tmp_path, monkeypatch):
-    """Pool-depth headroom (R2 #1540): candidates are fetched at max(ks)*3
-    so a monopolizing session's points cannot crowd other sessions out
-    BEFORE dedup runs — a session ranked beyond the raw top-20 still
-    appears in the pool and its session_recall@k is non-zero at k=25."""
+    """Pool-depth headroom (R2 #1540 + #1947): candidates are fetched at
+    the deepened ``pool_size`` depth (default 120 — #1947: the old
+    ``max(ks)*3`` = 60-item pool kept marked evidence points out, so a
+    monopolizing session's points cannot crowd other sessions out BEFORE
+    dedup runs — a session ranked beyond the raw top-20 still appears in
+    the pool and its session_recall@k is non-zero at k=25)."""
     from tools.longmem_eval import retrieve as rtr
 
     sdk = _fresh_sdk(tmp_path)
     try:
+        # env-hermetic: the default-depth assertions below must not be
+        # affected by a stray TORTOISE_LME_POOL_SIZE in the shell
+        monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
         for i in range(20):
             sdk.create_point("event", f"filler {i}", id=f"a{i}",
                              session_id="crowd-a", lme_question_id="crowd_q",
@@ -2711,13 +2716,13 @@ def test_session_crowded_out_still_surfaces(tmp_path, monkeypatch):
                  [{"role": "user", "content": "the sky is blue",
                    "has_answer": True}]]}
         ret = retrieve_for_question(sdk, q, ks=(20, 25), top_k=20)
-        assert captured["limit"] == 25 * 3  # max(ks) * 3 depth headroom
+        assert captured["limit"] == 120  # #1947 default pool size
         # B's point (ranked 21st raw) is in the deduped pool — with depth
         # max(ks)=25 it would have been excluded entirely
         assert ret["hits"][-1]["id"] == "b0"
         assert ret["session_recall@k"]["25"] > 0.0
         assert ret["session_recall@k"]["20"] == 0.0  # honest windowing
-        assert ret["dedup_stats"]["pool_depth_requested"] == 75
+        assert ret["dedup_stats"]["pool_depth_requested"] == 120
     finally:
         sdk.close()
 
@@ -2868,6 +2873,209 @@ def test_context_oversized_hit_skips_not_starves():
     assert "huge" not in ids
     assert "pt1" in ids and "pt2" in ids  # later hits still selected
     assert len(ctx) == 2
+
+
+# ── #1947: deepened retrieval pool (pool-size knob + depth diagnostic) ──
+
+
+def _deep_pool_question() -> dict:
+    """A single-session question whose graph carries marked statement points
+    ranked at pool depth 60-119 (beyond the old 60-item pool) — the #1947
+    reval3 shape: marked points sit too deep for the old pool to admit
+    them, so no boost multiplier can surface them (depth, not multiplier,
+    is the binding constraint)."""
+    return {
+        "question_id": "deep_pool_q", "question_type": "single-session-user",
+        "question": "what is the widget status", "answer": "42",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["deep-s0"],
+        "haystack_dates": ["2025-06-15"],
+        "answer_session_ids": ["deep-s0"],
+        "haystack_sessions": [[{"role": "user", "content": "x",
+                                "has_answer": True}]],
+    }
+
+
+def _inject_deep_pool_search(monkeypatch, *, limit) -> None:
+    """Fake hybrid_search returning ``limit`` hits whose ids exist in the
+    graph (``_annotate_hits`` resolves props per id) — the #1947 fetch-
+    depth seam (mirrors ``test_session_crowded_out_still_surfaces``)."""
+    from tools.longmem_eval import retrieve as rtr
+
+    def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None, entity_types=("point",),
+                     recency_fields=None, recency_boost=0.0):
+        return [{"id": f"pt{i}", "content": f"filler content {i}",
+                 "match_source": "tfidf"} for i in range(limit)]
+
+    monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+
+
+def _write_deep_pool_graph(sdk, *, n_points: int = 120) -> list[int]:
+    """Write ``n_points`` statement points; every 12th from rank 60 on is
+    marked (``has_answer=True``) — the reval3 marked-points-beyond-60
+    shape. Returns the marked ranks."""
+    marked_ranks = [i for i in range(60, n_points, 12)]
+    for i in range(n_points):
+        sdk.create_point(
+            "event", f"filler content {i}", id=f"pt{i}",
+            session_id="deep-s0", lme_question_id="deep_pool_q",
+            lme_session_index=0, is_episodic=True,
+            has_answer=(i in marked_ranks), status="draft")
+    return marked_ranks
+
+
+def test_mark_bands_boundaries():
+    """#1947: the depth-diagnostic band histogram buckets marked ranks at
+    the exact 0-based boundaries — ranks 0-19 → top-20, 20-39 → 21-40,
+    40-119 → 41-120, 120+ → 121+ (reachable when ``pool_size`` is raised
+    above the 120 default)."""
+    from tools.longmem_eval.retrieve import _mark_bands
+
+    assert _mark_bands([]) == {"top-20": 0, "21-40": 0, "41-120": 0, "121+": 0}
+    # boundaries inclusive on the low side (0-based pool ranks)
+    assert _mark_bands([0, 19])["top-20"] == 2
+    assert _mark_bands([20, 39]) == {
+        "top-20": 0, "21-40": 2, "41-120": 0, "121+": 0}
+    assert _mark_bands([40, 119]) == {
+        "top-20": 0, "21-40": 0, "41-120": 2, "121+": 0}
+    assert _mark_bands([120, 239]) == {
+        "top-20": 0, "21-40": 0, "41-120": 0, "121+": 2}
+    # a mixed distribution sums to the input length
+    mixed = _mark_bands([3, 25, 55, 130, 250])
+    assert sum(mixed.values()) == 5
+
+
+def test_pool_size_knob_controls_fetch_depth(tmp_path, monkeypatch):
+    """#1947: the pool fetch depth is a knob — the explicit ``pool_size``
+    arg wins over env ``TORTOISE_LME_POOL_SIZE``, which wins over the
+    deepened default 120 (up from the old ``max(ks) * 3`` = 60).
+    ``max(ks)`` is always the floor: recall@k is computed over the deduped
+    pool, so a knob below the deepest recall horizon would silently
+    truncate the surface the metrics measure."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        sdk.create_point("event", "the sky is blue", id="b0",
+                         session_id="deep-s0", lme_question_id="deep_pool_q",
+                         lme_session_index=0, is_episodic=True,
+                         status="draft")
+        captured = {}
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                         retrieval_budget_ms=None, entity_types=("point",),
+                         recency_fields=None, recency_boost=0.0):
+            captured["limit"] = limit
+            return [{"id": "b0", "content": "the sky is blue",
+                     "match_source": "tfidf"}]
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        q = _deep_pool_question()
+
+        # default (no env): 120 — the #1947 deepened pool depth
+        monkeypatch.delenv("TORTOISE_LME_POOL_SIZE", raising=False)
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        assert captured["limit"] == 120
+        assert ret["pool_depth"]["requested"] == 120
+        assert ret["dedup_stats"]["pool_depth_requested"] == 120
+
+        # explicit arg wins over env
+        monkeypatch.setenv("TORTOISE_LME_POOL_SIZE", "180")
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20,
+                                    pool_size=240)
+        assert captured["limit"] == 240
+        assert ret["pool_depth"]["requested"] == 240
+
+        # env fallback when the arg is None
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        assert captured["limit"] == 180
+        assert ret["pool_depth"]["requested"] == 180
+
+        # max(ks) floor: a knob below the deepest recall horizon cannot
+        # truncate the pool the recall metrics measure
+        ret = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20,
+                                    pool_size=10)
+        assert captured["limit"] == 20
+        assert ret["pool_depth"]["requested"] == 20
+
+        # garbage env → retrieve-layer clamp falls back to the default
+        monkeypatch.setenv("TORTOISE_LME_POOL_SIZE", "banana")
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        assert captured["limit"] == 120
+    finally:
+        sdk.close()
+
+
+def test_deep_pool_admits_marked_points_beyond_60(tmp_path, monkeypatch):
+    """#1947: the deepened pool (120) admits marked points ranked 60-119
+    that the old 60-item pool excluded (reval3: 66% of marked points sat
+    beyond the pool — C2's binding constraint was DEPTH). The
+    ``pool_depth`` diagnostic reports their entry + rank bands; pool
+    recall@20 stays honest (the marked points sit beyond top-20 until the
+    C2 boost — #1945's region — re-ranks them in)."""
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        marked_ranks = _write_deep_pool_graph(sdk)
+        _inject_deep_pool_search(monkeypatch, limit=120)
+        q = _deep_pool_question()
+        ret = retrieve_for_question(sdk, q, ks=(5, 10, 20), top_k=20)
+        # the pool is 120 items deep (fetch depth, no truncation)
+        assert len(ret["hits"]) == 120
+        assert ret["pool_depth"]["requested"] == 120
+        assert ret["pool_depth"]["pool_size"] == 120
+        # all 5 marked points entered the pool (graph denominator 5)
+        assert ret["pool_depth"]["marked_points_total"] == len(marked_ranks)
+        assert ret["pool_depth"]["marked_points_in_pool"] == len(marked_ranks)
+        # rank bands: all in the 41-120 headroom — beyond top-20 and the
+        # reader's 40-item window; that is the material #1945's boost
+        # re-ranks (this change only admits them into the pool)
+        assert ret["pool_depth"]["marked_points_bands"] == {
+            "top-20": 0, "21-40": 0, "41-120": len(marked_ranks), "121+": 0}
+        # recall@20 stays honest: the marked points are beyond top-20
+        assert ret["evidence_recall@k"]["20"] == 0.0
+        assert ret["reader_evidence@k"]["20"] == 0.0
+        # no marked chunks in this graph (point-only fixture)
+        assert ret["pool_depth"]["marked_chunks_in_pool"] == 0
+    finally:
+        sdk.close()
+
+
+def test_deep_pool_context_selection_40_of_120(tmp_path, monkeypatch):
+    """#1947: C1 context selection handles a 120-item pool — the
+    rank-interleave picks exactly ``context_item_cap`` (40) items within
+    the 8k token budget from the deep pool. The direct
+    ``_assemble_context`` contract mirrors the retrieval path (context
+    budget 8k at ~130 tok/item ≈ 40 items; the item cap binds first)."""
+    pool = [
+        {"id": f"p{i}", "content": f"point number {i} details",
+         "point_kind": "statement", "lme_session_index": i % 4}
+        for i in range(120)
+    ]
+    # direct unit contract: exactly 40 of 120, tokens within the 8k budget
+    ctx = _assemble_context(pool, top_k=20, max_context_tokens=8000,
+                            context_item_cap=40)
+    assert len(ctx) == 40
+    assert [h["id"] for h in ctx] == [f"p{i}" for i in range(40)]
+    assert _estimate_tokens(render_context(ctx)) <= 8000
+
+    # retrieval path: the deep pool flows through C1 unchanged
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        _write_deep_pool_graph(sdk)
+        _inject_deep_pool_search(monkeypatch, limit=120)
+        ret = retrieve_for_question(sdk, _deep_pool_question(),
+                                    ks=(5, 10, 20), top_k=20)
+        assert ret["pool_depth"]["pool_size"] == 120
+        assert ret["context_point_count"] == 40
+        assert ret["context_tokens"] <= 8000
+        # the marked points sit beyond the reader window (ranks 60-119) —
+        # the depth diagnostic is the signal; the C2 boost (#1945) is what
+        # lifts them into the 40-item window
+        assert ret["pool_depth"]["marked_points_in_pool"] == 5
+        assert ret["reader_evidence@k"]["20"] == 0.0
+    finally:
+        sdk.close()
 
 
 # ── C2 (#1745): evidence-mark boost (rank offset, read-time recompute) ──
