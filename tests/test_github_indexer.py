@@ -589,6 +589,43 @@ def test_drain_mode_drains_backlog_across_runs(sdk):
 
 # ── P2 (PR #1792): indexer-level honesty ─────────────────────────────
 
+def test_all_projection_failure_keeps_truncated(sdk):
+    """#1895 (code-review P1, PR #1989): a run that FETCHES items but
+    processes 0 because every fetched item failed projection is NOT a
+    clean drain — the truncated-clear must NOT fire. total_fetched > 0
+    with processed == 0 means the backlog is deferred by errors, not
+    drained: clearing `truncated` would exit DRAIN into a since-bounded
+    DIFF walk whose window (cursor.updated_at - 1s) misses the deferred
+    older backlog → permanent silent loss (the same hazard the
+    `not quota_hit` guard protects against). Pre-fix: cursor cleared to
+    {S, 2} clean; post-fix: stays {S, 2, truncated} so the next run
+    re-DRAINs and retries the backlog once projection heals."""
+    S = "2026-08-18T02:49:35Z"
+    S_old = "2026-08-18T02:49:33Z"  # 2s older — outside a since=S-1s DIFF window
+    # #3 at S_old is the deferred backlog: NOT skipped by the DRAIN
+    # boundary skip (older second), fetched, then fails projection.
+    t = MockGitHubTransport(
+        issues=[gh_issue(1, updated_at=S), gh_issue(2, updated_at=S),
+                gh_issue(3, updated_at=S_old)],
+        page_size=100)
+    indexer = _indexer(t)
+
+    def _boom(sdk, proj, repo, issue):
+        raise ValueError("projection failure (test)")
+    indexer._project_issue = _boom
+
+    stuck = {"updated_at": S, "number": 2, "truncated": True}
+    stats = _run(indexer, sdk, cursor=stuck)
+    assert stats["processed"] == 0
+    assert stats["total_fetched"] == 1  # #3 fetched (not skipped) but failed
+    assert len(stats["errors"]) == 1
+    assert stats["cleared_truncated"] is False
+    assert stats["cursor"] == {"updated_at": S, "number": 2,
+                                "truncated": True}, \
+        "an all-projection-failure run is not a clean drain — " \
+        "truncated must persist so the next run re-DRAINs the backlog"
+
+
 def test_resolve_repos_404_raises(sdk):
     """P2: an org that 404s on BOTH orgs/ and users/ raises
     GitHubFetchError — the job fails honestly, never a silent 0-point

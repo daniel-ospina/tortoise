@@ -142,9 +142,18 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
             # #1895: deterministic within-second tie-order shuffle. NOTE:
             # rng.shuffle(items[i:j]) would shuffle a slice COPY (a silent
             # no-op) — assign the shuffled slice back instead. The same
-            # Random(seed) is re-created per request, so every page request
-            # re-produces the SAME permutation and pagination stays
-            # consistent across page boundaries.
+            # Random(seed) is re-created per request, so identical input
+            # lists re-produce the SAME permutation and pagination stays
+            # consistent across page boundaries. Constraint: the permutation
+            # is a function of the FULL list, so requests whose pre-shuffle
+            # list differs (e.g. page 1 of a since-bounded walk filters
+            # `items` while the mock's Link next-URLs carry no `since`, so
+            # page 2+ slices come from the unfiltered list) shuffle
+            # different bases and can skip/duplicate across the page-1/
+            # page-2 boundary. No current test combines
+            # shuffle_within_second with a since window (the DIFF probe
+            # fast-follow, plan §Follow-ups, must seed per page or carry
+            # `since` through pagination before relying on it).
             if self.shuffle_within_second:
                 import random
                 rng = random.Random(self.seed)

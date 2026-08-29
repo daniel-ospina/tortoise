@@ -705,6 +705,7 @@ class GitHubIndexer:
             "events_minted": 0,
             "errors": [],
             "quota_hit": False,
+            "cleared_truncated": False,
             "cursor": cursor,
         }
         # A fetch failure (mid-walk 401/429 after bounded retries) RAISES
@@ -763,7 +764,8 @@ class GitHubIndexer:
             stats["cursor"] = new_cursor
         elif (cursor is not None and cursor.get("truncated")
                 and cursor.get("updated_at")
-                and not cap_hit and not stats["quota_hit"]):
+                and not cap_hit and not stats["quota_hit"]
+                and not stats["total_fetched"]):
             # #1895: a 0-processed run that did NOT cap/quota-cut means the
             # DRAIN walk skipped EVERY item — the deferred backlog is fully
             # drained (the previous truncated run landed on an exact cap
@@ -771,15 +773,22 @@ class GitHubIndexer:
             # boundary cursor (drop `truncated`) so the next run exits
             # DRAIN; otherwise the cursor stays truncated forever and every
             # re-poll re-walks the full stream (production freeze, #1895).
-            # (`last is None and cap_hit` is unreachable with non-empty
-            # updated_at items — cap_hit requires >= cap processed items,
-            # and an empty-updated_at item never pins `last` (pre-existing
-            # degenerate edge, impossible on GitHub's schema); `quota_hit`
-            # with 0 processed keeps truncated: a quota break is not a
-            # clean end — the deferred older backlog would be missed by a
-            # since-bounded DIFF walk. The `.get()` guards + falsy
-            # updated_at check keep the clear path KeyError-proof against
-            # hand-patched cursors — plan-verify cycle 1.)
+            # `total_fetched` (post-skip walk length) must ALSO be 0: a run
+            # that FETCHED items but processed 0 of them (every item failed
+            # projection into `errors`) is NOT a clean drain — clearing
+            # `truncated` would exit DRAIN into a since-bounded DIFF walk
+            # whose window misses the deferred older backlog, permanently
+            # skipping it (code-review P1, #1989). `quota_hit` with 0
+            # processed keeps truncated for the same reason (a quota break
+            # is not a clean end). The `.get()` guards + falsy updated_at
+            # check keep the clear path KeyError-proof against hand-patched
+            # cursors — plan-verify cycle 1.)
+            stats["cleared_truncated"] = True
+            logger.info(
+                "cleared truncated cursor {%s, %s} on 0-item drain "
+                "(backlog fully drained) — if this cursor predates #1895, "
+                "verify no non-prefix holes (gap audit, plan §Follow-ups)",
+                cursor["updated_at"], int(cursor.get("number") or 0))
             stats["cursor"] = {
                 "updated_at": cursor["updated_at"],
                 "number": int(cursor.get("number") or 0)}

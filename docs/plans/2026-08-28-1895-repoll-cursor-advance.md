@@ -96,7 +96,7 @@ aboutObjects: github-index-cursor, tortoise-github-indexer
 ### Task 1: Rework `_fetch_items` — second-buffered ASC flush
 
 **Files:**
-- Modify: `tortoise/indexer/github_indexer.py` (`_fetch_items`, ~line 300-372)
+- Modify: `tortoise/indexer/github_indexer.py` (`_fetch_items`, ~line 312-410)
 - Test: `tests/test_github_indexer.py`
 
 **Step 1: Write the failing regression test** (`tests/test_github_indexer.py`) — production shape; must FAIL on the current code (run 1 mints `{S, 1425, truncated}` non-prefix; low numbers lost). (All expected cursor values below re-verified empirically against the real mock + A1 algorithm this session.):
@@ -206,7 +206,7 @@ def test_second_block_spanning_pages_drains_and_advances_boundary(sdk):
 ### Task 2: `index_repo` — truncated-clear on clean 0-processed drain
 
 **Files:**
-- Modify: `tortoise/indexer/github_indexer.py` (`index_repo` cursor mint, ~line 720-735)
+- Modify: `tortoise/indexer/github_indexer.py` (`index_repo` cursor mint, ~line 754-786)
 - Test: `tests/test_github_indexer.py`
 
 **Step 1: Write the tests.** FALSIFIERS (both verified to FAIL on the current code — pre-fix a 0-processed run leaves `last is None` so the input truncated cursor is returned untouched): `test_truncated_clears_on_zero_processed_drain` and `test_stuck_truncated_cursor_clears_on_empty_drain`. GUARD test (green pre- AND post-fix; red only on an implementation that OMITS the `not quota_hit` guard): `test_quota_break_at_item_zero_keeps_truncated` — it protects the guard, it does not falsify the current code.
@@ -297,7 +297,8 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
             stats["cursor"] = new_cursor
         elif (cursor is not None and cursor.get("truncated")
                 and cursor.get("updated_at")
-                and not cap_hit and not stats["quota_hit"]):
+                and not cap_hit and not stats["quota_hit"]
+                and not stats["total_fetched"]):
             # #1895: a 0-processed run that did NOT cap/quota-cut means the
             # DRAIN walk skipped EVERY item — the deferred backlog is fully
             # drained (the previous truncated run landed on an exact cap
@@ -305,15 +306,16 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
             # boundary cursor (drop `truncated`) so the next run exits
             # DRAIN; otherwise the cursor stays truncated forever and every
             # re-poll re-walks the full stream (production freeze, #1895).
-            # (`last is None and cap_hit` is unreachable with non-empty
-            # updated_at items — cap_hit requires >= cap processed items,
-            # and an empty-updated_at item never pins `last` (pre-existing
-            # degenerate edge, impossible on GitHub's schema); `quota_hit`
-            # with 0 processed keeps truncated: a quota break is not a
-            # clean end — the deferred older backlog would be missed by a
-            # since-bounded DIFF walk. The `.get()` guards + falsy
-            # updated_at check keep the clear path KeyError-proof against
-            # hand-patched cursors — plan-verify cycle 1.)
+            # `total_fetched` (post-skip walk length) must ALSO be 0: a run
+            # that FETCHED items but processed 0 of them (every item failed
+            # projection into `errors`) is NOT a clean drain — clearing
+            # `truncated` would exit DRAIN into a since-bounded DIFF walk
+            # whose window misses the deferred older backlog, permanently
+            # skipping it (code-review P1, #1989). `quota_hit` with 0
+            # processed keeps truncated for the same reason. The `.get()`
+            # guards + falsy updated_at check keep the clear path
+            # KeyError-proof against hand-patched cursors — plan-verify
+            # cycle 1.)
             stats["cursor"] = {
                 "updated_at": cursor["updated_at"],
                 "number": int(cursor.get("number") or 0)}
@@ -374,11 +376,11 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
 
 ```bash
 # 1. Local quick check (URI-less carve-out lane — validated working on this machine):
-TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_github_indexer.py -q          # baseline 24 passed
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_github_indexer.py -q          # pre-change baseline 24 → 29 with new tests
 
 # 2. Docker lane (default; FalkorDB container is up: `docker ps` → falkordb:6379):
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
-  uv run pytest tests/test_github_indexer.py tests/test_github_index_lifecycle.py -v   # baseline 49 passed
+  uv run pytest tests/test_github_indexer.py tests/test_github_index_lifecycle.py -v   # pre-change baseline 49 → 55 with new tests
 
 # 3. New tests specifically:
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
