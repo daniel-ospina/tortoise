@@ -295,11 +295,11 @@ jobs:
             echo "::error::Fly machine guard could not determine fleet state (exit-2) — deploy blocked. Exit-2 can never be bypassed." >&2
             exit 2
           fi
-          if [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
+          if [ "$RC" -eq 1 ] && [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
             echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (runbook: SKIP_DB_HEALTH_GATE)." >&2
             exit 0
           fi
-          exit 1
+          exit "$RC"
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq

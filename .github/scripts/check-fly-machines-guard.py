@@ -51,6 +51,24 @@ master + fly-go main):
    ``requested_stop=true``, add a ``state == 'stopped'`` + crash-signature
    rule independent of ``requested_stop``.
 
+RESIDUAL GAPS (documented, not blocked):
+   (a) crash-leg field RENAMES — an absent ``restart_count``/``exit_code``/
+   ``type`` follows Go omitempty zero-value semantics (absent == 0/False →
+   no flag), which is indistinguishable at the JSON level from a renamed
+   field; a rename could silently disarm the crash leg for non-orphan
+   machines. The orphan leg is fail-closed by construction (absent config →
+   exit 2, empty group → exit 1).
+   (b) OOM/signal-killed exits reported with ``exit_code=0`` (fly-go
+   ExitEvent carries separate ``signal``/``oom_killed`` fields) would not
+   flag — inherited from flyctl's ``isConstantlyRestarting`` (exit_code-only
+   check). Verify the #545 OOM crash-loop class empirically and extend the
+   signature (``exit_code != 0 OR signal != 0 OR oom_killed``) if OOM kills
+   are ever observed with exit_code=0.
+   (c) ``[processes]``-section semantics: when fly.toml declares a
+   ``[processes]`` table, the traffic set is exactly its keys — a machine in
+   the implicit Fly ``app`` group would be flagged ORPHAN (fail-closed).
+   Adding ``[processes]`` must explicitly include the traffic groups.
+
    Crash-loop detection applies to TRAFFIC groups only (the ``[processes]``
    keys or ``{'app'}`` default) — internal groups are transient/non-traffic
    and crash-flagging them would deadlock the fix deploy after a failed
@@ -89,7 +107,7 @@ Env seams (hermetic tests + operator control):
   FLY_APP               app name override (default: fly.toml [app])
   FLY_API_URL           Machines API base (default https://api.machines.dev/v1)
   FLY_API_TOKEN         Fly API token (required when FLY_MACHINES_FILE unset)
-  FLY_GUARD_MAX_ATTEMPTS  API retry attempts (default 3; test seam keeps the
+  FLY_GUARD_MAX_ATTEMPTS  API retry attempts (default 5; test seam keeps the
                           suite fast — production keeps the default)
 
 Read-only: never writes to the Fly API. Usable as a standalone operator
@@ -157,6 +175,8 @@ def process_groups(toml: dict) -> tuple[frozenset[str], frozenset[str]]:
     the ``{'app'}`` default (single-process apps).
     """
     processes = toml.get("processes")
+    if processes is not None and not isinstance(processes, dict):
+        raise GuardError("'processes' in fly.toml is not a table")
     if isinstance(processes, dict) and processes:
         traffic = frozenset(processes.keys())
     else:
@@ -199,18 +219,19 @@ def _machine_config(machine) -> tuple[dict | None, dict | None]:
     """Validate + return (config, incomplete_config); raises GuardError."""
     if not isinstance(machine, dict):
         raise GuardError("machines list entry is not a JSON object")
+    mid = _clean(str(machine.get("id") or machine.get("name") or "?"))
     config = machine.get("config")
     incomplete = machine.get("incomplete_config")
     if config is None and incomplete is None:
         raise GuardError(
-            f"machine {machine.get('id', '?')}: neither 'config' nor 'incomplete_config' "
+            f"machine {mid}: neither 'config' nor 'incomplete_config' "
             "present (host unreachable without fallback?)"
         )
     if config is not None and not isinstance(config, dict):
-        raise GuardError(f"machine {machine.get('id', '?')}: 'config' is not a JSON object")
+        raise GuardError(f"machine {mid}: 'config' is not a JSON object")
     if incomplete is not None and not isinstance(incomplete, dict):
         raise GuardError(
-            f"machine {machine.get('id', '?')}: 'incomplete_config' is not a JSON object"
+            f"machine {mid}: 'incomplete_config' is not a JSON object"
         )
     for cfg in (config, incomplete):
         if cfg is None:
@@ -218,15 +239,15 @@ def _machine_config(machine) -> tuple[dict | None, dict | None]:
         metadata = cfg.get("metadata")
         if metadata is not None and not isinstance(metadata, dict):
             raise GuardError(
-                f"machine {machine.get('id', '?')}: 'metadata' is not a JSON object"
+                f"machine {mid}: 'metadata' is not a JSON object"
             )
     events = machine.get("events")
     if events is not None and not isinstance(events, list):
-        raise GuardError(f"machine {machine.get('id', '?')}: 'events' is not a JSON array")
+        raise GuardError(f"machine {mid}: 'events' is not a JSON array")
     state = machine.get("state")
     if state is not None and not isinstance(state, str):
         raise GuardError(
-            f"machine {machine.get('id', '?')}: 'state' is not a string "
+            f"machine {mid}: 'state' is not a string "
             "(cannot evaluate destroyed/destroying skip)"
         )
     return config, incomplete
@@ -286,7 +307,13 @@ def main() -> int:
     if not app:
         _err("cannot determine Fly app name (fly.toml [app] / FLY_APP)")
         return 2
-    allowed, traffic = process_groups(toml)
+    try:
+        allowed, traffic = process_groups(toml)
+    except GuardError as e:
+        # fail-closed: a malformed [processes] table must exit 2, never
+        # silently fall back to the default allowed set.
+        _err(f"cannot determine Fly app config: {e}")
+        return 2
 
     machines_file = os.environ.get("FLY_MACHINES_FILE")
     if machines_file:
@@ -329,15 +356,15 @@ def main() -> int:
         state = machine.get("state")
         if state is not None and not isinstance(state, str):
             _err(
-                f"cannot determine machines state: machine {machine.get('id', '?')}: "
-                "'state' is not a string"
+                f"cannot determine machines state: machine "
+                f"{_clean(str(machine.get('id') or '?'))}: 'state' is not a string"
             )
             return 2
         if state in INACTIVE_STATES:
             continue  # flyctl IsActive(): already gone, no remediation possible
         try:
             config, incomplete = _machine_config(machine)
-            mid = machine.get("id") or machine.get("name") or "?"
+            mid = _clean(str(machine.get("id") or machine.get("name") or "?"))
             mid = _clean(mid)
             using_incomplete = config is None
             cfg = config if config is not None else incomplete
@@ -390,7 +417,10 @@ def main() -> int:
             _err(f"cannot determine machines state: {e}")
             return 2
         except Exception as e:  # noqa: BLE001 — fail-closed catch-all (plan §Task 1)
-            _err(f"cannot determine machines state: machine {machine.get('id', '?')}: {e}")
+            _err(
+                f"cannot determine machines state: machine "
+                f"{_clean(str(machine.get('id') or '?'))}: {e}"
+            )
             return 2
         active += 1
 

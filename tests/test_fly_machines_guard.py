@@ -609,6 +609,23 @@ def test_fly_toml_is_directory_exit_2():
     assert "cannot determine" in r.stderr
 
 
+def test_malformed_processes_exit_2():
+    # A top-level 'processes' that isn't a table → fail-closed exit 2 (never
+    # silently fall back to the default allowed set).
+    d = FIXTURES / "conf"
+    d.mkdir(parents=True, exist_ok=True)
+    bad = d / "bad-processes.toml"
+    bad.write_text('app = "tortoise-y4mjjq"\nprocesses = "not-a-table"\n')
+    env = dict(os.environ)
+    for k in _AMBIENT:
+        env.pop(k, None)
+    env.update({"FLY_TOML": str(bad)})
+    r = subprocess.run([sys.executable, str(SCRIPT)], capture_output=True, text=True,
+                       env=env, cwd=REPO_ROOT)
+    assert r.returncode == 2, r.stdout
+    assert "cannot determine" in r.stderr
+
+
 def test_blank_app_exit_2():
     env = dict(os.environ)
     for k in _AMBIENT:
