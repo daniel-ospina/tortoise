@@ -548,24 +548,30 @@ class TestRegister:
 # probes. PATCH model fields use underscores (pydantic field names cannot
 # carry hyphens) — the mapping table drives both the registration check and
 # the PATCH round-trip.
-_STATE_KEY_TABLE: dict[str, str] = {
-    "capture_revised": "capture_revised",
-    "capture_ask_shown": "capture_ask_shown",
-    "session_capture_receipt": "session_capture_receipt",
-    "session_capture_receipt_claude": "session_capture_receipt_claude",
-    "session_capture_receipt_claude-desktop": "session_capture_receipt_claude_desktop",
-    "session_capture_receipt_claude-web": "session_capture_receipt_claude_web",
-    "session_capture_receipt_codex": "session_capture_receipt_codex",
-    "session_capture_receipt_cursor": "session_capture_receipt_cursor",
-    "session_capture_receipt_pi": "session_capture_receipt_pi",
-    "session_capture_last_error_claude": "session_capture_last_error_claude",
-    "session_capture_last_error_claude-desktop": "session_capture_last_error_claude_desktop",
-    "session_capture_last_error_claude-web": "session_capture_last_error_claude_web",
-    "session_capture_last_error_codex": "session_capture_last_error_codex",
-    "session_capture_last_error_cursor": "session_capture_last_error_cursor",
-    "session_capture_last_error_pi": "session_capture_last_error_pi",
-    "install_probe_claude": "install_probe_claude",
-    "install_probe_pi": "install_probe_pi",
+# #1893: TYPE-AWARE tuple form — (patch_field, sample_value). The sample
+# value is PATCHed and must round-trip (bool keys take True; timestamp keys
+# take an ISO string; scope keys take a small non-empty sample).
+_STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
+    "capture_revised": ("capture_revised", True),
+    "capture_ask_shown": ("capture_ask_shown", True),
+    "session_capture_receipt": ("session_capture_receipt", "2026-08-25T00:00:00Z"),
+    "session_capture_receipt_claude": ("session_capture_receipt_claude", "2026-08-25T00:00:00Z"),
+    "session_capture_receipt_claude-desktop": ("session_capture_receipt_claude_desktop", "2026-08-25T00:00:00Z"),
+    "session_capture_receipt_claude-web": ("session_capture_receipt_claude_web", "2026-08-25T00:00:00Z"),
+    "session_capture_receipt_codex": ("session_capture_receipt_codex", "2026-08-25T00:00:00Z"),
+    "session_capture_receipt_cursor": ("session_capture_receipt_cursor", "2026-08-25T00:00:00Z"),
+    "session_capture_receipt_pi": ("session_capture_receipt_pi", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_claude": ("session_capture_last_error_claude", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_claude-desktop": ("session_capture_last_error_claude_desktop", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_claude-web": ("session_capture_last_error_claude_web", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_codex": ("session_capture_last_error_codex", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_cursor": ("session_capture_last_error_cursor", "2026-08-25T00:00:00Z"),
+    "session_capture_last_error_pi": ("session_capture_last_error_pi", "2026-08-25T00:00:00Z"),
+    "install_probe_claude": ("install_probe_claude", "2026-08-25T00:00:00Z"),
+    "install_probe_pi": ("install_probe_pi", "2026-08-25T00:00:00Z"),
+    # #1893: persisted source-scope keys (short repo names / {repo, branch}).
+    "github_issues_scope": ("github_issues_scope", ["repo-a", "repo-b"]),
+    "github_docs_scope": ("github_docs_scope", [{"repo": "repo-a", "branch": "main"}]),
 }
 
 
@@ -580,7 +586,7 @@ def test_state_keys_registered_parametrized(client):
         DEFAULT_ONBOARDING_STATE,
         OnboardingStatePatchRequest,
     )
-    for state_key, patch_field in _STATE_KEY_TABLE.items():
+    for state_key, (patch_field, patch_value) in _STATE_KEY_TABLE.items():
         assert state_key in _ONBOARDING_DEFAULT_STATE, \
             f"{state_key} missing from _ONBOARDING_DEFAULT_STATE"
         assert state_key in DEFAULT_ONBOARDING_STATE, \
@@ -589,11 +595,9 @@ def test_state_keys_registered_parametrized(client):
             f"{state_key} missing from _ALLOWED_STATE_KEYS"
         assert patch_field in OnboardingStatePatchRequest.model_fields, \
             f"{state_key} missing from the live PATCH model (field {patch_field})"
-        # PATCH round-trip: a type-appropriate value must survive the merge
-        # and read back (bool fields take True; timestamp keys take an ISO
-        # string).
-        patch_value = (True if state_key in ("capture_revised", "capture_ask_shown")
-                       else "2026-08-25T00:00:00Z")
+        # PATCH round-trip: the type-aware sample value must survive the
+        # merge and read back (bool keys take True; timestamp keys take an
+        # ISO string; scope keys take a small non-empty sample).
         r = client.patch("/v1/onboarding/state",
                          json={patch_field: patch_value})
         assert r.status_code == 200, r.text
@@ -612,6 +616,149 @@ def test_capture_surface_keys_shared_across_defaults():
     capture_keys = {k for k in _STATE_KEY_TABLE}
     assert capture_keys <= set(_ONBOARDING_DEFAULT_STATE)
     assert capture_keys <= set(DEFAULT_ONBOARDING_STATE)
+
+
+# ── #1893: persisted GitHub source-scope keys ────────────────────────────
+# The client fixture does NOT provision a Team node, and the state writer is
+# MATCH...SET (a silent no-op without the node) — each test provisions
+# test-team-1 explicitly (test_install_probe_round_trip pattern) so the
+# PATCH→GET round-trips below assert REAL persistence, never in-memory-only
+# responses.
+
+
+def test_scope_keys_explicit_empty_round_trip(client):
+    """#1893: [] is a VALID scope value (all repos) and must round-trip as
+    [] — the persist path never omits empty (unlike the job builders).
+    Provisions the Team node so the write is real, GETs between the seed
+    and the clear so BOTH phases are pinned, and asserts the RAW STORED
+    jsonb directly (a GET cannot distinguish absent-vs-[] because the
+    defaults are [] — the raw read pins the wire form)."""
+    from tortoise.hosted_api import _make_sdk
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
+    import json as _json
+    registry = _make_sdk(namespace="registry")._get_registry()
+    registry.query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    # seed non-empty for BOTH keys — the selection must persist (journey
+    # steps 1-2: multi-repo issues + named-branch docs round-trip)
+    r = client.patch("/v1/onboarding/state", json={
+        "github_issues_scope": ["repo-a", "repo-b"],
+        "github_docs_scope": [{"repo": "repo-a", "branch": "dev"}],
+    })
+    assert r.status_code == 200, r.text
+    r = client.get("/v1/onboarding/state")
+    assert r.json()["onboarding"]["github_issues_scope"] == ["repo-a", "repo-b"]
+    assert r.json()["onboarding"]["github_docs_scope"] == [{"repo": "repo-a", "branch": "dev"}]
+    # clear to [] — the clear must land as [] not absent
+    r = client.patch("/v1/onboarding/state",
+                     json={"github_issues_scope": [], "github_docs_scope": []})
+    assert r.status_code == 200, r.text
+    got = r.json()["onboarding"]
+    assert got["github_issues_scope"] == []
+    assert got["github_docs_scope"] == []
+    r = client.get("/v1/onboarding/state")
+    assert r.json()["onboarding"]["github_issues_scope"] == []
+    assert r.json()["onboarding"]["github_docs_scope"] == []
+    # WIRE-FORM pin: the raw stored jsonb must contain both keys as [] — a
+    # GET readback cannot detect a storage-layer omit-empty regression
+    # (the merge default is already []), so read the node directly.
+    rows = registry.query(
+        "MATCH (t:Team {id:$id}) RETURN t.onboarding_state",
+        params={"id": "test-team-1"},
+    ).result_set
+    assert len(rows) == 1, rows
+    stored_raw = rows[0][0]
+    stored = _json.loads(stored_raw) if isinstance(stored_raw, str) else (stored_raw or {})
+    assert stored.get("github_issues_scope") == []
+    assert stored.get("github_docs_scope") == []
+
+
+def test_scope_keys_invalid_400(client):
+    """#1893: PATCH-boundary validation — invalid repo/branch scope entries
+    are rejected (400), never stored (mirrors the index endpoints). Seeds a
+    valid scope first, then asserts the 400 attempts leave it intact (real
+    storage, non-vacuous)."""
+    from tortoise.hosted_api import _make_sdk
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.patch("/v1/onboarding/state", json={"github_issues_scope": ["ok-repo"]})
+    assert r.status_code == 200, r.text
+    r = client.patch("/v1/onboarding/state", json={"github_issues_scope": ["bad name!"]})
+    assert r.status_code == 400, r.text
+    # P3-1 contract: a blank entry INSIDE a non-empty list is rejected
+    # (silently dropping it would turn a client bug into an org-wide diff)
+    r = client.patch("/v1/onboarding/state", json={"github_issues_scope": ["ok-repo", ""]})
+    assert r.status_code == 400, r.text
+    r = client.patch("/v1/onboarding/state",
+                     json={"github_docs_scope": [{"repo": "ok", "branch": "../../x"}]})
+    assert r.status_code == 400, r.text
+    r = client.patch("/v1/onboarding/state", json={"github_docs_scope": [{"repo": 123}]})
+    assert r.status_code == 400, r.text
+    r = client.patch("/v1/onboarding/state",
+                     json={"github_docs_scope": [{"repo": "ok", "branch": 123}]})
+    assert r.status_code == 400, r.text  # non-str branch → 400 (type-guard before strip, never 500)
+    # pydantic boundary: a non-dict docs entry never reaches the validator
+    # (list[dict] element type error) — pinned as the deliberate 422.
+    r = client.patch("/v1/onboarding/state", json={"github_docs_scope": ["repo-a"]})
+    assert r.status_code == 422, r.text
+    r = client.get("/v1/onboarding/state")
+    # the valid seed survived; nothing invalid was stored
+    assert r.json()["onboarding"]["github_issues_scope"] == ["ok-repo"]
+    assert r.json()["onboarding"]["github_docs_scope"] == []
+
+
+def test_scope_branch_normalized_to_null(client):
+    """#1893: a docs entry with branch "" (default contract) is persisted as
+    null (normalized at the PATCH boundary) — GET returns null, and a repeat
+    PATCH of the GET value is stable (no drift). Note: pydantic v2 lax mode
+    coerces int→str, so `{"github_issues_scope": [123]}` would store
+    ["123"] (a syntactically legal short name) — the 400 contract targets
+    genuinely invalid inputs, not lax-coercible ones."""
+    from tortoise.hosted_api import _make_sdk
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.patch("/v1/onboarding/state", json={
+        "github_docs_scope": [{"repo": "repo-a", "branch": ""}]})
+    assert r.status_code == 200, r.text
+    # REAL persistence: GET reads back the normalized form (null, not "")
+    r = client.get("/v1/onboarding/state")
+    assert r.json()["onboarding"]["github_docs_scope"] == [{"repo": "repo-a", "branch": None}]
+    # re-PATCH the GET value — stable (null stays null)
+    r2 = client.patch("/v1/onboarding/state", json={
+        "github_docs_scope": [{"repo": "repo-a", "branch": None}]})
+    assert r2.status_code == 200, r2.text
+    assert r2.json()["onboarding"]["github_docs_scope"] == [{"repo": "repo-a", "branch": None}]
+
+
+def test_scope_keys_normalized_at_patch(client):
+    """#1893: strip/dedupe normalization at the PATCH boundary — issues
+    repos are stripped + deduped (_validate_repo_scope); docs entries are
+    deduped by repo with a STRIPPED branch. Padded or duplicated values
+    never persist."""
+    from tortoise.hosted_api import _make_sdk
+    from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
+    _make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": "test-team-1", "st": "{}"},
+    )
+    r = client.patch("/v1/onboarding/state", json={"github_issues_scope": [" a ", "a"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding"]["github_issues_scope"] == ["a"]
+    r = client.patch("/v1/onboarding/state", json={
+        "github_docs_scope": [
+            {"repo": "ok", "branch": " dev "},
+            {"repo": "ok", "branch": "main"},
+        ]})
+    assert r.status_code == 200, r.text
+    assert r.json()["onboarding"]["github_docs_scope"] == [{"repo": "ok", "branch": "dev"}]
 
 
 # ── #1727 Slice 2 (Task 14, T2-P1): install-probe round-trip ────────────

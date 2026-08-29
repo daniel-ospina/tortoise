@@ -1962,6 +1962,11 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_last_error_pi": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
+    # #1893: persisted GitHub source-scope keys (written by the dashboard's
+    # scope selectors via PATCH — [] = all repos; registered here so the
+    # allowlist filter never drops them).
+    "github_issues_scope": [],  # list of short repo names; [] = all repos
+    "github_docs_scope": [],    # list of {repo, branch}; [] = all repos
 }
 
 
@@ -10312,6 +10317,11 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_last_error_pi": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
+    # #1893: persisted GitHub source-scope keys (dashboard scope selectors
+    # PATCH these; [] = all repos). Registered in BOTH default dicts + the
+    # PATCH model — the state-key registration test pins all four surfaces.
+    "github_issues_scope": [],  # list of short repo names; [] = all repos
+    "github_docs_scope": [],    # list of {repo, branch}; [] = all repos
 }
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
@@ -10463,6 +10473,12 @@ class OnboardingStatePatchRequest(BaseModel):
     session_capture_last_error_pi: str | None = None
     install_probe_claude: str | None = None
     install_probe_pi: str | None = None
+    # #1893: persisted GitHub source-scope keys — registered so the keys
+    # round-trip through the PATCH surface (parametrized registration test)
+    # and the dashboard can persist + rehydrate the scope selectors.
+    # [] = explicit clear (all repos) — a VALID value, never dropped.
+    github_issues_scope: list[str] | None = None
+    github_docs_scope: list[dict] | None = None
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so
     # the key round-trips through the PATCH surface.
     github_docs_indexed: bool | None = None
@@ -10521,6 +10537,10 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
         _track_analytics_event(team["team_id"], "artifact_copied",
                                {"harness": harness, "section": section})
+    # #1893: validate the persisted source-scope keys at the PATCH boundary
+    # (400 on invalid; valid values stored in NORMALIZED form — issues
+    # strip/dedupe, docs ""/None branch → null; [] = explicit clear).
+    updates = _validate_scope_payload(updates)
     state = _update_onboarding_state(team["team_id"], **updates)
     # #1765 review (onboarding dual-auth): a SESSION-authed call's email
     # belongs on the USER anchor (auth.users — managed via the profile
@@ -11369,6 +11389,47 @@ class GitHubRepollRequest(BaseModel):
     """
     repos: list[str] | None = None
     repo: str | None = None
+
+
+def _validate_scope_payload(updates: dict) -> dict:
+    """#1893: PATCH-boundary validation for the persisted source-scope keys
+    (github_issues_scope / github_docs_scope). Same conservative surface as
+    the index endpoints — _validate_repo_scope for issues (short names,
+    deduped), _is_safe_branch for docs branches. [] is a VALID value
+    (explicit clear = all repos) and is stored as-is — the persist path
+    NEVER omits empty (unlike the job builders, where absent = all)."""
+    if "github_issues_scope" in updates and updates["github_issues_scope"] is not None:
+        repos = _validate_repo_scope(updates["github_issues_scope"])
+        updates["github_issues_scope"] = repos if repos is not None else []
+    if "github_docs_scope" in updates and updates["github_docs_scope"] is not None:
+        scopes: list[dict] = []
+        seen_repos: set[str] = set()  # FIRST-WINS dedupe (API boundary — see note)
+        # ⚠️ dedupe asymmetry (intentional): the server dedupes FIRST-WINS
+        # (raw API boundary — the client already serializes unique repos),
+        # while the dashboard's reconcileDocsScope dedupes LAST-WINS
+        # (defensive corrupt-data path). Do NOT "align" one to the other —
+        # tests pin each contract (test_scope_keys_normalized_at_patch /
+        # sourceScope.test.js dedup-last-wins).
+        for s in updates["github_docs_scope"]:
+            if not isinstance(s, dict) or not isinstance(s.get("repo"), str):
+                raise HTTPException(status_code=400, detail="Invalid repo scope")
+            repo = s["repo"].strip()
+            if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", repo):
+                raise HTTPException(status_code=400, detail="Invalid repo name")
+            branch = s.get("branch")
+            if branch == "" or branch is None:
+                branch = None
+            else:
+                if not isinstance(branch, str):  # non-str branch → 400, never 500
+                    raise HTTPException(status_code=400, detail="Invalid branch")
+                branch = branch.strip()  # normalize like repo (padded branches never persist)
+                if not _is_safe_branch(branch):
+                    raise HTTPException(status_code=400, detail="Invalid branch")
+            if repo not in seen_repos:
+                seen_repos.add(repo)
+                scopes.append({"repo": repo, "branch": branch})
+        updates["github_docs_scope"] = scopes
+    return updates
 
 
 def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:

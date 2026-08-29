@@ -13,6 +13,14 @@ import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js
 // unit-tested); imported under an alias to avoid an ESM redeclaration collision
 // with the local isSessionKey wrapper below.
 import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'
+// #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
+// unit-tested — sourceScope.test.js).
+import {
+  reconcileIssuesScope, reconcileDocsScope,
+  serializeIssuesScope, serializeDocsScope,
+  buildIssuesJobBody, buildDocsJobBody,
+  shouldHydrate, shouldPersist, shouldResetBranch,
+} from './sourceScope.js'
 // #1765: identity surface — pure predicates + presentational components
 import { bannerShow, shouldRefetchOnFocus } from './identity.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
@@ -342,6 +350,62 @@ function claimIntentInFlight() {
   const [branchLists, setBranchLists] = React.useState({})
   const [docsScope, setDocsScope] = React.useState({ repos: [], branches: {} })
   const [issuesScope, setIssuesScope] = React.useState({ repos: [] })
+  // #1893: persist source-scope selections as allowlisted onboarding_state
+  // keys (github_issues_scope / github_docs_scope). scopeReadyRef gates the
+  // persist path — nothing persists until the initial GET resolves + the
+  // one-shot hydration below has seeded. hydratedTeamIdRef keys hydration
+  // to ONE pass per team session: refreshOnboarding() re-fires after every
+  // reindex/docs run + finishWelcomeLoads, so seeding inside it would
+  // clobber newer selections with the stale server value.
+  const hydratedTeamIdRef = React.useRef(null)
+  const scopeReadyRef = React.useRef(false)
+  // #1893 (scope-verify P1): PER-KEY pre-hydration touch tracking — a touch
+  // on ONE key must never suppress seeding of the OTHER, and must never
+  // persist the other key's un-seeded default over its stored server value.
+  const scopeTouchedRef = React.useRef({ issues: false, docs: false })
+  // #1893: a failed repos fetch must never be treated as an empty org —
+  // hydration (and therefore pruning) is skipped and NOT latched, so a
+  // reload re-attempts; nothing gets clobbered server-side.
+  const [reposLoadFailed, setReposLoadFailed] = React.useState(false)
+  // #1893: _update_onboarding_state is a WHOLE-STATE read-modify-write
+  // (non-atomic) — issues + docs PATCHes must serialize against each other,
+  // so a SINGLE shared FIFO queue (per-key queues would still race cross-key).
+  const scopePersistQueueRef = React.useRef(Promise.resolve())
+
+  function persistScope(payload) {
+    // fire-and-forget: a failed persist never blocks the UI; the next
+    // change re-persists the full list.
+    scopePersistQueueRef.current = scopePersistQueueRef.current
+      .then(() => api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+        body: JSON.stringify(payload) }))
+      .catch(() => {})
+  }
+
+  // scope-verify P2: mirror the latest selection in refs so the hydration
+  // effect's touched-branch never serializes a STALE closure value (the
+  // effect deps deliberately omit issuesScope/docsScope; the refs make the
+  // persist ordering-independent of React passive-effect flush timing).
+  const issuesScopeRef = React.useRef({ repos: [] })
+  const docsScopeRef = React.useRef({ repos: [], branches: {} })
+
+  function handleIssuesScopeChange(next) {
+    // #1893: NO DEBOUNCE by design — the persist fires synchronously on
+    // every change so a logout in the REAUTH window (<400ms after a
+    // toggle) can never lose the last selection (the observed production
+    // incident). Timing is untestable at the pure-node layer; covered by
+    // manual clickthrough (documented in the PR body).
+    scopeTouchedRef.current.issues = true
+    issuesScopeRef.current = next
+    setIssuesScope(next)
+    if (shouldPersist(scopeReadyRef.current)) persistScope({ github_issues_scope: serializeIssuesScope(next) })
+  }
+
+  function handleDocsScopeChange(next) {
+    scopeTouchedRef.current.docs = true
+    docsScopeRef.current = next
+    setDocsScope(next)
+    if (shouldPersist(scopeReadyRef.current)) persistScope({ github_docs_scope: serializeDocsScope(next) })
+  }
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
   // #1907: seed-step failure must surface INLINE (the global error banner
@@ -457,6 +521,37 @@ function claimIntentInFlight() {
   const [teams, setTeams] = React.useState([])
   const [graphs, setGraphs] = React.useState([])
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
+  // #1893 one-shot hydration: reconcile the persisted scope against the
+  // live org repo list, exactly once per team session. Gated on the pure
+  // shouldHydrate predicate (reposLoaded && onboarding && !reposLoadFailed
+  // && currentTeamId && not-yet-hydrated) — never seeds the default empty
+  // before the GET resolves, never prunes on a failed repos fetch, and
+  // NEVER dead-paths on a null team: currentTeamId is STATE (populated by
+  // the mount gate / team switcher), so the effect re-fires the moment the
+  // team resolves. PER-KEY seeding: a key the user touched pre-hydration is
+  // NOT seeded (their choice wins) and is persisted now; a key they did NOT
+  // touch is seeded from the persisted server value — never overwritten
+  // with the un-seeded default. Touch flags reset after hydration so a team
+  // switch re-enables seeding for the new team.
+  React.useEffect(() => {
+    if (!shouldHydrate({ reposLoaded, onboarding, reposLoadFailed,
+        currentTeamId, hydratedTeamId: hydratedTeamIdRef.current })) return
+    hydratedTeamIdRef.current = currentTeamId
+    if (!scopeTouchedRef.current.issues) {
+      setIssuesScope(reconcileIssuesScope(onboarding.github_issues_scope, reposList))
+    } else {
+      // serialize from the ref mirror — never the effect closure (P2)
+      persistScope({ github_issues_scope: serializeIssuesScope(issuesScopeRef.current) })
+    }
+    if (!scopeTouchedRef.current.docs) {
+      setDocsScope(reconcileDocsScope(onboarding.github_docs_scope, reposList))
+    } else {
+      persistScope({ github_docs_scope: serializeDocsScope(docsScopeRef.current) })
+    }
+    scopeTouchedRef.current = { issues: false, docs: false }
+    scopeReadyRef.current = true
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reposLoaded, onboarding, reposList, currentTeamId, reposLoadFailed])
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
   const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
   // #1877: create-team dialog state (gated-on-click upgrade UX)
@@ -1055,8 +1150,10 @@ function claimIntentInFlight() {
     try {
       const res = await api('/v1/onboarding/github/repos', { useSession: true })
       setReposList(res && Array.isArray(res.repos) ? res.repos : [])
+      setReposLoadFailed(false)
     } catch {
       setReposList([])  // best-effort — the selector still shows "All repos"
+      setReposLoadFailed(true)
     } finally {
       setReposLoaded(true)
     }
@@ -1091,6 +1188,16 @@ function claimIntentInFlight() {
         const info = branchLists[r]
         if (info && info.defaultBranch && !branches[r]) {
           branches[r] = info.defaultBranch
+          changed = true
+        }
+        // #1893: a persisted branch that no longer exists on GitHub must
+        // not stick a blank picker + fail the docs job — once the picker
+        // HAS loaded this repo's options and the persisted branch is not
+        // among them, reset to the default (''). ('' and 'all' are always
+        // valid; may race the defaultBranch fill above — either outcome is
+        // safe and consistent.)
+        if (shouldResetBranch(branches[r], info)) {
+          branches[r] = ''
           changed = true
         }
       })
@@ -1173,7 +1280,7 @@ function claimIntentInFlight() {
     try {
       // #1845: send the selected repo scope (list of SHORT names) — empty =
       // all repos (org-wide diff).
-      const body = issuesScope.repos.length ? { repos: issuesScope.repos } : {}
+      const body = buildIssuesJobBody(issuesScope)
       const res = await api('/v1/index/github/re-poll', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body) })
@@ -1205,17 +1312,7 @@ function claimIntentInFlight() {
         const gs = await api('/v1/onboarding/github/status', { useSession: true })
         org = gs && gs.org
       } catch { /* org stays undefined — the server 400s "org is required" and the row error surfaces it */ }
-      const payload = {}
-      if (org) payload.org = org
-      // #1845: per-repo scope list — each selected repo carries its own
-      // branch ('' = default main/master fallback, 'all' = every branch).
-      // Empty repos = ALL repos (org-wide, default branch).
-      if (docsScope.repos.length) {
-        payload.repos = docsScope.repos.map((r) => ({
-          repo: r,
-          branch: docsScope.branches[r] || '',
-        }))
-      }
+      const payload = buildDocsJobBody(docsScope, org)
       const res = await api('/v1/index/docs', { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload) })
@@ -3773,8 +3870,8 @@ function claimIntentInFlight() {
                         branchLists={branchLists}
                         docsScope={docsScope}
                         issuesScope={issuesScope}
-                        onDocsScopeChange={setDocsScope}
-                        onIssuesScopeChange={setIssuesScope}
+                        onDocsScopeChange={handleDocsScopeChange}
+                        onIssuesScopeChange={handleIssuesScopeChange}
                         onLoadBranches={loadBranches}
                       />
                       <div className="wizard-nav">
@@ -4362,8 +4459,8 @@ function claimIntentInFlight() {
               branchLists={branchLists}
               docsScope={docsScope}
               issuesScope={issuesScope}
-              onDocsScopeChange={setDocsScope}
-              onIssuesScopeChange={setIssuesScope}
+              onDocsScopeChange={handleDocsScopeChange}
+              onIssuesScopeChange={handleIssuesScopeChange}
               onLoadBranches={loadBranches}
             />
             {/* #1148-ux review: Team ID / Limits / billing-actions / quickstart
