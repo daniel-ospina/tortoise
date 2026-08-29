@@ -72,6 +72,21 @@ class _EdgeHandlers:
                         params={"sid": src}
                     )
                     self._autocreated_stubs = getattr(self, "_autocreated_stubs", 0) + 1
+            else:
+                # #1917: long IDs are presumed real ULIDs — never stub them.
+                # A source that doesn't resolve would silently match nothing
+                # in the MERGE below; warn instead of dropping the input.
+                exists = self.g.query(
+                    "MATCH (s:Point {id:$sid}) RETURN count(s) > 0",
+                    params={"sid": src},
+                ).result_set[0][0]
+                if not exists:
+                    _log.warning(
+                        "input source %r (id length %d >= 20) does not "
+                        "resolve to an existing Point — INPUT edge skipped",
+                        src, len(src),
+                    )
+                    continue
             if rel_type is not None:
                 # Known op_type → typed edge + reverse INPUT
                 self.g.query(
@@ -82,11 +97,10 @@ class _EdgeHandlers:
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
             else:
-                # Unknown op_type → INPUT edge only
+                # Unknown op_type → INPUT edge only (convention: source → operator)
                 self.g.query(
                     "MATCH (o:Point {id:$oid}) "
                     "MATCH (s:Point {id:$sid}) "
-                    "MERGE (o)-[:INPUT {idx:$idx}]->(s) "
                     "MERGE (s)-[:INPUT {idx:$idx}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )

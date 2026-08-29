@@ -15,6 +15,8 @@ status: ACTIVE — resume point
 
 > **OPS (2026-08-29, part 2):** Added "Generate with AI" button in the editor's Excerpt & tags card (`generateExcerptTagsMutation`, same server call, applies excerpt+tags only) — commit `5acb0715`. Fixed verify-blog CI (numpy → pip install -e . → TORTOISE_TEST_CARVE_OUT=1) which finally ENABLED the post-deploy E2E suite — it immediately caught 3 latent prod bugs, all fixed: (1) agent API PATCH 405 — `posts.ts` → `posts/[[path]].ts` routing (`0faefcb0`+`e6b0c95b`+`20c4bee6`); (2) `ctx.waitUntil` → `waitUntil` — EventContext has NO ctx property, so the unpublish purge path threw TypeError→500 (`a773121f`). All 10 blog E2E tests now PASS on every deploy (create→publish→unpublish→purge lifecycle verified live). 58 unit tests + tsc clean. Note: purge is now ACTIVE and tested working (CF token has Zone.Cache Purge).
 
+> **FIX (2026-08-29, part 3):** generate-cover founder mode was 502'ing on every call — OpenRouter `input_references` shape was `{type:'input_image', image_url:'url'}` but the ContentPartImage schema requires `{type:'image_url', image_url:{url}}` (400 ZodError → both providers fail → 502). Fixed + verified 200 (image/jpeg ~940KB). Also replaced the fallback model `black-forest-labs/flux.2-klein-4b` (doesn't exist in the OR catalog) with `google/gemini-3.1-flash-image` (stable non-preview). Commit `4b4491f3`. DB cleaned: removed 21 `blog-e2e` test posts (2 published ones purged from edge cache first, verified 404), keeping only `hello-tortoise-first-post` draft for review/publish.
+
 Next: blog content, or the dashboard/backlog issues.**
 
 ## 1. Immediate next step (do this first)

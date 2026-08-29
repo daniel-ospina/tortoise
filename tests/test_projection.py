@@ -540,9 +540,9 @@ def test_falkor_nand_operator():
 
 
 def test_falkor_unknown_operator_type():
+    """Unknown operator type defaults to :INPUT edges (source → operator)."""
     if _skip_if_no_falkor():
         pytest.skip("redislite falkordb unavailable")
-    """Unknown operator type defaults to :INPUT edges."""
     proj = _shared_proj()
     try:
         proj.apply({"type": "PointAdded",
@@ -550,10 +550,52 @@ def test_falkor_unknown_operator_type():
         proj.apply({"type": "OperatorAdded",
                      "point": {"id": "op1", "content": "XOR(a)", "context": "ctx",
                                "operator": {"op_type": "XOR", "inputs": ["a"]}}})
-        edges = proj.query(
+        # Correct convention: exactly one (s)-[:INPUT]->(o) edge.
+        correct = proj.query(
+            "MATCH (s:Point {id:'a'})-[r:INPUT]->(o:Point {id:'op1'}) RETURN count(r)"
+        ).result_set
+        assert correct[0][0] == 1, correct
+        # #1917: no inverted (o)-[:INPUT]->(s) edge.
+        inverted = proj.query(
             "MATCH (o:Point {id:'op1'})-[r:INPUT]->(s:Point) RETURN count(r)"
         ).result_set
-        assert edges[0][0] == 1
+        assert inverted[0][0] == 0, inverted
+    finally:
+        pass  # shared session projection — module helper owns close
+
+
+def test_falkor_long_id_input_missing_warns(caplog):
+    """#1917: unresolvable long-id (>= 20 chars) input warns instead of
+    silently matching nothing in the MERGE."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    import logging
+    proj = _shared_proj()
+    try:
+        proj.apply({"type": "PointAdded",
+                     "point": {"id": "a", "content": "A", "context": "ctx"}})
+        long_id = "0" * 26  # ULID-length id with no matching Point
+        with caplog.at_level(logging.WARNING, logger="tortoise.projection.edges"):
+            proj.apply({"type": "OperatorAdded",
+                         "point": {"id": "op1", "content": "IMPL(a, missing)",
+                                   "context": "ctx",
+                                   "operator": {"op_type": "IMPL",
+                                                "inputs": ["a", long_id]}}})
+        assert any(long_id in r.message for r in caplog.records), caplog.records
+        # The resolvable input still gets its edges; the missing one is skipped.
+        impl_edges = proj.query(
+            "MATCH (o:Point {id:'op1'})-[r:IMPL]->(s:Point) RETURN s.id"
+        ).result_set
+        assert sorted(r[0] for r in impl_edges) == ["a"], impl_edges
+        inputs = proj.query(
+            "MATCH (s:Point)-[:INPUT]->(o:Point {id:'op1'}) RETURN s.id"
+        ).result_set
+        assert sorted(r[0] for r in inputs) == ["a"], inputs
+        # No stub auto-created for the long-id source (#1917).
+        stub = proj.g.query(
+            "MATCH (n:Point {id:$sid}) RETURN count(n)", params={"sid": long_id}
+        ).result_set
+        assert stub[0][0] == 0, stub
     finally:
         pass  # shared session projection — module helper owns close
 
@@ -1560,6 +1602,62 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
     ).result_set
     assert rows and rows[0][0] == "legacy-tool", rows
     assert rows[0][1] == "other", rows
+
+
+def test_falkor_subject_stub_resolves_canonical_id():
+    """#1918: a Subject stub minted with a random-ulid id (webhook
+    name-stub) must adopt the canonical id when SubjectAdded lands — parity
+    with the #1155 Object fix (_upsert_object ON MATCH
+    o.id=coalesce($id, o.id)). Pre-fix: _upsert_subject ON MATCH only set
+    subjectKind/embedding, so MATCH (s:Subject {id:$sid}) wiring silently
+    matched nothing."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()  # wipes all graphs on every call
+
+    # EventRecorded lands FIRST → mints a Subject name-stub with a RANDOM
+    # ulid id (the webhook path, _event_plain_merge). The canonical id is
+    # not yet present on any node.
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-1918", "eventKind": "meeting.held",
+        "subject": "alice", "object": "",
+        "startedAt": "2026-08-28T10:00:00Z",
+        "endedAt": "2026-08-28T11:00:00Z"}})
+    stub_id = proj.g.query(
+        "MATCH (s:Subject {name:'alice'}) RETURN s.id").result_set
+    assert stub_id and stub_id[0][0] != "subject:alice", stub_id
+    # id-based wiring by the CANONICAL id matches nothing pre-fix.
+    pre = proj.g.query(
+        "MATCH (s:Subject {id:'subject:alice'}) RETURN s.name").result_set
+    assert pre == [], pre
+
+    # SubjectAdded arrives later with the canonical id.
+    proj.apply({"type": "SubjectAdded", "id": "subject:alice",
+                "name": "alice", "subject_kind": "person",
+                "createdAt": "2026-08-28T10:05:00Z"})
+
+    # The node carries the canonical id now — MATCH (s:Subject {id:$sid})
+    # wiring resolves the subject.
+    rows = proj.g.query(
+        "MATCH (s:Subject {id:'subject:alice'}) RETURN s.name, s.subjectKind"
+    ).result_set
+    assert rows and rows[0] == ["alice", "person"], rows
+
+    # A LATER id-based wiring pass (participatesIn by participant id) now
+    # matches — the bug's target: 0 subject wiring silently missing.
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-1918b", "eventKind": "meeting.held",
+        "subject": "", "object": "",
+        "participants": ["subject:alice"],
+        "startedAt": "2026-08-28T12:00:00Z",
+        "endedAt": "2026-08-28T13:00:00Z"}})
+    wired = proj.g.query(
+        "MATCH (s:Subject {id:'subject:alice'})-[:participatesIn]->(e:Event) "
+        "RETURN e.eventId ORDER BY e.eventId").result_set
+    # evt-1918's edge came from the name-fallback at event time; evt-1918b's
+    # edge came from the id-based MATCH AFTER canonicalization — the bug's
+    # exact target (post-fix both land on the one canonical node).
+    assert wired == [["evt-1918"], ["evt-1918b"]], wired
 
 
 def test_upsert_document_includes_source_path(live_proj):

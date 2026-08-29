@@ -478,6 +478,7 @@ function claimIntentInFlight() {
   const [backupInfo, setBackupInfo] = React.useState(null)
   const [newGraphName, setNewGraphName] = React.useState('')
   const teamIdRef = React.useRef(null)
+  const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
   const fallbackTeamIdRef = React.useRef(null) // Round-4: team auto-selected by recoverKey 400-fallback
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
   const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
@@ -1291,6 +1292,15 @@ function claimIntentInFlight() {
         body: JSON.stringify({ content: `${subjectName} is building ${projectName}`, kind: 'statement',
                                about_object: proj.id, tags: ['onboarding'], dedup: true }) })
       setWizardSeedDone(!!(subj && subj.id && proj && proj.id && p && p.id))
+      // #1906: the seeded point must land on the Overview without waiting
+      // for reload — team.point_count was captured at provisioning (0).
+      // Load-bearing for the header-exit race ('Open my dashboard →' is
+      // available on every wizard step): finishWelcomeLoads' refreshTeam
+      // can snapshot 0 while the seed commit is in flight; this post-seed
+      // refire lands the correct count. Bump the refresh seq so any
+      // in-flight pre-seed team response is dropped (code-review P2).
+      teamRefreshSeqRef.current += 1
+      refreshTeam(welcomeKey || '', undefined, teamRefreshSeqRef.current).catch(() => {})
       // #1691: reflect the subject in the account username (display_name)
       // — best-effort; the graph Subject is the source of truth.
       if (subj && subj.id && supabaseClient) {
@@ -1306,7 +1316,7 @@ function claimIntentInFlight() {
   }
 
   // #1842 P1 (re-review): the post-welcome load sequence, shared by
-  // wizardComplete AND the welcome header's "Open dashboard →" button
+  // wizardComplete AND the welcome header's "Open my dashboard →" button
   // (which previously only setWelcomeMode(false), bypassing the loads —
   // currentTeamId stayed null, the currentTeamId effect never fired
   // loadMembers/loadGraphs, and Graphs/Users/Backups shimmered forever on
@@ -1320,6 +1330,19 @@ function claimIntentInFlight() {
   async function finishWelcomeLoads() {
     await loadTeams().catch(() => {})
     loadBackups(welcomeKey || '').catch(() => {})
+    // #1906: the first-timer path never ran loadAll (keys+sessions) — the
+    // Overview 'API Keys' card stayed 0 until reload. loadTeams just
+    // pinned currentTeamId (Round-8), so loadAll's ?team_id= targets the
+    // new team. Fire-and-forget like completeLogin's card loads; each
+    // loader carries its own staleness guard.
+    loadAll(welcomeKey || '').catch(() => {})
+    // #1906: refetch the team so the Overview 'Data points' card reflects
+    // the seeded graph — team.point_count was captured at provisioning
+    // (pre-seed, 0). Also covers the header-exit-without-seed case (0
+    // stays 0 — honest).
+    // Pass the current refresh seq: if a seed refire bumps it mid-flight,
+    // this pre-seed response is dropped (it must not clobber the count).
+    refreshTeam(welcomeKey || '', undefined, teamRefreshSeqRef.current).catch(() => {})
     // #1847: re-fire the onboarding-state load NOW that the team exists —
     // the mount-time refreshOnboarding() fired BEFORE provisioning (mount
     // gate → provisionInApp) and 403'd 'No team membership' for first-timers,
@@ -1751,6 +1774,22 @@ function claimIntentInFlight() {
               setWelcomeKey(provisioned.api_key)
               setWelcomeTeamName(provisioned.team_name)
               setWelcomeGraphName(provisioned.graph_name || '')
+              // #1906: persist the shown-once key NOW — a reload (even
+              // mid-wizard, before any dashboard exit) must keep it; the
+              // mint path would otherwise mint a DIFFERENT bootstrap key
+              // and the revealed key is gone forever (atomic reveal+null,
+              // A13 — the server nulls its only plaintext copy on reveal,
+              // so the client must persist at reveal time or the shown-once
+              // key is unrecoverable). Guard truthy: the
+              // consumed-reveal path returns api_key '' (already revealed
+              // elsewhere), and a falsy value must never land in
+              // localStorage (mint-path convention, #1830). try/catch:
+              // private-mode storage throws.
+              if (provisioned.api_key) {
+                try { localStorage.setItem(KEY_STORAGE, provisioned.api_key) } catch { /* best-effort */ }
+                setApiKey(provisioned.api_key)
+                apiKeyRef.current = provisioned.api_key
+              }
               // #1660: prefill the seed step — the Subject from the OAuth
               // identity (name or email prefix), the Project from the team.
               {
@@ -1769,8 +1808,19 @@ function claimIntentInFlight() {
               // The provisioned team_id comes from the refreshTeam response
               // (the team row just created). No double-fire: completeLogin
               // never runs on this path.
-              refreshTeam(provisioned.api_key)
-                .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
+              refreshTeam(provisioned.api_key, undefined, teamRefreshSeqRef.current)
+                .then((t) => {
+                  if (t && t.team_id) {
+                    // #1906 (code-review P1): record the revealed key in the
+                    // per-team cache — switchTeam/revokeKey consult
+                    // teamKeysRef; without the entry, a switch away-and-back
+                    // mints a DIFFERENT bootstrap key (replacing the
+                    // shown-once key) and revoking the active key skips the
+                    // localStorage re-mint branch (stale-key 401 on reload).
+                    if (provisioned.api_key) teamKeysRef.current[t.team_id] = provisioned.api_key
+                    loadAlerts(t.team_id)
+                  }
+                })
                 .catch(() => {})
             } else {
               setWelcomeProvisionError('Could not create your team — try again.')
@@ -1921,7 +1971,7 @@ function claimIntentInFlight() {
     })()
   }, [])
 
-  async function refreshTeam(key, expectedTeamId) {
+  async function refreshTeam(key, expectedTeamId, seq) {
     // P1 (code-review): extracted team refetch — the success-return poll loop
     // used an undefined `jl` (dead code); this is the real refetch.
     // P2 (code-review): key param so the refetch targets the selected team —
@@ -1947,6 +1997,11 @@ function claimIntentInFlight() {
     //    user switched to B → /v1/team with A's key returns A's data).
     if (expectedTeamId != null && teamIdRef.current !== expectedTeamId) return t
     if (t?.team_id && teamIdRef.current && t.team_id !== teamIdRef.current) return t
+    // #1906 (code-review P2): optional monotonic seq — welcome-path callers
+    // that must win over concurrent refreshes (the post-seed refire) tag
+    // their call; a response tagged with a stale seq is dropped so a
+    // pre-seed point_count can never clobber the post-seed count.
+    if (seq != null && seq !== teamRefreshSeqRef.current) return t
     setTeam(t)
     return t
   }
@@ -3430,11 +3485,18 @@ function claimIntentInFlight() {
         <header>
           <div className="logo">Tortoise</div>
           <nav />
+          {/* #1906 (code-review P1): disabled while provisioning OR on the
+              terminal error/claim cards — exiting fires finishWelcomeLoads
+              against nothing (no teamIdRef pin → loadAll 403 → 'API Keys 0'
+              + a false error banner until reload). The spinner window is
+              transient; the error/claim cards' own CTAs (Try again / Go
+              claim my team) own the recovery. */}
           <button
             className="ghost small"
+            disabled={welcomeProvisioning || welcomeProvisionError}
             onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); finishWelcomeLoads() }}
           >
-            Open dashboard →
+            Open my dashboard →
           </button>
         </header>
         <main>
@@ -3549,7 +3611,7 @@ function claimIntentInFlight() {
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWelcomeOriented(false)}>← Back</button>
                             <div className="wizard-nav-actions">
-                              <button type="button" className="ghost" onClick={() => { setWelcomeMode(false); setTab('keys') }}>Go to API Keys →</button>
+                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
                             </div>
                           </div>
                         </>
@@ -3755,7 +3817,7 @@ function claimIntentInFlight() {
                                     {p.limits.map((l) => <li key={l}>{l}</li>)}
                                   </ul>
                                   {p.tier === 'free' ? (
-                                    // #1856: same as the header "Open dashboard →" button — this
+                                    // #1856: same as the header "Open my dashboard →" button — this
                                     // first-timer exit (completeLogin never runs) must still fire
                                     // finishWelcomeLoads() or currentTeamId/teams/apiKey stay unset
                                     // (account blob "No team", Members "Loading…" forever). The plans

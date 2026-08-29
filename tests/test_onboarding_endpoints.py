@@ -21,16 +21,24 @@ from tortoise.sdk import TortoiseSDK
 @pytest.fixture
 def client(tmp_path):
     """TestClient with a temp embedded DB + registry."""
-    db_path = str(tmp_path / "onboarding.db")  # noqa: F841
+    db_path = str(tmp_path / "onboarding.db")
     # Patch TortoiseSDK to use the temp DB (mirrors test_hosted_api.py)
     orig_init = TortoiseSDK.__init__
 
-    def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
+    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
         # Isolate EVERY SDK construction (registry included) to the fixture's
-        # temp DB — _make_sdk passes db_path= explicitly, and the registry
-        # must not fall back to the shared temp default (that leaks state
-        # across tests: "Team already exists").
-        orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
+        # temp DB — _make_sdk never passes db_path= (URI mode), so the
+        # caller-provided path (via **kw) or the fixture's temp DB wins;
+        # without this the registry falls back to the shared docker
+        # server / default temp and leaks state across tests ("Team already
+        # exists" / onboarding 409s). NOTE: the param must NOT be named
+        # `db_path` — it shadows the fixture's closure variable, silently
+        # re-enabling the leak.
+        caller_path = kw.pop("db_path", None)
+        resolved = db_path_arg
+        if resolved is None:
+            resolved = caller_path if caller_path is not None else db_path
+        orig_init(self, db_path=resolved,
                   namespace=namespace, **kw)
 
     TortoiseSDK.__init__ = _patched
@@ -57,15 +65,18 @@ def client(tmp_path):
 @pytest.fixture
 def unauth_client(tmp_path):
     """TestClient WITHOUT the auth override — real 401s."""
-    db_path = str(tmp_path / "unauth.db")  # noqa: F841
+    db_path = str(tmp_path / "unauth.db")
     orig_init = TortoiseSDK.__init__
 
-    def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
+    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
         # Isolate EVERY SDK construction (registry included) to the fixture's
-        # temp DB — _make_sdk passes db_path= explicitly, and the registry
-        # must not fall back to the shared temp default (that leaks state
-        # across tests: "Team already exists").
-        orig_init(self, db_path=db_path if db_path_arg is None else db_path_arg,
+        # temp DB (see the client fixture — the param must not shadow the
+        # closure `db_path`).
+        caller_path = kw.pop("db_path", None)
+        resolved = db_path_arg
+        if resolved is None:
+            resolved = caller_path if caller_path is not None else db_path
+        orig_init(self, db_path=resolved,
                   namespace=namespace, **kw)
 
     TortoiseSDK.__init__ = _patched
