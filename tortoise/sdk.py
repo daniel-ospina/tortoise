@@ -2565,6 +2565,14 @@ class TortoiseSDK:
         props = _sanitize_props(props, reject_id=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #1904 (bug-hunt 2026-08-28 P1-3): a content edit MUST recompute
+        # content_hash in the same round trip — every dedup surface matches
+        # on the stored hash (create_point dedup, ingest, _content_exists),
+        # so a stale hash after update_point(content=...) silently breaks
+        # dedup and diverges the live graph from JSONL replay (which derives
+        # the hash from PointRevised.new_content).
+        if "content" in props:
+            props["content_hash"] = _content_hash(props["content"])
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
 
@@ -2651,8 +2659,11 @@ class TortoiseSDK:
         self._mark_dirty([id])
         result = self.get_point(id)
         # #548: emit PointRevised event for rebuild parity
+        # #1904: content_hash is derived from content — keep it out of the
+        # event record (mirrors create_point's snapshot strip at emit).
+        emit_props = {k: v for k, v in props.items() if k != "content_hash"}
         self._emit_event("PointRevised", id=id,
-                         new_content=props.get("content"), **props)
+                         new_content=props.get("content"), **emit_props)
         return result
 
     def delete_point(self, id: str) -> bool:
