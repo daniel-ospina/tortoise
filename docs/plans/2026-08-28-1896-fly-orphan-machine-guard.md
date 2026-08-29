@@ -171,7 +171,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 ### Task 3: Verify + live dry-run + reconcile
 
 **Intent:** Prove the guard passes on today's (clean) fleet and catches the incident replay; confirm the hermetic suite is green.
-**Acceptance:** All hermetic tests pass (62 at final review — the plan's 28-test list is the initial sketch; test-review cycles extended it with type-drift, shape-validation, and retry-seam coverage); live dry-run of the script against the real fleet exits 0; `tests/` suite green (docker lane or carve-out lane per AGENTS.md).
+**Acceptance:** All hermetic tests pass (64 at final review — the plan.s 28-test list is the initial sketch; test-review + code-review cycles extended it with type-drift, shape-validation, retry-seam, and sanitization coverage); live dry-run of the script against the real fleet exits 0; `tests/` suite green (docker lane or carve-out lane per AGENTS.md).
 **Files:**
 - Test: `tests/test_fly_machines_guard.py` (incident fixture)
 
