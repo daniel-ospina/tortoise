@@ -336,6 +336,12 @@ jobs:
         # force a dev-group re-sync in the subprocess.)
         run: |
           pip install -e '.[test,embeddings]' uv
+          # #1917 (CI unblock): some ubuntu-latest runner images ship a stale
+          # workspace .venv that uv refuses to touch (uv #13986 / #9423 —
+          # "failed to create directory .venv: File exists"), failing every
+          # PR's fast-test legs at setup. Remove it so uv sync recreates the
+          # pre-warmed env (same result, tolerant of the stale dir).
+          rm -rf .venv
           uv sync --frozen
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
         # Leaky shared runners accumulate redislite tempdirs from every
