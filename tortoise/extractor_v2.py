@@ -2638,10 +2638,11 @@ def _event_kind_forms(master: dict) -> set[str]:
     if _PACK_EVENT_FORMS is None:
         _PACK_EVENT_FORMS = set()
         try:
-            from pathlib import Path  # noqa: I001 — lazy (module has no
-            # module-level pathlib import)
-            from tortoise.pack_registry import PackRegistry
-            packs_dir = Path(__file__).resolve().parent.parent / "packs"
+            from tortoise.pack_registry import (
+                PackRegistry,
+                default_packs_dir,
+            )
+            packs_dir = default_packs_dir()
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():
@@ -2678,10 +2679,11 @@ def _object_kind_forms(master: dict) -> set[str]:
     if _PACK_OBJECT_FORMS is None:
         _PACK_OBJECT_FORMS = set()
         try:
-            from pathlib import Path  # noqa: I001 — lazy (module has no
-            # module-level pathlib import)
-            from tortoise.pack_registry import PackRegistry
-            packs_dir = Path(__file__).resolve().parent.parent / "packs"
+            from tortoise.pack_registry import (
+                PackRegistry,
+                default_packs_dir,
+            )
+            packs_dir = default_packs_dir()
             reg = PackRegistry(packs_dir)
             reg.load_all()
             for ns, pack in reg.packs.items():

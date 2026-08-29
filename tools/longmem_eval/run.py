@@ -4268,6 +4268,38 @@ def _print_summary(report: dict[str, Any]) -> None:
         print("error census: no errors")
     for c in integ.get("checks") or []:
         print(f"  check: {c}")
+    # #1946: the extraction-health gate readout — printed BEFORE the score
+    # so the healthy/degraded split is seen before the blended accuracy
+    # (reval3: 33/50 questions ingested 0 semantic points yet the 0.880
+    # blended healthy 0.824 + degraded 0.909 into one headline).
+    eh = report.get("extraction_health")
+    if eh:
+        print("── extraction health ──")
+        flag = "⚠ DEGRADED" if eh.get("status") == "degraded" else "healthy"
+        print(f"status: {flag}  (healthy {eh.get('healthy_n')} / degraded "
+              f"{eh.get('degraded_n')}, degraded_fraction "
+              f"{eh.get('degraded_fraction')} >= threshold "
+              f"{eh.get('threshold')}; min_points {eh.get('min_points')})")
+        pop = eh.get("per_population_accuracy")
+        if pop:
+            for label, d in (("healthy", pop.get("healthy") or {}),
+                             ("degraded", pop.get("degraded") or {})):
+                acc = d.get("accuracy")
+                print(f"  {label:<9} accuracy "
+                      f"{acc if acc is not None else 'n/a'} (n={d.get('n')})")
+            if eh.get("status") == "degraded":
+                if eh.get("degraded_n"):
+                    print("  ⚠ degraded population present — the overall "
+                          "accuracy blends two populations; read the "
+                          "per-population numbers above")
+                else:
+                    # the flag fired on the run census alone (no degraded
+                    # question outcomes) — surface the deciding term,
+                    # mirroring the integrity block's "invalidity decided
+                    # by" line.
+                    print("  ⚠ run flagged by census: fatal_402_billing / "
+                          "empty_embed_list present in the error census "
+                          "(above) — extraction was billing/embedding-limited")
     print("── score ──")
     acc = report["accuracy"]
     print(f"overall accuracy:        {acc['overall']}")

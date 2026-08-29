@@ -5,9 +5,10 @@ import './index.css'
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
 import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
-// (off → install-pending → waiting → active, probe-driven) + the re-ask gate
-// predicate — pure, node --test unit-tested (captureStatus.test.js).
-import { captureStatusForHarness, lastErrorForHarness, shouldShowReAsk } from './captureStatus.js'
+// (off → install-pending → waiting → active, probe-driven) — pure, node --test
+// unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
+// removed with the consent gate (default-ON, ToS-covered).
+import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
 // #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
 // unit-tested); imported under an alias to avoid an ESM redeclaration collision
 // with the local isSessionKey wrapper below.
@@ -293,7 +294,7 @@ function claimIntentInFlight() {
   const wizardGithubPollRef = React.useRef(null)  // #1643 review P1: the status poll handle (hoisted so Cancel/unmount can stop it)
   // #1728 Slice 3: the Memory-sources surface (wizard step-1 + Overview
   // panel share ONE implementation). Full onboarding state drives the three
-  // opt-in toggles (issues / docs / sessions) + the misled-user re-ask.
+  // toggles (issues / docs / sessions).
   const [onboarding, setOnboarding] = React.useState(null)
   const [onboardingLoading, setOnboardingLoading] = React.useState(true)
   const [issuesWantOn, setIssuesWantOn] = React.useState(false)  // on-but-not-connected (inline Connect shown)
@@ -319,42 +320,12 @@ function claimIntentInFlight() {
   const [branchLists, setBranchLists] = React.useState({})
   const [docsScope, setDocsScope] = React.useState({ repos: [], branches: {} })
   const [issuesScope, setIssuesScope] = React.useState({ repos: [] })
-  // #1728 (Task 17): the misled-user re-ask — exactly once per visit until
-  // resolved. `capture_ask_shown` is set on ANSWER only; dismissal NEVER
-  // consumes the ask (re-shown next visit). One flag for BOTH surfaces
-  // (wizard step-1 + the Overview panel) — the first surface the user sees
-  // this visit renders the pane.
-  const [reaskOpen, setReaskOpen] = React.useState(false)
-  const reaskShownVisitRef = React.useRef(false)
-  const [reaskBusy, setReaskBusy] = React.useState(false)
-  const [reaskError, setReaskError] = React.useState('')
-  const reaskGate = shouldShowReAsk(onboarding)
-  React.useEffect(() => {
-    if (reaskGate && !reaskShownVisitRef.current) {
-      reaskShownVisitRef.current = true
-      setReaskOpen(true)
-    }
-  }, [reaskGate])
-  // #1728 (Task 17, review P2-4/P2-9): the re-ask pane renders at APP level
-  // (sibling above the tab content) so it shows on ANY tab / point-count — a
-  // 0-point team on Overview never mounted MemorySources, so a pane nested
-  // there was silently dropped while the gate ref was already consumed.
-  // Lite a11y: store the previously-focused element on open, focus the yes
-  // button, ESC dismisses, and focus is restored on close/answer.
-  const reaskYesRef = React.useRef(null)
-  const reaskPrevFocusRef = React.useRef(null)
-  const dismissReask = React.useCallback(() => { setReaskOpen(false); setReaskError('') }, [])
-  React.useEffect(() => {
-    if (reaskOpen) {
-      reaskPrevFocusRef.current = document.activeElement
-      if (reaskYesRef.current) reaskYesRef.current.focus()
-    } else if (reaskPrevFocusRef.current) {
-      reaskPrevFocusRef.current.focus()
-      reaskPrevFocusRef.current = null
-    }
-  }, [reaskOpen])
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
+  // #1907: seed-step failure must surface INLINE (the global error banner
+  // only renders post-welcome) — the message lives here and the retry is the
+  // re-enabled 'Seed my graph' button. Cleared on every attempt.
+  const [wizardSeedError, setWizardSeedError] = React.useState('')
   const [wizardDone, setWizardDone] = React.useState(false)
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
@@ -466,6 +437,15 @@ function claimIntentInFlight() {
   const [currentTeamId, setCurrentTeamId] = React.useState(null)
   const [currentGraphId, setCurrentGraphId] = React.useState(null)
   const [accountMenuOpen, setAccountMenuOpen] = React.useState(false) // #1148-ux: account blob dropdown
+  // #1877: create-team dialog state (gated-on-click upgrade UX)
+  const [createTeamOpen, setCreateTeamOpen] = React.useState(false)
+  const [createTeamName, setCreateTeamName] = React.useState('')
+  const [createTeamBusy, setCreateTeamBusy] = React.useState(false)
+  const [createTeamError, setCreateTeamError] = React.useState('')
+  const [createTeamUpgrade, setCreateTeamUpgrade] = React.useState(false)
+  // #1875: invitee-side pending invites (account-menu surface)
+  const [pendingInvites, setPendingInvites] = React.useState(null)  // null = not loaded
+  const [pendingInvitesBusy, setPendingInvitesBusy] = React.useState('')  // '' | invitation_id
   const accountBlobRef = React.useRef(null) // #1148-ux review P2-4/P3-1: outside-click + Escape close
   React.useEffect(() => {
     if (!accountMenuOpen) return
@@ -933,7 +913,7 @@ function claimIntentInFlight() {
   // #1643 (review P2-1): read the onboarding state on mount so completed
   // users never see the re-entry card again (the completion marker is
   // persisted server-side). #1728 Slice 3: the same read now feeds the full
-  // Memory-sources surface (three toggles + the re-ask gate).
+  // Memory-sources surface (three toggles).
   async function refreshOnboarding() {
     try {
       if (!sessionTokenRef.current) {
@@ -1106,11 +1086,11 @@ function claimIntentInFlight() {
     setMemoryBusy('sessions')
     setRowError('sessions', '')
     try {
-      // #1728 (T1-P8): toggle-on PATCH also sets capture_revised — a fresh
-      // opt-in resolves the exactly-once re-ask (never sees the pane). PATCH
-      // MERGE: no read-modify-write, no stale reads.
+      // #1927: session_recording is the off-switch (default ON) — the toggle
+      // writes the flag only (the re-ask machinery it used to feed is gone).
+      // PATCH MERGE: no read-modify-write, no stale reads.
       await api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
-        body: JSON.stringify({ session_recording: next, capture_revised: true }) })
+        body: JSON.stringify({ session_recording: next }) })
       await refreshOnboarding()
     } catch (e) {
       setRowError('sessions', (e && e.message) || 'Could not update session capture — try again.')
@@ -1227,27 +1207,9 @@ function claimIntentInFlight() {
     }
   }
 
-  // ── #1728 (Task 17): the misled-user re-ask answer (YES / NO). The
-  // answer PATCH writes the SAME consent keys as the wizard/panel toggles —
-  // session_recording (the enforced flag) + capture_revised + the
-  // ANSWER-only capture_ask_shown. Decline NEVER clears probes or receipts
-  // (re-enable resolves receipt-authoritative).
-  async function answerReask(yes) {
-    if (reaskBusy) return
-    setReaskBusy(true)
-    setReaskError('')
-    try {
-      await api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
-        body: JSON.stringify({ session_recording: yes, capture_revised: true, capture_ask_shown: true }) })
-      setReaskOpen(false)
-      await refreshOnboarding()
-    } catch (e) {
-      setReaskError((e && e.message) || 'Could not save your answer — try again.')
-    } finally {
-      setReaskBusy(false)
-    }
-  }
-
+  // #1927: the misled-user re-ask (YES / NO answer pane) was removed with the
+  // consent gate — session recording is default-ON and ToS-covered, so there
+  // is no exactly-once gate and no answer path.
   async function wizardConnectGithub() {
     setWizardGithub((g) => ({ ...g, busy: true }))
     setRowError('issues', '')
@@ -1314,6 +1276,7 @@ function claimIntentInFlight() {
 
   async function wizardSeedGraph() {
     setWizardSeeding(true)
+    setWizardSeedError('')  // #1907: a retry must not keep showing the stale error
     try {
       // #1660/ontology: the STATE sample — the user's Subject + their
       // Project as the first graph entities, wired by a statement Point
@@ -1336,7 +1299,9 @@ function claimIntentInFlight() {
       setWizardSeeding(false)
     } catch (e) {
       setWizardSeeding(false)
-      setError((e && e.message) || 'Could not seed your graph — try again.')
+      // #1907: the global error banner is invisible in welcome mode — render
+      // the failure inline in the seed step instead (button re-enables → retry).
+      setWizardSeedError((e && e.message) || 'Could not seed your graph — try again.')
     }
   }
 
@@ -2365,6 +2330,85 @@ function claimIntentInFlight() {
     } catch { /* best-effort */ }
   }
 
+  // #1875: fetch the invitee's pending invites when the account menu opens.
+  async function loadPendingInvites() {
+    if (!sessionTokenRef.current) return
+    try {
+      const res = await api('/v1/invites/pending', { useSession: true })
+      setPendingInvites((res && res.invites) || [])
+    } catch {
+      // #1875 review P2: a transient load failure must NOT collapse to the
+      // empty state (which hides real invites) — surface a retryable error.
+      setPendingInvites((prev) => (prev && prev.length ? prev : [{ _loadError: 'Could not load invites — reopen the menu to retry' }]))
+    }
+  }
+
+  async function acceptPendingInvite(inv) {
+    setPendingInvitesBusy(inv.invitation_id)
+    try {
+      const res = await api(`/v1/invites/pending/${encodeURIComponent(inv.invitation_id)}/accept`, {
+        method: 'POST', useSession: true,
+      })
+      setPendingInvites((prev) => (prev || []).filter((x) => x.invitation_id !== inv.invitation_id))
+      setAccountMenuOpen(false)
+      if (res?.team_id) { await loadTeams(); switchTeam(res.team_id) }
+    } catch (e) {
+      // #1875 review P2-1: a failed accept (free-cap / at-capacity / expired)
+      // keeps the invite in the list and surfaces the API detail — it must
+      // not silently vanish.
+      setPendingInvites((prev) => (prev || []).map((x) =>
+        x.invitation_id === inv.invitation_id ? { ...x, error: e?.message || 'Could not accept' } : x))
+    } finally {
+      setPendingInvitesBusy('')
+    }
+  }
+
+  async function declinePendingInvite(inv) {
+    setPendingInvitesBusy(inv.invitation_id)
+    try {
+      await api(`/v1/invites/pending/${encodeURIComponent(inv.invitation_id)}`, {
+        method: 'DELETE', useSession: true,
+      })
+    } catch { /* best-effort — remove locally regardless */ }
+    setPendingInvites((prev) => (prev || []).filter((x) => x.invitation_id !== inv.invitation_id))
+    setPendingInvitesBusy('')
+  }
+
+  async function handleCreateTeam() {
+    // #1877: create-team dialog submit — validation mirrors POST /v1/teams
+    // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
+    // upgrade UX (the dialog explains "upgrade a team, then create" — the
+    // new team doesn't exist until the gate passes).
+    const name = createTeamName.trim()
+    if (!name) { setCreateTeamError('Team name required'); return }
+    if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
+      setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
+      return
+    }
+    setCreateTeamBusy(true)
+    setCreateTeamError('')
+    setCreateTeamUpgrade(false)
+    try {
+      const res = await api('/v1/teams', {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ name }),
+      })
+      setCreateTeamOpen(false)
+      setCreateTeamName('')
+      await loadTeams()
+      if (res?.team_id) switchTeam(res.team_id)
+    } catch (e) {
+      if (e?.status === 402) {
+        setCreateTeamError(e.message || 'Create another team requires a paid plan')
+        setCreateTeamUpgrade(true)
+      } else {
+        setCreateTeamError(e?.message || 'Could not create the team')
+      }
+    } finally {
+      setCreateTeamBusy(false)
+    }
+  }
+
   async function switchTeam(teamId) {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
@@ -2579,7 +2623,8 @@ function claimIntentInFlight() {
       if (!res.ok) {
         const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
-          setError('Invites require the Team tier — upgrade to invite teammates.')
+          // #1875: render the API's detail (upgrade vs at-capacity)
+          setError(typeof b.detail === 'string' ? b.detail : 'Invites require the Pro or Team tier — upgrade to invite teammates.')
           setBusy(false)
           return
         }
@@ -3583,7 +3628,6 @@ function claimIntentInFlight() {
                         docsJob={docsJob}
                         memoryBusy={memoryBusy}
                         memoryErrors={memoryErrors}
-                        reaskBusy={reaskBusy}
                         onToggleIssues={toggleIssues}
                         onToggleDocs={toggleDocs}
                         onToggleSessions={toggleSessionRecording}
@@ -3645,6 +3689,11 @@ function claimIntentInFlight() {
                           </div>
                           <p className="dim small">Seeding adds: your subject, the project object (in progress), and a statement connecting them.</p>
                         </>
+                      )}
+                      {wizardSeedError && (
+                        <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>
+                          {wizardSeedError}
+                        </p>
                       )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>
@@ -3763,36 +3812,6 @@ function claimIntentInFlight() {
           <button className="ghost small" onClick={() => { setClaimError(''); try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ } window.history.replaceState({}, '', window.location.pathname) }} aria-label="Dismiss">✕</button>
         </div>
       )}
-      {reaskOpen && (
-        // #1728 (Task 17, review P2-4/P2-9): APP-level re-ask pane — shows
-        // regardless of tab/point-count (a 0-point team on Overview never
-        // mounted MemorySources). role=alertdialog + initial focus on the
-        // yes button; ESC dismisses; focus returns to the trigger on close.
-        <div
-          className="reask-pane"
-          role="alertdialog"
-          aria-modal="true"
-          aria-label="Session recording needs your decision"
-          onKeyDown={(e) => { if (e.key === 'Escape' && !reaskBusy) dismissReask() }}
-        >
-          <h4>Session recording needs your decision</h4>
-          <p>
-            You previously enabled this — before this fix, recording never ran;
-            nothing was captured.
-          </p>
-          <p className="dim small">
-            Keep it on and new sessions will be captured per-harness once a
-            tool's capture mechanism is installed — or turn it off. Already-
-            captured sessions stay.
-          </p>
-          {reaskError && <p className="error" role="alert">{reaskError}</p>}
-          <div className="wizard-nav-actions">
-            <button type="button" ref={reaskYesRef} className="btn-primary" onClick={() => answerReask(true)} disabled={reaskBusy}>Yes, keep recording</button>
-            <button type="button" className="ghost" onClick={() => answerReask(false)} disabled={reaskBusy}>No, turn it off</button>
-            <button type="button" className="ghost" onClick={dismissReask} disabled={reaskBusy}>Not now</button>
-          </div>
-        </div>
-      )}
       <header>
         <div className="logo">Tortoise</div>
         <nav>
@@ -3816,7 +3835,11 @@ function claimIntentInFlight() {
         <div className="account-blob" ref={accountBlobRef}>
           <button
             className="account-blob-btn"
-            onClick={() => setAccountMenuOpen(!accountMenuOpen)}
+            onClick={() => {
+              const opening = !accountMenuOpen
+              setAccountMenuOpen(opening)
+              if (opening) loadPendingInvites()  // #1875: refresh on open
+            }}
             onKeyDown={(e) => { if (e.key === 'Escape') setAccountMenuOpen(false) }}
             aria-expanded={accountMenuOpen}
             aria-label={`Account menu — ${currentTeamName || 'No team'}`}
@@ -3897,6 +3920,50 @@ function claimIntentInFlight() {
                   ))}
                 </>
               )}
+              {/* #1877: create-team entry — UNCONDITIONAL (it's the sole
+                  entry for single-team users; the switch label above stays
+                  hidden for teams.length ≤ 1). */}
+              <button className="account-menu-create" onClick={() => { setCreateTeamOpen(true); setCreateTeamName(''); setCreateTeamError(''); setCreateTeamUpgrade(false); setAccountMenuOpen(false) }}>
+                + Create new team
+              </button>
+              {/* #1875: invitee-side pending invites (Slack/GitHub/Notion
+                  workspace-switcher precedent). Renders only when there are
+                  pending invites; Accept lands on the team, Decline removes. */}
+              {pendingInvites && pendingInvites.length > 0 && (
+                pendingInvites[0] && pendingInvites[0]._loadError ? (
+                  <div className="account-invite" role="alert">
+                    <span className="dim small">{pendingInvites[0]._loadError}</span>
+                  </div>
+                ) : (
+                <>
+                  <div className="account-menu-label">Invites</div>
+                  {pendingInvites.map((inv) => (
+                    <div key={inv.invitation_id} className="account-invite">
+                      <div className="account-invite-text">
+                        <span className="account-invite-team">{inv.team_name}</span>
+                        <span className="dim small">{inv.inviter_email ? `by ${inv.inviter_email}` : ''}</span>
+                        {inv.error && <span className="account-invite-error" role="alert">{inv.error}</span>}
+                      </div>
+                      <div className="account-invite-actions">
+                        <button
+                          className="ghost small"
+                          disabled={pendingInvitesBusy !== ''}
+                          onClick={() => acceptPendingInvite(inv)}
+                        >
+                          {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
+                        </button>
+                        <button
+                          className="ghost small"
+                          disabled={pendingInvitesBusy !== ''}
+                          onClick={() => declinePendingInvite(inv)}
+                        >
+                          Decline
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                  </>
+              ))}
               <div className="account-menu-divider" />
               <button className="account-menu-logout" onClick={logout}>
                 Log out
@@ -3904,6 +3971,50 @@ function claimIntentInFlight() {
             </div>
           )}
         </div>
+        {/* #1877: create-team dialog — gated-on-click upgrade UX. The 402
+            state explains "upgrade a team, then create" (the new team
+            doesn't exist until the gate passes); the CTA lands on Billing
+            (#1876's team selector). */}
+        {createTeamOpen && (
+          <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) setCreateTeamOpen(false) }}>
+            <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new team"
+                 onClick={(e) => e.stopPropagation()}
+                 onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) setCreateTeamOpen(false) }}>
+              {createTeamUpgrade ? (
+                <>
+                  <h3>Create a new team</h3>
+                  <p className="error" role="alert">{createTeamError}</p>
+                  <p className="dim">The free plan includes one team. Upgrade an existing team to create more.</p>
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button className="btn-primary" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false); setTab('billing') }}>
+                      Upgrade
+                    </button>
+                    <button className="ghost" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false) }}>Cancel</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <h3>Create a new team</h3>
+                  <input
+                    aria-label="Team name"
+                    placeholder="Team name"
+                    autoFocus
+                    value={createTeamName}
+                    onChange={(e) => setCreateTeamName(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter' && !createTeamBusy) handleCreateTeam() }}
+                  />
+                  {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
+                  <div className="row" style={{ marginTop: 12 }}>
+                    <button className="btn-primary" onClick={handleCreateTeam} disabled={createTeamBusy}>
+                      {createTeamBusy ? 'Creating…' : 'Create team'}
+                    </button>
+                    <button className="ghost" onClick={() => setCreateTeamOpen(false)} disabled={createTeamBusy}>Cancel</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
         {team && team.tier !== 'team' && (
           <a className="tier-badge" href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">
             {team.tier || 'free'} tier · Upgrade
@@ -4092,9 +4203,9 @@ function claimIntentInFlight() {
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>
-            {/* #1728 Slice 3 (Task 17): the later-opt-in "Memory sources"
-                panel — ONE implementation shared with the wizard step-1
-                (the re-ask variant renders when the misled gate fires). */}
+            {/* #1728 Slice 3 (Task 17): the "Memory sources" panel — ONE
+                implementation shared with the wizard step-1. #1927: the re-ask
+                variant was removed with the consent gate. */}
             <MemorySources
               state={onboarding}
               loading={onboardingLoading}
@@ -4106,7 +4217,6 @@ function claimIntentInFlight() {
               docsJob={docsJob}
               memoryBusy={memoryBusy}
               memoryErrors={memoryErrors}
-              reaskBusy={reaskBusy}
               onToggleIssues={toggleIssues}
               onToggleDocs={toggleDocs}
               onToggleSessions={toggleSessionRecording}
@@ -4363,8 +4473,11 @@ function claimIntentInFlight() {
             {!isOwnerAdmin && (
               <p className="dim small">Only owners and admins can manage members.</p>
             )}
-            {team && team.tier !== 'team' && isOwnerAdmin && (
-              <p className="dim small">Invites require the Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
+            {/* #1875: Pro CAN invite up to capacity — the notice is only
+                for Free/Solo (the old copy rendered for Pro too and
+                contradicted the working invite form). */}
+            {team && team.tier !== 'pro' && team.tier !== 'team' && isOwnerAdmin && (
+              <p className="dim small">Invites require the Pro or Team tier — <a href="https://tortoise.premiselabs.co/product.html#pricing" target="_blank" rel="noreferrer">upgrade to add teammates</a>.</p>
             )}
             <table>
               <thead><tr><th>Email / User</th><th>Role</th><th>Status</th><th></th></tr></thead>
@@ -4515,23 +4628,18 @@ function claimIntentInFlight() {
 
 // #1728 Slice 3 (Tasks 16-17): the ONE shared Memory-sources surface — rendered
 // on the wizard step-1 AND the dashboard Overview panel (same component, same
-// toggle set + state machine). Three opt-in toggles (issues / docs / sessions)
+// toggle set + state machine). Three toggles (issues / docs / sessions)
 // reuse role="switch"/aria-checked; row failures render under the row with
 // role="alert" (never the global 402-upgrade banner); status regions carry
-// aria-live="polite". The misled-user re-ask pane renders at APP level (see
-// the App return — P2-9: it must show on any tab/point-count, and a 0-point
-// team on Overview never mounts this component), driven by the parent's
-// exactly-once gate (session_recording && !capture_revised &&
-// !capture_ask_shown); ANSWER sets capture_ask_shown (T2-P2f), dismissal never
-// consumes the ask. `reaskBusy` locks the sessions toggle while an answer is
-// in flight (review ISSUE 2).
+// aria-live="polite". #1927: the misled-user re-ask pane (exactly-once gate)
+// was removed with the consent gate — sessions are default-ON (ToS-covered)
+// and the sessions toggle here is the quiet off-switch.
 function MemorySources(props) {
   const {
     state, loading, wizardHarness, github,
     issuesWantOn, docsWantOn,
     indexJob, docsJob,
     memoryBusy, memoryErrors,
-    reaskBusy,
     reposList, reposLoaded, docsScope, issuesScope, branchLists,
     onToggleIssues, onToggleDocs, onToggleSessions,
     onConnectGithub, onIndexDocs, onReindexGithub,
@@ -4765,7 +4873,7 @@ function MemorySources(props) {
         </div>
       </div>
 
-      {/* ── Sessions toggle (ONE team-level consent; per-harness status) ── */}
+      {/* ── Sessions toggle (off-switch; default ON per ToS — per-harness status) ── */}
       <div className="toggle-row">
         <button
           type="button"
@@ -4775,7 +4883,7 @@ function MemorySources(props) {
           data-on={sessionsOn ? 'true' : 'false'}
           aria-label="Agent session recording"
           onClick={() => onToggleSessions(!sessionsOn)}
-          disabled={memoryBusy === 'sessions' || reaskBusy}  // review ISSUE 2: the re-ask answer is in flight ⇒ toggle is locked too
+          disabled={memoryBusy === 'sessions'}
         />
         <div className="toggle-body">
           <h4>Agent session recording</h4>

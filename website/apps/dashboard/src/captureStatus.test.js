@@ -6,19 +6,18 @@ import {
   CAPTURE_STATES,
   captureStatusForHarness,
   lastErrorForHarness,
-  shouldShowReAsk,
 } from './captureStatus.js'
 
 test('canonical 4-state vocabulary is off → install-pending → waiting → active', () => {
   assert.deepEqual(CAPTURE_STATES, ['off', 'install-pending', 'waiting', 'active'])
 })
 
-test('consent off ⇒ every harness reads off, even with probe + receipt', () => {
+test('recording off-switch ⇒ every harness reads off, even with probe + receipt', () => {
   const st = { session_recording: false, install_probe_claude: 't', session_capture_receipt_claude: 't' }
   assert.equal(captureStatusForHarness(st, 'claude'), 'off')
 })
 
-test('consent on, no probe ⇒ install-pending (install steps shown)', () => {
+test('recording on, no probe ⇒ install-pending (install steps shown)', () => {
   const st = { session_recording: true }
   assert.equal(captureStatusForHarness(st, 'claude'), 'install-pending')
 })
@@ -65,19 +64,4 @@ test('last-error sub-line reads the REGISTERED per-harness key, not client state
   assert.equal(lastErrorForHarness(st, 'claude'), 'provider 503')
   assert.equal(lastErrorForHarness(st, 'pi'), null)
   assert.equal(lastErrorForHarness(null, 'claude'), null)
-})
-
-test('re-ask gate: session_recording && !capture_revised && !capture_ask_shown', () => {
-  assert.equal(shouldShowReAsk({ session_recording: true, capture_revised: false, capture_ask_shown: false }), true)
-  // fresh opt-in (capture_revised set) never sees it
-  assert.equal(shouldShowReAsk({ session_recording: true, capture_revised: true, capture_ask_shown: false }), false)
-  // answered (capture_ask_shown set on ANSWER only) never sees it again
-  assert.equal(shouldShowReAsk({ session_recording: true, capture_revised: false, capture_ask_shown: true }), false)
-  // dismissal never consumes: ask_shown stays false → gate stays live
-  assert.equal(shouldShowReAsk({ session_recording: true, capture_revised: false, capture_ask_shown: false }), true)
-  // declined (consent off) → gate off
-  assert.equal(shouldShowReAsk({ session_recording: false, capture_revised: true, capture_ask_shown: true }), false)
-  // fresh team (never consented) → gate off
-  assert.equal(shouldShowReAsk({ session_recording: false, capture_revised: false, capture_ask_shown: false }), false)
-  assert.equal(shouldShowReAsk(null), false)
 })

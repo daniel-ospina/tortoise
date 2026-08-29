@@ -9,11 +9,12 @@ Negatives: turn cap (MAX_SESSION_TURNS=500) → 400; oversized turn content
 (>5000 chars) → accepted + truncated to the stored window (the old 422 is
 removed — #1532 D1, SDK truncation parity); unauthenticated → 401.
 
-Consent: #1727 Task 11 (P0) made session_recording the ENFORCED capture
-consent — a fresh team (session_recording=False) gets 403 on POST
-/v1/sessions until it opts in via the public PATCH /v1/onboarding/state
-surface (the same call the dashboard's Memory sources > Agent sessions
-toggle makes). The suite opts each tenant in before exercising capture.
+Consent: #1927 removed the ENFORCED capture consent — session_recording is
+now DEFAULT-ON (ToS-covered) with an optional off-switch: a fresh team
+(session_recording unset) captures on POST /v1/sessions with no gate; a team
+that disables it (PATCH /v1/onboarding/state, the dashboard's Memory sources
+> Agent sessions toggle) gets a clear 409. The suite seeds the flag
+per-tenant to stay explicit about the exercised path.
 """
 from __future__ import annotations
 
@@ -25,14 +26,15 @@ skip_unless_hosted_e2e()
 
 
 def _enable_session_recording(api, tenant: dict) -> None:
-    """Opt the tenant into session capture (the #1727 enforced consent)."""
+    """Seed the tenant's session_recording flag (explicit for determinism;
+    the default is ON — #1927)."""
     h = {"Authorization": f"Bearer {tenant['api_key']}"}
     r = api.patch("/v1/onboarding/state", headers=h,
                   json={"session_recording": True})
     assert r.status == 200, f"enable session_recording: {r.status} {r.text()}"
-    # Self-verifying: the opt-in must actually stick — a silently dropped
-    # PATCH would 403 the capture POSTs below (loud), but asserting the
-    # echoed state here makes the consent precondition explicit.
+    # Self-verifying: the seed must actually stick — a silently dropped
+    # PATCH would 409 the capture POSTs below (loud), but asserting the
+    # echoed state here makes the off-switch state explicit.
     assert r.json()["onboarding"]["session_recording"] is True, r.text()
 
 

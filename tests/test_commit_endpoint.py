@@ -278,6 +278,16 @@ def _inject_session_state(session_id: str, *, value_nodes_created: int = 0,
 # ── DE2E-2 — four-node chain + discoverability + entities + operators ──────
 
 class TestFourNodeChain:
+    def test_commit_works_when_recording_disabled(self, client):
+        """#1927 / #1910: commit_session needs NO session_recording gate —
+        the off-switch lives in _capture_session_impl only. A team with the
+        flag explicitly False can still POST /v1/sessions/commit (the
+        derived-commit receiver never consults it)."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(TEST_TEAM_ID, session_recording=False)
+        r = _commit(client, _raw_payload(1))
+        assert r.status_code == 200, r.text
+        assert r.json()["duplicate"] is False
     def test_commit_writes_four_node_chain(self, client):
         r = _commit(client, _raw_payload(1))
         assert r.status_code == 200, r.text

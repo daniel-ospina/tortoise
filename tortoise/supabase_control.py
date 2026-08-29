@@ -1025,6 +1025,14 @@ def invitation_accept(cp, token: str, user_id: str,
         # dead on arrival (every subsequent call 403s). Parity with the
         # deleted_at kill-switch above.
         raise InvitationError("Team is suspended", status=403)
+    # #1875/#1877 (P1 cycle-2): join-side free-cap on the TOKEN entry point
+    # too — a free-capped invitee must not join a free (or downgraded-window)
+    # team via the email link. Non-consuming (before the single-use PATCH).
+    if team.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
+            and count_active_free_memberships(cp, user_id) >= 1:
+        raise InvitationError(
+            "You already have a free team — this team requires a paid plan "
+            "to join", status=402)
     from tortoise.pricing import tier_limits
     tier = team.get("tier") or "free"
     lim = tier_limits(tier)
@@ -1893,6 +1901,32 @@ def api_key_by_id(cp, key_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
+# #1877: the per-person "one free team" entitlement — teams WITHOUT an
+# active paid subscription. Mirrors the dashboard ACTIVE_STATUSES
+# (main.jsx:835) — keep the two definitions in sync (dual-maintenance).
+_BILLING_ACTIVE_STATUSES = frozenset({"active", "past_due", "trialing"})
+
+
+def count_active_free_memberships(cp, user_id: str) -> int:
+    """Active memberships in teams WITHOUT an active paid subscription — the
+    Supabase twin of the registry count (tier='free' proxy; selfhost has no
+    subscription model, #1877). Shape-gates user_id (#1719: a non-UUID
+    literal would 22P02 → PostgREST 500) and skips dangling memberships
+    (team_by_id None → not counted — the #302 soft-delete sweep can leave
+    memberships for purged teams).
+    """
+    if not _is_uuid(user_id):
+        return 0
+    count = 0
+    for m in user_memberships(cp, user_id):
+        team = team_by_id(cp, m["team_id"])
+        if team is None:
+            continue  # dangling membership — not counted, never a 500
+        if team.get("subscription_status") not in _BILLING_ACTIVE_STATUSES:
+            count += 1
+    return count
+
+
 def membership_count_since(cp, *, cutoff: str, user_id: str | None = None,
                            identity: str | None = None,
                            role: str | None = None) -> int:
@@ -2170,3 +2204,210 @@ def metering_increment(cp, team_id: str, period: str, n: int = 1,
             "(non-fatal): team=%s period=%s n=%s", team_id, period, n,
         )
         return n
+
+
+# ── #1875: invitee-side pending/accept/decline (by-id, email-scoped) ────────
+
+
+def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
+                            user_email: str | None = None) -> dict:
+    """Accept a pending invitation by invitation ID (token-less, #1875) —
+    the invitee-side twin of the token-keyed ``invitation_accept`` (the
+    pending list cannot carry a token: invitations store only lookup_hash).
+
+    Preserves the token twin's checks (cycle-4 contract): pending-status
+    rejection, expiry, email-match, existing-membership 409, the max_users
+    quota gate, and the team deleted/suspended kill-switches. Additionally
+    applies the #1877 free-team entitlement: when the target team has no
+    active paid subscription and the invitee already holds a free team,
+    the accept is blocked BEFORE the single-use PATCH (NON-consuming — the
+    invitee can leave their free team and re-accept).
+    """
+    import uuid  # noqa: I001
+
+    now = datetime.now(timezone.utc)  # noqa: UP017
+    rows = cp.query(
+        "invitations",
+        select=["id", "team_id", "email", "role", "status", "expires_at"],
+        filters=[("id", "eq", invitation_id)],
+    )
+    if not rows:
+        raise InvitationError("Invitation not found", status=404)
+    inv = rows[0]
+
+    status = inv.get("status") or "pending"
+    if status != "pending":
+        if status == "accepted":
+            raise InvitationError("Invitation has already been accepted")
+        if status == "revoked":
+            raise InvitationError("Invitation has been revoked")
+        raise InvitationError("Invitation is not pending")
+    exp = _parse_ts(inv.get("expires_at"))
+    if exp is not None and exp <= now:
+        raise InvitationError("Invite token expired")
+
+    if not user_email or user_email.strip().lower() != (inv.get("email") or "").lower():
+        # security P2 (cycle-2): fail CLOSED — an email-less session cannot
+        # act on invites by id.
+        raise InvitationError("Invite email does not match this account",
+                              status=404)
+
+    existing = cp.query(
+        "team_memberships",
+        select=["id", "status"],
+        filters=[("user_id", "eq", user_id), ("team_id", "eq", inv["team_id"])],
+    )
+    if existing and existing[0].get("status") == "active":
+        raise InvitationError("Already a member of this team", status=409)
+
+    team = team_by_id(cp, inv["team_id"])
+    if team is None:
+        raise InvitationError("Team no longer exists", status=404)
+    if team.get("deleted_at"):
+        raise InvitationError("Team is scheduled for deletion", status=410)
+    if team.get("suspended_at"):
+        raise InvitationError("Team is suspended", status=403)
+    from tortoise.pricing import tier_limits
+    tier = team.get("tier") or "free"
+    lim = tier_limits(tier)
+    max_users = team.get("max_users")
+    if max_users is None:
+        max_users = lim.get("max_users_per_team")
+    if max_users is not None:
+        member_count = cp.query(
+            "team_memberships",
+            select=["id"],
+            filters=[("team_id", "eq", inv["team_id"]),
+                     ("status", "eq", "active")],
+        )
+        if len(member_count) >= int(max_users):
+            raise InvitationError(
+                "Team member limit reached", status=402)
+
+    # #1877 free-team entitlement (join side): the target team has no
+    # active paid subscription AND the invitee already holds a free team →
+    # blocked BEFORE the single-use PATCH (non-consuming; re-acceptable).
+    from tortoise.supabase_control import _BILLING_ACTIVE_STATUSES
+    if team.get("subscription_status") not in _BILLING_ACTIVE_STATUSES \
+            and count_active_free_memberships(cp, user_id) >= 1:
+        raise InvitationError(
+            "You already have a free team — this team requires a paid plan "
+            "to join", status=402)
+
+    # Single-use: conditional PATCH (status='pending' filter) then verify.
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("id", "eq", inv["id"]), ("status", "eq", "pending")],
+        json_body={"status": "accepted", "accepted_at": now.isoformat()},
+    )
+    check = cp.query(
+        "invitations", select=["status"], filters=[("id", "eq", inv["id"])],
+    )
+    if not check or check[0].get("status") != "accepted":
+        raise InvitationError("Invitation has already been accepted")
+
+    membership_id = uuid.uuid4().hex[:26]
+    try:
+        if existing:
+            cp.query(
+                "team_memberships",
+                method="PATCH",
+                filters=[("id", "eq", existing[0]["id"])],
+                json_body={"role": inv["role"], "status": "active",
+                           "invited_email": inv.get("email"),
+                           "updated_at": now.isoformat()},
+            )
+        else:
+            cp.query(
+                "team_memberships",
+                method="POST",
+                json_body={
+                    "id": membership_id,
+                    "user_id": user_id,
+                    "team_id": inv["team_id"],
+                    # 0001 NOT NULL columns (P1 cycle-2: the by-id accept
+                    # omitted team_name/graph_name → null violations on every
+                    # fresh accept in supabase mode; the token twin fills
+                    # them).
+                    "team_name": (team or {}).get("name") or "",
+                    "graph_name": (team or {}).get("graph_name") or "",
+                    "key_hash": "pending",
+                    "role": inv["role"],
+                    "status": "active",
+                    "identity": None,
+                    "invited_email": inv.get("email"),
+                    "created_at": now.isoformat(),
+                    "updated_at": now.isoformat(),
+                },
+            )
+    except Exception as e:
+        # P2 (second-model): compensating rollback — the token twin restores
+        # the invite to pending on a membership-write failure; the by-id
+        # accept must NOT permanently burn the invite on a transient error.
+        cp.query(
+            "invitations", method="PATCH", filters=[("id", "eq", inv["id"])],
+            json_body={"status": "pending", "accepted_at": None},
+        )
+        raise InvitationError(f"Could not create membership: {e}",
+                              status=402) from e
+    return {"team_id": inv["team_id"], "role": inv["role"]}
+
+
+def pending_invitations_for_email(cp, email: str) -> list[dict]:
+    """#1875: pending invitations for the session user's email (invitee-side
+    list). Returns team name + inviter for the dashboard surface; excludes
+    consumed/revoked/expired invites."""
+    import datetime as _dt
+    now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    rows = cp.query(
+        "invitations",
+        select=["id", "team_id", "email", "role", "status",
+                "expires_at", "invited_by", "inviter_email"],
+        filters=[("email", "eq", email), ("status", "eq", "pending")],
+        order="created_at",
+    )
+    out = []
+    for r in rows:
+        exp = r.get("expires_at")
+        if exp and exp <= now:
+            continue  # expired — not actionable
+        team = team_by_id(cp, r["team_id"])
+        out.append({
+            "invitation_id": r["id"],
+            "team_id": r["team_id"],
+            "team_name": (team or {}).get("name") or r["team_id"],
+            "role": r.get("role"),
+            "inviter_email": r.get("inviter_email") or r.get("invited_by"),
+            "expires_at": r.get("expires_at"),
+        })
+    return out
+
+
+def decline_invitation_by_email(cp, invitation_id: str, email: str) -> dict:
+    """#1875: invitee-side decline — revoke a pending invitation scoped to
+    the invitee's email. Idempotent; an accepted invite cannot be declined
+    (the membership exists)."""
+    rows = cp.query(
+        "invitations",
+        select=["id", "email", "status", "team_id"],
+        filters=[("id", "eq", invitation_id)],
+    )
+    if not rows:
+        raise InvitationError("Invitation not found", status=404)
+    inv = rows[0]
+    if (inv.get("email") or "").lower() != (email or "").lower():
+        raise InvitationError("Invitation not found", status=404)
+    if inv.get("status") == "accepted":
+        raise InvitationError(
+            "Invitation already accepted — cannot decline", status=409)
+    if inv.get("status") == "revoked":
+        return {"revoked": True, "already": True,
+                "invitation_id": invitation_id}
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("id", "eq", invitation_id), ("status", "eq", "pending")],
+        json_body={"status": "revoked"},
+    )
+    return {"revoked": True, "invitation_id": invitation_id}
