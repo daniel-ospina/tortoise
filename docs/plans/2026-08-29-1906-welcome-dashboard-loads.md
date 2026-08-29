@@ -96,6 +96,20 @@ refreshTeam(welcomeKey || '').catch(() => {})
 | first-timer overview | manual (out of scope this session) | post-wizard Overview shows real key count + seeded points |
 | key persistence | manual (out of scope) | reload keeps the shown-once key |
 
+## Code-review fix round (PR #1994 review gate)
+
+Reviewers (guidance, bug shallow+deep, history, PR-comments, security, UX consistency+coverage) found no P0s. Fixes applied in the fixer loop:
+
+| # | Finding | Resolution |
+|---|---------|------------|
+| R1 | P1 (history): welcome key never recorded in `teamKeysRef` — switchTeam away-and-back mints a DIFFERENT bootstrap key; revokeKey skips the localStorage re-mint branch | Provisioned branch's `refreshTeam(...).then` now records `teamKeysRef.current[t.team_id] = provisioned.api_key` (guarded truthy) alongside `loadAlerts` |
+| R2 | P1/P2 (ux-consistency + bug-deep): header "Open dashboard →" clickable during provisioning → finishWelcomeLoads against a non-existent team → 'API Keys 0' + false error banner until reload | Header button `disabled={welcomeProvisioning}`; label canonicalized to "Open my dashboard →" (matches the wizard done-step CTA — terminology drift P2) |
+| R3 | P1 (ux-coverage): step-0 "Go to API Keys →" exit (consumed-reveal path, api_key '') bypassed the chokepoint — no replaceState, no loads → API Keys tab lied "No keys yet.", eternal skeleton, /welcome URL stuck | Routed through the chokepoint: `replaceState('/') + setWelcomeMode(false) + setTab('keys') + finishWelcomeLoads()` (session-JWT loads need no key) |
+| R4 | P2 (history): refreshTeam has 3 welcome-path producers with no ordering guard — a pre-seed point_count 0 response could land after the post-seed 1 | Monotonic `teamRefreshSeqRef` + optional `seq` param on refreshTeam: post-seed refire bumps the seq and tags its call; the exit's refreshTeam tags with the current seq — a stale-seq response is dropped before setTeam (mirrors the file's Round-N staleness pattern) |
+| R5 | P2 (guidance): persist comment "the plaintext exists only here" self-contradictory with the persist 5 lines below | Reworded: server nulls its only plaintext copy on reveal (A13), so the client must persist at reveal time or the shown-once key is unrecoverable |
+| R6 | P2 (history): extract a shared postAuthLoads helper so completeLogin/finishWelcomeLoads can't drift | **Pushed back (documented, not implemented):** the two paths are intentionally different shapes — completeLogin owns the team gate + auth flip + error card semantics; finishWelcomeLoads is fire-and-forget with the never-rejects invariant. Forcing a shared helper would couple the exit path to login error semantics (or force completeLogin to split its flow). Parity risk is real; the #1842/#1906 comments + this plan doc encode it. |
+| R7 | P2 (ux-coverage): transient 0-state frame between exit and refetch landing; silent refreshTeam 5xx | **Partially pushed back:** the seq guard (R4) fixes the ordering; the brief pre-refire frame reflects the true state at exit time (mid-seed race only — normal seeded flow lands the post-seed refire before the user reaches the exit), and silent .catch on team refresh matches completeLogin's best-effort pattern (the re-entry card is the recovery affordance). |
+
 ## Failure modes
 
 | Failure | Handling |
