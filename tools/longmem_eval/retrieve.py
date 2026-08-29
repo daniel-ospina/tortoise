@@ -93,6 +93,36 @@ from typing import Any
 
 from tortoise import search_engine
 from tortoise.embeddings import EmbeddingModel
+from tortoise.retrieval import (
+    DEFAULT_CONTEXT_ITEM_CAP,
+    DEFAULT_CONTEXT_TOKEN_CAP,
+    DEFAULT_EVIDENCE_BOOST_ANSWER_STRING,
+    DEFAULT_EVIDENCE_BOOST_SOURCE,
+    DEFAULT_EVIDENCE_BOOST_VERBATIM,
+    DEFAULT_MAX_CHUNKS_PER_SESSION,
+    DEFAULT_POOL_SIZE,
+    _validity_marker,  # noqa: F401 — re-exported for the eval tests
+    render_context,
+    resolve_pool_size,
+)
+from tortoise.retrieval import (
+    TOKEN_ESTIMATOR as _TOKEN_ESTIMATOR,  # noqa: F401
+)
+from tortoise.retrieval import (
+    apply_evidence_boost as _apply_evidence_boost,
+)
+from tortoise.retrieval import (
+    assemble_context as _assemble_context,
+)
+from tortoise.retrieval import (
+    dedup_pool as _dedup_pool,
+)
+from tortoise.retrieval import (
+    estimate_tokens as _estimate_tokens,
+)
+from tortoise.retrieval import (
+    is_raw_chunk as _is_raw_chunk,
+)
 from tortoise.sdk import TortoiseSDK
 
 from . import encode_cache, evidence
@@ -267,92 +297,45 @@ def vector_search(sdk: TortoiseSDK, query: str, limit: int) -> list[tuple[str, f
 
 # token-count estimator: rough LLM token ≈ whitespace tokens, plus markup
 # allowance for role prefixes/JSON. Documented in report provenance.
-_TOKEN_ESTIMATOR = "whitespace-tokens + 10% markup allowance"
-
-#: R1 (#1540): per-session raw-chunk cap in the pool (E2E-1; the R6 MMR
-#: variant tunes it post-baseline). C5 (#1745): 2 -> 3 — the R1 cap was
-#: capping out the evidence chunk on ~18 questions (chunk_evidence_recall@20
-#: = 0 with evidence_recall@20 high); only 4/854 S-split sessions have >2
-#: marked chunks, so the budget cost is bounded.
-DEFAULT_MAX_CHUNKS_PER_SESSION = 3
-#: C1 (#1745): reader-context ITEM cap (default 40, knob
-#: ``TORTOISE_LME_CONTEXT_ITEMS``) — the measured ~114 tok/item means a
-#: 60-item pool (~6.8k tokens) may not bind the 8k token budget, so an
-#: unceilinged budget walk would flood the reader; the item cap bounds
-#: reader flood while the token budget selects within it (top-k saturation
-#: research, plan §3). TR questions ignore it — ``tr_top_k`` stays the
-#: pinned TR item cap (R5 #1544 flood control).
-DEFAULT_CONTEXT_ITEM_CAP = 40
-#: C2 (#1745): evidence-mark boost rank-offset multipliers — the answer-
-#: string mark (d, #1763 — the point's content carries the GOLD ANSWER, the
-#: strongest/answer-precise signal) gets the highest multiplier, verbatim/
-#: raw-chunk marks (the precise ones) the full boost, source-session-only
-#: points a reduced one (marks never influence RRF ranking — H2). #1945:
-#: the answer_string class is new — the reval3 census is 65% source_session
-#: / 34% answer_string / 1.1% verbatim, and C2 had no class for the honest
-#: mark. Knobs: ``TORTOISE_LME_EVIDENCE_BOOST_ANSWER_STRING`` /
+# ── retrieval-quality constants/functions — WIRED: the PRODUCT owns them ──
+# The pool-depth / context / boost defaults + functions now live in
+# ``tortoise/retrieval.py`` (the product inversion,
+# fix/invert-retrieval-to-product, docs/audit/2026-08-29-product-cohesion.md
+# retrieval PARTIAL section). The eval RE-EXPORTS them unchanged (see the
+# ``tortoise.retrieval`` import at the top of this module) and passes its
+# measurement knobs (TORTOISE_LME_*) through the product's resolution and
+# boost functions — there is no parallel eval copy.
+# ══ PRODUCT-PARITY NOTE (WIRED — shipped to product in this PR) ═════════════════════════════════════════════════════════
+# The context-assembly constants (``DEFAULT_CONTEXT_ITEM_CAP``,
+# ``DEFAULT_CONTEXT_TOKEN_CAP``, ``DEFAULT_MAX_CHUNKS_PER_SESSION``) and
+# the pool-depth default (``DEFAULT_POOL_SIZE`` = 120) are now PRODUCT
+# features in ``tortoise/retrieval.py`` (assemble_context / dedup_pool /
+# resolve_pool_size) — the product inversion shipped them with
+# product-appropriate defaults, and the SDK's ``tortoise_fts_query`` bakes
+# the pool floor at 120 (audit G2). The eval measures the product's
+# numbers: the pool resolution runs through
+# ``tortoise.retrieval.resolve_pool_size`` with the eval's
+# ``TORTOISE_LME_POOL_SIZE`` knob; context assembly runs through the
+# product's ``assemble_context``/``render_context``.
+# ═════════════════════════════════════════════════════════
+#: C2 (#1745) / #1945: the evidence-mark boost MULTIPLIER KNOBS the eval
+#: threads into the product's ``apply_evidence_boost`` (the product owns
+#: the boost transform + its defaults; the eval's per-class env knobs
+#: ``TORTOISE_LME_EVIDENCE_BOOST_ANSWER_STRING`` /
 #: ``TORTOISE_LME_EVIDENCE_BOOST_VERBATIM`` /
-#: ``TORTOISE_LME_EVIDENCE_BOOST_SOURCE``.
-# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
-# This is a QUALITY knob that lives in the eval harness and is NOT wired
-# into the product (tortoise/) path.
-#   Product default: no boost — product ranking is content-similarity-only
-#       (RRF fusion in tortoise_fts_query); marks never influence ranking
-#       (H2) in either codebase. Even in the eval this is OFF by default
-#       (env ``TORTOISE_LME_EVIDENCE_BOOST`` / explicit ``evidence_boost``
-#       flag) — #1945/#1745 C2, landed eval-side only (commit 6b36d5fe).
-#   Why eval-only:   the boost re-ranks marked hits so the pool-based
-#       evidence_recall@k measures the boosted pool — a benchmark
-#       measurement device. The gold-answer marks it boosts on (#1763,
-#       mark (d)) are eval-time truths the product never computes.
-#   Ship-to-product: not filed — the boost is inseparable from the
-#       evidence-marking machinery, itself eval-only; a product port
-#       would be a new feature (evidence-grounded reranking).
-#   Rationale:       the harness exists to IMPROVE the product; an
-#       evidence-aware rerank is a candidate product feature, not a
-#       harness invention.
-# ═════════════════════════════════════════════════════════════════════════
-DEFAULT_EVIDENCE_BOOST_ANSWER_STRING = 2.0
-DEFAULT_EVIDENCE_BOOST_VERBATIM = 1.5
-DEFAULT_EVIDENCE_BOOST_SOURCE = 1.15
-#: R1 (#1540): reader context token budget (≈ the pre-v2 baseline context
-#: size — a 4.4x reduction from the measured 35k whole-session flood;
-#: LightMem: compact evidence wins under tight budgets).
-DEFAULT_CONTEXT_TOKEN_CAP = 8000
-#: #1947: pool fetch depth for the baseline hybrid arm — deepened 60→120
-#: (reval3: 66% of marked evidence points never entered the 60-item pool,
-#: so the C2 boost had no material to work with; the vector leg already
-#: returns 120 hits/question). Knob ``TORTOISE_LME_POOL_SIZE``; the
-#: deepest recall horizon ``max(ks)`` is always the floor (recall@k is
-#: computed over the deduped pool). Replaces R1 #1540's ``max(ks) * 3``
-#: candidate-depth headroom — depth also serves the R1 contract (one
-#: session's points must not crowd other sessions out BEFORE dedup runs).
-#: The headroom is now FLAT-capped at the configured depth (previously
-#: proportional ``max(ks) * 3``) — in-repo callers never exceed ``max(ks)
-#: = 40`` (old and new depth coincide there at 120); external callers
-#: porting R1 semantics should raise ``pool_size`` explicitly for deeper
-#: recall horizons.
-# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
-# This is a QUALITY knob that lives in the eval harness and is NOT wired
-# into the product (tortoise/) path.
-#   Product default: pool = ``limit * 2`` (20 items at the hosted/MCP
-#       default limit=10) with a DELIBERATE env-only opt-in floor
-#       (``TORTOISE_POOL_FLOOR``, unset → behaves exactly as pre-#1348) —
-#       tortoise/sdk.py:9662-9686 ("NO BAKED DEFAULT FLOOR").
-#   Why eval-only:   #1947 deepened the eval pool 60→120 (reval3: 66% of
-#       marked evidence never entered the 60-item pool, so the C2 boost
-#       had no material) and landed eval-side only (commit ba986f8b
-#       touched only tools/longmem_eval/). Shipping the depth is a
-#       PRODUCT decision (audit G2: raising the default is the single
-#       highest-leverage retrieval change); the harness cannot make it.
-#   Ship-to-product: open product decision (audit G2) — no tracking
-#       issue filed; tracked as the G2 cohesion gap.
-#   Rationale:       the harness exists to IMPROVE the product; the deep
-#       pool is a candidate product feature (recall depth), not a
-#       harness invention.
-# ═════════════════════════════════════════════════════════════════════════
-DEFAULT_POOL_SIZE = 120
-
+#: ``TORTOISE_LME_EVIDENCE_BOOST_SOURCE`` resolve eval-side and pass
+#: through). The answer-string class (the strongest multiplier, #1945) is
+#: a first-class product boost class — OFF by default in both codebases
+#: (fail-safe, #1745).
+# ══ PRODUCT-PARITY NOTE (WIRED — shipped to product in this PR) ═════════════════════════════════════════════════════════
+# The evidence-mark boost is now a PRODUCT method
+# (``tortoise.retrieval.apply_evidence_boost`` — position-ceiling rank
+# promotion, OFF by default, mark provider injectable). The eval supplies
+# its dataset-derived marks (``evidence.mark_for_question`` — read-time
+# recompute incl. the gold-answer answer_string class, #1763 mark (d))
+# and the knob resolution; the RANK TRANSFORM is the product's. The
+# boost remains default-off per the #1745 fail-safe decision.
+# ═════════════════════════════════════════════════════════
 #: R5 (#1544): TR top_k cap (20→12) — the transcript-flood control for
 #: temporal-reasoning questions (9/18 TR losses were reader refusals under
 #: ~40k-token floods despite sr@5=1.0). Knob-exposed via ``--tr-top-k``.
@@ -476,14 +459,6 @@ def _apply_time_window(annotated: list[dict], constraint: TimeConstraint,
     return list(annotated)  # ordering/None → no filter
 
 
-def _estimate_tokens(text: str) -> int:
-    return int(len(text.split()) * 1.1)
-
-
-_ROLE_PREFIX = re.compile(r"^\[(user|assistant|system|tool|unknown)\]\s+",
-                             re.IGNORECASE)
-
-
 def _speaker_for_turns(proj, turn_ids: list[str]) -> dict[str, str]:
     """One-query speaker lookup for source-turn links (E3 D7). Returns
     {turn_node_id: speaker} for the turns that exist."""
@@ -558,36 +533,6 @@ def _annotate_hits(hits: list[dict], props: dict, dates: list[str]) -> list[dict
     return annotated
 
 
-def _is_raw_chunk(h: dict) -> bool:
-    """True for a raw verbatim chunk (pointKind ``session-transcript``).
-    Points of every other kind (extracted statements, episodic turn points)
-    are the compact epistemic surface (D3 #1540: never chunk-capped)."""
-    return h.get("point_kind") == "session-transcript"
-
-
-def _dedup_pool(annotated: list[dict], *,
-                max_chunks_per_session: int) -> list[dict]:
-    """Per-session chunk cap (rank order): at most ``max_chunks_per_session``
-    raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
-    the hit's session_id when present, else its lme_session_index —
-    distinct sessions NEVER share a bucket (no ``-1`` collapse).
-    Points/turn points are never capped (compact epistemic surface, D3).
-    """
-    if max_chunks_per_session < 1:
-        raise ValueError("max_chunks_per_session must be >= 1, got "
-                         f"{max_chunks_per_session!r}")
-    seen: dict[str, int] = {}
-    pool: list[dict] = []
-    for h in annotated:
-        if _is_raw_chunk(h):
-            key = h.get("session_id") or f"idx:{h.get('lme_session_index', -1)}"
-            if seen.get(key, 0) >= max_chunks_per_session:
-                continue
-            seen[key] = seen.get(key, 0) + 1
-        pool.append(h)
-    return pool
-
-
 def _mark_bands(ranks: list[int]) -> dict[str, int]:
     """#1947: marked-hit rank bands over the deduped pool — the
     ``pool_depth`` diagnostic's histogram. Bands are the semantically
@@ -607,161 +552,6 @@ def _mark_bands(ranks: list[int]) -> dict[str, int]:
             counts["121+"] += 1
     return counts
 
-
-def _apply_evidence_boost(
-    pool: list[dict],
-    *,
-    question: dict | None = None,
-    evidence_sessions: set[str] | None = None,
-    answer_turn_contents: list[str] | None = None,
-    boost_answer_string: float = DEFAULT_EVIDENCE_BOOST_ANSWER_STRING,
-    boost_verbatim: float = DEFAULT_EVIDENCE_BOOST_VERBATIM,
-    boost_source: float = DEFAULT_EVIDENCE_BOOST_SOURCE,
-) -> tuple[list[dict], dict[str, Any]]:
-    """C2 (#1745): evidence-mark rank boost over the deduped pool.
-
-    Marked hits (H2: marks never influence RRF ranking — the fused score is
-    content-similarity-only) move up by a stable rank offset so they can
-    surface into the pool top-20. The boost is a RANK re-scaling, NOT an
-    RRF-score multiplier (verifier P1-6: annotated hits drop
-    ``scores.rrf`` — there is no score to multiply): ``scaled_rank =
-    original_index / factor`` with factor 1.0 unmarked, ``boost_source``
-    for source-session-only marks, ``boost_verbatim`` for verbatim /
-    raw-chunk marks, ``boost_answer_string`` for the #1763 answer-string
-    mark (d). Placement is position-ceiling promotion (Horn's
-    greedy, review F2): hits are processed in descending scaled-priority
-    order and each takes the LARGEST free position <= its ceiling, where
-    the ceiling is the ORIGINAL pool index for marked hits and
-    unconstrained for unmarked hits. Properties:
-      * position-ceiling — never demotes a marked hit below its original
-        pool index (a dense run of higher-factor marked hits cannot push
-        a lower-factor marked hit out of the top-k it occupied pre-boost),
-      * never reorders within a boost class (same factor -> monotonic)
-        and never reorders unmarked hits (relative order preserved),
-      * bounded — no negative ranks, every hit lands in [0, n).
-
-    #1945: the answer_string mark (d) is a FIRST-CLASS boost class with
-    the STRONGEST multiplier (>= verbatim's) — it is the honest
-    "this point contains the gold answer" signal, computed at eval time
-    from the question's gold ``answer`` (the extractor never sees it).
-    Class priority: answer_string (strongest) > verbatim/raw_chunk >
-    source_session > unmarked. A stored ``has_answer`` hit with no
-    read-time mark still falls back to the source class (conservative).
-
-    The verbatim-vs-source split is recomputed at READ TIME via
-    ``evidence.mark_for`` (verifier P1-4: the OR'd ``has_answer`` prop
-    cannot express the split) — the annotated hits already carry
-    ``content``/``quote``/``session_id`` and the question carries
-    ``haystack_sessions`` + the gold ``answer``, so no graph change is
-    needed.
-
-    Placement contract: the caller applies this BEFORE ``_recall_metrics``
-    so post-fix ``evidence_recall@k`` is honestly "evidence recall over the
-    boosted pool" (stated in the methodology); the pre-boost ranking rides
-    back in ``stats["pre_boost_ranked_ids"]`` for the C4 ablation.
-
-    Returns ``(boosted_pool, stats)``; ``stats`` carries the per-class
-    multiplier, the read-time mark census and the pre-boost id order.
-    """
-    from . import evidence as ev
-    # factor domain guard (review P1-2 + F9): a boost factor < 1.0 is a rank
-    # DIVISION — 0.0 is a ZeroDivisionError and a negative factor silently
-    # inverts the pool order. Non-finite values (NaN/Inf) are rejected the
-    # same way (a NaN passes the < 1.0 comparison and would poison every
-    # sort key; inf would zero every key and make the boost a silent
-    # no-op). Reject loudly at the function boundary (the
-    # env/CLI layers clamp >= 1.0 independently; this is the last line).
-    if not (math.isfinite(boost_answer_string)
-            and boost_answer_string >= 1.0) \
-            or not (math.isfinite(boost_verbatim) and boost_verbatim >= 1.0) \
-            or not (math.isfinite(boost_source) and boost_source >= 1.0):
-        raise ValueError(
-            "evidence-boost multipliers must be >= 1.0 and finite (a "
-            "rank-scaling division), got answer_string="
-            f"{boost_answer_string!r} verbatim={boost_verbatim!r} "
-            f"source={boost_source!r}")
-    if evidence_sessions is None:
-        evidence_sessions = (ev.evidence_sessions(question)
-                             if question else set())
-    if answer_turn_contents is None:
-        answer_turn_contents = [
-            (t.get("content") or "")
-            for s in ((question or {}).get("haystack_sessions") or [])
-            for t in s if t.get("has_answer")
-        ]
-    # #1945: the gold answer (mark (d)) is a benchmark truth the dataset
-    # question carries — empty when absent (None question / no answer),
-    # in which case answer_string never fires and the class is inert.
-    gold_answer = str((question or {}).get("answer") or "")
-    census = {"source_session": 0, "verbatim": 0, "raw_chunk": 0,
-              "answer_string": 0}
-    scored: list[tuple[dict, float, int]] = []
-    marked_by_idx: dict[int, bool] = {}
-    for i, h in enumerate(pool):
-        marks = ev.mark_for(
-            h, session_id=h.get("session_id"),
-            evidence_sessions=evidence_sessions,
-            answer_turn_contents=answer_turn_contents,
-            gold_answer=gold_answer)["marks"]
-        for mk in census:
-            if marks.get(mk):
-                census[mk] += 1
-        # #1945: the answer-string class is the strongest signal (the
-        # point carries the GOLD ANSWER) and takes priority over the
-        # verbatim/raw-chunk provenance classes.
-        if marks.get("answer_string"):
-            factor = boost_answer_string
-        elif marks.get("verbatim") or marks.get("raw_chunk"):
-            factor = boost_verbatim
-        elif marks.get("source_session") or h.get("has_answer"):
-            factor = boost_source
-        else:
-            factor = 1.0
-        scored.append((h, i / factor, i))
-        marked_by_idx[i] = factor > 1.0
-    # Position-ceiling promotion (review F2): the plain ascending sort let a
-    # dense run of higher-factor marked hits (verbatim chunks, x1.5) pass a
-    # lower-factor marked hit (source point, x1.15) and DEMOTE it below its
-    # original pool index — the reproduced counter-example moved the point
-    # 19 -> 22, out of top-20 (evidence_recall@20 dropped 1 -> 0 with the
-    # boost ON). Horn's greedy: process hits in DESCENDING scaled-priority
-    # order (for unmarked hits the scaled key IS the pool index, so they
-    # run in descending index order) and assign each hit the LARGEST free
-    # position <= its ceiling — original index for marked hits,
-    # unconstrained for unmarked. Properties (verified by brute force):
-    #   (a) marked hits never land below their original index;
-    #   (b) unmarked relative order preserved (descending processing +
-    #       largest-free assignment = strictly decreasing slots);
-    #   (c) order within a boost class preserved (same argument).
-    n = len(pool)
-    free = list(range(n))
-    placement: dict[int, tuple[dict, float, int]] = {}
-    for h, key, i in sorted(
-            scored, key=lambda x: (-x[1], -x[2])):
-        ceiling = i if marked_by_idx[i] else n  # +inf ~ n: always satisfiable
-        pos = max(p for p in free if p <= ceiling)
-        free.remove(pos)
-        placement[pos] = (h, key, i)
-    scored = [placement[p] for p in range(n)]
-    stats: dict[str, Any] = {
-        "applied": True,
-        "boost_answer_string": boost_answer_string,
-        "boost_verbatim": boost_verbatim,
-        "boost_source": boost_source,
-        "marks_census": census,
-        "pre_boost_ranked_ids": [h["id"] for h in pool],
-        "moved": sum(1 for _, _, i in scored
-                      if _rank_delta(scored, i)),
-    }
-    return [h for h, _, _ in scored], stats
-
-
-def _rank_delta(scored: list[tuple[dict, float, int]], orig_index: int) -> bool:
-    """True when the hit with original pool index ``orig_index`` moved to a
-    strictly earlier position after the boost (the ``moved`` counter)."""
-    new_pos = next(pos for pos, (_, _, i) in enumerate(scored)
-                   if i == orig_index)
-    return new_pos < orig_index
 
 
 def _recall_metrics(
@@ -860,177 +650,6 @@ def _leg_mix(hits: list[dict]) -> dict[str, int]:
         counts[leg] = counts.get(leg, 0) + 1
     return dict(sorted(counts.items()))
 
-
-def _validity_marker(h: dict) -> str:
-    """Validity-window marker text for one hit (E6 #1538, D7).
-
-    Extends the #1367 supersession markers with the promoted window fields:
-      - live hit with ``valid_from`` → ``[valid since <from>]``
-      - superseded hit → ``[valid <from> → <to>]``; with ``expired_at`` →
-        ``[valid <from> → <to>; expired <tx-date>]``
-      - undated hits → NO validity marker (byte-identical rendering)
-    ISO date strings (YYYY-MM-DD — the dataset/``when`` normalization): no
-    full timestamps in the reader context; timestamps stay on the graph
-    properties. The supersession markers (SUPERSEDED BY / SUPERSEDES) are
-    unchanged and render first."""
-    marks: list[str] = []
-    sb = h.get("superseded_by") or {}
-    snippet = (sb.get("content_snippet") or "").strip()
-    if snippet:
-        marks.append(f"[SUPERSEDED BY: {snippet}]")
-    supersedes = h.get("supersedes") or []
-    snips = [(s.get("content_snippet") or "").strip()
-             for s in supersedes if (s.get("content_snippet") or "").strip()]
-    if snips:
-        marks.append("[SUPERSEDES: " + " ; ".join(snips) + "]")
-    vf = (h.get("valid_from") or "").strip()
-    vt = (h.get("valid_to") or "").strip()
-    ex = (h.get("expired_at") or "").strip()
-    if vf:
-        # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
-        vfd = vf[:10] if len(vf) > 10 else vf
-        if vt:
-            vtd = vt[:10] if len(vt) > 10 else vt
-            if ex:
-                exd = ex[:10] if len(ex) > 10 else ex
-                marks.append(f"[valid {vfd} → {vtd}; expired {exd}]")
-            else:
-                marks.append(f"[valid {vfd} → {vtd}]")
-        else:
-            marks.append(f"[valid since {vfd}]")
-    return " ".join(marks)
-
-
-def _render_block(h: dict) -> str:
-    """One hit's rendered context block — the SINGLE implementation shared
-    by ``render_context`` and the token budget (factored out of
-    ``render_context``, R1 #1540). ``question_date`` never appears here: it
-    only prepends the ``Current Date:`` header once in ``render_context``.
-    Per-hit dates come from the hit's own ``session_date``."""
-    idx = h.get("lme_session_index")
-    prefix = f"[session {idx}]" if idx is not None and idx >= 0 else "[session ?]"
-    sdate = h.get("session_date")
-    if sdate:
-        prefix = f"{prefix} (session date {sdate})"
-    # E3 (#1535): speaker decoration — mirrors the deterministic leg's
-    # "[role] text" turn shape so the reader sees who asserted the fact.
-    # Unknown → byte-identical rendering (backward-compat). Skip when the
-    # content ALREADY carries a role bracket (turn points are written as
-    # "[role] text" AND have the speaker prop — decorating both would
-    # double-attribute, e.g. "[user] [user] ..." on the deterministic leg's
-    # primary recall surface).
-    spk = h.get("speaker") or ""
-    # only the deterministic leg's own role-bracket shape suppresses the
-    # decoration — a non-role bracket prefix ([context], [IMPORTANT])
-    # must not suppress speaker attribution
-    if spk and not _ROLE_PREFIX.match(h.get("content", "")):
-        prefix = f"{prefix} [{spk}]"
-    marker = _validity_marker(h)
-    if marker:
-        # _validity_marker already returns self-bracketed groups
-        # (e.g. "[SUPERSEDED BY: x] [valid 2026-06-10 → 2026-06-12]") — no
-        # extra wrap.
-        prefix = f"{prefix} {marker}"
-    return f"{prefix} {h.get('content', '')}"
-
-
-# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
-# This is a QUALITY knob that lives in the eval harness and is NOT wired
-# into the product (tortoise/) path.
-#   Product default: NO context builder exists — MCP/SDK consumers
-#       (tortoise_search / tortoise_recall / hosted /v1/search) get raw
-#       ranked lists from tortoise_fts_query; nothing assembles a
-#       budget-capped, rank-interleaved reader context (#1745 landed
-#       eval-side only, commit 6b36d5fe).
-#   Why eval-only:   the context exists to feed the EVAL reader (also
-#       eval-only — see the reader.py parity note). Shipping it to the
-#       product = a NEW product feature (a context/answer surface, audit
-#       G7 — the missing bridge between retrieval and any future
-#       answer/agent-use surface).
-#   Ship-to-product: open product decision — tracked under the reader
-#       decision (hosted /v1/ask vs retrieval-only scope; audit G1/G7);
-#       no separate tracking issue filed.
-#   Rationale:       the harness exists to IMPROVE the product; the
-#       rank-interleaved context is the candidate product context/answer
-#       surface, not a harness invention.
-# ═════════════════════════════════════════════════════════════════════════
-def _assemble_context(pool: list[dict], *, top_k: int,
-                      max_context_tokens: int,
-                      question_date: str | None = None,
-                      context_item_cap: int | None = None) -> list[dict]:
-    """Budget-capped, rank-interleaved reader context (C1 #1745).
-
-    Iterates the pool in TRUE RRF rank order — extracted points and raw
-    chunks interleaved, a chunk ranked above a point enters the context at
-    its rank, not after all points (replaces R1's points-first partition,
-    UX decision 3, which starved the chunk leg: any pool with >= top_k
-    points dropped chunks entirely regardless of rank). Bounded by BOTH
-    the token budget (``max_context_tokens``) and an explicit item cap
-    (``context_item_cap``; defaults to ``top_k`` for back-compat with
-    pure-function callers — the run path passes the resolved
-    ``context_item_cap`` / TR ``tr_top_k``). ``top_k`` stays "the max
-    number of context items" at the default cap.
-
-    Token accounting (the alignment invariant): raw whitespace words
-    accumulate per block (question_date-independent) + the once-prepended
-    ``Current Date: …`` header words; the 1.1 markup multiplier applies
-    ONCE to the joined total, so ``context_tokens ==
-    _estimate_tokens(render_context(...))`` holds exactly (no per-block
-    ``int()`` drift). Oversized hits are SKIPPED (continue), never starving
-    the rest of the context.
-    """
-    if max_context_tokens < 1:
-        raise ValueError("max_context_tokens must be >= 1, got "
-                         f"{max_context_tokens!r}")
-    item_bound = context_item_cap if context_item_cap is not None else top_k
-    if item_bound < 1:
-        raise ValueError("context_item_cap must be >= 1, got "
-                         f"{item_bound!r}")
-    header_words = (len(f"Current Date: {question_date}".split())
-                    if question_date else 0)
-    selected: list[dict] = []
-    words = header_words
-    for h in pool:
-        if len(selected) >= item_bound:
-            break
-        cost = len(_render_block(h).split())
-        if int((words + cost) * 1.1) > max_context_tokens:
-            continue  # skip this hit; keep later ones (no starvation)
-        selected.append(h)
-        words += cost
-    return selected
-
-
-def render_context(hits: list[dict], *, question_date: str | None = None) -> str:
-    """Render annotated hits as the reader-facing context text.
-
-    Shared by the LLM reader (its prompt input) and the token estimator so
-    ``context_tokens`` always matches what the reader actually consumed.
-
-    The rendering follows the OFFICIAL LongMemEval gen.py shape: a
-    ``Current Date: {question_date}`` header (the question's date, needed to
-    answer temporal-reasoning questions — "how many days ago") and a
-    per-session date annotation on every chunk. Without these, TR questions
-    are structurally unanswerable (TR ≈ 0% regardless of retrieval) — P1
-    #1144.
-
-    #1367: hits carrying the promoted supersession state (superseded_by /
-    supersedes — #1353 D8) are annotated so the reader sees "this statement
-    replaced that one": a superseded hit is marked ``[SUPERSEDED BY:
-    <newest superseding claim>]`` and a superseding hit ``[SUPERSEDES:
-    <replaced claims>]`` (the superseding claim's content is included via
-    its snippet; when the superseding point is itself in the hits its full
-    content renders too). Hits without the state render byte-identically.
-
-    R1 #1540: per-hit rendering is the shared ``_render_block`` (the token
-    budget uses the identical accounting), so ``context_tokens`` always
-    matches what the reader consumed. Output is byte-identical to pre-R1
-    for non-chunk hits.
-    """
-    text = "\n\n".join(_render_block(h) for h in hits)
-    if question_date:
-        text = f"Current Date: {question_date}\n\n{text}"
-    return text
 
 
 def hybrid_search(sdk: TortoiseSDK, query: str, limit: int,
@@ -1355,10 +974,13 @@ def retrieve_for_question(
         # (default 120, knob TORTOISE_LME_POOL_SIZE; explicit arg wins);
         # max(ks) floor so the deepest recall horizon never measures a
         # truncated pool (recall@k is computed over the deduped pool).
-        pool_limit = max(
-            (pool_size if pool_size is not None
-             else _env_int("TORTOISE_LME_POOL_SIZE", DEFAULT_POOL_SIZE)),
-            max(ks))
+        pool_limit = resolve_pool_size(
+            max(ks),
+            pool_size=pool_size,
+            env_name="TORTOISE_LME_POOL_SIZE",
+            default=DEFAULT_POOL_SIZE,
+            exact=False,
+        )
 
     # ── R3 (#1542) D4: per-leg trace (E2E-1 never-null leg-mix). The
     # retrieval records into ``legs`` at the engine (tortoise_fts_query) and
@@ -1481,8 +1103,8 @@ def retrieve_for_question(
               else _env_boost_float("TORTOISE_LME_EVIDENCE_BOOST_SOURCE",
                                     DEFAULT_EVIDENCE_BOOST_SOURCE))
         pool, evidence_boost_stats = _apply_evidence_boost(
-            pool, question=question, boost_answer_string=bas,
-            boost_verbatim=bv, boost_source=bs)
+            pool, mark_for=evidence.mark_for_question(question),
+            boost_answer_string=bas, boost_verbatim=bv, boost_source=bs)
     else:
         evidence_boost_stats = {
             "applied": False,
