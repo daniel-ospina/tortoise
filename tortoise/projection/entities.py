@@ -281,11 +281,26 @@ class _EntityHandlers:
             embedding = compute_embedding(name)
         except Exception:
             pass
+        # #1918: canonical id must win on MATCH too — parity with the #1155
+        # Object fix (_upsert_object ON MATCH o.id=coalesce($id, o.id)). The
+        # webhook name-stub path (_event_plain_merge) can mint a Subject stub
+        # with a RANDOM ulid id before this entity path's SubjectAdded lands;
+        # without the ON MATCH id write, the MERGE below adopts the stub by
+        # NAME and the canonical id never lands on any node — MATCH
+        # (s:Subject {id:$sid}) wiring (participatesIn, aboutSubject) silently
+        # matches nothing. coalesce($id, s.id) makes the incoming id win on
+        # MATCH; this function early-returns when the caller sends no id, so
+        # entities without ids never fire the clause. Accepted trade-off
+        # (same as #1155 for Objects): a LATE random-ulid SubjectAdded from a
+        # producer without a deterministic id (api.add_subject, which unlike
+        # add_object has no id= override) can re-id a canonical node — blast
+        # radius is id-based wiring only (about* edges match by name).
         self.g.query(
             "MERGE (s:Subject {name:$name}) "
             "ON CREATE SET s.id=$id, s.subjectKind=$sk, s.createdAt=coalesce($ca, $now), "
             "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END "
-            "ON MATCH SET s.subjectKind=coalesce($sk, s.subjectKind), "
+            "ON MATCH SET s.id=coalesce($id, s.id), "
+            "            s.subjectKind=coalesce($sk, s.subjectKind), "
             "            s.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE s.embedding END",
             params={"id": sid, "name": name,
                     "sk": ev.get("subject_kind", "other"),

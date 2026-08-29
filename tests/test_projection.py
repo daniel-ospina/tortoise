@@ -1604,6 +1604,62 @@ def test_upsert_event_legacy_string_uses_still_works(live_proj):
     assert rows[0][1] == "other", rows
 
 
+def test_falkor_subject_stub_resolves_canonical_id():
+    """#1918: a Subject stub minted with a random-ulid id (webhook
+    name-stub) must adopt the canonical id when SubjectAdded lands — parity
+    with the #1155 Object fix (_upsert_object ON MATCH
+    o.id=coalesce($id, o.id)). Pre-fix: _upsert_subject ON MATCH only set
+    subjectKind/embedding, so MATCH (s:Subject {id:$sid}) wiring silently
+    matched nothing."""
+    if _skip_if_no_falkor():
+        pytest.skip("redislite falkordb unavailable")
+    proj = _shared_proj()  # wipes all graphs on every call
+
+    # EventRecorded lands FIRST → mints a Subject name-stub with a RANDOM
+    # ulid id (the webhook path, _event_plain_merge). The canonical id is
+    # not yet present on any node.
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-1918", "eventKind": "meeting.held",
+        "subject": "alice", "object": "",
+        "startedAt": "2026-08-28T10:00:00Z",
+        "endedAt": "2026-08-28T11:00:00Z"}})
+    stub_id = proj.g.query(
+        "MATCH (s:Subject {name:'alice'}) RETURN s.id").result_set
+    assert stub_id and stub_id[0][0] != "subject:alice", stub_id
+    # id-based wiring by the CANONICAL id matches nothing pre-fix.
+    pre = proj.g.query(
+        "MATCH (s:Subject {id:'subject:alice'}) RETURN s.name").result_set
+    assert pre == [], pre
+
+    # SubjectAdded arrives later with the canonical id.
+    proj.apply({"type": "SubjectAdded", "id": "subject:alice",
+                "name": "alice", "subject_kind": "person",
+                "createdAt": "2026-08-28T10:05:00Z"})
+
+    # The node carries the canonical id now — MATCH (s:Subject {id:$sid})
+    # wiring resolves the subject.
+    rows = proj.g.query(
+        "MATCH (s:Subject {id:'subject:alice'}) RETURN s.name, s.subjectKind"
+    ).result_set
+    assert rows and rows[0] == ["alice", "person"], rows
+
+    # A LATER id-based wiring pass (participatesIn by participant id) now
+    # matches — the bug's target: 0 subject wiring silently missing.
+    proj.apply({"type": "EventRecorded", "event": {
+        "id": "evt-1918b", "eventKind": "meeting.held",
+        "subject": "", "object": "",
+        "participants": ["subject:alice"],
+        "startedAt": "2026-08-28T12:00:00Z",
+        "endedAt": "2026-08-28T13:00:00Z"}})
+    wired = proj.g.query(
+        "MATCH (s:Subject {id:'subject:alice'})-[:participatesIn]->(e:Event) "
+        "RETURN e.eventId ORDER BY e.eventId").result_set
+    # evt-1918's edge came from the name-fallback at event time; evt-1918b's
+    # edge came from the id-based MATCH AFTER canonicalization — the bug's
+    # exact target (post-fix both land on the one canonical node).
+    assert wired == [["evt-1918"], ["evt-1918b"]], wired
+
+
 def test_upsert_document_includes_source_path(live_proj):
     """#167: _upsert_document persists sourcePath on DocumentCreated + partial
     update preserves existing value via coalesce-null sentinel."""
