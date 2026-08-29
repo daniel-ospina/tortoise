@@ -18,12 +18,12 @@
 
 import {
   type Env, validUrl, SITE_URL,
-} from "../_lib.ts";
+} from "../../_lib.ts";
 import {
   META_TITLE_MAX, META_DESCRIPTION_MAX, EXCERPT_MAX, TAGS_MAX, TAG_LEN_MAX,
-} from "../_shared/meta-contract.ts";
-import { SLUG_MAX, SLUG_RE } from "../_shared/slug.ts";
-import { purgeUrl } from "../_shared/cloudflare-purge.ts";
+} from "../../_shared/meta-contract.ts";
+import { SLUG_MAX, SLUG_RE } from "../../_shared/slug.ts";
+import { purgeUrl } from "../../_shared/cloudflare-purge.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 const TITLE_MAX = 200;
