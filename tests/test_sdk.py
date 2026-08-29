@@ -87,6 +87,42 @@ class TestUpdatePoint:
         sdk.update_point(p["id"], content="after")
         assert sdk.get_point(p["id"])["content"] == "after"
 
+    def test_update_content_recomputes_content_hash(self, sdk):
+        """#1904: update_point(content=...) recomputes content_hash in the
+        same round trip. All dedup surfaces match on the stored hash, so a
+        stale hash after a content edit silently breaks dedup — the edited
+        point's re-insert must dedup to the SAME point (exactly once)."""
+        import hashlib
+        p = sdk.create_point("statement", "X")
+        sdk.update_point(p["id"], content="Y")
+        after = sdk.get_point(p["id"])
+        assert after["content_hash"] == hashlib.sha256(b"Y").hexdigest()
+        again = sdk.create_or_update_point("statement", "Y")
+        assert again["id"] == p["id"]
+        g = sdk._get_proj().g
+        cnt = g.query(
+            "MATCH (n:Point {content_hash:$ch}) WHERE n.is_operator = false "
+            "RETURN count(n)",
+            params={"ch": hashlib.sha256(b"Y").hexdigest()},
+        ).result_set[0][0]
+        assert cnt == 1
+
+    def test_update_content_hash_not_in_event_record(self, tmp_path):
+        """#1904: content_hash is DERIVED from content — the PointRevised
+        record must not persist it (mirrors create_point's snapshot strip)."""
+        import json
+        sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
+                          event_log_path=str(tmp_path / "events.jsonl"))
+        p = sdk.create_point("statement", "X")
+        sdk.update_point(p["id"], content="Y")
+        lines = (tmp_path / "events.jsonl").read_text().splitlines()
+        revised = [json.loads(l) for l in lines  # noqa: E741
+                   if json.loads(l).get("type") == "PointRevised"]
+        assert revised, "PointRevised event must be emitted"
+        assert "content_hash" not in revised[0]
+        assert revised[0]["new_content"] == "Y"
+        sdk.close()
+
 
 # ── delete_point ─────────────────────────────────────────────────────
 
@@ -1130,6 +1166,46 @@ def test_r16_skips_unset_status_operator(sdk):
         "no spurious OperatorPromoted for a live-by-projection operator"
     )
     sdk2.close()
+
+
+def test_update_content_replay_hash_parity(tmp_path):
+    """#1904 replay parity: the live graph's stored content_hash for an
+    edited point equals the hash the JSONL replay derives from the replayed
+    content (PointRevised.new_content). Before the fix the stored hash stayed
+    at sha256("X") while the replay content was "Y" — live graph and replay
+    diverged."""
+    import hashlib
+    import json
+    from tortoise.projection import fold  # replay single source of truth
+
+    event_log = tmp_path / "events.jsonl"
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"),
+                      event_log_path=str(event_log))
+    p = sdk.create_point("statement", "X")
+    sdk.update_point(p["id"], content="Y")
+    live_hash = sdk.get_point(p["id"])["content_hash"]
+    assert live_hash == hashlib.sha256(b"Y").hexdigest()
+
+    # fold() is the replay's single source of truth (projection module
+    # contract): the replayed content determines the derived hash.
+    events = [json.loads(l) for l in event_log.read_text().splitlines()]  # noqa: E741
+    replayed = fold(events)[p["id"]]
+    assert replayed["content"] == "Y"
+    assert live_hash == hashlib.sha256(
+        replayed["content"].encode()).hexdigest()
+
+    # wipe+rebuild_all: the edited content survives and the edited point is
+    # still exactly-once reachable via dedup (hash-less fallback scan).
+    rebuilt = sdk._get_proj().rebuild_all(str(tmp_path))
+    assert rebuilt["events"] > 0
+    row = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.content",
+        params={"id": p["id"]},
+    ).result_set[0]
+    assert row[0] == "Y"
+    again = sdk.create_or_update_point("statement", "Y")
+    assert again["id"] == p["id"]
+    sdk.close()
 
 
 def test_promotion_survives_rebuild(sdk, tmp_path):
