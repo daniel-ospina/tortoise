@@ -1176,6 +1176,7 @@ def test_update_content_replay_hash_parity(tmp_path):
     diverged."""
     import hashlib
     import json
+
     from tortoise.projection import fold  # replay single source of truth
 
     event_log = tmp_path / "events.jsonl"

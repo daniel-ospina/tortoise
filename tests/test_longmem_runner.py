@@ -33,8 +33,8 @@ from tools.longmem_eval.judge import (  # noqa: E402, RUF100
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, _apply_evidence_boost, _assemble_context, _dedup_pool,
-    _estimate_tokens, _is_raw_chunk, hybrid_search, render_context,
-    retrieve_for_question,
+    _estimate_tokens, _is_raw_chunk, _recall_metrics, hybrid_search,
+    render_context, retrieve_for_question,
 )
 from tools.longmem_eval.run import (
     CheckpointStaleError, _assert_python_version, _print_summary,
@@ -406,6 +406,10 @@ def test_outcomes_to_report_golden_shape():
         "reader_evidence@k": None,
         "ranked_ids_pre_boost": None,
         "evidence_boost": None,
+        # #1948: the reader-surface metric (points+chunks in the FULL
+        # reader context) rides the projection parallel to
+        # reader_evidence@k — o.get-based, None on golden outcomes.
+        "reader_surface@k": None,
         "breaker_open": None,
         "dropped_reason": None,
         # #1786: o.get-based projection — the golden input outcome lacks
@@ -3795,6 +3799,146 @@ def test_reader_context_contains_chunk_evidence(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_recall_metrics_turn_evidence_semantics_pinned():
+    """#1948: pins the turn-vs-evidence denominator semantics —
+    ``turn_recall@k`` and ``evidence_recall@k`` are THE SAME formula (marked
+    non-chunk hits in top-k / evidence_point_count) whenever evidence points
+    exist (the reval3 0.722-vs-0.299 aggregate split is a denominator/
+    population artifact, not a retrieval phenomenon); on degraded questions
+    with zero evidence points, evidence_recall@k is None (M6) and
+    turn_recall@k falls back to the DETERMINISTIC answer-turn binary."""
+    hits = [
+        {"id": f"h{i}", "session_id": f"s{i % 2}",
+         "has_answer": i < 3, "point_kind": "statement"}
+        for i in range(10)
+    ]
+    # healthy: 5 evidence points exist, 3 marked hits in top-10 — the pair
+    # is numerically identical (same formula, same denominator).
+    session, turn, ev, chunk = _recall_metrics(
+        hits, ks=(10,), answer_sessions={"s0"},
+        evidence_turn_ids=set(), evidence_point_count=5,
+        chunk_evidence_point_count=0)
+    assert turn["10"] == ev["10"] == 3 / 5
+    assert session["10"] == 1.0
+    assert chunk["10"] is None
+    # degraded: 0 evidence points → evidence is None; turn falls back to
+    # the binary answer-turn match (h2 is in top-10, h99 is not → 1/2).
+    session, turn, ev, chunk = _recall_metrics(
+        hits, ks=(10,), answer_sessions={"s0"},
+        evidence_turn_ids={"h2", "h99"}, evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert ev["10"] is None
+    assert turn["10"] == 0.5
+    # degraded + no answer-turn ids either → both None (never forced 0.0).
+    session, turn, ev, chunk = _recall_metrics(
+        hits, ks=(10,), answer_sessions={"s0"},
+        evidence_turn_ids=set(), evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert ev["10"] is None
+    assert turn["10"] is None
+
+
+def test_reader_surface_counts_context_evidence_beyond_pool_k(tmp_path, monkeypatch):
+    """#1948: ``reader_surface@k`` is the honest reader-surface measure —
+    evidence-bearing content (points AND chunks) in the FULL reader context
+    counts as read even when it ranks beyond pool[:k] (the reval3
+    rank-31-chunk case: in context, answered correctly, chunk@20 = 0.0).
+    The pool@k metrics undercount the rank-(20, context-cap] window; the
+    legacy metrics are unchanged."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _boost_question()
+        q["question_id"] = "reader-surface-q"
+        # 24 unmarked extracted points + a marked point at rank 25 + a
+        # marked chunk at rank 26 — both evidence-bearing items sit in the
+        # rank-(20, 40] window the pool@20 metrics cannot see.
+        for i in range(24):
+            sdk.create_point("statement", f"unrelated filler chat {i}",
+                             id=f"fill{i}", session_id="b-s0",
+                             lme_question_id="reader-surface-q",
+                             lme_session_index=0, is_episodic=True,
+                             status="draft")
+        sdk.create_point("statement", "I painted the wall a light gray",
+                         id="evidence-pt", session_id="b-s1",
+                         lme_question_id="reader-surface-q",
+                         lme_session_index=1, is_episodic=True,
+                         has_answer=True, status="draft")
+        sdk.create_point("session-transcript",
+                         "I painted the wall a light gray",
+                         id="evidence-chunk", session_id="b-s1",
+                         lme_question_id="reader-surface-q",
+                         lme_session_index=1, is_episodic=True,
+                         has_answer=True, status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            hits = [{"id": f"fill{i}",
+                     "content": f"unrelated filler chat {i}",
+                     "match_source": "tfidf"} for i in range(24)]
+            hits.append({"id": "evidence-pt",
+                         "content": "I painted the wall a light gray",
+                         "match_source": "tfidf"})
+            hits.append({"id": "evidence-chunk",
+                         "content": "I painted the wall a light gray",
+                         "match_source": "tfidf"})
+            return hits
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        ret = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        # 26-item pool; both marked items rank beyond pool[:20] but inside
+        # the default 40-item context cap — the reader saw them.
+        assert ret["context_point_count"] == 26
+        ctx_ids = {h["id"] for h in ret["context_points"]}
+        assert {"evidence-pt", "evidence-chunk"} <= ctx_ids
+        # legacy pool metrics: honest about pool[:20] — both miss
+        assert ret["evidence_recall@k"]["20"] == 0.0
+        assert ret["chunk_evidence_recall@k"]["20"] == 0.0
+        assert ret["reader_evidence@k"]["20"] == 0.0  # points-only, [:20]
+        # the reader-surface metric: 2/2 evidence-bearing items were in the
+        # reader's ACTUAL context, at every k (k-independent by construction)
+        assert ret["reader_surface@k"]["20"] == 1.0
+        assert ret["reader_surface@k"]["5"] == 1.0
+    finally:
+        sdk.close()
+
+
+def test_reader_surface_vacuity_is_none(tmp_path, monkeypatch):
+    """#1948: on a question with NO evidence-bearing content at all, the
+    reader-surface denominator is empty → N/A (None), mirroring
+    evidence_recall@k (M6 — "no evidence exists" stays distinguishable)."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _boost_question()
+        q["question_id"] = "reader-surface-vac"
+        for i in range(5):
+            sdk.create_point("statement", f"unrelated filler chat {i}",
+                             id=f"fill{i}", session_id="b-s0",
+                             lme_question_id="reader-surface-vac",
+                             lme_session_index=0, is_episodic=True,
+                             status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            return [{"id": f"fill{i}",
+                     "content": f"unrelated filler chat {i}",
+                     "match_source": "tfidf"} for i in range(5)]
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        ret = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        assert ret["reader_surface@k"]["20"] is None
+        assert ret["reader_surface@k"]["5"] is None
+    finally:
+        sdk.close()
+
+
 def test_reader_evidence_recall_diagnostic(tmp_path, monkeypatch):
     """C4 (#1745): ``reader_evidence@k`` ≈ ``evidence@k`` on the mini
     fixture — the pool->context drop is ~0 after C1 (evidence in the pool
@@ -3814,6 +3958,24 @@ def test_reader_evidence_recall_diagnostic(tmp_path, monkeypatch):
         assert ret["reader_evidence@k"]["20"] == 1.0
     finally:
         sdk.close()
+
+
+def test_reader_surface_survives_run_evaluation(tmp_path):
+    """#1948 (review P1): the runner's outcome allowlist copies
+    ``reader_surface@k`` end-to-end — run_evaluation outcomes AND the
+    report's retrieval block carry the metric (the deliverable is emitted
+    in real runs, not only in retrieve_for_question's raw dict)."""
+    q = _mini()[0]
+    outcomes, report = run_evaluation(
+        [q], reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+        split="s", work_dir=str(tmp_path), max_context_tokens=3000,
+    )
+    assert len(outcomes) == 1
+    assert "reader_surface@k" in outcomes[0]
+    assert "reader_evidence@k" in outcomes[0]
+    r = report["retrieval"]
+    assert "reader_surface@k" in r
+    assert "reader_surface_n@k" in r
 
 
 def test_degenerate_knobs_raise():
