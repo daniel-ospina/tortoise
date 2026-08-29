@@ -18,12 +18,12 @@
 
 import {
   type Env, validUrl, SITE_URL,
-} from "../_lib.ts";
+} from "../../_lib.ts";
 import {
   META_TITLE_MAX, META_DESCRIPTION_MAX, EXCERPT_MAX, TAGS_MAX, TAG_LEN_MAX,
-} from "../_shared/meta-contract.ts";
-import { SLUG_MAX, SLUG_RE } from "../_shared/slug.ts";
-import { purgeUrl } from "../_shared/cloudflare-purge.ts";
+} from "../../_shared/meta-contract.ts";
+import { SLUG_MAX, SLUG_RE } from "../../_shared/slug.ts";
+import { purgeUrl } from "../../_shared/cloudflare-purge.ts";
 
 const HSTS = { "Strict-Transport-Security": "max-age=31536000; includeSubDomains" };
 const TITLE_MAX = 200;
@@ -389,7 +389,7 @@ export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
   );
 };
 
-export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params, ctx }) => {
+export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params, waitUntil }) => {
   if (!env.SUPABASE_URL || !env.SUPABASE_SERVICE_ROLE_KEY) {
     return err(503, "not_configured", "agent API not configured");
   }
@@ -398,7 +398,9 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
   const agent = auth.identity;
   if (rateLimited(agent.agentName)) return err(429, "rate_limited", "rate limit exceeded");
 
-  const slug = (params.slug as string) ?? "";
+  // [[path]] catch-all: params.path = [] for /blog/api/posts (create),
+  // [slug] for /blog/api/posts/{slug} (PATCH). Only the PATCH surface reads it.
+  const slug = ((params.path as string[] | undefined) ?? [])[0] ?? "";
   if (!SLUG_RE.test(slug)) return err(400, "validation", "invalid slug");
 
   const contentLength = Number(request.headers.get("content-length") ?? "0");
@@ -491,14 +493,14 @@ export const onRequestPatch: PagesFunction<Env> = async ({ request, env, params,
 
   // #1865: unpublish (resulting status = draft on a previously published post)
   // → purge the article URL from the edge cache (best-effort, fail-open). The
-  // stale-200 window otherwise survives up to the cache TTL. ctx.waitUntil
+  // stale-200 window otherwise survives up to the cache TTL. waitUntil
   // guarantees the purge runs after the response (Cloudflare isolates are
   // torn down otherwise). Purge whenever the resulting status is non-published
   // — a draft→draft purge is a harmless fail-open no-op, and it also covers
   // the TOCTOU window where the post was published between GET and PATCH
   // (wasPublished would read stale-false).
   if (resultStatus === "draft") {
-    ctx.waitUntil(
+    waitUntil(
       purgeUrl(`${SITE_URL}/blog/${slug}`, env).then((purged) => {
         if (!purged) console.warn(`[purge] agent-api unpublish failed: /blog/${slug}`);
       }),

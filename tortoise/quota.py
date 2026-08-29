@@ -300,6 +300,7 @@ def count_team_usage(team_id: str, resource: str, sdk=None) -> int:
 
     Supported resources: points, api_keys, sessions, users, graphs,
     documents (#1726: the :Document count with the transcript discriminator).
+    ``points`` counts non-episodic Points + Object/Subject nodes (#1911).
     """
     return _count_resource(team_id, resource, sdk=sdk)
 
@@ -312,7 +313,10 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
       ``is_episodic`` flag is the quota discriminator — #947, epic #909
       §4.4; legacy Points without the flag count as non-episodic,
       fail-closed, until graph-scripts/backfill_is_episodic.py backfills
-      them, R-18)
+      them, R-18) PLUS all Object/Subject nodes (#1911 — the /v1/objects
+      + /v1/subjects gates check this resource, and Object/Subject carry
+      only their own labels, so they must be counted here or the cap is
+      vacuous for those writes)
     - api_keys: active (non-revoked) APIKey nodes in registry
     - sessions: Session nodes in tenant graph (MATCH (s:Session) — NOT the
       all-nodes count; #947 P0)
@@ -403,14 +407,33 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
                 "MATCH (s:Session) RETURN count(s)",
             ).result_set
             return int(rows[0][0])
-        # points: non-episodic Points only — the Point-level is_episodic flag
-        # is the discriminator. A MISSING flag counts as non-episodic
-        # (fail-closed, R-18): legacy regex-path captures lack it and must be
-        # backfilled episodic by graph-scripts/backfill_is_episodic.py, else
-        # false 402s persist for existing capture users.
+        # points: non-episodic Points PLUS Object/Subject nodes (#1911). The
+        # Point-level is_episodic flag is the Point discriminator — a MISSING
+        # flag counts as non-episodic (fail-closed, R-18): legacy regex-path
+        # captures lack it and must be backfilled episodic by
+        # graph-scripts/backfill_is_episodic.py, else false 402s persist for
+        # existing capture users. Object/Subject nodes are counted
+        # UNCONDITIONALLY: they carry only their own labels (projection/
+        # entities.py _upsert_object/_upsert_subject) and previously NEVER
+        # appeared in this count — the /v1/objects + /v1/subjects gates
+        # (hosted_api._check_team_limit resource="points") and the MCP
+        # create_object/create_subject tools (_quota_gated "points") checked
+        # a count that could only ever see Points, so a free team could write
+        # unbounded objects/subjects without ever 402ing (bug-hunt 2026-08-28
+        # server P2-1, #1911). max_points IS the pricing max_graph_nodes node
+        # cap (tortoise.pricing tier_limits) — counting Object+Subject
+        # against it applies the plan's real node cap, not a Point-only cap.
+        # #1844 interplay (recorded intent): the GitHub indexer is an
+        # UNGATED object writer (hosted_api.py:11097 — no points-quota
+        # preflight, by design). Its minted Object nodes now count against
+        # the cap, so an indexing-heavy team can be pushed past max_points,
+        # after which all points-gated writes 402 until upgrade — the
+        # intended "0 uncapped object/subject growth" posture. A future
+        # indexer preflight (follow-up) would gate the job itself.
         rows = sdk._get_proj().g.query(
-            "MATCH (n:Point) "
-            "WHERE n.is_episodic IS NULL OR n.is_episodic = false "
+            "MATCH (n) "
+            "WHERE (n:Point AND (n.is_episodic IS NULL OR n.is_episodic = false)) "
+            "   OR n:Object OR n:Subject "
             "RETURN count(n)",
         ).result_set
         return int(rows[0][0])

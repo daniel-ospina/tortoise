@@ -5904,6 +5904,12 @@ def _team_limits_from_node(team_node: dict) -> dict:
 async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
     """E6 — list my memberships (team switcher). Placeholder rows excluded.
 
+    #1912: per-row suspended_at — a suspended membership no longer 403s the
+    whole switcher. Healthy teams stay listable; the suspended team itself
+    is blocked from selection (suspended_at stamp, no graph resolution).
+    When EVERY membership is suspended there is nothing healthy to list →
+    403 SUSPENDED with the appeal detail (#1853 lockdown preserved).
+
     #765 (plan Task 8 reader inventory): graph_list resolves via the
     mode-aware SDK (Supabase → teams.graph_name derivation via the seam;
     registry → Graph nodes), so this endpoint never touches the registry in
@@ -5914,12 +5920,13 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
         team = await _team_node(m["team_id"])
         if team is None:
             continue
-        # #1853: a suspended membership 403s the switcher (locked down —
-        # the detail carries the appeal link; mixed healthy/suspended
-        # memberships are blocked as a whole so the suspended state is
-        # never silently hidden).
-        _ensure_not_suspended(team)
-        graphs = _make_sdk(namespace="registry").graph_list(m["team_id"])
+        suspended_at = team.get("suspended_at")
+        graphs = []
+        if suspended_at is None:
+            # Suspended rows are excluded from graph resolution — they
+            # cannot be selected anyway, and graph_list must not observe
+            # the suspension stamp.
+            graphs = _make_sdk(namespace="registry").graph_list(m["team_id"])
         out.append({
             "team_id": m["team_id"],
             "team_name": team.get("name", m["team_id"]),
@@ -5927,23 +5934,69 @@ async def list_my_teams(user: dict = Depends(get_current_user)):  # noqa: B008
             "role": m["role"],
             "graph_count": len(graphs),
             "default_graph_id": next((g["graph_id"] for g in graphs if g["kind"] == "default"), None),
+            "suspended_at": suspended_at,
         })
+    if out and all(t["suspended_at"] is not None for t in out):
+        # No healthy team to switch to — every membership is suspended.
+        # 403 with the appeal detail (the user must see why and how to
+        # appeal); a mixed list returns per-row suspended_at instead.
+        raise HTTPException(status_code=403, detail=_suspended_detail())
     return out
 
 
-def _count_active_free_memberships(user_id: str) -> int:
+# #1954: per-user serialization of the "one free team" check+provision.
+# The #1877 entitlement is read-then-write: concurrent POST /v1/teams (or
+# POST /v1/onboarding/team) requests can all read
+# count_active_free_memberships == 0 (and the 429 owner-membership count
+# sees 0 too) then all provision → multiple free teams. The count+provision
+# must be ATOMIC.
+# Design: a module-level dict of asyncio.Lock keyed by user_id. Per-user
+# (NOT a single global) granularity — the race is per-PERSON (the
+# entitlement is per-user), so a global lock would needlessly serialize
+# every tenant's team creation (throughput). The dict is append-only,
+# bounded by the set of users who create teams (~100s of bytes per entry).
+# Uncontended acquisition binds no event loop, so the module-level dict is
+# safe across TestClient portal loops and test loops.
+# SCOPE (documented): this is an IN-PROCESS guard. It fully closes the race
+# on the single-process hosted lane (lock + sync critical section = loop
+# atomic). The registry/selfhost lane may run MULTI-PROCESS (uvicorn
+# workers) — there each process has its own lock, so it narrows the window
+# but is NOT bulletproof; DB-level enforcement (e.g. a partial unique index
+# on free-tier owner memberships) is the multi-process backstop (issue
+# #1954 target, follow-up).
+_TEAM_CREATE_LOCKS: dict[str, asyncio.Lock] = {}
+
+
+def _team_create_lock(user_id: str) -> asyncio.Lock:
+    """Return the per-user serialization lock for team/membership provision.
+
+    Same user → same lock (concurrent check+provision calls serialize);
+    different users → different locks (no cross-tenant blocking).
+    """
+    lock = _TEAM_CREATE_LOCKS.get(user_id)
+    if lock is None:
+        lock = _TEAM_CREATE_LOCKS.setdefault(user_id, asyncio.Lock())
+    return lock
+
+
+async def _count_active_free_memberships(user_id: str) -> int:
     """#1877: active memberships in teams WITHOUT an active paid subscription
     (the per-person "one free team" entitlement). Mode-aware: supabase reads
     subscription_status; selfhost (no subscription model) uses tier='free'
     as the no-sub proxy. The supabase twin shape-gates user_id and skips
     dangling memberships — never a 500."""
     from tortoise.supabase_control import (
-        get_control_plane,
-        is_supabase_enabled,
         count_active_free_memberships as _sb_count,
     )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
     if is_supabase_enabled():
-        return _sb_count(get_control_plane(), user_id)
+        import asyncio as _asyncio
+        count = _sb_count(get_control_plane(), user_id)
+        await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
+        return count
     reg = _make_sdk(namespace="registry")._get_registry()
     rows = reg.query(
         "MATCH (m:Membership {user_id:$uid, status:'active'}) "
@@ -5956,6 +6009,8 @@ def _count_active_free_memberships(user_id: str) -> int:
     # review P2: `tier IS NULL` fail-closes the same shape as the supabase
     # twin (a missing subscription_status counts as free → 402) — a legacy/
     # manual tier-less Team node must not grant an extra free slot.
+    import asyncio as _asyncio
+    await _asyncio.sleep(0)  # the TOCTOU read window (#1954)
     return rows[0][0] if rows else 0
 
 
@@ -5981,84 +6036,113 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     if not _re.match(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$", name):
         raise HTTPException(status_code=422, detail="Invalid team name")
 
+    # #1954: the 429/409/402 gates + provision are read-then-write — the
+    # whole check+provision runs under the per-user lock so a concurrent
+    # burst from a 0-free-team account cannot all read count==0 and mint
+    # multiple free teams (the count+provision must be atomic).
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        async with _team_create_lock(user["user_id"]):
+            return await _create_team_supabase_lane(cp, name, user)
+    sdk = _make_sdk(namespace="registry")
+    async with _team_create_lock(user["user_id"]):
+        return await _create_team_registry_lane(sdk, name, user)
+
+
+async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
+    """#1954: the Supabase create_team lane — 429 → 409 → 402 gates + the
+    atomic provision_team write. MUST be called holding the caller's
+    _team_create_lock (the gates are read-then-write; the lock is what makes
+    a concurrent burst mint exactly one team)."""
     import uuid as _uuid
     from datetime import datetime
     from datetime import timedelta as _td
 
     from tortoise.auth import lookup_hash
     from tortoise.supabase_control import (
-        get_control_plane,
-        is_supabase_enabled,
         membership_count_since,
         provision_team,
         team_by_name,
     )
 
-    if is_supabase_enabled():
-        cp = get_control_plane()
-        # Per-user team-creation rate limit (abuse posture) — the Supabase
-        # twin of the registry owner-membership count (#743(b) semantics:
-        # role='owner' rows created within the last hour).
-        since = (datetime.now(UTC) - _td(hours=1)).isoformat()
-        recent = membership_count_since(
-            cp, cutoff=since, user_id=user["user_id"], role="owner")
-        if recent >= 3:
-            raise HTTPException(status_code=429,
-                                detail="Too many teams created — try again later")
-        # Duplicate-name 409 (registry team_create raises ControlPlaneError
-        # 'already exists'; the 0011 unique index is the atomic guard — the
-        # pre-check is the friendly fast-path, the RPC 409 is authoritative).
-        if team_by_name(cp, name):
-            raise HTTPException(status_code=409, detail="Team name already exists")
-        # #1877: per-person entitlement — one free team. Any active
-        # membership in a team without an active paid subscription blocks
-        # creating another (the new team would start Free → 2 free teams).
-        # Order pinned: 429 → 409 → 402 (a free-capped user creating a
-        # duplicate name gets 409, not 402). STRING detail (the dashboard
-        # fetch layer string-handles details).
-        if _count_active_free_memberships(user["user_id"]) >= 1:
-            raise HTTPException(
-                status_code=402,
-                detail="Create another team requires a paid plan — upgrade an existing team first")
+    # Per-user team-creation rate limit (abuse posture) — the Supabase
+    # twin of the registry owner-membership count (#743(b) semantics:
+    # role='owner' rows created within the last hour).
+    since = (datetime.now(UTC) - _td(hours=1)).isoformat()
+    recent = membership_count_since(
+        cp, cutoff=since, user_id=user["user_id"], role="owner")
+    if recent >= 3:
+        raise HTTPException(status_code=429,
+                            detail="Too many teams created — try again later")
+    # Duplicate-name 409 (registry team_create raises ControlPlaneError
+    # 'already exists'; the 0011 unique index is the atomic guard — the
+    # pre-check is the friendly fast-path, the RPC 409 is authoritative).
+    if team_by_name(cp, name):
+        raise HTTPException(status_code=409, detail="Team name already exists")
+    # #1877: per-person entitlement — one free team. Any active
+    # membership in a team without an active paid subscription blocks
+    # creating another (the new team would start Free → 2 free teams).
+    # Order pinned: 429 → 409 → 402 (a free-capped user creating a
+    # duplicate name gets 409, not 402). STRING detail (the dashboard
+    # fetch layer string-handles details).
+    if await _count_active_free_memberships(user["user_id"]) >= 1:
+        raise HTTPException(
+            status_code=402,
+            detail="Create another team requires a paid plan — upgrade an existing team first")
 
-        team_id = str(_uuid.uuid4().hex[:26])
-        graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
-        api_key = f"tt_{_uuid.uuid4().hex}"
-        # Eager default-graph TeamMeta FIRST (register_user's documented
-        # ordering — review P2, PR #874): an orphaned graph namespace is
-        # harmless, an orphaned teams row is not (provision-then-graph would
-        # 500 the client with rows persisted; retry then 409s on the name).
-        proj = _make_sdk(namespace=team_id)._get_proj()
-        proj.db.select_graph(graph_name).query(
-            "CREATE (:TeamMeta {name: $name, created: $now})",
-            params={"name": name, "now": datetime.now(UTC).isoformat()},
-        )
-        # #1686: journal the minted team_* graph (session sweep drops it).
-        _journal_append_product(graph_name)
-        try:
-            provision_team(cp, **{
-                "p_user_id": user["user_id"],
-                "p_identity": None,
-                "p_team_id": team_id,
-                "p_team_name": name,
-                "p_api_key": api_key,
-                "p_key_hash": hash_api_key(api_key),
-                "p_lookup_hash": lookup_hash(api_key),
-                "p_graph_name": graph_name,
-                "p_tier": "free",
-            })
-        except Exception as e:
-            # 0011 unique index: a concurrent duplicate name surfaces as a
-            # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
-            # the registry path).
-            if "HTTP 409" in str(e):
-                raise HTTPException(status_code=409,  # noqa: B904
-                                    detail="Team name already exists")
-            raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
-        return {"team_id": team_id, "graph_name": graph_name,
-                "tier": "free", "name": name}
+    team_id = str(_uuid.uuid4().hex[:26])
+    graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
+    api_key = f"tt_{_uuid.uuid4().hex}"
+    # Eager default-graph TeamMeta FIRST (register_user's documented
+    # ordering — review P2, PR #874): an orphaned graph namespace is
+    # harmless, an orphaned teams row is not (provision-then-graph would
+    # 500 the client with rows persisted; retry then 409s on the name).
+    proj = _make_sdk(namespace=team_id)._get_proj()
+    proj.db.select_graph(graph_name).query(
+        "CREATE (:TeamMeta {name: $name, created: $now})",
+        params={"name": name, "now": datetime.now(UTC).isoformat()},
+    )
+    # #1686: journal the minted team_* graph (session sweep drops it).
+    _journal_append_product(graph_name)
+    try:
+        provision_team(cp, **{
+            "p_user_id": user["user_id"],
+            "p_identity": None,
+            "p_team_id": team_id,
+            "p_team_name": name,
+            "p_api_key": api_key,
+            "p_key_hash": hash_api_key(api_key),
+            "p_lookup_hash": lookup_hash(api_key),
+            "p_graph_name": graph_name,
+            "p_tier": "free",
+        })
+    except Exception as e:
+        # 0011 unique index: a concurrent duplicate name surfaces as a
+        # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
+        # the registry path).
+        if "HTTP 409" in str(e):
+            raise HTTPException(status_code=409,  # noqa: B904
+                                detail="Team name already exists")
+        raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
+    return {"team_id": team_id, "graph_name": graph_name,
+            "tier": "free", "name": name}
 
-    sdk = _make_sdk(namespace="registry")
+
+async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
+    """#1954: the registry (selfhost) create_team lane — 429 → 409 → 402
+    gates + sdk.team_create. MUST be called holding the caller's
+    _team_create_lock. NOTE (documented): the registry lane may run
+    MULTI-PROCESS (selfhost uvicorn workers) — the in-process lock narrows
+    the window there but is not bulletproof; DB-level enforcement is the
+    multi-process backstop (issue #1954 target, follow-up)."""
+    from datetime import datetime, timedelta
+
+    from tortoise.exceptions import ControlPlaneError
+
     reg = sdk._get_registry()
     # Per-user team-creation rate limit (abuse posture) — not a tier block.
     # #743(b): the count was never checked, `since` was `now` (always 0), and
@@ -6085,7 +6169,7 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
         raise HTTPException(status_code=409, detail="Team name already exists")
     # #1877: per-person entitlement — one free team (tier='free' proxy;
     # selfhost has no subscription model). STRING detail.
-    if _count_active_free_memberships(user["user_id"]) >= 1:
+    if await _count_active_free_memberships(user["user_id"]) >= 1:
         raise HTTPException(
             status_code=402,
             detail="Create another team requires a paid plan — upgrade an existing team first")
@@ -6093,7 +6177,6 @@ async def create_team(body: dict, user: dict = Depends(get_current_user)):  # no
     try:
         result = sdk.team_create(name, owner_user_id=user["user_id"])
     except Exception as e:
-        from tortoise.exceptions import ControlPlaneError
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
             raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
         raise HTTPException(status_code=500, detail="Team creation failed")  # noqa: B904
@@ -6277,6 +6360,36 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+# #1965: per-team in-process asyncio locks serializing the Pro capacity
+# check + mint (invite side) and the capacity pre-check + consume (accept
+# side). Closes the count-then-mint TOCTOU from #1875 — concurrent
+# POST /v1/invites on a Pro team could both read active+pending < 2 and
+# both mint, exceeding max_users. The lock makes the check-and-mint a
+# serialized critical section per team, so a losing concurrent request
+# re-reads the count AFTER the winner's mint and hits the gate.
+#
+# In-process scope only (FastAPI serves one event loop per worker — an
+# asyncio.Lock serializes all coroutines on that loop; cross-worker
+# coordination would need a DB-level constraint, out of #1965 scope).
+_INVITE_TEAM_LOCKS: dict[str, asyncio.Lock] = {}
+_INVITE_TEAM_LOCKS_GUARD = threading.Lock()
+
+
+def _invite_team_lock(team_id: str) -> asyncio.Lock:
+    """Memoized per-team lock (bounded by team count, not request volume).
+
+    The guard covers the dict read-modify-write across threads: FastAPI may
+    import/construct the app from any thread, and asyncio.Lock() in 3.10+ is
+    loop-agnostic at construction (binds on first use).
+    """
+    with _INVITE_TEAM_LOCKS_GUARD:
+        lock = _INVITE_TEAM_LOCKS.get(team_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _INVITE_TEAM_LOCKS[team_id] = lock
+        return lock
+
+
 def _set_invite_email_sent(cp, invitation_id: str) -> None:
     """Stamp invitations.email_sent_at on provider-accept (best-effort)."""
     try:
@@ -6326,19 +6439,25 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
             if tier in ("free", "solo"):
                 raise HTTPException(status_code=402,
                                     detail="Invites require the Pro or Team tier — upgrade to invite teammates")
-            if tier == "pro":
-                from datetime import datetime as _dt, timezone as _tz
-                active = [m for m in team_members(get_control_plane(), team_id)
-                          if m.get("status") == "active"]
-                now = _dt.now(_tz.utc).isoformat()
-                pending = [i for i in pending_invitations(get_control_plane(), team_id)
-                           if not i.get("expires_at") or i["expires_at"] > now]
-                if len(active) + len(pending) >= 2:  # Pro max_users=2
-                    raise HTTPException(status_code=402,
-                                        detail="Team member limit reached — upgrade to invite more")
-            inv = invitation_mint(get_control_plane(), team_id, email, role,
-                                  invited_by=user["user_id"],
-                                  inviter_email=(user.get("email") or None))
+            # #1965: per-team lock around the capacity check + mint — two
+            # concurrent invites must not both read active+pending < 2 and
+            # both mint past max_users. Serialized per team_id; the count
+            # is re-read inside the critical section so a losing request
+            # sees the winner's minted invite.
+            async with _invite_team_lock(team_id):
+                if tier == "pro":
+                    from datetime import datetime as _dt
+                    active = [m for m in team_members(get_control_plane(), team_id)
+                              if m.get("status") == "active"]
+                    now = _dt.now(UTC).isoformat()
+                    pending = [i for i in pending_invitations(get_control_plane(), team_id)
+                               if not i.get("expires_at") or i["expires_at"] > now]
+                    if len(active) + len(pending) >= 2:  # Pro max_users=2
+                        raise HTTPException(status_code=402,
+                                            detail="Team member limit reached — upgrade to invite more")
+                inv = invitation_mint(get_control_plane(), team_id, email, role,
+                                      invited_by=user["user_id"],
+                                      inviter_email=(user.get("email") or None))
             # #307: best-effort invite email — never blocks the mint.
             try:
                 from tortoise.email_notify import send_invite_email
@@ -6367,73 +6486,81 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
     await _require_owner_admin(user["user_id"], team_id)
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    team_row = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN properties(t)",
-        params={"id": team_id},
-    ).result_set
-    if not team_row:
-        raise HTTPException(status_code=404, detail="Unknown team")
-    team_node = team_row[0][0]
-    tier = team_node.get("tier", "free")
-    # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Pro →
-    # capacity = active members + PENDING invitations (authoritative
-    # Invitation nodes — not the fake invite-{iid} membership rows, which
-    # are never cleaned); Team → unlimited (None-skip). Replaces the old
-    # active-only `_check_team_limit(limits, "users")` for Pro (cycle-2 P2:
-    # active-only under-counted pending seats).
-    if tier in ("free", "solo"):
-        raise HTTPException(status_code=402,
-                            detail="Invites require the Pro or Team tier — upgrade to invite teammates")
-    if tier == "pro":
-        from datetime import datetime as _pdt, timezone as _ptz
-        active = reg.query(
-            "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
-            params={"tid": team_id},
-        ).result_set[0][0]
-        now = _pdt.now(_ptz.utc).isoformat()
-        pending = reg.query(
-            "MATCH (i:Invitation {team_id:$tid}) "
-            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
-            "AND (i.expires_at IS NULL OR i.expires_at > $now) RETURN count(i)",
-            params={"tid": team_id, "now": now},
-        ).result_set[0][0]
-        if active + pending >= 2:  # Pro max_users=2
+    # #1965: per-team lock around the tier gate + capacity check + dup check
+    # + mint (the count-then-mint TOCTOU: concurrent invites can both read
+    # active+pending < 2 and both mint past max_users; the dup check is
+    # included so same-email races serialize too). The registry lane's
+    # critical section is currently synchronous (atomic per coroutine), so
+    # the lock is defense-in-depth: it guarantees correctness if any await
+    # (async capacity read, to_thread offload) is introduced later.
+    async with _invite_team_lock(team_id):
+        team_row = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": team_id},
+        ).result_set
+        if not team_row:
+            raise HTTPException(status_code=404, detail="Unknown team")
+        team_node = team_row[0][0]
+        tier = team_node.get("tier", "free")
+        # #1875: tier gate matches pricing. Free/Solo → upgrade gate; Pro →
+        # capacity = active members + PENDING invitations (authoritative
+        # Invitation nodes — not the fake invite-{iid} membership rows, which
+        # are never cleaned); Team → unlimited (None-skip). Replaces the old
+        # active-only `_check_team_limit(limits, "users")` for Pro (cycle-2 P2:
+        # active-only under-counted pending seats).
+        if tier in ("free", "solo"):
             raise HTTPException(status_code=402,
-                                detail="Team member limit reached — upgrade to invite more")
+                                detail="Invites require the Pro or Team tier — upgrade to invite teammates")
+        if tier == "pro":
+            from datetime import datetime as _pdt
+            active = reg.query(
+                "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
+                params={"tid": team_id},
+            ).result_set[0][0]
+            now = _pdt.now(UTC).isoformat()
+            pending = reg.query(
+                "MATCH (i:Invitation {team_id:$tid}) "
+                "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+                "AND (i.expires_at IS NULL OR i.expires_at > $now) RETURN count(i)",
+                params={"tid": team_id, "now": now},
+            ).result_set[0][0]
+            if active + pending >= 2:  # Pro max_users=2
+                raise HTTPException(status_code=402,
+                                    detail="Team member limit reached — upgrade to invite more")
 
-    # Invitation node via SDK (token returned once); roles admin/member allowed here
-    import uuid as _uuid
-    from datetime import datetime, timedelta
+        # Invitation node via SDK (token returned once); roles admin/member allowed here
+        import uuid as _uuid
+        from datetime import datetime, timedelta
 
-    from tortoise.auth import hash_api_key as _hash
+        from tortoise.auth import hash_api_key as _hash
 
-    dup = reg.query(
-        "MATCH (i:Invitation {team_id:$tid, email:$email}) "
-        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') RETURN count(i)",
-        params={"tid": team_id, "email": email},
-    ).result_set[0][0]
-    if dup:
-        raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
+        dup = reg.query(
+            "MATCH (i:Invitation {team_id:$tid, email:$email}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') RETURN count(i)",
+            params={"tid": team_id, "email": email},
+        ).result_set[0][0]
+        if dup:
+            raise HTTPException(status_code=409, detail="Pending invitation already exists for this email")
 
-    token = str(_uuid.uuid4())
-    token_hash = _hash(token)
-    iid = _short_id()
-    now = datetime.now(UTC).isoformat()
-    expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
-    reg.query(
-        "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, "
-        "token_hash:$th, created_by:$cb, inviter_email:$ie, created_at:$now, "
-        "expires_at:$exp, accepted_at:null, status:'pending'})",
-        params={"id": iid, "tid": team_id, "email": email, "role": role,
-                "th": token_hash, "cb": user["user_id"], "ie": user.get("email"),
-                "now": now, "exp": expires_at},
-    )
-    # Also record the invitee row in team_memberships (status='invited') per plan §4.1
-    reg.query(
-        "MERGE (m:Membership {team_id:$tid, user_id:$fake}) "
-        "ON CREATE SET m.role=$role, m.status='invited', m.invited_email=$email, m.created_at=$now",
-        params={"tid": team_id, "fake": f"invite-{iid}", "role": role, "email": email, "now": now},
-    )
+        token = str(_uuid.uuid4())
+        token_hash = _hash(token)
+        iid = _short_id()
+        now = datetime.now(UTC).isoformat()
+        expires_at = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+        reg.query(
+            "CREATE (i:Invitation {id:$id, team_id:$tid, email:$email, role:$role, "
+            "token_hash:$th, created_by:$cb, inviter_email:$ie, created_at:$now, "
+            "expires_at:$exp, accepted_at:null, status:'pending'})",
+            params={"id": iid, "tid": team_id, "email": email, "role": role,
+                    "th": token_hash, "cb": user["user_id"], "ie": user.get("email"),
+                    "now": now, "exp": expires_at},
+        )
+        # Also record the invitee row in team_memberships (status='invited') per plan §4.1
+        reg.query(
+            "MERGE (m:Membership {team_id:$tid, user_id:$fake}) "
+            "ON CREATE SET m.role=$role, m.status='invited', m.invited_email=$email, m.created_at=$now",
+            params={"tid": team_id, "fake": f"invite-{iid}", "role": role, "email": email, "now": now},
+        )
     # #307: best-effort invite email — never blocks the mint.
     try:
         from tortoise.email_notify import send_invite_email
@@ -6580,8 +6707,13 @@ async def accept_invite(body: dict, request: Request,
     )
     if is_supabase_enabled():
         try:
-            res = _sb_accept(get_control_plane(), token, user["user_id"],
-                             user_email=user.get("email"))
+            # #1954: the join-side free-cap check + membership write inside
+            # invitation_accept are read-then-write — serialize per user so
+            # two concurrent accepts cannot both read count==0 and mint two
+            # free memberships.
+            async with _team_create_lock(user["user_id"]):
+                res = _sb_accept(get_control_plane(), token, user["user_id"],
+                                 user_email=user.get("email"))
             _forget_invite_accept(request, token)
             return res
         except InvitationError as e:
@@ -6611,6 +6743,10 @@ async def accept_invite(body: dict, request: Request,
     if not invite:
         raise HTTPException(status_code=400, detail="Invalid or expired invite token")
     if invite["expires_at"] and invite["expires_at"] < datetime.now(UTC).isoformat():
+        # #1908: the expiry 400 fired BEFORE the ghost cleanup — an expired
+        # invite kept its fake invite-{iid} membership row forever (pre-#1880
+        # ghosts are swept by the one-time backfill). Delete before raising.
+        _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
         raise HTTPException(status_code=400, detail="Invite token expired")
 
     # Email match guard (invitee must be the invitee's account)
@@ -6629,37 +6765,69 @@ async def accept_invite(body: dict, request: Request,
     # #1853: a suspended team must not mint memberships (registry path —
     # mirrors the deleted_at kill-switch in invitation_accept).
     _ensure_not_suspended(await _team_node(invite["team_id"]))
-    # #1875/#1877 (P1 cycle-2): join-side free-cap on the TOKEN entry point
-    # too — a free-capped invitee must not join a free (or downgraded-window)
-    # team via the email link. Non-consuming (before the accepted_at write).
-    _team_row = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN properties(t)",
-        params={"id": invite["team_id"]},
-    ).result_set
-    _team_tier = (_team_row[0][0].get("tier") if _team_row else None) or "free"
-    if _team_tier == "free" and _count_active_free_memberships(user["user_id"]) >= 1:
-        raise HTTPException(
-            status_code=402,
-            detail="You already have a free team — this team requires a paid plan to join")
+    # #1954: the join-side free-cap (check) + the accepted_at write +
+    # membership_create are read-then-write — serialize per user so two
+    # concurrent accepts cannot both read count==0 and mint two free
+    # memberships.
+    async with _team_create_lock(user["user_id"]):
+        # #1875/#1877 (P1 cycle-2): join-side free-cap on the TOKEN entry
+        # point too — a free-capped invitee must not join a free (or
+        # downgraded-window) team via the email link. Non-consuming
+        # (before the accepted_at write).
+        _team_row = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": invite["team_id"]},
+        ).result_set
+        _team_tier = (_team_row[0][0].get("tier") if _team_row else None) or "free"
+        if _team_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
+            raise HTTPException(
+                status_code=402,
+                detail="You already have a free team — this team requires a paid plan to join")
 
-    # Token single-use: mark accepted
-    reg.query(
-        "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
-        params={"id": invite["id"], "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
-    )
-    # Create the active membership (route through membership_create for the max_users gate)
-    try:
-        sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
-    except Exception as e:
-        # #1880: the accepted_at write above ran BEFORE membership_create, so a
-        # max_users 402 leaves a consumed invite + NO real membership — the fake
-        # invite-{iid} row must still be deleted (permanent ghost otherwise).
-        # NOTE (second-model P2): this delete is coupled to the consumed-on-402
-        # ordering — if a future fix reorders membership_create BEFORE the
-        # accepted_at write (making 402 non-consuming/retryable), this except-path
-        # delete must be REMOVED (the pending placeholder would be legitimate).
-        _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
-        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
+    # #1965: per-team lock around the capacity pre-check + consume. The
+    # capacity pre-check runs INSIDE the lock BEFORE the accepted_at write
+    # and mirrors membership_create's max_users gate (count ACTIVE
+    # memberships vs the Team node's max_users) — so a losing concurrent
+    # accept (or an accept past the seat cap) bails with a NON-consuming
+    # 402: the invite stays pending (accepted_at NULL) and is retryable
+    # once a seat frees. Serializing per team_id makes the pre-check
+    # authoritative: the loser runs after the winner's membership_create
+    # committed, so it sees the new active count. membership_create stays
+    # as the backstop (tier changes / downgrade windows).
+    async with _invite_team_lock(invite["team_id"]):
+        _cap_row = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": invite["team_id"]},
+        ).result_set
+        _cap_max = (_cap_row[0][0].get("max_users") if _cap_row else None)
+        if _cap_max is not None:
+            _cap_active = reg.query(
+                "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
+                params={"tid": invite["team_id"]},
+            ).result_set[0][0]
+            if _cap_active >= int(_cap_max):
+                raise HTTPException(
+                    status_code=402,
+                    detail="Team member limit reached — upgrade to invite more")
+
+        # Token single-use: mark accepted
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
+            params={"id": invite["id"], "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
+        )
+        # Create the active membership (route through membership_create for the max_users gate)
+        try:
+            sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
+        except Exception as e:
+            # #1880: the accepted_at write above ran BEFORE membership_create, so a
+            # membership_create failure (non-capacity: team deleted between the
+            # pre-check and the create, transient graph error) leaves a consumed
+            # invite + NO real membership — the fake invite-{iid} row must still
+            # be deleted (permanent ghost otherwise). With the #1965 pre-check,
+            # a max_users rejection is caught BEFORE the accepted_at write, so
+            # this except-path only fires for genuinely exceptional failures.
+            _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
+            raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
     # #1880: drop the fake invite-{iid} membership row (ghost-members bug)
     _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
     _forget_invite_accept(request, token)
@@ -6744,8 +6912,8 @@ async def list_pending_invites_for_me(user: dict = Depends(get_current_user)):  
             get_control_plane(), email)}
     sdk = _make_sdk(namespace="registry")
     reg = sdk._get_registry()
-    from datetime import datetime as _dt, timezone as _tz
-    now = _dt.now(_tz.utc).isoformat()
+    from datetime import datetime as _dt
+    now = _dt.now(UTC).isoformat()
     rows = reg.query(
         "MATCH (i:Invitation {email:$email}) "
         "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
@@ -6767,9 +6935,13 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     suspended-team — PLUS the #1877 free-team entitlement: when the target
     team is free-tier (no subscription model) and the invitee already holds
     a free team, blocked BEFORE the accepted_at write (NON-consuming — the
-    invitee can leave their free team and re-accept; documented divergence
-    from the token branch's consumed-on-402). Also deletes the fake
-    invite-{iid} membership row (#1880) on success and on the 402 path."""
+    invitee can leave their free team and re-accept). #1965 aligned the two
+    branches' capacity semantics: a max_users pre-check (mirroring
+    membership_create's gate) runs under the per-team lock BEFORE the
+    accepted_at write, so a losing concurrent accept (or an accept past the
+    seat cap) is a NON-consuming 402 — the invite stays pending and
+    retryable. Also deletes the fake invite-{iid} membership row (#1880) on
+    success and on the (except-path) 402 after the accepted_at write."""
     reg = sdk._get_registry()
     rows = reg.query(
         "MATCH (i:Invitation {id:$id}) "
@@ -6786,6 +6958,9 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     if status == "revoked":
         raise HTTPException(status_code=409, detail="Invitation has been revoked")
     if expires_at and expires_at < datetime.now(UTC).isoformat():
+        # #1908: same pre-delete 400 ordering bug as the token branch — the
+        # fake invite-{iid} membership row must die with the expired invite.
+        _delete_fake_invite_membership(sdk, team_id, iid)
         raise HTTPException(status_code=400, detail="Invite token expired")
     user_email = (user.get("email") or "").lower()
     # P1 (second-model): fail CLOSED — an email-less session cannot accept
@@ -6800,26 +6975,52 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
     if existing:
         raise HTTPException(status_code=409, detail="Already a member of this team")
     _ensure_not_suspended(await _team_node(team_id))
-    # #1877 free-cap (join side): free-tier target + free-capped invitee →
-    # blocked BEFORE the accepted_at write (non-consuming).
-    team_row = reg.query(
-        "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": team_id},
-    ).result_set
-    team_tier = (team_row[0][0].get("tier") if team_row else None) or "free"
-    if team_tier == "free" and _count_active_free_memberships(user["user_id"]) >= 1:
-        raise HTTPException(
-            status_code=402,
-            detail="You already have a free team — this team requires a paid plan to join")
-    reg.query(
-        "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
-        params={"id": iid, "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
-    )
-    try:
-        sdk.membership_create(team_id, user["user_id"], role)
-    except Exception as e:
-        _delete_fake_invite_membership(sdk, team_id, iid)
-        raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
-    _delete_fake_invite_membership(sdk, team_id, iid)  # #1880 ghost cleanup
+    # #1954: the join-side free-cap (check) + the accepted_at write +
+    # membership_create are read-then-write — serialize per user so two
+    # concurrent accepts cannot both read count==0 and mint two free
+    # memberships.
+    async with _team_create_lock(user["user_id"]):
+        # #1877 free-cap (join side): free-tier target + free-capped invitee →
+        # blocked BEFORE the accepted_at write (non-consuming).
+        team_row = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": team_id},
+        ).result_set
+        team_tier = (team_row[0][0].get("tier") if team_row else None) or "free"
+        if team_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
+            raise HTTPException(
+                status_code=402,
+                detail="You already have a free team — this team requires a paid plan to join")
+
+    # #1965: same per-team lock + capacity pre-check as the TOKEN accept
+    # branch — the max_users pre-check runs INSIDE the lock BEFORE the
+    # accepted_at write (mirroring membership_create's gate, counting ACTIVE
+    # memberships vs the Team node's max_users), so a losing concurrent
+    # accept bails with a NON-consuming 402 (invite stays pending).
+    async with _invite_team_lock(team_id):
+        _cap_row = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": team_id},
+        ).result_set
+        _cap_max = (_cap_row[0][0].get("max_users") if _cap_row else None)
+        if _cap_max is not None:
+            _cap_active = reg.query(
+                "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
+                params={"tid": team_id},
+            ).result_set[0][0]
+            if _cap_active >= int(_cap_max):
+                raise HTTPException(
+                    status_code=402,
+                    detail="Team member limit reached — upgrade to invite more")
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
+            params={"id": iid, "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
+        )
+        try:
+            sdk.membership_create(team_id, user["user_id"], role)
+        except Exception as e:
+            _delete_fake_invite_membership(sdk, team_id, iid)
+            raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
+        _delete_fake_invite_membership(sdk, team_id, iid)  # #1880 ghost cleanup
     return {"team_id": team_id, "role": role}
 
 
@@ -6836,9 +7037,12 @@ async def accept_invite_by_id(invitation_id: str,
     )
     if is_supabase_enabled():
         try:
-            return invitation_accept_by_id(
-                get_control_plane(), invitation_id, user["user_id"],
-                user.get("email"))
+            # #1954: the join-side free-cap + membership write are
+            # read-then-write — serialize per user (see _team_create_lock).
+            async with _team_create_lock(user["user_id"]):
+                return invitation_accept_by_id(
+                    get_control_plane(), invitation_id, user["user_id"],
+                    user.get("email"))
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
     sdk = _make_sdk(namespace="registry")
@@ -10221,6 +10425,20 @@ async def create_onboarding_team(body: dict,
             detail="A session user is required to create a sub-team — "
                    "sign in or mint a session key first",
         )
+    # #1954: the re-entry guard is read-then-write — the guard read + the
+    # provision + the team_created write all run under the per-user lock so
+    # a concurrent double-call cannot both read team_created absent and mint
+    # two sub-teams.
+    async with _team_create_lock(owner_user_id):
+        return _create_onboarding_team_lane(team, name, owner_user_id)
+
+
+def _create_onboarding_team_lane(team: dict, name: str,
+                                 owner_user_id: str) -> dict:
+    """#1954: the onboarding sub-team lane — re-entry guard + provision +
+    team_created write. MUST be called holding the caller's
+    _team_create_lock (the guard is read-then-write; the lock is what makes
+    a concurrent double-call mint exactly one sub-team)."""
     # NOTE (second-model P2, plan deviation): the plan's "reject non-UUID
     # created_by" step is NOT applied — the test fixtures use non-UUID ids
     # by design, and the provision RPC already maps a non-UUID uuid-column
