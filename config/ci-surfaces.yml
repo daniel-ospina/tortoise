@@ -174,6 +174,7 @@ surfaces:
   - test_epic903_scheduler.py
   - test_epic903_staleness.py
   - test_epic903_warmstart.py
+  - test_eval_extraction_health.py
   - test_eval_metrics.py
   - test_eval_report_integrity.py
   - test_event_log.py
@@ -272,6 +273,7 @@ surfaces:
   - test_relationships_bounded.py
   - test_remove_context_migration.py
   - test_render.py
+  - test_retrieval.py
   - test_review_connections.py
   - test_round_trip_parity.py
   - test_run_protocol.py
