@@ -18,7 +18,7 @@ from playwright.sync_api import Page, expect
 if not os.environ.get("RUN_DASHBOARD_E2E"):
     pytest.skip("dashboard e2e: opt-in via RUN_DASHBOARD_E2E=1", allow_module_level=True)
 
-from tests.e2e.test_session_login_flow import APP_HOST, AUTH_HOST, DASHBOARD_URL
+from tests.e2e.test_session_login_flow import APP_HOST, AUTH_HOST, DASHBOARD_URL, _proxy_body
 
 
 def _session(user_id: str) -> dict:
@@ -100,8 +100,7 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
             return
         if url.startswith(AUTH_HOST):
             from tests.e2e.test_session_login_flow import AUTH_ORIGIN
-            resp = page.request.get(AUTH_ORIGIN + url[len(AUTH_HOST):])
-            route.fulfill(status=resp.status, content_type="text/html", body=resp.text())
+            _proxy_body(route, AUTH_ORIGIN + url[len(AUTH_HOST):], page)
             return
         if url.startswith(APP_HOST):
             local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
