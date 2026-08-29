@@ -21,7 +21,9 @@ import { isValidSlug } from "../_shared/slug.ts";
 
 const IMAGES_API = "https://openrouter.ai/api/v1/images";
 const PRIMARY = "google/gemini-3.1-flash-image-preview";
-const FALLBACK = "black-forest-labs/flux.2-klein-4b";
+// Stable sibling of the primary (non-preview). Verified in the OpenRouter
+// catalog 2026-08-29 — the original flux.2-klein-4b fallback does not exist.
+const FALLBACK = "google/gemini-3.1-flash-image";
 const ASPECT = "16:9";
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_MIME = new Set(["image/jpeg", "image/png", "image/webp"]);
@@ -89,7 +91,11 @@ async function callImageProvider(
     aspect_ratio: ASPECT,
   };
   if (mode === "founder") {
-    body.input_references = REFERENCE_IMAGES.map((image_url) => ({ type: "input_image", image_url }));
+    // OpenRouter ContentPartImage schema: type must be the literal "image_url"
+    // and image_url is an OBJECT ({url}) — not a string. The old shape
+    // {type:"input_image", image_url:"https://..."} was rejected with a 400
+    // (ZodError) → both providers "fail" → 502 on every founder-mode call.
+    body.input_references = REFERENCE_IMAGES.map((image_url) => ({ type: "image_url", image_url: { url: image_url } }));
   }
   let res: Response;
   try {
