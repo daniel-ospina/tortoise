@@ -65,6 +65,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_commit_endpoint.py": {"registry": "prod-coupled"},
     "test_dr_endpoints.py": {"registry": "prod-coupled"},
     "test_export_delete.py": {"registry": "prod-coupled"},
+    "test_free_team_entitlement.py": {"registry": "prod-coupled"},
     "test_github_index_lifecycle.py": {"registry": "prod-coupled"},
     "test_hosted_api.py": {"registry": "prod-coupled",
                            "team-002": "team-identity"},
