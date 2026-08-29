@@ -98,6 +98,7 @@ dry-run: FLY_API_TOKEN=... python3 .github/scripts/check-fly-machines-guard.py
 
 from __future__ import annotations
 
+import http.client
 import json
 import os
 import sys
@@ -123,15 +124,25 @@ DEFAULT_API_URL = "https://api.machines.dev/v1"
 # flyctl IsActive(): machines in these states are excluded from the fleet.
 INACTIVE_STATES = frozenset({"destroyed", "destroying"})
 
-MAX_ATTEMPTS = 3  # API retry budget (2s/4s backoff) — the deploy step it gates retries 5x45s.
+MAX_ATTEMPTS = 5  # API retry budget (4s/8s/16s/32s backoff) — roughly matches
+# the deploy step it gates (5x45s waits; see the workflow's retry comment). A
+# transient Fly API race must ride through, not block the deploy (#1346 class).
 
 
 class GuardError(Exception):
     """Fail-closed: the machines state cannot be determined."""
 
 
+def _clean(value: str) -> str:
+    """Sanitize machine-controlled strings before embedding in log lines."""
+    return " ".join(value.split())
+
+
 def _err(message: str) -> None:
-    print(message, file=sys.stderr)
+    # GitHub Actions annotation (parsed from the log by the runner); harmless
+    # plain text when run locally. All could-not-determine diagnostics route
+    # through here so a blocked deploy's root cause surfaces in the UI.
+    print(f"::error::{message}", file=sys.stderr)
 
 
 def load_fly_toml(path: Path) -> dict:
@@ -174,11 +185,13 @@ def fetch_machines(app: str, token: str, api_url: str, max_attempts: int = MAX_A
             except Exception:
                 snippet = ""
             last_err = f"machines API HTTP {e.code}: {snippet[:400]}"
-        except (urllib.error.URLError, TimeoutError, OSError,
-                json.JSONDecodeError, ValueError) as e:
+        except (urllib.error.URLError, http.client.HTTPException, TimeoutError,
+                OSError, json.JSONDecodeError, ValueError) as e:
+            # http.client.HTTPException covers IncompleteRead / BadStatusLine —
+            # truncated-body races that must retry + exit 2, never traceback.
             last_err = f"machines API error: {e}"
         if attempt < max_attempts - 1:
-            time.sleep(2 ** (attempt + 1))  # 2s, 4s, ...
+            time.sleep(2 ** (attempt + 2))  # 4s, 8s, 16s, 32s, ...
     raise RuntimeError(last_err or "machines API error")
 
 
@@ -324,45 +337,62 @@ def main() -> int:
             continue  # flyctl IsActive(): already gone, no remediation possible
         try:
             config, incomplete = _machine_config(machine)
+            mid = machine.get("id") or machine.get("name") or "?"
+            mid = _clean(mid)
+            using_incomplete = config is None
+            cfg = config if config is not None else incomplete
+            group = process_group(machine, cfg) if cfg is not None else ""
+            group = _clean(group)
+
+            if not group:
+                violations.append(
+                    f"ORPHAN machine {mid}: empty process group — NOT part of Fly Launch; "
+                    f"destroy: fly machines destroy {mid} -a {app}"
+                )
+            elif group not in allowed:
+                violations.append(
+                    f"ORPHAN machine {mid}: process group '{group}' not in allowed set "
+                    f"{sorted(allowed)}; destroy: fly machines destroy {mid} -a {app}"
+                )
+
+            if group in traffic and using_incomplete:
+                warnings.append(
+                    f"machine {mid}: host unreachable (host_status != ok) — crash-loop "
+                    "detection not evaluated for this machine; orphan check passed"
+                )
+            elif group in traffic:
+                if "events" not in machine:
+                    # fly-go marshals events with omitempty: an absent key means an
+                    # empty array (a legitimately event-less machine). Still surface
+                    # it — if a field-rename drift hides the array, this warning is
+                    # the tripwire while the shape validation catches the rest.
+                    warnings.append(
+                        f"machine {mid}: no 'events' array in the API response — "
+                        "crash-loop detection not evaluated; if this is unexpected, "
+                        "check for Fly API shape drift"
+                    )
+                else:
+                    verdict = crash_loop_verdict(machine)
+                    if verdict is None:
+                        _err(
+                            f"cannot determine machines state: machine {mid} has an exit "
+                            "event without a parseable request.exit_event (API shape "
+                            "drift?)"
+                        )
+                        return 2
+                    if verdict:
+                        violations.append(
+                            f"CRASH-LOOP machine {mid}: restart_count>1 with non-zero exit "
+                            f"and no requested stop; investigate: fly logs -a {app}; "
+                            f"destroy: fly machines destroy {mid} -a {app}"
+                        )
         except GuardError as e:
             _err(f"cannot determine machines state: {e}")
             return 2
+        except Exception as e:  # noqa: BLE001 — fail-closed catch-all (plan §Task 1)
+            _err(f"cannot determine machines state: machine {machine.get('id', '?')}: {e}")
+            return 2
         active += 1
-        mid = machine.get("id") or machine.get("name") or "?"
-        using_incomplete = config is None
-        cfg = config if config is not None else incomplete
-        group = process_group(machine, cfg) if cfg is not None else ""
-
-        if not group:
-            violations.append(
-                f"ORPHAN machine {mid}: empty process group — NOT part of Fly Launch; "
-                f"destroy: fly machines destroy {mid} -a {app}"
-            )
-        elif group not in allowed:
-            violations.append(
-                f"ORPHAN machine {mid}: process group '{group}' not in allowed set "
-                f"{sorted(allowed)}; destroy: fly machines destroy {mid} -a {app}"
-            )
-
-        if group in traffic and using_incomplete:
-            warnings.append(
-                f"machine {mid}: host unreachable (host_status != ok) — crash-loop "
-                "detection not evaluated for this machine; orphan check passed"
-            )
-        elif group in traffic:
-            verdict = crash_loop_verdict(machine)
-            if verdict is None:
-                _err(
-                    f"cannot determine machines state: machine {mid} has an exit event "
-                    "without a parseable request.exit_event (API shape drift?)"
-                )
-                return 2
-            if verdict:
-                violations.append(
-                    f"CRASH-LOOP machine {mid}: restart_count>1 with non-zero exit and no "
-                    f"requested stop; investigate: fly logs -a {app}; "
-                    f"destroy: fly machines destroy {mid} -a {app}"
-                )
 
     for w in warnings:
         print(f"::warning::{w}")
@@ -378,7 +408,15 @@ def main() -> int:
         return 1
 
     if active == 0:
+        # Deliberate: an empty fleet is the pre-first-deploy shape — the deploy
+        # creates machines. Warning annotation so a masking/empty response is
+        # visible, not silent.
         print("OK: 0 active machines — nothing to guard (deploy will create machines)")
+        print(
+            "::warning::0 active machines — deploy will create machines; verify this "
+            "is the intended (first) deploy",
+            file=sys.stderr,
+        )
     else:
         print(f"OK: {active} active machine(s), all Launch-managed and not crash-looping")
     return 0

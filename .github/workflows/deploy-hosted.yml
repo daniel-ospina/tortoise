@@ -88,10 +88,12 @@ on:
       # #1896: incident-fix deploys must not be blocked by the Fly machine
       # guard when the flagged machine IS the broken one (e.g. OOM crash-loop
       # on the volume-backed app machine — the deploy replaces it). Mirrors
-      # skip-db-health-gate/skip-pack-smoke; a skipped gate emits a warning —
-      # never silent. Bypasses ONLY the exit-1 violation check — exit-2
-      # (could-not-determine: missing token / API error) is never bypassable
-      # for missing FLY_API_TOKEN (hard-required in Verify secrets).
+      # skip-db-health-gate/skip-pack-smoke; a bypassed gate emits a warning —
+      # never silent. The skip translates ONLY exit-1 (violations) for
+      # incident-fix deploys; exit-2 (could-not-determine: API error, shape
+      # drift) can NEVER be bypassed. Incident-window convention: set
+      # vars.SKIP_FLY_MACHINES_GUARD=true during incidents, CLEAR IT AFTER
+      # (same runbook as SKIP_DB_HEALTH_GATE).
       skip-fly-machines-guard:
         description: 'Skip the Fly machine fleet guard (incident-fix deploys)'
         required: false
@@ -277,15 +279,30 @@ jobs:
       # #1719) — exit-2 via missing FLY_API_TOKEN is never bypassable (token
       # hard-required in Verify secrets).
       - name: Check Fly machines (orphan + crash-loop guard, fail-closed)
-        if: ${{ ! (inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true') }}
-        run: python3 .github/scripts/check-fly-machines-guard.py
+        # ALWAYS runs. The skip translates ONLY exit-1 (fleet violations) for
+        # incident-fix deploys (warning emitted, never silent); exit-2
+        # (could-not-determine: API error, malformed shape, missing token) can
+        # NEVER be bypassed and always blocks the deploy.
+        run: |
+          set +e
+          python3 .github/scripts/check-fly-machines-guard.py
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$RC" -eq 2 ]; then
+            echo "::error::Fly machine guard could not determine fleet state (exit-2) — deploy blocked. Exit-2 can never be bypassed." >&2
+            exit 2
+          fi
+          if [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
+            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (runbook: SKIP_DB_HEALTH_GATE)." >&2
+            exit 0
+          fi
+          exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq
-      - name: Warn when Fly machine guard bypassed (#1896)
-        if: ${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}
-        run: |
-          echo "::warning::Fly machine guard SKIPPED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Exit-2 via missing FLY_API_TOKEN can never be bypassed (token hard-required in Verify secrets); an API-error exit-2 IS bypassed by this skip, same accepted risk as skip-db-health-gate (#1719)."
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
           ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"

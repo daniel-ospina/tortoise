@@ -100,7 +100,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 **Step 3: Implement the script** (key logic):
 - Config: `tomllib.load(fly.toml)` → app name (env override `FLY_APP`); allowed process groups = `[processes]` keys, or default `{'app'}` when no `[processes]` section, **always unioned** with Fly-internal groups `{'fly_app_release_command', 'fly_app_console', 'fly_app_test_machine_command'}`. **Traffic groups** (crash-loop check scope) = the `[processes]` keys or `{'app'}` default — internal groups are orphan-checked only.
 - `FLY_TOML` default resolved from the script location (`REPO_ROOT = Path(__file__).resolve().parent.parent.parent` — the check-migration-drift precedent), so the operator's live dry-run works from any CWD.
-- Machines source: `FLY_MACHINES_FILE` env seam (test) → else `GET {FLY_API_URL}/apps/{app}/machines` with `Authorization: Bearer {FLY_API_TOKEN}` (default `FLY_API_URL=https://api.machines.dev/v1`; `timeout=30` per attempt, **3 attempts with 2s/4s exponential backoff** (`2^(attempt+1)`, overridable via `FLY_GUARD_MAX_ATTEMPTS`) — matching the deploy step's demonstrated tolerance for transient Fly API races; fail-closed exit 2 after exhaustion). Type-assert the response is a JSON array.
+- Machines source: `FLY_MACHINES_FILE` env seam (test) → else `GET {FLY_API_URL}/apps/{app}/machines` with `Authorization: Bearer {FLY_API_TOKEN}` (default `FLY_API_URL=https://api.machines.dev/v1`; `timeout=30` per attempt, **5 attempts with 4s/8s/16s/32s exponential backoff** (`2^(attempt+2)`, overridable via `FLY_GUARD_MAX_ATTEMPTS`) — the retry budget roughly matches the deploy step's 5×45s tolerance for transient Fly API races (the #1346 class: a gate must not hold deploys on a transient blip the deploy would have survived); fail-closed exit 2 after exhaustion). Type-assert the response is a JSON array.
 - **Skip destroyed machines**: `state ∈ {destroyed, destroying}` → skip before both checks (flyctl `IsActive()`; the list endpoint returns them).
 - **Fail-closed shape validation** (per machine): machine not a dict, `config` present-but-not-a-dict, `config.metadata` present-but-not-a-dict, or `events` present-but-not-a-list → exit 2 "cannot determine machines state". **`config` absent → fall back to `incomplete_config`** (fly-go `GetConfig()` semantics — the documented `host_status != "ok"` response shape): orphan-check from `incomplete_config.metadata`, SKIP the crash-check for that machine (warn "crash-loop detection not evaluated: host unreachable"). Exit 2 only when BOTH `config` and `incomplete_config` are absent. Wrap per-machine evaluation in a catch-all: any unexpected exception → exit 2 with `::error::` (a rename/drift of the API shape must fail the deploy, never silently pass — the orphan leg is fail-closed by construction, the crash-loop leg must be too).
 - **Orphan detection** (flyctl `ProcessGroup()`): `config.metadata.fly_process_group` → `config.metadata.process_group` → `''`. Empty group → ORPHAN (not part of Fly Launch). Non-empty group NOT in allowed set → ORPHAN (fail-closed on unexpected groups).
@@ -117,7 +117,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 ### Task 2: Wire the fail-closed gate into `deploy-hosted.yml`
 
 **Intent:** Every app deploy is gated on fleet health before code ships — the guard is the recurrence-prevention half of #1896.
-**Acceptance:** Gate step runs after the migration-drift gate (#1095 precedent), strictly before `flyctl deploy`; FAIL-CLOSED (missing token / API error → exit 2 → deploy fails); incident-fix bypass mirrors the `skip-db-health-gate` (#1719) / `skip-pack-smoke` (#1929) convention — `skip-fly-machines-guard` workflow_dispatch input + `vars.SKIP_FLY_MACHINES_GUARD` lane, `::warning::` emitted, bypasses ONLY the exit-1 violation check, never exit-2.
+**Acceptance:** Gate step runs after the migration-drift gate (#1095 precedent), strictly before `flyctl deploy`; FAIL-CLOSED (missing token / API error → exit 2 → deploy fails); incident-fix bypass mirrors the `skip-db-health-gate` (#1719) / `skip-pack-smoke` (#1929) convention — `skip-fly-machines-guard` workflow_dispatch input + `vars.SKIP_FLY_MACHINES_GUARD` lane, `::warning::` emitted. The gate step ALWAYS runs; the skip translates ONLY exit-1 (violations) — exit-2 (could-not-determine: API error, malformed shape, missing token) can NEVER be bypassed.
 **Files:**
 - Modify: `.github/workflows/deploy-hosted.yml`
 
@@ -125,7 +125,7 @@ def test_live_api_clean()                          # stub returns clean fixture 
 
 **Step 2:** Add the `skip-fly-machines-guard` input (mirror `skip-pack-smoke`: `required: false`, `default: 'false'`, `type: boolean`; `vars.SKIP_FLY_MACHINES_GUARD` lane) with the bypass-warning step emitting `::warning::`.
 
-**Step 3:** Insert the gate step after the migration-drift gate step, before "Set all app secrets" (on push-triggered runs `inputs` is an empty object → `inputs.skip-fly-machines-guard` is falsy → the gate runs; `vars.SKIP_FLY_MACHINES_GUARD` is the documented push bypass — byte-identical to the live `skip-db-health-gate` pattern):
+**Step 3:** Insert the gate step after the migration-drift gate step, before "Set all app secrets" (on push-triggered runs `inputs` is an empty object → `inputs.skip-fly-machines-guard` is falsy → the gate runs; `vars.SKIP_FLY_MACHINES_GUARD` is the documented push bypass — byte-identical to the live `skip-db-health-gate` pattern). The gate step ALWAYS runs; the shell wrapper translates ONLY exit-1 (violations) for incident-fix deploys — exit-2 (could-not-determine) can NEVER be bypassed:
 
 ```yaml
       # Fly machine guard (#1896): fail-closed check that no orphan or
@@ -136,17 +136,28 @@ def test_live_api_clean()                          # stub returns clean fixture 
       # machine is not serving traffic, and the deploy creates replacements.
       # Incident-fix bypass: skip-fly-machines-guard input / SKIP_FLY_MACHINES_GUARD
       # var (mirrors skip-db-health-gate #1719) — exit-2 (could-not-determine)
-      # is NEVER bypassable.
+      # is NEVER bypassable; only exit-1 (violations) is translatable.
       - name: Check Fly machines (orphan + crash-loop guard, fail-closed)
-        if: ${{ ! (inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true') }}
-        run: python3 .github/scripts/check-fly-machines-guard.py
+        run: |
+          set +e
+          python3 .github/scripts/check-fly-machines-guard.py
+          RC=$?
+          set -e
+          if [ "$RC" -eq 0 ]; then
+            exit 0
+          fi
+          if [ "$RC" -eq 2 ]; then
+            echo "::error::Fly machine guard could not determine fleet state (exit-2) — deploy blocked. Exit-2 can never be bypassed." >&2
+            exit 2
+          fi
+          if [ "${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}" = "true" ]; then
+            echo "::warning::Fly machine guard violations BYPASSED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Clear the input/var after the incident (runbook: SKIP_DB_HEALTH_GATE)." >&2
+            exit 0
+          fi
+          exit 1
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
           FLY_APP: tortoise-y4mjjq
-      - name: Warn when Fly machine guard bypassed (#1896)
-        if: ${{ inputs.skip-fly-machines-guard || vars.SKIP_FLY_MACHINES_GUARD == 'true' }}
-        run: |
-          echo "::warning::Fly machine guard SKIPPED (skip-fly-machines-guard) — orphan/crash-loop machines will NOT block this deploy. Exit-2 via missing FLY_API_TOKEN can never be bypassed (token hard-required in Verify-secrets); an API-error exit-2 IS bypassed by this skip, same accepted risk as skip-db-health-gate (#1719)."
 ```
 
 `FLY_APP` is set explicitly so the checked app always equals the deployed app, independent of fly.toml drift.

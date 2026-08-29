@@ -53,7 +53,7 @@ _AMBIENT = ("FLY_API_TOKEN", "FLY_MACHINES_FILE", "FLY_TOML", "FLY_APP",
 
 def _machine(mid: str, group: str | None, events: list[dict] | None = None,
              state: str | None = None, incomplete: dict | None = None,
-             metadata: dict | None = None) -> dict:
+             metadata: dict | None = None, omit_events: bool = False) -> dict:
     """Build a fixture machine dict shaped like the live Fly Machines API.
 
     group=None → no fly_process_group metadata (empty group = orphan).
@@ -63,6 +63,10 @@ def _machine(mid: str, group: str | None, events: list[dict] | None = None,
     ``metadata`` is ignored — ``incomplete_config`` drives the verdict.
     ``host_status`` is set for fixture realism only; the script keys off
     config presence, not host_status.
+
+    Healthy machines carry an explicit ``events: []`` (the API marshals the
+    array with omitempty — an absent key means an empty array); pass
+    ``omit_events=True`` to construct the absent-key drift shape.
     """
     md = {"fly_process_group": group} if group is not None else {}
     if metadata is not None:
@@ -70,6 +74,8 @@ def _machine(mid: str, group: str | None, events: list[dict] | None = None,
     m: dict = {"id": mid, "name": f"name-{mid}", "config": {"metadata": md}}
     if events is not None:
         m["events"] = events
+    elif not omit_events:
+        m["events"] = []
     if state is not None:
         m["state"] = state
     if incomplete is not None:
@@ -315,6 +321,16 @@ def test_most_recent_exit_wins():
     older_crash = _exit_event(restart_count=3, exit_code=127)
     r = _run({}, [_machine("multi1", "app", [recent_clean, older_crash])])
     assert r.returncode == 0, r.stderr
+
+
+def test_events_absent_warns_not_fails():
+    # fly-go marshals events with omitempty — an absent key means an empty
+    # array (legitimately event-less machine). The guard warns (drift tripwire)
+    # but does NOT fail the deploy (false-positive risk).
+    r = _run({}, [_machine("noev1", "app", omit_events=True)])
+    assert r.returncode == 0, r.stderr
+    assert "no 'events' array" in r.stdout
+    assert "1 active machine" in r.stdout
 
 
 def test_incident_replay():
