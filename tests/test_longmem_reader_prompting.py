@@ -28,6 +28,7 @@ API keys, no dataset download.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -41,7 +42,7 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402, F401, I001, RUF100
 from tools.longmem_eval.judge import MockJudge  # noqa: E402, RUF100
 from tools.longmem_eval.reader import (  # noqa: E402, RUF100
     LLMReader, MockReader, _SYSTEM_PROMPT, _ABSTRACTION_FRAGMENT,
-    _TYPE_FRAGMENTS, system_prompt_for,
+    _TYPE_FRAGMENTS, build_reader, system_prompt_for,
 )
 from tools.longmem_eval.retrieve import render_context  # noqa: E402, RUF100
 from tools.longmem_eval.run import run_evaluation  # noqa: E402, RUF100
@@ -1044,3 +1045,430 @@ def test_abs_never_crosses_reader_call_site(tmp_path):
     text = render_context(call["context_hits"],
                           question_date=call["question_date"])
     assert "_abs" not in text and "pt_abs_001_abs" not in text
+
+
+# ── #1775: structural two-phase commit/abstain (reval3 class) ──────────────
+# Reval3 (2026-08-28): 4 of 6 wrong answers were this class — the gold
+# string was VERBATIM in a top-10 context item yet the reader abstained or
+# hedged (b86304ba 'worth triple what I paid' — answer 3.6h old, newest in
+# set; 75499fd8 'Golden Retrievers like Max'; ec81a493; 51a45a95). The
+# #1762 calibration reduced but did not eliminate over-abstention: the A1
+# clause still fired the abstention branch on PARTIAL evidence even when
+# the asked value was present. #1775 restructures the clause into an
+# explicit two-phase decision — PHASE 1 (PRESENCE COMMIT) commits whenever
+# the asked value is stated in the context, even amid noise or with other
+# details missing; PHASE 2 (ABSTENTION) runs only when Phase 1 finds no
+# affirmative statement of the value. These lock the structure:
+# prompt-content pins for the two-phase labels + operative sentences, the
+# four reval3 fixtures red→green (context-reading fakes: the value is
+# parsed out of the rendered context, so a retrieval/render regression
+# fails loudly), a genuine-absence abstention control (Phase 2 intact),
+# and a real-model smoke (gated on provider keys) for the commit-on-present
+# case — the calibration probe the review gate asked for (#1775 obs. 1).
+
+
+def test_abstention_clause_is_two_phase_structural():
+    """#1775: the A1 clause is now an explicit, ORDERED two-phase decision —
+    PHASE 1 (PRESENCE COMMIT) is decided first, PHASE 2 (ABSTENTION) is
+    licensed only when Phase 1 finds no affirmative statement of the asked
+    value. The old single-pass wording let the abstention branch fire on
+    partial evidence even when the value was in context (the reval3 class).
+    The pinned labels/sentences are the structure's operative markers — a
+    reword that merges the phases back into one pass fails here."""
+    clause = _ABSTRACTION_FRAGMENT
+    # ordered two-phase structure (exact labels)
+    assert "PHASE 1 — PRESENCE COMMIT" in clause
+    assert "PHASE 2 — ABSTENTION" in clause
+    assert clause.index("PHASE 1") < clause.index("PHASE 2")
+    # presence-first semantics: partial evidence with the value present is
+    # a COMMIT signal, never an abstention trigger (the reval3 class)
+    assert "presence first" in clause.lower()
+    assert "partial evidence is still presence" in clause.lower()
+    assert "other details" in clause.lower()    # missing details ≠ absence
+    assert "commit to the value" in clause.lower()
+    # Phase 2 is conditional on Phase 1 finding nothing (structural order)
+    assert "only when Phase 1 found no affirmative statement" in clause
+    # same-instance scoping (review-gate observation #2): a value stated
+    # for the SAME subject/instance as the question is the answer — the
+    # different-value guard must not license abstention on present
+    # same-instance evidence
+    assert "same subject or instance" in clause.lower()
+
+
+_REVAL3_CASES = [
+    # (qid, question, gold, hedge, value_pattern, turns) — the 4 reval3
+    # wrong answers; the hedge is the reader's ACTUAL reval3 hypothesis
+    # (quoted from .longmemeval_cache/reval3-wrong-analysis.md).
+    pytest.param(
+        "pt_reval3_001_b86304ba",
+        "How much is Ava's sunset painting worth?",
+        "triple what I paid",
+        "The memory does not mention any painting of a sunset, nor the "
+        "amount paid for it. The asked information is absent.",
+        r"worth (.+?) for it",
+        [
+            {"role": "user", "content": "I finished the sunset painting "
+             "yesterday.", "has_answer": False},
+            {"role": "assistant", "content": "I would love to see it!",
+             "has_answer": False},
+            # verbatim gold in a top-10 item; the subject is only named in
+            # the earlier turn — partial evidence, value present
+            {"role": "user", "content": "I realized that it's actually "
+             "worth triple what I paid for it, which is amazing!",
+             "has_answer": True},
+        ],
+        id="b86304ba-sunset-painting",
+    ),
+    pytest.param(
+        "pt_reval3_002_75499fd8",
+        "What breed is Ava's dog Max?",
+        "Golden Retriever",
+        "The memory mentions a dog named Max, but it does not contain the "
+        "asked breed.",
+        r"([A-Z]\w+ Retrievers?) like Max",
+        [
+            {"role": "user", "content": "Max needs a new collar before "
+             "winter.", "has_answer": False},
+            # verbatim gold ('Golden Retrievers like Max') in a top-10 item
+            {"role": "assistant", "content": "A new collar with a nice "
+             "name tag is a great idea! Golden Retrievers like Max "
+             "deserve a comfortable, durable, and stylish collar.",
+             "has_answer": True},
+        ],
+        id="75499fd8-dog-breed",
+    ),
+    pytest.param(
+        "pt_reval3_003_ec81a493",
+        "How many copies of the album did it sell worldwide?",
+        "500",
+        "The memory mentions a signed poster from a limited edition of "
+        "only 500 copies worldwide, but it does not contain the asked "
+        "information about how many copies of the album itself.",
+        r"only (\d+) copies worldwide",
+        [
+            {"role": "user", "content": "I got a signed poster from my "
+             "favorite artist's debut album.", "has_answer": False},
+            {"role": "user", "content": "It is a limited edition of only "
+             "500 copies worldwide.", "has_answer": True},
+        ],
+        id="ec81a493-album-copies",
+    ),
+    pytest.param(
+        "pt_reval3_004_51a45a95",
+        "Where did Ava redeem the $5 coupon?",
+        "Target",
+        "The memory mentions redeeming the coupon from an email inbox, "
+        "but it does not contain the asked information about where.",
+        r"from (Target)",
+        [
+            {"role": "user", "content": "I've been using the Cartwheel "
+             "app from Target.", "has_answer": False},
+            {"role": "user", "content": "I actually redeemed a $5 coupon "
+             "on coffee creamer last Sunday, which was a nice surprise "
+             "since I didn't know I had it in my email inbox.",
+             "has_answer": True},
+            {"role": "user", "content": "I shop at Target pretty "
+             "frequently.", "has_answer": False},
+        ],
+        id="51a45a95-coupon-venue",
+    ),
+]
+
+
+class _TwoPhaseCommitModel:
+    """Fake reproducing the reval3 hedge class (#1775): the gold string is
+    verbatim in the rendered context (a top-10 item), yet the pre-#1775
+    reader abstained/hedged. The green branch is CONTEXT-READING — parses
+    the value out of the rendered context (proving the retrieval→render
+    pipeline delivered it) and commits; the red branch is the reval3 hedge
+    verbatim. Gates on the structural PHASE 1 label — a reword that merges
+    the phases back into one pass flips the fake red."""
+
+    def __init__(self, pattern: str, hedge: str):
+        self._pattern = re.compile(pattern)
+        self._hedge = hedge
+
+    def complete(self, *, system: str, user: str) -> str:
+        if "PHASE 1 — PRESENCE COMMIT" not in system:
+            return self._hedge
+        m = self._pattern.search(user)
+        if not m:
+            return self._hedge
+        return m.group(1).strip()
+
+
+@pytest.mark.parametrize(
+    "qid,question,gold,hedge,pattern,turns", _REVAL3_CASES)
+def test_reval3_present_gold_commits(tmp_path, qid, question, gold, hedge,
+                                     pattern, turns):
+    """#1775 red→green for the reval3 abstention class: the gold string is
+    verbatim in a top-10 context item, yet the reader hedged. PHASE 1 must
+    commit to the present value — never abstain because other details are
+    missing or the answer turn is noisy. Red leg: the fake reproduces the
+    reval3 hedge (the hypothesis must be in the hedge register); green leg:
+    the fake commits the value parsed from the rendered context and
+    MockJudge scores it correct with no hedge framing. (MockJudge uses
+    plain containment — the ec81a493 hedge embeds the gold, so its red leg
+    is asserted on hypothesis TEXT, not the label; cf. the subset-rule
+    note in the #1762 hedge test.)"""
+    q = {
+        "question_id": qid,
+        "question_type": "single-session-user",
+        "question": question,
+        "answer": gold,
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": ["sess-1"],
+        "haystack_sessions": [turns],
+    }
+
+    class _PreTwoPhaseModel(_TwoPhaseCommitModel):
+        def complete(self, *, system, user):
+            # strip the structural Phase-1 label so the fake takes the
+            # pre-#1775 branch (the reval3 hedge)
+            return super().complete(
+                system=system.replace("PHASE 1 — PRESENCE COMMIT", "X"),
+                user=user)
+
+    pre = run_evaluation(
+        [q], reader=LLMReader(_PreTwoPhaseModel(pattern, hedge),
+                              model_id="pre-1775"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    hyp_pre = pre[0][0]["hypothesis"]
+    # red: the reval3 hedge register — 'mentions X but does not contain' /
+    # 'does not mention … absent' (for ec81a493 the gold is embedded, so
+    # the TEXT is the discriminator, exactly as the subset-rule judge)
+    assert "does not contain" in hyp_pre.lower() \
+        or "does not mention" in hyp_pre.lower()
+
+    post = run_evaluation(
+        [q], reader=LLMReader(_TwoPhaseCommitModel(pattern, hedge),
+                              model_id="post-1775"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    hyp = post[0][0]["hypothesis"]
+    assert post[0][0]["label"] is True          # green: commits the value
+    assert gold.lower() in hyp.lower()          # the value, committed
+    # no hedge framing — the #1762 pin ('mentions X but does not
+    # contain…' forbidden when X is the answer) holds in the commit branch
+    assert "does not contain" not in hyp.lower()
+    assert "does not mention" not in hyp.lower()
+
+
+class _PartialEvidenceCommitModel:
+    """Partial-evidence fake (#1775): the asked VALUE is present but the
+    rest of the question's details are missing (the subject is only named
+    in an earlier turn — reval3 b86304ba's 'worth triple what I paid'
+    with 'sunset painting' never co-occurring). Phase 1 must commit to the
+    value, not abstain because other details are missing. Gates the commit
+    branch on the 'partial evidence is still presence' sentence — a reword
+    that drops it flips the fake to the reval3 hedge (red)."""
+
+    _VALUE = re.compile(r"worth (.+?) for it")
+
+    def complete(self, *, system: str, user: str) -> str:
+        m = self._VALUE.search(user)
+        if m and "Partial evidence is still presence" in system:
+            return m.group(1).strip()
+        return ("The memory does not mention any painting of a sunset, "
+                "nor the amount paid for it. The asked information is "
+                "absent.")
+
+
+def test_partial_evidence_with_answer_present_commits(tmp_path):
+    """#1775: partial evidence is NOT absence. When the context states the
+    asked value but omits other details of the question (here: the subject
+    is only named in an earlier turn), Phase 1 commits to the value — the
+    exact over-abstention shape reval3 measured (b86304ba: gold verbatim,
+    yet 'the asked information is absent')."""
+    q = {
+        "question_id": "pt_reval3_005_partial",
+        "question_type": "single-session-user",
+        "question": "How much is Ava's sunset painting worth?",
+        "answer": "triple what I paid",
+        "question_date": "2025-06-15",
+        "haystack_session_ids": ["sess-1"],
+        "haystack_dates": ["2025-06-10"],
+        "answer_session_ids": ["sess-1"],
+        "haystack_sessions": [[
+            {"role": "user", "content": "I finished the sunset painting "
+             "yesterday.", "has_answer": False},
+            {"role": "user", "content": "I realized that it's actually "
+             "worth triple what I paid for it, which is amazing!",
+             "has_answer": True},
+        ]],
+    }
+
+    class _PreSentenceModel(_PartialEvidenceCommitModel):
+        def complete(self, *, system, user):
+            # strip the operative sentence so the fake takes the
+            # pre-#1775 branch (the reval3 hedge)
+            return super().complete(
+                system=system.replace(
+                    "Partial evidence is still presence", "X"),
+                user=user)
+    pre = run_evaluation(
+        [q], reader=LLMReader(_PreSentenceModel(), model_id="pre-1775"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False          # red: the reval3 hedge
+    assert "does not mention" in pre[0][0]["hypothesis"].lower()
+
+    post = run_evaluation(
+        [q], reader=LLMReader(_PartialEvidenceCommitModel(),
+                              model_id="post-1775"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert post[0][0]["label"] is True          # green: commits the value
+    assert post[0][0]["hypothesis"] == "triple what I paid"
+    assert "does not mention" not in post[0][0]["hypothesis"].lower()
+
+
+class _Phase2AbstainingModel:
+    """Phase 2 contract fake (#1775): genuine absence (no affirmative
+    statement of the asked value anywhere in the context) still abstains
+    evidence-backed — the two-phase restructure must not remove the
+    abstention branch. CONTEXT-READING: commits the value when the context
+    states it, abstains when it does not. Gates the abstention branch on
+    the PHASE 2 label — a reword that merges the phases commits the decoy
+    (red)."""
+
+    _VALUE = re.compile(r"painted the walls (.+?) for ")
+
+    def complete(self, *, system: str, user: str) -> str:
+        m = self._VALUE.search(user)
+        if m:
+            return m.group(1).strip()          # present → commit (control)
+        if "PHASE 2 — ABSTENTION" in system:
+            return ("The memory does not mention repainting the bedroom "
+                    "walls.")                  # absent → evidence-backed
+        return "gray"                          # pre-2-phase: fabricates
+
+
+def test_two_phase_genuine_absence_still_abstains(tmp_path):
+    """#1775: the two-phase structure keeps Phase 2 — when Phase 1 finds no
+    affirmative statement of the asked value (genuine absence), the reader
+    abstains evidence-backed rather than fabricating. The #1762 vacuity
+    contract holds under the restructure (control: with the value in the
+    rendered context the same fake commits — the phase decision, not the
+    marker alone, decides)."""
+    q = _vacuity_question()  # pt_commit_004_abs: bicycle context, no color
+
+    class _PreTwoPhaseModel(_Phase2AbstainingModel):
+        def complete(self, *, system, user):
+            # strip the Phase-2 label so the fake takes the merged-pass
+            # branch (fabricates a value from nothing)
+            return super().complete(
+                system=system.replace("PHASE 2 — ABSTENTION", "X"),
+                user=user)
+    pre = run_evaluation(
+        [q], reader=LLMReader(_PreTwoPhaseModel(), model_id="pre-1775"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert pre[0][0]["label"] is False          # red: fabrication
+    assert "gray" in pre[0][0]["hypothesis"].lower()
+
+    post = run_evaluation(
+        [q], reader=LLMReader(_Phase2AbstainingModel(),
+                              model_id="post-1775"),
+        judge=MockJudge(), ks=(5,), top_k=20, split="s",
+        work_dir=str(tmp_path))
+    assert post[0][0]["label"] is True          # green: evidence-backed
+    assert "does not mention" in post[0][0]["hypothesis"].lower()
+    assert "gray" not in post[0][0]["hypothesis"].lower()
+    # control: not unconditionally abstaining — value present → commit
+    ctrl = _Phase2AbstainingModel().complete(
+        system=system_prompt_for("single-session-user"),
+        user="[user] I painted the walls a lighter shade of gray for a "
+             "calming effect.")
+    assert ctrl == "a lighter shade of gray"
+
+
+def _require_reader_model() -> None:
+    """Skip the real-model smoke unless the pinned reader's provider key is
+    configured (CI has no keys → skips fast; local/model runs exercise the
+    live calibration probe). Build-resolution failures (e.g. a deepseek-
+    only machine where the pinned openrouter spec cannot resolve) also
+    skip — never crash the suite."""
+    if not os.environ.get("OPENROUTER_API_KEY"):
+        pytest.skip("OPENROUTER_API_KEY absent — real-model reader smoke gated")
+    try:
+        build_reader()
+    except (ValueError, RuntimeError) as exc:
+        pytest.skip(f"reader build unavailable — {exc}")
+
+
+def test_real_model_commits_on_present_value():
+    """Real-model smoke (#1775, obs. 1 — the calibration probe the review
+    gate asked for): with provider keys present, the pinned reader commits
+    to the verbatim gold in a top-10 context item instead of hedging.
+    Shape = reval3 75499fd8: 'Golden Retrievers like Max' sits at rank 9
+    amid noise. Multi-sample majority on purpose: the pinned model is
+    NOISY on the hedge class at temp 0 (observed commit rates, same
+    context: old #1762 clause ~25%, new #1775 two-phase clause ~80%) — a
+    single-shot assert would be flaky, and a rate majority is the
+    before/after number the review gate asked to measure. The unit fakes
+    above pin the deterministic red→green; this probe verifies the real
+    model follows the clause."""
+    _require_reader_model()
+    reader = build_reader()  # pinned: openrouter:deepseek/deepseek-v4-flash
+    hits = [
+        {"content": t, "lme_session_index": 0,
+         "session_date": "2025-06-10"}
+        for t in (
+            "I picked up groceries on the way home and the store was out "
+            "of oat milk again.",
+            "My brother called about the family reunion — he wants to "
+            "meet at the lake house in July.",
+            "The new headphones are great but the battery drains fast "
+            "when I use noise cancelling.",
+            "I booked a flight to Lisbon for September and found a decent "
+            "hotel near the tram line.",
+            "The garden needs watering twice a day now that it is so hot.",
+            "I spent the afternoon organizing my desk drawers — found the "
+            "old charger.",
+            "I finally switched my phone plan to the cheaper carrier and "
+            "saved $30 a month.",
+            "Max needs a new collar before winter.",
+            # verbatim gold in a top-10 item (rank 9), amid noise
+            "A new collar with a nice name tag is a great idea! Golden "
+            "Retrievers like Max deserve a comfortable, durable, and "
+            "stylish collar.",
+        )
+    ]
+
+    def _is_commit(hyp: str) -> bool:
+        low = hyp.lower()
+        return ("golden retriever" in low
+                and "does not contain" not in low
+                and "does not mention" not in low
+                and "absent" not in low
+                and "not know" not in low)
+
+    commits = 0
+    valid = 0
+    for _ in range(4):
+        # LLMReader.answer strips the raw completion, so a provider that
+        # returns content:null raises (AttributeError) rather than
+        # returning None — treat any per-sample failure as a transient
+        # hiccup and do not count the sample (observed during probing).
+        try:
+            hyp = reader.answer(
+                context_hits=hits,
+                question="What breed is Ava's dog Max?",
+                question_date="2025-06-15",
+                question_type="single-session-user")
+        except Exception:
+            continue
+        if not hyp:
+            continue
+        valid += 1
+        commits += _is_commit(hyp)
+    # majority over the VALID samples: the two-phase clause must move the
+    # commit rate well above the old clause's ~25% (measured pre-change)
+    assert valid >= 2, "fewer than 2 valid model samples — probe inconclusive"
+    assert commits > valid // 2, \
+        f"pinned reader committed {commits}/{valid} on present gold " \
+        "(expected majority) — the two-phase clause is not being followed"

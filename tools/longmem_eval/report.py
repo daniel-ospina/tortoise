@@ -77,6 +77,39 @@ RECOVERABLE_CENSUS_CLASSES = frozenset({
     # chunk failure to hard.
 })
 
+#: #1946: extraction-health gate constants. A per-question outcome is
+#: DEGRADED when its SEMANTIC extraction failed or was billing-killed — the
+#: reval3 shape: 33/50 questions ingested ZERO extracted points
+#: (``fatal_402_billing`` 1591 / ``s1_chunk_summary`` 1596 /
+#: ``empty_embed_list`` 1600 in the census) yet the run 'completed' and the
+#: report blended a 0.880 that was 66% raw-fallback. The integrity gate's
+#: census counted those errors but nothing ACTED on them; this gate flags
+#: the run and splits the report into healthy/degraded populations so the
+#: blend is visible, never silent.
+EXTRACTION_MIN_POINTS = 100
+#: #1946: census classes whose PRESENCE at any count degrades a question —
+#: billing intervened (the 500-Q must never certify a billing-limited run)
+#: or the embed list never materialized (no dense leg).
+EXTRACTION_KILLER_CENSUS_CLASSES = frozenset({
+    "fatal_402_billing",
+    "empty_embed_list",
+})
+#: #1946: the S1→S2 CASCADE class — degraded only AT SCALE (a handful of
+#: per-chunk digest failures on a productive extraction is benign; a count
+#: near the session scale means the semantic layer collapsed).
+EXTRACTION_DEGRADE_CENSUS_CLASSES = frozenset({"s1_chunk_summary"})
+#: #1946: per-question ``s1_chunk_summary`` count at which the question is
+#: degraded even when the points rule does not fire (co-occurs with the
+#: 402 cascade — reval3's partial questions carried 20-35).
+EXTRACTION_DEGRADE_MIN_COUNT = 10
+#: #1946: run-level flag threshold — the degraded FRACTION at which a run's
+#: extraction health status flips to "degraded" (a "material fraction",
+#: per the issue; reval3's 33-35/50 = 0.66-0.70 is far above any
+#: reasonable default). Independent of the integrity criterion (#1747's
+#: lane) — this is the additive population-split readout.
+EXTRACTION_HEALTH_DEGRADED_FRACTION = 0.25
+
+
 #: #1747: eval-failure classes that are transient-safe — the retry budget
 #: was BURNED (``retries_exhausted``), so the question failed, but the cause
 #: is recoverable → rate-limited like the census recoverable classes, not
@@ -177,6 +210,101 @@ def _outcome_grade(o: dict[str, Any]) -> str:
         return "recoverable" if not flag else "clean"
     # census empty — the runner's binary flag is the only error signal.
     return "hard" if not flag else "clean"
+
+
+def _outcome_extraction_health(o: dict[str, Any]) -> str:
+    """#1946: classify one COMPLETED outcome's extraction health.
+
+    Returns ``"healthy"`` or ``"degraded"``. DEGRADED when ANY of:
+
+    * ``ingest.points`` (the semantic extraction count written by the v2
+      leg) is a real number < ``EXTRACTION_MIN_POINTS`` — the issue's
+      "points_total < 100" shorthand; ``points_total`` counts raw chunks
+      + turns too and stays ~900-1100 on a 402-degraded run, so the real
+      semantic signal is ``ingest.points``. A question can extract ZERO
+      points with a CLEAN census (the extractor silently produces nothing)
+      — the points rule catches the silent shape the census cannot.
+    * ``points_total`` (the live pool size) < ``EXTRACTION_MIN_POINTS`` —
+      the graph itself is tiny, nothing to retrieve.
+    * the error census carries an ``EXTRACTION_KILLER_CENSUS_CLASSES``
+      class (fatal_402_billing / empty_embed_list) at ANY count — a
+      billing event is a run-level integrity event even when the question
+      partially extracted (reval3's 66f24dbb shape: points 202, 20 billing
+      errors).
+    * ``s1_chunk_summary`` at scale (count >= ``EXTRACTION_DEGRADE_MIN_COUNT``)
+      — the S1→S2 cascade class; low counts on a productive extraction are
+      benign (the integrity gate rate-limits them).
+
+    Deterministic mode (no ``ingest.points`` key — the deterministic leg
+    writes turns/chunks, no semantic extraction) is classified by census
+    ONLY: the points rules can never falsely degrade a deterministic run —
+    including the ``points_total`` rule (the raw chunk/turn pool can be
+    legitimately small on a dev slice). The full_context.py cell baseline
+    (the option-5 no-extraction sentinel ``{"sessions", "points": 0,
+    "errors": []}``) is also exempt from the points rules — extraction by
+    design, not failure (a killer census class on that shape still
+    degrades). Recoverable classes (parse_error / partial_parse /
+    transient_*) with points >= min are healthy — the integrity gate's
+    rate-limited classes are not extraction degradation. Malformed input
+    (non-numeric / non-finite points / points_total, non-dict non-list
+    error_classes) is None-safe and never crashes the report; a malformed
+    killer-shape error_classes value with an otherwise-healthy outcome is
+    classified by the points rule alone.
+    """
+    ing = o.get("ingest")
+    points = ing.get("points") if isinstance(ing, dict) else None
+    points_total = o.get("points_total")
+    ec = o.get("error_classes")
+    if isinstance(ec, dict):
+        classes = set(ec)
+        s1 = ec.get("s1_chunk_summary")
+    elif isinstance(ec, (list, tuple, set, frozenset)):
+        # legacy flat-list shape (defensive back-compat) — presence of the
+        # cascade class degrades: no counts exist to gate scale on, so
+        # presence IS scale (fail-closed toward degraded, mirroring the
+        # inline comment's promise).
+        classes = {c for c in ec if isinstance(c, str)}
+        s1 = (EXTRACTION_DEGRADE_MIN_COUNT
+              if "s1_chunk_summary" in classes else 0)
+    else:
+        classes = set()
+        s1 = 0
+    # census rules first (presence-based, apply in EVERY mode): a killer
+    # class on any shape — including the full-context sentinel — degrades.
+    if classes & EXTRACTION_KILLER_CENSUS_CLASSES:
+        return "degraded"
+    if (isinstance(s1, int) and not isinstance(s1, bool)
+            and s1 >= EXTRACTION_DEGRADE_MIN_COUNT):
+        return "degraded"
+    # full_context.py cell-baseline carve-out: the option-5 no-extraction
+    # sentinel ({"sessions", "points": 0, "errors": []} — raw context
+    # only, extraction by design) is exempt from the points rules. The
+    # sentinel is distinguishable from a real zero-extract by its minimal
+    # key set (the v2/deterministic legs always record more).
+    if (isinstance(ing, dict) and set(ing) == {"sessions", "points", "errors"}
+            and points == 0 and ing.get("errors") == []):
+        return "healthy"
+    # real numeric points only — bool / str / non-finite / None never fire
+    # the points rules (malformed checkpoint data must not fabricate a
+    # degraded or healthy verdict, mirroring _numeric's fail-closed type
+    # discipline).
+    if (isinstance(points, (int, float)) and not isinstance(points, bool)
+            and math.isfinite(points) and points < EXTRACTION_MIN_POINTS):
+        return "degraded"
+    # points_total (the live pool size) — a tiny graph is degraded, but the
+    # rule applies ONLY in semantic mode (the v2 leg always records
+    # ``ingest.points``): in deterministic mode the raw chunk/turn pool can
+    # be legitimately small (a dev slice) and the census-only promise must
+    # hold. In v2 mode the rule is largely subsumed by the points rule
+    # (pool ⊇ points) and catches the tiny-pool-with-productive-points
+    # contradiction.
+    if (isinstance(ing, dict) and "points" in ing
+            and isinstance(points_total, (int, float))
+            and not isinstance(points_total, bool)
+            and math.isfinite(points_total)
+            and points_total < EXTRACTION_MIN_POINTS):
+        return "degraded"
+    return "healthy"
 
 
 def _failure_grade(error_class: Any) -> str:
@@ -762,6 +890,12 @@ def build_report(
     # is directly measurable (pool recall is the upper bound since C1).
     reader_evidence_recall: dict[str, float] = {}
     reader_evidence_recall_n: dict[str, int] = {}
+    # #1948: the reader-surface metric — evidence-bearing content (points
+    # AND chunks) in the FULL reader context / evidence-bearing content
+    # total, aggregated parallel to reader_evidence@k (which counts points
+    # only) so the pool@k rank-(20, cap] undercount is directly measurable.
+    reader_surface_recall: dict[str, float] = {}
+    reader_surface_recall_n: dict[str, int] = {}
     # #1763: the re-baselined point-level answer-availability view (mark (d)
     # answer_string) — aggregated parallel to evidence_recall@k so the legacy
     # source-session-dominated metric stays byte-identical (D5 #1540
@@ -809,6 +943,16 @@ def build_report(
         if real_rre:
             reader_evidence_recall[str(k)] = _mean(real_rre)
             reader_evidence_recall_n[str(k)] = len(real_rre)
+        # #1948: reader_surface@k — evidence-bearing points+chunks in the
+        # FULL reader context / evidence-bearing total. N/A on empty
+        # denominators like the other evidence metrics; k-independent by
+        # construction (the context is the same list for every k).
+        rrs = [(o.get("reader_surface@k") or {}).get(str(k), None)
+               for o in outcomes]
+        real_rrs = [v for v in rrs if v is not None]
+        if real_rrs:
+            reader_surface_recall[str(k)] = _mean(real_rrs)
+            reader_surface_recall_n[str(k)] = len(real_rrs)
         # #1763: the answer-string re-baselined view — point-level answer
         # availability (mark (d), gold answer string in the point's
         # content/quote/search_keys). Aggregated parallel to
@@ -1176,6 +1320,95 @@ def build_report(
         integrity["justified"] = True
         integrity["threshold_violation_justification"] = integrity_justification
 
+    # ── #1946: extraction-health gate — the population split + run-level
+    # flag that ACTS on the census the integrity gate counts. reval3:
+    # 33/50 questions ingested ZERO semantic points (fatal_402_billing /
+    # s1_chunk_summary / empty_embed_list at session scale) yet the run
+    # 'completed' and blended a 0.880 that was 66% raw-fallback — the
+    # integrity census counted the errors but nothing ACTED on them. This
+    # block classifies every shape-filtered outcome healthy/degraded and
+    # emits healthy_n / degraded_n / per-population accuracy so the blend
+    # is visible, never silent. Design: FLAG + split (not abort) — the
+    # healthy population carries the real full-stack signal (reval3:
+    # 14/17 = 0.824, n=17) and the degraded population's raw-fallback
+    # numbers are a useful baseline; abort pre-finalize would destroy
+    # salvageable data. The integrity gate already vetoes such runs
+    # (valid=false, 35 hard-invalid on reval3); the missing piece was the
+    # REPORT-level readout. Status is DEGRADED when the degraded fraction
+    # is material (>= EXTRACTION_HEALTH_DEGRADED_FRACTION) OR the run
+    # census carries ANY fatal_402_billing / empty_embed_list (a single
+    # billing event is a run-level integrity event — the 500-Q must never
+    # certify a billing-limited run). The split is always emitted
+    # regardless of status.
+    eh_health = [_outcome_extraction_health(o) for o in outcomes]
+    eh_healthy = [o for o, h in zip(outcomes, eh_health, strict=True)
+                  if h == "healthy"]
+    eh_degraded = [o for o, h in zip(outcomes, eh_health, strict=True)
+                   if h == "degraded"]
+    eh_healthy_n = len(eh_healthy)
+    eh_degraded_n = len(eh_degraded)
+    eh_denom = eh_healthy_n + eh_degraded_n
+    eh_degraded_fraction = (eh_degraded_n / eh_denom if eh_denom else 0.0)
+
+    def _pop_acc(outs: list[dict]) -> float | None:
+        if not outs:
+            return None  # an empty population's accuracy is None, never a
+        # fabricated 0.0 (a 0.0 would read as a score).
+        return _mean([1.0 if o["label"] else 0.0 for o in outs])
+
+    # the run-level flag: a material degraded fraction OR any killer-class
+    # census presence (fatal_402_billing / empty_embed_list — a single
+    # billing event flags the run; s1_chunk_summary alone rides the
+    # fraction, it is the recoverable-class cascade signal).
+    eh_status = ("degraded"
+                 if (eh_degraded_fraction >= EXTRACTION_HEALTH_DEGRADED_FRACTION
+                     or bool(set(error_census)
+                             & EXTRACTION_KILLER_CENSUS_CLASSES))
+                 else "healthy")
+    extraction_health: dict[str, Any] = {
+        "status": eh_status,
+        "threshold": EXTRACTION_HEALTH_DEGRADED_FRACTION,
+        "min_points": EXTRACTION_MIN_POINTS,
+        "census_classes": sorted(EXTRACTION_KILLER_CENSUS_CLASSES
+                                  | EXTRACTION_DEGRADE_CENSUS_CLASSES),
+        "healthy_n": eh_healthy_n,
+        "degraded_n": eh_degraded_n,
+        "degraded_fraction": round(eh_degraded_fraction, 4),
+        "per_population_accuracy": (
+            None if retrieval_only else {
+                "healthy": {"n": eh_healthy_n,
+                             "accuracy": _pop_acc(eh_healthy)},
+                "degraded": {"n": eh_degraded_n,
+                              "accuracy": _pop_acc(eh_degraded)},
+            }),
+        # degraded question ids — the operator's actionable list (string-
+        # coerced: checkpoint question_ids may be ints).
+        "degraded_qids": sorted(
+            {str(o.get("question_id")) for o in eh_degraded}),
+        "criterion": (
+            "#1946 extraction-health: per-question DEGRADED = "
+            "ingest.points < min_points (semantic extraction produced "
+            "< 100 points — the reval3 402 shape; points_total counts "
+            "raw chunks+turns, so ingest.points is the semantic signal) "
+            "OR points_total < min_points (tiny pool — semantic mode "
+            "only) OR a killer census class (fatal_402_billing / "
+            "empty_embed_list) present at any count OR s1_chunk_summary "
+            "at scale (count >= "
+            f"{EXTRACTION_DEGRADE_MIN_COUNT}); deterministic mode (no "
+            "ingest.points) and the full_context cell baseline (the "
+            "{\"sessions\", points: 0, \"errors\": []} no-extraction "
+            "sentinel) classify by census only — never falsely degraded "
+            "by the points rules; recoverable classes (parse_error / "
+            "partial_parse / transient_*) are healthy. "
+            "Run status = degraded when degraded_fraction >= "
+            f"{EXTRACTION_HEALTH_DEGRADED_FRACTION} OR any "
+            "fatal_402_billing / empty_embed_list in the run census "
+            "(a billing event is a run-level integrity event). The split "
+            "is always emitted — the blended accuracy is a two-population "
+            "mix and must be read per population"
+        ),
+    }
+
     # ── Retry-then-fix protocol: census → mechanical-fix triage (M4 #1524,
     # D6 — documented, never gated: integrity.valid is REPORTED, not a
     # publish gate) ─────────────────────────────────────────────────────────
@@ -1429,6 +1662,14 @@ def build_report(
             # fabricated).
             "reader_evidence@k": _gated(reader_evidence_recall or None),
             "reader_evidence_n@k": _gated(reader_evidence_recall_n or None),
+            # #1948: the reader-surface metric — evidence-bearing content
+            # (points AND chunks) in the FULL reader context / evidence-
+            # bearing content total. The honest "did the reader see the
+            # evidence" measure: chunk@20 undercounts the rank-(20, cap]
+            # window (a marked chunk at pool rank 31 in context counts as
+            # read here), and reader_evidence@k counts points only.
+            "reader_surface@k": _gated(reader_surface_recall or None),
+            "reader_surface_n@k": _gated(reader_surface_recall_n or None),
             # #1763: the re-baselined point-level answer-availability view
             # (mark (d) answer_string). The pilot census is 98.5%
             # source-session (472/479 marks), so the legacy evidence_recall@k
@@ -1474,6 +1715,11 @@ def build_report(
         },
         # M7 (D1/D2/D3/D4): the self-explanatory-report keys.
         "integrity": integrity,
+        # #1946: the extraction-health gate — healthy/degraded population
+        # split + per-population accuracy + run-level flag (see the block
+        # computation above). Always emitted: a degraded run can never
+        # masquerade as a single-population measurement.
+        "extraction_health": extraction_health,
         "leg_mix": leg_mix,
         "pool_size": pool_size,
         "evidence": evidence,
@@ -1573,9 +1819,21 @@ def build_report(
                                  "extracted points (pointKind <> "
                                  "session-transcript) in top-k — raw chunks are "
                                  "excluded from the turn/evidence numerator and "
-                                 "denominator (D5, no granularity bias), with the "
-                                 "deterministic evidence-turn-id fallback when the "
-                                 "graph has no marks; evidence_recall@k = marked "
+                                 "denominator (D5, no granularity bias); #1948 "
+                                 "(pinned): turn_recall@k and evidence_recall@k "
+                                 "are THE SAME formula (marked non-chunk hits in "
+                                 "top-k / evidence_point_count) whenever evidence "
+                                 "points exist — the reval3 turn-vs-evidence "
+                                 "aggregate split (0.722 vs 0.299) is a denominator/ "
+                                 "population artifact, not a retrieval phenomenon; "
+                                 "on degraded questions with zero evidence points "
+                                 "evidence_recall@k is None and turn_recall@k falls "
+                                 "back to the deterministic answer-turn binary (did "
+                                 "the answer TURN surface in top-k — 31/33 = 1.0 on "
+                                 "reval3's degraded population), so the turn/evidence "
+                                 "pair is a MIXED metric on mixed populations — "
+                                 "compare only on the evidence-bearing subset; "
+                                 "evidence_recall@k = marked "
                                  "extracted points surfaced / marked extracted "
                                  "points total, N/A (None) on empty denominators "
                                  "(M6 #1526 — never forced 0.0); #1745 (C2): when "
@@ -1593,7 +1851,18 @@ def build_report(
                                  "APPROXIMATE upper bound: the budget walk's "
                                  "skip-not-starve lets a lower-ranked marked "
                                  "item enter the k-prefix, so reader_evidence@k "
-                                 "can exceed evidence_recall@k); with C2 on it is "
+                                 "can exceed evidence_recall@k); #1948 "
+                                 "reader_surface@k = the honest reader-surface "
+                                 "measure: evidence-bearing content (points AND "
+                                 "chunks — the D5 union denominator) present in the "
+                                 "FULL reader context / evidence-bearing content "
+                                 "total — chunk@20 undercounts the rank-(20, "
+                                 "context-cap] window (a marked chunk at pool rank "
+                                 "31 in context counts as read here while "
+                                 "chunk_evidence_recall@20 = 0.0), and "
+                                 "reader_evidence@k counts points only; "
+                                 "k-independent by construction, N/A on empty "
+                                 "denominators; with C2 on it is "
                                  "the BOOSTED-pool reader surface — the boost-off "
                                  "ablation arm isolates C1; chunk containment "
                                  "is reported separately as chunk_evidence_recall@k "

@@ -322,6 +322,10 @@ function claimIntentInFlight() {
   const [issuesScope, setIssuesScope] = React.useState({ repos: [] })
   const [wizardSeedDone, setWizardSeedDone] = React.useState(false)
   const [wizardSeeding, setWizardSeeding] = React.useState(false)
+  // #1907: seed-step failure must surface INLINE (the global error banner
+  // only renders post-welcome) — the message lives here and the retry is the
+  // re-enabled 'Seed my graph' button. Cleared on every attempt.
+  const [wizardSeedError, setWizardSeedError] = React.useState('')
   const [wizardDone, setWizardDone] = React.useState(false)
   const [onboardingComplete, setOnboardingComplete] = React.useState(false)
   const [welcomeOriented, setWelcomeOriented] = React.useState(false)
@@ -1272,6 +1276,7 @@ function claimIntentInFlight() {
 
   async function wizardSeedGraph() {
     setWizardSeeding(true)
+    setWizardSeedError('')  // #1907: a retry must not keep showing the stale error
     try {
       // #1660/ontology: the STATE sample — the user's Subject + their
       // Project as the first graph entities, wired by a statement Point
@@ -1294,7 +1299,9 @@ function claimIntentInFlight() {
       setWizardSeeding(false)
     } catch (e) {
       setWizardSeeding(false)
-      setError((e && e.message) || 'Could not seed your graph — try again.')
+      // #1907: the global error banner is invisible in welcome mode — render
+      // the failure inline in the seed step instead (button re-enables → retry).
+      setWizardSeedError((e && e.message) || 'Could not seed your graph — try again.')
     }
   }
 
@@ -3682,6 +3689,11 @@ function claimIntentInFlight() {
                           </div>
                           <p className="dim small">Seeding adds: your subject, the project object (in progress), and a statement connecting them.</p>
                         </>
+                      )}
+                      {wizardSeedError && (
+                        <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>
+                          {wizardSeedError}
+                        </p>
                       )}
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(wizardStep - 1)}>← Back</button>

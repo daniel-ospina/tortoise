@@ -384,6 +384,9 @@ class TestInvitationCRUD:
         )
         result = sdk.cleanup_expired_invitations()
         assert result["cleaned"] >= 1
+        # #1908: the sweep also reports the fake invite-{iid} membership
+        # rows deleted (registry list_members ghost cleanup).
+        assert result["ghosts_deleted"] >= 0
 
     def test_invitation_create_rejects_invalid_role(self, sdk, team):
         with pytest.raises(ControlPlaneError, match="Invalid role"):

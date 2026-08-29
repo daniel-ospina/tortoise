@@ -15,9 +15,27 @@ The judge model is configured via env, never hardcoded:
     OPENAI_API_KEY             (or another configured provider key)
 
 Abstention questions (``_abs`` in question_id) use the unanswerable-template.
+
+Near-miss policy (issue #1949 decision record)
+----------------------------------------------
+reval3's 3b6f954b: hypothesis "University of Melbourne." vs gold
+"University of Melbourne in Australia" — the core entity is right, the
+geographic qualifier is missing. Under the official binary rubric this is
+graded "no" (the subset rule: "If the response only contains a subset of
+the information required by the answer, answer no.").
+
+DECISION: KEEP STRICT. The anscheck templates are the benchmark's
+verbatim — partial credit would change label semantics and break
+comparability with published LongMemEval accuracies. The near-miss is
+instead a *known rubric edge*: classified deterministically
+(``classify_answer`` → ``AnswerGrade.NEAR_MISS``), still graded wrong, and
+recorded at ~2% expected rate (1/50 in reval3). Tests pin
+``NEAR_MISS_GRADING = "strict"`` and that the 3b6f954b shape grades False
+(tests/test_longmem_runner.py — issue #1949 section).
 """
 from __future__ import annotations  # noqa: I001
 
+import enum
 import json
 import logging
 import os
@@ -31,6 +49,20 @@ from .reader import _resolve_provider, _parse_model_spec
 logger = logging.getLogger(__name__)
 
 DEFAULT_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
+
+# Issue #1949 decision record — judge near-miss (subset-rule) policy.
+#
+# reval3's 3b6f954b ("University of Melbourne." vs gold "University of
+# Melbourne in Australia") is a near-miss: the core entity is correct, a
+# required geographic qualifier is omitted. DECISION: KEEP STRICT. The
+# anscheck templates are the benchmark's verbatim (published LongMemEval
+# numbers are only comparable if the rubric is untouched); partial credit
+# would change label semantics and muddy comparability. The near-miss is a
+# *known* rubric edge instead — classified deterministically by
+# ``classify_answer`` (AnswerGrade.NEAR_MISS), still graded wrong, and
+# recorded at ~2% expected rate (1/50 in reval3). Do not change
+# NEAR_MISS_GRADING without a new rubric decision.
+NEAR_MISS_GRADING = "strict"
 
 # Raw question_type values in the dataset → official answer-check template.
 _TEMPLATES = (
@@ -138,6 +170,75 @@ def _parse_judge_response(raw: str) -> bool:
     return "yes" in raw.lower()
 
 
+class AnswerGrade(enum.Enum):
+    """Deterministic grading class (issue #1949 near-miss pin).
+
+    A 3-class projection of the official rubric's containment rule, used
+    to *observe* the verdict deterministically (no LLM call):
+    - CORRECT: the gold answer is contained in the hypothesis (clear right)
+    - NEAR_MISS: the hypothesis is a strict subset of the gold — the
+      response names the right entity but omits a required qualifier (the
+      reval3 3b6f954b class: "University of Melbourne." vs gold
+      "University of Melbourne in Australia")
+    - WRONG: neither containment direction holds (clear wrong, wrong
+      entity, or abstention)
+
+    Strict grading is retained (NEAR_MISS_GRADING = "strict"): NEAR_MISS
+    still grades *wrong* under the official binary rubric — the prompt's
+    subset rule is explicit ("If the response only contains a subset of
+    the information required by the answer, answer no."). This class is
+    an observation layer only; it never alters the verdict.
+    """
+
+    CORRECT = "correct"
+    NEAR_MISS = "near-miss"
+    WRONG = "wrong"
+
+
+_TRAILING_PUNCTUATION = ".,;:!?()[]{}\"'`’‘“”«»…-"
+
+
+def _normalize_answer_text(text: str) -> str:
+    """Deterministic normalization for subset/containment checks (issue
+    #1949): lowercase, strip leading/trailing punctuation and whitespace,
+    collapse internal whitespace. Internal punctuation is preserved (e.g.
+    "St. Louis", "co-op") so normalization cannot merge distinct answers.
+    """
+    text = (text or "").strip().lower()
+    return " ".join(text.strip(_TRAILING_PUNCTUATION).split())
+
+
+def classify_answer(answer: str, hypothesis: str) -> AnswerGrade:
+    """Deterministic 3-class grading of a (gold, hypothesis) pair.
+
+    Mirrors the containment rule the official judge prompt asks the LLM to
+    apply: CORRECT iff the normalized gold is contained in the normalized
+    hypothesis; NEAR_MISS iff the hypothesis is a strict subset of the
+    gold (entity right, qualifier omitted — the 3b6f954b class); else
+    WRONG. An empty answer or hypothesis grades WRONG (never NEAR_MISS —
+    "" is a substring of everything).
+    """
+    gold = _normalize_answer_text(answer)
+    hyp = _normalize_answer_text(hypothesis)
+    if not gold or not hyp:
+        return AnswerGrade.WRONG
+    if gold in hyp:
+        return AnswerGrade.CORRECT
+    if hyp in gold:
+        return AnswerGrade.NEAR_MISS
+    return AnswerGrade.WRONG
+
+
+def grade_label(answer: str, hypothesis: str) -> bool:
+    """The strict binary verdict for a (gold, hypothesis) pair.
+
+    True iff the gold is contained in the hypothesis (CORRECT). NEAR_MISS
+    and WRONG both grade False — strict grading is pinned by the issue
+    #1949 decision record (NEAR_MISS_GRADING = "strict").
+    """
+    return classify_answer(answer, hypothesis) is AnswerGrade.CORRECT
+
+
 class Judge(Protocol):
     model_id: str
     def judge(self, *, question_type: str, question: str, answer: str,
@@ -236,11 +337,12 @@ class MockJudge:
 
     Non-abstention: containment rule the LLM judge is asked to apply — the
     response is correct iff it contains the golden answer (normalized,
-    case-insensitive substring). Abstention: correct iff the response uses
-    unanswerability markers (the LLM judge's criterion: "the model correctly
-    identifies the question as unanswerable"). With the MockReader returning
-    the evidence turns' content, this scores the full retrieval→reader→judge
-    loop without any API keys.
+    case-insensitive substring; see ``grade_label`` / ``classify_answer``,
+    issue #1949 near-miss decision). Abstention: correct iff the response
+    uses unanswerability markers (the LLM judge's criterion: "the model
+    correctly identifies the question as unanswerable"). With the
+    MockReader returning the evidence turns' content, this scores the full
+    retrieval→reader→judge loop without any API keys.
     """
 
     model_id = "mock-judge"
@@ -264,9 +366,10 @@ class MockJudge:
         if abstention:
             low = hypothesis.lower()
             return any(m in low for m in self._ABSTRACTION_MARKERS)
-        if not answer:
-            return False
-        return answer.strip().lower() in hypothesis.lower()
+        # Strict deterministic rubric (issue #1949): grade_label delegates
+        # to classify_answer so the near-miss (subset) class is pinned —
+        # entity right, qualifier missing → False, consistently.
+        return grade_label(answer, hypothesis)
 
 
 def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:

@@ -914,8 +914,8 @@ def _get_kind_expander():
         with _registry_lock:
             if _registry_cache is None:
                 from .pack_registry import PackRegistry  # noqa: I001
-                from pathlib import Path as _Path
-                packs_dir = _Path(__file__).resolve().parent.parent / "packs"
+                from .pack_registry import default_packs_dir
+                packs_dir = default_packs_dir()
                 _registry_cache = PackRegistry(packs_dir)
                 _registry_cache.load_all()
     return _registry_cache
@@ -2565,6 +2565,14 @@ class TortoiseSDK:
         props = _sanitize_props(props, reject_id=True)
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
+        # #1904 (bug-hunt 2026-08-28 P1-3): a content edit MUST recompute
+        # content_hash in the same round trip — every dedup surface matches
+        # on the stored hash (create_point dedup, ingest, _content_exists),
+        # so a stale hash after update_point(content=...) silently breaks
+        # dedup and diverges the live graph from JSONL replay (which derives
+        # the hash from PointRevised.new_content).
+        if "content" in props:
+            props["content_hash"] = _content_hash(props["content"])
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
 
@@ -2651,8 +2659,11 @@ class TortoiseSDK:
         self._mark_dirty([id])
         result = self.get_point(id)
         # #548: emit PointRevised event for rebuild parity
+        # #1904: content_hash is derived from content — keep it out of the
+        # event record (mirrors create_point's snapshot strip at emit).
+        emit_props = {k: v for k, v in props.items() if k != "content_hash"}
         self._emit_event("PointRevised", id=id,
-                         new_content=props.get("content"), **props)
+                         new_content=props.get("content"), **emit_props)
         return result
 
     def delete_point(self, id: str) -> bool:
@@ -11725,23 +11736,106 @@ class TortoiseSDK:
         return {"revoked": True, "invitation_id": invitation_id}
 
     def cleanup_expired_invitations(self) -> dict:
-        """Mark expired invitations as 'expired' status.
+        """Mark expired invitations as 'expired' status AND delete the fake
+        invite-{iid} Membership row for each (#1908) — an expired invite
+        must not leave a permanent ghost in registry list_members (pre-#1880
+        ghosts are swept by sweep_invite_ghost_memberships).
 
-        Returns count of cleaned invitations.
+        Order matters (#1908 review P2): the ghost rows are deleted BEFORE
+        the 'expired' stamp so a failed delete is retried on the next run
+        (a stamp-first ordering would strand the ghost forever — the
+        re-run predicate skips already-expired invites). Deletes are
+        best-effort, mirroring _delete_fake_invite_membership (#1902 P2).
+
+        Returns counts: ``cleaned`` invitations marked expired and
+        ``ghosts_deleted`` fake membership rows removed.
+        """
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        reg = self._get_registry()
+        pending = reg.query(
+            "MATCH (i:Invitation) "
+            "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'expired') "
+            "RETURN i.id, i.team_id",
+            params={"now": now},
+        ).result_set
+        deleted = 0
+        for iid, team_id in pending:
+            try:
+                reg.query(
+                    "MATCH (m:Membership {team_id:$tid, user_id:$fake}) DELETE m",
+                    params={"tid": team_id, "fake": f"invite-{iid}"},
+                )
+                deleted += 1
+            except Exception as _e:
+                _logger.warning(
+                    "invite ghost-cleanup failed for %s on %s (%s)",
+                    iid, team_id, _e)
+        reg.query(
+            "MATCH (i:Invitation) "
+            "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status <> 'expired') "
+            "SET i.status = 'expired'",
+            params={"now": now},
+        )
+        return {"cleaned": len(pending), "ghosts_deleted": deleted}
+
+    def sweep_invite_ghost_memberships(self, *, dry_run: bool = False) -> dict:
+        """#1908: one-time backfill sweep for pre-#1880 invite-{iid} ghosts.
+
+        Deletes Membership rows whose user_id matches 'invite-*' when the
+        backing Invitation node is TERMINAL — consumed (accepted_at set),
+        expired (expires_at past or status='expired'), revoked
+        (status='revoked' / 'accepted'), or MISSING (orphaned fake row with
+        no Invitation node). Rows backing a still-pending, unexpired invite
+        are kept (they are the legit 'invited' placeholder in list_members).
+
+        Idempotent — re-running after a sweep finds nothing. With
+        ``dry_run=True`` reports the ghost count without writing (the
+        graph-script's --dry-run mode).
+
+        Returns {"found", "ghosts", "deleted"} — found = invite-* rows
+        examined, ghosts = rows qualifying for deletion, deleted = rows
+        actually removed (0 under dry_run).
         """
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         reg = self._get_registry()
         rows = reg.query(
-            "MATCH (i:Invitation) "
-            "WHERE i.expires_at < $now AND i.accepted_at IS NULL "
-            "AND (i.status IS NULL OR i.status <> 'expired') "
-            "SET i.status = 'expired' "
-            "RETURN count(i)",
-            params={"now": now},
+            "MATCH (m:Membership) WHERE m.user_id STARTS WITH 'invite-' "
+            "OPTIONAL MATCH (i:Invitation {id: substring(m.user_id, 7)}) "
+            "RETURN m.user_id, m.team_id, properties(i)",
         ).result_set
-        count = rows[0][0] if rows else 0
-        return {"cleaned": count}
+        ghosts: list[tuple[str, str]] = []
+        for fake_uid, team_id, inv_props in rows:
+            if inv_props is None:
+                ghosts.append((fake_uid, team_id))  # orphaned fake row
+                continue
+            node = dict(inv_props)
+            consumed = node.get("accepted_at") is not None \
+                or node.get("status") in ("accepted", "revoked", "expired")
+            expired = node.get("expires_at") is not None \
+                and node["expires_at"] < now
+            if consumed or expired:
+                ghosts.append((fake_uid, team_id))
+        failed = 0
+        if not dry_run:
+            for fake_uid, team_id in ghosts:
+                try:
+                    reg.query(
+                        "MATCH (m:Membership {team_id:$tid, user_id:$uid}) DELETE m",
+                        params={"tid": team_id, "uid": fake_uid},
+                    )
+                except Exception as _e:
+                    # best-effort, mirroring _delete_fake_invite_membership
+                    # (#1902 P2) — a transient failure is retried by a re-run.
+                    failed += 1
+                    _logger.warning(
+                        "invite ghost-cleanup failed for %s on %s (%s)",
+                        fake_uid, team_id, _e)
+        return {"found": len(rows), "ghosts": len(ghosts),
+                "deleted": 0 if dry_run else len(ghosts) - failed}
 
     # ── Helpers ───────────────────────────────────────────────────
 
