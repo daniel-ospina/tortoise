@@ -690,8 +690,16 @@ Dependency spine: W5-node-plumbing → W2 → W3 → W9; W4 (Settings owner) →
 
 ## Review-gate record
 
-**Gates:** per-substep reviewers (dispatched via `task`) — recorded below as they run.
+**Gates:** per-substep reviewers (dispatched via `task`) — recorded as they ran.
+
+**Substep reviews (fresh-context, dispatched via task):**
+- **§1-3 (journeys/workflows/prototype):** reviewer returned 9 issues (2 P1: fork-aware completion + state ownership; 7 P2) → all fixed in-doc; re-dispatched → 3 residuals fixed → CLEARED.
+- **§4-6 (data model/architecture/interfaces):** reviewer code-verified against hosted_api.py/sdk.py/supabase_control.py/ONTOLOGY.md; returned 10 issues (4 P1: checkpoint contract #398 misattribution, store-swap backward compat, OTP-on-both-paths, cross-store transaction overclaim; 6 P2) → all fixed → CLEARED.
+- **§7 (detailed E2E) — e2e-coverage reviewer:** verified 12/12 high-level E2E have DE2E counterparts + surface-bracket fidelity; returned 6 P2 assertion-level gaps → all fixed → CLEARED.
+- **§8 coherence (parallel dispatch ×2: cross-substep-drift + risk-completeness):** cycle 1 → 9 + 10 issues (3 P1: compact-path unsatisfiable, LLM-503, free-team 402; 16 P2) → all fixed; cycle 2 → 7 P2 → fixed; cycle 3 → 7 P2 (incl. build-gate unification, capture-disclosed semantics, catalog-presented storage) → fixed; cycle 4 → 5 P2 → fixed; cycle 5 → 1 P1 (last_decide_attempt 409 contract) → fixed; cycle 6 → 2 P2 pins → fixed; cycle 7 → 2 P2 (DM-2 allowlist, W11 reattribution) → fixed; cycle 8 → 1 P2 (member_progress write surface) → fixed + synced to test-design #1992; cycle 9 → 3 P2 sync gaps → fixed; cycle 10 → 4 P2 labels/assertions → fixed; cycle 11 → 2 P2 → fixed. **Final: NO ISSUES FOUND — coherence CLEARED.**
+
+**Test-design sync cycles (04-test-design.md ↔ plan):** 3 fix cycles syncing plan pins into the #1992 surface map (fork-aware gates, store split, OTP both paths, member_progress, onboards edge, graph-down, self-host fork, 402, collision, archived-not-deleted) → CLEARED.
 
 ## Human Gate #2 — Plan review
 
-**Pending:** after coherence review passes, present plan for approval.
+**APPROVED 2026-08-29 (in-session — user replied "proceed" to the plan review).**

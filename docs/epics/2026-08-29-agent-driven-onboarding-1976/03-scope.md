@@ -165,7 +165,10 @@ The cut is **user-visible journey first, infrastructure second** (align Rail 1):
 ### E2E-12: Cross-W journey (owned by W5)
 **Given:** a fresh user
 **When:** they complete the full journey (signup → org → fork → connect → seed → decide)
-**Then:** every step of E2E-1 through E2E-6 passes in one sitting, W11 fires seed_complete + decide_complete once per org (deduped), and onboarding_complete is set only on the aha + checklist done
+**Then:** every step of E2E-1 through E2E-6 passes in one sitting, W11 fires seed_complete + decide_complete once per org (deduped), and onboarding_complete is set only on the fork-aware completion gate
+**And:** completion semantics are FORK-AWARE (self: two Subjects + one decide + connected; build: org-anchor Subject + connected + catalog-presented-once; compact: org-anchor Subject + harness-connected) — dismissal alone never completes
+
+> **Superseded-semantics note (verify P2 fix):** the original single-gate wording ("set only on the aha + checklist done") was SUPERSEDED by plan §7 DE2E-12's fork-aware gates (P1 fix, consistency resolution round 2/plan review). This scope row is amended to match; the capstone #2008 walks the fork-aware version.
 
 ---
 
@@ -173,7 +176,7 @@ The cut is **user-visible journey first, infrastructure second** (align Rail 1):
 
 ## Epic Scope Ready for Review
 
-**Scope:** 12 in-scope workstreams (W1-W9, W11, W12; W10 explicitly out until RBAC) + 3 named out-of-scope surfaces (webhook ingestion, billing UI, landing page)
+**Scope:** 11 in-scope workstreams (W1-W9, W11, W12; W10 explicitly out until RBAC) + 3 named out-of-scope surfaces (webhook ingestion, billing UI, landing page)
 **Customer value map:** 17 capabilities mapped — one user-visible line each
 **E2E test cases:** 12 drafted (behavioral, before journeys)
 **Complexity:** UX epic / Architecture standard / Ontology standard / Accessibility low
@@ -186,4 +189,5 @@ Review the scope boundaries, customer value map, and E2E test cases. Reply **"pr
 ## Review-gate record
 
 **Gate:** fresh-context reviewer (dispatched via `task`) — runs AFTER human approval per the skill.
-**Status:** pending human approval (Gate #1).
+**Human Gate #1: APPROVED 2026-08-29 (in-session — user replied "approved" to the scope review).**
+**Scope review (fresh-context, post-approval):** dispatched — returned NO ISSUES FOUND after the axis-revalidation + value-map + E2E checks were verified against the artifacts. CLEARED.
