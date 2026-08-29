@@ -33,8 +33,8 @@ from tools.longmem_eval.judge import (  # noqa: E402, RUF100
 from tools.longmem_eval.reader import MockReader, build_reader  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     _annotate_hits, _apply_evidence_boost, _assemble_context, _dedup_pool,
-    _estimate_tokens, _is_raw_chunk, hybrid_search, render_context,
-    retrieve_for_question,
+    _estimate_tokens, _is_raw_chunk, _recall_metrics, hybrid_search,
+    render_context, retrieve_for_question,
 )
 from tools.longmem_eval.run import (
     CheckpointStaleError, _assert_python_version, _print_summary,
@@ -406,6 +406,10 @@ def test_outcomes_to_report_golden_shape():
         "reader_evidence@k": None,
         "ranked_ids_pre_boost": None,
         "evidence_boost": None,
+        # #1948: the reader-surface metric (points+chunks in the FULL
+        # reader context) rides the projection parallel to
+        # reader_evidence@k — o.get-based, None on golden outcomes.
+        "reader_surface@k": None,
         "breaker_open": None,
         "dropped_reason": None,
         # #1786: o.get-based projection — the golden input outcome lacks
@@ -3129,7 +3133,12 @@ def test_evidence_boost_promotes_marked_hits():
     """C2 (#1745): a marked point at pool rank 25 surfaces into the top-20
     context AFTER the boost; unmarked hits at the same rank do not. The
     boost is a stable rank offset, not an RRF-score multiplier (scores are
-    dropped in ``_annotate_hits``)."""
+    dropped in ``_annotate_hits``). #1945 note: this fixture's point content
+    IS the answer turn, which contains the gold "light gray" — so the
+    answer_string class (x2.0, the strongest) fires here alongside verbatim;
+    the asserted ceiling/order invariants are factor-independent (verified
+    by the isolated cerulean fixture in
+    ``test_evidence_boost_answer_string_class_is_strongest``)."""
     pool = _boost_pool(24)  # evidence-pt at rank 25 (index 24)
     assert pool[24]["id"] == "evidence-pt"
     # pre-boost: the marked point is outside top-20
@@ -3140,6 +3149,8 @@ def test_evidence_boost_promotes_marked_hits():
     assert stats["applied"] is True
     assert stats["marks_census"]["verbatim"] == 1
     assert stats["marks_census"]["source_session"] == 1
+    # #1945: the fixture's content carries the gold answer string too
+    assert stats["marks_census"]["answer_string"] == 1
     assert stats["pre_boost_ranked_ids"] == [h["id"] for h in pool]
     assert "evidence-pt" in [h["id"] for h in boosted[:20]]
     post = _assemble_context(boosted, top_k=20, max_context_tokens=10**6)
@@ -3178,6 +3189,10 @@ def test_evidence_boost_precision_guard_recomputed():
     boosted, stats = _apply_evidence_boost(pool, question=question)
     assert stats["marks_census"]["verbatim"] == 1
     assert stats["marks_census"]["source_session"] == 2  # both marked
+    # #1945: the verbatim fixture's content carries the gold "light gray"
+    # too (answer_string x2.0 fires on it — the isolated cerulean fixture
+    # covers the verbatim-only isolation)
+    assert stats["marks_census"]["answer_string"] == 1
     ids = [h["id"] for h in boosted]
     v_pos, s_pos = ids.index("verbatim-pt"), ids.index("source-pt")
     # verbatim outranks source despite being one rank BELOW pre-boost
@@ -3186,6 +3201,99 @@ def test_evidence_boost_precision_guard_recomputed():
     assert v_pos < 24 and s_pos < 23
     # full > reduced: the verbatim hit jumps farther than the source-only
     assert (24 - v_pos) > (23 - s_pos) >= 1
+
+
+def _answer_string_question() -> dict:
+    """A question whose GOLD ANSWER ("cerulean") is NOT a substring of its
+    answer turn ("I painted the wall a light gray") — so an answer-string-ONLY
+    point (content carries the gold, no quote) and a verbatim-ONLY point
+    (quote carries the turn, content does not carry the gold) are cleanly
+    separable boost classes (mark (d) #1763 vs mark (b) M6)."""
+    return {
+        "question_id": "boost_as_q", "question_type": "single-session-user",
+        "question": "What color did Ava paint the wall?",
+        "answer": "cerulean", "question_date": "2025-06-15",
+        "haystack_session_ids": ["b-s0", "b-s1"],
+        "haystack_dates": ["2025-06-10", "2025-06-14"],
+        "answer_session_ids": ["b-s1"],
+        "haystack_sessions": [
+            [{"role": "user", "content": f"unrelated filler chat {i}",
+              "has_answer": False} for i in range(6)],
+            [{"role": "user",
+              "content": "I painted the wall a light gray",
+              "has_answer": True}],
+        ],
+    }
+
+
+def _answer_string_pool() -> list[dict]:
+    """20 unmarked b-s0 fillers + verbatim-only at index 20 (quote carries
+    the answer turn; content does NOT carry the gold "cerulean" -> mark (b)
+    only) + answer-string-only at index 21 (content carries the gold; no
+    quote -> mark (d) only)."""
+    pool = [
+        {"id": f"fill{i}", "content": f"unrelated filler chat {i}",
+         "session_id": "b-s0", "point_kind": "statement",
+         "lme_session_index": 0, "session_date": "2025-06-10",
+         "quote": "", "has_answer": False}
+        for i in range(20)
+    ]
+    pool.append({"id": "verbatim-pt",
+                 "content": "She described the shade she used",
+                 "session_id": "b-s1", "point_kind": "statement",
+                 "lme_session_index": 1, "session_date": "2025-06-14",
+                 "quote": "I painted the wall a light gray",
+                 "has_answer": True})
+    pool.append({"id": "answer-pt",
+                 "content": "The final color was cerulean",
+                 "session_id": "b-s1", "point_kind": "statement",
+                 "lme_session_index": 1, "session_date": "2025-06-14",
+                 "quote": "", "has_answer": True})
+    return pool
+
+
+def test_evidence_boost_answer_string_class_is_strongest():
+    """#1945: the answer-string mark (d, #1763) is a FIRST-CLASS boost
+    class — the strongest signal (the point's content carries the GOLD
+    ANSWER), so its multiplier is >= verbatim's (x1.5). A point whose
+    content contains the gold answer but has no quote (answer-string-only)
+    starting BELOW a verbatim-only point must outrank it post-boost."""
+    from tools.longmem_eval.retrieve import (
+        DEFAULT_EVIDENCE_BOOST_ANSWER_STRING,
+        DEFAULT_EVIDENCE_BOOST_VERBATIM,
+    )
+    # design contract: the answer-precise class is the strongest (>= verbatim)
+    assert DEFAULT_EVIDENCE_BOOST_ANSWER_STRING >= DEFAULT_EVIDENCE_BOOST_VERBATIM
+    pool = _answer_string_pool()
+    boosted, stats = _apply_evidence_boost(pool,
+                                           question=_answer_string_question())
+    # read-time census: the answer-string mark counts its own class
+    assert stats["marks_census"]["answer_string"] == 1
+    assert stats["marks_census"]["verbatim"] == 1
+    assert stats["marks_census"]["source_session"] == 2
+    assert stats["boost_answer_string"] == DEFAULT_EVIDENCE_BOOST_ANSWER_STRING
+    ids = [h["id"] for h in boosted]
+    a_pos, v_pos = ids.index("answer-pt"), ids.index("verbatim-pt")
+    # the answer-string point started BELOW the verbatim point (21 vs 20)
+    # but the stronger multiplier outranks it post-boost
+    assert a_pos < v_pos
+    assert a_pos < 21 and v_pos < 20
+    # stronger class moves farther (bounded by the position ceiling)
+    assert (21 - a_pos) > (20 - v_pos) >= 1
+
+
+def test_evidence_boost_answer_string_knob_honored():
+    """#1945: the answer-string boost class is knob-exposed
+    (``boost_answer_string``) — a stronger multiplier moves the class
+    farther (still position-ceiling bounded)."""
+    pool = _answer_string_pool()
+    boosted, stats = _apply_evidence_boost(
+        pool, question=_answer_string_question(), boost_answer_string=4.0)
+    assert stats["boost_answer_string"] == 4.0
+    a_pos = [h["id"] for h in boosted].index("answer-pt")
+    # 21 / 4.0 = 5.25 scaled priority -> lands strictly above the default
+    # multiplier's position (x2.0 -> pos 11 on this fixture)
+    assert a_pos < 11
 
 
 def test_evidence_boost_no_marked_point_displacement():
@@ -3219,6 +3327,11 @@ def test_evidence_boost_no_marked_point_displacement():
     assert stats["marks_census"]["source_session"] == 25
     assert stats["marks_census"]["verbatim"] == 10
     assert stats["marks_census"]["raw_chunk"] == 10
+    # #1945: the chunk fixtures' content IS the answer turn (carries the
+    # gold "light gray") — the answer_string class (x2.0) fires on all 10;
+    # the no-displacement invariant holds for ANY stronger class (ceiling
+    # is factor-independent)
+    assert stats["marks_census"]["answer_string"] == 10
     top20 = {h["id"] for h in boosted[:20]}
     # every marked POINT stays in top-20 (the boosted chunks cannot
     # redistribute evidence out of the reader's reach)
@@ -3264,6 +3377,11 @@ def test_evidence_boost_boundary_point_not_displaced():
     boosted, stats = _apply_evidence_boost(pool, question=question)
     assert stats["marks_census"]["verbatim"] == 5
     assert stats["marks_census"]["source_session"] == 6
+    # #1945: the chunk fixtures carry the gold "light gray" -> the
+    # answer_string class (x2.0) fires on all 5 (stronger than the
+    # docstring's verbatim x1.5); the position-ceiling property asserted
+    # below is factor-independent
+    assert stats["marks_census"]["answer_string"] == 5
     ids = [h["id"] for h in boosted]
     pos = ids.index("source-pt")
     # (a) the point is never demoted below its original pool index
@@ -3306,9 +3424,10 @@ def test_evidence_boost_stored_mark_fallback_source_class():
                  "quote": "", "has_answer": False})
     boosted, stats = _apply_evidence_boost(pool, question=question)
     # read-time recompute found NOTHING (b-s0 is not an evidence session;
-    # no quote; content does not contain the answer turn)
+    # no quote; content does not contain the answer turn; no gold answer
+    # string in content/quote/search_keys)
     assert stats["marks_census"] == {"source_session": 0, "verbatim": 0,
-                                      "raw_chunk": 0}
+                                      "raw_chunk": 0, "answer_string": 0}
     ids = [h["id"] for h in boosted]
     stored_pos, control_pos = ids.index("stored-pt"), ids.index("control-pt")
     # source-class fallback: the stored-mark hit moved UP by the source
@@ -3383,6 +3502,66 @@ def test_boost_before_recall_metrics(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_answer_string_evidence_recall_emitted(tmp_path, monkeypatch):
+    """#1945: the retrieval leg emits the HONEST answer-availability metric
+    per outcome — ``answer_string_evidence_recall@k`` (mark (d) #1763: gold
+    answer string contained in the point's content/quote/search_keys) over
+    the effective pool — the seam report.py aggregates as
+    ``retrieval.answer_string_evidence_recall@k``. OFF by default (fail-safe,
+    #1745): the answer-string-marked point ranks outside pool[:20] -> 0.0;
+    with the boost ON the answer_string class (strongest multiplier)
+    surfaces it -> 1.0 (the honest metric rides the BOOSTED pool, same
+    surface as the legacy evidence_recall@k — C2 placement)."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _boost_question()  # gold "light gray"
+        sdk.create_point("statement", "I painted the wall a light gray",
+                         id="evidence-pt", session_id="b-s1",
+                         lme_question_id="boost_q", lme_session_index=1,
+                         is_episodic=True, has_answer=True, status="draft",
+                         quote="I painted the wall a light gray")
+        for i in range(24):
+            sdk.create_point("statement", f"unrelated filler chat {i}",
+                             id=f"fill{i}", session_id="b-s0",
+                             lme_question_id="boost_q", lme_session_index=0,
+                             is_episodic=True, status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                         retrieval_budget_ms=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            hits = [{"id": f"fill{i}",
+                     "content": f"unrelated filler chat {i}",
+                     "match_source": "tfidf"} for i in range(24)]
+            hits.append({"id": "evidence-pt",
+                         "content": "I painted the wall a light gray",
+                         "match_source": "tfidf"})
+            return hits
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        # OFF (default): the honest metric is EMITTED with the marked point
+        # outside pool[:20] -> 0.0 at every k (1 marked, 0 surfaced)
+        ret_off = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        aser_off = ret_off["answer_string_evidence_recall@k"]
+        assert aser_off["5"] == 0.0
+        assert aser_off["20"] == 0.0
+        assert ret_off["evidence_boost"]["applied"] is False
+        # ON: the answer_string class (x2.0) surfaces the point -> 1.0
+        ret_on = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20,
+                                       evidence_boost=True)
+        assert ret_on["answer_string_evidence_recall@k"]["20"] == 1.0
+        # the honest metric rides the BOOSTED pool (legacy metric agrees)
+        assert ret_on["evidence_recall@k"]["20"] == 1.0
+        assert ret_on["evidence_boost"]["applied"] is True
+        assert ret_on["evidence_boost"]["marks_census"]["answer_string"] == 1
+        # pre-boost ranking preserved for the ablation (identical to OFF)
+        assert ret_on["ranked_ids_pre_boost"] == ret_off["ranked_ids"]
+    finally:
+        sdk.close()
+
+
 def test_evidence_boost_rejects_invalid_multipliers():
     """C2 (review P1-2 + F9): a boost factor < 1.0 or NON-FINITE is
     rejected at the function boundary — 0.0 would ZeroDivide the rank
@@ -3402,6 +3581,13 @@ def test_evidence_boost_rejects_invalid_multipliers():
     with pytest.raises(ValueError, match=r"must be >= 1.0"):
         _apply_evidence_boost(pool, question=_boost_question(),
                               boost_source=float("inf"))
+    # #1945: the answer-string class gets the same boundary guard
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_answer_string=0.0)
+    with pytest.raises(ValueError, match=r"must be >= 1.0"):
+        _apply_evidence_boost(pool, question=_boost_question(),
+                              boost_answer_string=float("nan"))
     # env multipliers outside [0,1] are honored (the rerank._env_float
     # MMR-lambda clamp must NOT swallow the 1.5/1.15 defaults)
     import os as _os
@@ -3613,6 +3799,146 @@ def test_reader_context_contains_chunk_evidence(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_recall_metrics_turn_evidence_semantics_pinned():
+    """#1948: pins the turn-vs-evidence denominator semantics —
+    ``turn_recall@k`` and ``evidence_recall@k`` are THE SAME formula (marked
+    non-chunk hits in top-k / evidence_point_count) whenever evidence points
+    exist (the reval3 0.722-vs-0.299 aggregate split is a denominator/
+    population artifact, not a retrieval phenomenon); on degraded questions
+    with zero evidence points, evidence_recall@k is None (M6) and
+    turn_recall@k falls back to the DETERMINISTIC answer-turn binary."""
+    hits = [
+        {"id": f"h{i}", "session_id": f"s{i % 2}",
+         "has_answer": i < 3, "point_kind": "statement"}
+        for i in range(10)
+    ]
+    # healthy: 5 evidence points exist, 3 marked hits in top-10 — the pair
+    # is numerically identical (same formula, same denominator).
+    session, turn, ev, chunk = _recall_metrics(
+        hits, ks=(10,), answer_sessions={"s0"},
+        evidence_turn_ids=set(), evidence_point_count=5,
+        chunk_evidence_point_count=0)
+    assert turn["10"] == ev["10"] == 3 / 5
+    assert session["10"] == 1.0
+    assert chunk["10"] is None
+    # degraded: 0 evidence points → evidence is None; turn falls back to
+    # the binary answer-turn match (h2 is in top-10, h99 is not → 1/2).
+    session, turn, ev, chunk = _recall_metrics(
+        hits, ks=(10,), answer_sessions={"s0"},
+        evidence_turn_ids={"h2", "h99"}, evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert ev["10"] is None
+    assert turn["10"] == 0.5
+    # degraded + no answer-turn ids either → both None (never forced 0.0).
+    session, turn, ev, chunk = _recall_metrics(
+        hits, ks=(10,), answer_sessions={"s0"},
+        evidence_turn_ids=set(), evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert ev["10"] is None
+    assert turn["10"] is None
+
+
+def test_reader_surface_counts_context_evidence_beyond_pool_k(tmp_path, monkeypatch):
+    """#1948: ``reader_surface@k`` is the honest reader-surface measure —
+    evidence-bearing content (points AND chunks) in the FULL reader context
+    counts as read even when it ranks beyond pool[:k] (the reval3
+    rank-31-chunk case: in context, answered correctly, chunk@20 = 0.0).
+    The pool@k metrics undercount the rank-(20, context-cap] window; the
+    legacy metrics are unchanged."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _boost_question()
+        q["question_id"] = "reader-surface-q"
+        # 24 unmarked extracted points + a marked point at rank 25 + a
+        # marked chunk at rank 26 — both evidence-bearing items sit in the
+        # rank-(20, 40] window the pool@20 metrics cannot see.
+        for i in range(24):
+            sdk.create_point("statement", f"unrelated filler chat {i}",
+                             id=f"fill{i}", session_id="b-s0",
+                             lme_question_id="reader-surface-q",
+                             lme_session_index=0, is_episodic=True,
+                             status="draft")
+        sdk.create_point("statement", "I painted the wall a light gray",
+                         id="evidence-pt", session_id="b-s1",
+                         lme_question_id="reader-surface-q",
+                         lme_session_index=1, is_episodic=True,
+                         has_answer=True, status="draft")
+        sdk.create_point("session-transcript",
+                         "I painted the wall a light gray",
+                         id="evidence-chunk", session_id="b-s1",
+                         lme_question_id="reader-surface-q",
+                         lme_session_index=1, is_episodic=True,
+                         has_answer=True, status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            hits = [{"id": f"fill{i}",
+                     "content": f"unrelated filler chat {i}",
+                     "match_source": "tfidf"} for i in range(24)]
+            hits.append({"id": "evidence-pt",
+                         "content": "I painted the wall a light gray",
+                         "match_source": "tfidf"})
+            hits.append({"id": "evidence-chunk",
+                         "content": "I painted the wall a light gray",
+                         "match_source": "tfidf"})
+            return hits
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        ret = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        # 26-item pool; both marked items rank beyond pool[:20] but inside
+        # the default 40-item context cap — the reader saw them.
+        assert ret["context_point_count"] == 26
+        ctx_ids = {h["id"] for h in ret["context_points"]}
+        assert {"evidence-pt", "evidence-chunk"} <= ctx_ids
+        # legacy pool metrics: honest about pool[:20] — both miss
+        assert ret["evidence_recall@k"]["20"] == 0.0
+        assert ret["chunk_evidence_recall@k"]["20"] == 0.0
+        assert ret["reader_evidence@k"]["20"] == 0.0  # points-only, [:20]
+        # the reader-surface metric: 2/2 evidence-bearing items were in the
+        # reader's ACTUAL context, at every k (k-independent by construction)
+        assert ret["reader_surface@k"]["20"] == 1.0
+        assert ret["reader_surface@k"]["5"] == 1.0
+    finally:
+        sdk.close()
+
+
+def test_reader_surface_vacuity_is_none(tmp_path, monkeypatch):
+    """#1948: on a question with NO evidence-bearing content at all, the
+    reader-surface denominator is empty → N/A (None), mirroring
+    evidence_recall@k (M6 — "no evidence exists" stays distinguishable)."""
+    from tools.longmem_eval import retrieve as rtr
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        q = _boost_question()
+        q["question_id"] = "reader-surface-vac"
+        for i in range(5):
+            sdk.create_point("statement", f"unrelated filler chat {i}",
+                             id=f"fill{i}", session_id="b-s0",
+                             lme_question_id="reader-surface-vac",
+                             lme_session_index=0, is_episodic=True,
+                             status="draft")
+
+        def _fake_search(sdk_, query, limit, *, leg_trace=None,
+                     retrieval_budget_ms=None,
+                         entity_types=("point",), recency_fields=None,
+                         recency_boost=0.0):
+            return [{"id": f"fill{i}",
+                     "content": f"unrelated filler chat {i}",
+                     "match_source": "tfidf"} for i in range(5)]
+
+        monkeypatch.setattr(rtr, "hybrid_search", _fake_search)
+        ret = retrieve_for_question(sdk, q, ks=(5, 20), top_k=20)
+        assert ret["reader_surface@k"]["20"] is None
+        assert ret["reader_surface@k"]["5"] is None
+    finally:
+        sdk.close()
+
+
 def test_reader_evidence_recall_diagnostic(tmp_path, monkeypatch):
     """C4 (#1745): ``reader_evidence@k`` ≈ ``evidence@k`` on the mini
     fixture — the pool->context drop is ~0 after C1 (evidence in the pool
@@ -3632,6 +3958,24 @@ def test_reader_evidence_recall_diagnostic(tmp_path, monkeypatch):
         assert ret["reader_evidence@k"]["20"] == 1.0
     finally:
         sdk.close()
+
+
+def test_reader_surface_survives_run_evaluation(tmp_path):
+    """#1948 (review P1): the runner's outcome allowlist copies
+    ``reader_surface@k`` end-to-end — run_evaluation outcomes AND the
+    report's retrieval block carry the metric (the deliverable is emitted
+    in real runs, not only in retrieve_for_question's raw dict)."""
+    q = _mini()[0]
+    outcomes, report = run_evaluation(
+        [q], reader=MockReader(), judge=MockJudge(), ks=(5,), top_k=5,
+        split="s", work_dir=str(tmp_path), max_context_tokens=3000,
+    )
+    assert len(outcomes) == 1
+    assert "reader_surface@k" in outcomes[0]
+    assert "reader_evidence@k" in outcomes[0]
+    r = report["retrieval"]
+    assert "reader_surface@k" in r
+    assert "reader_surface_n@k" in r
 
 
 def test_degenerate_knobs_raise():

@@ -890,6 +890,12 @@ def build_report(
     # is directly measurable (pool recall is the upper bound since C1).
     reader_evidence_recall: dict[str, float] = {}
     reader_evidence_recall_n: dict[str, int] = {}
+    # #1948: the reader-surface metric — evidence-bearing content (points
+    # AND chunks) in the FULL reader context / evidence-bearing content
+    # total, aggregated parallel to reader_evidence@k (which counts points
+    # only) so the pool@k rank-(20, cap] undercount is directly measurable.
+    reader_surface_recall: dict[str, float] = {}
+    reader_surface_recall_n: dict[str, int] = {}
     # #1763: the re-baselined point-level answer-availability view (mark (d)
     # answer_string) — aggregated parallel to evidence_recall@k so the legacy
     # source-session-dominated metric stays byte-identical (D5 #1540
@@ -937,6 +943,16 @@ def build_report(
         if real_rre:
             reader_evidence_recall[str(k)] = _mean(real_rre)
             reader_evidence_recall_n[str(k)] = len(real_rre)
+        # #1948: reader_surface@k — evidence-bearing points+chunks in the
+        # FULL reader context / evidence-bearing total. N/A on empty
+        # denominators like the other evidence metrics; k-independent by
+        # construction (the context is the same list for every k).
+        rrs = [(o.get("reader_surface@k") or {}).get(str(k), None)
+               for o in outcomes]
+        real_rrs = [v for v in rrs if v is not None]
+        if real_rrs:
+            reader_surface_recall[str(k)] = _mean(real_rrs)
+            reader_surface_recall_n[str(k)] = len(real_rrs)
         # #1763: the answer-string re-baselined view — point-level answer
         # availability (mark (d), gold answer string in the point's
         # content/quote/search_keys). Aggregated parallel to
@@ -1646,6 +1662,14 @@ def build_report(
             # fabricated).
             "reader_evidence@k": _gated(reader_evidence_recall or None),
             "reader_evidence_n@k": _gated(reader_evidence_recall_n or None),
+            # #1948: the reader-surface metric — evidence-bearing content
+            # (points AND chunks) in the FULL reader context / evidence-
+            # bearing content total. The honest "did the reader see the
+            # evidence" measure: chunk@20 undercounts the rank-(20, cap]
+            # window (a marked chunk at pool rank 31 in context counts as
+            # read here), and reader_evidence@k counts points only.
+            "reader_surface@k": _gated(reader_surface_recall or None),
+            "reader_surface_n@k": _gated(reader_surface_recall_n or None),
             # #1763: the re-baselined point-level answer-availability view
             # (mark (d) answer_string). The pilot census is 98.5%
             # source-session (472/479 marks), so the legacy evidence_recall@k
@@ -1795,9 +1819,21 @@ def build_report(
                                  "extracted points (pointKind <> "
                                  "session-transcript) in top-k — raw chunks are "
                                  "excluded from the turn/evidence numerator and "
-                                 "denominator (D5, no granularity bias), with the "
-                                 "deterministic evidence-turn-id fallback when the "
-                                 "graph has no marks; evidence_recall@k = marked "
+                                 "denominator (D5, no granularity bias); #1948 "
+                                 "(pinned): turn_recall@k and evidence_recall@k "
+                                 "are THE SAME formula (marked non-chunk hits in "
+                                 "top-k / evidence_point_count) whenever evidence "
+                                 "points exist — the reval3 turn-vs-evidence "
+                                 "aggregate split (0.722 vs 0.299) is a denominator/ "
+                                 "population artifact, not a retrieval phenomenon; "
+                                 "on degraded questions with zero evidence points "
+                                 "evidence_recall@k is None and turn_recall@k falls "
+                                 "back to the deterministic answer-turn binary (did "
+                                 "the answer TURN surface in top-k — 31/33 = 1.0 on "
+                                 "reval3's degraded population), so the turn/evidence "
+                                 "pair is a MIXED metric on mixed populations — "
+                                 "compare only on the evidence-bearing subset; "
+                                 "evidence_recall@k = marked "
                                  "extracted points surfaced / marked extracted "
                                  "points total, N/A (None) on empty denominators "
                                  "(M6 #1526 — never forced 0.0); #1745 (C2): when "
@@ -1815,7 +1851,18 @@ def build_report(
                                  "APPROXIMATE upper bound: the budget walk's "
                                  "skip-not-starve lets a lower-ranked marked "
                                  "item enter the k-prefix, so reader_evidence@k "
-                                 "can exceed evidence_recall@k); with C2 on it is "
+                                 "can exceed evidence_recall@k); #1948 "
+                                 "reader_surface@k = the honest reader-surface "
+                                 "measure: evidence-bearing content (points AND "
+                                 "chunks — the D5 union denominator) present in the "
+                                 "FULL reader context / evidence-bearing content "
+                                 "total — chunk@20 undercounts the rank-(20, "
+                                 "context-cap] window (a marked chunk at pool rank "
+                                 "31 in context counts as read here while "
+                                 "chunk_evidence_recall@20 = 0.0), and "
+                                 "reader_evidence@k counts points only; "
+                                 "k-independent by construction, N/A on empty "
+                                 "denominators; with C2 on it is "
                                  "the BOOSTED-pool reader surface — the boost-off "
                                  "ablation arm isolates C1; chunk containment "
                                  "is reported separately as chunk_evidence_recall@k "
