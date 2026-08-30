@@ -416,6 +416,27 @@ class TestResolveApiKeyFailSoft:
         finally:
             monkeypatch.undo()
 
+    def test_marker_column_drift_quota_keeps_max_points(self, fake):
+        """#2040 (code-review round 5): resolve_team_limits runs the SAME
+        full additive ladder — marker-column-only drift must degrade just
+        the marker while max_points (the #1859 points-cap override) stays
+        readable; a missing 2040 tier would 400 every rung → hard 500 on
+        every quota-enforced write (the exact #1832 class)."""
+        from tortoise.quota import resolve_team_limits
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        try:
+            import tortoise.supabase_control as sc
+            monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+            fake.tables["teams"][0]["max_points"] = 999
+            fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+            limits = resolve_team_limits("team-free-001")
+            assert limits["max_points"] == 999  # override survives drift
+        finally:
+            monkeypatch.undo()
+
     def test_resolve_api_key_api_keys_enabled_false_drift_fail_open(self,
                                                                    fake):
         """#1096 accepted-risk doc (code-review fix): a per-key DISABLED
