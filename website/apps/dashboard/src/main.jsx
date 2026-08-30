@@ -391,15 +391,20 @@ function claimIntentInFlight() {
   // memberships[0] while its follow-up refreshOnboarding read the selected
   // team). Only called post-render (handlers/effects), so the teamIdRef
   // binding below is always initialized.
-  function onboardingTeamQ() {
-    return teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
+  function onboardingTeamQ(sep = '?') {
+    return teamIdRef.current ? `${sep}team_id=${encodeURIComponent(teamIdRef.current)}` : ''
   }
 
   function persistScope(payload) {
     // fire-and-forget: a failed persist never blocks the UI; the next
     // change re-persists the full list.
+    // #1893 (code-review P1): capture the team at CALL time — the queue
+    // drains asynchronously, and a switchTeam before flush must NOT retarget
+    // a queued PATCH (built with team A's scope) at team B. Evaluated here,
+    // before the .then(), so team+payload stay paired.
+    const _teamQ = onboardingTeamQ()
     scopePersistQueueRef.current = scopePersistQueueRef.current
-      .then(() => api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
+      .then(() => api(`/v1/onboarding/state${_teamQ}`, { method: 'PATCH', useSession: true,
         body: JSON.stringify(payload) }))
       .catch(() => {})
   }
@@ -1126,7 +1131,15 @@ function claimIntentInFlight() {
       // currentTeamId but is set synchronously in switchTeam (no render
       // closure race).
       const st = await api(`/v1/onboarding/state${onboardingTeamQ()}`, { useSession: true })
-      if (st && st.onboarding && teamIdRef.current === _teamAtCall) {
+      // #1893 (code-review P1): apply ONLY a team-pinned response. The mount
+      // `[]`-effect GET fires before the mount gate sets teamIdRef (captured
+      // _teamAtCall = null) — applying it would seed memberships[0]'s scope
+      // under the selected team (wrong for multi-membership users) and let
+      // hydration latch the wrong team's data before the currentTeamId
+      // effect's pinned refetch lands. The pinned refetch is authoritative;
+      // the unpinned mount GET is discarded (harmless — the refetch corrects
+      // onboarding, and the first-timer 403-swallow path is unaffected).
+      if (st && st.onboarding && _teamAtCall && teamIdRef.current === _teamAtCall) {
         // code-review P1: this response is for the CURRENT team (the team
         // did not move while the GET was in flight) — clear the switch-stale
         // flag so hydration can proceed.
@@ -1242,8 +1255,10 @@ function claimIntentInFlight() {
     try {
       const q = encodeURIComponent(repo)
       // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
+      // The URL already carries ?repo= — join team_id with & (a second `?`
+      // would corrupt the repo value and silently unpin the team).
       const _teamAtCall = teamIdRef.current
-      const res = await api(`/v1/onboarding/github/branches?repo=${q}${onboardingTeamQ()}`, { useSession: true })
+      const res = await api(`/v1/onboarding/github/branches?repo=${q}${onboardingTeamQ('&')}`, { useSession: true })
       if (teamIdRef.current !== _teamAtCall) return  // stale switch response
       const branches = res && Array.isArray(res.branches) ? res.branches : []
       const defaultBranch = (res && res.default_branch) || ''
