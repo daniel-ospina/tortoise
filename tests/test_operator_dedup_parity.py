@@ -218,7 +218,8 @@ def test_create_entity_event_journals_single_line(s1919):
     """#2061: create_entity(type='event') (the create_event super-surface)
     journals exactly ONE EventRecorded — the emit lives on the shared
     _create_entity Event branch, so the alias path can never double-emit.
-    Caller-supplied props ride the journal (replay persistence parity)."""
+    Caller-supplied props ride the journal AND survive the rebuild onto the
+    restored node (replay persistence parity — _persist_extra_props)."""
     events, sdk = s1919  # noqa: RUF059
     node = sdk.create_entity(
         "event", "Board review",
@@ -231,6 +232,38 @@ def test_create_entity_event_journals_single_line(s1919):
     assert recs[0]["eventKind"] == "review"
     assert recs[0]["status"] == "scheduled"
     assert recs[0]["name"] == "Board review"
+    # replay persistence parity: the caller props land on the RESTORED node
+    _rebuild(sdk, events)
+    g = sdk._get_proj().g
+    assert _count(g, "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
+                  params={"eid": eid}) == 1
+    row = g.query(
+        "MATCH (e:Event {eventId:$eid}) RETURN e.name, e.eventKind, e.status",
+        params={"eid": eid}).result_set[0]
+    assert row == ["Board review", "review", "scheduled"]
+
+
+def test_create_event_without_log_path_is_noop_safe(s1919, tmp_path):
+    """#2061: create_event WITHOUT event_log_path must not crash — the
+    journal emission no-ops (_emit_event: no log → early return) while the
+    live graph write and about-edge wiring proceed. Pins the no-log contract
+    for the new unconditional _emit_event call on the Event path."""
+    events, sdk = s1919  # noqa: RUF059
+    sdk.close()
+    db = os.path.join(str(tmp_path), "i2061-nolog.db")
+    bare = TortoiseSDK(db)  # no event_log_path
+    try:
+        eid = bare.create_event("Launch party", "sessionCaptured")["eventId"]
+        g = bare._get_proj().g
+        assert _count(g, "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
+                      params={"eid": eid}) == 1
+        # live Event-input operator still works without a journal
+        pa = bare.create_point("statement", "A")["id"]
+        op = bare.create_operator("IMPL", pa, [eid])["id"]
+        assert _count(g, "MATCH (o:Point {id:$p})-[r:IMPL]->(t:Event) RETURN count(r)",
+                      params={"p": op}) == 1
+    finally:
+        bare.close()
 
 
 def test_operator_event_input_replay_edge_stats_parity(s1919):

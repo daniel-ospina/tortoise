@@ -12006,7 +12006,9 @@ class TortoiseSDK:
     def _create_entity(self, label: str, id_val: str, props: dict, event_type: str,
                        *, _skip_sanitize: bool = False,
                        is_episodic: bool | None = None) -> dict:
-        """Generic entity creation. Applies to graph via projection (event log + FalkorDB).
+        """Generic entity creation. Applies to graph via projection
+        (FalkorDB); SDK-created Events additionally journal EventRecorded
+        via ``_emit_event`` (#2061).
 
         ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
         source_path route): the caller has already extracted the server-
@@ -12068,9 +12070,10 @@ class TortoiseSDK:
             # its INPUT edge on replay ("input source ... does not resolve").
             # The journaled payload mirrors the exact dict applied above
             # (minus 'type'/'id' — _emit_event carries those; 'point'/
-            # 'payload' were popped pre-apply, the filter is defensive) so
-            # replay upserts a byte-identical Event node. EventRecorded is
-            # NOT in
+            # 'payload' were popped pre-apply and the journal envelope keys
+            # event_id/ts/initiated_by/projection_version are excluded so a
+            # caller prop can never override them) so replay upserts a
+            # byte-identical Event node. EventRecorded is NOT in
             # _GRAPH_EVENT_TYPES → JSONL-only emission, no graph-event-store
             # double-write. The session-indexing path (_session_event_write)
             # journals its own EventRecorded and never routes through
@@ -12079,7 +12082,9 @@ class TortoiseSDK:
                 "EventRecorded",
                 id=event["id"],
                 **{k: v for k, v in event.items()
-                   if k not in ("type", "id", "point", "payload")},
+                   if k not in ("type", "id", "point", "payload",
+                                "event_id", "ts", "initiated_by",
+                                "projection_version")},
             )
         # #452: Subject/Object MERGE by name (content-hash dedup).
         # When the name already exists, the fresh id_val never lands on the
