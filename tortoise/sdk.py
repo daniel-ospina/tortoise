@@ -12042,13 +12042,45 @@ class TortoiseSDK:
                 event["eventId"] = id_val
         if label == "Source":
             event["url"] = id_val
-        # Apply through projection (writes to JSONL + FalkorDB)
+        if label == "Event":
+            # #2061: 'point'/'payload' are JSONL-envelope-reserved names (the
+            # rebuild journal uses 'point' for full point snapshots, and
+            # _emit_event reserves both as kwargs) — drop them from the node
+            # write as well so live and replay stay byte-identical (a caller
+            # passing them as event props gets NO persistence on either path,
+            # never divergent persistence).
+            event.pop("point", None)
+            event.pop("payload", None)
+        # Apply through projection (writes to FalkorDB)
         apply_result = proj.apply(event)
         if label == "Source":
             # epic #900 T3: thread the conditional-MERGE QueryResult so
             # create_source can attribute the counter-authority outcome
             # (nodes_created) from the single statement (pin b).
             proj._source_merge_result = apply_result
+        if label == "Event":
+            # #2061: journal EventRecorded so SDK-created Events survive
+            # rebuild_all (fold parity for Event-input operators).
+            # proj.apply writes the LIVE graph only — the SDK JSONL journal
+            # is written exclusively via _emit_event, and without this line a
+            # rebuild replays EventRecorded (pass 1b → _upsert_event) but
+            # never sees this Event → an operator with an Event input loses
+            # its INPUT edge on replay ("input source ... does not resolve").
+            # The journaled payload mirrors the exact dict applied above
+            # (minus 'type'/'id' — _emit_event carries those; 'point'/
+            # 'payload' were popped pre-apply, the filter is defensive) so
+            # replay upserts a byte-identical Event node. EventRecorded is
+            # NOT in
+            # _GRAPH_EVENT_TYPES → JSONL-only emission, no graph-event-store
+            # double-write. The session-indexing path (_session_event_write)
+            # journals its own EventRecorded and never routes through
+            # _create_entity — no double-emission.
+            self._emit_event(
+                "EventRecorded",
+                id=event["id"],
+                **{k: v for k, v in event.items()
+                   if k not in ("type", "id", "point", "payload")},
+            )
         # #452: Subject/Object MERGE by name (content-hash dedup).
         # When the name already exists, the fresh id_val never lands on the
         # node (ON CREATE never fires).  Re-fetch the canonical id from the
