@@ -21,25 +21,23 @@ from tortoise.sdk import TortoiseSDK
 @pytest.fixture
 def client(tmp_path):
     """TestClient with a temp embedded DB + registry."""
-    db_path = str(tmp_path / "onboarding.db")
+    fixture_db_path = str(tmp_path / "onboarding.db")
     # Patch TortoiseSDK to use the temp DB (mirrors test_hosted_api.py)
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
         # Isolate EVERY SDK construction (registry included) to the fixture's
-        # temp DB — _make_sdk never passes db_path= (URI mode), so the
-        # caller-provided path (via **kw) or the fixture's temp DB wins;
-        # without this the registry falls back to the shared docker
-        # server / default temp and leaks state across tests ("Team already
-        # exists" / onboarding 409s). NOTE: the param must NOT be named
-        # `db_path` — it shadows the fixture's closure variable, silently
-        # re-enabling the leak.
-        caller_path = kw.pop("db_path", None)
-        resolved = db_path_arg
-        if resolved is None:
-            resolved = caller_path if caller_path is not None else db_path
-        orig_init(self, db_path=resolved,
-                  namespace=namespace, **kw)
+        # temp DB. The fixture path is FORCED unconditionally (caller kwargs
+        # dropped) — _make_sdk's embedded-lane fallback constructs
+        # TortoiseSDK(db_path=<shared /tmp/tortoise.db>) and forwarding that
+        # caller path binds the SHARED fallback DB, leaking team state across
+        # tests ("Sub-team already created" 409s in the URI-less tier-2 CI
+        # lane; URI-mode constructions pass no db_path and already fall to
+        # the fixture path). Same pattern as
+        # test_hosted_api._patch_tortoise_sdk_init. NOTE: the closure var
+        # must NOT be named `db_path` — a `db_path` parameter would shadow
+        # it, silently re-enabling the leak.
+        orig_init(self, db_path=fixture_db_path, namespace=namespace)
 
     TortoiseSDK.__init__ = _patched
     # #1497: break the _make_sdk embedded fallback anchor — module-level
@@ -60,29 +58,33 @@ def client(tmp_path):
         yield tc
     app.dependency_overrides.clear()
     TortoiseSDK.__init__ = orig_init
+    # #1502-class teardown parity (mirror test_hosted_api._restore_...):
+    # evict the anchor created during this test so a stale SDK bound to this
+    # test's temp DB never leaks into the next test file's run.
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
+    _FALLBACK_KEEPALIVE.clear()
 
 
 @pytest.fixture
 def unauth_client(tmp_path):
     """TestClient WITHOUT the auth override — real 401s."""
-    db_path = str(tmp_path / "unauth.db")
+    fixture_db_path = str(tmp_path / "unauth.db")
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
         # Isolate EVERY SDK construction (registry included) to the fixture's
-        # temp DB (see the client fixture — the param must not shadow the
-        # closure `db_path`).
-        caller_path = kw.pop("db_path", None)
-        resolved = db_path_arg
-        if resolved is None:
-            resolved = caller_path if caller_path is not None else db_path
-        orig_init(self, db_path=resolved,
-                  namespace=namespace, **kw)
+        # temp DB (see the client fixture — the closure var must not shadow
+        # `db_path`).
+        orig_init(self, db_path=fixture_db_path, namespace=namespace)
 
     TortoiseSDK.__init__ = _patched
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
+    _FALLBACK_KEEPALIVE.clear()
     with TestClient(app) as tc:
         yield tc
     TortoiseSDK.__init__ = orig_init
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
+    _FALLBACK_KEEPALIVE.clear()
 
 
 # ── Onboarding state ────────────────────────────────────────────

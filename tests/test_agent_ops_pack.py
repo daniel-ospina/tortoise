@@ -30,7 +30,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
-import pytest  # noqa: I001
+import pytest
 from fastapi.testclient import TestClient
 
 from tortoise import extractor_v2 as v2
@@ -69,7 +69,8 @@ FIXTURES_DIR = os.path.join(
 
 def _fixture(name: str) -> list[dict]:
     """Fixture .txt → conversation EDUs (role: content)."""
-    text = open(os.path.join(FIXTURES_DIR, name), encoding="utf-8").read()
+    with open(os.path.join(FIXTURES_DIR, name), encoding="utf-8") as fh:
+        text = fh.read()
     return [
         {"role": "assistant", "content": line.strip()}
         for line in text.splitlines()
@@ -355,5 +356,6 @@ class TestRulesWithWhyExtraction:
                      "near_miss.txt"):
             path = os.path.join(FIXTURES_DIR, name)
             assert os.path.exists(path), f"missing fixture {name}"
-            text = open(path, encoding="utf-8").read()
+            with open(path, encoding="utf-8") as fh:
+                text = fh.read()
             assert len(text.strip()) > 0

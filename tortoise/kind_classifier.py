@@ -282,7 +282,8 @@ class KindClassifier:
                 try:
                     from tortoise.enforcement import resolve_enforcement
                     nm = self.index.near_misses(reranked)
-                    if any(resolve_enforcement(kind=k) == "retry" for k in [reranked] + list(nm or [])):
+                    if any(resolve_enforcement(kind=k) == "retry"
+                           for k in [reranked, *list(nm or [])]):
                         stats["near_miss_retries"] = stats.get("near_miss_retries", 0) + 1
                 except Exception:
                     # the classification batch

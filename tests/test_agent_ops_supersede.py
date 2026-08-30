@@ -21,11 +21,10 @@ from __future__ import annotations
 
 import os
 import tempfile
-import uuid
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest  # noqa: I001
+import pytest
 
 from tortoise.sdk import TortoiseSDK
 
