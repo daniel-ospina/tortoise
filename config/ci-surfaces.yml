@@ -54,6 +54,7 @@ surfaces:
   - test_epic903_mcp.py
   - test_export_delete.py
   - test_export_cli.py
+  - test_export_pack_config.py
   - test_failure_contract.py
   - test_fake_control_plane.py
   - test_free_team_entitlement.py   # main-side drift unblock (#1929): committed on main (entitlement gate work) but never added to selection — the --integrity gate fails every PR without it
