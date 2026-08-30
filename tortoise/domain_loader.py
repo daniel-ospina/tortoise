@@ -26,6 +26,7 @@ flat registry for backward compat, but the packs are the canonical source.
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Lock
@@ -38,6 +39,8 @@ from .pack_registry import (
     CANONICAL_POINT_KINDS,
     PackRegistry,
 )
+
+log = logging.getLogger(__name__)
 
 # Base known kinds (ONTOLOGY §12).
 _BASE_KINDS: set[str] = {
@@ -77,26 +80,95 @@ _registry: PackRegistry | None = None
 _registry_lock = Lock()
 # Overridable packs dir (tests inject temp packs; None = repo default).
 _PACKS_DIR: Path | None = None
+# #1930: env value whose TORTOISE_PACKS_DIR leg fell back (sticky) — while
+# the env value is unchanged, _get_registry resolves the skip-env default
+# directly instead of re-attempting the broken env dir per call (no reload
+# storm). Reset per test via tests/conftest.py.
+_env_fallback_key: str | None = None
 
 
 def _get_registry() -> PackRegistry | None:
     """Lazily load the pack registry once; None if packs are unavailable.
 
     The adapter must never break the legacy vocabulary — any load failure
-    degrades to the base/registered kinds only (ponytail).
+    degrades to the base/registered kinds only (ponytail), and is LOGGED
+    (never silent). ``TORTOISE_PACKS_DIR`` (env leg) is resolved through
+    ``default_packs_dir()``; when the env dir yields 0 valid packs (S1a) or
+    its load raises (S1b), warn + sticky-fall back to the packaged/repo
+    default so the daemon registry is never silently empty (G1 class, epic
+    #1891 WF-2). ``_PACKS_DIR`` (test injection) always wins over env.
     """
-    global _registry
-    from tortoise.pack_registry import default_packs_dir
-    packs_dir = _PACKS_DIR or default_packs_dir()
+    global _registry, _env_fallback_key
+    from tortoise.pack_registry import (
+        _warn_packs_once,
+        default_packs_dir,
+        env_packs_dir,
+        env_packs_dir_value,
+    )
+    env_val = env_packs_dir_value()
+    if _PACKS_DIR is not None:
+        packs_dir = _PACKS_DIR
+    elif (_env_fallback_key is not None and _PACKS_DIR is None and env_val
+            and env_val == _env_fallback_key):
+        # Sticky branch (S1a/S1b landed): skip the broken env dir. The
+        # _PACKS_DIR guard mirrors the set-side guards — test injection must
+        # always win over env, even after a fallback.
+        packs_dir = default_packs_dir(_skip_env=True)
+    else:
+        packs_dir = default_packs_dir()
     if _registry is None or _registry.packs_dir != packs_dir:
         with _registry_lock:
             if _registry is None or _registry.packs_dir != packs_dir:
                 try:
                     reg = PackRegistry(packs_dir)
                     reg.load_all()
+                    if (not reg.packs and reg.errors and _PACKS_DIR is None
+                            and env_val and env_packs_dir() == packs_dir):
+                        # S1a: env leg active but every manifest failed
+                        # validation — the empty-registry defect class (G1).
+                        # (The _PACKS_DIR guard is intentional: the test-only
+                        # injection knob with an all-malformed dir yields an
+                        # empty registry + Task-2 warn, no fallback.)
+                        _env_fallback_key = env_val
+                        packs_dir = default_packs_dir(_skip_env=True)
+                        log.warning(
+                            "TORTOISE_PACKS_DIR=%r: 0 valid packs (%d isolated) "
+                            "— falling back to the default catalog %s",
+                            env_val, len(reg.errors), packs_dir)
+                        reg = PackRegistry(packs_dir)
+                        reg.load_all()
+                        reg.fallback_note = (
+                            f"TORTOISE_PACKS_DIR={env_val}: 0 valid packs; "
+                            f"loaded default catalog {packs_dir}")
                     _registry = reg
-                except Exception:
-                    _registry = None  # ponytail: degrade to legacy vocabulary
+                except Exception as e:  # noqa: BLE001, RUF100 — ponytail
+                    if (_PACKS_DIR is None and env_val
+                            and env_packs_dir() == packs_dir):
+                        # S1b: the env-dir load itself raised — fall back once
+                        # (never silent empty), same sticky semantics.
+                        _env_fallback_key = env_val
+                        packs_dir = default_packs_dir(_skip_env=True)
+                        log.warning(
+                            "TORTOISE_PACKS_DIR=%r: pack load failed (%s) — "
+                            "falling back to the default catalog %s",
+                            env_val, e, packs_dir)
+                        try:
+                            reg = PackRegistry(packs_dir)
+                            reg.load_all()
+                            reg.fallback_note = (
+                                f"TORTOISE_PACKS_DIR={env_val}: load failed; "
+                                f"loaded default catalog {packs_dir}")
+                            _registry = reg
+                        except Exception as e2:  # noqa: BLE001, RUF100
+                            _warn_packs_once(("ponytail", "default-load"),
+                                "pack registry load failed, degrading to "
+                                "legacy vocabulary: %s", e2)
+                            _registry = None
+                    else:
+                        _warn_packs_once(("ponytail", str(packs_dir)),
+                            "pack registry load failed, degrading to legacy "
+                            "vocabulary: %s", e)
+                        _registry = None
     return _registry
 
 
