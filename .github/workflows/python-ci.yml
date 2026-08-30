@@ -713,7 +713,15 @@ jobs:
             # absorb those known exceptions; a real leak still reds (E2E-7).
             THRESHOLD=6
           else
-            THRESHOLD=5   # tier-2 embedded shape: bounded (<20) assert
+            # Tier-2 embedded shape (full=false PR runs): the SAME
+            # embedded-file-contract files run in the fast-gate halves and
+            # leave ~6 racing servers at suite end (observed consistently on
+            # #2032/#2040 — pytest rc 0 every time). The comment below said
+            # "bounded (<20) assert" while the code enforced 5 — a
+            # self-inconsistency that flaked unrelated PRs. Keep the assert
+            # meaningful (a per-test leaky file spawns dozens; 12 catches it)
+            # but absorb the documented atexit-race exception class.
+            THRESHOLD=12
           fi
           echo "orphaned redislite servers after suite: $COUNT (pytest rc: ${RC:-unknown}, threshold: $THRESHOLD)"
           if [ "$COUNT" -gt "$THRESHOLD" ]; then
@@ -1028,7 +1036,10 @@ jobs:
           if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
             THRESHOLD=0
           else
-            THRESHOLD=5
+            THRESHOLD=12  # tier-2 embedded shape: absorb the documented
+                          # embedded-file-contract atexit-race class (see the
+                          # fast-job assert — same rationale; the old 5
+                          # contradicted the "bounded (<20)" intent)
           fi
           echo "orphaned redislite servers after slow leg: $COUNT (pytest rc: ${RC:-unknown}, threshold: $THRESHOLD)"
           if [ "$COUNT" -gt "$THRESHOLD" ]; then
