@@ -106,7 +106,7 @@ FIXTURES = [
         "expected_abstained": False,
     },
     {
-        "fixture": "vacuity-answer",
+        "fixture": "decision-commit",
         "question": "did we decide on the apartment near the park?",
         "question_date": "2026-08-29",
         "seeds": [

@@ -27,7 +27,6 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from tools.longmem_eval.dataset import load_dataset  # noqa: E402
 from tortoise.sdk import TortoiseSDK  # noqa: E402
 
 
@@ -66,13 +65,16 @@ def _normalize(text) -> str:
 
 def _grade(question: dict, result: dict) -> tuple[bool, str]:
     """Lightweight containment judge vs the gold answer. For _abs questions
-    the verdict is abstained-with-marker (the judge's criterion)."""
+    the verdict is abstained-with-marker (the judge's criterion). The
+    marker vocabulary is the judge's canonical list (MockJudge
+    ``_ABSTRACTION_MARKERS`` — a strict subset of the product's
+    ``_ABSTAINED_PHRASES``, plan P2-32), imported so the spot-check and the
+    graded judge cannot drift."""
+    from tools.longmem_eval.judge import MockJudge
     qid = question.get("question_id") or ""
     if "_abs" in qid:
         ok = result["abstained"] and any(
-            m in _normalize(result["answer"])
-            for m in ("do not know", "does not contain", "not mention",
-                      "no information", "not enough", "cannot answer"))
+            m in _normalize(result["answer"]) for m in MockJudge._ABSTRACTION_MARKERS)
         return ok, f"abstain={result['abstained']} answer={result['answer'][:80]!r}"
     gold = _normalize(question.get("answer") or "")
     answer = _normalize(result["answer"])
@@ -89,7 +91,8 @@ def _grade(question: dict, result: dict) -> tuple[bool, str]:
 
 
 def main() -> int:
-    spotcheck = json.load(open("/tmp/ask_spotcheck.json"))
+    with open("/tmp/ask_spotcheck.json") as f:
+        spotcheck = json.load(f)
     results = []
     for i, q in enumerate(spotcheck):
         db = os.path.join(tempfile.mkdtemp(prefix="ask_spot_"), "t.db")

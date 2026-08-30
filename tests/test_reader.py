@@ -13,7 +13,9 @@ Task 2 — deterministic type detection + the best-effort abstained label:
   * detect_question_type ordered precedence TR→KU→MS→SSP→None,
   * _looks_abstained phrase list + blank/whitespace → True,
   * LLMReader.answer + _looks_abstained over empty/whitespace/refusal
-    outputs → blank → abstained=True with NO_EVIDENCE_TEXT substitution.
+    outputs → blank → abstained=True (the canonical NO_EVIDENCE_TEXT
+    substitution happens at the SDK surface — pinned in
+    tests/test_ask_api.py, not inside the reader).
 
 Fully offline: stub models only, no API keys, no DB.
 """
@@ -28,18 +30,17 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise.reader import (  # noqa: E402, RUF100
-    DEFAULT_READER_MAX_TOKENS,
-    LLMReader,
-    NO_EVIDENCE_TEXT,
-    PROBE_SYSTEM,
-    Reader,
-    _ABSTRACTION_FRAGMENT,
     _ABSTAINED_PHRASES,
-    _KNOWLEDGE_UPDATE_FRAGMENT,
-    _MULTI_SESSION_FRAGMENT,
+    _ABSTRACTION_FRAGMENT,
     _SYSTEM_PROMPT,
     _TYPE_FRAGMENTS,
+    DEFAULT_READER_MAX_TOKENS,
+    NO_EVIDENCE_TEXT,
+    PROBE_SYSTEM,
+    LLMReader,
+    Reader,
     _looks_abstained,
+    build_reader_user_message,
     detect_question_type,
     reader_prompt_constants,
     system_prompt_for,
@@ -55,16 +56,21 @@ def _sha16(text: str) -> str:
 # Golden hashes captured from the PRE-move eval constants
 # (tools/longmem_eval/reader.py + tools/longmem_eval/preflight.py, commit
 # aeb163ab-era) — a byte change in ANY ported constant fails the snapshot.
+# #2027 (calibration fix): the golden hashes for the A1 clause (and the
+# derived full-prompt hashes) were re-captured after the intentional
+# generic-baseline Phase-1 presence-commit change — the snapshot pins
+# against ACCIDENTAL drift, and an intentional, reviewed prompt change
+# re-records it (see docs/runbook/1987-ask-abstention-check.md).
 _GOLDEN = {
     "_SYSTEM_PROMPT": "0a4140a708890f69",
-    "_ABSTRACTION_FRAGMENT": "715039d20a5ec054",
+    "_ABSTRACTION_FRAGMENT": "092f425543110a80",
     "_TEMPORAL_FRAGMENT": "592395e8f607e749",
     "_PREFERENCE_FRAGMENT": "9a59cae923aedbd7",
     "_KNOWLEDGE_UPDATE_FRAGMENT": "71be4f3f3c08540a",
     "_MULTI_SESSION_FRAGMENT": "dab194c9c65fd916",
     "PROBE_SYSTEM": "4debae82c849c293",
-    "generic+A1 (system_prompt_for(None))": "0df6c4515627f219",
-    "temporal-reasoning full": "50b515d857ce1788",
+    "generic+A1 (system_prompt_for(None))": "6cfd5d7635f90d1e",
+    "temporal-reasoning full": "6b8b47ea2c357e2d",
 }
 
 
@@ -92,10 +98,19 @@ def test_generic_prompt_is_generic_plus_a1_only() -> None:
 
 
 def test_type_prompt_appends_fragment() -> None:
-    assert system_prompt_for("temporal-reasoning") == \
-        _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT + _TYPE_FRAGMENTS["temporal-reasoning"]
+    """Full-prompt assembly pin for EVERY fragment type — exact equality,
+    so a dropped/reordered fragment fails loudly (the assembly ORDER is
+    cross-pinned in test_longmem_reader_prompting.py
+    test_type_fragments_append_after_universal_clause). Multi-session and
+    the empty-string type ("" ≠ None — the ``_TYPE_FRAGMENTS.get(q, "")``
+    path) were previously unpinned; both ship here."""
+    for t in _TYPE_FRAGMENTS:
+        assert system_prompt_for(t) == \
+            _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT + _TYPE_FRAGMENTS[t], t
     assert system_prompt_for("knowledge-update") == \
         _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT + _TYPE_FRAGMENTS["knowledge-update"]
+    # empty-string type falls to the generic baseline (same as None)
+    assert system_prompt_for("") == _SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
 
 
 def test_reader_prompt_constants_covers_a1() -> None:
@@ -113,8 +128,9 @@ def test_no_evidence_text_pinned() -> None:
         "The memory context does not contain the information needed to "
         "answer this question."
     )
-    # it is the product's own constant — not part of the eval snapshot
-    assert _sha16(NO_EVIDENCE_TEXT) != _GOLDEN["generic+A1 (system_prompt_for(None))"]
+    # NO_EVIDENCE_TEXT is deliberately NOT part of the byte-identity
+    # snapshot (adding a snapshot entry for it would be a contract change,
+    # not accidental drift) — policy documented here, not asserted
 
 
 # ══ Task 1: re-export identity (the eval reader IS the product reader) ════
@@ -181,6 +197,44 @@ def test_llmreader_answer_renders_product_context() -> None:
     assert f"Memory context:\n{expected_ctx}\n\nQuestion: how many days ago did we meet?\n\nAnswer:" == user
 
 
+def test_llmreader_answer_strips_raw_completion() -> None:
+    """answer() strips the raw completion (test-review re-review #2013): a
+    padded non-blank reply through the product path — the strip regression
+    class the ping test already covers."""
+    model = _StubModel(reply="  42 days  \n")
+    reader = LLMReader(model, model_id="stub")
+    out = reader.answer(context_hits=[{"content": "x", "has_answer": True}],
+                        question="q")
+    assert out == "42 days"
+
+
+def test_build_reader_user_message_direct() -> None:
+    """Direct unit pin of the single-sourced user-message template — the
+    SDK local lane and LLMReader.answer share ONE copy (no parallel
+    template drift); the render path is cross-pinned above."""
+    assert build_reader_user_message("[user] hi", "what changed?") == \
+        "Memory context:\n[user] hi\n\nQuestion: what changed?\n\nAnswer:"
+
+
+def test_llmreader_constructor_identity() -> None:
+    """Carried identity contract: model_spec defaults to model_id; the
+    provider/pinned passthrough round-trips (consumed by ask-lane metering
+    and eval reporting — a dropped passthrough would silently de-identify
+    runs)."""
+    r = LLMReader(_StubModel(), model_id="bare")
+    assert r.model_spec == "bare"
+    assert r.provider is None
+    assert r.pinned is None
+    r2 = LLMReader(_StubModel(), model_id="bare", model_spec="deepseek:x",
+                   provider="deepseek-direct", pinned=True)
+    assert r2.model_spec == "deepseek:x"
+    assert r2.provider == "deepseek-direct"
+    assert r2.pinned is True
+    # an explicit empty spec still falls back to model_id
+    r3 = LLMReader(_StubModel(), model_id="bare", model_spec="")
+    assert r3.model_spec == "bare"
+
+
 # ══ Task 2: detect_question_type ══════════════════════════════════════════
 
 class TestDetectQuestionType:
@@ -200,6 +254,12 @@ class TestDetectQuestionType:
         "what was the gym schedule before 2025?",
         "what did we decide at the meeting on 2025-03-14?",
         "what was the policy back in 2024?",
+        # test-review re-review #2013: the remaining KU alternation
+        # branches — "at present" / "right now" (current-value markers)
+        # and "during" (date-preposition) were unpinned
+        "what are the gym hours at present?",
+        "what is the schedule right now?",
+        "what did we decide during 2024?",
     ])
     def test_knowledge_update(self, q: str) -> None:
         assert detect_question_type(q) == "knowledge-update"
@@ -237,9 +297,12 @@ class TestDetectQuestionType:
         assert detect_question_type(q) is None
 
     def test_precedence_tr_over_ku(self) -> None:
-        # "how many days ago" is high-precision temporal — even though it
-        # mentions a past tense + date-ish shape, TR wins.
-        assert detect_question_type("how many days ago was the schedule changed?") \
+        # dual-matching fixture: "how many days ago" (TR) + "before 2025"
+        # (KU) BOTH match — TR must win (test-review re-review #2013: the
+        # original fixture matched TR only, so a TR-after-KU reorder would
+        # have passed silently).
+        assert detect_question_type(
+            "how many days ago was the schedule changed before 2025?") \
             == "temporal-reasoning"
 
     def test_precedence_ku_over_ms(self) -> None:
@@ -257,6 +320,37 @@ class TestDetectQuestionType:
         # WITHOUT the year does not match (deliberate month-only boundary).
         assert detect_question_type("what was the gym schedule before March?") is None
 
+    # #2027 test-review pins: regex branches previously unpinned — a
+    # widening here silently changes which prompt ships on the product
+    # path. EXACT per-branch types (test-review re-review #2013): a marker
+    # leaking into the wrong category would ship the wrong reasoning
+    # fragment — membership in a 3-type set cannot catch that.
+    @pytest.mark.parametrize("q,expected", [
+        ("how long months has it been since the gym changed?",
+         "temporal-reasoning"),                 # TR "how long"+unit
+        ("how long years ago did we start the office?",
+         "temporal-reasoning"),
+        ("throughout the year, how did the schedule change?",
+         "multi-session"),                      # MS "throughout"
+        ("which city do you like best?",
+         "single-session-preference"),          # SSP "like best"
+        ("which restaurant do you like most?",
+         "single-session-preference"),          # SSP "like most"
+    ])
+    def test_untested_markers_positive(self, q: str, expected: str) -> None:
+        assert detect_question_type(q) == expected, q
+
+    def test_between_gap_over_60_chars_falls_through(self) -> None:
+        # the TR between-range rule is bounded at 60 chars (.{1,60}) — a
+        # wider gap must NOT match (accidental widening is the class to pin)
+        long_gap = "between " + "words " * 20 + "and then what changed?"
+        assert len(long_gap) > 60
+        assert detect_question_type(long_gap) is None
+
+    def test_how_long_without_unit_falls_through(self) -> None:
+        # "how long" without a day/week/month/year unit is not temporal
+        assert detect_question_type("how long was the meeting?") is None
+
 
 # ══ Task 2: _looks_abstained ══════════════════════════════════════════════
 
@@ -266,6 +360,47 @@ class TestLooksAbstained:
         for phrase in _ABSTAINED_PHRASES:
             assert _looks_abstained(f"I {phrase} about that.") is True, phrase
 
+    def test_abstained_phrase_set_pinned(self) -> None:
+        """The phrase list is the census authority (judge ⊆ product, plan
+        P2-32) — pin the EXACT set so a deletion fails loudly (the loop
+        above alone would silently shrink with the list)."""
+        assert set(_ABSTAINED_PHRASES) == {
+            "do not know", "don't know", "not know", "unanswerable",
+            "incomplete", "cannot answer", "can't answer", "not enough",
+            "does not contain", "doesn't contain", "not mention",
+            "not mentioned", "no mention of", "asked information is absent",
+            "information is absent", "no memory", "no information",
+            "nothing related", "unable to answer", "not sure", "unsure",
+            "don't have that information", "don't have information",
+            "absent from the context",
+        }
+
+    def test_confident_answer_false(self) -> None:
+        assert _looks_abstained("The gym schedule is Monday and Wednesday.") is False
+        assert _looks_abstained("3 days ago.") is False
+
+    def test_innocuous_phrase_usage_is_documented_limitation(self) -> None:
+        """Best-effort limitation (pinned, not silent): a confident answer
+        that legitimately contains an abstention phrase as ordinary text
+        ("not enough chairs", "does not contain the document") IS labeled
+        abstained — the label is a substring heuristic, NEVER a gate (the
+        two-phase prompt is authoritative; the SDK substitutes
+        NO_EVIDENCE_TEXT on this label, per tests/test_ask_api.py). This
+        pin makes the accepted trade-off explicit so a future tightening
+        (phrase-boundary / clause-scoped matching) is a reviewed change."""
+        assert _looks_abstained(
+            "There were not enough chairs, so we moved the meeting.") is True
+        assert _looks_abstained(
+            "The drawer does not contain the document; it is in the safe.") is True
+
+    def test_case_insensitive_and_non_str(self) -> None:
+        # the lowercasing contract (a refactor could drop it — this is the
+        # function that gates NO_EVIDENCE_TEXT substitution upstream)
+        assert _looks_abstained("I DO NOT KNOW the answer.") is True
+        assert _looks_abstained("I Do Not Know the answer.") is True
+        # non-str input goes through str(answer) — never crashes
+        assert _looks_abstained(42) is False
+
     def test_judge_markers_are_subset(self) -> None:
         """The product phrase list is a STRICT SUPERSET of the judge's
         abstention markers — the judge never flags an abstention the product
@@ -274,25 +409,22 @@ class TestLooksAbstained:
         for marker in judge_mod.MockJudge._ABSTRACTION_MARKERS:
             assert marker in _ABSTAINED_PHRASES, marker
 
-    def test_confident_answer_false(self) -> None:
-        assert _looks_abstained("The gym schedule is Monday and Wednesday.") is False
-        assert _looks_abstained("3 days ago.") is False
-
     def test_blank_and_whitespace_true(self) -> None:
         assert _looks_abstained("") is True
         assert _looks_abstained("   \n\t  ") is True
         assert _looks_abstained(None) is True
 
-    def test_empty_output_substitutes_no_evidence(self) -> None:
-        """Blank output → abstained=True with the canonical no-evidence text
-        (the deterministic substitution the SDK/hosted surfaces use)."""
+    def test_blank_output_labels_abstained(self) -> None:
+        """Blank model output → the reader returns the raw blank and
+        ``_looks_abstained`` labels it abstained (the deterministic case).
+        The canonical ``NO_EVIDENCE_TEXT`` substitution happens at the SDK
+        surface (pinned in tests/test_ask_api.py), not inside the reader —
+        this test pins the reader-side label only."""
         model = _StubModel(reply="")
         reader = LLMReader(model, model_id="stub")
         out = reader.answer(context_hits=[], question="q")
         assert out == ""
         assert _looks_abstained(out) is True
-        # the canonical substitution is the upstream contract
-        assert NO_EVIDENCE_TEXT
 
     def test_whitespace_output_abstained(self) -> None:
         model = _StubModel(reply="   \n  ")

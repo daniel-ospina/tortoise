@@ -42,6 +42,136 @@ ownedBy: epistemic-team
 
 ---
 
+## Calibration fix (#2027) — reader Phase-1 generic presence-commit + Phase-2 compression — 2026-08-30 (re-run)
+
+> The #2027 reader-calibration fix (the gate-d blocker work) shipped to
+> this branch and the gates were re-run. **Verdict: the reader's
+> OVER-ABSTENTION class is fixed (the reader now commits on present
+> evidence — the issue's core defect), but the (d) aggregate stays below
+> 0.8 and the (a) abstention accuracy slipped below 0.9 on the DEFAULT
+> reader model (deepseek-v4-flash): the remaining failures are bound by
+> reader-MODEL content quality and FTS-40 retrieval, not the abstention
+> clause. A qwen3.8-max probe proves the model is the binding constraint.
+> Merge REMAINS BLOCKED; the follow-up path is recorded below.**
+
+### The fix (tortoise/reader.py `_ABSTRACTION_FRAGMENT`)
+
+1. **Phase-1 generic presence-commit** (#2027): Phase 1 now fires on
+   PRESENT EVIDENCE regardless of fragment engagement — a
+   category-independent rule ("These instructions apply to every
+   question — whether or not it matches a recognized category…; the
+   absence of category instructions is never a reason to abstain"), a
+   derived-value commit (elapsed time/counts/totals/ordering computed
+   from the dated facts in context; off-by-one acceptable; "do not
+   abstain merely because the number is not literally written"), a
+   synthesis commit (preference-shaped answers draw on stated
+   preferences/experiences), scoped to the asked subject's events being
+   present (the false-commit guard).
+2. **Phase-2 compression**: the abstention branch is now minimal —
+   "abstain ONLY when no turn in the context mentions the asked subject
+   or event at all… Then simply state that the asked information is
+   absent, mentioning the related facts found in the memory if any."
+   The elaborate evidence-backed template + the bicycle exemplar were
+   REMOVED: a live-prompt ablation on deepseek-v4-flash showed they
+   licensed the hedge form the reader over-produces on present evidence
+   (same smoker question: elaborate Phase 2 → abstain; minimal Phase 2 →
+   commit "10 days ago"; generic-only → commit).
+3. **Judge-marker vocabulary alignment** (plan P2-32: judge ⊆ product):
+   MockJudge `_ABSTRACTION_MARKERS` + the spot-check judge now recognize
+   the reader's canonical abstention phrasings ("asked information is
+   absent", "information is absent", "no mention of", "don't have
+   (that) information", "absent from the context") — the plan's census
+   authority (the product label) already had them; without the judge
+   extension, correct abstentions scored as failures (the runbook's
+   documented vocab-gap class).
+4. Tests: docker-lane suite **175 passed, 1 skipped** (reader + eval
+   reader + SDK + metering + LLM-regression fixture mode); ruff clean on
+   all changed files. New `tests/test_reader_abstention_calibration.py`
+   (7 tests: generic-baseline presence-commit pins, Phase-2
+   never-instruction-gap pin, the two #2027 evidence shapes as
+   red→green fixtures — d6233ab6 synthesis + gpt4_8279ba02 derived
+   day-count — and the 09ba9854_abs scoped-commit control).
+
+### (d) QA spot-check — re-run: **FAIL — aggregate 0.38 (8/21) < 0.8**
+
+Full spot-check (`TORTOISE_TEST_CARVE_OUT=1 uv run python
+ tools/ask_spotcheck.py` — real product lane, containment judge,
+21-question composition, seed 1987). **The false-abstention class is
+GONE**: every question whose asked value/subject reached the context now
+COMMITS (d6233ab6 synthesizes the reunion answer, b0479f84 recommends
+documentaries, 0100672e commits a mug total, gpt4_6ed717ea commits an
+order) — pre-fix these 10/21 abstained. The aggregate is now bound by
+three non-abstention failure classes:
+
+| class | failures | cause (verified) |
+|---|---|---|
+| reader-MODEL content error | gpt4_8279ba02 (commits purchase date, no day count), gpt4_7a0daae1 (hedge), gpt4_6ed717ea (wrong order), 830ce83f (recency noise: commits the older Chicago mention; gold = the suburbs), 0100672e ($60 total vs $12 each), e831120c (hedge), b0479f84 (commits wrong recs) | deepseek-v4-flash answers wrong content — arithmetic, ordering, recency, per-unit reasoning |
+| retrieval gap (FTS top-40) | ceb54acb (answer turn ranks ~70: 'sexual fixations' list never retrieved), 1de5cff2 ('veja' turn not in top-40), gpt4_d84a3211 (dollar amounts not in top-40), 1d4e3b97 (chain/cassette turn not retrieved) | the product ask lane is FTS-only; the gold turns rank below the 8k/40 caps on these long haystacks |
+| containment-judge bar | d6233ab6 (long synthesis gold: needs ~45-word overlap), 1d4e3b97 (same) | the judge's `max(2, len(gold_words)//2)` word-overlap bar on ~70-90-word synthesis golds is structurally unreachable |
+
+qwen3.8-max diagnostic (same evidence, `qwen/qwen3.8-max` via the
+OpenRouter registry): gpt4_8279ba02 → "10 days ago.", gpt4_7a0daae1 →
+"One week.", f4f1d8a4_abs → "I don't know what your dad gave you…" —
+**the reader MODEL is the binding constraint on the content class**; the
+ask lane cannot serve qwen today (deepseek-direct primary 400s on the
+qwen spec and 400 is not a failover trigger).
+
+### (a) Graded `_abs` — re-run: **26/30 judge-marker (0.867) < 0.9 — compression trade-off**
+
+Full 30-Q `_abs` set, unified product reader, MockJudge, 4 chunks
+(9/9/9/3), A1 invariant held (marker never crossed; skip count 0). The 4
+fails are all FALSE-COMMITS on the near-miss class (031748ae_abs,
+a96c20ee_abs, 2133c1b5_abs, 09ba9854_abs): the compressed Phase 2 makes
+the weak model commit related-but-not-asked material ("Senior Software
+Engineer" for the asked "Manager" role; taxi price for the absent bus
+fare). Prompt-ablation: a near-miss subject guard ("related or
+near-miss material about a DIFFERENT instance/role/item is not the asked
+subject") recovers (a) to 29/30 at the cost of RE-INTRODUCING the
+derived-class over-abstention (gpt4_8279ba02 / gpt4_7a0daae1 abstain
+again) — deepseek-v4-flash cannot hold both classes; the model is the
+constraint, not the clause.
+
+### (b) Product-lane known-answer smoke — re-run: **PASS**
+
+```
+answer: The office hours policy is 9am to 5pm.
+abstained: False | model: deepseek-v4-flash | provider: deepseek-direct | route: deepseek-direct
+cost_estimate_usd: 0.000156 | context_tokens: 24 | question_type: None
+```
+
+### LLM regression module (fixture mode) — re-run: **PASS**
+
+`TORTOISE_ASK_LLM_REGRESSION=1 uv run pytest tests/test_ask_regression_llm.py`
+→ green; transcripts regenerated for the new prompt hash
+(`tools/gen_ask_transcripts.py`, P2-25).
+
+### Gate status after the #2027 calibration fix
+
+| Sub-gate | Verdict | Blocking? |
+|---|---|---|
+| (a) graded `_abs` | **FAIL (0.867 < 0.9)** — near-miss false-commit class under the compressed Phase 2 on the default reader model | ⛔ |
+| (b) known-answer smoke | **PASS** | ✓ |
+| (c) detector parity | **FAILURE BRANCH** — #2009 OPEN, default in effect | ✓ (branch recorded) |
+| (d) QA spot-check ≥ 0.8 | **FAIL — 0.38 (8/21); abstention class fixed, aggregate bound by model content + FTS-40 retrieval + judge bar** | **⛔ merge BLOCKED** |
+
+**MERGE REMAINS BLOCKED.** The reader-calibration deliverable (#2027) is
+DONE (the over-abstention defect is fixed; the issue's own evidence
+shapes — d6233ab6 / gpt4_8279ba02 — no longer abstain), but the (d)
+aggregate cannot reach 0.8 on the shipped lane regardless of the prompt
+(empirically bounded by reader-model content quality + FTS-40 retrieval +
+containment-judge bar). **Unblock path (follow-up):** (1) upgrade the ask
+reader model to a capable model (qwen3.8-max proven) — requires
+provider routing for the ask lane (the deepseek-direct primary 400s on
+non-deepseek specs and 400 is not a failover trigger) + the M5
+`READER_MODEL` pin + cost re-measure; (2) retrieval: FTS top-40 misses
+gold turns on long haystacks (ceb5 at rank ~70) — hybrid/reranking or a
+reviewed top-k for the ask lane; (3) composition note: the 3 SSP
+long-gold questions are structurally ungradeable by the containment
+judge's word-overlap bar. Tracked via #2009 (detector) + a new issue for
+the reader-model/retrieval upgrade.
+
+---
+
 ## Results (2026-08-30 — FULL pre-ship gate run, post-review-clean PR #2013)
 
 > All four sub-gates + the LLM regression module re-run in full on the

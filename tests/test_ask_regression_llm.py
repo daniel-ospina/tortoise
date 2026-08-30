@@ -9,7 +9,7 @@ VENICE_API_KEY). Two modes:
     transport transcripts at ``tests/fixtures/ask_llm_transcripts/`` in the
     docker/unit lane — deterministic replayed ``complete()`` transcripts for
     (a) gold-verbatim-commit (gold string in context → MUST commit,
-    abstained=False), (b) vacuity-answer (partial/chunk evidence → MUST
+    abstained=False), (b) decision-commit (the decision IS in context → MUST
     answer, not abstain), (c) genuine-absence-abstain (→ MUST abstain),
     PLUS (d) all-superseded-stale-evidence (MUST answer from stale evidence
     WITH the [SUPERSEDED BY] markers present — SINGLE-SIDED assertion: a
