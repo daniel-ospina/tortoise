@@ -103,7 +103,7 @@ def test_operator_replay_with_event_input_creates_edges(s1919):
     journal (pre-existing gap, out of #1919 scope); rebuild_all's two-pass
     structure upserts all EventRecorded (pass 1b) before wiring operator
     edges (pass 2), so the Event node resolves at edge time."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     pa = sdk.create_point("statement", "A")["id"]
     eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
     # journal the EventRecorded (session-indexing shape) so the rebuild
@@ -141,7 +141,7 @@ def test_operator_live_vs_replay_edge_stats_equal(s1919):
     IDENTICAL edge_stats (operators/impl/nand/input). Pre-fix live had
     input_edges=0 while the replay produced one INPUT edge per input
     (fold-parity violation)."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
     pc = sdk.create_point("statement", "C")["id"]
@@ -163,7 +163,7 @@ def test_operator_live_vs_replay_edge_stats_equal(s1919):
 def test_operator_live_input_edge_shape_matches_replay(s1919):
     """P2-10 shape leg: the live INPUT edges carry the same (idx) property the
     replay MERGE writes — (s)-[:INPUT {idx}]->(o) per input, in input order."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
     op = sdk.create_operator("IMPL", pa, [pb])["id"]

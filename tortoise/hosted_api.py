@@ -2078,7 +2078,9 @@ _IMPORT_MAX_BYTES = 64 * 1024 * 1024
 # Idempotency-ledger / quarantine props on the Team node (control plane).
 _IMPORT_LEDGER_PROPS = ("last_import_sha256", "last_import_quarantined_sha256")
 
-_SENSITIVE_OP_LIMITS = {"export": 20, "team_delete": 5, "import": 5}  # per hour per IP
+_SENSITIVE_OP_LIMITS = {
+    "export": 20, "team_delete": 5, "import": 5, "pack_manifest": 5,
+}  # per hour per IP
 _SENSITIVE_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
 _SENSITIVE_LOCK = asyncio.Lock()
 
@@ -2302,7 +2304,8 @@ def _check_dashboard_key_login(team: dict, request: Request) -> None:
 
 
 async def _check_sensitive_op_rate_limit(request: Request, op: str) -> None:
-    """Per-IP hourly budget for sensitive team ops (export / team_delete)."""
+    """Per-IP hourly budget for sensitive team ops (export / team_delete /
+    import / pack_manifest)."""
     max_per_hour = _SENSITIVE_OP_LIMITS.get(op)
     if max_per_hour is None:
         return
@@ -3422,17 +3425,27 @@ async def upload_pack_manifest(
     namespace → 422, connector/tool entrypoints (ontology-only v1) → 422.
     Stores the manifest graph-natively in the tenant's graph
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
-    idempotent MERGE + per-(graph, namespace) lock #1307).
+    idempotent MERGE + per-(graph, namespace) lock #1307). Per-IP rate
+    budget (429) — checked BEFORE the body is read (cheapest rejection,
+    mirrors import #1389/#1230). Check-time charging (the sensitive-op
+    family doctrine; #1719's deferred terminal charge is session-login
+    only) — a server fault (503) consumes budget; a family-wide
+    defer_charge migration is tracked separately. The MCP install tool
+    (tortoise_pack_install) calls upsert_tenant_manifest in-process and
+    is NOT covered by this REST budget (tracked separately).
 
     Response matrix: no auth → 401; request body over the wire cap
     (~397KB — checked BEFORE any parse) → 413 "manifest request body
     exceeds the size cap"; malformed JSON / empty body → 500; missing
     manifest_yaml → 422 "missing required field: manifest_yaml"; invalid
     manifest → 422 {errors}; manifest over 64KB → 413 "manifest exceeds
-    64KB"; success → 201 {activated, namespace}.
+    64KB"; rate budget exhausted → 429 "Rate limit exceeded for
+    pack_manifest. Please try again later." (Retry-After: 3600); upsert
+    failure → 503; success → 201 {activated, namespace}.
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
+    await _check_sensitive_op_rate_limit(request, "pack_manifest")
     team_id = team.get("team_id")
     if not team_id:
         raise HTTPException(status_code=401, detail="Authentication required")
