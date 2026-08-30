@@ -259,7 +259,25 @@ replaying a new journal silently drops the new record kinds (and reintroduces
 wipe-before-parse, turning one torn line into total loss). The restore path is
 a pre-release backup per the drill above.
 
-### Troubleshooting: why isn't my file indexed?
+#
+## 8. Expansion packs (optional)
+
+Tortoise ships five starter expansion packs by default (`dev`, `marketing`,
+`product-strategy`, `pm`, `agent-ops`) — YAML manifests that extend the core
+ontology with a domain vocabulary, chains, and extraction guidance. The
+starter set loads automatically on every install; `tortoise_packs_list` shows
+your active packs.
+
+- **Use a custom pack:** put `packs/<namespace>/manifest.yaml` under
+  `TORTOISE_PACKS_DIR` and restart (missing/empty dirs warn and fall back —
+  never a silent empty registry).
+- **Author one:** `tortoise pack new mydomain` scaffolds from the template;
+  `tortoise pack validate <dir>` checks it against the shared validator
+  before you install.
+- **Learn the format:** [docs/EXPANSION_PACKS.md](EXPANSION_PACKS.md) (behavior)
+  + `packs/_template/manifest.yaml` (schema).
+
+## Troubleshooting: why isn't my file indexed?
 
 1. Re-run `tortoise index directory <dir>` manually and read the `errors[]`
    entries (each names the rel-path + a cause-class: `decode` / `size` /

@@ -273,6 +273,20 @@ class KindClassifier:
                 assignments[iid] = {
                     "kind": reranked, "margin": rerank_sim, "mode": "rerank"
                 }
+                # #1934 (epic #1891 slice 3): kind-level enforcement seam —
+                # when a NEAR-MISS pair involves a kind whose pack declares
+                # ``enforcement: retry``, record the bounded re-attempt
+                # signal (the extractor's M3 loop provides the actual
+                # bounded retry ≤3 attempts; this marks the near-miss for
+                # it so the ladder is no longer dead config on this path).
+                try:
+                    from tortoise.enforcement import resolve_enforcement
+                    nm = self.index.near_misses(reranked)
+                    if any(resolve_enforcement(kind=k) == "retry" for k in [reranked] + list(nm or [])):
+                        stats["near_miss_retries"] = stats.get("near_miss_retries", 0) + 1
+                except Exception:
+                    # the classification batch
+                    pass
                 continue
             stats["adjudication_tail"] += 1
             tail.append((iid, item, top))

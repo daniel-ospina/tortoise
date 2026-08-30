@@ -643,6 +643,8 @@ relations:
 ```yaml
 namespace: dev
 name: "Development"
+version: "0.1.0"
+tier: free
 ontology:
   extends: core
   objectKinds: [epic, issue, code]
@@ -650,17 +652,33 @@ ontology:
   equivalentTo: {issue: [pm:task]}
   pointKinds: [requirement, bug]
   documentKinds: [architectureDoc, apiSpec]
+  kindDefs:                     # extractor prompt material (v3, epic #909)
+    epic:
+      description: A large body of work decomposed into issues
+      nearMisses: [issue]
   relations:
     - predicate: decomposesInto
       mechanism: IMPL
       semantics: hasPart
       fromKind: dev:epic
       toKind: dev:issue
-  hierarchies:
-    - path: "Epic → Issue"
+      extractable: true
+  chains:                       # business-logic paths (v3)
+    - id: epicToCode
+      steps: [epic, issue, code]
+      enforcement: warn
+  memory_granularity: 'Durable: the epic/issue state and the reasoning.
+    Ephemeral: sprint mechanics, ticket logistics.'
+extraction:                     # extraction activation + enforcement (v3)
+  active: true
+  sourceTypes: [conversation]
+  enforcement:
+    default: warn
+    kinds:
+      requirement: retry
 ```
 
-Packs are loaded via the pack registry (`PackRegistry`) at startup; their kinds extend the core vocabulary and are queryable via `expand_kind` / `equivalentTo`.
+Packs are loaded via the pack registry (`PackRegistry`) at startup; their kinds extend the core vocabulary and are queryable via `expand_kind` / `equivalentTo`. The manifest is **declarative only — no code executes on load**; connector/tool entrypoints are code references that are allowlisted (starter packs) and rejected on hosted tenant uploads (ontology-only v1, epic #1891). Authoring guidance: `docs/EXPANSION_PACKS.md` (behavior) + `packs/_template/manifest.yaml` (machine-checkable schema).
 
 ---
 

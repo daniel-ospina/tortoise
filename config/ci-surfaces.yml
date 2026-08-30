@@ -50,10 +50,12 @@ surfaces:
   - test_email_integration_resend.py
   - test_email_notify.py
   - test_email_signup.py
+  - test_enforcement.py
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
   - test_export_cli.py
+  - test_export_pack_config.py
   - test_failure_contract.py
   - test_fake_control_plane.py
   - test_free_team_entitlement.py   # main-side drift unblock (#1929): committed on main (entitlement gate work) but never added to selection — the --integrity gate fails every PR without it
@@ -118,6 +120,8 @@ surfaces:
   - test_about_edges.py
   - test_about_event_untangle.py
   - test_action_endpoints_dual_auth.py
+  - test_agent_ops_pack.py
+  - test_agent_ops_supersede.py
   - test_alert_store.py
   - test_analytics.py
   - test_analyze.py
@@ -252,9 +256,11 @@ surfaces:
   - test_ops_safety.py
   - test_orient_direct_consolidation.py
   - test_p1_differentiators.py
+  - test_pack_cli.py
   - test_pack_content_v3.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  - test_pack_manifest_store.py
   - test_pack_shipping.py
   - test_pack_shipping_wheel.py
   - test_pack_state.py

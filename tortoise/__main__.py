@@ -2917,6 +2917,10 @@ def _cmd_export(args) -> int:
 
     try:
         dump = dump_graph(proj.g, graph_name=proj.graph_name)
+        # #1936: pack-config block rides INSIDE the payload (same integrity
+        # hash as the dump — additive v1.1, never an envelope sibling).
+        from tortoise.export import collect_pack_config
+        dump["pack_config"] = collect_pack_config(proj)
     except Exception as e:
         print(f"Error: graph dump failed: {e}", file=sys.stderr)
         proj.close()
@@ -3069,6 +3073,118 @@ def _cmd_validate(args) -> int:
     if violations and not getattr(args, "warn_only", False):
         return 1
     return 0
+
+
+# ── tortoise pack new / pack validate (#1931, epic #1891 slice 2) ────────
+
+# Starter namespaces a pack author must not claim (mirrors the hosted
+# upload's 422 reserved-namespace rejection — one guard, both surfaces).
+RESERVED_STARTER_NAMESPACES = frozenset(
+    ("dev", "pm", "marketing", "product-strategy", "agent-ops")
+)
+
+
+def _cmd_pack_new(args) -> int:
+    """tortoise pack new <namespace> — scaffold from the template.
+
+    Validates the namespace BEFORE writing (camelCase, no colons, not a
+    canonical kind, not a reserved starter name) so a broken pack is never
+    created. Writes <dir>/<namespace>/manifest.yaml filled with the
+    namespace + name + version.
+    """
+
+    from tortoise.pack_registry import (
+        CANONICAL_DOCUMENT_KINDS,
+        CANONICAL_EVENT_KINDS,
+        CANONICAL_OBJECT_KINDS,
+        CANONICAL_POINT_KINDS,
+    )
+
+    ns = (args.namespace or "").strip()
+    errors: list[str] = []
+    if not ns:
+        errors.append("namespace is required")
+    if ns and ":" in ns:
+        errors.append(f"namespace '{ns}' must not contain ':'")
+    if ns and ns[0].isupper():
+        errors.append(f"namespace '{ns}' should be camelCase (lowercase first letter)")
+    if ns and ns in RESERVED_STARTER_NAMESPACES:
+        errors.append(f"namespace '{ns}' is a reserved starter pack — pick a different name")
+    _canon = CANONICAL_OBJECT_KINDS | CANONICAL_POINT_KINDS | CANONICAL_EVENT_KINDS \
+        | CANONICAL_DOCUMENT_KINDS
+    if ns and ns in {k.lower() for k in _canon}:
+        errors.append(f"namespace '{ns}' collides with a canonical kind — pick a different name")
+    if errors:
+        for e in errors:
+            print(f"tortoise pack new: ✗ {e}", file=sys.stderr)
+        return 1
+
+    src = Path(__file__).resolve().parent.parent / "packs" / "_template" / "manifest.yaml"
+    if not src.exists():
+        print("tortoise pack new: ✗ template not found — install includes packs/_template/",
+              file=sys.stderr)
+        return 1
+    base = Path(args.dir) if args.dir else Path(__file__).resolve().parent.parent / "packs"
+    dest_dir = base / ns
+    dest = dest_dir / "manifest.yaml"
+    if dest.exists():
+        print(f"tortoise pack new: ✗ {dest} already exists", file=sys.stderr)
+        return 1
+    text = src.read_text()
+    text = text.replace("namespace:  # REQUIRED: set this (e.g., \"myapp\")",
+                        f"namespace: {ns}")
+    text = text.replace("name:  # REQUIRED: set this (e.g., \"My Domain Pack\")",
+                        f"name: {ns.title()} Pack")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest.write_text(text)
+    print(f"tortoise pack new: ✓ scaffolded {dest}")
+    print(f"  → edit kinds/chains, then run: tortoise pack validate {dest_dir}")
+    return 0
+
+
+def _cmd_pack_validate(args) -> int:
+    """tortoise pack validate <dir> — schema + cross-pack validation.
+
+    Reuses PackRegistry._validate + _validate_cross_pack_refs (thin glue —
+    the validator is the single source of truth). Exit 0 clean, 1 errors.
+    Accepts the pack dir (packs/<ns>) or its parent (a packs/ dir).
+    """
+    import json as _json
+
+    from tortoise.pack_registry import PackRegistry
+
+    target = Path(args.dir).resolve()
+    packs_dir = target.parent if (target / "manifest.yaml").exists() else target
+    if not packs_dir.is_dir():
+        print(f"tortoise pack validate: ✗ {packs_dir} is not a directory", file=sys.stderr)
+        return 1
+    reg = PackRegistry(packs_dir)
+    reg.load_all()
+    errors: dict[str, list[str]] = {}
+    for ns, errs in reg.errors.items():
+        if (packs_dir / ns / "manifest.yaml").exists() or ns == target.name:
+            errors[ns] = errs
+    ok = not errors
+    if getattr(args, "json", False):
+        print(_json.dumps({
+            "ok": ok,
+            "packs_dir": str(packs_dir),
+            "loaded": sorted(reg.packs),
+            "errors": errors,
+        }, indent=2))
+    else:
+        print(f"tortoise pack validate: {packs_dir}")
+        for ns in sorted(reg.packs):
+            print(f"  ✓ {ns}")
+        for ns, errs in errors.items():
+            print(f"  ✗ {ns}:")
+            for e in errs:
+                print(f"      {e}")
+        if ok:
+            print("✓ Clean — pack(s) validate")
+        else:
+            print(f"✗ {sum(len(v) for v in errors.values())} error(s)")
+    return 0 if ok else 1
 
 
 def _cmd_audit(args) -> int:
@@ -4872,6 +4988,18 @@ def main(argv: list[str] | None = None) -> int:
     vld.add_argument("--db", default=None, help="Docker URI or file path (default: TORTOISE_DB_URI / FALKORDB_* / embedded path)")
     vld.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     vld.add_argument("--warn-only", action="store_true", help="Report violations but exit 0 (pure advisory — never gates)")
+
+    # ── pack authoring (#1931, epic #1891 slice 2) ─────────────────────────
+    pk = sp.add_parser("pack", help="Expansion-pack authoring (scaffold + validate)")
+    pack_sp = pk.add_subparsers(dest="pack_cmd")
+    pn = pack_sp.add_parser("new", help="Scaffold a new expansion pack from the template")
+    pn.add_argument("namespace", help="Pack namespace (camelCase, no colons, not a reserved starter name)")
+    pn.add_argument("--dir", default=None,
+                    help="Output dir for <dir>/<namespace>/manifest.yaml (default: repo packs/ dir)")
+    pv = pack_sp.add_parser("validate", help="Validate a pack directory against the registry schema")
+    pv.add_argument("dir", help="Path to the pack dir containing manifest.yaml (or its parent packs/ dir)")
+    pv.add_argument("--db", default=None, help="DB target (unused for pure schema validation; kept for CLI convention)")
+    pv.add_argument("--json", action="store_true", help="Machine-readable JSON output")
     cc = sp.add_parser("check-consistency", help="Verify event log matches graph state")
     cc.add_argument("--db", required=True, help="Docker URI or file path")
     cc.add_argument("--log", required=True, help="Path to events.jsonl")
@@ -5162,6 +5290,13 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_export(args)
     elif args.cmd == "validate":
         return _cmd_validate(args)
+    elif args.cmd == "pack":
+        if args.pack_cmd == "new":
+            return _cmd_pack_new(args)
+        if args.pack_cmd == "validate":
+            return _cmd_pack_validate(args)
+        print("tortoise pack: unknown subcommand. Try: tortoise pack new --help", file=sys.stderr)
+        return 1
     elif args.cmd == "migrate-db":
         from tortoise.migrate_db import main as _migrate_main
         return _migrate_main(["--force"] if args.force else [])

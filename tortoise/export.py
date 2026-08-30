@@ -64,6 +64,42 @@ class ExportError(RuntimeError):
 # ── canonical serialization ──────────────────────────────────────────────────
 
 
+def collect_pack_config(proj) -> dict:
+    """#1936: the pack-config block carried INSIDE the encrypted payload.
+
+    Reads the graph's ``PackInstall`` activation records (namespace, version,
+    source) plus the ``:PackManifest`` nodes' YAML (custom packs only —
+    starter packs live in the shared catalog, yaml=null). Shape (v1):
+    ``{schema_version: 1, packs: [{namespace, version, activated, yaml}]}``
+    — ``activated`` mirrors the record's status/active, ``yaml`` is the
+    custom manifest text or null for starter packs.
+    """
+    records = []
+    try:
+        rows = proj.g.query(
+            "MATCH (p:PackInstall) RETURN p.namespace, p.version, "
+            "p.source, p.status ORDER BY p.namespace"
+        ).result_set
+        for ns, version, source, status in rows:
+            yaml_text = None
+            if source == "custom":
+                mrows = proj.g.query(
+                    "MATCH (m:PackManifest {namespace: $ns}) RETURN m.yaml",
+                    params={"ns": ns},
+                ).result_set
+                yaml_text = mrows[0][0] if mrows else None
+            records.append({
+                "namespace": ns,
+                "version": version or "0.1.0",
+                "activated": (status or "active") == "active",
+                "yaml": yaml_text,
+            })
+    except Exception:
+        # failure must not fail the export (the graph dump is the payload).
+        return {"schema_version": 1, "packs": []}
+    return {"schema_version": 1, "packs": records}
+
+
 def canonical_json_bytes(payload: dict) -> bytes:
     """Byte-stable canonical serialization (frozen design decision #4)."""
     return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")

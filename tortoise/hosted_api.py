@@ -3167,10 +3167,74 @@ async def list_packs(team: dict = Depends(get_current_team)):  # noqa: B008
         # to_thread (contextvars-propagating, py3.9+) — never
         # run_in_executor (does NOT propagate; cpython#78195).
         packs = await asyncio.to_thread(get_tenant_packs, sdk)
+        # #1935: merge tenant-authored manifests (name/version from the
+        # :PackManifest node — richer than the PackInstall join alone).
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        manifests = await asyncio.to_thread(get_tenant_manifests, sdk)
+        by_ns = {m["namespace"]: m for m in manifests}
+        merged = []
+        for p in packs:
+            m = by_ns.get(p["namespace"])
+            if m and p.get("source") == "custom":
+                p = {**p, "name": m.get("name", p.get("name")),
+                     "version": m.get("version", p.get("version"))}
+            merged.append(p)
+        packs = merged
     except Exception:
         _logger.exception("pack introspection failed for team %s", team_id)
         raise HTTPException(status_code=503, detail="Pack catalog unavailable")  # noqa: B904
     return {"packs": packs}
+
+
+@app.post("/v1/packs/manifests", status_code=201)
+async def upload_pack_manifest(
+    request: Request,
+    team: dict = Depends(get_current_team),  # noqa: B008
+):
+    """#1935 (epic #1891 slice 4): per-tenant custom pack upload.
+
+    Body: ``{manifest_yaml: str}`` — the namespace is read from the
+    manifest's REQUIRED field (no redundant payload field). Validates
+    against the SHARED registry validator (schema + cross-pack vs
+    core+starter), then applies the tenant policy: reserved starter
+    namespace → 422, connector/tool entrypoints (ontology-only v1) → 422.
+    Stores the manifest graph-natively in the tenant's graph
+    (``:PackManifest``) and activates it (``PackInstall`` source='custom',
+    idempotent MERGE + per-(graph, namespace) lock #1307).
+
+    Response matrix: no auth → 401; invalid/malformed → 422 {errors};
+    oversized (>64KB) → 413; success → 201 {activated, namespace}.
+    Cross-tenant isolation is structural (tenant graph namespace — no
+    tenant selector exists on any surface).
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    body = await request.json()
+    manifest_yaml = (body or {}).get("manifest_yaml") if isinstance(body, dict) else None
+    if not manifest_yaml or not isinstance(manifest_yaml, str):
+        raise HTTPException(status_code=422,
+                            detail="missing required field: manifest_yaml")
+    from tortoise.pack_manifest_store import (
+        MAX_MANIFEST_BYTES,
+        upsert_tenant_manifest,
+        validate_manifest,
+    )
+    if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
+        raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
+    result = validate_manifest(manifest_yaml)
+    if not result.ok:
+        raise HTTPException(status_code=422,
+                            detail={"errors": result.errors or ["invalid manifest"]})
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        record = await asyncio.to_thread(upsert_tenant_manifest, sdk, manifest_yaml)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"errors": [str(e)]})  # noqa: B904
+    except Exception:
+        _logger.exception("pack manifest upload failed for team %s", team_id)
+        raise HTTPException(status_code=503, detail="Pack catalog unavailable")  # noqa: B904
+    return {"activated": True, **record}
 
 
 def _team_is_anon(team_id: str) -> bool:
@@ -7754,6 +7818,82 @@ async def _quarantine_import(
         _logger.warning("quarantine stamp failed for team %s", team_id)
 
 
+def _apply_import_pack_config(sdk, payload: dict) -> None:
+    """#1936: apply the payload's pack config after a successful restore.
+
+    - ``pack_config`` present: for each pack with a custom manifest ``yaml``,
+      upsert the tenant manifest (validated — a failure raises ValueError,
+      quarantining the import: fail-loudly, never silent partial). Starter
+      packs (yaml null) get their activation record ensured.
+    - ``pack_config`` ABSENT (pre-v1.1 artifact): loud-mismatch guard — if
+      the dump references namespaced kinds NOT in the shared catalog or
+      starter set, the vocabulary would be silently dropped → raise.
+    """
+    from tortoise.domain_loader import _get_registry
+    from tortoise.pack_manifest_store import upsert_tenant_manifest
+    from tortoise.pack_state import DEFAULT_STARTER_PACKS
+
+    pc = payload.get("pack_config")
+    if pc is None:
+        _check_foreign_kinds(payload)
+        return
+    packs = pc.get("packs", []) if isinstance(pc, dict) else []
+    for pack in packs:
+        ns = pack.get("namespace")
+        if not ns:
+            continue
+        yaml_text = pack.get("yaml")
+        if yaml_text:
+            # Validated upsert — ValueError (invalid manifest) quarantines.
+            upsert_tenant_manifest(sdk, yaml_text)
+        else:
+            # Starter-pack activation record (idempotent MERGE).
+            reg = _get_registry()
+            meta = reg.pack_summaries().get(ns) if reg is not None else None
+            if meta is None and ns not in DEFAULT_STARTER_PACKS:
+                raise ValueError(f"pack_config references unknown starter pack '{ns}'")
+            from tortoise.pack_state import _pack_install_lock, _resolved_graph_name, _target_graph
+            g = _target_graph(sdk, None)
+            lock_graph = _resolved_graph_name(sdk, None)
+            now = datetime.now(UTC).isoformat()
+            with _pack_install_lock(lock_graph, ns):
+                g.query(
+                    "MERGE (p:PackInstall {namespace: $ns}) "
+                    "SET p.version = $version, p.status = 'active', "
+                    "    p.installed_at = coalesce(p.installed_at, $now)",
+                    params={"ns": ns, "version": str(pack.get("version", "0.1.0")),
+                            "now": now},
+                )
+
+
+def _check_foreign_kinds(payload: dict) -> None:
+    """Loud-mismatch guard for pre-v1.1 artifacts (no pack_config).
+
+    Scans the dump's node kinds for ``ns:kind`` values where ns is neither a
+    starter namespace nor a shared-catalog pack — such a vocabulary would be
+    silently dropped on import. Raises ValueError (→ 422 quarantine).
+    """
+    from tortoise.domain_loader import _get_registry
+    from tortoise.pack_state import DEFAULT_STARTER_PACKS
+
+    reg = _get_registry()
+    known = set(DEFAULT_STARTER_PACKS)
+    if reg is not None:
+        known |= set(reg.pack_summaries())
+    foreign: set[str] = set()
+    for node in payload.get("nodes", []) or []:
+        kind = node.get("kind") or node.get("pointKind") or node.get("objectKind")
+        if isinstance(kind, str) and ":" in kind:
+            ns = kind.split(":", 1)[0]
+            if ns not in known and ns not in ("core",):
+                foreign.add(kind)
+    if foreign:
+        raise ValueError(
+            "artifact predates pack-config (v1.1) but references unknown pack "
+            f"kinds {sorted(foreign)[:5]} — the vocabulary would be lost; "
+            "re-export with a newer tortoise version")
+
+
 def _rebuild_import_indexes(sdk, graph_name: str) -> None:
     """Rebuild range/FTS/vector indexes on the swapped live graph — the
     logical dump + GRAPH.COPY restores data, not schema (mirror of the
@@ -7903,6 +8043,17 @@ async def import_team(team_id: str, request: Request,
             await asyncio.to_thread(
                 _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
             )
+            # #1936: apply the payload's pack config (custom manifests +
+            # starter activations) so the migrated vocabulary is live. Any
+            # pack failure quarantines the import (fail-loudly, never silent
+            # partial).
+            try:
+                await asyncio.to_thread(_apply_import_pack_config, sdk, parsed["payload"])
+            except ValueError as e:
+                await _quarantine_import(
+                    request, team_id, user, sha256=sha, reason=str(e)
+                )
+                raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             await _async_audit(
                 request, team_id, "team_import",
                 resource_type="team", resource_id=team_id,

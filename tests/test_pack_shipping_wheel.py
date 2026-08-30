@@ -16,6 +16,7 @@ test-slow CI job (90m budget), never in the fast gate.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import tarfile
@@ -104,7 +105,12 @@ def built_dist(tmp_path_factory):
 class TestWheelInstall:
     """Clean-venv install of the built (sdist-rebuilt) wheel loads the starter set."""
 
-    def test_wheel_install_loads_starter_set(self, built_dist, tmp_path):
+    def test_wheel_install_loads_starter_set(self, built_dist, tmp_path, monkeypatch):
+        # #1930: deliberately inject a bogus TORTOISE_PACKS_DIR into the runner
+        # env so the in-venv `default_packs_dir() == packaged` assertion passes
+        # ONLY via the env= sanitize override on the subprocess below — if the
+        # override regresses, the wheel smoke fails (enforced, not a comment).
+        monkeypatch.setenv("TORTOISE_PACKS_DIR", str(tmp_path / "bogus-packs"))
         venv = tmp_path / "venv"
         subprocess.run([sys.executable, "-m", "venv", str(venv)], check=True)
         pip = venv / "bin" / "pip"
@@ -143,6 +149,10 @@ assert t.exists(), f"sample transcript missing: {t}"
 print(f"wheel smoke OK: {n} >= {bound}; transcript at {t}")
 """
         res = subprocess.run([str(python), "-c", code], capture_output=True,
-                             text=True, timeout=600, cwd=tmp_path)
+                             text=True, timeout=600, cwd=tmp_path,
+                             # #1930: sanitize the ambient TORTOISE_PACKS_DIR
+                             # (blank≡unset) — the bogus value injected above
+                             # must never redirect the wheel smoke.
+                             env=dict(os.environ, TORTOISE_PACKS_DIR=""))
         assert res.returncode == 0, f"in-venv assertion failed:\n{res.stdout}\n{res.stderr}"
         assert "wheel smoke OK" in res.stdout
