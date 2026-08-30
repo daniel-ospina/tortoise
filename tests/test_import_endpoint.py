@@ -575,15 +575,9 @@ class TestImportValidationFailClosed:
 # ═══════════════════════════════════════════════════════════════════════════
 
 
-_CUSTOM_MANIFEST = """namespace: tenant-ops
-name: Tenant Operations
-version: 0.1.0
-tier: free
-ontology:
-  extends: core
-  objectKinds:
-  - contract
-"""
+# Shared manifest constant (drift-hazard: one source of truth — the same
+# ontology is validated by the guard tests in test_export_pack_config.py).
+from tests.test_export_pack_config import CUSTOM_MANIFEST as _CUSTOM_MANIFEST  # noqa: E402
 
 
 class TestImportForeignKindsGuard:
@@ -631,6 +625,29 @@ class TestImportForeignKindsGuard:
         r = _post_import(tc, artifact, key)
         assert r.status_code == 422, r.text
         assert "declares no packs" in r.text  # accurate reason for the v1.1 empty-packs path
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
+        assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
+
+    def test_import_partial_packs_foreign_kind_422(self, sb_client, as_user,
+                                                   capture_audit):
+        """v1.1 artifact whose declared packs do NOT cover every namespaced
+        kind in the dump → guard fires → 422 + quarantine, nothing lands.
+        (Reachable on orphaned/partial pack state: a kind whose namespace is
+        in no source of truth — catalog, starters, dump manifests, declared
+        packs — would silently drop, the exact #2028 failure class.)"""
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=1, n_edges=0)
+        payload["nodes"][0]["props"]["objectKind"] = "ghost:poltergeist"
+        payload["pack_config"] = {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0", "activated": True,
+             "yaml": _CUSTOM_MANIFEST}]}
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "does not cover" in r.text
         assert any(e["operation"] == "quarantined_import" for e in capture_audit)
         assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
 

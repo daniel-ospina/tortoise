@@ -198,6 +198,41 @@ class TestForeignKindsGuard:
         with pytest.raises(ValueError, match="predates pack-config"):
             _check_foreign_kinds(payload)
 
+    def test_declared_pack_namespaces_absorbed(self):
+        """v1.1 artifact: namespaces declared in pack_config are legitimate
+        (manifest upsert establishes them post-swap) → pass (#2028)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0",
+             "activated": True, "yaml": CUSTOM_MANIFEST}]},
+            "nodes": [{"dump_id": 1, "labels": ["Object"],
+                        "props": {"objectKind": "tenant-ops:contract"}}]}
+        _check_foreign_kinds(payload)
+
+    def test_partial_packs_do_not_mask_foreign_kinds(self):
+        """Declared packs for namespace A do NOT legitimize kinds from
+        undeclared namespace B — same silent-drop class as pre-v1.1
+        (#2028, follow-up #2039)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0",
+             "activated": True, "yaml": CUSTOM_MANIFEST}]},
+            "nodes": [{"dump_id": 1, "labels": ["Object"],
+                        "props": {"objectKind": "ghost:poltergeist"}}]}
+        with pytest.raises(ValueError, match="does not cover"):
+            _check_foreign_kinds(payload)
+
+    def test_malformed_packs_list_gets_accurate_reason(self):
+        """pack_config present with a truthy NON-list packs → the guard
+        still rejects foreign kinds, labeled as not-covered (not mislabeled
+        pre-v1.1) (#2028 code-review)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"pack_config": {"schema_version": 1, "packs": "junk"},
+                    "nodes": [{"dump_id": 1, "labels": ["Object"],
+                                "props": {"objectKind": "tenant-ops:contract"}}]}
+        with pytest.raises(ValueError, match="does not cover"):
+            _check_foreign_kinds(payload)
+
     def test_real_dump_graph_foreign_kind_raises(self, sdk):
         """Guard against ACTUAL dump_graph output — the exact shape the bug
         shipped against (#2028 Indicator 3).
@@ -223,6 +258,18 @@ class TestForeignKindsGuard:
         dump = dump_graph(sdk._get_proj().g, graph_name="t")
         dump.pop("pack_config", None)
         _check_foreign_kinds(dump)
+
+    def test_real_dump_graph_event_kind_foreign_raises(self, sdk):
+        """Real-dump coverage for a second writer key (eventKind) — locks
+        the props scan against actual dump output for non-point kinds
+        (#2028, code-review #2041)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        from tortoise.hosted_backup import dump_graph
+        sdk.create_event("Contract signed", eventKind="tenant-ops:contract_signed")
+        dump = dump_graph(sdk._get_proj().g, graph_name="t")
+        dump.pop("pack_config", None)
+        with pytest.raises(ValueError, match="predates pack-config"):
+            _check_foreign_kinds(dump)
 
 
 class TestApplyImportPackConfig:

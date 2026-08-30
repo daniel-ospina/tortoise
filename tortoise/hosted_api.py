@@ -7870,7 +7870,7 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
 
 
 # Kind-carrying prop keys on dump nodes — the 6 live writer keys
-# (sdk.py:9661 kind_field: point/event/subject/document/object/source) plus
+# (sdk.py:9659-9660 kind_field: point/event/subject/document/object/source) plus
 # `kind` (extractor_v2 legacy-compat) and `actionKind` (pack-declared bucket,
 # no current node carrier — future-proof). `op_type` is deliberately NOT here:
 # operator types are a fixed non-namespaced set (IMPL/NAND/MITIGATES).
@@ -7879,15 +7879,20 @@ _KIND_PROP_KEYS = ("pointKind", "objectKind", "eventKind", "documentKind",
 
 
 def _check_foreign_kinds(payload: dict) -> None:
-    """Loud-mismatch guard for pre-v1.1 artifacts (no pack_config).
+    """Loud-mismatch guard against unknown pack vocabulary on import.
 
-    Scans the dump's node kinds for ``ns:kind`` values where ns is neither a
-    starter namespace, a shared-catalog pack, nor a namespace carried by the
-    dump's OWN PackManifest nodes (self-contained vocabulary — a restored
-    manifest makes the vocabulary live, so it must not be rejected). Dump
-    nodes are ``{dump_id, labels, props}`` with kinds inside ``props``
-    (hosted_backup.dump_graph); a namespaced kind from an unknown pack would
-    be silently dropped on import → raise ValueError (→ 422 quarantine).
+    Scans the dump's node kinds for ``ns:kind`` values whose namespace is in
+    NONE of: starter packs, the shared catalog, the dump's own PackManifest
+    nodes (self-contained vocabulary — a restored manifest makes the vocab
+    live), or the artifact's own ``pack_config`` declared packs (v1.1+ — the
+    manifest upsert establishes those namespaces). Such vocabulary would be
+    silently dropped on import → raise ValueError (→ 422 quarantine).
+
+    Fires for three artifact classes: (a) pre-v1.1 (no pack_config); (b)
+    v1.1 with a pack_config declaring no/malformed packs (exporter-emittable
+    for graphs whose custom kinds have no PackInstall records); (c) v1.1
+    whose declared packs do NOT cover every namespaced kind in the dump
+    (partial/orphaned pack state). Each gets a distinct quarantine reason.
 
     Documented boundaries: (a) only NAMESPACED foreign kinds are detectable —
     legacy un-namespaced pack kinds are indistinguishable from core vocab and
@@ -7901,12 +7906,13 @@ def _check_foreign_kinds(payload: dict) -> None:
     from tortoise.domain_loader import _get_registry
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
 
+    pc = payload.get("pack_config")
     reg = _get_registry()
     known = set(DEFAULT_STARTER_PACKS)
     if reg is not None:
         known |= set(reg.pack_summaries())
-    # Absorb namespaces carried by the dump's OWN PackManifest nodes first —
-    # a self-contained artifact restores its vocabulary and must not be
+    # Absorb namespaces carried by the dump's OWN PackManifest nodes — a
+    # self-contained artifact restores its vocabulary and must not be
     # rejected (PackManifest is exported; see _is_export_skip_node).
     for node in payload.get("nodes", []) or []:
         if not isinstance(node, dict):
@@ -7916,6 +7922,16 @@ def _check_foreign_kinds(payload: dict) -> None:
             props = node.get("props") or {}
             if isinstance(props, dict):
                 ns = props.get("namespace")
+                if isinstance(ns, str) and ns:
+                    known.add(ns)
+    # Absorb the artifact's OWN declared pack namespaces (v1.1+) — the
+    # post-swap manifest upsert establishes those vocabularies, so they are
+    # legitimately known; only namespaces in the dump but in NO source of
+    # truth (catalog, starters, dump manifests, declared packs) are foreign.
+    if isinstance(pc, dict):
+        for p in pc.get("packs") or []:
+            if isinstance(p, dict):
+                ns = p.get("namespace")
                 if isinstance(ns, str) and ns:
                     known.add(ns)
     foreign: set[str] = set()
@@ -7932,21 +7948,22 @@ def _check_foreign_kinds(payload: dict) -> None:
                 if ns not in known and ns != "core":
                     foreign.add(kind)
     if foreign:
-        # Accurate quarantine reason: distinguish a genuinely pre-v1.1
-        # artifact (no pack_config at all) from a v1.1 artifact whose
-        # pack_config declares NO packs (exporter-emittable when the graph's
-        # custom kinds have no PackInstall records) — both would drop the
-        # vocabulary, but the remediation differs.
-        pc = payload.get("pack_config")
-        if isinstance(pc, dict) and not pc.get("packs"):
+        # Accurate quarantine reason per artifact class — an operator reading
+        # the audit trail must get the right remediation.
+        if not isinstance(pc, dict):
+            raise ValueError(
+                "artifact predates pack-config (v1.1) but references unknown "
+                f"pack kinds {sorted(foreign)[:5]} — the vocabulary would be "
+                "lost; re-export with a newer tortoise version")
+        if not pc.get("packs"):
             raise ValueError(
                 "pack_config declares no packs but the artifact references "
                 f"unknown pack kinds {sorted(foreign)[:5]} — the vocabulary "
                 "would be lost; install the pack and re-export")
         raise ValueError(
-            "artifact predates pack-config (v1.1) but references unknown pack "
-            f"kinds {sorted(foreign)[:5]} — the vocabulary would be lost; "
-            "re-export with a newer tortoise version")
+            "pack_config does not cover the artifact's pack kinds "
+            f"{sorted(foreign)[:5]} — the vocabulary would be lost; install "
+            "the referenced pack and re-export")
 
 
 def _rebuild_import_indexes(sdk, graph_name: str) -> None:
@@ -8059,25 +8076,16 @@ async def import_team(team_id: str, request: Request,
                 parsed["payload"].get("graph_name"), graph_name,
             )
             try:
-                # #2028: run the foreign-kind guard whenever the artifact
-                # cannot establish its vocabulary — no pack_config at all
-                # (pre-v1.1), or a pack_config with NO packs (exporter-
-                # emittable: collect_pack_config returns {schema_version:1,
-                # packs:[]} for a graph whose custom kinds have no PackInstall
-                # records). Either way the vocabulary would be silently
-                # dropped → reject BEFORE any restore/swap so a rejection 422s
-                # with the live graph untouched and last_import_sha256
-                # unstamped (retries converge). ValueError here is caught by
-                # the except below → quarantine + 422. Post-v1.1 artifacts
-                # WITH packs establish their namespaces via manifest upsert
-                # and skip the guard.
-                pc = parsed["payload"].get("pack_config")
-                if (not isinstance(pc, dict)
-                        or not isinstance(pc.get("packs"), list)
-                        or not pc.get("packs")):
-                    await asyncio.to_thread(
-                        _check_foreign_kinds, parsed["payload"]
-                    )
+                # #2028: run the foreign-kind guard BEFORE any restore/swap so
+                # a rejection 422s with the live graph untouched and
+                # last_import_sha256 unstamped (retries converge). The guard
+                # absorbs the artifact's own pack_config declared namespaces
+                # AND dump-native PackManifest namespaces into its known-set,
+                # so every legitimate artifact (pre-v1.1 core/starter, v1.1
+                # with covering packs, self-contained manifests) passes and
+                # only genuinely undeclared foreign vocabulary 422s —
+                # fail-loudly, never silent partial.
+                await asyncio.to_thread(_check_foreign_kinds, parsed["payload"])
                 result = await asyncio.to_thread(
                     _restore_into_temp_verify_swap,
                     sdk._get_proj().db, parsed["payload"],
@@ -8114,6 +8122,12 @@ async def import_team(team_id: str, request: Request,
             # Idempotency ledger stamp — best-effort; a crash between the swap
             # and this stamp is the documented double-import convergence case
             # (#1230: idempotency is convergence, not strict-once).
+            # #2040: this stamp runs BEFORE _apply_import_pack_config, so a
+            # pack-application failure (invalid manifest, unknown starter)
+            # 422s with the ledger already stamped → re-import converges to
+            # `already` with the vocabulary never applied. Deferred to #2040
+            # (pre-existing #1936 ordering); the #2028 guard path below is
+            # pre-restore and does not stamp.
             await asyncio.to_thread(
                 _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
             )

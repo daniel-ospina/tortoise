@@ -19,7 +19,7 @@ ownedBy: epistemic-team
 **Team:** epistemic-team
 **Role:** product-implementer
 
-**Architecture:** Two-part fix in `tortoise/hosted_api.py`. (1) `_check_foreign_kinds` reads `node.get("props") or {}` for the full kind-key set (`_KIND_PROP_KEYS` = pointKind/objectKind/eventKind/documentKind/subjectKind/sourceKind + compat `kind`/`actionKind`), known-set = DEFAULT_STARTER_PACKS ∪ shared-catalog pack_summaries ∪ dump-native PackManifest namespaces (self-contained vocab), `core` excluded. (2) Hoist the guard into the existing restore try-block (before `_restore_into_temp_verify_swap`, gated on `pack_config is None`, wrapped in `asyncio.to_thread`) so the existing `except (ValueError, KeyError) → _quarantine_import → 422` handler fires with zero side effects — retries converge (no `last_import_sha256` stamp). `_apply_import_pack_config` keeps its pc-None call as idempotent defense-in-depth. No changes to `dump_graph`, `DUMP_FORMAT`, `restore_graph`, `pack_state`, or the hub.
+**Architecture:** Two-part fix in `tortoise/hosted_api.py`. (1) `_check_foreign_kinds` reads `node.get("props") or {}` for the full kind-key set (`_KIND_PROP_KEYS` = pointKind/objectKind/eventKind/documentKind/subjectKind/sourceKind + compat `kind`/`actionKind`), known-set = DEFAULT_STARTER_PACKS ∪ shared-catalog pack_summaries ∪ dump-native PackManifest namespaces ∪ the artifact's OWN declared `pack_config` namespaces (self-contained vocab + manifest-upsert-established vocab), `core` excluded. (2) Hoist the guard into the existing restore try-block — run UNCONDITIONALLY before `_restore_into_temp_verify_swap`, wrapped in `asyncio.to_thread` — so the existing `except (ValueError, KeyError) → _quarantine_import → 422` handler fires with zero side effects; every legitimate artifact passes (its namespaces are absorbed), only genuinely undeclared foreign vocabulary 422s (fail-loudly, never silent partial). Distinct quarantine reason per artifact class: pre-v1.1 (no pack_config), v1.1 empty/malformed packs, v1.1 partial coverage. Retries converge (no `last_import_sha256` stamp on rejection). `_apply_import_pack_config` keeps its pc-None call as idempotent defense-in-depth. No changes to `dump_graph`, `DUMP_FORMAT`, `restore_graph`, `pack_state`, or the hub.
 
 ### Pattern Research
 
@@ -375,25 +375,16 @@ In `tortoise/hosted_api.py`, inside the existing `try:` block that wraps `_resto
 
 ```python
             try:
-                # #2028: run the foreign-kind guard whenever the artifact
-                # cannot establish its vocabulary — no pack_config at all
-                # (pre-v1.1), or a pack_config with NO packs (exporter-
-                # emittable: collect_pack_config returns {schema_version:1,
-                # packs:[]} for a graph whose custom kinds have no PackInstall
-                # records). Either way the vocabulary would be silently
-                # dropped → reject BEFORE any restore/swap so a rejection 422s
-                # with the live graph untouched and last_import_sha256
-                # unstamped (retries converge). ValueError here is caught by
-                # the except below → quarantine + 422. Post-v1.1 artifacts
-                # WITH packs establish their namespaces via manifest upsert
-                # and skip the guard.
-                pc = parsed["payload"].get("pack_config")
-                if (not isinstance(pc, dict)
-                        or not isinstance(pc.get("packs"), list)
-                        or not pc.get("packs")):
-                    await asyncio.to_thread(
-                        _check_foreign_kinds, parsed["payload"]
-                    )
+                # #2028: run the foreign-kind guard BEFORE any restore/swap so
+                # a rejection 422s with the live graph untouched and
+                # last_import_sha256 unstamped (retries converge). The guard
+                # absorbs the artifact's own pack_config declared namespaces
+                # AND dump-native PackManifest namespaces into its known-set,
+                # so every legitimate artifact (pre-v1.1 core/starter, v1.1
+                # with covering packs, self-contained manifests) passes and
+                # only genuinely undeclared foreign vocabulary 422s —
+                # fail-loudly, never silent partial.
+                await asyncio.to_thread(_check_foreign_kinds, parsed["payload"])
                 result = await asyncio.to_thread(
                     _restore_into_temp_verify_swap,
                     sdk._get_proj().db, parsed["payload"],
@@ -415,7 +406,7 @@ Expected: PASS.
 
 **Ordering/precedence notes (documented, by design):** the 413 node-count cap runs before the lock and the guard — a dual-fault payload (foreign kind + oversize) returns 413, not 422 (defensible: size rejection first). Envelope/tamper failures 422 before the guard. The `_apply_import_pack_config` pc-None guard call is retained as defense-in-depth but is redundant-by-construction post-hoist: same payload, same sticky process-global registry — it can never fire for a payload the hoist passed.
 
-**Follow-up note (pre-existing, OUT of #2028 scope):** malformed-but-truthy `pack_config` shapes (`{"packs": [42]}` → AttributeError in `_apply_import_pack_config`'s `pack.get` post-swap; non-list packs) 500 after the swap/ledger stamp — pre-existing (#1936), unreachable from any exporter; the packs-presence gate narrows (does not widen) the exposure window by 422ing foreign-kind payloads pre-restore. Filed as a follow-up issue; not fixed here.
+**Follow-up note (pre-existing, OUT of #2028 scope):** malformed-but-truthy `pack_config` shapes (`{"packs": [42]}` → AttributeError in `_apply_import_pack_config`'s `pack.get` post-swap; non-list packs) 500 after the swap/ledger stamp — pre-existing (#1936), unreachable from any exporter; the unconditional guard narrows (does not widen) the exposure window by 422ing foreign-kind payloads pre-restore. Filed as #2040; not fixed here. **Boundary:** the backup-restore endpoint (`restore_backup`, hosted_backup.py — same `dump_graph` shape, no guard/pack-config application) has the same pre-v1.1 silent-drop class but is a separate surface, out of #2028 scope — noted in PR #2041 follow-ups.
 
 **Step 6: Commit**
 
