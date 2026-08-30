@@ -4091,6 +4091,7 @@ function claimIntentInFlight() {
                         onReindexGithub={reindexGithub}
                         reposList={reposList}
                         reposLoaded={reposLoaded}
+                        reposLoadFailed={reposLoadFailed}
                         branchLists={branchLists}
                         docsScope={docsScope}
                         issuesScope={issuesScope}
@@ -4680,6 +4681,7 @@ function claimIntentInFlight() {
               onReindexGithub={reindexGithub}
               reposList={reposList}
               reposLoaded={reposLoaded}
+              reposLoadFailed={reposLoadFailed}
               branchLists={branchLists}
               docsScope={docsScope}
               issuesScope={issuesScope}
@@ -5095,7 +5097,7 @@ function MemorySources(props) {
     issuesWantOn, docsWantOn,
     indexJob, docsJob,
     memoryBusy, memoryErrors,
-    reposList, reposLoaded, docsScope, issuesScope, branchLists,
+    reposList, reposLoaded, reposLoadFailed, docsScope, issuesScope, branchLists,
     onToggleIssues, onToggleDocs, onToggleSessions,
     onConnectGithub, onIndexDocs, onReindexGithub,
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
@@ -5196,7 +5198,9 @@ function MemorySources(props) {
                       </label>
                     ))}
                     {reposLoaded && reposList.length === 0 && (
-                      <span className="dim small">No repos listed — the index will run org-wide.</span>
+                      reposLoadFailed
+                        ? <span className="dim small">Couldn't load the repo list — re-check your GitHub connection.</span>
+                        : <span className="dim small">No repos listed — the index will run org-wide.</span>
                     )}
                   </fieldset>
                   <span className="dim small" aria-live="polite">
@@ -5321,7 +5325,9 @@ function MemorySources(props) {
                     )
                   })}
                   {reposLoaded && reposList.length === 0 && (
-                    <span className="dim small">No repos listed — the index will run org-wide.</span>
+                    reposLoadFailed
+                      ? <span className="dim small">Couldn't load the repo list — re-check your GitHub connection.</span>
+                      : <span className="dim small">No repos listed — the index will run org-wide.</span>
                   )}
                 </fieldset>
                 <span className="dim small" aria-live="polite">
