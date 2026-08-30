@@ -65,6 +65,7 @@ from tortoise.sdk import (
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
+from tortoise.transport import ask_exposure_enabled
 
 _logger = logging.getLogger(__name__)
 
@@ -2884,15 +2885,6 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
 # decision is made (the benchmark will use a strong reader model).
 
 
-def _ask_exposure_enabled() -> bool:
-    """Hosted ask-exposure gate: OFF by default (#2013 product decision).
-    ``TORTOISE_ENABLE_ASK=1`` (tests/dev) registers the /v1/ask route;
-    unset/anything-else leaves it unregistered (404 on /v1/ask). The SDK
-    local lane and the eval path are NOT affected — this gates only the
-    customer-facing hosted surface."""
-    return os.environ.get("TORTOISE_ENABLE_ASK") == "1"
-
-
 _ASK_ROUTE_REGISTERED = False
 
 
@@ -3001,7 +2993,7 @@ async def ask_question(body: AskRequest,
 # flag is on (the handler above is defined unconditionally — the route is
 # what is gated). TORTOISE_ENABLE_ASK=1 (tests/dev) registers it; the
 # default hosted app serves no /v1/ask (404).
-if _ask_exposure_enabled():
+if ask_exposure_enabled():
     _register_ask_route()
 
 

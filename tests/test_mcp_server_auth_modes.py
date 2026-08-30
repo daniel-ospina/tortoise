@@ -181,6 +181,28 @@ class TestAskExposureGating:
 
     _list_tool_names = TestToolGroupFiltering._list_tool_names
 
+    def _call_tool(self, tc, name, arguments):
+        """Issue a JSON-RPC tools/call and return the parsed body (SSE-framed
+        responses on Streamable HTTP — mirrors _list_tool_names)."""
+        import json as _json
+        r = tc.post("/mcp",
+                    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": name, "arguments": arguments}},
+                    headers={"Accept": "application/json, text/event-stream",
+                             "Content-Type": "application/json"})
+        data_line = next((ln[6:] for ln in r.text.splitlines()
+                          if ln.startswith("data: ")), r.text)
+        return _json.loads(data_line)
+
+    @staticmethod
+    def _result_text(body):
+        """Concatenated tool-result content text (the _http_excluded_error
+        body is serialized INTO the result content, per test_mcp_http.py's
+        tortoise_dream excluded-call pattern)."""
+        return "".join(c.get("text", "") for c in
+                        body.get("result", {}).get("content", [])
+                        if isinstance(c, dict))
+
     def test_ask_absent_from_default_surface(self, make_client, monkeypatch):
         monkeypatch.delenv("TORTOISE_ENABLE_ASK", raising=False)
         tc = make_client(auth_mode="none")
@@ -217,6 +239,50 @@ class TestAskExposureGating:
         tc = make_client(auth_mode="none", tool_group="ask")
         names = self._list_tool_names(tc)
         assert set(names) == {"tortoise_ask"}
+
+    def test_ask_call_gated_off_default_surface(self, make_client, monkeypatch):
+        """#2013 CALL-TIME gate: a NAME-ADDRESSED tools/call for
+        tortoise_ask on the default hosted surface (flag unset) returns the
+        ERR_EXCLUDED structured error. FastMCP dispatches tools/call by
+        name WITHOUT consulting the list Transform, so a listing-only gate
+        would leak the ask exposure; the call-time gate mirrors the listing
+        intent at the call boundary."""
+        monkeypatch.delenv("TORTOISE_ENABLE_ASK", raising=False)
+        tc = make_client(auth_mode="none")
+        body = self._call_tool(tc, "tortoise_ask", {"question": ""})
+        text = self._result_text(body)
+        assert "-32004" in text or "not available over HTTP" in text, \
+            f"expected ERR_EXCLUDED, got: {body}"
+        # the pipeline must NOT run — local-lane validation (invalid_question)
+        # would prove the gate was skipped
+        assert "invalid_question" not in text, \
+            f"pipeline ran — the call-time gate did not fire: {body}"
+
+    def test_ask_call_reaches_pipeline_when_flag_on(self, make_client, monkeypatch):
+        """TORTOISE_ENABLE_ASK=1: the default-surface call reaches the
+        pipeline — an EMPTY question hits local-lane validation
+        (invalid_question), proving the gate passed the call through."""
+        monkeypatch.setenv("TORTOISE_ENABLE_ASK", "1")
+        tc = make_client(auth_mode="none")
+        body = self._call_tool(tc, "tortoise_ask", {"question": ""})
+        text = self._result_text(body)
+        assert "not available over HTTP" not in text, \
+            f"call-time gate blocked an unlocked surface: {body}"
+        assert "invalid_question" in text, \
+            f"expected validation error (pipeline reached), got: {body}"
+
+    def test_ask_call_serves_on_explicit_ask_group_flag_off(self, make_client, monkeypatch):
+        """An explicit tool_group='ask' server (dev/eval opt-in) serves the
+        call even with the flag OFF — the call-time gate must not block the
+        documented opt-in surface."""
+        monkeypatch.delenv("TORTOISE_ENABLE_ASK", raising=False)
+        tc = make_client(auth_mode="none", tool_group="ask")
+        body = self._call_tool(tc, "tortoise_ask", {"question": ""})
+        text = self._result_text(body)
+        assert "not available over HTTP" not in text, \
+            f"call-time gate blocked the explicit ask group: {body}"
+        assert "invalid_question" in text, \
+            f"expected validation error (pipeline reached), got: {body}"
 
     def test_ask_strict_flag_parse_off(self, make_client, monkeypatch):
         # the MCP gate parses STRICTLY == "1" — "0"/"true" keep the ask

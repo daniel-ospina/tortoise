@@ -187,7 +187,9 @@ _MULTI_SESSION_FRAGMENT = (
 # presence-commit rule), licenses DERIVED answers (elapsed time, counts,
 # totals, ordering) computed from the dated events/facts in context —
 # scoped to the asked subject's events actually being present (the
-# false-commit guard, 09ba9854_abs) — and synthesized answers drawn from
+# false-commit guard, 09ba9854_abs — LIVE it still false-commits under
+# the compressed branch; the guard holds only on the deterministic fake,
+# see the runbook) — and synthesized answers drawn from
 # stated preferences; PHASE 2 abstains only on genuine absence (no turn
 # mentions the asked subject), never merely because no special
 # instructions were attached. The Phase-2 abstention branch was also
@@ -197,8 +199,12 @@ _MULTI_SESSION_FRAGMENT = (
 # form on present evidence (prompt-ablation: the same smoker question
 # committed '10 days ago' with the generic prompt and with a compressed
 # Phase 2, and abstained with the elaborate Phase 2); the compressed
-# branch keeps the genuine-absence abstention (graded _abs 0.9 intact)
-# without licensing the hedge template.
+# branch keeps the genuine-absence abstention form without licensing the
+# hedge template — at the measured cost of the near-miss false-commit
+# class ((a) 26/30 = 0.867 on the default reader model; the 0.9 figure
+# was the pre-compression full-run value — see
+# docs/runbook/1987-ask-abstention-check.md; the reader-model trade-off,
+# not the clause).
 _ABSTRACTION_FRAGMENT = (
     "\n\nPARTIAL-KNOWLEDGE ABSTENTION: decide in two phases — presence "
     "first, abstention only when the asked value is absent.\n"

@@ -23,9 +23,10 @@ from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
-                               _transport_mode, _get_team_sdk,
+                               _transport_mode, _tool_group, _get_team_sdk,
                                HTTP_ALLOWED, ERR_UNAUTHORIZED, ERR_EXCLUDED,
                                SELFHOST_TEAM_ID)
+from tortoise.transport import ask_exposure_enabled
 
 _log = logging.getLogger(__name__)
 
@@ -38,12 +39,6 @@ _log = logging.getLogger(__name__)
 # tool_group="ask" server (dev/eval) still serves it.
 _ASK_TOOL_GROUP = "ask"
 
-
-def _ask_exposure_enabled() -> bool:
-    """Ask-exposure gate (shared semantics with hosted_api.py's flag):
-    ``TORTOISE_ENABLE_ASK=1`` unlocks the ask tool on the DEFAULT hosted
-    /mcp surface; unset/anything-else keeps it gated off."""
-    return os.environ.get("TORTOISE_ENABLE_ASK") == "1"
 
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
@@ -1052,6 +1047,15 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     Invalid inputs (empty/oversize/bad type/bad date) surface as a
     STRUCTURED tool error {"error": {"code": …}} with ZERO LLM calls.
     """
+    # #2013 PRODUCT-GATING: call-time gate mirroring the listing filter —
+    # FastMCP dispatches tools/call by name without consulting the list
+    # Transform, so a listing-only gate would leak the ask exposure. Served
+    # only on (a) the default surface with TORTOISE_ENABLE_ASK=1 or (b) an
+    # explicit tool_group="ask" server (dev/eval opt-in).
+    if (_transport_mode.get() == "http"
+            and _tool_group.get() != _ASK_TOOL_GROUP
+            and not ask_exposure_enabled()):
+        return _http_excluded_error()
     from tortoise.exceptions import (
         AskQuotaExceeded,
         AskReaderUnavailable,
@@ -2821,7 +2825,6 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
         regardless — deliberate opt-in.
         """
         async def list_tools(self, tools):
-            from tortoise.mcp_auth import _tool_group
             group = _tool_group.get()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
@@ -2838,7 +2841,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                     # explicit curation-group request — serve that group's tools
                     if tgroup != group:
                         return False
-                elif tgroup == _ASK_TOOL_GROUP and not _ask_exposure_enabled():
+                elif tgroup == _ASK_TOOL_GROUP and not ask_exposure_enabled():
                     # default (ungrouped) hosted surface: the gated ask group
                     # is excluded unless the exposure flag is on (#2013)
                     return False

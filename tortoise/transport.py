@@ -26,6 +26,7 @@ rely on ``not team_id`` (team_id=None) and do NOT need the flag.
 """
 from __future__ import annotations
 
+import os
 from contextvars import ContextVar
 
 #: True while a SELFHOST HTTP MCP transport is serving the request. Read by
@@ -34,3 +35,11 @@ from contextvars import ContextVar
 #: condition. Set ONLY by selfhost transport code.
 _selfhost_transport: ContextVar[bool] = ContextVar("_selfhost_transport",
                                                    default=False)
+
+
+def ask_exposure_enabled() -> bool:
+    """#2013 PRODUCT-GATING: hosted ask-exposure gate — OFF by default.
+    ``TORTOISE_ENABLE_ASK=1`` (tests/dev) unlocks; unset/anything-else
+    keeps the exposure gated off. Shared by hosted_api.py (/v1/ask route
+    registration) and mcp_server.py (tortoise_ask call/listing gates)."""
+    return os.environ.get("TORTOISE_ENABLE_ASK") == "1"
