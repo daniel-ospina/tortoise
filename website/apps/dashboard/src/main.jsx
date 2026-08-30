@@ -381,17 +381,25 @@ function claimIntentInFlight() {
   // (pre-existing infra limitation, #1827; not introduced by this PR).
   const scopePersistQueueRef = React.useRef(Promise.resolve())
 
+  // #1893 (code-review P1): ALL onboarding-state / github / index calls pin
+  // the SELECTED team (the server defaults to memberships[0] without it) — a
+  // multi-membership user must read/write the team the scope surface shows.
+  // teamIdRef mirrors currentTeamId but is set synchronously in switchTeam
+  // (no render closure race). ONE helper for every call site keeps the
+  // surface consistent — a partially-pinned surface makes toggles write one
+  // team and read another (review P1: toggleSessionRecording wrote
+  // memberships[0] while its follow-up refreshOnboarding read the selected
+  // team). Only called post-render (handlers/effects), so the teamIdRef
+  // binding below is always initialized.
+  function onboardingTeamQ() {
+    return teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
+  }
+
   function persistScope(payload) {
     // fire-and-forget: a failed persist never blocks the UI; the next
     // change re-persists the full list.
-    // #1893 (code-review P1): TEAM-scoped — pin ?team_id= so multi-membership
-    // users persist to the SELECTED team's onboarding_state, never
-    // memberships[0]'s (same pattern as refreshTeam/loadAll). The persist
-    // gate + hydration both require currentTeamId, so the fallback is
-    // defensive only.
-    const _teamQ = teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
     scopePersistQueueRef.current = scopePersistQueueRef.current
-      .then(() => api(`/v1/onboarding/state${_teamQ}`, { method: 'PATCH', useSession: true,
+      .then(() => api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
         body: JSON.stringify(payload) }))
       .catch(() => {})
   }
@@ -1082,6 +1090,12 @@ function claimIntentInFlight() {
   // persisted server-side). #1728 Slice 3: the same read now feeds the full
   // Memory-sources surface (three toggles).
   async function refreshOnboarding() {
+    // #1893 (code-review P1): response-identity guard — capture the team at
+    // CALL time and bail if the team moved before the response lands (a
+    // switchTeam during the in-flight GET must not land team A's onboarding
+    // under team B, and must not clear the switch-stale flag for a stale
+    // team). Mirrors the Round-10 _teamAtCall pattern in loadAll/loadGraphs.
+    const _teamAtCall = teamIdRef.current
     try {
       if (!sessionTokenRef.current) {
         // Mount race (#1838): the onboarding-state GET rides the session JWT —
@@ -1111,11 +1125,11 @@ function claimIntentInFlight() {
       // defaults to memberships[0] without it). teamIdRef mirrors
       // currentTeamId but is set synchronously in switchTeam (no render
       // closure race).
-      const _teamQ = teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
-      const st = await api(`/v1/onboarding/state${_teamQ}`, { useSession: true })
-      if (st && st.onboarding) {
-        // code-review P1: this response is FOR the current team — clear the
-        // switch-stale flag so hydration can proceed.
+      const st = await api(`/v1/onboarding/state${onboardingTeamQ()}`, { useSession: true })
+      if (st && st.onboarding && teamIdRef.current === _teamAtCall) {
+        // code-review P1: this response is for the CURRENT team (the team
+        // did not move while the GET was in flight) — clear the switch-stale
+        // flag so hydration can proceed.
         onboardingStaleRef.current = false
         setOnboarding(st.onboarding)
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
@@ -1158,7 +1172,7 @@ function claimIntentInFlight() {
       // it). It resets on harness-tab switch and on step change instead.
       setTimeout(() => { if (mountedRef.current) setWizardCopied('') }, 1600)  // review: mounted-guard the flash timer
     }
-    api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ harness: wizardHarness, section: 'config' }) }).catch(() => {})
   }
 
@@ -1200,9 +1214,10 @@ function claimIntentInFlight() {
   // ── #1845: load the connected org's repo names for the scope selectors ──
   async function loadRepos() {
     // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
-    const _teamQ = teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
+    const _teamAtCall = teamIdRef.current
     try {
-      const res = await api(`/v1/onboarding/github/repos${_teamQ}`, { useSession: true })
+      const res = await api(`/v1/onboarding/github/repos${onboardingTeamQ()}`, { useSession: true })
+      if (teamIdRef.current !== _teamAtCall) return  // stale switch response
       setReposList(res && Array.isArray(res.repos) ? res.repos : [])
       // #1893 (code-review P1): a server-side resolve failure returns 200
       // with an EMPTY list + resolve_error:true (never a 500) — that is
@@ -1210,10 +1225,11 @@ function claimIntentInFlight() {
       // a transport failure (pruning on it would clobber the stored scope).
       setReposLoadFailed(!!(res && res.resolve_error))
     } catch {
+      if (teamIdRef.current !== _teamAtCall) return
       setReposList([])  // best-effort — the selector still shows "All repos"
       setReposLoadFailed(true)
     } finally {
-      setReposLoaded(true)
+      if (teamIdRef.current === _teamAtCall) setReposLoaded(true)
     }
   }
   // #1845: lazily load a repo's branch list for the docs per-repo branch
@@ -1226,12 +1242,14 @@ function claimIntentInFlight() {
     try {
       const q = encodeURIComponent(repo)
       // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
-      const _teamQ = teamIdRef.current ? `&team_id=${encodeURIComponent(teamIdRef.current)}` : ''
-      const res = await api(`/v1/onboarding/github/branches?repo=${q}${_teamQ}`, { useSession: true })
+      const _teamAtCall = teamIdRef.current
+      const res = await api(`/v1/onboarding/github/branches?repo=${q}${onboardingTeamQ()}`, { useSession: true })
+      if (teamIdRef.current !== _teamAtCall) return  // stale switch response
       const branches = res && Array.isArray(res.branches) ? res.branches : []
       const defaultBranch = (res && res.default_branch) || ''
       setBranchLists((prev) => ({ ...prev, [repo]: { branches, defaultBranch } }))
     } catch {
+      if (teamIdRef.current !== _teamAtCall) return
       setBranchLists((prev) => ({ ...prev, [repo]: { branches: [], defaultBranch: '' } }))
     }
   }
@@ -1240,49 +1258,50 @@ function claimIntentInFlight() {
   // a repo whose default is neither main nor master indexes the right
   // branch out of the box.
   React.useEffect(() => {
-    setDocsScope((prev) => {
-      let changed = false
-      const branches = { ...prev.branches }
-      prev.repos.forEach((r) => {
-        if (!Object.prototype.hasOwnProperty.call(branchLists, r)) return
-        const info = branchLists[r]
-        // #1893: a persisted branch that no longer exists on GitHub must
-        // not stick a blank picker + fail the docs job. Runs BEFORE the
-        // default fill so a reset lands on the repo's API default option
-        // (deterministic — the fill is skipped for a truthy stale branch;
-        // '' and 'all' are always-valid markers). Idempotent guard: if the
-        // API default itself is not among the options, the heal target is
-        // already set — stop (no re-trigger loop under the docsScope dep).
-        if (shouldResetBranch(branches[r], info)) {
-          const heal = info.defaultBranch || ''
-          if (branches[r] !== heal) {
-            branches[r] = heal
-            changed = true
-          }
-        }
-        if (info && info.defaultBranch && !branches[r]) {
-          branches[r] = info.defaultBranch
+    // #1893 (review P3): compute from the closure (docsScope is a dep) and
+    // persist from the EFFECT BODY — never inside the state updater (React
+    // purity: StrictMode double-invokes updaters, and updaters can run during
+    // render-phase eager evaluation).
+    let changed = false
+    const branches = { ...docsScope.branches }
+    docsScope.repos.forEach((r) => {
+      if (!Object.prototype.hasOwnProperty.call(branchLists, r)) return
+      const info = branchLists[r]
+      // #1893: a persisted branch that no longer exists on GitHub must
+      // not stick a blank picker + fail the docs job. Runs BEFORE the
+      // default fill so a reset lands on the repo's API default option
+      // (deterministic — the fill is skipped for a truthy stale branch;
+      // '' and 'all' are always-valid markers). Idempotent guard: if the
+      // API default itself is not among the options, the heal target is
+      // already set — stop (no re-trigger loop under the docsScope dep).
+      if (shouldResetBranch(branches[r], info)) {
+        const heal = info.defaultBranch || ''
+        if (branches[r] !== heal) {
+          branches[r] = heal
           changed = true
         }
-      })
-      const next = changed ? { ...prev, branches } : prev
-      // code-review P2: mirror the ref — the hydration touched-branch
-      // serializes docsScopeRef.current (never the effect closure), so a
-      // healed/reset value must be visible there or a team-switch persist
-      // could re-persist the stale branch it just healed.
-      if (changed) {
-        docsScopeRef.current = next
-        // #1893 (code-review P2): persist the healed value so the server
-        // converges — a stale persisted branch would otherwise re-hydrate +
-        // re-heal on every session (UI-only fix; the stored value never
-        // converges until the next manual docs toggle). Gated on the persist
-        // gate (post-hydration) so the un-seeded default is never written.
-        if (shouldPersist(scopeReadyRef.current)) {
-          persistScope({ github_docs_scope: serializeDocsScope(next) })
-        }
       }
-      return next
+      if (info && info.defaultBranch && !branches[r]) {
+        branches[r] = info.defaultBranch
+        changed = true
+      }
     })
+    if (!changed) return
+    const next = { ...docsScope, branches }
+    // code-review P2: mirror the ref — the hydration touched-branch
+    // serializes docsScopeRef.current (never the effect closure), so a
+    // healed/reset value must be visible there or a team-switch persist
+    // could re-persist the stale branch it just healed.
+    docsScopeRef.current = next
+    setDocsScope(next)
+    // #1893 (code-review P2): persist the healed value so the server
+    // converges — a stale persisted branch would otherwise re-hydrate +
+    // re-heal on every session (UI-only fix; the stored value never
+    // converges until the next manual docs toggle). Gated on the persist
+    // gate (post-hydration) so the un-seeded default is never written.
+    if (shouldPersist(scopeReadyRef.current)) {
+      persistScope({ github_docs_scope: serializeDocsScope(next) })
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [branchLists, docsScope])
   // Load once when the team is connected (re-connect/rotation re-loads via the
@@ -1301,10 +1320,16 @@ function claimIntentInFlight() {
   // the persist gate — once onboarding resolves, the user's REAL toggles
   // should still persist (only PRUNING stays gated on reposLoadFailed via
   // shouldHydrate; a failed fetch is never evidence of an empty org). The
-  // connected-flip effect above retries loadRepos whenever reposLoadFailed
-  // flips, so hydration re-arms on the next successful fetch.
+  // connected-flip effect above retries loadRepos when reposLoadFailed flips
+  // (bounded: one extra attempt per flip — a second consecutive failure
+  // leaves both flags unchanged, so no re-render/no loop). Hydration re-arms
+  // on the next successful fetch (reload or reconnect also re-attempts).
   React.useEffect(() => {
-    if (onboarding && currentTeamId && reposLoadFailed && !scopeReadyRef.current) {
+    // #1893 (code-review P2): gate the reopen on the switch-stale flag too —
+    // during a team switch, onboarding is still the OLD team's object and
+    // opening the persist gate would persist a selection built against the
+    // un-seeded default under the NEW team's id.
+    if (onboarding && currentTeamId && reposLoadFailed && !scopeReadyRef.current && !onboardingStaleRef.current) {
       scopeReadyRef.current = true
     }
   }, [onboarding, currentTeamId, reposLoadFailed]) // eslint-disable-line react-hooks/exhaustive-deps
@@ -1317,7 +1342,7 @@ function claimIntentInFlight() {
       // #1927: session_recording is the off-switch (default ON) — the toggle
       // writes the flag only (the re-ask machinery it used to feed is gone).
       // PATCH MERGE: no read-modify-write, no stale reads.
-      await api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+      await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
         body: JSON.stringify({ session_recording: next }) })
       await refreshOnboarding()
     } catch (e) {
@@ -1336,7 +1361,7 @@ function claimIntentInFlight() {
       setRowError('issues', '')
       setIssuesWantOn(false)
       try {
-        await api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+        await api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
           body: JSON.stringify({ github_connected: false }) })
         await refreshOnboarding()
       } catch (e) {
@@ -1373,7 +1398,7 @@ function claimIntentInFlight() {
       // #1845: send the selected repo scope (list of SHORT names) — empty =
       // all repos (org-wide diff).
       const body = buildIssuesJobBody(issuesScope)
-      const res = await api('/v1/index/github/re-poll', { method: 'POST', useSession: true,
+      const res = await api(`/v1/index/github/re-poll${onboardingTeamQ()}`, { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body) })
       const jobId = res && res.job_id
@@ -1401,7 +1426,7 @@ function claimIntentInFlight() {
     try {
       let org
       try {
-        const gs = await api('/v1/onboarding/github/status', { useSession: true })
+        const gs = await api(`/v1/onboarding/github/status${onboardingTeamQ()}`, { useSession: true })
         org = gs && gs.org
       } catch { /* org stays undefined — the server 400s "org is required" and the row error surfaces it */ }
       // #1845: per-repo scope list — each selected repo carries its own
@@ -1409,7 +1434,7 @@ function claimIntentInFlight() {
       // Empty repos = ALL repos (org-wide, default branch). #1893: pure
       // builder (sourceScope.js) — omit-empty contract node-tested.
       const payload = buildDocsJobBody(docsScope, org)
-      const res = await api('/v1/index/docs', { method: 'POST', useSession: true,
+      const res = await api(`/v1/index/docs${onboardingTeamQ()}`, { method: 'POST', useSession: true,
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload) })
       const jobId = res && res.job_id
@@ -1436,7 +1461,7 @@ function claimIntentInFlight() {
     setWizardGithub((g) => ({ ...g, busy: true }))
     setRowError('issues', '')
     try {
-      const res = await api('/v1/onboarding/github/connect', { method: 'POST', useSession: true })
+      const res = await api(`/v1/onboarding/github/connect${onboardingTeamQ()}`, { method: 'POST', useSession: true })
       const authUrl = (res && (res.auth_url || res.authorize_url)) || null
       if (!authUrl) { setWizardGithub((g) => ({ ...g, busy: false })); return }
       const win = window.open(authUrl, '_blank')
@@ -1451,7 +1476,7 @@ function claimIntentInFlight() {
       // short-circuit, handle in a ref, per-team guard) — the old 120s
       // dangling setTimeout is gone.
       startBoundedPoll(wizardGithubPollRef, {
-        url: '/v1/onboarding/github/status',
+        url: `/v1/onboarding/github/status${onboardingTeamQ()}`,
         isTerminal: (st) => st && st.connected,
         onStatus: (st) => {
           if (st && st.connected) {
@@ -1462,7 +1487,7 @@ function claimIntentInFlight() {
           setWizardGithub((g) => ({ ...g, busy: false }))
           if (st && st.connected) {
             setIssuesWantOn(true)
-            api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+            api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
               body: JSON.stringify({ github_connected: true }) }).catch(() => {})
             refreshOnboarding().catch(() => {})
             // connected+indexing: the OAuth callback auto-enqueues the
@@ -1575,7 +1600,7 @@ function claimIntentInFlight() {
 
   async function wizardComplete() {
     setWizardDone(true)
-    api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
       body: JSON.stringify({ onboarding_complete: true }) }).catch(() => {})
     window.history.replaceState({}, '', '/')
     setWelcomeMode(false)
@@ -2557,9 +2582,11 @@ function claimIntentInFlight() {
     scopeTouchedRef.current = { issues: false, docs: false }
     issuesScopeRef.current = { repos: [] }
     docsScopeRef.current = { repos: [], branches: {} }
+    onboardingStaleRef.current = false  // #1893 (review P3): a failed-switch stale flag must not leak across logout
     setReposLoadFailed(false)
     setReposLoaded(false)
     setReposList([])
+    setBranchLists({})  // #1893 (review P2): don't carry the previous session's cached branches
     setDocsScope({ repos: [], branches: {} })
     setIssuesScope({ repos: [] })
     sessionTokenRef.current = null      // Round-4: never reuse the previous user's JWT
@@ -2769,6 +2796,11 @@ function claimIntentInFlight() {
     setReposLoadFailed(false)
     setReposLoaded(false)
     setReposList([])
+    // #1893 (code-review P2): branchLists is NOT team-keyed and loadBranches
+    // short-circuits on hasOwnProperty — without a reset, team B would reuse
+    // team A's cached branches for colliding repo names (and the heal-persist
+    // would write A's branch data into B's stored scope).
+    setBranchLists({})
     setDocsScope({ repos: [], branches: {} })
     setIssuesScope({ repos: [] })
     try {
@@ -2816,6 +2848,14 @@ function claimIntentInFlight() {
       // (the scope hydration for the new team is blocked until then), and
       // the connected-flip effect re-loads the new team's repos.
       await refreshOnboarding().catch(() => {})
+      // #1893 (code-review P2): if the refetch failed, the stale flag stays
+      // set and hydration would be blocked indefinitely — bounded retry (one
+      // re-issue after a short delay) so a transient failure recovers
+      // in-session instead of until the next reload.
+      if (onboardingStaleRef.current) {
+        await new Promise((r) => setTimeout(r, 1500))
+        if (teamIdRef.current === teamId) await refreshOnboarding().catch(() => {})
+      }
       // members + graphs load via the currentTeamId effect (JWT team-scoped;
       // both loaders carry their own staleness guard).
     } catch (e) {
@@ -3078,6 +3118,16 @@ function claimIntentInFlight() {
   React.useEffect(() => {
     if (currentTeamId) {
       teamIdRef.current = currentTeamId
+      // #1893 (code-review P1): the mount-time refreshOnboarding() fired
+      // BEFORE the team resolved (unpinned — server resolves memberships[0],
+      // which is the WRONG team for a multi-membership user whose stored-key
+      // team is not the first membership). Re-fetch now that the team is
+      // known, so onboarding (and the scope surface) track the selected
+      // team. teamIdRef is set above, so the pinned GET targets the right
+      // team. This also recovers a switch whose onboarding refetch failed
+      // (the switchTeam catch swallowed it — the stale flag would otherwise
+      // stay set and block hydration forever).
+      refreshOnboarding().catch(() => {})
       loadMembers(currentTeamId)
       loadGraphs(currentTeamId)
     }
