@@ -10464,6 +10464,15 @@ class TortoiseSDK:
         bounded RAG pass locally (or a POST to hosted ``/v1/ask`` when
         ``TORTOISE_API_URL`` is set).
 
+        ⛔ GATED / EXPERIMENTAL (#2013 product decision): the ask surface is
+        NOT served to hosted customers — ``/v1/ask`` and the MCP
+        ``tortoise_ask`` tool are OFF by default (``TORTOISE_ENABLE_ASK=1``
+        unlocks them for tests/dev only). This method stays shipped as the
+        EVAL's reader path (the LongMemEval benchmark runs through the
+        product reader) — do not build production features on it until the
+        reader-model decision is made (the benchmark will use a strong
+        reader model).
+
         Local lane pipeline: validation FIRST (``AskValidationError``, zero
         model calls) → ``tortoise_fts_query`` (``include_terminal=True`` —
         the D8 supersession markers reach the reader; cost-bounded by the

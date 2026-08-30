@@ -171,3 +171,58 @@ class TestToolGroupFiltering:
         tc = make_client(auth_mode="none")
         names = self._list_tool_names(tc)
         assert len(names) > 30  # full surface when no group filter
+
+
+class TestAskExposureGating:
+    """#2013 PRODUCT-GATING: the MCP tortoise_ask tool is absent from the
+    DEFAULT hosted surface unless TORTOISE_ENABLE_ASK=1, and present on an
+    EXPLICIT tool_group="ask" server (dev/eval opt-in). The reader ships;
+    only the ask EXPOSURE is gated."""
+
+    _list_tool_names = TestToolGroupFiltering._list_tool_names
+
+    def test_ask_absent_from_default_surface(self, make_client, monkeypatch):
+        monkeypatch.delenv("TORTOISE_ENABLE_ASK", raising=False)
+        tc = make_client(auth_mode="none")
+        names = self._list_tool_names(tc)
+        assert "tortoise_ask" not in names
+        # the default surface stays FULL otherwise — ~80 tools (88
+        # http_policy − 1 gated ask − 7 no-handler registry skips − ~6
+        # retired onboarding). A filter regression hiding a substantial
+        # fraction fails this tight bound (test-review #2013 — the old
+        # `> 30` guard could not).
+        assert len(names) >= 75, f"default surface shrank to {len(names)}"
+
+    def test_ask_present_with_explicit_ask_group(self, make_client, monkeypatch):
+        # deliberate opt-in: an explicit tool_group="ask" server serves it
+        # regardless of the exposure flag (this is the dev/eval surface)
+        monkeypatch.delenv("TORTOISE_ENABLE_ASK", raising=False)
+        tc = make_client(auth_mode="none", tool_group="ask")
+        names = self._list_tool_names(tc)
+        assert "tortoise_ask" in names
+        assert set(names) == {"tortoise_ask"}
+
+    def test_ask_present_on_default_surface_when_flag_on(self, make_client, monkeypatch):
+        # TORTOISE_ENABLE_ASK=1 unlocks the ask tool on the default surface
+        # (parity with the /v1/ask route)
+        monkeypatch.setenv("TORTOISE_ENABLE_ASK", "1")
+        tc = make_client(auth_mode="none")
+        names = self._list_tool_names(tc)
+        assert "tortoise_ask" in names
+
+    def test_ask_present_with_explicit_group_and_flag_on(self, make_client, monkeypatch):
+        # flag-ON + explicit group combination (the dev surface with the
+        # exposure unlocked) — serves the ask tool either way
+        monkeypatch.setenv("TORTOISE_ENABLE_ASK", "1")
+        tc = make_client(auth_mode="none", tool_group="ask")
+        names = self._list_tool_names(tc)
+        assert set(names) == {"tortoise_ask"}
+
+    def test_ask_strict_flag_parse_off(self, make_client, monkeypatch):
+        # the MCP gate parses STRICTLY == "1" — "0"/"true" keep the ask
+        # tool gated off the default surface (parity with the route)
+        for flag in ("0", "true"):
+            monkeypatch.setenv("TORTOISE_ENABLE_ASK", flag)
+            tc = make_client(auth_mode="none")
+            names = self._list_tool_names(tc)
+            assert "tortoise_ask" not in names, flag

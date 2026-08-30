@@ -237,8 +237,9 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         rest_spec=RestSpec(method="GET", path="/v1/search"),
     ),
     # ── Ask answer surface (#1987 Task 8/9) ───────────────────────
-    # group="memory" co-curated sibling of tortoise_search (#523): an ask
-    # consumes LLM tokens + the per-minute ask budget (search is LLM-free) —
+    # #2013 PRODUCT-GATING: group="ask" (OWN group, OFF by default — see
+    # GROUP_BY_NAME below) — an ask consumes LLM tokens + the per-minute
+    # ask budget (search is LLM-free) —
     # documented in the tool description. Read-classified: NOT in
     # _QUOTA_GATED / WRITE_TOOL_NAMES (introspection green). ``AskRequest``
     # is referenced by STRING (the registry convention — no class import,
@@ -1137,6 +1138,10 @@ class FastAPIRouterAdapter:
 #   journal   — checkpoints, diary, decisions, approvals
 #   admin     — status, health, teams, governance, migrations
 #   onboarding — hosted onboarding flows
+#   ask       — the answer surface (#2013 PRODUCT-GATING): OFF by default —
+#               excluded from the ungrouped hosted surface unless
+#               TORTOISE_ENABLE_ASK=1; served only via an explicit
+#               tool_group="ask" server
 
 GROUP_BY_NAME: dict[str, str] = {
     # memory
@@ -1149,7 +1154,11 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_invalidate": "memory", "tortoise_retract_point": "memory",
     "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
-    "tortoise_ask": "memory",  # #1987: co-curated answer surface sibling of tortoise_search
+    # #2013 PRODUCT-GATING: the ask tool has its OWN group (no longer the
+    # "memory" default) so the hosted surface can exclude it by default —
+    # the READER ships (the eval's reader), the ask EXPOSURE is gated off
+    # until the reader-model decision is made.
+    "tortoise_ask": "ask",
     "tortoise_expand_relationships": "memory",
     "tortoise_recall": "memory",
     "tortoise_issue_insight": "memory",

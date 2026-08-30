@@ -20,6 +20,13 @@ from pathlib import Path
 
 import pytest
 
+# #2013 PRODUCT-GATING: the hosted /v1/ask route is OFF by default — this
+# file exercises the FULL ask pipeline, so it explicitly registers the
+# route on the shared app AFTER importing hosted_api (the idempotent
+# ``_register_ask_route`` — no reliance on import order or on the env flag
+# being set before import, which would leak a session-wide env mutation).
+# The gating itself (404 OFF / serves ON) is pinned in
+# tests/test_ask_gating.py via isolated subprocesses.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from test_hosted_api import (  # noqa: E402, RUF100
@@ -32,6 +39,11 @@ from test_hosted_api import (  # noqa: E402, RUF100
 )
 
 from tortoise import hosted_api as ha_mod  # noqa: E402
+
+# #2013 PRODUCT-GATING: register the /v1/ask route explicitly (idempotent)
+# so the full-pipeline tests in this file serve it regardless of import
+# order or a session env flag (test-review #2013 — no env mutation leak).
+ha_mod._register_ask_route()
 from fastapi import Request as _AskRequest  # noqa: E402 — module-level so the
 # `_suspended(request: _AskRequest)` override annotation resolves under
 # ``from __future__ import annotations`` (a local import inside the test fn

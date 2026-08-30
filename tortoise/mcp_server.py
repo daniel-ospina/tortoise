@@ -29,6 +29,22 @@ from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
 
 _log = logging.getLogger(__name__)
 
+# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE (the MCP tortoise_ask
+# tool) is off by default. The READER ships (the eval's reader — the 500-Q
+# benchmark runs through it); only the customer-facing ask EXPOSURE is
+# gated until the reader-model decision is made. ``tortoise_ask`` lives in
+# its OWN curation group ("ask", see tool_registry.py GROUP_BY_NAME) so the
+# default (ungrouped) hosted /mcp surface can exclude it; an explicit
+# tool_group="ask" server (dev/eval) still serves it.
+_ASK_TOOL_GROUP = "ask"
+
+
+def _ask_exposure_enabled() -> bool:
+    """Ask-exposure gate (shared semantics with hosted_api.py's flag):
+    ``TORTOISE_ENABLE_ASK=1`` unlocks the ask tool on the DEFAULT hosted
+    /mcp surface; unset/anything-else keeps it gated off."""
+    return os.environ.get("TORTOISE_ENABLE_ASK") == "1"
+
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
 
@@ -2790,13 +2806,19 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
-        group scoping (#523).
+        group scoping (#523) + the #2013 gated ask group.
 
         The excluded tools (team_create/backfill_v25/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-
         scoped servers keep the agent's tool-selection surface under ~20.
+
+        #2013 PRODUCT-GATING: the ask tool (group="ask") is absent from the
+        DEFAULT (ungrouped) hosted surface unless TORTOISE_ENABLE_ASK=1 — the
+        reader ships (the eval's reader), the hosted ask EXPOSURE is gated
+        off. An EXPLICIT tool_group="ask" server (dev/eval) serves it
+        regardless — deliberate opt-in.
         """
         async def list_tools(self, tools):
             from tortoise.mcp_auth import _tool_group
@@ -2811,7 +2833,14 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
                     return False
-                if group and GROUP_BY_NAME.get(t.name) != group:
+                tgroup = GROUP_BY_NAME.get(t.name)
+                if group:
+                    # explicit curation-group request — serve that group's tools
+                    if tgroup != group:
+                        return False
+                elif tgroup == _ASK_TOOL_GROUP and not _ask_exposure_enabled():
+                    # default (ungrouped) hosted surface: the gated ask group
+                    # is excluded unless the exposure flag is on (#2013)
                     return False
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this team's onboarding is complete (fail-open

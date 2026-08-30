@@ -2874,7 +2874,40 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     return {"results": out, "count": len(out)}
 
 
-@app.post("/v1/ask", response_model=None)
+# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE is off by default ──────
+# The READER (tortoise/reader.py) stays shipped — it is the eval's reader
+# (the 500-Q LongMemEval benchmark runs through it; the eval re-exports the
+# product reader). The HOSTED ask EXPOSURE is gated: no /v1/ask route in
+# the served app unless TORTOISE_ENABLE_ASK=1 (tests/dev). The route
+# handler + the path-scoped error translation stay in the codebase,
+# tested, ready — just not served to customers until the reader-model
+# decision is made (the benchmark will use a strong reader model).
+
+
+def _ask_exposure_enabled() -> bool:
+    """Hosted ask-exposure gate: OFF by default (#2013 product decision).
+    ``TORTOISE_ENABLE_ASK=1`` (tests/dev) registers the /v1/ask route;
+    unset/anything-else leaves it unregistered (404 on /v1/ask). The SDK
+    local lane and the eval path are NOT affected — this gates only the
+    customer-facing hosted surface."""
+    return os.environ.get("TORTOISE_ENABLE_ASK") == "1"
+
+
+_ASK_ROUTE_REGISTERED = False
+
+
+def _register_ask_route() -> None:
+    """Register the /v1/ask route on the module-level app (idempotent).
+    Called at import when ``TORTOISE_ENABLE_ASK=1``; tests call it to
+    exercise the ON state without a subprocess re-import."""
+    global _ASK_ROUTE_REGISTERED
+    if _ASK_ROUTE_REGISTERED:
+        return
+    app.add_api_route("/v1/ask", ask_question, methods=["POST"],
+                      response_model=None)
+    _ASK_ROUTE_REGISTERED = True
+
+
 async def ask_question(body: AskRequest,
                        team: dict = Depends(get_current_team)):  # noqa: B008
     """Team-scoped answer surface (#1987 Task 7): one bounded RAG pass over
@@ -2962,6 +2995,14 @@ async def ask_question(body: AskRequest,
     # ``duration_ms`` = hosted wall-clock from request receipt to response.
     result["duration_ms"] = max(0, int((_dt2.now(UTC) - t0).total_seconds() * 1000))
     return result
+
+
+# #2013 PRODUCT-GATING: the /v1/ask route is served ONLY when the exposure
+# flag is on (the handler above is defined unconditionally — the route is
+# what is gated). TORTOISE_ENABLE_ASK=1 (tests/dev) registers it; the
+# default hosted app serves no /v1/ask (404).
+if _ask_exposure_enabled():
+    _register_ask_route()
 
 
 @app.get("/v1/topics/{topic}/summary")
