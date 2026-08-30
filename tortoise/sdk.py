@@ -3907,6 +3907,17 @@ class TortoiseSDK:
         # warned (structured) and the write proceeds; the violations event
         # feeds the future governance app. Consults the pack registry's
         # declared relation predicates — the ladder is no longer dead config.
+        #
+        # #2030 (verified, NOT a bug): relation predicates are declared and
+        # matched BARE by contract — manifests declare bare `relations[]
+        # .predicate` verbs and the write path passes bare labels, so the
+        # bare-vs-bare comparison is consistent. Namespaced enforcement
+        # resolution (#2030) applies to the KIND arm of resolve_enforcement
+        # only; a namespaced relation label is out of scope here. (Epic §6
+        # scope: the "undeclared relation/kind-PAIR → warn-not-block"
+        # contract has NO kind-pair leg on the write path — this check
+        # covers the relation leg only; the kind-pair leg is an epic-level
+        # gap, out of #2030 scope.)
         warnings: list[dict] = []
         if label:
             from tortoise.domain_loader import _get_registry

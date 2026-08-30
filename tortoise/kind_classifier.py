@@ -198,6 +198,10 @@ class KindClassifier:
             "embedding_errors": 0,
             "classify_errors": 0,
             "closed_vocab_rejects": 0,
+            # #2030: always-present so downstream telemetry consumers see the
+            # key even when the hook never fires (additive key only — the
+            # classify_later payload's 'additive keys only' convention).
+            "near_miss_retries": 0,
         }
         warnings: list[str] = []
         tail: list[tuple[str, dict, list[tuple[str, float]]]] = []
@@ -286,7 +290,8 @@ class KindClassifier:
                            for k in [reranked, *list(nm or [])]):
                         stats["near_miss_retries"] = stats.get("near_miss_retries", 0) + 1
                 except Exception:
-                    # the classification batch
+                    # the classification batch must not abort on a raising
+                    # seam — fail-open, mirroring the rerank path
                     pass
                 continue
             stats["adjudication_tail"] += 1

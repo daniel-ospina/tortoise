@@ -1,19 +1,37 @@
 """Pack-declared enforcement — the ONE shared seam (#1934, epic #1891 slice 3).
 
 Resolves the manifest enforcement ladder (``warn | retry | block``) through a
-single primitive consumed by BOTH the extraction-side kind classifier and the
-SDK write path (``create_operator``). Prior state: ``PackManifest.enforcement_for*``
-was validated at load but had ZERO production call sites — the ladder was dead
-config. This module completes the deferred "extractor-retry semantics layer"
-(``domain_validators.resolve_rule_severity`` docstring) and the write-path
-warn-not-block hook (2026-08-05 governance D1/D2: warn-not-block default;
-``block`` stays out of scope — per-pack opt-in at most, adversarial over-
-constraint risk).
+single primitive consumed by the extraction-side kind classifier's near-miss
+hook (the classifier passes NAMESPACED index kinds — see below). The SDK write
+path's ``create_operator`` does NOT call ``resolve_enforcement``: it performs
+its own inline bare-predicate relation check (warn-not-block), importing only
+``emit_violation``/``warning_for_relation`` for the warn path — see sdk.py.
+Prior state: ``PackManifest.enforcement_for*`` was validated at load but had
+ZERO production call sites — the ladder was dead config. This module completes
+the deferred "extractor-retry semantics layer" (the kind/relation arms — the
+chain-only legacy ladder ``domain_validators.resolve_rule_severity`` remains
+live in commit_schema for chain.enforcement, unaware of this seam's
+``extraction.enforcement.chains`` rung; the two ladders are NOT reconciled
+here — pre-existing #405 boundary) and the write-path warn-not-block hook
+(2026-08-05 governance D1/D2: warn-not-block default; ``block`` stays out of
+scope — per-pack opt-in at most, adversarial over-constraint risk).
+
+Non-str kinds (e.g. a numeric id) are tolerated by the bare scan's dict ops
+and resolve to the cross-pack default (warn) — the namespaced branch is
+reached only for ``str`` inputs, preserving the never-raise contract.
 
 Resolution order (single source of truth):
     kind:     kindDefs[].enforcement → extraction.enforcement.kinds → default → warn
     relation: extraction.enforcement.relations[predicate] → default → warn
     chain:    chain.enforcement → extraction.enforcement.chains[id] → default → warn
+
+Namespaced kinds (#2030): the classifier index emits kinds in `ns:local`
+form (78/79 index kinds). A namespaced kind resolves the LOCAL name against
+THE declaring pack (kindDefs / extraction.enforcement.kinds are keyed by
+bare local names) — exclusively, never the cross-pack max-severity scan
+(a stripped name would collide across namespaces: `issue`, `workflow`, …).
+Unknown/malformed namespaces (there is no `core` pack) degrade to warn —
+never raise. Bare kinds keep the cross-pack max-severity scan below.
 
 Dispatchers:
     warn  → structured warning + violations event (shape committed for the
@@ -56,6 +74,22 @@ def resolve_enforcement(
     # wins (an agent-ops `rule: retry` must not be downgraded by another
     # pack's warn default).
     _SEV = {"warn": 0, "retry": 1, "block": 2}
+    # Namespaced kind (ns:local — the classifier index form, #2030):
+    # resolve the LOCAL name against THE declaring pack, EXCLUSIVELY
+    # (namespace-scoped like KindIndex.near_misses but stricter — no
+    # any-namespace fallback: a stripped name feeding the cross-pack scan
+    # would mis-attribute on collided bare names). Unknown/malformed
+    # namespaces (e.g. `core:` — no core pack) degrade to warn, never raise.
+    if isinstance(kind, str) and ":" in kind:
+        ns, _, local = kind.rpartition(":")
+        if not local:
+            return "warn"  # malformed: an empty local name never resolves
+        pack = reg.get_pack(ns)
+        if pack is None:
+            return "warn"
+        lv = pack.enforcement_for(local)
+        return lv if lv in VALID_LEVELS else "warn"
+    # Bare kind / relation / chain — the cross-pack max-severity scan.
     best = "warn"
     best_sev = 0
     for pack in reg.packs.values():
