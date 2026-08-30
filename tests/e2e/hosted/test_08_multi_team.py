@@ -28,10 +28,14 @@ def _create_team(api, jwt_headers, name_suffix):
 
 
 def test_multi_team_ownership_and_listing(api, session_jwt):
-    """One session user creates two teams; GET /v1/teams lists both."""
+    """One session user creates two teams; GET /v1/teams lists both.
+
+    The #1877 free-team entitlement gate (402) only applies to FREE plans —
+    bump the first team to tier=team so the second create passes."""
     user_id, tok = session_jwt()  # noqa: RUF059
     h = {"Authorization": f"Bearer {tok}"}
     t1 = _create_team(api, h, "alpha")
+    bump_team_tier(api, t1.get("id") or t1.get("team_id"), "team")
     t2 = _create_team(api, h, "beta")
 
     r = api.get("/v1/teams", headers=h)

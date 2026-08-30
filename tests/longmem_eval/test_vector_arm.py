@@ -261,7 +261,7 @@ def test_vector_search_passes_elevated_timeout(tmp_path, monkeypatch, fake_embed
         # embedded lane True, docker lane False (the redirect's
         # server-mode flag). The timeout + api + limit contract is
         # lane-independent.
-        _uri = os.environ.get("TORTOISE_DB_URI")
+        _uri = os.environ.get("TORTOISE_DB_URI") or None
         assert calls[0]["is_embedded"] == (_uri is None), (
             f"is_embedded={calls[0]['is_embedded']} must match the lane")
         # embedded lane: no vector-index API (brute-force); docker lane: the
