@@ -31,3 +31,5 @@ ownedBy: epistemic-team
 | Client/server package split (`tortoise-client` thin driver, #526) | `docs/client-server-split.md` |
 | Beta feedback & bug reporting (#1199) | `docs/beta-feedback.md` |
 | Blog keyword research — topic taxonomy + keyword map (#1862) | `docs/research/2026-08-28-tortoise-blog-keywords/research.md` |
+
+| (temp non-vacuous drift-check verify — 387 lift, deleted after) | `docs/00_index.md` |
