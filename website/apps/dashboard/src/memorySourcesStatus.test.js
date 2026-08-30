@@ -183,10 +183,12 @@ test('extrapolated ETA below the 5s floor → suppressed (4s case)', () => {
     '40s · 9/10 repos')
 })
 test('extrapolated ETA at exactly 5s still renders (>= 5 gate)', () => {
+  // progress 90, elapsed 45s → eta = round(45/90*10) = 5 — the exact
+  // boundary: >= 5 renders, < 5 suppressed.
   assert.equal(jobStatusLine(
-    { status: 'started', progress: 50, started_at: NOW / 1000 - 6,
-      repos_processed: 1, repos_total: 2 }, NOW),
-    '6s · 1/2 repos · ~6s left')
+    { status: 'started', progress: 90, started_at: NOW / 1000 - 45,
+      repos_processed: 9, repos_total: 10 }, NOW),
+    '45s · 9/10 repos · ~5s left')
 })
 
 // ── CSS-rule assertion (#1894 render-layer gate — the rule lives in
