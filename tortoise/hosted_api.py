@@ -7869,12 +7869,34 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
                 )
 
 
+# Kind-carrying prop keys on dump nodes — the 6 live writer keys
+# (sdk.py:9661 kind_field: point/event/subject/document/object/source) plus
+# `kind` (extractor_v2 legacy-compat) and `actionKind` (pack-declared bucket,
+# no current node carrier — future-proof). `op_type` is deliberately NOT here:
+# operator types are a fixed non-namespaced set (IMPL/NAND/MITIGATES).
+_KIND_PROP_KEYS = ("pointKind", "objectKind", "eventKind", "documentKind",
+                   "subjectKind", "sourceKind", "actionKind", "kind")
+
+
 def _check_foreign_kinds(payload: dict) -> None:
     """Loud-mismatch guard for pre-v1.1 artifacts (no pack_config).
 
     Scans the dump's node kinds for ``ns:kind`` values where ns is neither a
-    starter namespace nor a shared-catalog pack — such a vocabulary would be
-    silently dropped on import. Raises ValueError (→ 422 quarantine).
+    starter namespace, a shared-catalog pack, nor a namespace carried by the
+    dump's OWN PackManifest nodes (self-contained vocabulary — a restored
+    manifest makes the vocabulary live, so it must not be rejected). Dump
+    nodes are ``{dump_id, labels, props}`` with kinds inside ``props``
+    (hosted_backup.dump_graph); a namespaced kind from an unknown pack would
+    be silently dropped on import → raise ValueError (→ 422 quarantine).
+
+    Documented boundaries: (a) only NAMESPACED foreign kinds are detectable —
+    legacy un-namespaced pack kinds are indistinguishable from core vocab and
+    require re-export via migrate_kinds; (b) known-set membership is catalog
+    presence, not activation — non-starter CATALOG-pack kinds in a pre-v1.1
+    artifact still lose activation (no manifest in the artifact); (c) a None
+    registry collapses known to starter + PackManifest (fail-closed bias);
+    (d) nested-dict kinds inside props are not scanned (FalkorDB props are
+    scalar/array in real dumps).
     """
     from tortoise.domain_loader import _get_registry
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
@@ -7883,14 +7905,44 @@ def _check_foreign_kinds(payload: dict) -> None:
     known = set(DEFAULT_STARTER_PACKS)
     if reg is not None:
         known |= set(reg.pack_summaries())
+    # Absorb namespaces carried by the dump's OWN PackManifest nodes first —
+    # a self-contained artifact restores its vocabulary and must not be
+    # rejected (PackManifest is exported; see _is_export_skip_node).
+    for node in payload.get("nodes", []) or []:
+        if not isinstance(node, dict):
+            continue
+        labels = node.get("labels") or []
+        if isinstance(labels, list) and "PackManifest" in labels:
+            props = node.get("props") or {}
+            if isinstance(props, dict):
+                ns = props.get("namespace")
+                if isinstance(ns, str) and ns:
+                    known.add(ns)
     foreign: set[str] = set()
     for node in payload.get("nodes", []) or []:
-        kind = node.get("kind") or node.get("pointKind") or node.get("objectKind")
-        if isinstance(kind, str) and ":" in kind:
-            ns = kind.split(":", 1)[0]
-            if ns not in known and ns not in ("core",):
-                foreign.add(kind)
+        if not isinstance(node, dict):
+            continue
+        props = node.get("props") or {}
+        if not isinstance(props, dict):
+            continue
+        for key in _KIND_PROP_KEYS:
+            kind = props.get(key)
+            if isinstance(kind, str) and ":" in kind:
+                ns = kind.split(":", 1)[0]
+                if ns not in known and ns != "core":
+                    foreign.add(kind)
     if foreign:
+        # Accurate quarantine reason: distinguish a genuinely pre-v1.1
+        # artifact (no pack_config at all) from a v1.1 artifact whose
+        # pack_config declares NO packs (exporter-emittable when the graph's
+        # custom kinds have no PackInstall records) — both would drop the
+        # vocabulary, but the remediation differs.
+        pc = payload.get("pack_config")
+        if isinstance(pc, dict) and not pc.get("packs"):
+            raise ValueError(
+                "pack_config declares no packs but the artifact references "
+                f"unknown pack kinds {sorted(foreign)[:5]} — the vocabulary "
+                "would be lost; install the pack and re-export")
         raise ValueError(
             "artifact predates pack-config (v1.1) but references unknown pack "
             f"kinds {sorted(foreign)[:5]} — the vocabulary would be lost; "
@@ -8007,6 +8059,25 @@ async def import_team(team_id: str, request: Request,
                 parsed["payload"].get("graph_name"), graph_name,
             )
             try:
+                # #2028: run the foreign-kind guard whenever the artifact
+                # cannot establish its vocabulary — no pack_config at all
+                # (pre-v1.1), or a pack_config with NO packs (exporter-
+                # emittable: collect_pack_config returns {schema_version:1,
+                # packs:[]} for a graph whose custom kinds have no PackInstall
+                # records). Either way the vocabulary would be silently
+                # dropped → reject BEFORE any restore/swap so a rejection 422s
+                # with the live graph untouched and last_import_sha256
+                # unstamped (retries converge). ValueError here is caught by
+                # the except below → quarantine + 422. Post-v1.1 artifacts
+                # WITH packs establish their namespaces via manifest upsert
+                # and skip the guard.
+                pc = parsed["payload"].get("pack_config")
+                if (not isinstance(pc, dict)
+                        or not isinstance(pc.get("packs"), list)
+                        or not pc.get("packs")):
+                    await asyncio.to_thread(
+                        _check_foreign_kinds, parsed["payload"]
+                    )
                 result = await asyncio.to_thread(
                     _restore_into_temp_verify_swap,
                     sdk._get_proj().db, parsed["payload"],

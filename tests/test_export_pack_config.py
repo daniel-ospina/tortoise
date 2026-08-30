@@ -109,16 +109,120 @@ class TestExportRoundTrip:
 
 class TestForeignKindsGuard:
     def test_pre_v1_1_with_foreign_kinds_raises(self):
+        """Real dump shape: kinds live inside node["props"] (#2028)."""
         from tortoise.hosted_api import _check_foreign_kinds
-        payload = {"nodes": [{"kind": "tenant-ops:contract", "id": "x"}]}
+        payload = {"nodes": [{"dump_id": 1, "labels": ["Point"],
+                              "props": {"objectKind": "tenant-ops:contract"}}]}
         with pytest.raises(ValueError, match="predates pack-config"):
             _check_foreign_kinds(payload)
 
     def test_pre_v1_1_clean_payload_passes(self):
         from tortoise.hosted_api import _check_foreign_kinds
-        payload = {"nodes": [{"kind": "statement", "id": "x"},
-                             {"pointKind": "dev:epic", "id": "y"}]}
-        _check_foreign_kinds(payload)  # dev is a starter → no raise
+        payload = {"nodes": [
+            {"dump_id": 1, "labels": ["Point"], "props": {"pointKind": "statement"}},
+            {"dump_id": 2, "labels": ["Event"], "props": {"eventKind": "dev:review"}},
+            {"dump_id": 3, "labels": ["Point"], "props": {"kind": "core:meeting"}},
+            {"dump_id": 4, "labels": ["Point"]},  # absent props — robustness
+        ]}
+        _check_foreign_kinds(payload)  # dev is a starter, core excluded, bare passes
+
+    @pytest.mark.parametrize("key", ["pointKind", "objectKind", "eventKind",
+                                     "documentKind", "subjectKind", "sourceKind",
+                                     "actionKind", "kind"])
+    def test_extended_keys_foreign_raises(self, key):
+        """Every kind-carrying prop key must catch a foreign namespace (#2028)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"nodes": [{"dump_id": 1, "labels": ["X"],
+                              "props": {key: "tenant-ops:thing"}}]}
+        with pytest.raises(ValueError, match="predates pack-config"):
+            _check_foreign_kinds(payload)
+
+    @pytest.mark.parametrize("key,value", [
+        ("pointKind", "statement"), ("objectKind", "dev:epic"),
+        ("eventKind", "pm:cardCreated"), ("kind", "core:meeting")])
+    def test_extended_keys_clean_passes(self, key, value):
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"nodes": [{"dump_id": 1, "labels": ["X"],
+                              "props": {key: value}}]}
+        _check_foreign_kinds(payload)
+
+    def test_non_string_kind_value_passes(self):
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"nodes": [{"dump_id": 1, "labels": ["X"],
+                              "props": {"pointKind": 42}}]}
+        _check_foreign_kinds(payload)  # isinstance guard — no crash
+
+    def test_non_dict_props_and_nodes_skipped(self):
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"nodes": [
+            "junk",
+            {"dump_id": 2, "labels": ["X"], "props": []},
+            # PackManifest-labeled node with non-dict props must not
+            # AttributeError in the absorption loop either
+            {"dump_id": 3, "labels": ["PackManifest"], "props": []},
+        ]}
+        _check_foreign_kinds(payload)  # no AttributeError → 500
+
+    def test_many_foreign_kinds_lists_only_five(self):
+        from tortoise.hosted_api import _check_foreign_kinds
+        foreign = [f"ns{i}:kind{j}" for i in range(6) for j in range(2)]
+        payload = {"nodes": [{"dump_id": i, "labels": ["X"], "props": {"objectKind": k}}
+                             for i, k in enumerate(foreign)]}
+        with pytest.raises(ValueError) as ei:
+            _check_foreign_kinds(payload)
+        # message lists exactly 5 (sorted(foreign)[:5])
+        assert "ns0:kind0" in str(ei.value) and "ns5:kind1" not in str(ei.value)
+
+    def test_self_contained_packmanifest_passes(self):
+        """A dump carrying its OWN PackManifest restores its vocabulary —
+        the namespace is self-contained and must not be rejected (#2028)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"nodes": [
+            {"dump_id": 1, "labels": ["PackManifest"],
+             "props": {"namespace": "tenant-ops", "yaml": "namespace: tenant-ops"}},
+            {"dump_id": 2, "labels": ["Object"],
+             "props": {"objectKind": "tenant-ops:contract"}},
+        ]}
+        _check_foreign_kinds(payload)
+
+    def test_packmanifest_mismatch_still_raises(self):
+        """A manifest for a DIFFERENT namespace does not mask the foreign
+        kind — absorption is namespace-keyed (#2028)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"nodes": [
+            {"dump_id": 1, "labels": ["PackManifest"],
+             "props": {"namespace": "other-ns"}},
+            {"dump_id": 2, "labels": ["Object"],
+             "props": {"objectKind": "tenant-ops:contract"}},
+        ]}
+        with pytest.raises(ValueError, match="predates pack-config"):
+            _check_foreign_kinds(payload)
+
+    def test_real_dump_graph_foreign_kind_raises(self, sdk):
+        """Guard against ACTUAL dump_graph output — the exact shape the bug
+        shipped against (#2028 Indicator 3).
+
+        No _seed_packs here: a genuine pre-v1.1 artifact predates PackManifest
+        storage (#1935) so its dump carries NO manifest node — tenant-ops is
+        foreign to both the shared catalog and the dump itself → must raise.
+        (A dump that DOES carry its own PackManifest is self-contained and
+        covered by test_self_contained_packmanifest_passes above — seeding one
+        here would mask the foreign kind and wrongly pass.)"""
+        from tortoise.hosted_api import _check_foreign_kinds
+        from tortoise.hosted_backup import dump_graph
+        sdk.create_object("Contract 1", objectKind="tenant-ops:contract")
+        dump = dump_graph(sdk._get_proj().g, graph_name="t")
+        dump.pop("pack_config", None)  # pre-v1.1 artifact (no pack_config)
+        with pytest.raises(ValueError, match="predates pack-config"):
+            _check_foreign_kinds(dump)
+
+    def test_real_dump_graph_clean_graph_passes(self, sdk):
+        from tortoise.hosted_api import _check_foreign_kinds
+        from tortoise.hosted_backup import dump_graph
+        sdk.create_point("statement", content="A claim")
+        dump = dump_graph(sdk._get_proj().g, graph_name="t")
+        dump.pop("pack_config", None)
+        _check_foreign_kinds(dump)
 
 
 class TestApplyImportPackConfig:

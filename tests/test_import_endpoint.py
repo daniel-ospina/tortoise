@@ -571,6 +571,95 @@ class TestImportValidationFailClosed:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# #2028 — pre-v1.1 foreign-kind guard (loud mismatch, never silent drop)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+_CUSTOM_MANIFEST = """namespace: tenant-ops
+name: Tenant Operations
+version: 0.1.0
+tier: free
+ontology:
+  extends: core
+  objectKinds:
+  - contract
+"""
+
+
+class TestImportForeignKindsGuard:
+    def test_import_pre_v1_1_foreign_kind_422(self, sb_client, as_user,
+                                              capture_audit):
+        """Pre-v1.1 artifact (no pack_config) with a namespaced custom-pack
+        kind → guard fires PRE-restore → 422 + quarantine; nothing lands in
+        the live graph, last_import_sha256 unstamped (retries converge).
+
+        No _seed_live_graph — no additional long-held holder on the file
+        (the anchor+SDK pair is empirically safe: same pattern as the unskipped
+        json-body-form / fresh-team tests)."""
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=1, n_edges=0)
+        payload["nodes"][0]["props"]["pointKind"] = "tenant-ops:contract"
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "predates pack-config" in r.text  # the guard is the rejection source
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
+        assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
+        # ledger NOT stamped → re-import of the same artifact re-validates
+        # (quarantine stamps a separate key; last_import_sha256 is untouched)
+        assert not fake.tables["teams"][0].get("last_import_sha256")
+
+    def test_import_v1_1_empty_packs_foreign_kind_422(self, sb_client, as_user,
+                                                      capture_audit):
+        """v1.1 artifact whose pack_config establishes NO vocabulary
+        (collect_pack_config emits {schema_version:1, packs:[]} for a graph
+        whose custom kinds have no PackInstall records) → the guard still
+        fires → 422 + quarantine, nothing lands (#2028 — same silent-drop
+        class as pre-v1.1: packs:[] upserts nothing, so the custom vocab
+        would be dropped)."""
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=1, n_edges=0)
+        payload["nodes"][0]["props"]["pointKind"] = "tenant-ops:contract"
+        payload["pack_config"] = {"schema_version": 1, "packs": []}
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "declares no packs" in r.text  # accurate reason for the v1.1 empty-packs path
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
+        assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
+
+    def test_import_post_v1_1_custom_pack_passthrough_200(self, sb_client,
+                                                          as_user):
+        """Post-v1.1 artifact (pack_config present) with a custom-pack kind →
+        guard gated off (falsy-check); restore + manifest upsert succeed →
+        200. Locks the gate: WITHOUT the pack_config the same kinds 422 (see
+        test_import_pre_v1_1_foreign_kind_422); WITH it they import.
+
+        No _seed_live_graph — no additional long-held holder (same pattern as
+        the unskipped json-body-form / fresh-team tests)."""
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=1, n_edges=0)
+        payload["nodes"][0]["props"]["objectKind"] = "tenant-ops:contract"
+        payload["pack_config"] = {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0", "activated": True,
+             "yaml": _CUSTOM_MANIFEST}]}
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 200, r.text
+        assert r.json()["imported"] is True
+        assert _counts(db_path)["ids"] == ["pt-0"]  # restore+swap landed
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Happy path (S5) — temp→verify→swap; counts + Point IDs match; audited
 # ═══════════════════════════════════════════════════════════════════════════
 
