@@ -7394,10 +7394,12 @@ def _team_members_sync(team_id: str) -> list[dict]:
 def _team_namespace(team_node: dict, team_id: str) -> str:
     """Namespace for the team's data graph.
 
-    Stored ``graph_name`` (sdk.team_create uses ``team_{name}`` and records
-    it on the Team node; code-review P1, PR #873) wins over the
-    ``team_{team_id}`` convention used by provision_tenant — exporting the
-    wrong graph would silently return an empty dump.
+    Stored ``graph_name`` wins over the ``team_{team_id}`` fallback — the
+    stored name is canonical for export (code-review P1, PR #873). Since
+    #1903 all Supabase-lane provisions mint ``team_{team_id}`` (provision_tenant,
+    register_user, agent_signup, create_team, onboarding sub-team); the
+    registry lane (sdk.team_create) still stores ``team_{name}`` (#2023).
+    Exporting the wrong graph would silently return an empty dump.
     """
     graph_name = team_node.get("graph_name")
     if graph_name and str(graph_name).startswith("team_") and len(str(graph_name)) > 5:
@@ -8206,8 +8208,10 @@ async def delete_team(team_id: str, request: Request,
 def _drop_team_graph(team_id: str, graph_name: str | None = None) -> None:
     """Best-effort drop of a team's FalkorDB graph.
 
-    graph_name wins when known (sdk.team_create stores ``team_{name}``);
-    the ``team_{team_id}`` fallback matches provision_tenant graphs.
+    graph_name wins when known (the stored name is canonical: Supabase
+    lanes mint ``team_{team_id}`` since #1903; the registry lane
+    sdk.team_create stores ``team_{name}``, #2023); the ``team_{team_id}``
+    fallback matches the data-plane convention.
     Errors are logged and swallowed — callers that need a drop failure
     to be fatal (Supabase purge retry anchor, #926) use
     :func:`_drop_team_graph_strict` instead.

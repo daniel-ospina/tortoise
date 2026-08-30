@@ -613,13 +613,15 @@ class TestCreateTeam:
         assert manifest["graph_name"] == f"team_{team_id}"  # stored name wins
         # dump captured non-skip nodes (the provision RPC may co-mint
         # starter PackInstall nodes, so assert >=1, not an exact total)
-        assert manifest["node_count"] >= 1
+        assert manifest["node_count"] >= 1, \
+            f"dump empty: graph {manifest['graph_name']} — seed/redirect divergence"
         # restore round-trip: the dump captured the seeded node
         backup_key = f"backups/{manifest['backup_id']}/dump.enc"
         r2 = tc.post("/backups/restore",
                      json={"backup_key": backup_key, "confirm": True})
         assert r2.status_code == 200, r2.text
-        assert r2.json()["restored"]["nodes"] >= 1
+        assert r2.json()["restored"]["nodes"] >= 1, \
+            f"restore empty: {r2.json()}"
         # specific-content proof: the seeded point survived the round-trip
         probe = ha_mod._make_sdk(namespace=team_id)
         try:
