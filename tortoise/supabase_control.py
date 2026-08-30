@@ -110,12 +110,15 @@ _TEAM_ADDITIVE_SELECT = [
 _TEAM_ADDITIVE_IMPORT_TIER = [
     # #1230 import idempotency ledger + quarantine record (Team-node props).
     "last_import_sha256", "last_import_quarantined_sha256",
-    # #2040 post-swap pack-failure marker (consulted by the import
-    # already-fast-path — must be readable through the same fail-soft seam).
-    "last_import_pack_failed_sha256",
     # points-cap override (the plan's max_points / graph_size_cap source).
     "max_points",
 ]
+# #2040 post-swap pack-failure marker — its OWN tier (20260830000001, the
+# NEWEST import migration) so a schema missing ONLY the marker column
+# degrades just the marker (already-fast-path re-validates — convergent,
+# never a lie) while the #1230 ledger + max_points stay readable. Dropped
+# FIRST by the ladder (newest migration dropped first).
+_TEAM_ADDITIVE_2040_TIER = ["last_import_pack_failed_sha256"]
 _TEAM_ADDITIVE_DKL_TIER = ["dashboard_key_login"]      # 20260813000005
 _TEAM_ADDITIVE_0015_TIER = ["suspended_at", "flagged_at"]  # 0015
 # Stripe billing state (0012 — OLDER than 0015). Dropped LAST in the retry
@@ -581,7 +584,8 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     team_row = _teams_row_fail_soft(
         cp, team_id, select=_QUOTA_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
+        additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+                         _TEAM_ADDITIVE_IMPORT_TIER,
                          _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
                          _TEAM_ADDITIVE_BILLING_TIER])
     if team_row is None:
@@ -770,7 +774,8 @@ def team_by_id(cp, team_id: str) -> dict | None:
                 "backup_enabled", "backup_latest_at", "backup_restored_at",
                 "created_at", "deleted_at", "grace_hours"]
             + _TEAM_ADDITIVE_SELECT,
-        additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
+        additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+                         _TEAM_ADDITIVE_IMPORT_TIER,
                          _TEAM_ADDITIVE_DKL_TIER, _TEAM_ADDITIVE_0015_TIER,
                          _TEAM_ADDITIVE_BILLING_TIER])
 

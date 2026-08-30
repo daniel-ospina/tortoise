@@ -351,6 +351,27 @@ class TestResolveApiKeyFailSoft:
         assert any("api_keys base-only read failed" in r.message
                    for r in caplog.records)
 
+    def test_marker_column_drift_degrades_marker_only(self, fake, caplog):
+        """#2040 (code-review round 3): a schema missing ONLY the
+        post-swap pack-failure marker column (20260830000001) must degrade
+        just the marker (already-fast-path re-validates — convergent) while
+        the #1230 ledger + max_points stay readable. The marker's OWN tier
+        (dropped first) prevents a single missing column from dropping the
+        whole import tier (which would break the idempotency read)."""
+        from tortoise.supabase_control import team_by_id
+        fake.tables["teams"][0]["last_import_sha256"] = "sha-a"
+        fake.tables["teams"][0]["max_points"] = 999
+        fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        # marker padded to safe None (its tier dropped first)
+        assert team.get("last_import_pack_failed_sha256") is None
+        # #1230 ledger + points-cap override still readable (import tier intact)
+        assert team.get("last_import_sha256") == "sha-a"
+        assert team.get("max_points") == 999
+        assert any("additive" in r.message for r in caplog.records)
+
     def test_resolve_api_key_api_keys_enabled_false_drift_fail_open(self,
                                                                    fake):
         """#1096 accepted-risk doc (code-review fix): a per-key DISABLED

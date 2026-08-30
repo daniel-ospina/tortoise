@@ -7949,8 +7949,13 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
                 raw = _yaml.safe_load(yaml_text)
             except Exception:  # defer to apply-time validation
                 continue
+            # #2040 code-review: normalize the yaml namespace with the SAME
+            # strip() validate_manifest applies (str(...).strip() — the
+            # exporter emits the verbatim manifest yaml alongside the
+            # stripped node ns, so a quoted whitespace-padded namespace must
+            # not false-positive a mismatch pre-restore).
             if isinstance(raw, dict) and isinstance(raw.get("namespace"), str) \
-                    and raw["namespace"] != ns:
+                    and str(raw["namespace"]).strip() != ns:
                 raise _ImportVerifyError(
                     f"pack_config pack namespace {ns!r} does not match "
                     f"manifest namespace {raw['namespace']!r}", payload_sha)
@@ -8453,9 +8458,17 @@ async def import_team(team_id: str, request: Request,
                         "last_import_pack_failed_sha256", sha,
                     )
                 except Exception as ex:
-                    _logger.warning(
-                        "import pack-failure marker stamp failed for "
-                        "team %s: %s", team_id, ex,
+                    # #2040 review round 3: if BOTH the L-clear and the
+                    # marker stamp fail, L may hold a stale sha with the
+                    # marker unset — the already-fast-path would then fire
+                    # for a sha whose vocabulary is NOT live. ERROR (not
+                    # warning): an operator seeing repeated `already` for
+                    # this sha with this logged failure knows to force a
+                    # re-swap.
+                    _logger.error(
+                        "import pack-failure marker stamp FAILED for team %s "
+                        "(double-write failure — already-fast-path may fire "
+                        "with vocab not live): %s", team_id, ex,
                     )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
             except (OSError, RuntimeError) as e:
@@ -8484,9 +8497,10 @@ async def import_team(team_id: str, request: Request,
                         "last_import_pack_failed_sha256", sha,
                     )
                 except Exception as ex:
-                    _logger.warning(
-                        "import pack-failure marker stamp failed for "
-                        "team %s: %s", team_id, ex,
+                    _logger.error(
+                        "import pack-failure marker stamp FAILED for team %s "
+                        "(double-write failure — already-fast-path may fire "
+                        "with vocab not live): %s", team_id, ex,
                     )
                 raise HTTPException(status_code=503, detail=f"Import failed: {e}")  # noqa: B904
             # Idempotency ledger stamp — best-effort; a crash between the swap
