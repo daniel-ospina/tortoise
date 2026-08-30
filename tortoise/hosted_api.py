@@ -7396,8 +7396,9 @@ def _team_namespace(team_node: dict, team_id: str) -> str:
 
     Stored ``graph_name`` wins over the ``team_{team_id}`` fallback — the
     stored name is canonical for export (code-review P1, PR #873). Since
-    #1903 all Supabase-lane provisions mint ``team_{team_id}`` (provision_tenant,
-    register_user, agent_signup, create_team, onboarding sub-team); the
+    #1903 all provision paths (provision_tenant — selfhost-only, 503 in
+    Supabase mode — register_user, agent_signup, and the Supabase-lane
+    create_team + onboarding sub-team) mint ``team_{team_id}``; only the
     registry lane (sdk.team_create) still stores ``team_{name}`` (#2023).
     Exporting the wrong graph would silently return an empty dump.
     """

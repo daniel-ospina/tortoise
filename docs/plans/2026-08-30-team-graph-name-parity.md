@@ -19,7 +19,7 @@ ownedBy: epistemic-team
 **Team:** epistemic-team
 **Role:** product-implementer
 
-**Architecture:** Naming-parity fix at the two Supabase-lane provision mint sites. `_create_team_supabase_lane` (hosted_api.py:6170) and `_create_onboarding_team_lane` (hosted_api.py:10628) currently mint `f"team_{name}"`, but every data-plane op resolves `_make_sdk(namespace=team_id)` → graph `team_{team_id}`. Export (`_team_namespace` :7330), backup (`teams.graph_name`), and delete (`_drop_team_graph` with stored name) all consume the STORED name — minting `team_{team_id}` makes the stored name equal the actual data location, fixing all three surfaces at the root with a 2-line production change. Registry lane (`sdk.team_create` → `team_{name}`) and the pre-fix fleet are tracked separately in #2023 (out of scope by issue + scope decisions).
+**Architecture:** Naming-parity fix at the two Supabase-lane provision mint sites. `_create_team_supabase_lane` (hosted_api.py:6170) and `_create_onboarding_team_lane` (hosted_api.py:10632) currently mint `f"team_{name}"`, but every data-plane op resolves `_make_sdk(namespace=team_id)` → graph `team_{team_id}`. Export (`_team_namespace` :7394), backup (`teams.graph_name`), and delete (`_drop_team_graph` with stored name) all consume the STORED name — minting `team_{team_id}` makes the stored name equal the actual data location, fixing all three surfaces at the root with a 2-line production change. Registry lane (`sdk.team_create` → `team_{name}`) and the pre-fix fleet are tracked separately in #2023 (out of scope by issue + scope decisions).
 
 ### Pattern Research
 
@@ -57,7 +57,7 @@ Bug pattern flags: graph-name drift (stored name ≠ data-plane name); orphaned 
 **Acceptance:** `graph_name = f"team_{team_id}"` minted in `_create_team_supabase_lane` and `_create_onboarding_team_lane` (Supabase branch); stale `# sdk.team_create parity` comments updated to describe the new convention; no other production code changed.
 
 **Files:**
-- Modify: `tortoise/hosted_api.py` (:6170 mint site, :10628 mint site)
+- Modify: `tortoise/hosted_api.py` (:6170 mint site, :10632 mint site)
 
 **Step 1:** Edit `_create_team_supabase_lane` (hosted_api.py:6170):
 ```python
@@ -65,7 +65,7 @@ team_id = str(_uuid.uuid4().hex[:26])
 graph_name = f"team_{team_id}"  # stored name == data-plane namespace (team_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (sdk.team_create keeps team_{name}; registry lane tracked in #2023)
 ```
 
-**Step 2:** Edit `_create_onboarding_team_lane` Supabase branch (hosted_api.py:10628):
+**Step 2:** Edit `_create_onboarding_team_lane` Supabase branch (hosted_api.py:10632):
 ```python
 team_id = str(_uuid.uuid4().hex[:26])
 graph_name = f"team_{team_id}"  # stored name == data-plane namespace — parity with create_team/register_user/agent_signup
