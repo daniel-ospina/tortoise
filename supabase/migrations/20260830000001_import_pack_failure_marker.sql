@@ -18,11 +18,12 @@
 --
 -- Additive + idempotent (IF NOT EXISTS), same pattern as 20260817000001.
 -- Nullable, no default, no NOT NULL — a schema missing it (drift, one
--- migration behind) fails soft: the #1096 ladder drops
--- _TEAM_ADDITIVE_IMPORT_TIER, so the already-fast-path degrades to
--- re-validating (convergent, never a lie) and the quota read falls back to
--- tier limits, never a 500. The control plane reads/writes via
--- service_role, so no new grants are needed (precedent: 20260817000001).
+-- migration behind) fails soft: the #1096 ladder drops the marker's OWN
+-- tier (_TEAM_ADDITIVE_2040_TIER, newest dropped first) so only the marker
+-- degrades to unset — the already-fast-path re-validates (convergent,
+-- never a lie) while the #1230 ledger + max_points reads stay intact.
+-- The control plane reads/writes via service_role, so no new grants are
+-- needed (precedent: 20260817000001).
 -- ============================================================================
 
 ALTER TABLE public.teams

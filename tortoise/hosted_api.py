@@ -1452,6 +1452,7 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     from tortoise.supabase_control import (
         _QUOTA_SELECT,
         _TEAM_ADDITIVE_0015_TIER,
+        _TEAM_ADDITIVE_2040_TIER,
         _TEAM_ADDITIVE_BILLING_TIER,
         _TEAM_ADDITIVE_DKL_TIER,
         _TEAM_ADDITIVE_IMPORT_TIER,
@@ -1459,14 +1460,15 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     )
     row = _teams_row_fail_soft(
         cp, team_id, select=_QUOTA_SELECT,
-        # #1832: the FULL additive ladder (import tier dropped FIRST — newest
-        # migration first), same as resolve_api_key / recover_team_key. The
-        # #1230 import ledger + points-cap columns (last_import_sha256/
-        # max_points, migration 20260817000001) ride _QUOTA_SELECT; omitting
-        # the import tier made EVERY ladder attempt 400 (PGRST204) → terminal
-        # raise → HTTP 500 on /v1/team, /v1/team/keys, /v1/sessions,
-        # /v1/onboarding/state.
-        additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+        # #1832: the FULL additive ladder (newest migration tier dropped
+        # FIRST — 2040 marker, then import tier), same as resolve_api_key /
+        # recover_team_key. The #1230 import ledger + points-cap columns
+        # (last_import_sha256/max_points, migration 20260817000001) ride
+        # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
+        # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
+        # /v1/sessions, /v1/onboarding/state.
+        additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+                         _TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
                          _TEAM_ADDITIVE_0015_TIER,
                          _TEAM_ADDITIVE_BILLING_TIER])
     if row is None:
@@ -8988,7 +8990,8 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         get_control_plane, is_supabase_enabled,
         recover_team_key, SignupTokenRecoveryError,
         _teams_row_fail_soft, _QUOTA_SELECT,
-        _TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+        _TEAM_ADDITIVE_2040_TIER, _TEAM_ADDITIVE_IMPORT_TIER,
+        _TEAM_ADDITIVE_DKL_TIER,
         _TEAM_ADDITIVE_0015_TIER, _TEAM_ADDITIVE_BILLING_TIER,
     )
 
@@ -9012,10 +9015,14 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         row = _teams_row_fail_soft(
             cp, team_id, select=_QUOTA_SELECT,
             # #1709 fixer P2.6: the FULL additive ladder (same as
-            # resolve_api_key) — the recovery emergency path must not 500 on
-            # migration skew (a schema one migration behind the newest
-            # additive drops that tier to safe defaults instead of raising).
-            additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+            # resolve_api_key — newest migration tier dropped FIRST, incl.
+            # the #2040 marker tier) — the recovery emergency path must not
+            # 500 on migration skew (a schema one migration behind the
+            # newest additive drops that tier to safe defaults instead of
+            # raising).
+            additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+                            _TEAM_ADDITIVE_IMPORT_TIER,
+                            _TEAM_ADDITIVE_DKL_TIER,
                             _TEAM_ADDITIVE_0015_TIER,
                             _TEAM_ADDITIVE_BILLING_TIER])
         if row is None or row.get("deleted_at") is not None:
