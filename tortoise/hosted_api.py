@@ -10945,8 +10945,27 @@ async def public_demo(team: dict = Depends(get_current_team)):  # noqa: B008
                                 source="demo", point_count=15)
         return {"status": "already_seeded", "team_id": team["team_id"]}
 
+    # #1922: quota-gate the seed like the MCP twin
+    # (tortoise_onboarding_demo_create → _enforce_quota("points")). The demo
+    # seed writes ~13 Points, so it must consume the points quota like any
+    # other Point-creating write — the REST surface was the 0-quota bypass
+    # (bug-hunt 2026-08-28 server P2-13). Idempotent re-calls short-circuit
+    # above and skip the gate (no write).
+    _check_team_limit(team, "points")
+
     # Call the shared demo seeder (extracted from /internal/demo)
     created = _seed_demo_graph(team["team_id"])
+
+    # #1922: meter the seed that actually ran — one write op billing 12
+    # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
+    # the value-first commit cost driver epic #909 §4.4). A concurrent
+    # request may have completed the seed first (sentinel now present) —
+    # then the seeder returns already_seeded without a points count and
+    # the OTHER request already recorded the op (guard on status so the
+    # idempotent re-call never 500s on the missing key).
+    if created.get("status") == "demo_created":
+        _record_write_op(team, nodes_written=created.get("points", 0) + 1)
+
     _update_onboarding_state(team["team_id"], demo_created=True)
     return {"status": "seeded", "team_id": team["team_id"],
             "points_created": created}
