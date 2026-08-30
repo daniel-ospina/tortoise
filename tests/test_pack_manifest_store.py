@@ -146,6 +146,36 @@ class TestValidateManifest:
         assert not r.ok
         assert "64KB" in r.errors[0]
 
+    def test_traversal_namespace_rejected(self, tmp_path, monkeypatch):
+        """#2029 review gate (security P1): a traversal namespace must never
+        escape the temp registry dir — no mkdir/write outside it. The
+        charset guard rejects ../ and /, the resolve-containment check
+        backstops `..` (defense in depth)."""
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+        from tortoise.pack_manifest_store import validate_manifest
+
+        class _FixedTempDir:
+            def __init__(self, root: _Path):
+                self._root = root
+
+            def __enter__(self):
+                self._root.mkdir(parents=True, exist_ok=True)
+                return str(self._root)
+
+            def __exit__(self, *exc):  # noqa: ANN002
+                return False
+
+        monkeypatch.setattr(_tempfile, "TemporaryDirectory",
+                            lambda prefix="": _FixedTempDir(tmp_path / "td"))
+        for bad in ("../escape", "a/b", "a\\b", "..", "-", "x:y"):
+            r = validate_manifest(f"namespace: {bad}\nname: X\ntier: free\n")
+            assert not r.ok, bad
+            assert "namespace" in r.errors[0], (bad, r.errors)
+        # Defense in depth: nothing escaped the registry dir.
+        assert not (tmp_path / "escape").exists()
+        assert not (tmp_path / "td" / ".." / "escape").resolve().exists()
+
 
 # ── API surface ─────────────────────────────────────────────────────────────
 
@@ -224,8 +254,10 @@ class TestUploadBodyCap:
 
     @staticmethod
     def _wire_cap() -> int:
-        from tortoise.pack_manifest_store import MAX_MANIFEST_BYTES
-        return MAX_MANIFEST_BYTES * 3 + 4096
+        """The production wire cap — imported, never re-derived: a formula
+        copy here would silently unpin the boundary if the cap changed."""
+        from tortoise.pack_manifest_store import MANIFEST_WIRE_CAP_BYTES
+        return MANIFEST_WIRE_CAP_BYTES
 
     def test_upload_413_spoofed_content_length_not_read(self, client):
         """Content-Length over the wire cap → 413 with the body UNREAD.
@@ -311,6 +343,27 @@ class TestUploadBodyCap:
         )
         assert r.status_code == 413
         assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_201_transfer_encoding_overrides_content_length(self, client):
+        """RFC 7230 §3.3.3: when Transfer-Encoding is present it overrides
+        Content-Length — the CL early-exit must NOT fire on a bogus large CL;
+        the small body streams through the cap and parses → 201."""
+        r = client.post(
+            "/v1/packs/manifests",
+            content=json.dumps({"manifest_yaml": VALID_MANIFEST}).encode(),
+            headers={"content-length": str(1 << 30),
+                     "transfer-encoding": "chunked"},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["activated"] is True
+
+    def test_upload_422_traversal_namespace(self, client):
+        """A traversal namespace → 422 from validate_manifest on the
+        endpoint surface (review-gate security P1) — no escape write."""
+        r = client.post("/v1/packs/manifests", json={
+            "manifest_yaml": "namespace: ../escape\nname: X\ntier: free\n"})
+        assert r.status_code == 422
+        assert "namespace" in str(r.json()["detail"])
 
     def test_upload_malformed_json_500(self, client):
         """Malformed JSON → 500 (JSONDecodeError → generic exception

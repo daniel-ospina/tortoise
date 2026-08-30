@@ -3203,10 +3203,11 @@ async def upload_pack_manifest(
     idempotent MERGE + per-(graph, namespace) lock #1307).
 
     Response matrix: no auth → 401; request body over the wire cap
-    (~196KB — checked BEFORE any parse) → 413 "manifest request body
+    (~397KB — checked BEFORE any parse) → 413 "manifest request body
     exceeds the size cap"; malformed JSON / empty body → 500; missing
-    manifest_yaml / invalid manifest → 422 {errors}; manifest over 64KB
-    → 413 "manifest exceeds 64KB"; success → 201 {activated, namespace}.
+    manifest_yaml → 422 "missing required field: manifest_yaml"; invalid
+    manifest → 422 {errors}; manifest over 64KB → 413 "manifest exceeds
+    64KB"; success → 201 {activated, namespace}.
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
@@ -3214,6 +3215,7 @@ async def upload_pack_manifest(
     if not team_id:
         raise HTTPException(status_code=401, detail="Authentication required")
     from tortoise.pack_manifest_store import (
+        MANIFEST_WIRE_CAP_BYTES,
         MAX_MANIFEST_BYTES,
         upsert_tenant_manifest,
         validate_manifest,
@@ -3221,25 +3223,25 @@ async def upload_pack_manifest(
     # #2029: reject oversized request bodies BEFORE buffering/parsing them —
     # the 64KB check below alone only fires after request.json() has buffered
     # the entire body (memory-DoS on a tenant-authenticated surface).
-    # Content-Length is only an early-exit OPTIMIZATION, never a trust
-    # boundary: Transfer-Encoding beats Content-Length (RFC 7230 §3.3.3) and
-    # HTTP/2 has no CL framing, so the body is ALWAYS stream-read under a
-    # hard cap, mirroring _read_import_body.
-    # Wire cap = 3x the yaml cap + slack: JSON escaping doubles `"`/`\`/
-    # newlines and triples non-ASCII (ensure_ascii \uXXXX), so every valid
-    # <=64KB manifest clears the wire layers; the exact
-    # len(manifest_yaml.encode()) check below remains the authoritative gate.
-    body_cap = MAX_MANIFEST_BYTES * 3 + 4096
+    # Content-Length is an early-exit OPTIMIZATION for genuinely CL-framed
+    # HTTP/1.x messages only: when Transfer-Encoding is present it overrides
+    # Content-Length (RFC 7230 §3.3.3), and HTTP/2 has no CL framing — so a
+    # body can always exceed its header. The streaming cap below is therefore
+    # UNCONDITIONAL: it is the sole arbiter for chunked / TE / h2 / no-CL /
+    # under-claimed bodies and must never be skipped based on CL.
     wire_detail = "manifest request body exceeds the size cap"
     content_length = request.headers.get("content-length")
-    if content_length is not None:
+    transfer_encoding = request.headers.get("transfer-encoding")
+    http_version = request.scope.get("http_version", "1.1")
+    if (content_length is not None and transfer_encoding is None
+            and http_version.startswith("1")):
         try:
-            too_large = int(content_length) > body_cap
+            too_large = int(content_length) > MANIFEST_WIRE_CAP_BYTES
         except ValueError:
             too_large = False  # malformed header → the streaming cap below
         if too_large:
             raise HTTPException(status_code=413, detail=wire_detail)
-    raw = await _read_capped_body(request, body_cap, wire_detail)
+    raw = await _read_capped_body(request, MANIFEST_WIRE_CAP_BYTES, wire_detail)
     body = _json.loads(raw)
     manifest_yaml = (body or {}).get("manifest_yaml") if isinstance(body, dict) else None
     if not manifest_yaml or not isinstance(manifest_yaml, str):
@@ -7588,9 +7590,9 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
 
     Content-Length alone is spoofable (a client can claim a small length and
     stream unbounded bytes) — the cap is enforced while draining the stream,
-    so an oversized body 413s before any buffering or parse work. Shared by
-    the import-artifact path (_read_import_body) and the pack-manifest upload
-    path (#2029).
+    so an oversized body 413s before the ENTIRE body is buffered or any parse
+    work. Shared by the import-artifact path (_read_import_body) and the
+    pack-manifest upload path (#2029).
     """
     chunks: list[bytes] = []
     total = 0
@@ -7603,11 +7605,10 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
 
 
 async def _read_import_body(request: Request) -> bytes:
-    """Read the raw request body under a HARD streaming cap.
+    """Read the raw import-artifact body under a HARD streaming cap (64 MiB).
 
-    Content-Length alone is spoofable (a client can claim a small length and
-    stream unbounded bytes) — the cap is enforced while draining the stream,
-    so an oversized artifact 413s before any buffering or decrypt work.
+    Delegates to ``_read_capped_body`` with the import cap — the streaming
+    rationale lives on the shared helper.
     """
     return await _read_capped_body(
         request,
