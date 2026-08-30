@@ -50,6 +50,7 @@ surfaces:
   - test_email_integration_resend.py
   - test_email_notify.py
   - test_email_signup.py
+  - test_enforcement.py
   - test_epic903_hosted.py
   - test_epic903_mcp.py
   - test_export_delete.py
