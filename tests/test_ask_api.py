@@ -12,10 +12,7 @@ Reuses the test_hosted_api harness (auth override + temp embedded DB).
 """
 from __future__ import annotations
 
-import json
-import os
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -30,21 +27,21 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from test_hosted_api import (  # noqa: E402, RUF100
-    TEST_TEAM,
     TEST_TEAM_ID,
-    client as _client_fixture,  # noqa: F401
     unauth_client,  # noqa: F401
-    _patch_tortoise_sdk_init,
-    _restore_tortoise_sdk_init,
+)
+from test_hosted_api import (
+    client as _client_fixture,
 )
 
-from tortoise import hosted_api as ha_mod  # noqa: E402
+from tortoise import hosted_api as ha_mod
 
 # #2013 PRODUCT-GATING: register the /v1/ask route explicitly (idempotent)
 # so the full-pipeline tests in this file serve it regardless of import
 # order or a session env flag (test-review #2013 — no env mutation leak).
 ha_mod._register_ask_route()
 from fastapi import Request as _AskRequest  # noqa: E402 — module-level so the
+
 # `_suspended(request: _AskRequest)` override annotation resolves under
 # ``from __future__ import annotations`` (a local import inside the test fn
 # would leave 'Request' unresolvable in the fn's module globals → FastAPI
@@ -124,7 +121,7 @@ def _seed_point(client, content: str = "the gym schedule is Monday and Wednesday
 
 # ── Auth + error body ──────────────────────────────────────────────────────
 
-def test_ask_unauthenticated_401(unauth_client):
+def test_ask_unauthenticated_401(unauth_client):  # noqa: F811
     """401 missing/invalid key → the CANONICAL body (status-derived — the
     auth dependency's details are non-canonical, P1-3)."""
     r = unauth_client.post("/v1/ask", json={"question": "q"})
@@ -140,7 +137,7 @@ def test_error_body_shape(client, monkeypatch):
     assert r.json() == {"error": {"code": "invalid_question"}}
 
 
-def test_non_ask_paths_keep_default_body(unauth_client):
+def test_non_ask_paths_keep_default_body(unauth_client):  # noqa: F811
     """P1-3: non-ask paths keep FastAPI's default {\"detail\": …} — the
     path-scoped handler never touches them."""
     r = unauth_client.get("/v1/team")
@@ -154,6 +151,7 @@ def test_suspended_team_403_passthrough(client):
     _suspended_detail() DICT detail (never the canonical body, never an 11th
     code)."""
     from fastapi import HTTPException
+
     from tortoise.hosted_api import _suspended_detail
 
     def _suspended(request: _AskRequest):
@@ -257,7 +255,7 @@ def test_malformed_json_400_invalid_question(client, monkeypatch):
 
 
 def test_unicode_question_accepted(client, monkeypatch):
-    fake = _FakeReaderFactory().install(monkeypatch)
+    _FakeReaderFactory().install(monkeypatch)
     r = client.post("/v1/ask", json={"question": "¿cuál es el horario? 🏋️"})
     assert r.status_code == 200
 
@@ -267,8 +265,7 @@ def test_unicode_question_accepted(client, monkeypatch):
 def test_budget_429_with_retry_after(client, monkeypatch):
     """60 budgeted asks → the 61st is 429 quota_exceeded + Retry-After; an
     ask after the window elapses succeeds (no permanent lockout)."""
-    import time as _t
-    fake = _FakeReaderFactory().install(monkeypatch)
+    _FakeReaderFactory().install(monkeypatch)
     # fill the budget: 60 asks (each consumes a slot)
     for _ in range(60):
         r = client.post("/v1/ask", json={"question": "q"})
@@ -292,7 +289,7 @@ def test_in_flight_cap_429(client, monkeypatch):
     """Per-team in-flight cap 4 → the 5th concurrent ask is 429
     in_flight_limit (Retry-After omitted)."""
     import threading
-    import time as _t
+
     import tortoise.sdk as sdk_mod
 
     gate = threading.Event()
@@ -386,6 +383,7 @@ def test_ask_exec_floor_guarantees_execution(monkeypatch):
     request released past the cap 504s at acquire WITHOUT starting the call
     (no wasted model call)."""
     import asyncio
+
     import tortoise.quota as quota_mod
 
     monkeypatch.setattr(quota_mod, "_ASK_TIMEOUT_S", 3.0)

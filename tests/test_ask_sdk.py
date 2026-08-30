@@ -30,28 +30,25 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.retrieval import estimate_tokens_ask  # noqa: E402
-from tortoise.sdk import (  # noqa: E402
-    ASK_SDK_TIMEOUT_S,
-    TortoiseSDK,
-    _reset_ask_reader_cache_for_tests,
-)
-from tortoise.schemas import (  # noqa: E402
-    CODE_INVALID_QUESTION,
-    CODE_QUESTION_TOO_LONG,
-    CODE_INVALID_QUESTION_TYPE,
-    CODE_INVALID_QUESTION_DATE,
-    CODE_QUOTA_EXCEEDED,
-    CODE_IN_FLIGHT_LIMIT,
-    CODE_UNAUTHORIZED,
-)
-from tortoise.exceptions import (  # noqa: E402
+from tortoise.exceptions import (
     AskInFlightLimit,
     AskQuotaExceeded,
     AskReaderUnavailable,
     AskRetrievalUnavailable,
     AskTimeout,
     AskValidationError,
+)
+from tortoise.retrieval import estimate_tokens_ask
+from tortoise.schemas import (
+    CODE_INVALID_QUESTION,
+    CODE_INVALID_QUESTION_DATE,
+    CODE_INVALID_QUESTION_TYPE,
+    CODE_QUESTION_TOO_LONG,
+)
+from tortoise.sdk import (
+    ASK_SDK_TIMEOUT_S,
+    TortoiseSDK,
+    _reset_ask_reader_cache_for_tests,
 )
 
 
@@ -206,7 +203,6 @@ def test_annotate_d8_rides_through_decorated_hits():
     """Superseded point → superseded_by rides through the ALREADY-decorated
     hits (annotate_ask_hits does NOT re-fetch D8 state)."""
     sdk = _new_sdk()
-    proj = sdk._get_proj()
     old = sdk.create_point("statement", "gym schedule is Monday")
     new = sdk.create_point("statement", "gym schedule is Tuesday")
     sdk.supersede_point(old["id"], new["id"])
@@ -274,7 +270,7 @@ def test_local_lane_default_question_date_utc(monkeypatch):
     """question_date default = server-now-UTC (resolved value in the
     response); a non-UTC clock at a boundary time does not leak local date."""
     sdk = _new_sdk()
-    fake = _install_fake(sdk, monkeypatch)
+    _install_fake(sdk, monkeypatch)
     result = sdk.ask("q")
     import re
     assert re.match(r"^\d{4}-\d{2}-\d{2}$", result["question_date"])
@@ -312,7 +308,6 @@ def test_decoy_near_miss_exactly_one_call(monkeypatch):
 def test_local_lane_validation_first_zero_calls(monkeypatch):
     """P2-8: invalid inputs → AskValidationError with ZERO model calls AND
     zero retrieval calls (the retrieval stub is never invoked)."""
-    import tortoise.sdk as sdk_mod
     sdk = _new_sdk()
     fake = _install_fake(sdk, monkeypatch)
     retrieved = []
@@ -385,7 +380,7 @@ def test_undated_hits(monkeypatch):
 
 def test_question_type_passthrough_and_override(monkeypatch):
     sdk = _new_sdk()
-    fake = _install_fake(sdk, monkeypatch)
+    _install_fake(sdk, monkeypatch)
     r = sdk.ask("how many days ago did we meet?")
     assert r["question_type"] == "temporal-reasoning"
     r2 = sdk.ask("how many days ago did we meet?",
@@ -443,7 +438,7 @@ def test_tokens_race_same_cached_instance(monkeypatch):
     def _ask(q):
         try:
             results.append(sdk.ask(q))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             errors.append(e)
 
     threads = [threading.Thread(target=_ask, args=(f"what is the schedule {i}?",))
@@ -460,7 +455,6 @@ def test_tokens_race_same_cached_instance(monkeypatch):
 
 def test_cache_key_isolation():
     """Team A vs team B resolve to DIFFERENT cached model instances."""
-    import tortoise.sdk as sdk_mod
     sdk_a = TortoiseSDK(tempfile.mkdtemp() + "/a.db", namespace="team-a")
     sdk_b = TortoiseSDK(tempfile.mkdtemp() + "/b.db", namespace="team-b")
     a = sdk_a._ask_reader_model()
@@ -498,7 +492,6 @@ def test_locked_reader_forwards_finish_reason(monkeypatch):
     same capture frame as the token usage (P2 — consumers previously got
     None because the attribute was never set)."""
     import tortoise.sdk as sdk_mod
-    sdk = _new_sdk()
 
     class FinishReader:
         def complete(self, *, system, user):
@@ -523,7 +516,6 @@ def test_locked_reader_forwards_finish_reason(monkeypatch):
 
 def test_both_not_either_control(monkeypatch):
     """tortoise_search / tortoise_recall never invoke the reader factory."""
-    import tortoise.sdk as sdk_mod
     sdk = _new_sdk()
     _seed_event_graph(sdk, [
         {"content": "the gym schedule is Monday", "eventId": "ev1",
@@ -563,8 +555,6 @@ class _FakeAskServer:
         return 200, self.responses[0], self.headers
 
     def start(self, monkeypatch) -> str:
-        seen = {}
-
         class _H(BaseHTTPRequestHandler):
             def do_POST(self):
                 length = int(self.headers.get("Content-Length", 0))
@@ -614,7 +604,6 @@ def test_post_ask_status_mapping(monkeypatch):
     in_flight_limit → AskInFlightLimit; code-less 429 → AskQuotaExceeded
     (retry_after=None); 400 + invalid_question → AskValidationError; 504 →
     AskTimeout; 502 → typed; unreachable → typed."""
-    import tortoise.sdk as sdk_mod
     cases = [
         # the REAL server shape: Retry-After in the HTTP HEADER (the
         # hosted server ALSO ships the seconds in the 429 body — P1)
@@ -658,9 +647,7 @@ def test_post_ask_status_mapping(monkeypatch):
                 assert ei.value.code == code, (status, ei.value.code)
             if exc_type is AskQuotaExceeded and status == 429:
                 ra = ei.value.retry_after
-                if headers and headers.get("Retry-After"):
-                    assert ra == 42
-                elif body.get("error", {}).get("retry_after"):
+                if (headers and headers.get("Retry-After")) or body.get("error", {}).get("retry_after"):
                     assert ra == 42
                 else:
                     assert ra is None
@@ -708,7 +695,6 @@ def test_post_ask_429_unparseable_header_falls_back_to_body(monkeypatch):
 def test_post_ask_timeout_mapping(monkeypatch):
     """504 → AskTimeout with source='server'; a client-fired timeout maps to
     AskTimeout with source='client' (monkeypatched SHORT client timeout)."""
-    import tortoise.sdk as sdk_mod
     server = _FakeAskServer()
     server.status = 504
     server.responses = [{}]

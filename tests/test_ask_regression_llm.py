@@ -42,15 +42,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.reader import reader_prompt_constants  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
-from tortoise.retrieval import (  # noqa: E402
-    DEFAULT_CONTEXT_ITEM_CAP,
-    DEFAULT_CONTEXT_TOKEN_CAP,
-    assemble_context,
-    dedup_pool,
-    render_context,
-)
+from tortoise.reader import reader_prompt_constants
+from tortoise.sdk import TortoiseSDK
 
 TRANSCRIPTS_DIR = Path(__file__).parent / "fixtures" / "ask_llm_transcripts"
 
@@ -226,7 +219,7 @@ def test_fixture_replay_user_message_byte_equal(monkeypatch) -> None:
             _seed(sdk, tx["seeds"])
             replay = _ReplayReader(tx["completion"])
             monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
-                                lambda: replay)
+                                lambda replay=replay: replay)
             sdk.ask(tx["question"], question_date=tx["question_date"])
             assert replay.user_message == tx["user_message"], (
                 f"rendered context drifted for {tx['fixture']} — regenerate")
