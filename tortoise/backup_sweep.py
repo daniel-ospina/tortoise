@@ -194,7 +194,10 @@ def team_graph_name(source, team_id: str) -> str:
     name — provision writes ``team_{team_id}``, #770). Supabase mode:
     ``teams.graph_name`` is the source of truth (SDK team creation names
     graphs ``team_{name}`` — a sweep that assumed ``team_{id}`` would back up
-    a nonexistent graph for SDK-created teams).
+    a nonexistent graph for SDK-created teams). Since #1903 the Supabase-lane
+    provisions (create_team, onboarding sub-team) mint ``team_{team_id}``, so
+    ``teams.graph_name`` now resolves ``team_{team_id}`` for dashboard teams
+    and ``team_{name}`` only for registry-lane (sdk.team_create) teams (#2023).
 
     Fail-closed: a query error or a vanished/missing ``graph_name`` row
     raises RuntimeError — the sweep never guesses a graph name.

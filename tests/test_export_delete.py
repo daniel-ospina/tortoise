@@ -447,6 +447,66 @@ class TestDeleteSupabase:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# #1903 — dashboard-created teams (POST /v1/teams): stored graph_name must
+# equal the data-plane namespace (team_{team_id}) so export/delete resolve
+# the REAL graph. The old mint (team_{name}) made export empty and delete
+# orphan the real graph.
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestDashboardCreatedTeamRoundTrip:
+    def test_dashboard_created_team_export_returns_points(self, sb_client, as_user):
+        """#1903 Indicator 1+2: POST /v1/teams mints graph_name=team_{team_id}
+        and a dashboard-created team's export returns its points (the stored
+        name resolves the real data graph)."""
+        tc, fake, db_path = sb_client
+        as_user()
+        r = tc.post("/v1/teams", json={"name": "acme"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        team_id = body["team_id"]
+        assert body["graph_name"] == f"team_{team_id}"  # Indicator 1
+        fn, p = fake.rpc_calls[0]
+        assert fn == "provision_team"
+        assert p["p_graph_name"] == f"team_{team_id}"
+        # data-plane write (the real write path: namespace=team_id)
+        seed_sdk = _seed_graph(db_path, team_id=team_id, n_points=1, n_events=0)  # noqa: F841
+        r2 = tc.get(f"/v1/teams/{team_id}/export")
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["summary"]["points"] == 1  # Indicator 2
+
+    def test_dashboard_created_team_delete_drops_team_id_graph(self, sb_client, as_user, monkeypatch, capture_audit):
+        """#1903 Indicator 3: delete of a dashboard-created team targets the
+        team_{team_id} graph (the old team_{name} stored name orphaned it).
+        The _drop_team_graph_strict spy is the mechanism proof — embedded
+        FalkorDBLite has no delete_graph, so the assertion is on the CORRECT
+        TARGET passed to the drop."""
+        tc, fake, _ = sb_client
+        as_user()
+        # env must be 0 BEFORE delete — soft_delete stamps the STORED
+        # grace_hours and the purge honors stored grace over env
+        # (_past_grace): a 24h stamp would skip the just-deleted team.
+        monkeypatch.setenv("TORTOISE_TEAM_DELETE_GRACE_HOURS", "0")
+        r = tc.post("/v1/teams", json={"name": "acme"})
+        assert r.status_code == 200, r.text
+        team_id = r.json()["team_id"]
+        assert r.json()["graph_name"] == f"team_{team_id}"
+        dropped = []
+        monkeypatch.setattr(ha_mod, "_drop_team_graph_strict",
+                            lambda tid, gn=None: dropped.append((tid, gn)))
+        r = tc.delete(f"/v1/teams/{team_id}")
+        assert r.status_code == 202, r.text
+        assert r.json()["grace_hours"] == 0  # env->stored promise pinned
+        ha_mod._purge_deleted_teams()
+        # exactly one drop, exactly the team_{team_id} target (suite precedent:
+        # TestPurge asserts strict equality on the captured drop list)
+        assert dropped == [(team_id, f"team_{team_id}")]  # Indicator 3
+        assert not any(t["id"] == team_id for t in fake.tables["teams"])
+        ops = [e["operation"] for e in capture_audit]
+        assert "team_delete_purged" in ops
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Same surface — registry mode (selfhost control plane)
 # ═══════════════════════════════════════════════════════════════════════════
 

@@ -6167,7 +6167,7 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
             detail="Create another team requires a paid plan — upgrade an existing team first")
 
     team_id = str(_uuid.uuid4().hex[:26])
-    graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
+    graph_name = f"team_{team_id}"  # stored name == data-plane namespace (team_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.team_create keeps team_{name} — registry lane tracked in #2023)
     api_key = f"tt_{_uuid.uuid4().hex}"
     # Eager default-graph TeamMeta FIRST (register_user's documented
     # ordering — review P2, PR #874): an orphaned graph namespace is
@@ -7394,10 +7394,13 @@ def _team_members_sync(team_id: str) -> list[dict]:
 def _team_namespace(team_node: dict, team_id: str) -> str:
     """Namespace for the team's data graph.
 
-    Stored ``graph_name`` (sdk.team_create uses ``team_{name}`` and records
-    it on the Team node; code-review P1, PR #873) wins over the
-    ``team_{team_id}`` convention used by provision_tenant — exporting the
-    wrong graph would silently return an empty dump.
+    Stored ``graph_name`` wins over the ``team_{team_id}`` fallback — the
+    stored name is canonical for export (code-review P1, PR #873). Since
+    #1903 all provision paths (provision_tenant — selfhost-only, 503 in
+    Supabase mode — register_user, agent_signup, and the Supabase-lane
+    create_team + onboarding sub-team) mint ``team_{team_id}``; only the
+    registry lane (sdk.team_create) still stores ``team_{name}`` (#2023).
+    Exporting the wrong graph would silently return an empty dump.
     """
     graph_name = team_node.get("graph_name")
     if graph_name and str(graph_name).startswith("team_") and len(str(graph_name)) > 5:
@@ -8206,8 +8209,10 @@ async def delete_team(team_id: str, request: Request,
 def _drop_team_graph(team_id: str, graph_name: str | None = None) -> None:
     """Best-effort drop of a team's FalkorDB graph.
 
-    graph_name wins when known (sdk.team_create stores ``team_{name}``);
-    the ``team_{team_id}`` fallback matches provision_tenant graphs.
+    graph_name wins when known (the stored name is canonical: Supabase
+    lanes mint ``team_{team_id}`` since #1903; the registry lane
+    sdk.team_create stores ``team_{name}``, #2023); the ``team_{team_id}``
+    fallback matches the data-plane convention.
     Errors are logged and swallowed — callers that need a drop failure
     to be fatal (Supabase purge retry anchor, #926) use
     :func:`_drop_team_graph_strict` instead.
@@ -10625,7 +10630,7 @@ def _create_onboarding_team_lane(team: dict, name: str,
         import uuid as _uuid
         try:
             team_id = str(_uuid.uuid4().hex[:26])
-            graph_name = f"team_{name}"  # sdk.team_create parity
+            graph_name = f"team_{team_id}"  # stored name == data-plane namespace — parity with create_team/register_user/agent_signup (#1903)
             # #1716: keyless provisioning — all-NULL key params → the RPC
             # writes teams + membership but NO api_keys row (all-or-none
             # guard, migration 20260825214233). #1748: USER path — the

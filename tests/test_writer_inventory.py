@@ -466,10 +466,15 @@ class TestCreateTeam:
         body = r.json()
         assert body["name"] == "acme"
         assert body["tier"] == "free"
-        assert body["graph_name"] == "team_acme"  # sdk.team_create parity
+        assert body["graph_name"] == f"team_{body['team_id']}"  # #1903: stored name == data-plane namespace
 
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
+        assert p["p_graph_name"] == f"team_{body['team_id']}"
+        # persisted teams.graph_name pinned (the round-trip consumers read it)
+        assert next(t for t in fake.tables["teams"]
+                    if t["id"] == body["team_id"])["graph_name"] == \
+            f"team_{body['team_id']}"
         assert p["p_user_id"] == _USER1
         assert p["p_identity"] is None
         assert p["p_team_id"] == body["team_id"]
@@ -561,6 +566,78 @@ class TestCreateTeam:
         r = tc.post("/v1/teams", json={"name": "acme"})
         assert r.status_code == 200, r.text
         spy.assert_clean()
+
+    def test_backup_round_trip_dashboard_created_team(self, user_client, monkeypatch):
+        """#1903 backup surface: a dashboard-created team's backup resolves
+        teams.graph_name (= team_{team_id} post-fix) and dumps the REAL data
+        graph (manifest node_count + restore round-trip capture the seeded
+        point). Mirrors the pro_backup_client setup (:1006-1031) — POST
+        /backups is key-auth (get_current_team) and the tier gate reads the
+        dependency dict."""
+        import base64 as _b64  # noqa: I001
+        import tortoise.hosted_api as ha_mod
+        from tortoise import pricing as _pricing
+        from tortoise.hosted_backup import MemoryStorage
+
+        tc, fake, _ = user_client  # noqa: RUF059
+        monkeypatch.setenv(
+            "TORTOISE_BACKUP_KEY", _b64.b64encode(os.urandom(32)).decode()
+        )
+        store = MemoryStorage()  # SHARED — _backup_storage is called per request
+        monkeypatch.setattr(ha_mod, "_backup_storage", lambda: store)
+        monkeypatch.setattr(
+            _pricing, "daily_backups_enabled", lambda tier: tier == "pro"
+        )
+        r = tc.post("/v1/teams", json={"name": "acme"})
+        assert r.status_code == 200, r.text
+        team_id = r.json()["team_id"]
+        assert r.json()["graph_name"] == f"team_{team_id}"
+        # get_current_team_session honors the get_current_team override
+        # (hosted_api.py:1540-1548), so one override covers create + restore.
+        app.dependency_overrides[get_current_team] = lambda: dict(
+            TEST_TEAM, team_id=team_id, tier="pro", backup_enabled=True)
+        # seed the real data graph: bind the raw handle to the EXPLICIT
+        # team_{team_id} graph (the same graph the backup dump reads via
+        # from_uri) so the seed target is explicit and lane-independent —
+        # mirrors test_restore_binds_live_graph_to_teams_graph_name.
+        sdk = ha_mod._make_sdk(namespace=team_id)
+        try:
+            sdk._get_proj().db.select_graph(f"team_{team_id}").query(
+                "CREATE (p:Point {id:'seed-1', content:'real decision'})"
+            )
+        finally:
+            sdk.close()
+        r = tc.post("/backups")
+        assert r.status_code == 201, r.text
+        manifest = r.json()
+        assert manifest["graph_name"] == f"team_{team_id}"  # stored name wins
+        # dump captured non-skip nodes (the provision RPC may co-mint
+        # starter PackInstall nodes, so assert >=1, not an exact total)
+        assert manifest["node_count"] >= 1, \
+            f"dump empty: graph {manifest['graph_name']} — seed/redirect divergence"
+        # restore round-trip: the dump captured the seeded node
+        backup_key = f"backups/{manifest['backup_id']}/dump.enc"
+        r2 = tc.post("/backups/restore",
+                     json={"backup_key": backup_key, "confirm": True})
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["restored"]["nodes"] >= 1, \
+            f"restore empty: {r2.json()}"
+        # specific-content proof: the seeded point survived the round-trip
+        probe = ha_mod._make_sdk(namespace=team_id)
+        try:
+            rows = probe._get_proj().db.select_graph(
+                f"team_{team_id}").query(
+                    "MATCH (p:Point {id:'seed-1'}) RETURN count(p)").result_set
+            # swap proof: the dump excludes TeamMeta (_EXPORT_SKIP_LABELS), so
+            # a post-restore TeamMeta would mean the live graph was never
+            # replaced by the restore.
+            metas = probe._get_proj().db.select_graph(
+                f"team_{team_id}").query(
+                    "MATCH (t:TeamMeta) RETURN count(t)").result_set
+        finally:
+            probe.close()
+        assert rows[0][0] == 1
+        assert metas[0][0] == 0
 
 
 # ── Members surface: list / remove / role change ───────────────────────────
@@ -796,10 +873,15 @@ class TestOnboardingTeam:
         r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["graph_name"] == "team_subteam"
+        assert body["graph_name"] == f"team_{body['team_id']}"  # #1903: stored name == data-plane namespace
         assert "key" not in body  # #1716: the response never carries a key
         fn, p = fake.rpc_calls[0]
         assert fn == "provision_team"
+        assert p["p_graph_name"] == f"team_{body['team_id']}"
+        # persisted teams.graph_name pinned (the round-trip consumers read it)
+        assert next(t for t in fake.tables["teams"]
+                    if t["id"] == body["team_id"])["graph_name"] == \
+            f"team_{body['team_id']}"
         # #1748: USER path — the session user is the owner member (no
         # throwaway anon-{uuid} identity).
         assert p["p_user_id"] == "user-1"
