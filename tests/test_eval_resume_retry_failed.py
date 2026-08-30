@@ -22,6 +22,7 @@ import os
 import sys
 import tempfile
 import threading
+import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -96,6 +97,21 @@ def _shared_embedded_sdk() -> TortoiseSDK:
             sdk.close = _noop_close  # type: ignore[method-assign]
             with contextlib.suppress(Exception):
                 sdk._get_proj().g.query("RETURN 1 AS one")
+            if not _shared_alive(sdk):
+                # The eager start raced its own socket creation (a rig that
+                # no-ops the global time.sleep defeats redislite's
+                # socket-wait, so the suppressed probe above never confirmed
+                # the server) — never hand back a not-ready server; discard
+                # this attempt and retry with a fresh tempdir.
+                last = RuntimeError("shared server did not become ready")
+                with contextlib.suppress(Exception):
+                    del sdk.close
+                with contextlib.suppress(Exception):
+                    sdk.close()
+                with contextlib.suppress(Exception):
+                    td.cleanup()
+                _t.sleep(1.5)
+                continue
             _embedded_shared = (sdk, td)
             return sdk
         raise RuntimeError(f"shared embedded server could not start after 3 attempts: {last!r}")
@@ -223,6 +239,7 @@ def _resume_fingerprint() -> dict:
         reader_model="mock-reader", judge_model="mock-judge",
         ks=(5,), top_k=5, split="s", ingest_mode="v2",
         extractor_model=None, max_retries=0,
+        ingest_write_retries=0,  # the _run rig exhausts writes on attempt 1
         dataset_fingerprint="unknown", rerank_config=rr["config"],
         context_item_cap=runner._env_int("TORTOISE_LME_CONTEXT_ITEMS",
                                          runner.DEFAULT_CONTEXT_ITEM_CAP),
@@ -261,6 +278,28 @@ def _write_fault(monkeypatch):
     monkeypatch.setattr(proj_mod._GuardedGraph, "query", _flaky)
 
 
+def _noop_sleep_runner_time() -> types.ModuleType:
+    """Copy of the `time` module whose `sleep` is a no-op, bound ONLY to the
+    runner's namespace.
+
+    Never patch the GLOBAL time.sleep here: the embedded redislite
+    server-start wait loop (`_start_redis` → `time.sleep(.1)` socket poll)
+    uses the same module object, so a no-op sleep turns the 60s socket-wait
+    into a ~1ms spin and raises RedisLiteServerStartError before the
+    daemonized redis-server has created its socket (#1988). Patching
+    `runner.time` (a module attribute) isolates the no-op to the pipeline's
+    own backoff sleeps while the global `time` stays real for redislite.
+    """
+    import time as _time
+
+    shim = types.ModuleType("time")
+    for _name in dir(_time):
+        if not _name.startswith("_"):
+            setattr(shim, _name, getattr(_time, _name))
+    shim.sleep = lambda _s: None
+    return shim
+
+
 def _run(tmp_path, monkeypatch, *, retry_failed=False, fail_writes=False,
          judge_boom=False, reader_boom=False, max_retries=0):
     """One mini run with the resume-test rig. Returns (outcomes, report,
@@ -268,7 +307,7 @@ def _run(tmp_path, monkeypatch, *, retry_failed=False, fail_writes=False,
     monkeypatch persists across _run calls within one test — a later
     fail_writes=False run must restore the original)."""
     monkeypatch.setattr(runner.random, "uniform", lambda a, b: 0.0)
-    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner, "time", _noop_sleep_runner_time())
     if fail_writes:
         _write_fault(monkeypatch)
     else:
@@ -302,7 +341,10 @@ def _run(tmp_path, monkeypatch, *, retry_failed=False, fail_writes=False,
         _mini()[:1], reader=reader, judge=judge, ks=(5,), top_k=5,
         split="s", work_dir=str(tmp_path), checkpoint=str(cp),
         ingest_mode="v2", extractor_model=None, retry_failed=retry_failed,
-        max_retries=max_retries)
+        max_retries=max_retries,
+        ingest_write_retries=0,  # exhaust the write stage on the FIRST write
+        # (mirrors the ingest file's R2 rig — the write-fault is persistent)
+        )
     return outcomes, report, cp, sdk_creations
 
 
@@ -739,7 +781,7 @@ def test_resume_reattempt_limiter_caps_inflight(tmp_path, monkeypatch):
     tracking = _TrackingLimiter()
     monkeypatch.setattr(runner, "_REINGEST_LIMITER", tracking)
     monkeypatch.setattr(runner.random, "uniform", lambda a, b: 0.0)
-    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner, "time", _noop_sleep_runner_time())
 
     # make each re-attempt overlap: a small REAL delay (threading.Event.wait,
     # unaffected by the run's time.sleep no-op patch) inside the pipeline so
@@ -748,21 +790,24 @@ def test_resume_reattempt_limiter_caps_inflight(tmp_path, monkeypatch):
 
     def _slow_make(*a, **k):
         threading.Event().wait(0.05)
-        # #1988: shared embedded server (see the module note above).
-        if k.get("db_uri") is None:
-            return _shared_embedded_sdk(), _noop_close
+        # This test dispatches 4 CONCURRENT re-attempts; each question needs
+        # its own embedded server (fresh tempdir) — the shared server would
+        # mix the four qids' nodes in one graph and trip the census
+        # watchdog's hard-invalid arm (WatchdogAbortError: census_error).
         return real_make(*a, **k)
 
     monkeypatch.setattr(runner, "_make_question_sdk", _slow_make)
 
-    _reset_shared_graph(_mini()[:4])  # #1988: fresh qid namespace per run
+    # NOTE: no _reset_shared_graph here — per-question fresh servers isolate
+    # each qid (the fresh-tempdir semantics this test relies on).
     reader = MockReader()
     judge = MockJudge()
     outcomes, report = runner.run_evaluation(
         _mini()[:4], reader=reader, judge=judge, ks=(5,), top_k=5,
         split="s", work_dir=str(tmp_path), checkpoint=str(cp),
         ingest_mode="v2", extractor_model=None, retry_failed=True,
-        max_retries=0, workers=4)
+        max_retries=0, workers=4,
+        ingest_write_retries=0)  # matches _resume_fingerprint()
     assert len(outcomes) == 4  # all four re-attempts completed
     assert report["n_failed"] == 0
     assert tracking.acquire_count == 4  # each re-attempt acquired at claim

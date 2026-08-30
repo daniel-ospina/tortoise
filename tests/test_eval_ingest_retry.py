@@ -16,6 +16,7 @@ import json
 import os
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,28 @@ def _noop_close() -> None:
     return None
 
 
+def _noop_sleep_runner_time() -> types.ModuleType:
+    """Copy of the `time` module whose `sleep` is a no-op, bound ONLY to the
+    runner's namespace.
+
+    Never patch the GLOBAL time.sleep here: the embedded redislite
+    server-start wait loop (`_start_redis` → `time.sleep(.1)` socket poll)
+    uses the same module object, so a no-op sleep turns the 60s socket-wait
+    into a ~1ms spin and raises RedisLiteServerStartError before the
+    daemonized redis-server has created its socket (#1988). Patching
+    `runner.time` (a module attribute) isolates the no-op to the pipeline's
+    own backoff sleeps while the global `time` stays real for redislite.
+    """
+    import time as _time
+
+    shim = types.ModuleType("time")
+    for _name in dir(_time):
+        if not _name.startswith("_"):
+            setattr(shim, _name, getattr(_time, _name))
+    shim.sleep = lambda _s: None
+    return shim
+
+
 def _shared_embedded_sdk() -> TortoiseSDK:
     """Lazily create the one embedded SDK shared by every run_evaluation
     question in this module (issue #1988)."""
@@ -97,6 +120,21 @@ def _shared_embedded_sdk() -> TortoiseSDK:
             sdk.close = _noop_close  # type: ignore[method-assign]
             with contextlib.suppress(Exception):
                 sdk._get_proj().g.query("RETURN 1 AS one")
+            if not _shared_alive(sdk):
+                # The eager start raced its own socket creation (a rig that
+                # no-ops the global time.sleep defeats redislite's
+                # socket-wait, so the suppressed probe above never confirmed
+                # the server) — never hand back a not-ready server; discard
+                # this attempt and retry with a fresh tempdir.
+                last = RuntimeError("shared server did not become ready")
+                with contextlib.suppress(Exception):
+                    del sdk.close
+                with contextlib.suppress(Exception):
+                    sdk.close()
+                with contextlib.suppress(Exception):
+                    td.cleanup()
+                _t.sleep(1.5)
+                continue
             _embedded_shared = (sdk, td)
             return sdk
         raise RuntimeError(f"shared embedded server could not start after 3 attempts: {last!r}")
@@ -755,7 +793,7 @@ def _run_with_r2_fault(instances, tmp_path, monkeypatch, *, persistent=False,
 
     monkeypatch.setattr(proj_mod._GuardedGraph, "query", flaky)
     monkeypatch.setattr(runner.random, "uniform", lambda a, b: 0.0)
-    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner, "time", _noop_sleep_runner_time())
 
     reader = MockReader()
     if resume_fail == "reader":
@@ -860,7 +898,7 @@ def test_provider_transient_no_write_retry_no_r2(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ev2, "extract_session_v2", _provider_timeout)
     monkeypatch.setattr(runner.random, "uniform", lambda a, b: 0.0)
-    monkeypatch.setattr(runner.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(runner, "time", _noop_sleep_runner_time())
     sdk_creations = {"n": 0}
     real_make = runner._make_question_sdk
 
