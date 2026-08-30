@@ -1,0 +1,67 @@
+name: ai-review-gate
+
+# Hard GitHub-enforced AI review gate.
+# Branch protection requires the `ai-review-gate` status check on every PR to
+# main. It passes only when the PR body carries a FRESH AI-review evidence
+# marker posted by record-review.sh (the code-review skill → review-enforcer
+# record → marker). This replaces the human-approval requirement with an AI
+# review gate that a pi session cannot bypass.
+#
+# Security: runs via pull_request_target so the workflow file is always the
+# trusted main-branch copy. It NEVER checks out PR code and NEVER executes
+# anything from the PR — it only reads the event payload (PR body + head SHA),
+# so there is no code-injection vector.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ai-review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate AI review evidence in PR body
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          # Latest marker line, format (see record-review.sh):
+          #   review recorded: reviews/<PR>.json verdict=clean @ <sha12> (<repo>)
+          marker="$(printf '%s\n' "${PR_BODY:-}" \
+            | grep -E "review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ " \
+            | tail -n 1 || true)"
+
+          if [ -z "$marker" ]; then
+            echo "::error::No AI review evidence found in PR #${PR_NUMBER} body."
+            echo "::error::The code-review gate requires a recorded AI review. Run:"
+            echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean"
+            echo "::error::(that posts the evidence marker into this PR body)"
+            exit 1
+          fi
+
+          recorded_sha="$(printf '%s' "$marker" | sed -nE 's/.*verdict=clean(-micro)? @ ([0-9a-f]+) \(.*/\2/p')"
+          if [ -z "$recorded_sha" ]; then
+            echo "::error::Could not parse AI review marker: ${marker}"
+            exit 1
+          fi
+
+          expected="${HEAD_SHA:0:12}"
+          if [ "$recorded_sha" != "$expected" ]; then
+            echo "::error::AI review evidence is stale: recorded @ ${recorded_sha}, but PR head is ${expected}."
+            echo "::error::Re-run the code-review skill after the latest push, then re-record:"
+            echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean"
+            exit 1
+          fi
+
+          echo "AI review gate passed: ${marker}"
