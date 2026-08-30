@@ -213,23 +213,31 @@ def test_second_block_spanning_pages_drains_and_advances_boundary(sdk):
 
 ```python
 def test_truncated_clears_on_zero_processed_drain(sdk):
-    """#1895: an exact-cap-multiple run (500 new items, cap 500) stamps
-    truncated; the NEXT run (DRAIN) processes 0 and must mint a CLEAN
-    boundary cursor so the run after exits DRAIN. Pre-fix: the 0-processed
-    run left `last is None` → cursor untouched → truncated forever."""
+    """#1895: a truncated cursor whose deferred backlog is FULLY drained
+    (a 0-processed DRAIN run that did NOT cap/quota-cut and whose walk
+    reached the stream end) mints a CLEAN boundary cursor so the run after
+    exits DRAIN. (#1989 review round 2: an exact-cap-multiple run 1 now
+    mints CLEAN in ONE run — see
+    test_exact_cap_multiple_mints_clean_and_next_run_is_diff — so this
+    falsifier uses a LEGACY truncated cursor over an already-indexed
+    backlog; the heal also stamps a durable `gap_audit_required` marker,
+    #1989 review round 2.) Pre-fix: the 0-processed run left `last is
+    None` → cursor untouched → truncated forever."""
     S = "2026-08-18T02:49:35Z"
     t = MockGitHubTransport(
-        issues=[gh_issue(n, updated_at=S) for n in range(1, 501)],
+        issues=[gh_issue(n, updated_at=S) for n in range(1, 401)],
         page_size=100)
-    stats1 = _run(_indexer(t), sdk, cap=500)
-    assert stats1["cursor"] == {"updated_at": S, "number": 500, "truncated": True}
-    stats2 = _run(_indexer(t), sdk, cursor=stats1["cursor"], cap=500)
-    assert stats2["processed"] == 0
-    assert stats2["cursor"] == {"updated_at": S, "number": 500}  # clean
+    _run(_indexer(t), sdk)  # index all 400
+    stuck = {"updated_at": S, "number": 400, "truncated": True}
+    stats = _run(_indexer(t), sdk, cursor=stuck, cap=500)
+    assert stats["processed"] == 0
+    assert stats["cleared_truncated"] is True
+    assert stats["cursor"] == {"updated_at": S, "number": 400,
+                                "gap_audit_required": True}
     # run 3 is DIFF (its first issues request carries `since`), not DRAIN —
     # and stays exact-once
     n_before = len(t.issue_query_params())
-    stats3 = _run(_indexer(t), sdk, cursor=stats2["cursor"], cap=500)
+    stats3 = _run(_indexer(t), sdk, cursor=stats["cursor"], cap=500)
     assert stats3["processed"] == 0
     assert any("since" in p for p in t.issue_query_params()[n_before:]), \
         "a clean cursor must exit DRAIN (the next run uses since)"
@@ -367,24 +375,27 @@ def test_quota_break_at_item_zero_keeps_truncated(sdk):
 
 **New tests (all in `tests/test_github_indexer.py` unless noted):**
 1. `test_second_block_spanning_pages_drains_and_advances_boundary` — the issue-required integration test: ≥2 consecutive capped runs over a synthetic backlog advance the boundary and eventually clear `truncated`; exact production shape (1425 @ one second + 460 newer); asserts the no-loss Object census including the pre-fix-skipped low numbers.
-2. `test_truncated_clears_on_zero_processed_drain` — exact-cap-multiple end: run 1 `{S, 500, truncated}` → run 2 0-processed → clean `{S, 500}` → run 3 DIFF (`since` present in the last issue query) → 0 new.
-3. `test_stuck_truncated_cursor_clears_on_empty_drain` — the legacy frozen-cursor shape heals: 0-processed DRAIN mints a clean cursor.
+2. `test_exact_cap_multiple_mints_clean_and_next_run_is_diff` (+ `test_truncated_clears_on_zero_processed_drain`) — review round 2: an exact-cap-multiple run now mints CLEAN `{S, 500}` in ONE run (the walk-end flush no longer stamps a spurious `truncated` when the final block is fully consumed — no wasted DRAIN re-walk); a legacy truncated cursor whose backlog is already indexed still heals (0-processed DRAIN → clean cursor + `gap_audit_required` marker).
+3. `test_stuck_truncated_cursor_clears_on_empty_drain` — the legacy frozen-cursor shape heals: 0-processed DRAIN mints a clean cursor (+ `gap_audit_required` marker, round 2).
 4. `test_within_second_order_independent_advance` — mock shuffle mode proves order-independence of the ASC flush.
-5. (optional) `tests/test_github_index_lifecycle.py::test_repoll_drains_and_clears_truncated_persisted` — hosted_api persistence round-trip.
+5. `test_premature_walk_end_keeps_truncated` (+ `test_premature_walk_end_exact_cap_mints_truncated`, `test_premature_walk_end_uncapped_mints_truncated`) — review rounds 2-3 walk-completeness guard: a walk that ends PREMATURELY (final page's Link keeps rel="last" without rel="next" — truncated header / gateway partial body) must NOT clear truncated on the 0-processed path NOR mint a clean cursor on the exact-cap-final-block / uncapped mint paths — the hidden older backlog would be permanently skipped by the next since-bounded DIFF. Round 3 extends the guard from the clear path to the MINT paths (silent-loss invariant, P1).
+6. `test_newest_second_mint_on_multisecond_drain` — round 2: an uncapped multi-second walk mints the boundary at the NEWEST processed second (next DIFF skips the whole newer window; 0 re-projection).
+7. `test_shuffle_with_since_window_pagination_is_consistent` — round 2-3: mock Link URLs carry `since` through pagination (real-GitHub fidelity); round 3 adds 50 items outside the since window so the filter bites (pre-change page-2+ base differed → skip/dup across the boundary under shuffle would be caught).
+8. (optional) `tests/test_github_index_lifecycle.py::test_repoll_drains_and_clears_truncated_persisted` — hosted_api persistence round-trip.
 
 ## Verification Plan
 
 ```bash
 # 1. Local quick check (URI-less carve-out lane — validated working on this machine):
-TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_github_indexer.py -q          # pre-change baseline 24 → 30 with new tests
+TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/test_github_indexer.py -q          # pre-change baseline 24 → 36 with new tests (34 + 2 round-3 premature-end mint guards)
 
 # 2. Docker lane (default; FalkorDB container is up: `docker ps` → falkordb:6379):
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
-  uv run pytest tests/test_github_indexer.py tests/test_github_index_lifecycle.py -v   # pre-change baseline 49 → 56 with new tests
+  uv run pytest tests/test_github_indexer.py tests/test_github_index_lifecycle.py -v   # pre-change baseline 49 → 62 with new tests (60 + 2 round-3)
 
 # 3. New tests specifically:
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \
-  uv run pytest tests/test_github_indexer.py -k "second_block_spanning or zero_processed_drain or stuck_truncated or within_second_order" -v
+  uv run pytest tests/test_github_indexer.py -k "second_block_spanning or zero_processed_drain or stuck_truncated or within_second_order or exact_cap_multiple or premature_walk_end or newest_second or shuffle_with_since" -v
 
 # 4. Full-suite regression (docker lane):
 TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/ -q

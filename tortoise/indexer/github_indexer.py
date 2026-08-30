@@ -53,6 +53,14 @@ _GITHUB_API = "https://api.github.com"
 _MAX_ITEMS_PER_RUN = 500
 _PAGE_SIZE = 100
 
+# #1989 review round 3 (security): upper bound for a plausible issue
+# number in a CLIENT-WRITABLE persisted cursor. The cursor is PATCHable via
+# /v1/onboarding/state, so a hand-patched huge `number` (e.g. 10^100) must
+# fail closed — a heal or skip keyed off it would mask an entire boundary
+# second as "processed" (permanent silent loss). Real GitHub issue numbers
+# are far below this ceiling; anything above is a malformed cursor.
+_SANE_ISSUE_NUMBER_MAX = 10_000_000
+
 # Terminal point statuses — the current-statement lookup is externalId +
 # status != terminal (P1-2), NEVER content-hash dedup (a revert mints v+1,
 # so a content-identical terminal point must never be resolved as current).
@@ -254,8 +262,15 @@ class GitHubIndexer:
             return None
 
     async def _fetch_page(self, client: httpx.AsyncClient, repo: str,
-                          cursor: dict | None) -> tuple[list[dict], str | None, int | None]:
-        """Fetch one page of issues (updated desc) + next URL + last-page total estimate."""
+                          cursor: dict | None) -> tuple[list[dict], str | None, int | None, bool]:
+        """Fetch one page of issues (updated desc) + next URL + last-page total
+        estimate + whether this page's Link claimed more pages exist (rel="last").
+
+        The rel="last" flag feeds the walk-completeness check (#1989 review
+        round 2): a page that carries rel="last" (the API claims more pages)
+        but no rel="next" is a PREMATURE end — the walk stopped early and a
+        truncated-clear on it would silently lose the un-fetched backlog.
+        """
         params = "state=all&per_page=100&sort=updated&direction=desc"
         since = ""
         if cursor and cursor.get("updated_at"):
@@ -279,7 +294,7 @@ class GitHubIndexer:
         batch = r.json()
         link = r.headers.get("Link", "")
         urls = self._link_header_urls(link)
-        return batch, urls.get("next"), self._last_page_estimate(link)
+        return batch, urls.get("next"), self._last_page_estimate(link), "last" in urls
 
     @staticmethod
     def _inside_cursor(issue: dict, cursor: dict | None, *,
@@ -301,28 +316,59 @@ class GitHubIndexer:
             return False
         n = github_map._norm_issue(issue)
         cur_updated = (cursor.get("updated_at") or "")
-        cur_number = int(cursor.get("number") or 0)
+        # #1989 review round 3 (security): the persisted cursor is
+        # CLIENT-WRITABLE (PATCH /v1/onboarding/state) — a non-int `number`
+        # must NOT crash the walk (honest-but-ungraceful job failure).
+        # Fail open to "process": the item is (idempotently) indexed rather
+        # than skipped, so a malformed cursor can never mask a boundary
+        # second as processed.
+        try:
+            cur_number = int(cursor.get("number") or 0)
+        except (TypeError, ValueError):
+            cur_number = 0
         if not n["updated_at"] or not cur_updated:
             return False
+        # DRAIN mode (previous run cap-truncated or quota-interrupted):
+        # items newer than the cursor second were indexed by the run that
+        # minted the cursor — always skip them, regardless of `number`
+        # sanity (counting them toward the cap again is the P1-4
+        # oscillation).
         if drain and n["updated_at"] > cur_updated:
             return True
+        # #1989 review round 3 (security): a malformed cursor `number`
+        # (non-int, or implausibly huge) must NOT silently skip items at
+        # the boundary second. Fail open to "process" (the item gets
+        # indexed; projection is idempotent — ingest dedup) rather than
+        # fail closed to "skip" (which would mask the second as processed
+        # and lose it on the since-bounded DIFF).
+        if not (0 < cur_number <= _SANE_ISSUE_NUMBER_MAX):
+            return False
         return (n["updated_at"] == cur_updated
                 and n["number"] <= cur_number)
 
     async def _fetch_items(self, client: httpx.AsyncClient, repo: str,
                            cursor: dict | None,
-                           cap: int) -> tuple[list[dict], int | None, bool]:
+                           cap: int) -> tuple[list[dict], int | None, bool, bool]:
         """Fetch issues (updated desc, paginated) up to ``cap``.
 
-        Returns (items, total_estimate, cap_hit).
+        Returns (items, total_estimate, cap_hit, walk_complete).
+
+        ``walk_complete``: True when the walk ended on a page whose Link
+        carried NO rel="last" (the API did not claim more pages exist). A
+        premature end (rel="last" present but rel="next" absent — truncated
+        Link header / gateway 200-with-partial-body) is False, so the
+        truncated-clear in ``index_repo`` must NOT fire on a walk that did
+        not actually reach the stream end (#1989 review round 2).
 
         Two resume regimes (pinned by the plan's resume semantics):
-        - DIFF (steady state — the previous run was NOT cap-truncated):
-          first page ``since = cursor.updated_at − 1s``; the whole walk stays
-          since-bounded (GitHub carries ``since`` in Link next URLs). Only
-          items updated at/after the boundary second are fetched; boundary-
-          second items with number ≤ cursor.number are skipped (T2-P4 —
-          exactly once across the boundary).
+        - DIFF (previous run not cap-truncated; on dense-boundary repos the
+          −1s probe can re-cap mid-block and re-stamp `truncated` — the
+          bounded oscillation documented in plan §Follow-ups / fast-follow
+          #1990): first page `since = cursor.updated_at − 1s`; the whole
+          walk stays since-bounded (GitHub carries `since` in Link next
+          URLs). Only items updated at/after the boundary second are
+          fetched; boundary-second items with number ≤ cursor.number are
+          skipped (T2-P4 — exactly once across the boundary).
         - DRAIN (previous run cap-truncated): no ``since`` — the walk
           refetches from the top so the deferred backlog (updated before the
           cursor) keeps draining up to ``cap`` per run. The boundary skip
@@ -347,21 +393,51 @@ class GitHubIndexer:
         # (cap-truncated or quota-interrupted previous run).
         drain = bool(cursor and cursor.get("truncated"))
         since_cursor = None if drain else cursor
-        batch, next_url, total_estimate = await self._fetch_page(
+        batch, next_url, total_estimate, final_has_last = await self._fetch_page(
             client, repo, since_cursor)
 
-        def _flush(block: list[dict]) -> bool:
+        def _flush(block: list[dict], *, final: bool = False) -> bool:
             """Process ONE complete second-run ASC. True ⇒ cap hit (the
-            walk stops)."""
+            walk stops).
+
+            ``final`` (walk end): a cap reached exactly at the block's last
+            processable item is NOT a truncation — the stream is exhausted
+            and everything was indexed, so no spurious ``truncated`` stamp
+            (the next poll would waste a full DRAIN re-walk; #1989 review
+            round 2). A cap cut mid-block still stamps it (the block's tail
+            is deferred backlog).
+            """
             nonlocal items, cap_hit
             block.sort(key=lambda i: int(
                 github_map._norm_issue(i)["number"] or 0))
-            for item in block:
+            for i, item in enumerate(block):
                 if self._inside_cursor(item, cursor, drain=drain):
                     continue
                 items.append(item)
                 if len(items) >= cap:
-                    cap_hit = True
+                    if not final:
+                        cap_hit = True
+                        return True
+                    # final block: the no-truncation exemption only holds
+                    # when the walk GENUINELY reached the stream end (the
+                    # final page carried NO rel="last"). A premature end
+                    # (rel="last" present, rel="next" absent — truncated
+                    # Link header / gateway partial body) means more pages
+                    # exist: an exact-cap cut there is a REAL truncation,
+                    # because the hidden older backlog must be re-DRAINed
+                    # (#1989 review round 3 — clearing on a premature end
+                    # would exit into a since-bounded DIFF that never
+                    # reaches the un-fetched items = permanent loss).
+                    if not final_has_last:
+                        # clean end: truncated only if processable items
+                        # remain in the block past the cap cut
+                        for later in block[i + 1:]:
+                            if not self._inside_cursor(later, cursor,
+                                                       drain=drain):
+                                cap_hit = True
+                                break
+                    else:
+                        cap_hit = True
                     return True
             return False
 
@@ -377,13 +453,13 @@ class GitHubIndexer:
                     # next one starts (a cap cut mid-flush lands on a
                     # complete ASC prefix, #1895)
                     if _flush(block):
-                        return items, total_estimate, cap_hit
+                        return items, total_estimate, cap_hit, not final_has_last
                     current_second = second
                     block = []
                 block.append(item)
             if not next_url:
-                _flush(block)  # final run — complete at walk end
-                return items, total_estimate, cap_hit
+                _flush(block, final=True)  # final run — complete at walk end
+                return items, total_estimate, cap_hit, not final_has_last
             if since_cursor is None:
                 # DRAIN: GitHub's Link next-URL carries the `since` param —
                 # strip it so the walk continues the FULL sorted fetch into
@@ -404,6 +480,10 @@ class GitHubIndexer:
             # previous page forever).
             batch = r.json()
             urls = self._link_header_urls(r.headers.get("Link", ""))
+            # #1989 review round 2: track the LAST page's rel="last" so
+            # walk_complete reflects the FINAL page (a page claiming more
+            # pages exist while omitting rel="next" is a premature end).
+            final_has_last = "last" in urls
             next_url = urls.get("next")
             if total_estimate is None:
                 total_estimate = self._last_page_estimate(
@@ -712,10 +792,17 @@ class GitHubIndexer:
         # GitHubFetchError — the caller marks the job failed with a readable
         # error and the cursor is NOT advanced past unprocessed items
         # (T1-P13: honest fail; re-run resumes without gaps/dupes).
-        items, total_estimate, cap_hit = await self._fetch_items(
+        items, total_estimate, cap_hit, walk_complete = await self._fetch_items(
             client, repo, cursor, cap)
         stats["total_fetched"] = len(items)
         last: dict | None = None
+        # #1989 review round 2: track the NEWEST processed item too — a
+        # multi-second run whose walk completes uncapped mints the boundary
+        # at the newest second (everything newer was processed), not the
+        # oldest appended item (which would re-probe the whole newer window
+        # idempotently on the next DIFF). Capped/quota-cut runs still mint
+        # from ``last`` (the cut boundary is exact-once).
+        newest: dict | None = None
         for item in items:
             if quota_check is not None:
                 try:
@@ -746,6 +833,12 @@ class GitHubIndexer:
             # ever to PROCESSED items — a mid-walk failure leaves it put).
             if n["updated_at"]:
                 last = {"updated_at": n["updated_at"], "number": n["number"]}
+                if (newest is None
+                        or n["updated_at"] > newest["updated_at"]
+                        or (n["updated_at"] == newest["updated_at"]
+                            and n["number"] > newest["number"])):
+                    newest = {"updated_at": n["updated_at"],
+                              "number": n["number"]}
         # Honest truncation (P1-3): "N issues beyond window" from the
         # rel="last" upper-bound estimate — 0 when nothing is known to
         # remain beyond the cap window.
@@ -753,19 +846,41 @@ class GitHubIndexer:
             stats["issues_beyond_window"] = max(
                 0, total_estimate - stats["processed"])
         if last is not None:
-            new_cursor: dict[str, Any] = {
-                "updated_at": last["updated_at"], "number": last["number"]}
-            # Cap-truncated runs AND quota-interrupted runs stamp
-            # `truncated` so the next run enters DRAIN mode and keeps
-            # draining the deferred backlog (P2, PR #1792: a quota break
-            # must not silently drop the unprocessed tail).
-            if cap_hit or stats["quota_hit"]:
+            # Uncapped full walks mint at the NEWEST processed item so the
+            # next DIFF probe skips the whole newer window (its boundary
+            # second was fully processed — contiguous ASC prefix). Capped /
+            # quota-cut runs mint at ``last`` (the cut boundary: the
+            # processed set at that second is exactly the prefix up to the
+            # cut — DRAIN resumes from there, #1989 review round 2).
+            # #1989 review round 3: a PREMATURE walk end (rel="last" on the
+            # final page, no rel="next") also mints from ``last`` AND
+            # stamps `truncated` — the newest-second clean-mint claim only
+            # holds when the walk actually completed. Clearing on a walk
+            # that did not reach the stream end would exit DRAIN into a
+            # since-bounded DIFF whose window misses the un-fetched older
+            # backlog → permanent silent loss (same invariant as the
+            # 0-processed clear guard below).
+            if cap_hit or stats["quota_hit"] or not walk_complete:
+                new_cursor: dict[str, Any] = {
+                    "updated_at": last["updated_at"], "number": last["number"]}
+            else:
+                src = newest or last
+                new_cursor = {"updated_at": src["updated_at"],
+                              "number": src["number"]}
+            # Cap-truncated runs, quota-interrupted runs, AND premature-end
+            # walks stamp `truncated` so the next run enters DRAIN mode and
+            # keeps draining the deferred backlog (P2, PR #1792: a quota
+            # break must not silently drop the unprocessed tail; a
+            # premature end must not silently skip the un-fetched backlog,
+            # #1989 review round 3).
+            if cap_hit or stats["quota_hit"] or not walk_complete:
                 new_cursor["truncated"] = True
             stats["cursor"] = new_cursor
         elif (cursor is not None and cursor.get("truncated")
                 and cursor.get("updated_at")
                 and not cap_hit and not stats["quota_hit"]
-                and not stats["total_fetched"]):
+                and not stats["total_fetched"]
+                and walk_complete):
             # #1895: a 0-processed run that did NOT cap/quota-cut means the
             # DRAIN walk skipped EVERY item — the deferred backlog is fully
             # drained (the previous truncated run landed on an exact cap
@@ -783,15 +898,43 @@ class GitHubIndexer:
             # is not a clean end). The `.get()` guards + falsy updated_at
             # check keep the clear path KeyError-proof against hand-patched
             # cursors — plan-verify cycle 1.)
-            stats["cleared_truncated"] = True
-            logger.info(
-                "cleared truncated cursor {%s, %s} on 0-item drain "
-                "(backlog fully drained) — if this cursor predates #1895, "
-                "verify no non-prefix holes (gap audit, plan §Follow-ups)",
-                cursor["updated_at"], int(cursor.get("number") or 0))
-            stats["cursor"] = {
-                "updated_at": cursor["updated_at"],
-                "number": int(cursor.get("number") or 0)}
+            # .get() guards + falsy updated_at check keep the clear path
+            # KeyError-proof against hand-patched cursors — plan-verify
+            # cycle 1. #1989 review round 2 (security): the persisted
+            # cursor is CLIENT-WRITABLE (PATCH /v1/onboarding/state accepts
+            # an arbitrary dict), so the clear must also survive a
+            # malformed `number` (non-int) — fail closed by KEEPING
+            # truncated (the next run re-DRAINs; `_inside_cursor` parses
+            # the same field on any non-empty walk anyway).
+            try:
+                cur_number = int(cursor.get("number") or 0)
+            except (TypeError, ValueError):
+                cur_number = None
+            # #1989 review round 3 (security, P2): bound the healed number
+            # to a plausible issue-number range — a huge int (10^100) in a
+            # hand-patched cursor would otherwise clear and mint
+            # {S, 10^100}, and the next DIFF's `_inside_cursor`
+            # (number <= 10^100) would skip the entire boundary second
+            # permanently (masked loss legitimized by the heal). Fail
+            # closed: keep truncated so the next run re-DRAINs and re-verifies.
+            if cur_number is not None and 0 < cur_number <= _SANE_ISSUE_NUMBER_MAX:
+                stats["cleared_truncated"] = True
+                logger.info(
+                    "cleared truncated cursor {%s, %s} on 0-item drain "
+                    "(backlog fully drained) — if this cursor predates "
+                    "#1895, verify no non-prefix holes (gap audit, plan "
+                    "§Follow-ups)",
+                    cursor["updated_at"], cur_number)
+                stats["cursor"] = {
+                    "updated_at": cursor["updated_at"],
+                    "number": cur_number,
+                    # #1989 review round 2: durable heal marker — the
+                    # healed cursor round-trips opaquely through hosted_api,
+                    # so a later audit can distinguish a cursor healed over
+                    # a possible pre-#1895 non-prefix gap from a verified-
+                    # complete drain (plan §Follow-ups gap audit).
+                    "gap_audit_required": True,
+                }
         await self._close()
         return stats
 
