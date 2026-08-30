@@ -279,6 +279,17 @@ class TestPaginatedQuery:
         ids2 = {r["id"] for r in page2["results"]}
         assert ids1.isdisjoint(ids2)
 
+    def test_invalid_pagination_params_rejected(self, sdk):
+        # #1914: limit=0 would make hasMore = skip + 0 < total always True
+        # on non-empty graphs (infinite pagination loop); negative skip/limit
+        # would pass raw into Cypher. Both must fail cleanly (ValueError →
+        # clean 400 at the API surface).
+        sdk.create_point("statement", "A")
+        for kwargs in ({"limit": 0}, {"limit": -5}, {"skip": -1},
+                       {"skip": -1, "limit": 0}):
+            with pytest.raises(ValueError, match="must be"):
+                sdk.paginated_query(kind="statement", **kwargs)
+
 
 # ── get_point ────────────────────────────────────────────────────────
 

@@ -4162,6 +4162,15 @@ class TortoiseSDK:
         to surface tombstones. #1391: the default exclusion now covers ALL
         terminal statuses (retracted, superseded, outdated, archived).
         """
+        # #1914: invalid pagination params fail cleanly instead of looping
+        # (limit=0 → hasMore = skip + 0 < total always True on non-empty
+        # graphs → infinite pagination loop) or passing raw negatives into
+        # Cypher. Mirrors the guard in tortoise_query (mcp_server.py) and
+        # the other paginators (list_drafts, belief_timeline).
+        if skip < 0:
+            raise ValueError(f"skip must be >= 0, got {skip}")
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
         clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
