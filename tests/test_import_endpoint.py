@@ -1157,14 +1157,17 @@ class TestImportPackConfigApplyFailures:
         assert r_a2.json()["imported"] is True
         assert r_a2.json()["already"] is False
 
-    def test_registry_mode_clear_stamps_empty(self, tmp_path):
+    def test_registry_mode_clear_stamps_empty(self, sb_client):
         """Registry-mode ``_stamp_import_prop`` clear: the SET path must store
         the "" sentinel verbatim on the Team node (the clear is
         falsy-safe for every ledger consumer)."""
         from tortoise.hosted_api import _stamp_import_prop
         from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(db_path=str(tmp_path / "reg.db"),
-                          namespace="registry")
+        # Use the sb_client fixture: its SDK-init patch forces every SDK onto
+        # the shared per-test import.db server — a fresh db_path here would
+        # spawn a second embedded server that survives the conftest end-sweep
+        # (redislite orphan gate, #1005/E2E-7).
+        sdk = TortoiseSDK(namespace="registry")
         try:
             g = sdk._get_registry()
             g.query("CREATE (t:Team {id:$id})", params={"id": TEAM_ID})
