@@ -3895,6 +3895,23 @@ class TortoiseSDK:
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
+        # #1934 (epic #1891 slice 3): relation-level write validation —
+        # warn-not-block (governance D1/D2). An undeclared domain label is
+        # warned (structured) and the write proceeds; the violations event
+        # feeds the future governance app. Consults the pack registry's
+        # declared relation predicates — the ladder is no longer dead config.
+        warnings: list[dict] = []
+        if label:
+            from tortoise.domain_loader import _get_registry
+            from tortoise.enforcement import emit_violation, warning_for_relation
+            reg = _get_registry()
+            declared = set()
+            if reg is not None:
+                declared = {r.get("predicate") for r in reg.list_relations()}
+            if label not in declared and label not in ("IMPL", "NAND", "MITIGATES"):
+                warnings.append(warning_for_relation(label))
+                emit_violation(code="undeclared_relation", relation=label,
+                               detail=f"op_type={op_type}")
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
         # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
@@ -3972,6 +3989,10 @@ class TortoiseSDK:
         # (a formerly operator-less claim now has an operator). Drop seeds.
         self._get_ep().invalidate_messages(inputs)
         result = self.get_point(pid)
+        # #1934: merge the structured warnings into the result (warn-not-block
+        # contract — consumers may surface or ignore; the shape is stable).
+        if warnings:
+            result["warnings"] = warnings
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         event_point = dict(result)
