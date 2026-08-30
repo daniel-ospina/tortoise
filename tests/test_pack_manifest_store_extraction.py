@@ -354,6 +354,33 @@ class TestMemoization:
                     ha_mod._make_sdk(namespace=TEST_TEAM_B["team_id"]))), \
             "each tenant must own a distinct memo key"
 
+    def test_fleet_cap_eviction_does_not_crash(self, client, monkeypatch):
+        """Second-model gate fix: the fleet-cap eviction extracts the gid
+        from the KEY tuple (``pop()`` returns the VALUE — indexing it raised
+        KeyError, crashing the eviction loop past the cap)."""
+        import tortoise.pack_manifest_store as pms
+        from tortoise.pack_manifest_store import tenant_view
+        sdk = _team_sdk()
+        monkeypatch.setattr(pms, "_MAX_TENANT_VIEWS", 2)
+        # Pre-fill the memo with two OTHER tenants (past the cap once the
+        # real tenant inserts).
+        with pms._TENANT_VIEWS_GUARD:
+            pms._TENANT_VIEWS.clear()
+            pms._TENANT_VIEWS[("ghost-a", "v1")] = {"catalog": {}, "tenant": [],
+                                                    "yaml": {}, "brief": {}}
+            pms._TENANT_VIEWS[("ghost-b", "v1")] = {"catalog": {}, "tenant": [],
+                                                    "yaml": {}, "brief": {}}
+        assert _upload(client, VALID_MANIFEST) == 201
+        view = tenant_view(sdk)  # must not raise
+        assert "tenant-ops:contract" in view["brief"], \
+            "the current tenant's view must compile"
+        with pms._TENANT_VIEWS_GUARD:
+            assert len(pms._TENANT_VIEWS) <= pms._MAX_TENANT_VIEWS, \
+                "fleet cap must bound the memo"
+            assert any(k[0] != "ghost-a" and k[0] != "ghost-b"
+                       for k in pms._TENANT_VIEWS), \
+                "the real tenant's entry must survive the eviction"
+
     def test_view_memo_hit_and_write_invalidation(self, client):
         """The consumer path rides the tenant-view memo: cache hit on repeat
         (view identity), write invalidation (new kinds reach the tenant
