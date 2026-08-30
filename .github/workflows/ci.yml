@@ -1,8 +1,9 @@
 name: CI
-# Self-contained CI (fix #555) — no reusable-workflow call (GitHub fails to
-# parse agent-infra/docs-ci.yml@main: "error parsing called workflow") and no
-# `scripts/` symlink (it resolves to a local agent-infra path, broken on the
-# runner). All checks use repo-local scripts.
+# Mixed CI: repo-local checks (self-contained, #555) + agent-infra reusable
+# workflows pinned to semver tags (#303, #387). The `scripts/` symlink stays
+# repo-local-independent (machine-local path, unverifiable on the runner) —
+# the agent-infra node-ci script-validate/skill-lint gates are therefore
+# skipped here (python-ci.yml carries the stack gates instead).
 
 on:
   pull_request:
@@ -97,20 +98,21 @@ jobs:
           args: --no-progress ${{ steps.changed.outputs.files }}
 
   dashboard-js-tests:
-    # #1894: the dashboard's pure-derivation + CSS-rule test suite (node
-    # --test, zero deps — no npm ci needed) must run PRE-merge. The
-    # deploy-pages.yml vite build is post-merge and syntax-level only; it
-    # would never catch a regression in the memory-source derivations or
-    # the disabled-switch opacity rule these tests pin.
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Dashboard JS unit tests (node --test, zero deps)
-        run: node --test src/*.test.js
-        working-directory: website/apps/dashboard
+    # #1894/#387: the dashboard's pure-derivation + CSS-rule test suite (node
+    # --test, zero deps) now runs via the agent-infra reusable unit-test
+    # capability (node-ci.yml@v0.1.1) — the migration target of #387.
+    # script-validate/skill-lint skipped: tortoise's scripts/ symlink is
+    # machine-local (broken on the runner) and there is no
+    # scripts/check-skill-lint.mjs (un-bootstrapped) — the stack gates live
+    # in python-ci.yml.
+    uses: daniel-ospina/agent-infra/.github/workflows/node-ci.yml@v0.1.1
+    with:
+      node-version: '22'
+      working-directory: website/apps/dashboard
+      test-glob: 'src/*.test.js'
+      script-validate: false
+      skill-lint: false
+    secrets: inherit
 
   uv-lock-check:
     # #493: the committed uv.lock is the dev-environment source of truth —
@@ -472,7 +474,7 @@ jobs:
 
   agent-infra-ci:
     # #303 — generic stack CI from agent-infra reusable workflows, pinned to a
-    # semver tag (@v0.1.0). Bump = tag + manifest ci.ref edit; agent-infra
+    # semver tag (@v0.1.1). Bump = tag + manifest ci.ref edit; agent-infra
     # check blocks on a stale pin. GitHub Actions CANNOT parse symlinked
     # workflow files (#555), so the reusable workflow is a real committed file
     # in agent-infra/.github/workflows/python-ci.yml.
@@ -508,10 +510,17 @@ jobs:
     #                           top-level dir with __init__.py, sorted) — not
     #                           the engine. `mypy tortoise/` is what the
     #                           baseline was measured against.
-    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.0
+    uses: daniel-ospina/agent-infra/.github/workflows/python-ci.yml@v0.1.1
     with:
       python-version: '3.12'
       test-command: ''
       lint-command: 'pip install ruff==0.16.4 && ruff check .'
       typecheck-command: 'mypy tortoise/'
+    secrets: inherit
+
+  drift-check:
+    # #305/#387 — agent-infra drift gate: structural drift (version pin,
+    # symlinks, missing templates, workflow refs vs manifest.check.ci.ref)
+    # fails CI; content drift warns. Runs tiered via agent-infra check --ci.
+    uses: daniel-ospina/agent-infra/.github/workflows/drift-check.yml@main
     secrets: inherit
