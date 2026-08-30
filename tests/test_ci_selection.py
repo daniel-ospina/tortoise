@@ -39,7 +39,8 @@ def test_onboarding_change_selects_onboarding():
     r = _sel(["tortoise/onboarding/AGENT_ONBOARDING.md"])
     assert r["full"] is False
     assert "onboarding" in r["surfaces"]
-    assert set(r["test_files"]) == _tier1() | set(load_manifest()["surfaces"]["onboarding"])
+    assert set(r["test_files"]) == ((_tier1() | set(load_manifest()["surfaces"]["onboarding"]))
+                                     - set(load_manifest().get("carve_out", [])))
 
 
 def test_ep_change_selects_ep():

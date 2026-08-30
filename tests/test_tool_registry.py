@@ -90,9 +90,10 @@ class TestRegistryEquivalence:
         + 1 #405 (tortoise_validate_domain) + 1 #438 (find_cross_lens_candidates)
         + 1 #348 (tortoise_audit) + 1 #318 (tortoise_packs_list)
         + 1 #1249 (tortoise_dream_health_check) + 1 #1353
-        (tortoise_expand_relationships) + 1 #1727 (tortoise_session_capture)."""
+        (tortoise_expand_relationships) + 1 #1727 (tortoise_session_capture)
+        + 1 #1935 (tortoise_pack_install)."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 95, f"Expected 95, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 96, f"Expected 96, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
