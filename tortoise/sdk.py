@@ -10718,6 +10718,19 @@ class TortoiseSDK:
                     _ask_build_locks.pop(key, None)
                 raise
             with _ASK_READER_CACHE_LOCK:
+                entry = cache.get(key)
+                if entry is not None and not entry.failed():
+                    # A sibling thread's build landed while this one ran —
+                    # possible ONLY after a failed build popped the per-key
+                    # single-flight lock (P2-16): the lock is per-build, so
+                    # the sibling built on a FRESH lock concurrently. The
+                    # EXISTING entry wins — never overwrite it without
+                    # close() (the clobbered _LockedReader's model client
+                    # socket would leak and its in-flight count orphan).
+                    cache.move_to_end(key)
+                    entry.incr_inflight()
+                    locked.close()
+                    return entry
                 cache[key] = locked
                 cache.move_to_end(key)
                 locked.incr_inflight()
@@ -10789,10 +10802,11 @@ class TortoiseSDK:
                                        status_code=status)
             # 429-is-quota: a code-less 429 → AskQuotaExceeded
             # (retry_after=None — NEVER AskValidationError, P2-15).
-            # The hosted server emits Retry-After in the HTTP HEADER (never
-            # the body) — prefer the header, fall back to the body field.
-            # Parse the header FIRST; RFC 7231 allows an HTTP-date
-            # (float() raises → None) — only then fall back to the body.
+            # The hosted server emits Retry-After in the HTTP HEADER and
+            # ALSO ships the seconds in the 429 body (P1) — prefer the
+            # header, fall back to the body field. Parse the header FIRST;
+            # RFC 7231 allows an HTTP-date (float() raises → None) — only
+            # then fall back to the body.
             retry_after = None
             header_ra = r.headers.get("Retry-After")
             if header_ra is not None:

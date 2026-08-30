@@ -616,8 +616,8 @@ def test_post_ask_status_mapping(monkeypatch):
     AskTimeout; 502 → typed; unreachable → typed."""
     import tortoise.sdk as sdk_mod
     cases = [
-        # the REAL server shape: Retry-After in the HTTP HEADER (P1 — the
-        # hosted server never emits a body ``retry_after`` field)
+        # the REAL server shape: Retry-After in the HTTP HEADER (the
+        # hosted server ALSO ships the seconds in the 429 body — P1)
         (429, {"error": {"code": "quota_exceeded"}},
          AskQuotaExceeded, None, {"Retry-After": "42"}),
         # body-only fallback (still honored when the header is absent)

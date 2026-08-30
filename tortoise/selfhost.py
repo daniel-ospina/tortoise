@@ -147,12 +147,14 @@ _selfhost_default_validation = app.exception_handlers.get(
 
 @app.exception_handler(_starlette_exceptions.HTTPException)
 async def _selfhost_ask_http_handler(request, exc):
-    from tortoise.schemas import ASK_ERROR_CODES  # noqa: I001
+    from tortoise.schemas import (  # noqa: I001
+        ASK_ERROR_CODES, CODE_UNAUTHORIZED,
+    )
     if request.url.path == "/v1/ask":
         status = exc.status_code
         detail = exc.detail
         if status == 401:
-            return JSONResponse({"error": {"code": "unauthorized"}},
+            return JSONResponse({"error": {"code": CODE_UNAUTHORIZED}},
                                 status_code=401, headers=exc.headers)
         if (status in (400, 502, 504)
                 and isinstance(detail, str) and detail in ASK_ERROR_CODES):
@@ -165,8 +167,9 @@ async def _selfhost_ask_http_handler(request, exc):
 async def _selfhost_ask_validation_handler(request, exc):
     """Malformed JSON on /v1/ask → 400 ``invalid_question`` (parity with
     hosted, P1-3); other paths keep FastAPI's default 422."""
+    from tortoise.schemas import CODE_INVALID_QUESTION  # noqa: I001
     if request.url.path == "/v1/ask":
-        return JSONResponse({"error": {"code": "invalid_question"}},
+        return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
                             status_code=400)
     if _selfhost_default_validation is not None:
         return await _selfhost_default_validation(request, exc)

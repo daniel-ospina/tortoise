@@ -17,7 +17,10 @@ VENICE_API_KEY). Two modes:
     ``_abs`` verdict covers EVAL-SHAPED evidence only, this fixture covers
     PRODUCT-SHAPED superseded/degraded/annotated evidence — P2-18).
   * LIVE-KEY mode (a provider key env present): runs the REAL lane
-    (``build_reader_model``) against the same seeded fixtures.
+    (``build_reader_model``) against the same seeded fixtures. The
+    fixture-replay byte-equality tests SKIP in this mode — a real build
+    does not reproduce the recorded bytes; ``test_live_key_mode_real_lane``
+    covers live mode with loose assertions.
 
 TRANSCRIPT FIDELITY GUARD (P2-25/P2-19): the recorded PROMPT HASH must
 match the current ``reader_prompt_constants()`` and the replayed user
@@ -170,6 +173,10 @@ def test_fixture_replay_verdict(tx: dict, monkeypatch) -> None:
     message BYTE-EQUAL (fidelity) and the verdict matches the pinned
     expectation (MUST commit / MUST answer / MUST abstain / MUST answer from
     stale evidence)."""
+    if _live_keys_present() and not _fixture_mode():
+        pytest.skip("live-key mode — replay byte-equality only meaningful "
+                    "in fixture mode (test_live_key_mode_real_lane covers "
+                    "live mode with loose assertions)")
     result = _run_fixture(tx, monkeypatch)
     assert result["abstained"] is tx["expected_abstained"], (
         tx["fixture"], result["answer"])
@@ -194,6 +201,9 @@ def test_transcript_fidelity_prompt_hash() -> None:
     ``reader_prompt_constants()`` — a stale transcript (old prompt) fails,
     forcing fixture REGENERATION whenever the golden-string snapshot
     changes."""
+    if _live_keys_present() and not _fixture_mode():
+        pytest.skip("live-key mode — fixture-prompt-hash check only "
+                    "meaningful in fixture mode")
     generic, fragments = reader_prompt_constants()
     current = _sha256(json.dumps(
         {"system": generic, "fragments": fragments}, sort_keys=True))

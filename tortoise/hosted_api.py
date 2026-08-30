@@ -509,12 +509,14 @@ async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
     EVERYTHING else (incl. the 403 suspended-team passthrough — the
     ``_suspended_detail()`` DICT) → the captured default handler's response
     with ``exc.headers`` preserved."""
-    from tortoise.schemas import ASK_ERROR_CODES, CODE_QUOTA_EXCEEDED
+    from tortoise.schemas import (  # noqa: I001
+        ASK_ERROR_CODES, CODE_QUOTA_EXCEEDED, CODE_UNAUTHORIZED,
+    )
     if request.url.path == "/v1/ask":
         status = exc.status_code
         detail = exc.detail
         if status == 401:
-            return JSONResponse({"error": {"code": "unauthorized"}},
+            return JSONResponse({"error": {"code": CODE_UNAUTHORIZED}},
                                 status_code=401, headers=exc.headers)
         if (status in (400, 429, 502, 504)
                 and isinstance(detail, str) and detail in ASK_ERROR_CODES):
@@ -541,8 +543,9 @@ async def _ask_path_scoped_validation_handler(request: Request,
     """Malformed JSON body on /v1/ask → 400 ``invalid_question`` (raised at
     body-PARSE time, before any field validator runs — P1-3); other paths
     keep FastAPI's default 422 behavior via the captured default handler."""
+    from tortoise.schemas import CODE_INVALID_QUESTION  # noqa: I001
     if request.url.path == "/v1/ask":
-        return JSONResponse({"error": {"code": "invalid_question"}},
+        return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
                             status_code=400)
     if _ask_default_validation_handler is not None:
         return await _ask_default_validation_handler(request, exc)

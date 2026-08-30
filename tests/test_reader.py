@@ -387,9 +387,12 @@ class TestLooksAbstained:
         substring heuristic, NEVER a gate (the two-phase prompt is
         authoritative; the SDK substitutes NO_EVIDENCE_TEXT on this
         label, per tests/test_ask_api.py). Since the clause-scoped
-        tightening (P2), only the FIRST-clause occurrence labels
-        abstained — a TRAILING qualifier never does (pinned in
-        ``test_trailing_qualifier_not_abstained`` below). These pins make
+        tightening (P2), the FIRST-clause occurrence labels abstained; a
+        TRAILING qualifier does not (pinned in
+        ``test_trailing_qualifier_not_abstained`` below) — except a
+        FINAL-clause flat refusal ("I don't know.") which labels
+        abstained (cycle-2 pins in
+        ``test_reader_abstention_calibration.py``). These pins make
         the accepted trade-off explicit."""
         assert _looks_abstained(
             "There were not enough chairs, so we moved the meeting.") is True

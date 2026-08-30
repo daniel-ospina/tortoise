@@ -551,6 +551,17 @@ def test_abstained_label_clause_scoped_pin():
         "economics), but it does not contain the asked information.",
         "No turns mention the smoker; the information is absent from "
         "the context.",
+        # cycle-2 pins: genuine whole-answer abstentions WITHOUT the
+        # "asked"/"absent" anchor — a later-clause marker as the answer's
+        # operative (final) clause (flat refusal / asked-subject reference)
+        # MUST label abstained (the pre-cycle-2 clause-scope rule missed
+        # these — false-negative class, P2).
+        "The answer: I don't know.",
+        "I searched the memory. I cannot answer.",
+        "The gym schedule is Monday. I do not know.",
+        "I remember the trip. I don't know the date.",
+        "The memory mentions a new bicycle, but it does not contain the "
+        "color.",
     ):
         assert _looks_abstained(abstention) is True, abstention
     # committed answers with a trailing qualifier → NOT abstained
@@ -563,5 +574,14 @@ def test_abstained_label_clause_scoped_pin():
         "age.",
         "I bought the smoker 10 days ago, though I do not know the "
         "exact hour.",
+        # cycle-2 pins: committing answers whose later clause carries an
+        # abstention marker — MUST stay NOT abstained (the #2027
+        # committing-hedge class; a "though"-hedge or a possessive-
+        # attribute qualifier never labels abstained even when it is the
+        # final clause).
+        "The gym schedule is Monday and Wednesday, though I do not know "
+        "if it changed since",
+        "Golden Retriever — Max's breed. The context does not mention "
+        "his age.",
     ):
         assert _looks_abstained(committed) is False, committed

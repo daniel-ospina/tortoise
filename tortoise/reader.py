@@ -407,8 +407,11 @@ def detect_question_type(question: str | None) -> str | None:
 # ── Best-effort abstained label (Task 2) ───────────────────────────────────
 
 #: Abstained phrases — a STRICT SUPERSET of judge.py's abstention
-#: vocabulary (``_ABSTRACTION_MARKERS`` ⊆ this list) so the judge never
-#: flags an abstention the product label misses.
+#: vocabulary (``_ABSTRACTION_MARKERS`` ⊆ this list). Vocabulary-only claim:
+#: matching is clause-scoped, so a later-clause marker may label differently
+#: from the judge's whole-answer match — the product label's committed-hedge
+#: class (#2027: "…though I do not know if it changed") stays NOT abstained
+#: even when the judge's whole-answer pass would flag the phrase.
 _ABSTAINED_PHRASES: tuple[str, ...] = (
     "do not know", "don't know", "not know", "unanswerable", "incomplete",
     "cannot answer", "can't answer", "not enough", "does not contain",
@@ -446,15 +449,29 @@ def _looks_abstained(answer: str | None) -> bool:
     # subject / absence — #2027 canonical: 'absent from the context',
     # 'asked information is absent'). Match the first clause, or a later
     # clause that references the abstention's subject ("asked"/"absent")
-    # — a trailing confidence hedge never labels abstained.
-    clauses = re.split(r"[,;:.!?—]+", low)
+    # or a FINAL-clause flat refusal ("I don't know."/"I cannot answer.")
+    # — a trailing confidence hedge ("though…"/possessive attribute)
+    # never labels abstained.
+    clauses = [c for c in re.split(r"[,;:.!?—]+", low) if c]
     if any(p in clauses[0] for p in _ABSTAINED_PHRASES):
         return True
-    return any(
-        ("asked" in c or "absent" in c)
-        and any(p in c for p in _ABSTAINED_PHRASES)
-        for c in clauses[1:]
-    )
+    for c in clauses[1:]:
+        if not any(p in c for p in _ABSTAINED_PHRASES):
+            continue
+        if "asked" in c or "absent" in c:
+            return True
+        # A later-clause marker WITHOUT the "asked"/"absent" anchor: a
+        # genuine whole-answer abstention only when the marker clause is
+        # the FINAL clause and the answer is dominated by the abstention
+        # form — a flat refusal ("I don't know.") or a clause referencing
+        # the asked subject ("it does not contain the color"). NOT a
+        # committing-hedge qualifier (#2027): a "though"-attached hedge
+        # ("…though I do not know if it changed since") or a possessive-
+        # attribute reference ("the context does not mention his age").
+        if c == clauses[-1] and "though" not in c \
+                and not re.search(r"\b(?:his|her|its|their)\b", c):
+            return True
+    return False
 
 
 class Reader(Protocol):
