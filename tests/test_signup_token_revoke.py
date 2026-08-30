@@ -799,7 +799,8 @@ class TestRevokeBodySweepCap:
     get_current_team override honored by get_current_team_session); the 413
     then fires at the body read. Own TestClient with
     raise_server_exceptions=False so the malformed→500 pin observes the
-    REAL 500 response (the app's #1591 handler re-raises for telemetry)."""
+    REAL 500 response (the app's #1591 handler logs the traceback via
+    logging.exception and returns a plain 500 JSON)."""
 
     @pytest.fixture
     def sweep_client(self):

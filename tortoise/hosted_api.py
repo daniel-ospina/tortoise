@@ -7683,9 +7683,18 @@ _BODY_MAX_BYTES = 256 * 1024
 _COMMIT_SESSION_MAX_BYTES = 8 * 1024 * 1024
 _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 
-_BODY_413_DETAIL = "request body exceeds the size cap (256 KiB)"
-_COMMIT_SESSION_413_DETAIL = "commit session request body exceeds the size cap (8 MiB)"
-_STRIPE_WEBHOOK_413_DETAIL = "Stripe webhook body exceeds the size cap (1 MiB)"
+# detail strings derive the byte count from the cap constants (never a
+# literal that can silently drift from the enforced cap — the #2033
+# wire_detail precedent: the 413 message stays truthful under cap changes).
+_BODY_413_DETAIL = f"request body exceeds the size cap ({_BODY_MAX_BYTES // 1024} KiB)"
+_COMMIT_SESSION_413_DETAIL = (
+    f"commit session request body exceeds the size cap "
+    f"({_COMMIT_SESSION_MAX_BYTES // (1024 * 1024)} MiB)"
+)
+_STRIPE_WEBHOOK_413_DETAIL = (
+    f"Stripe webhook body exceeds the size cap "
+    f"({_STRIPE_WEBHOOK_MAX_BYTES // (1024 * 1024)} MiB)"
+)
 
 
 async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> bytes:
@@ -7694,8 +7703,10 @@ async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> by
     Content-Length alone is spoofable (a client can claim a small length and
     stream unbounded bytes) — the cap is enforced while draining the stream,
     so an oversized body 413s before the ENTIRE body is buffered or any parse
-    work. Shared by the import-artifact path (_read_import_body) and the
-    pack-manifest upload path (#2029).
+    work. Shared by the import-artifact path (_read_import_body), the
+    pack-manifest upload path (#2029), and every request-body read swept in
+    #2032 (register/login/signup/claim/keys/agent/oauth/commit/stripe — the
+    caps + detail strings live in the constants block directly above).
     """
     chunks: list[bytes] = []
     total = 0
