@@ -105,7 +105,7 @@ CHAINS = {
     },
 }
 
-PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:")
+PACK_NS = ("product-strategy:", "dev:", "marketing:", "pm:", "agent-ops:")
 
 # E2 (#1534): the USER-PERSONAL-STATE vocabulary — the operative criterion for
 # the Tier-A classification hint (personal bests, schedules, preferences). The
@@ -234,6 +234,8 @@ _PACK_TRIGGERS = {
     "product-strategy:": ("product", "market", "competitor", "customer",
                           "roadmap", "feature", "use case", "strategy"),
     "pm:": ("project", "milestone", "pm:", "portfolio", "program"),
+    "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
+                    "destructive action", "policy", "standing rule"),
     "epistemic-team:": ("epistemic", "weight", "confidence", "claim",
                         "premise", "evidence"),
 }
@@ -2358,6 +2360,85 @@ def validate_chains(embed_list: dict, master: dict | None = None) -> list[dict]:
     return notes
 
 
+def validate_chain_completeness(embed_list: dict,
+                                 master: dict | None = None) -> list[dict]:
+    """Rules-with-why chain completeness (issue #1933, E2E-4 negative a).
+
+    A pack chain whose FIRST emitted step is missing its NEXT step is an
+    INCOMPLETE chain: e.g. the agent-ops ``ruleLifecycle`` chain
+    [rule, rationale, ruleRevised] — a rule emitted WITHOUT its rationale
+    (the why) breaks the rules-with-why contract. Deterministic, no LLM:
+
+    1. Collect every emitted kind (entities/points/events, bare form) from
+       the embed list (PRE-repair — pack point kinds like
+       ``agent-ops:rationale`` are still visible here, unlike the commit
+       payload where FIX P repairs them to ``statement``).
+    2. For each PACK-DECLARED chain whose id is NOT in the canonical
+       hardcoded ``CHAINS`` dict (productDelivery/epicToCode/
+       campaignToChannel — their enforcement semantics are established via
+       the graph/payload validators and must not change), find the LOWEST
+       step index with an emitted item.
+    3. If the NEXT step (index+1) has NO emitted item → warn, naming the
+       missing step. A ruleRevised-only embed (highest step emitted, no
+       next step) never warns — a revision without its rule is outside this
+       chain's completeness contract.
+    4. Zero emitted items for ANY step → no note, no warning (unrelated
+       sessions never flood warnings).
+
+    Severity is the chain's manifest enforcement (warn — never blocks).
+    Returns notes mirroring ``validate_chains``' format.
+    """
+    master = master or build_master_list()
+    emitted: set[str] = set()
+    for e in (embed_list.get("entities") or []):
+        if isinstance(e, dict) and e.get("kind"):
+            emitted.add(str(e["kind"]).rsplit(":", 1)[-1].lower())
+    for p in (embed_list.get("points") or []):
+        if isinstance(p, dict) and p.get("pointKind"):
+            emitted.add(str(p["pointKind"]).rsplit(":", 1)[-1].lower())
+    for ev in (embed_list.get("events") or []):
+        if isinstance(ev, dict) and ev.get("eventKind"):
+            emitted.add(str(ev["eventKind"]).rsplit(":", 1)[-1].lower())
+    if not emitted:
+        return []
+    try:
+        from tortoise.pack_registry import PackRegistry, default_packs_dir
+        reg = PackRegistry(default_packs_dir())
+        reg.load_all()
+    except Exception:  # noqa: BLE001, RUF100 — never block capture
+        return []
+    notes: list[dict] = []
+    for pack in reg.packs.values():
+        for chain in getattr(pack, "chains", []) or []:
+            cid = chain.get("id")
+            steps = [str(s) for s in (chain.get("steps") or [])]
+            if not cid or len(steps) < 2 or cid in CHAINS:
+                continue  # canonical chains keep their established semantics
+            idx = {s.lower(): i for i, s in enumerate(steps)}
+            present = [i for s, i in idx.items() if s in emitted]
+            if not present:
+                continue  # chain not in play for this session
+            first = min(present)
+            nxt = first + 1
+            if nxt >= len(steps):
+                continue  # chain ends at its first emitted step — complete
+            missing = steps[nxt]
+            if idx.get(missing.lower()) is not None and \
+                    missing.lower() not in emitted:
+                notes.append({
+                    "chain": cid,
+                    "finding": (f"chain '{cid}' emitted '{steps[first]}' but "
+                                f"its next step '{missing}' is missing — the "
+                                f"chain is incomplete"),
+                    "action": "warned",
+                    "note": (f"'{missing}' is the next declared chain step "
+                             f"({ ' → '.join(steps) }); per chain enforcement "
+                             f"'{chain.get('enforcement', 'warn')}' this is a "
+                             "warning, never a block"),
+                })
+    return notes
+
+
 def _minted_kind_report(embed_list: dict, master: dict | None = None) -> list[str]:
     """Every kind used in entities/events/points that is NOT writable by
     the matching write gate (indicator: 0 minted kinds). Each lane uses the
@@ -3642,6 +3723,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         # chain-enforcement failure path.
         _bump_census_class(error_census, "chain_enforcement_failed")
 
+    # ── chain completeness (#1933, E2E-4 negative a): DETERMINISTIC check
+    # on the embed list (PRE-repair — pack point kinds like
+    # agent-ops:rationale are still visible here, unlike the commit payload
+    # where FIX P repairs them to statement). A pack chain whose first
+    # emitted step is missing its next step (ruleLifecycle: rule without
+    # rationale) is an incomplete chain — warn per the chain's manifest
+    # enforcement, never block. Notes are collected NOW and merged into
+    # ``result`` after it exists (the chain-enforcement block runs before
+    # ``result`` is created; the S5-failure branch carries them too).
+    chain_completeness_notes: list[dict] = []
+    try:
+        chain_completeness_notes = validate_chain_completeness(
+            complete_list, master)
+    except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+        errors.append(f"chain completeness check failed: {type(e).__name__}: {e}")
+        _bump_census_class(error_census, "chain_completeness_failed")
+
     # ── S5: embed execution (deterministic) ────────────────────────────────
     if not complete_list:
         errors.append("no embed list produced (S2/S4 empty) — nothing to embed")
@@ -3665,6 +3763,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         "notes": chain_enforcer_notes,
         "stats": chain_enforcer_stats,
     }
+    # #1933 (E2E-4 negative a): the chain-completeness evidence surface +
+    # human-readable warnings (additive keys — the S5-failure branch above
+    # carries the same merge).
+    result["chain_completeness"] = {"notes": chain_completeness_notes}
+    if chain_completeness_notes:
+        result.setdefault("warnings", []).extend(
+            f"{n['finding']}" for n in chain_completeness_notes)
     # #1695 Task 5: the classify-later evidence surface (flag-off: the
     # empty block — no telemetry growth, additive keys only).
     result["classify_later"] = {
@@ -4498,7 +4603,8 @@ __all__ = [  # noqa: RUF022
     "resolve_backend_mode", "search_graph",
     "run_s4", "render_s4_prompt",
     "merge_embed_lists", "_merge_key", "_s4_merge_stats",
-    "execute_embed", "validate_chains", "derive_supersessions",
+    "execute_embed", "validate_chains", "validate_chain_completeness",
+    "derive_supersessions",
     "classify_consolidation", "DecisionRecord", "resolve_entities",
     "extract_session_v2",
     "S1_TMPL", "S2_TMPL", "S4_TMPL", "OUTPUT_CONTRACT",
