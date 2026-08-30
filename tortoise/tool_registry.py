@@ -32,6 +32,9 @@ class ToolDefinition:
     handler_override: Optional[Callable] = None  # For raw-Cypher REST ops  # noqa: UP045
     rest_spec: Optional[RestSpec] = None         # For SDK-backed REST ops  # noqa: UP045
     group: str = "memory"        # Curation group (#523): memory|reasoning|graph|sessions|sources|journal|admin|onboarding
+    hosted_only: bool = False    # #1935: register ONLY on the hosted surface
+                                 # (deployment-gated — e.g. tortoise_pack_install;
+                                 # self-host uses filesystem packs dir + CLI)
 
 
 # ── Shorthand constructors ────────────────────────────────────────
@@ -175,6 +178,20 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         annotations=_ro(),
         http_policy=True,
         sdk_method="get_tenant_packs",  # pack_state helper, not an SDK method
+    ),
+    ToolDefinition(
+        name="tortoise_pack_install",
+        description="Install a custom expansion pack on the HOSTED surface (#1935): "
+                    "validates against the shared registry + tenant policy "
+                    "(reserved starter namespace, ontology-only v1), stores the "
+                    "manifest in the tenant graph and activates it. Deployment- "
+                    "gated: on self-host this is an actionable stub (use the "
+                    "filesystem packs dir + tortoise pack CLI).",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="upsert_tenant_manifest",  # pack_manifest_store helper
+        group="admin",
+        hosted_only=True,
     ),
     # ── Tags (#215) ───────────────────────────────────────────────
     ToolDefinition(
@@ -1148,7 +1165,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_session_context": "sessions", "tortoise_get_session": "sessions",
     "tortoise_index_sessions": "sessions", "tortoise_search_sessions": "sessions",
     "tortoise_list_graphs": "sessions", "tortoise_list_namespaces": "sessions",
-    "tortoise_packs_list": "admin",
+    "tortoise_packs_list": "admin", "tortoise_pack_install": "admin",  # #1935
     "tortoise_events_poll": "sessions",  # #432 CDC/subscription — not a memory tool
     # #1727 (Task 13): the session-capture filing tool groups under
     # "sessions" (else it falls to the "memory" default and is filtered out
