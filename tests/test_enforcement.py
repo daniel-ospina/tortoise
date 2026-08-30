@@ -70,6 +70,16 @@ class TestResolveEnforcement:
         assert resolve_enforcement(kind="agent-ops:") == "warn"  # empty local — hard-warn
         assert resolve_enforcement(kind="a:b:c") == "warn"  # multi-colon → ns 'a:b' absent
 
+    def test_non_str_kind_fails_open_to_warn(self):
+        """#2030 pin — the never-raise contract also holds for non-str
+        kinds (numeric ids etc.): the namespaced branch is reached only for
+        str inputs; non-str kinds fall through to the bare scan's dict ops
+        (cross-pack default → warn). Pre-fix code already tolerated them
+        (#1784 non-str safety) — the fix must not regress that."""
+        from tortoise.enforcement import resolve_enforcement
+        assert resolve_enforcement(kind=123) == "warn"
+        assert resolve_enforcement(kind=None) == "warn"
+
     def test_namespaced_declaring_pack_only(self):
         """#2030 pin (b) content-level guard — a namespaced kind resolves
         against its declaring pack only: dev:issue is warn (dev declares no
@@ -88,8 +98,11 @@ class TestResolveEnforcement:
         two packs declaring the SAME bare kind at different levels — the
         declaring pack's own level wins (a:widget retry; b:widget warn even
         though pack 'a' has retry); an invalid declared level falls to warn
-        via the VALID_LEVELS guard. RED on pre-fix code (the bare path
-        misses the full-namespaced key → a:widget resolves warn)."""
+        via the VALID_LEVELS guard. RED on pre-fix code via the b/c/d/f
+        pins (the bare scan aggregates cross-pack defaults: b:widget/c:widget
+        resolve retry pre-fix vs warn post-fix; :rule/multi-colon degrade
+        pre-fix too). a:widget itself is GREEN on both (pack e's retry
+        default supplies it pre-fix) — see the in-body NOTE."""
         from tortoise.enforcement import resolve_enforcement
         from tortoise.pack_registry import PackManifest
 
@@ -418,9 +431,21 @@ class TestCreateOperatorWarnNotBlock:
 # retry; near-miss partner core:standard → warn) is pinned in
 # TestResolveEnforcement above + TestNearMissRetrySignal in
 # tests/test_kind_classifier.py (which exercises the FULL hook with the
-# real registry). A dedicated TestClassifierRetrySignal class duplicated
-# those assertions verbatim and was removed (test-review cycle 7 — no
-# discriminating value).
+# real registry). The former TestClassifierRetrySignal seam-resolution
+# tests duplicated those assertions verbatim and were removed (test-review
+# cycle 7 — no discriminating value); the M3 extractor-bound pin survives
+# below because it pins a DIFFERENT contract (the extractor's bounded
+# completion loop, not the classifier hook).
+
+class TestClassifierRetrySignalM3Bound:
+    def test_retry_count_key_is_bounded_by_m3_loop(self):
+        """The seam records near_miss_retries; the ACTUAL bounded re-attempt
+        is the extractor's M3 loop (≤3 attempts, _COMPLETE_RETRIES=2) —
+        near-miss accounting is census telemetry, never a loop (the
+        classifier never re-encodes; pinned behaviorally by
+        test_classifier_never_re_attempts_encode in test_kind_classifier.py)."""
+        import tortoise.extractor_v2 as v2
+        assert getattr(v2, "_COMPLETE_RETRIES", 2) <= 3
 
 # ── Chain rewire regression guard (behavioral, not byte-identical) ─────────
 

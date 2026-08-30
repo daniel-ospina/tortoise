@@ -3,15 +3,22 @@
 Resolves the manifest enforcement ladder (``warn | retry | block``) through a
 single primitive consumed by the extraction-side kind classifier's near-miss
 hook (the classifier passes NAMESPACED index kinds — see below). The SDK write
-path's ``create_operator`` does NOT call this seam: it performs its own inline
-bare-predicate relation check (warn-not-block) — see sdk.py. Prior state:
-``PackManifest.enforcement_for*`` was validated at load but had ZERO
-production call sites — the ladder was dead config. This module completes the
-deferred "extractor-retry semantics layer"
-(``domain_validators.resolve_rule_severity`` docstring) and the write-path
-warn-not-block hook (2026-08-05 governance D1/D2: warn-not-block default;
-``block`` stays out of scope — per-pack opt-in at most, adversarial over-
-constraint risk).
+path's ``create_operator`` does NOT call ``resolve_enforcement``: it performs
+its own inline bare-predicate relation check (warn-not-block), importing only
+``emit_violation``/``warning_for_relation`` for the warn path — see sdk.py.
+Prior state: ``PackManifest.enforcement_for*`` was validated at load but had
+ZERO production call sites — the ladder was dead config. This module completes
+the deferred "extractor-retry semantics layer" (the kind/relation arms — the
+chain-only legacy ladder ``domain_validators.resolve_rule_severity`` remains
+live in commit_schema for chain.enforcement, unaware of this seam's
+``extraction.enforcement.chains`` rung; the two ladders are NOT reconciled
+here — pre-existing #405 boundary) and the write-path warn-not-block hook
+(2026-08-05 governance D1/D2: warn-not-block default; ``block`` stays out of
+scope — per-pack opt-in at most, adversarial over-constraint risk).
+
+Non-str kinds (e.g. a numeric id) are tolerated by the bare scan's dict ops
+and resolve to the cross-pack default (warn) — the namespaced branch is
+reached only for ``str`` inputs, preserving the never-raise contract.
 
 Resolution order (single source of truth):
     kind:     kindDefs[].enforcement → extraction.enforcement.kinds → default → warn
@@ -73,7 +80,7 @@ def resolve_enforcement(
     # any-namespace fallback: a stripped name feeding the cross-pack scan
     # would mis-attribute on collided bare names). Unknown/malformed
     # namespaces (e.g. `core:` — no core pack) degrade to warn, never raise.
-    if kind is not None and ":" in kind:
+    if isinstance(kind, str) and ":" in kind:
         ns, _, local = kind.rpartition(":")
         if not local:
             return "warn"  # malformed: an empty local name never resolves
