@@ -44,6 +44,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_audit.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
                        r'monkeypatch\.setenv\(\s*$'],
     "test_billing.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    "test_body_cap_sweep.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #2032: embedded lane via delenv (the test_billing pattern — registry-lane determinism for register/agent mints)
     "test_bridge_mcp.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_chain_enforcer.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"'],
     "test_github_index_lifecycle.py": [r'monkeypatch\.delenv\("TORTOISE_DB_URI"',

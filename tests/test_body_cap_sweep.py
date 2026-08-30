@@ -53,7 +53,10 @@ def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
 
 def _patch_sdk_init(monkeypatch, db_path: str):
     """Route EVERY TortoiseSDK construction to one temp DB (embedded lane),
-    mirroring test_hosted_api._patch_tortoise_sdk_init."""
+    mirroring test_hosted_api._patch_tortoise_sdk_init. Teardown CLOSES the
+    _FALLBACK_KEEPALIVE anchors before clearing (the #1950 lesson: clearing
+    alone leaks the anchored redislite daemons — they stay alive until the
+    last connection is GC'd, tripping the CI redislite-orphan hygiene check)."""
     import tortoise.hosted_api as ha_mod
 
     _orig = ha_mod.TortoiseSDK.__init__
@@ -69,7 +72,13 @@ def _patch_sdk_init(monkeypatch, db_path: str):
             yield
         finally:
             app.dependency_overrides.clear()
-            ha_mod._FALLBACK_KEEPALIVE.clear()
+            for ns in list(ha_mod._FALLBACK_KEEPALIVE):
+                anchor = ha_mod._FALLBACK_KEEPALIVE.pop(ns, None)
+                if anchor is not None:
+                    try:  # noqa: SIM105
+                        anchor.close()
+                    except Exception:
+                        pass
 
     return _manager()
 
