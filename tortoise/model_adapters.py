@@ -676,9 +676,11 @@ class RotatingModel:
         self.last_finish_reason: str | None = None
         self.route = providers[0].provider if providers else None
         # #1987 Task 3: the resolved-spec + per-call usage forwards (mirrored
-        # from the serving adapter; ``model`` is the serving lane's wire id).
-        self.model: str = model or (getattr(providers[0], "id", "")
-                                    if providers else "")
+        # from the serving adapter; ``model`` is the serving lane's wire id —
+        # NOT the raw model_id spec, so RoutingModel and RotatingModel report
+        # the SAME format).
+        self.model: str = (getattr(providers[0], "id", "")
+                           if providers else (model or ""))
         self.last_prompt_tokens: int = 0
         self.last_completion_tokens: int = 0
 

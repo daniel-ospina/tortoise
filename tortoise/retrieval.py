@@ -166,11 +166,11 @@ def dedup_pool(annotated: list[dict], *,
 
     ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.
     Default None = the historical bucket key (session_id / lme index). The
-    ASK lane passes a key extractor preferring the ANNOTATED session
-    identifier (``session_date`` from the Event join, falling back to
-    ``session_id``) — the dedup then groups by the annotated key, so hits
-    that lack ``sessionId`` but share an Event-derived session date are
-    capped together (pre-annotation dedup could not group them).
+    ASK lane passes a key extractor preferring the UNIQUE session identifier
+    (``session_id`` from the Event join, falling back to the annotated
+    ``session_date``) — distinct same-day sessions never collapse into one
+    bucket; hits LACKING ``sessionId`` but sharing an Event-derived session
+    date still cap together (pre-annotation dedup could not group them).
     """
     if max_chunks_per_session < 1:
         raise ValueError("max_chunks_per_session must be >= 1, got "
@@ -210,6 +210,20 @@ _NON_WHITESPACE_RUN = re.compile(r"\S+")
 #: never under-count and the per-query cost stays honestly bounded.
 _ASK_CJK_TOKENS_PER_CHAR = 0.65
 
+#: Emoji/other-symbol runs tokenize at ~1.5-2+ tokens per codepoint (ZWJ
+#: sequences are the extreme — a 7-codepoint family emoji charges ~7-15
+#: tokens). A dedicated per-codepoint floor keeps the estimate conservative
+#: (the meter must never under-count).
+_ASK_SYMBOL_TOKENS_PER_CHAR = 2.0
+
+
+def _run_has_symbol(run: str) -> bool:
+    """True when a non-whitespace run contains a Unicode Symbol character
+    (categories So/Sk — emoji, dingbats, modifier symbols) that tokenizers
+    charge per-codepoint (never a single whitespace-token run)."""
+    import unicodedata
+    return any(unicodedata.category(ch) in ("So", "Sk") for ch in run)
+
 
 def estimate_tokens_ask(text: str) -> int:
     """The ask lane's conservative token estimator (#1987 Task 6, P2-1).
@@ -234,14 +248,17 @@ def estimate_tokens_ask(text: str) -> int:
     base = int(len(text.split()) * 1.1)
     surcharge = 0
     for run in _NON_WHITESPACE_RUN.findall(text):
-        if len(run) >= 4 and any(ord(ch) > 127 for ch in run):
-            # A long unspaced NON-ASCII run is almost certainly CJK/emoji —
-            # charge the conservative per-char rate (never under-count); the
-            # run already counted as one whitespace token in ``base``, so the
-            # surcharge is the per-char overage beyond that. Pure-ASCII runs
-            # (normal words) keep the standard whitespace estimate.
-            char_est = max(1, int(len(run) * _ASK_CJK_TOKENS_PER_CHAR))
-            surcharge += max(0, char_est - 1)
+        if not any(ord(ch) > 127 for ch in run):
+            continue  # pure-ASCII runs (normal words) keep the base estimate
+        # A NON-ASCII run (any length — threshold 1 so short CJK/emoji runs
+        # are covered) is charged a conservative per-char rate; symbol/emoji
+        # runs use the higher per-codepoint floor. The run already counted as
+        # one whitespace token in ``base``, so the surcharge is the per-char
+        # overage beyond that.
+        per_char = (_ASK_SYMBOL_TOKENS_PER_CHAR if _run_has_symbol(run)
+                    else _ASK_CJK_TOKENS_PER_CHAR)
+        char_est = max(1, int(len(run) * per_char))
+        surcharge += max(0, char_est - 1)
     return base + surcharge
 
 
@@ -376,7 +393,12 @@ def assemble_context(
                     if question_date else 0)
     selected: list[dict] = []
     words = header_words
-    bytes_used = len(f"Current Date: {question_date}".encode("utf-8")) \
+    # The separator framing bytes (P1): render_context joins blocks with
+    # "\n\n" AND appends a trailing "\n\n" after the header — account those
+    # so ``len(evidence) <= byte_cap`` is a HARD invariant (not just the
+    # block bytes). ``+2`` per accepted block is deliberately conservative
+    # (over-counts the last block's absent trailing separator by 2 bytes).
+    bytes_used = (len(f"Current Date: {question_date}".encode("utf-8")) + 2) \
         if question_date else 0
     for h in pool:
         if len(selected) >= item_bound:
@@ -389,9 +411,9 @@ def assemble_context(
             # whole-hit drop under the byte cap — a hit is fully in or fully
             # out; the skip keeps later (lower-ranked) hits' chance like the
             # token cap (no starvation), mirroring the token-budget behavior.
-            if bytes_used + len(block.encode("utf-8")) > byte_cap:
+            if bytes_used + len(block.encode("utf-8")) + 2 > byte_cap:
                 continue
-            bytes_used += len(block.encode("utf-8"))
+            bytes_used += len(block.encode("utf-8")) + 2
         selected.append(h)
         words += cost
     return selected

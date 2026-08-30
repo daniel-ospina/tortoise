@@ -666,6 +666,23 @@ def _call_sync(fn, args, kwargs):
     return fn(*args, **kwargs)
 
 
+def ask_in_flight_capacity(team_id: str | None) -> bool:
+    """True when the per-team in-flight ask cap still has room (or team_id
+    is None). A cheap pre-check for the budget gates (#1987 P2): a request
+    that ``run_ask_bounded`` will reject with 429 ``in_flight_limit`` must
+    not burn a budget slot. Best-effort — a benign race can still charge a
+    slot that later 429s, but the common full-cap case is skipped."""
+    if not team_id:
+        return True
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return True
+    st = _ask_state_for_loop(loop)
+    return st["in_flight"][team_id] < _ASK_TEAM_IN_FLIGHT_CAP
+
+
 async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
     """Shared bounded ask runner (#1987 Task 7/8/9) — the ONE wrapper the
     hosted HTTP handler, the hosted MCP handler, and the selfhost REST
@@ -702,6 +719,13 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
     sdk_team_id = fn_kwargs.pop("_sdk_team_id", team_id)
     if sdk_team_id is not None:
         fn_kwargs["team_id"] = sdk_team_id
+    # contextvars do NOT propagate to run_in_executor worker threads (3.12,
+    # empirically confirmed) — capture the selfhost-transport flag HERE (the
+    # asyncio context) and thread it through so the executor-thread metering
+    # exemption is honored (never a phantom :MeteringRecord).
+    from tortoise.transport import _selfhost_transport
+    if _selfhost_transport.get():
+        fn_kwargs["_selfhost_transport"] = True
     if team_id:
         if inflight[team_id] >= _ASK_TEAM_IN_FLIGHT_CAP:
             raise AskInFlightLimitError(
@@ -709,6 +733,7 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
                 f"({_ASK_TEAM_IN_FLIGHT_CAP})")
         inflight[team_id] += 1
     future = None
+    t_start = time.monotonic()
     try:
         try:
             await asyncio.wait_for(sem.acquire(), timeout=_ASK_TIMEOUT_S)
@@ -721,7 +746,16 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
                 raise AskBoundedTimeoutError(
                     f"ask queued past {_ASK_TIMEOUT_S}s (8 in flight)") from e
             raise
-        future = loop.run_in_executor(None, _call_sync, fn, args, fn_kwargs)
+        try:
+            future = loop.run_in_executor(None, _call_sync, fn, args, fn_kwargs)
+        except BaseException:
+            # loop closed/shutting down → run_in_executor raises SYNCHRONOUSLY
+            # (no future, no done-callback): release the slot + counter NOW.
+            with contextlib.suppress(Exception):
+                sem.release()
+            if team_id:
+                inflight[team_id] -= 1
+            raise
 
         def _release(_fut) -> None:
             with contextlib.suppress(Exception):  # best-effort release — never blocks
@@ -730,9 +764,13 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
                 inflight[team_id] -= 1
 
         future.add_done_callback(_release)
+        # The SECOND window uses the REMAINING budget (the acquire above may
+        # have already consumed part of it) — total per-request latency is
+        # truly capped at ``_ASK_TIMEOUT_S``.
+        remaining = max(0.0, _ASK_TIMEOUT_S - (time.monotonic() - t_start))
         try:
             return await asyncio.wait_for(asyncio.shield(future),
-                                          timeout=_ASK_TIMEOUT_S)
+                                          timeout=remaining)
         except TimeoutError as e:
             raise AskBoundedTimeoutError(
                 f"ask exceeded {_ASK_TIMEOUT_S}s") from e

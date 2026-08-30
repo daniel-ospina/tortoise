@@ -146,6 +146,7 @@ __all__ = [
     "AskInFlightLimit",
     "AskQuotaExceeded",
     "AskReaderUnavailable",
+    "AskRequest",
     "AskRetrievalUnavailable",
     "AskTimeout",
     "AskValidationError",

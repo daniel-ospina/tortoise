@@ -196,6 +196,21 @@ def test_empty_pool_abstained_200(client, monkeypatch):
     assert NO_EVIDENCE_TEXT  # canonical text is the blank-output substitution
 
 
+def test_empty_pool_blank_reply_substitutes_no_evidence(client, monkeypatch):
+    """P2: hosted empty-pool with a BLANK reply → 200 abstained with the
+    canonical NO_EVIDENCE_TEXT substitution (exactly one LLM call) — the
+    blank path is only otherwise exercised at unit/local-lane level."""
+    from tortoise.reader import NO_EVIDENCE_TEXT
+    fake = _FakeReaderFactory(reply="").install(monkeypatch)
+    r = client.post("/v1/ask", json={"question": "nothing about this at all"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["abstained"] is True
+    assert body["answer"] == NO_EVIDENCE_TEXT
+    assert body["evidence"] is not None
+    assert fake["n"] == 1
+
+
 # ── Input boundary (the pinned code set) ───────────────────────────────────
 
 @pytest.mark.parametrize("payload,code", [

@@ -237,6 +237,14 @@ NO_EVIDENCE_TEXT = (
     "this question."
 )
 
+
+def build_reader_user_message(evidence: str, question: str) -> str:
+    """The reader's user-message template (#1987 Task 5) — single-sourced
+    so the SDK local lane and ``LLMReader.answer`` share ONE copy (no
+    parallel template drift: the eval measures ``LLMReader.answer``, the
+    product ships ``sdk.ask``)."""
+    return f"Memory context:\n{evidence}\n\nQuestion: {question}\n\nAnswer:"
+
 #: Official gen.py default generation length for non-CoT runs (the reader's
 #: answer prompt is answered at temperature 0, max_tokens 500 — the official
 #: call shape, no JSON mode; see ``build_reader_model``).
@@ -418,10 +426,7 @@ class LLMReader:
         # single-session-preference get reasoning instructions that counter
         # the reader's documented hedging/miscounting failures.
         context = render_context(context_hits, question_date=question_date)
-        user = (
-            f"Memory context:\n{context}\n\n"
-            f"Question: {question}\n\nAnswer:"
-        )
+        user = build_reader_user_message(context, question)
         raw = self._model.complete(
             system=system_prompt_for(question_type), user=user)
         return raw.strip()

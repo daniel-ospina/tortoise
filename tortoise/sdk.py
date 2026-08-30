@@ -64,6 +64,11 @@ def _prune_ask_reader_cache(cache) -> None:
         for key, entry in list(cache.items()):
             if entry.inflight() == 0:
                 cache.pop(key, None)
+                # Drop the single-flight build lock alongside the idle entry
+                # (P2 — the build-lock dict must not grow unbounded). Safe:
+                # an idle entry can never have an in-flight build (a build
+                # either returns the idle entry or the entry is absent).
+                _ask_build_locks.pop(key, None)
                 entry.close()
                 break
         else:
@@ -10419,6 +10424,10 @@ class TortoiseSDK:
             validate_ask_question_date,
         )
         from tortoise.exceptions import AskValidationError
+        if not isinstance(question, str):
+            raise AskValidationError(
+                "question must be a non-empty string",
+                code=VALIDATION_CODE_EMPTY)
         if question is None or not str(question).strip():
             raise AskValidationError(
                 "question must be a non-empty string",
@@ -10450,7 +10459,7 @@ class TortoiseSDK:
 
     def ask(self, question: str, *, question_type: str | None = None,
             question_date: str | None = None, team_id: str | None = None,
-            _reader_factory=None) -> dict:
+            _reader_factory=None, _selfhost_transport: bool = False) -> dict:
         """Answer a question about captured memory (#1987 Task 5) — ONE
         bounded RAG pass locally (or a POST to hosted ``/v1/ask`` when
         ``TORTOISE_API_URL`` is set).
@@ -10462,7 +10471,7 @@ class TortoiseSDK:
         → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
         → ``assemble_context`` (8000-token estimate cap AND 32 KiB byte cap,
         whole-hit drop) → ``detect_question_type`` (or caller override) →
-        ONE ``LLMReader.answer`` via ``build_reader_model()`` (never an
+        ONE reader call via ``build_reader_model()`` (never an
         LLM-skip pre-gate — exactly one model call incl. empty context) →
         ``_looks_abstained`` (blank → ``NO_EVIDENCE_TEXT``) → best-effort
         ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
@@ -10495,6 +10504,7 @@ class TortoiseSDK:
         from tortoise.reader import (
             NO_EVIDENCE_TEXT,
             _looks_abstained,
+            build_reader_user_message,
             detect_question_type,
             system_prompt_for,
         )
@@ -10539,8 +10549,8 @@ class TortoiseSDK:
         # 4. Dedup (annotated session key — P2-20) + assembly (8k/40/32KiB).
         try:
             def _ask_session_key(h: dict) -> str:
-                return (h.get("session_date")
-                        or h.get("session_id")
+                return (h.get("session_id")
+                        or h.get("session_date")
                         or f"idx:{h.get('lme_session_index', -1)}")
 
             deduped = dedup_pool(
@@ -10561,7 +10571,12 @@ class TortoiseSDK:
             else detect_question_type(question)
 
         # 6. ONE reader call via the per-namespace cached model.
-        evidence = render_context(assembled, question_date=question_date)
+        try:
+            evidence = render_context(assembled, question_date=question_date)
+            context_tokens = estimate_tokens_ask(evidence)
+        except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
+            raise AskRetrievalUnavailable(
+                f"context rendering unavailable: {type(e).__name__}") from e
         try:
             model = self._ask_reader_model(_reader_factory)
         except Exception as e:  # noqa: BLE001, RUF100 — a build failure is a reader failure
@@ -10570,8 +10585,7 @@ class TortoiseSDK:
         try:
             raw = model.complete(
                 system=system_prompt_for(qtype),
-                user=(f"Memory context:\n{evidence}\n\n"
-                      f"Question: {question}\n\nAnswer:"))
+                user=build_reader_user_message(evidence, question))
         except Exception as e:  # noqa: BLE001, RUF100
             raise AskReaderUnavailable(
                 f"reader unavailable: {type(e).__name__}") from e
@@ -10579,7 +10593,6 @@ class TortoiseSDK:
             decr = getattr(model, "decr_inflight", None)
             if decr is not None:
                 decr()
-        context_tokens = estimate_tokens_ask(evidence)
         answer = (raw or "").strip()
         abstained = _looks_abstained(answer)
         if abstained and not answer:
@@ -10596,14 +10609,18 @@ class TortoiseSDK:
                 record_ask_usage(
                     team_id,
                     tokens_in=input_tokens, tokens_out=out_tokens,
-                    cost_usd=estimate_ask_cost_usd(input_tokens, out_tokens))
+                    cost_usd=estimate_ask_cost_usd(input_tokens, out_tokens),
+                    _selfhost_transport=_selfhost_transport)
             except Exception:  # noqa: BLE001, RUF100 — metering never blocks
                 pass
 
         # 8. Degradation signal (leg_trace + D8-decoration-unavailable).
         degraded = any(bool(leg.get("degraded")) for leg in leg_trace)
         if not degraded:
-            degraded = self._ask_d8_decoration_unavailable(hits)
+            try:
+                degraded = self._ask_d8_decoration_unavailable(hits)
+            except Exception:  # noqa: BLE001, RUF100 — degrade to False
+                degraded = False
 
         serving = getattr(model, "last_route", None) or \
             getattr(model, "route", None)
@@ -10753,7 +10770,12 @@ class TortoiseSDK:
                                        status_code=status)
             # 429-is-quota: a code-less 429 → AskQuotaExceeded
             # (retry_after=None — NEVER AskValidationError, P2-15).
+            # The hosted server emits Retry-After in the HTTP HEADER (never
+            # the body) — prefer the header, fall back to the body field.
             retry_after = err.get("retry_after") if isinstance(err, dict) else None
+            header_ra = r.headers.get("Retry-After")
+            if header_ra is not None:
+                retry_after = header_ra
             try:
                 retry_after = float(retry_after) if retry_after is not None else None
             except (TypeError, ValueError):

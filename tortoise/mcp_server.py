@@ -1046,20 +1046,25 @@ async def tortoise_ask(question: str, question_type: str | None = None,
         AskBoundedTimeoutError,
         AskInFlightLimitError,
         ask_budget_retry_after,
+        ask_in_flight_capacity,
         ask_llm_budget_available,
         run_ask_bounded,
     )
     team_id = _current_team_id.get()
-    # Budget gate (the ONE shared bucket helper — stdio/selfhost exempt).
-    if not ask_llm_budget_available(team_id):
-        return {"error": {"code": "quota_exceeded",
-                          "retry_after": ask_budget_retry_after(team_id)}}
     sdk = _get_team_sdk()
-    # Local-lane validation FIRST (structured error, ZERO complete() calls).
+    # Local-lane validation FIRST (structured error, ZERO complete() calls)
+    # — BEFORE the budget gate, so invalid inputs never consume a budget slot
+    # (matching the HTTP path's validate-first semantics).
     try:
         sdk._ask_validate(question, question_type, question_date)
     except AskValidationError as e:
         return {"error": {"code": e.code}}
+    # Budget gate (the ONE shared bucket helper — stdio/selfhost exempt) —
+    # skip the charge when the in-flight cap is already full (a request that
+    # will 429 ``in_flight_limit`` must not burn a budget slot, P2).
+    if ask_in_flight_capacity(team_id) and not ask_llm_budget_available(team_id):
+        return {"error": {"code": "quota_exceeded",
+                          "retry_after": ask_budget_retry_after(team_id)}}
     try:
         return await run_ask_bounded(
             sdk.ask, team_id, question,

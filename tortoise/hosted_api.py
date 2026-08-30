@@ -2900,6 +2900,7 @@ async def ask_question(body: AskRequest,
         AskBoundedTimeoutError,
         AskInFlightLimitError,
         ask_budget_retry_after,
+        ask_in_flight_capacity,
         ask_llm_budget_available,
         run_ask_bounded,
     )
@@ -2918,8 +2919,11 @@ async def ask_question(body: AskRequest,
     )
 
     team_id = team.get("team_id")
-    # Budget gate (per-team per-minute — shared with the MCP handler).
-    if not ask_llm_budget_available(team_id):
+    # Budget gate (per-team per-minute — shared with the MCP handler) — BUT
+    # only charge a slot when the per-team in-flight cap still has room: a
+    # request run_ask_bounded will 429 ``in_flight_limit`` must not burn
+    # budget (P2).
+    if ask_in_flight_capacity(team_id) and not ask_llm_budget_available(team_id):
         raise HTTPException(
             status_code=429, detail=CODE_QUOTA_EXCEEDED,
             headers={"Retry-After": str(int(ask_budget_retry_after(team_id)))})

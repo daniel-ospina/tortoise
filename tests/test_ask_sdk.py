@@ -515,15 +515,16 @@ class _FakeAskServer:
                                  "cost_estimate_usd": 0.0, "duration_ms": 1,
                                  "retrieval_degraded": False}]
         self.status = 200
+        self.headers: dict[str, str] = {}
         self.handler = None
 
-    def _handle(self, body: dict, auth: str) -> tuple[int, dict]:
+    def _handle(self, body: dict, auth: str) -> tuple[int, dict, dict]:
         self.requests.append((body, auth))
         if self.status == 200 and self.responses:
-            return 200, self.responses[0]
+            return 200, self.responses[0], self.headers
         if self.status and self.responses:
-            return self.status, self.responses[0]
-        return 200, self.responses[0]
+            return self.status, self.responses[0], self.headers
+        return 200, self.responses[0], self.headers
 
     def start(self, monkeypatch) -> str:
         seen = {}
@@ -533,9 +534,11 @@ class _FakeAskServer:
                 length = int(self.headers.get("Content-Length", 0))
                 body = json.loads(self.rfile.read(length) or b"{}")
                 auth = self.headers.get("Authorization", "")
-                status, payload = server._handle(body, auth)
+                status, payload, headers = server._handle(body, auth)
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
+                for k, v in headers.items():
+                    self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(json.dumps(payload).encode())
 
@@ -577,28 +580,35 @@ def test_post_ask_status_mapping(monkeypatch):
     AskTimeout; 502 → typed; unreachable → typed."""
     import tortoise.sdk as sdk_mod
     cases = [
+        # the REAL server shape: Retry-After in the HTTP HEADER (P1 — the
+        # hosted server never emits a body ``retry_after`` field)
+        (429, {"error": {"code": "quota_exceeded"}},
+         AskQuotaExceeded, None, {"Retry-After": "42"}),
+        # body-only fallback (still honored when the header is absent)
         (429, {"error": {"code": "quota_exceeded", "retry_after": 42}},
-         AskQuotaExceeded, None),
+         AskQuotaExceeded, None, None),
         (429, {"error": {"code": "in_flight_limit"}},
-         AskInFlightLimit, None),
-        (429, {}, AskQuotaExceeded, None),  # code-less 429 → quota (P2-15)
+         AskInFlightLimit, None, None),
+        (429, {}, AskQuotaExceeded, None, None),  # code-less 429 → quota (P2-15)
         (400, {"error": {"code": "invalid_question"}},
-         AskValidationError, "invalid_question"),
-        (400, {}, AskValidationError, "invalid_question"),  # code-less 400
-        (401, {}, AskValidationError, "unauthorized"),      # code-less 401
-        (403, {}, AskValidationError, "unauthorized"),      # code-less 403
-        (422, {}, AskValidationError, "invalid_question"),  # code-less 422
-        (402, {}, AskReaderUnavailable, None),   # code-less 402 (P2-3)
+         AskValidationError, "invalid_question", None),
+        (400, {}, AskValidationError, "invalid_question", None),  # code-less 400
+        (401, {}, AskValidationError, "unauthorized", None),      # code-less 401
+        (403, {}, AskValidationError, "unauthorized", None),      # code-less 403
+        (422, {}, AskValidationError, "invalid_question", None),  # code-less 422
+        (402, {}, AskReaderUnavailable, None, None),   # code-less 402 (P2-3)
         (502, {"error": {"code": "retrieval_unavailable"}},
-         AskRetrievalUnavailable, None),
+         AskRetrievalUnavailable, None, None),
         (502, {"error": {"code": "reader_unavailable"}},
-         AskReaderUnavailable, None),
-        (504, {}, AskTimeout, None),
+         AskReaderUnavailable, None, None),
+        (504, {}, AskTimeout, None, None),
     ]
-    for status, body, exc_type, code in cases:
+    for status, body, exc_type, code, headers in cases:
         server = _FakeAskServer()
         server.status = status
         server.responses = [body]
+        if headers:
+            server.headers = headers
         server.start(monkeypatch)
         try:
             sdk = _new_sdk()
@@ -608,7 +618,9 @@ def test_post_ask_status_mapping(monkeypatch):
                 assert ei.value.code == code, (status, ei.value.code)
             if exc_type is AskQuotaExceeded and status == 429:
                 ra = ei.value.retry_after
-                if body.get("error", {}).get("retry_after"):
+                if headers and headers.get("Retry-After"):
+                    assert ra == 42
+                elif body.get("error", {}).get("retry_after"):
                     assert ra == 42
                 else:
                     assert ra is None

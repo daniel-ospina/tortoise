@@ -91,14 +91,23 @@ _logger = logging.getLogger(__name__)
 #: with a per-team lock (cross-process races remain possible and are
 #: documented best-effort, mirroring the per-process budget bucket).
 import threading as _threading  # noqa: E402
+from weakref import WeakValueDictionary as _WeakValueDictionary  # noqa: E402
 
-_ask_meter_locks: dict[str, _threading.Lock] = {}
+#: Per-team increment-serialization lock registry — BOUNDED by construction:
+#: a WeakValueDictionary keeps each lock alive only while some thread holds
+#: it (a released lock with no holder is GC'd), so a fresh team id never leaks
+#: a permanent registry entry (the ask build-lock finding's mirror).
+_ask_meter_locks: _WeakValueDictionary = _WeakValueDictionary()
 _ask_meter_locks_guard = _threading.Lock()
 
 
 def _ask_meter_lock(team_id: str) -> _threading.Lock:
     with _ask_meter_locks_guard:
-        return _ask_meter_locks.setdefault(team_id, _threading.Lock())
+        lock = _ask_meter_locks.get(team_id)
+        if lock is None:
+            lock = _threading.Lock()
+            _ask_meter_locks[team_id] = lock
+        return lock
 
 # ── Period helpers ───────────────────────────────────────────────────────────
 
@@ -327,7 +336,8 @@ def _selfhost_transport_active() -> bool:
 
 def record_ask_usage(team_id: str | None, tier: str | None = None, *,
                      calls: int = 1, tokens_in: int = 0, tokens_out: int = 0,
-                     cost_usd: float = 0.0) -> dict | None:
+                     cost_usd: float = 0.0,
+                     _selfhost_transport: bool = False) -> dict | None:
     """Record a per-query ask usage increment (#1987 Task 6).
 
     Best-effort, non-fatal (metering failures never block the answer).
@@ -344,7 +354,7 @@ def record_ask_usage(team_id: str | None, tier: str | None = None, *,
 
     Returns a dict summary or None (exempt/no-op/failure).
     """
-    if not team_id or _selfhost_transport_active():
+    if not team_id or _selfhost_transport or _selfhost_transport_active():
         return None
     period = _current_period()
     now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
