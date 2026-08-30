@@ -213,8 +213,10 @@ def test_dashboard_preserves_search_params_on_auth_bounce() -> None:
     when the shared bridge is blocked/unavailable. Mirrors the mount gate
     (main.jsx ~1629) and the signup-form precedent."""
     dash = _read(DASHBOARD)
-    # the primary path passes the params through bounceToAuth
-    assert "window.bounceToAuth(window.location.search)" in dash, (
+    # the primary path passes the params through bounceToAuth (#1909 adds the
+    # oauthErrorHash second arg — assert the leading params-preserving call
+    # shape, not the closed literal, so the intent survives arg evolution)
+    assert "window.bounceToAuth(window.location.search," in dash, (
         "provisionInApp 401 bounce must preserve search params"
     )
     # the degraded fallback appends them too (mount-gate parity)
