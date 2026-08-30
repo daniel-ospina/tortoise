@@ -2836,6 +2836,17 @@ class TortoiseSDK:
             "MATCH (n:Point {id:$id})-[:TAGGED]->() RETURN count(*) > 0",
             params={"id": id},
         ).result_set[0][0]
+        # #1916: capture the deleted point's 1-hop reverse-BFS neighbors
+        # BEFORE the DETACH DELETE — the delete removes the node's edges, so
+        # the post-delete _mark_dirty reverse-BFS can no longer see them and
+        # no neighbor would be dirtied (stored confidences stay stale at
+        # pre-delete values). Shared helper keeps this capture in lockstep
+        # with _mark_dirty's own traversal.
+        op_ids, neighbor_claims = self._reverse_bfs_neighbors(proj, [id])
+        neighbor_ids = (
+            [oid for oid in op_ids if oid != id]
+            + [cid for cid in neighbor_claims if cid != id]
+        )
         proj.g.query("MATCH (n:Point {id:$id}) DETACH DELETE n", params={"id": id})
         # #548: emit PointRetracted event for rebuild parity (after delete,
         # so the graph mutation is committed before the event is written)
@@ -2845,8 +2856,11 @@ class TortoiseSDK:
         # otherwise accumulate in list_tags.
         if has_tag_edges:
             proj.g.query("MATCH (t:Tag) WHERE NOT (t)<-[:TAGGED]-() DELETE t")
-        # Dreaming (#85): deletion changes the graph structure around neighbors.
-        self._mark_dirty([id])
+        # Dreaming (#85): deletion changes the graph structure around
+        # neighbors — mark the pre-captured neighbors dirty (#1916) so the
+        # reverse-BFS has surviving edges to traverse (the deleted point's
+        # own edges are already gone) and a dream fires.
+        self._mark_dirty([id, *neighbor_ids])
         # Epic 903-C4 (#1242): a deleted operator/claim changes the factor
         # graph — surviving neighbors' edges carry messages computed under
         # the OLD graph. Full drop (delete is rare; cheap). P2-review: the
@@ -7666,6 +7680,31 @@ class TortoiseSDK:
                 params={"ids": ids, "run_ep": run_ep},
             )
 
+    def _reverse_bfs_neighbors(self, proj, point_ids: list[str]
+                               ) -> tuple[list[str], list[str]]:
+        """1-hop reverse-BFS from ``point_ids``: operators targeting them
+        (reverse of operator→point), then the claims those operators target
+        (1-hop forward). Shared by ``_mark_dirty`` (post-write marking) and
+        ``delete_point`` (pre-delete neighbor capture, #1916) so the
+        traversal can never drift between the two — a change to the BFS
+        shape updates both call sites in lockstep. Returns ``(op_ids,
+        claim_ids)``."""
+        rows = proj.g.query(
+            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(p:Point) "
+            "WHERE p.id IN $ids RETURN DISTINCT op.id",
+            params={"ids": list(point_ids)},
+        ).result_set
+        op_ids = [r[0] for r in rows]
+        claim_ids: list[str] = []
+        if op_ids:
+            rows = proj.g.query(
+                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+                "WHERE op.id IN $oids RETURN DISTINCT c.id",
+                params={"oids": op_ids},
+            ).result_set
+            claim_ids = [r[0] for r in rows]
+        return op_ids, claim_ids
+
     def _mark_dirty(self, point_ids: list[str]) -> None:
         """Mark claims whose confidence is now stale after a write.
 
@@ -7706,22 +7745,11 @@ class TortoiseSDK:
             "RETURN m.ep_version"
         ).result_set
         ep_version = int(rows[0][0]) if rows else 1
-        # Operators targeting the mutated points (reverse of operator→point).
-        rows = proj.g.query(
-            "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(p:Point) "
-            "WHERE p.id IN $ids RETURN DISTINCT op.id",
-            params={"ids": list(point_ids)},
-        ).result_set
-        op_ids = [r[0] for r in rows]
-        dirty_ids = list(point_ids)
-        if op_ids:
-            # Claims those operators target (1-hop forward from operators).
-            rows = proj.g.query(
-                "MATCH (op:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
-                "WHERE op.id IN $oids RETURN DISTINCT c.id",
-                params={"oids": op_ids},
-            ).result_set
-            dirty_ids += [r[0] for r in rows]
+        # Operators targeting the mutated points, then the claims those
+        # operators target (shared 1-hop reverse-BFS — delete_point's
+        # pre-delete neighbor capture uses the same helper, #1916).
+        _op_ids, claim_ids = self._reverse_bfs_neighbors(proj, point_ids)
+        dirty_ids = list(point_ids) + claim_ids
         # #1163: persist the dirty markings (points + reverse-BFS claims) so
         # any process/request can see them — the graph is the source of
         # truth, the in-memory set above is the mirror.

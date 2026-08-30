@@ -211,6 +211,13 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     for s in surfaces:
         files.update(manifest["surfaces"].get(s, []))
     files -= slow  # #1371: slow files never run in the fast gate
+    # #1988: carve-out (embedded-only) files run in the dedicated carve-out
+    # job — on tier-2 PR legs the fast-matrix process runs everything embedded
+    # (URI unset) and exhausts its redislite spawn budget before the late
+    # embedded suites (RedisLiteServerStartError); the carve-out job gives
+    # them a fresh process. The carve-out job now runs on PRs too.
+    carve = set(manifest.get("carve_out", []))
+    files -= carve
     return {"surfaces": surfaces, "full": False, "test_files": sorted(files),
             "slow_files": sorted(slow)}
 

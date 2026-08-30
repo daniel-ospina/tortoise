@@ -227,6 +227,14 @@ def _make_question_sdk(*, db_uri: str | None, namespace: str | None,
 
         return TortoiseSDK(namespace=namespace), _cleanup
     td = tempfile.TemporaryDirectory(dir=work_dir, prefix="lme-")
+    # #1944: under parallel-matrix/CI load the vendored redislite 10s server-
+    # start timeout races (RedisLiteServerStartError — the falkordb.so module
+    # load + socket bind can exceed 10s on a contended runner), making the
+    # embedded eval questions fail with zero outcomes. Raise the client-side
+    # start budget for the per-question embedded servers (normally instant).
+    import redislite.client as _rc
+    if _rc.Redis.start_timeout < 60:
+        _rc.Redis.start_timeout = 60
     return TortoiseSDK(os.path.join(td.name, "lme.db")), td.cleanup
 
 

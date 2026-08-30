@@ -81,8 +81,8 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """97 tools = the merge-base census (97, incl. tortoise_ask from the
-        #1987 surface) — this PR re-grouped ask memory→ask, adding 0 tools.
+        """97 tools = the merged census (96 on main + tortoise_ask from the
+        #1987 surface, re-grouped ask memory→ask, adding 0 tools net).
         The census is bumped per add."""
         from tortoise.tool_registry import TOOL_REGISTRY
         assert len(TOOL_REGISTRY) == 97, f"Expected 97, got {len(TOOL_REGISTRY)}"
