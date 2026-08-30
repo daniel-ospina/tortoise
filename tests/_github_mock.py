@@ -8,8 +8,9 @@ Simulates the GitHub Issues API surface the indexer walks:
 """
 from __future__ import annotations
 
-import httpx
 from urllib.parse import urlencode
+
+import httpx
 
 
 def gh_issue(number: int, *, state: str = "open", title: str | None = None,
