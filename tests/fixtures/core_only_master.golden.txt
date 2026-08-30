@@ -43,6 +43,7 @@ USER-PERSONAL-STATE VOCABULARY (Tier-A classification hint — the VALUE is the 
 - preference: A stated preference/choice VALUE — likes, dislikes, defaults, chosen options ('prefers dark mode', 'coffee not tea'). The CHOICE is the fact; retain it verbatim.
 
 MEMORY GRANULARITY (what to keep, what to strip)
+- agent-ops: Durable: the rule text, the situation that created it, and the reasoning that supports or undermines it. Ephemeral: rule mechanics, approval logistics, tool-specific workarounds.
 - dev: Durable: root-cause analysis, the chosen fix approach vs rejected alternatives, durable constraints (e.g. preserve production semantics), and environment beliefs that affect future work (e.g. subagents stall under load). Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds.
 - marketing: Durable: campaign strategy — which campaigns/channels/audiences are being pursued and why, the positioning decisions, the reasoning, the actual content pieces (they ARE the product), and the metric snapshots showing whether a strategy is working. Ephemeral: publishing mechanics, scheduling logistics.
 - pm: Durable: plan/goal/target state — what was decided, what's committed, the reasoning, and milestone outcomes. Ephemeral: card/board status, sprint burndown, assignment logistics, issue triage.
