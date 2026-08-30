@@ -3991,14 +3991,19 @@ class TortoiseSDK:
             f"CREATE (o:Point {{id:$id, is_operator:true, op_type:$op, direction:$direction{props_clause}}})",
             params=params,
         )
-        # Ontology v2.1: map part/whole ops to hasPart, remove INPUT edges.
+        # Ontology v2.1: map part/whole ops to hasPart.
         # A1b (#1272): operator endpoints may be Point OR Event nodes.
+        # #1919 (P2-10): the typed edge is mirrored by a reverse
+        # (s)-[:INPUT]->(o) edge — the same shape the OperatorAdded replay
+        # MERGEs (projection/edges.py), so live graphs and rebuilt graphs
+        # carry identical INPUT edges (fold-parity).
         edge_type = "hasPart" if op_type not in ("IMPL", "NAND") else op_type
         for i, inp_id in enumerate(inputs):
             proj.g.query(
                 f"MATCH (o:Point {{id:$oid}}), (s) WHERE (s:Point OR s:Event) "
                 f"AND s.id = $sid "
-                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s)",
+                f"CREATE (o)-[:{edge_type} {{idx:$i}}]->(s) "
+                f"CREATE (s)-[:INPUT {{idx:$i}}]->(o)",
                 params={"oid": pid, "sid": inp_id, "i": i},
             )
         # Draft → live lifecycle (#131): source point goes live when first edge created.
@@ -5629,10 +5634,18 @@ class TortoiseSDK:
                         # bare Point instead of the operator. Use the TWO-STEP
                         # pattern: MATCH both endpoints, then edge-only MERGE
                         # (with idx parity for create_operator's edge shape).
+                        # #1919 (P1, review gate): the completion endpoints are
+                        # Point OR Event (A1b #1272) — a Point-only MATCH would
+                        # silently drop the typed edge for an absorbed Event
+                        # input (never converging to the dedup key). The
+                        # reverse INPUT edge mirrors create_operator + the
+                        # replay convention (fold-parity).
                         proj.g.query(
-                            f"MATCH (o:Point {{id:$oid}}), (t:Point {{id:$inp}}) "
+                            f"MATCH (o:Point {{id:$oid}}), (t) "
+                            f"WHERE (t:Point OR t:Event) AND t.id = $inp "
                             f"MERGE (o)-[r:{op_type if op_type in ('IMPL','NAND') else 'hasPart'}]->(t) "
-                            f"SET r.idx = $idx",
+                            f"SET r.idx = $idx "
+                            f"MERGE (t)-[:INPUT {{idx:$idx}}]->(o)",
                             params={"oid": oid, "inp": _inp, "idx": _i},
                         )
                     completed = len([src] + dsts) - len(written)  # noqa: RUF005
@@ -6183,7 +6196,8 @@ class TortoiseSDK:
             params["direction"] = canonical_dir
         rows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
-            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
+            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
+            f"WHERE (t:Point OR t:Event) "
             f"WITH o, collect(t.id) AS targets, collect(r) AS _ "
             f"WHERE {' AND '.join(conds)} "
             f"RETURN o.id, o.status LIMIT 1",
@@ -6210,7 +6224,8 @@ class TortoiseSDK:
             pcond.append("o.direction = $direction")
         prows = proj.g.query(
             f"MATCH (o:Point {{is_operator:true, op_type:$op}}) "
-            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t:Point) "
+            f"OPTIONAL MATCH (o)-[r:{edge_rel}]->(t) "
+            f"WHERE (t:Point OR t:Event) "
             f"WITH o, collect(t.id) AS targets "
             f"WHERE {' AND '.join(pcond)} "
             f"RETURN o.id, o.status, targets",
