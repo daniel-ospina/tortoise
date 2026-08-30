@@ -646,9 +646,10 @@ def test_scope_keys_explicit_empty_round_trip(client):
     and the clear so BOTH phases are pinned, and asserts the RAW STORED
     jsonb directly (a GET cannot distinguish absent-vs-[] because the
     defaults are [] — the raw read pins the wire form)."""
+    import json as _json
+
     from tortoise.hosted_api import _make_sdk
     from tortoise.sdk import TortoiseSDK  # noqa: F401 (module anchored)
-    import json as _json
     registry = _make_sdk(namespace="registry")._get_registry()
     registry.query(
         "CREATE (t:Team {id:$id, onboarding_state:$st})",
