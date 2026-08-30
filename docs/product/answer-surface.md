@@ -1,3 +1,12 @@
+---
+title: "Ask Answer Surface (#1987)"
+type: operations
+domain: operations
+doc_status: live
+created: 2026-08-29
+ownedBy: epistemic-team
+---
+
 # Ask Answer Surface (#1987)
 
 > The product answer surface: an LLM reader that ANSWERS questions about
@@ -5,15 +14,23 @@
 > LongMemEval-benchmarked two-phase reader (0.83 accuracy on the
 > integrity-valid run; the eval now re-exports the product reader so prompt
 > drift is impossible by construction).
+>
+> ⛔ **#2013 PRODUCT-GATING (2026-08-30): the HOSTED ask EXPOSURE is OFF by
+> default.** The READER ships (it is the eval's reader — the 500-Q
+> LongMemEval benchmark runs through it); the customer-facing ask exposure
+> is gated until the reader-model decision is made (the benchmark will use
+> a strong reader model). No `/v1/ask` route and no `tortoise_ask` in the
+> default hosted MCP tool group unless `TORTOISE_ENABLE_ASK=1` (tests/dev).
+> The capability stays in the codebase, tested, ready.
 
 ## Surfaces
 
 | Surface | Where | Notes |
 |---|---|---|
-| `POST /v1/ask` (hosted) | `tortoise/hosted_api.py` | Team-scoped (tt_ key or session JWT), budgeted (60/min/team → 429 + Retry-After), metered per-query |
-| `TortoiseSDK.ask()` | `tortoise/sdk.py` | Local lane (embedded/selfhost, BYOK) — full pipeline, no hosted API; hosted mode when `TORTOISE_API_URL` is set |
-| MCP `tortoise_ask` | `tortoise/mcp_server.py` | `group="memory"` co-curated sibling of `tortoise_search` (#523); read-classified; same budget bounds |
-| `POST /v1/ask` (self-host REST) | `tortoise/selfhost_api.py` | Static-key auth; local lane; NO team budget; unmetered (zero records) |
+| `POST /v1/ask` (hosted) | `tortoise/hosted_api.py` | **GATED (#2013): not registered unless `TORTOISE_ENABLE_ASK=1` — 404 by default.** Team-scoped (tt_ key or session JWT), budgeted (60/min/team → 429 + Retry-After), metered per-query |
+| `TortoiseSDK.ask()` | `tortoise/sdk.py` | **GATED/EXPERIMENTAL (#2013): the eval's reader path — stays shipped, not for production use until the reader-model decision.** Local lane (embedded/selfhost, BYOK) — full pipeline, no hosted API; hosted mode when `TORTOISE_API_URL` is set |
+| MCP `tortoise_ask` | `tortoise/mcp_server.py` | **GATED (#2013): own curation group `"ask"`, excluded from the default hosted /mcp surface unless `TORTOISE_ENABLE_ASK=1`; an explicit `tool_group="ask"` server (dev/eval) serves it.** Read-classified; same budget bounds |
+| `POST /v1/ask` (self-host REST) | `tortoise/selfhost_api.py` | Stays — the local-lane REST parity surface. Static-key auth; local lane; NO team budget; unmetered (zero records) |
 | `GET /v1/team` ask-usage | `tortoise/hosted_api.py` | `ask_calls/ask_tokens_in/ask_tokens_out/ask_cost_usd` for the current period; zeros for fresh teams |
 
 **both-not-either:** `tortoise_search` / `GET /v1/search` / `tortoise_recall`

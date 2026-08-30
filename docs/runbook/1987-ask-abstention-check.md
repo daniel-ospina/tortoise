@@ -14,6 +14,43 @@ ownedBy: epistemic-team
 > file (verified by `scripts/check-ask-premerge.cjs` in the commit-workflow
 > pre-merge step).
 
+---
+
+## PRODUCT DECISION (2026-08-30, PR #2013) — ask exposure gated, reader shipped
+
+> **The (d) gate is MOOT by product decision.** The reader over-abstention
+> class is FIXED (#2027, below) — that was the gate-d blocker. The remaining
+> (d)/(a) shortfall is bound by the DEFAULT reader MODEL's content quality
+> (deepseek-v4-flash cannot hold both the derived-commit and the
+> near-miss-abstain classes; empirically verified — see the #2027 section),
+> not by the abstention clause. The product decision: **the READER ships as
+> the eval's reader** (the 500-Q LongMemEval benchmark runs through it; the
+> eval re-exports the product reader), and **the hosted ask EXPOSURE is
+> gated off** until the reader-model decision is made. The benchmark will
+> use a STRONG reader model (qwen3.8-max reproduced the commits on the
+> failing evidence). Merge is no longer blocked by (d).**
+
+**What shipped in PR #2013 (this decision):**
+
+| Surface | Status | Where |
+|---|---|---|
+| `tortoise/reader.py` (the reader itself) | **SHIPPED, unchanged** — the eval's reader | `tortoise/reader.py` (re-exported by `tools/longmem_eval/reader.py`) |
+| `TortoiseSDK.ask()` | **Stays** — the eval's reader path; docstring marks it GATED/EXPERIMENTAL (not for production use until the reader-model decision) | `tortoise/sdk.py` |
+| `POST /v1/ask` (hosted) | **GATED OFF by default** — route not registered (404) unless `TORTOISE_ENABLE_ASK=1` (tests/dev); handler + error translation stay, tested, ready | `tortoise/hosted_api.py` |
+| MCP `tortoise_ask` | **GATED OFF by default** — own curation group `"ask"`, excluded from the default hosted /mcp surface unless `TORTOISE_ENABLE_ASK=1`; explicit `tool_group="ask"` (dev/eval) serves it | `tortoise/mcp_server.py`, `tortoise/tool_registry.py` |
+| `POST /ask` (self-host REST) | **Stays** — the local-lane REST parity surface (mirrors the SDK local lane; no team budget, unmetered) | `tortoise/selfhost_api.py` |
+
+**Follow-up (tracked, not blocking):** (1) the ask reader-model upgrade —
+provider routing for the ask lane (deepseek-direct primary 400s on non-
+deepseek specs and 400 is not a failover trigger) + the M5 `READER_MODEL`
+pin + cost re-measure; (2) retrieval: FTS top-40 misses gold turns on long
+haystacks (ceb5 at rank ~70) — hybrid/reranking or a reviewed top-k for the
+ask lane; (3) composition: the 3 SSP long-gold questions are structurally
+ungradeable by the containment judge's word-overlap bar. The gate results
+below remain the evidence base for those follow-ups.
+
+---
+
 ## Procedure
 
 1. **Dataset prerequisite (P1-4):** the eval dataset is a HARD prerequisite —
@@ -115,6 +152,14 @@ OpenRouter registry): gpt4_8279ba02 → "10 days ago.", gpt4_7a0daae1 →
 **the reader MODEL is the binding constraint on the content class**; the
 ask lane cannot serve qwen today (deepseek-direct primary 400s on the
 qwen spec and 400 is not a failover trigger).
+
+**Reval3 probe measurement (2026-08-30, recorded for
+`test_real_model_commits_on_present_value` — the #1775 obs-1 shape,
+'Golden Retrievers like Max' at rank 9 amid noise): the pinned default
+reader committed 0/5 (answers "The context does not mention Ava or her
+dog Max.") — the under-commit is the same model class, on a noisy top-10
+shape the runbook's (d) evidence shapes do not cover; the probe is now
+warn-only (the deterministic fakes pin the clause contract).**
 
 ### (a) Graded `_abs` — re-run: **26/30 judge-marker (0.867) < 0.9 — compression trade-off**
 
