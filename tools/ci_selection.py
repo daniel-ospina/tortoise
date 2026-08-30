@@ -46,6 +46,10 @@ NL = chr(10)
 SHARED_MODULES = (
     "tortoise/sdk.py",
     "tortoise/ep.py",
+    # cross-cutting leaf: exception classes consumed by sdk, api, core, AND ep
+    # surfaces (test_divergence_conformance, test_epic903_modes,
+    # test_ingest_*, test_calibration) — a change here runs the full matrix.
+    "tortoise/exceptions.py",
     "tortoise/tool_registry.py",
     "tortoise/mcp_server.py",
     "tortoise/projection/",
@@ -70,15 +74,20 @@ SOURCE_PATTERNS = {
             # ask-lane shared vocabulary/gating: a PR touching ONLY these
             # must select sdk so test_ask_sdk.py (+ ask reader/calibration
             # pins) run — the old fallback to core ran NO ask tests.
-            "tortoise/schemas.py", "tortoise/exceptions.py",
-            "tortoise/transport.py"),
+            # exceptions.py is SHARED (cross-cutting leaf -> full matrix);
+            # transport.py is dual-wired with api: its only direct unit test
+            # is test_metering.py::test_selfhost_transport_exemption.
+            "tortoise/schemas.py", "tortoise/transport.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
             # live in the api surface — a metering.py/selfhost.py-only PR must
-            # select api (core runs no ask tests).
-            "tortoise/metering.py", "tortoise/selfhost.py"),
+            # select api (core runs no ask tests). transport.py is dual-wired
+            # here (in addition to sdk): its only direct unit test is
+            # test_metering.py::test_selfhost_transport_exemption.
+            "tortoise/metering.py", "tortoise/selfhost.py",
+            "tortoise/transport.py"),
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
