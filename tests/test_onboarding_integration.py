@@ -48,6 +48,9 @@ def client(tmp_path, monkeypatch):
     app.dependency_overrides[get_current_team] = lambda: {
         "team_id": real_team_id, "tier": "free", "key_id": "k1",
         "max_users": 1, "max_graphs": 1, "max_teams": 1,
+        # #1922: /v1/demo is quota-gated — the auth override must carry the
+        # fail-closed max_points cap or the seed path 500s.
+        "max_points": 10000,
     }
     with TestClient(app) as tc:
         yield tc
