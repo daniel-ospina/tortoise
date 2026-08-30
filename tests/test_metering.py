@@ -571,6 +571,63 @@ class TestAskMetering:
         assert usage["period"] == "2026-09"
         assert usage["ask_tokens_in"] == 20  # old period's record is frozen
 
+    def test_migration_code_contract(self, monkeypatch):
+        """Plan Task 6 Step 1: the migration↔code contract — the RPC name
+        ``metering_increment_ask`` and the ask_* column set the CODE calls
+        MUST match the real migration file (20260829000001), so a column
+        reword or RPC rename in either direction fails loudly. Covers both
+        record_ask_usage (supabase branch → RPC body keys) and
+        get_ask_usage (supabase branch → the ask_* select)."""
+        import re as _re
+        from pathlib import Path
+        mig = (Path(__file__).resolve().parent.parent
+               / "supabase" / "migrations"
+               / "20260829000001_metering_ask_columns.sql").read_text()
+        # (a) the ADD COLUMN set the migration defines
+        cols = set(_re.findall(r"ADD COLUMN IF NOT EXISTS\s+(\w+)", mig))
+        assert cols == {"ask_calls", "ask_tokens_in", "ask_tokens_out",
+                        "ask_cost_usd"}
+        # the token counters are bigint (P2 — the ~20.7B token/month
+        # envelope is ~10x over the integer range)
+        assert "ask_tokens_in   bigint" in mig
+        assert "ask_tokens_out  bigint" in mig
+        # (b) the RPC name + parameter set the migration defines
+        rpc = _re.search(r"CREATE OR REPLACE FUNCTION public\.(\w+)\(", mig)
+        assert rpc is not None and rpc.group(1) == "metering_increment_ask"
+        params = set(_re.findall(r"p_(\w+)\s+\w+", mig))
+        assert params == {"team_id", "period", "calls", "tokens_in",
+                          "tokens_out", "cost_usd"}
+        # (c) the supabase-mode record path calls the SAME RPC with the
+        # SAME p_* body keys (FakeControlPlane records the call body)
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise import supabase_control as sc
+        from tortoise.metering import get_ask_usage, record_ask_usage
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        record_ask_usage("team-1", tokens_in=100, tokens_out=50,
+                         cost_usd=0.001)
+        fn, body = fake.rpc_calls[-1]
+        assert fn == "metering_increment_ask"
+        assert set(body) == {"p_team_id", "p_period", "p_calls",
+                             "p_tokens_in", "p_tokens_out", "p_cost_usd"}
+        assert body["p_team_id"] == "team-1"
+        assert body["p_tokens_in"] == 100 and body["p_tokens_out"] == 50
+        # (d) the supabase-mode READ path selects the SAME ask_* columns
+        fake.seed("metering_records", [{"team_id": "team-1",
+                                         "period": body["p_period"],
+                                         "ask_calls": 1,
+                                         "ask_tokens_in": 100,
+                                         "ask_tokens_out": 50,
+                                         "ask_cost_usd": 0.001}])
+        usage = get_ask_usage("team-1")
+        assert usage["ask_calls"] == 1
+        assert usage["ask_tokens_in"] == 100
+        assert usage["ask_tokens_out"] == 50
+        assert abs(usage["ask_cost_usd"] - 0.001) < 1e-9
+
 
 # ── #1987 Task 6: estimate_tokens_ask ───────────────────────────────────────
 

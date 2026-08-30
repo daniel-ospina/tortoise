@@ -2,11 +2,14 @@
 
 The product answer surface: an LLM reader that answers questions about
 captured memory, built from the LongMemEval benchmarked two-phase reader
-(presence-commit → abstain, 0.83 accuracy on the integrity-valid run). This
-module OWNS all reader prompt text and the reader class — the eval harness
-(`tools/longmem_eval/reader.py`) is a thin re-export so prompt drift is
-impossible by construction (the #1983 inversion pattern applied to the
-reader).
+(presence-commit → abstain). This module OWNS all reader prompt text and
+the reader class — the eval harness (`tools/longmem_eval/reader.py`) is a
+thin re-export so prompt drift is impossible by construction (the #1983
+inversion pattern applied to the reader). Measurements of the SHIPPED
+prompt live in docs/runbook/1987-ask-abstention-check.md (the runbook's
+post-#2027 numbers: graded `_abs` 26/30 = 0.867; QA spot-check aggregate
+0.38 < 0.8 on the default reader model — deepseek-v4-flash, a
+reader-MODEL bound, not a prompt one).
 
 Key contracts:
   * ``LLMReader.answer`` renders the reader context via the PRODUCT
@@ -37,9 +40,9 @@ from typing import Any, Protocol
 from tortoise.retrieval import render_context
 
 # ═════════════════════════════════════════════════════════════════════════
-# ══ READER PROMPT CONSTANTS (byte-identical port from tools/longmem_eval/
-# ══ reader.py — the eval re-exports these; golden-hash pinned in
-# ══ tests/test_reader.py) ═════════════════════════════════════════════════
+# ══ READER PROMPT CONSTANTS (OWNED here — the product is the source of
+# ══ truth; tools/longmem_eval/reader.py RE-EXPORTS these (the #1987
+# ══ inversion); golden-hash pinned in tests/test_reader.py) ══════════════
 # ═════════════════════════════════════════════════════════════════════════
 
 _SYSTEM_PROMPT = (
@@ -432,7 +435,26 @@ def _looks_abstained(answer: str | None) -> bool:
     if not text:
         return True
     low = text.lower()
-    return any(phrase in low for phrase in _ABSTAINED_PHRASES)
+    # Clause-scoped matching (P2): a raw whole-answer substring match
+    # over-labels COMMITTED answers that carry a trailing qualifier
+    # ("The gym schedule is Monday, though I do not know if it changed.",
+    # "…though the context does not mention his age.") as abstained — the
+    # exact hedge class #2027 fought. The two-phase model emits abstention
+    # as the answer's OPERATIVE clause: the whole-answer form (a marker in
+    # the FIRST clause) or the Phase-2 template "[related facts], but the
+    # asked value is absent" (a LATER clause referencing the asked
+    # subject / absence — #2027 canonical: 'absent from the context',
+    # 'asked information is absent'). Match the first clause, or a later
+    # clause that references the abstention's subject ("asked"/"absent")
+    # — a trailing confidence hedge never labels abstained.
+    clauses = re.split(r"[,;:.!?—]+", low)
+    if any(p in clauses[0] for p in _ABSTAINED_PHRASES):
+        return True
+    return any(
+        ("asked" in c or "absent" in c)
+        and any(p in c for p in _ABSTAINED_PHRASES)
+        for c in clauses[1:]
+    )
 
 
 class Reader(Protocol):

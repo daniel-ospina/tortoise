@@ -516,3 +516,52 @@ def test_derived_commit_still_abstains_on_absent_subject(tmp_path):
         question="How much is the bus fare downtown?",
         question_date="2023-05-25", question_type=None)
     assert ctrl == "$3"
+
+
+# ── Product abstained-label pin: clause-scoped (P2) ──────────────────────
+
+def test_abstained_label_clause_scoped_pin():
+    """P2 clause-scoped tightening of ``_looks_abstained`` (the product
+    label, distinct from the judge's whole-answer match): the abstention
+    must be the answer's OPERATIVE clause, not a trailing qualifier.
+
+    * The #2027 canonical abstention forms — whole-answer ('asked
+      information is absent', 'does not contain', 'absent from the
+      context') AND the Phase-2 template shape '[related facts], but the
+      asked value is absent' (the taxi fixture's trailing 'absent from
+      the context' clause) — MUST stay abstained (no regression).
+    * A committed answer with a trailing confidence qualifier ('…though I
+      do not know if it changed', 'the context does not mention his age')
+      is NOT abstained — the exact hedge class #2027 fought.
+    """
+    from tortoise.reader import _looks_abstained
+    # #2027 canonical abstentions → abstained (whole-answer + trailing
+    # Phase-2 template forms)
+    for abstention in (
+        "The asked information is absent.",
+        "The memory does not contain the asked information.",
+        "The asked bus fare is absent from the context.",
+        "The memory does not contain the asked information — it does "
+        "not state how many days ago I bought a smoker.",
+        # the Phase-2 template: 'mentioning the related facts found in
+        # the memory if any' — the abstention trails the premise clause
+        "The memory mentions taxi prices, but the asked bus fare is "
+        "absent from the context.",
+        "It mentions nostalgic high school experiences (debate team, AP "
+        "economics), but it does not contain the asked information.",
+        "No turns mention the smoker; the information is absent from "
+        "the context.",
+    ):
+        assert _looks_abstained(abstention) is True, abstention
+    # committed answers with a trailing qualifier → NOT abstained
+    for committed in (
+        "The gym schedule is Monday, though I do not know if it "
+        "changed.",
+        "The move date is Monday, though I'm not sure about the move "
+        "date.",
+        "He was born in 1978, though the context does not mention his "
+        "age.",
+        "I bought the smoker 10 days ago, though I do not know the "
+        "exact hour.",
+    ):
+        assert _looks_abstained(committed) is False, committed

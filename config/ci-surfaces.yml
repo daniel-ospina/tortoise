@@ -79,6 +79,8 @@ surfaces:
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
+  - test_ask_api.py
+  - test_ask_gating.py
   - test_session_auth.py
   - test_session_capture_e2e.py
   - test_session_context.py
@@ -369,6 +371,8 @@ surfaces:
   - test_welcome_url_consolidation.py
   - test_website_static.py
   sdk:
+  - test_ask_regression_llm.py
+  - test_ask_sdk.py
   - test_client_surface.py
   - test_config.py
   - test_cross_lens.py
@@ -379,6 +383,8 @@ surfaces:
   - test_log.py
   - test_models.py
   - test_namespace_uri_mode.py
+  - test_reader.py
+  - test_reader_abstention_calibration.py
   - test_sdk.py
   - test_sdk_dedup.py
   - test_search_engine_recency.py

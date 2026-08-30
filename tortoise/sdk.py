@@ -118,6 +118,8 @@ class _LockedReader:
                     self._model, "last_prompt_tokens", 0)
                 self.last_completion_tokens = getattr(
                     self._model, "last_completion_tokens", 0)
+                self.last_finish_reason = getattr(
+                    self._model, "last_finish_reason", None)
                 return out
             finally:
                 self._inflight -= 1
@@ -10451,7 +10453,7 @@ class TortoiseSDK:
                 f"temporal-reasoning|knowledge-update|multi-session|"
                 f"single-session-preference",
                 code=VALIDATION_CODE_BAD_TYPE)
-        if question_date is not None and not validate_ask_question_date(question_date):
+        if question_date is not None and not validate_ask_question_date(str(question_date)):
             raise AskValidationError(
                 f"invalid question_date {question_date!r} (expected "
                 f"YYYY-MM-DD, real calendar date)",
@@ -10705,7 +10707,15 @@ class TortoiseSDK:
                 locked = _LockedReader(model)
             except Exception:
                 # Failed builds are NEVER cached (P2-21) — the key stays
-                # absent so a subsequent ask rebuilds and succeeds.
+                # absent so a subsequent ask rebuilds and succeeds. Also
+                # drop the per-key single-flight lock (P2): a failed build
+                # leaves NO cache entry to evict alongside it, so without
+                # this the lock would linger in the module dict forever —
+                # unbounded growth under sustained build failure across
+                # namespaces. Safe: the failed build leaves no cached state
+                # and this thread still holds the lock while unwinding.
+                with _ASK_READER_CACHE_LOCK:
+                    _ask_build_locks.pop(key, None)
                 raise
             with _ASK_READER_CACHE_LOCK:
                 cache[key] = locked
@@ -10833,6 +10843,17 @@ class TortoiseSDK:
                         403: CODE_UNAUTHORIZED, 422: CODE_INVALID_QUESTION}
             default_code = defaults.get(status, CODE_INVALID_QUESTION)
             raise _val_err(default_code, f"ask rejected (HTTP {status})")
+        if status >= 500:
+            # Residual 5xx NOT covered above (500 handler failure, 503
+            # LB/deploy drain) — never escapes as an untyped
+            # requests.HTTPError on the ask surface: map to the typed
+            # unavailable exceptions with the status retained, mirroring
+            # the 502 branch (P2).
+            if code == CODE_RETRIEVAL_UNAVAILABLE:
+                raise AskRetrievalUnavailable("retrieval unavailable",
+                                              status_code=status)
+            raise AskReaderUnavailable("reader unavailable",
+                                       status_code=status)
         r.raise_for_status()
         return body
 

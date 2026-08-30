@@ -331,6 +331,9 @@ def test_local_lane_validation_first_zero_calls(monkeypatch):
         ("q", {"question_date": "2023-02-29"}, CODE_INVALID_QUESTION_DATE),
         ("a\x00b", {}, CODE_INVALID_QUESTION),
         ("\u200b", {}, CODE_INVALID_QUESTION),
+        ("q", {"question_date": 20230101},
+         CODE_INVALID_QUESTION_DATE),  # non-str date → str()-coerced like the
+                                       # hosted AskRequest validator (P2)
     ]:
         with pytest.raises(AskValidationError) as ei:
             sdk.ask(bad, **kw)
@@ -469,7 +472,10 @@ def test_cache_key_isolation():
 
 def test_failed_build_never_cached(monkeypatch):
     """P2-21: the first ask's build raises → the cache does NOT retain the
-    key → the second ask rebuilds and succeeds."""
+    key → the second ask rebuilds and succeeds. P2: the per-key build lock
+    is ALSO popped on the failed build — it never lingers in the module
+    dict (unbounded growth under sustained build failure across
+    namespaces)."""
     import tortoise.sdk as sdk_mod
     sdk = _new_sdk()
     state = {"fail": True}
@@ -480,9 +486,39 @@ def test_failed_build_never_cached(monkeypatch):
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _factory)
     with pytest.raises(AskReaderUnavailable):
         sdk.ask("q")
+    # P2: the failed build leaves NO cached entry AND no lingering lock
+    assert sdk_mod._ask_build_locks == {}
     state["fail"] = False
     result = sdk.ask("q")
     assert result["answer"] == "ok now"
+
+
+def test_locked_reader_forwards_finish_reason(monkeypatch):
+    """_LockedReader forwards the inner model's last_finish_reason from the
+    same capture frame as the token usage (P2 — consumers previously got
+    None because the attribute was never set)."""
+    import tortoise.sdk as sdk_mod
+    sdk = _new_sdk()
+
+    class FinishReader:
+        def complete(self, *, system, user):
+            self.last_prompt_tokens = 10
+            self.last_completion_tokens = 20
+            self.last_finish_reason = "stop"
+            return "the gym schedule is Monday"
+
+        def close(self):
+            pass
+
+    locked = sdk_mod._LockedReader(FinishReader())
+    assert locked.complete(system="s", user="u") == "the gym schedule is Monday"
+    assert locked.last_prompt_tokens == 10
+    assert locked.last_completion_tokens == 20
+    assert locked.last_finish_reason == "stop"
+    # an inner model WITHOUT the attribute → None (never a crash)
+    locked2 = sdk_mod._LockedReader(FakeReader(reply="x"))
+    locked2.complete(system="s", user="u")
+    assert locked2.last_finish_reason is None
 
 
 def test_both_not_either_control(monkeypatch):
@@ -601,6 +637,10 @@ def test_post_ask_status_mapping(monkeypatch):
          AskRetrievalUnavailable, None, None),
         (502, {"error": {"code": "reader_unavailable"}},
          AskReaderUnavailable, None, None),
+        (500, {}, AskReaderUnavailable, None, None),   # residual 5xx → typed (P2)
+        (500, {"error": {"code": "retrieval_unavailable"}},
+         AskRetrievalUnavailable, None, None),         # body code still honored
+        (503, {}, AskReaderUnavailable, None, None),   # LB/deploy drain → typed
         (504, {}, AskTimeout, None, None),
     ]
     for status, body, exc_type, code, headers in cases:

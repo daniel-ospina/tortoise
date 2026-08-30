@@ -380,18 +380,37 @@ class TestLooksAbstained:
         assert _looks_abstained("3 days ago.") is False
 
     def test_innocuous_phrase_usage_is_documented_limitation(self) -> None:
-        """Best-effort limitation (pinned, not silent): a confident answer
-        that legitimately contains an abstention phrase as ordinary text
-        ("not enough chairs", "does not contain the document") IS labeled
-        abstained — the label is a substring heuristic, NEVER a gate (the
-        two-phase prompt is authoritative; the SDK substitutes
-        NO_EVIDENCE_TEXT on this label, per tests/test_ask_api.py). This
-        pin makes the accepted trade-off explicit so a future tightening
-        (phrase-boundary / clause-scoped matching) is a reviewed change."""
+        """Best-effort limitation (pinned, not silent): a committed answer
+        whose FIRST clause legitimately contains an abstention phrase as
+        ordinary text ("not enough chairs", "does not contain the
+        document") IS labeled abstained — the label is a clause-scoped
+        substring heuristic, NEVER a gate (the two-phase prompt is
+        authoritative; the SDK substitutes NO_EVIDENCE_TEXT on this
+        label, per tests/test_ask_api.py). Since the clause-scoped
+        tightening (P2), only the FIRST-clause occurrence labels
+        abstained — a TRAILING qualifier never does (pinned in
+        ``test_trailing_qualifier_not_abstained`` below). These pins make
+        the accepted trade-off explicit."""
         assert _looks_abstained(
             "There were not enough chairs, so we moved the meeting.") is True
         assert _looks_abstained(
             "The drawer does not contain the document; it is in the safe.") is True
+
+    def test_trailing_qualifier_not_abstained(self) -> None:
+        """P2 clause-scoped tightening: a COMMITTED answer that carries a
+        trailing confidence qualifier ("…though I do not know if it
+        changed", "I'm not sure about the move date", "the context does
+        not mention his age") is NOT labeled abstained — the abstention
+        must be the answer's operative clause, not a trailing hedge (the
+        #2027 hedge class)."""
+        assert _looks_abstained(
+            "The gym schedule is Monday, though I do not know if it changed.") is False
+        assert _looks_abstained(
+            "The move date is Monday, though I'm not sure about the move date.") is False
+        assert _looks_abstained(
+            "He was born in 1978, though the context does not mention his age.") is False
+        assert _looks_abstained(
+            "I bought the smoker 10 days ago, though I do not know the exact hour.") is False
 
     def test_case_insensitive_and_non_str(self) -> None:
         # the lowercasing contract (a refactor could drop it — this is the

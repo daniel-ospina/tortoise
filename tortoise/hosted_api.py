@@ -19,7 +19,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Hashable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -509,7 +509,7 @@ async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
     EVERYTHING else (incl. the 403 suspended-team passthrough — the
     ``_suspended_detail()`` DICT) → the captured default handler's response
     with ``exc.headers`` preserved."""
-    from tortoise.schemas import ASK_ERROR_CODES
+    from tortoise.schemas import ASK_ERROR_CODES, CODE_QUOTA_EXCEEDED
     if request.url.path == "/v1/ask":
         status = exc.status_code
         detail = exc.detail
@@ -518,8 +518,20 @@ async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
                                 status_code=401, headers=exc.headers)
         if (status in (400, 429, 502, 504)
                 and isinstance(detail, str) and detail in ASK_ERROR_CODES):
-            return JSONResponse({"error": {"code": detail}},
-                                status_code=status, headers=exc.headers)
+            body = {"error": {"code": detail}}
+            # The documented 429 body contract ships ``retry_after`` IN THE
+            # BODY (the MCP surface reads it from the body; the SDK falls
+            # back to it when the header is unparseable) — the header alone
+            # would leave the body field absent (P2). Mirror the seconds
+            # when the Retry-After header is present.
+            if (status == 429 and detail == CODE_QUOTA_EXCEEDED
+                    and exc.headers and exc.headers.get("Retry-After")):
+                # RFC 7231 allows an HTTP-date Retry-After — the body field
+                # is omitted when it cannot be parsed as seconds.
+                with suppress(TypeError, ValueError):
+                    body["error"]["retry_after"] = int(
+                        float(exc.headers["Retry-After"]))
+            return JSONResponse(body, status_code=status, headers=exc.headers)
     return await _ask_default_http_exc_handler(request, exc)
 
 

@@ -277,7 +277,11 @@ def test_budget_429_with_retry_after(client, monkeypatch):
     assert r.status_code == 429
     body = r.json()
     assert body["error"]["code"] == "quota_exceeded"
-    assert "Retry-After" in r.headers or "retry_after" in body["error"]
+    assert "Retry-After" in r.headers
+    # the documented body contract ships ``retry_after`` IN THE BODY — the
+    # header alone would leave it absent (P2)
+    assert "retry_after" in body["error"]
+    assert body["error"]["retry_after"] == int(r.headers["Retry-After"])
     # the budget self-heals: clear the window (monotonic-forward) → succeeds
     _reset_ask_budget_for_tests()
     r2 = client.post("/v1/ask", json={"question": "q"})
