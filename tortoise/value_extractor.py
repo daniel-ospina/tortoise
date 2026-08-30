@@ -17,9 +17,22 @@ from pathlib import Path
 
 # ── The value brief: compiled vocab + semantics (the #954 contract) ─────────
 
-def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
+def compile_value_brief(packs_dir: Path | str | None = None,
+                        tenant_manifests: dict[str, str] | None = None) -> dict:
     """The closed vocabulary + kind semantics from the installed packs.
-    The same source the prompts and the enforcer validate against."""
+    The same source the prompts and the enforcer validate against.
+
+    ``tenant_manifests`` (#2031 — hosted per-tenant custom packs) is an
+    ADDITIVE overlay: ``{namespace: full manifest yaml}`` compiled through
+    the SAME loop as the filesystem catalog (the epic #1891 plan §4
+    mandate: the tenant-view compile reuses this function — no parallel
+    compile path). ``None`` → the default (shared-catalog-only) path,
+    byte-identical to before. The overlay contributes the tenant manifest's
+    kindDefs (with nearMisses, same extraction discipline), its
+    memory_granularity, and declared-but-kindDefs-less object/document/
+    event kinds (empty semantics — the parity surface for the default
+    path's FIX M declared-kind acceptance, which is served by the
+    process-global ``_PACK_*_FORMS`` sets that tenant packs never reach)."""
     from tortoise.pack_registry import PackRegistry  # noqa: I001
     from tortoise.pack_registry import default_packs_dir
     import yaml
@@ -58,6 +71,42 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
         if g:
             granularity[ns] = g
 
+    # #2031: per-tenant custom packs (hosted) — the SAME compile loop over
+    # the tenant's :PackManifest YAMLs (graph-native, not filesystem).
+    # Reserved-namespace validation (pack_manifest_store.validate_manifest)
+    # rejects starter + ``core`` + ``memory_granularity`` namespaces, so
+    # overlay keys can never shadow the shared catalog or the brief's
+    # reserved ``memory_granularity`` key.
+    if tenant_manifests:
+        _DECLARED_KIND_ATTRS = ("objectKinds", "documentKinds", "eventKinds")
+        for ns, manifest_yaml in tenant_manifests.items():
+            raw = yaml.safe_load(manifest_yaml) or {}
+            if not isinstance(raw, dict):
+                continue
+            onto = raw.get("ontology") or {}
+            kd = onto.get("kindDefs") or {}
+            declared: set[str] = set()
+            for attr in _DECLARED_KIND_ATTRS:
+                for k in (onto.get(attr) or []):
+                    if isinstance(k, str):
+                        declared.add(k)
+            for k, spec in kd.items():
+                kinds[f"{ns}:{k}"] = {
+                    "description": spec.get("description", ""),
+                    "nearMisses": spec.get("nearMisses", []),
+                }
+                declared.discard(k)
+            # Declared-but-kindDefs-less kinds (the #1935 fixture shape:
+            # objectKinds: [contract] with no kindDef) — empty semantics so
+            # they ride the master's pack_kinds and the write gates accept
+            # them (FIX M parity; _PACK_*_FORMS only serve the shared
+            # catalog, never tenant packs).
+            for k in sorted(declared):
+                kinds.setdefault(f"{ns}:{k}", {"description": "", "nearMisses": []})
+            g = onto.get("memory_granularity")
+            if g:
+                granularity[ns] = g
+
     core = {
         "core:Project": "A project",
         "core:WorkItem": "A unit of work",
@@ -76,7 +125,13 @@ def compile_value_brief(packs_dir: Path | str | None = None) -> dict:
         "core:goal": "A goal state (commitment-state family)",
         "core:target": "A target state (commitment-state family)",
     }
-    return {**core, **kinds, "memory_granularity": granularity}
+    # The core vocabulary is merged LAST so it can never be shadowed by a
+    # kind key (a legacy/bypass :PackManifest node with namespace `core`
+    # would otherwise override canonical core kinds — the write gate
+    # rejects that namespace, this is defense-in-depth). On the default path
+    # kinds keys are all namespaced (starter packs), so the order flip is a
+    # no-op there (byte-identical).
+    return {**kinds, **core, "memory_granularity": granularity}
 
 
 def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:

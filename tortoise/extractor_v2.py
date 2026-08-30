@@ -157,30 +157,25 @@ def _desc(brief: dict, key: str) -> str:
 _MASTER_LIST_CACHE: dict | None = None
 
 
-def build_master_list() -> dict:
-    """The v2 master list: compile_value_brief() kinds + the §3 additions
-    (subjects, points, events, chains, memory_granularity). Section values
-    are {kind: description} dicts — rendered as readable text in prompts.
-
-    Memoized (#1350 chunking finding): the packs are static per process —
-    re-reading + YAML-parsing every manifest per chunk cost 12.2s of a 14.3s
-    60-chunk run. Returns a deep copy so callers can't mutate the cache.
-    """
-    import copy
-    global _MASTER_LIST_CACHE
-    if _MASTER_LIST_CACHE is not None:
-        return copy.deepcopy(_MASTER_LIST_CACHE)
-    from tortoise.value_extractor import compile_value_brief
-    brief = compile_value_brief()
+def _build_master_from_brief(brief: dict,
+                             pack_prefixes: tuple[str, ...] = PACK_NS) -> dict:
+    """The master-list sections from a compiled value brief (#2031 refactor
+    of the build_master_list loop body — the section semantics are
+    byte-identical to pre-#2031). ``pack_prefixes`` is the namespace
+    allowlist for the pack_kinds section: the DEFAULT path passes the
+    starter set; the hosted tenant path passes starter + that tenant's
+    namespaces. Loop semantics preserved exactly: the memory_granularity
+    skip precedes the prefix check, and pack_kinds keeps the brief's
+    insertion order (prompt-visible)."""
     objects = {k: _desc(brief, k) for k in CORE_OBJECT_KEYS}
     pack_kinds = {}
     for k, v in brief.items():  # noqa: B007
         if k == "memory_granularity":
             continue
-        if not k.startswith(PACK_NS):
+        if not k.startswith(pack_prefixes):
             continue
         pack_kinds[k] = _desc(brief, k)
-    master = {
+    return {
         "objects": objects,
         "subjects": dict(SUBJECTS),
         "points": dict(POINTS),
@@ -194,8 +189,41 @@ def build_master_list() -> dict:
         # it); rendered into S2/S4 prompt context only.
         "user_personal_state": dict(USER_PERSONAL_STATE),
     }
-    _MASTER_LIST_CACHE = copy.deepcopy(master)
-    return master
+
+
+def build_master_list(team_id: str | None = None, sdk=None) -> dict:
+    """The v2 master list: compile_value_brief() kinds + the §3 additions
+    (subjects, points, events, chains, memory_granularity). Section values
+    are {kind: description} dicts — rendered as readable text in prompts.
+
+    Memoized (#1350 chunking finding): the packs are static per process —
+    re-reading + YAML-parsing every manifest per chunk cost 12.2s of a 14.3s
+    60-chunk run. Returns a deep copy so callers can't mutate the cache.
+
+    #2031 hosted tenant path (``team_id`` + ``sdk``): the master compiles
+    from the memoized tenant view's brief (shared catalog + THIS tenant's
+    :PackManifest manifests) with the pack_kinds allowlist extended to the
+    tenant's namespaces — so tenant A's pack kinds reach A's extraction
+    prompts and write gates while tenant B's never do. The tenant path
+    NEVER reads or writes the process-global ``_MASTER_LIST_CACHE`` (#1154:
+    a tenant-scoped compile must not poison the shared memo); the #1350
+    perf guard rides the tenant-view memo (per (graph_identity,
+    pack_config_version), invalidated on :PackManifest write) instead.
+    """
+    if team_id is None and sdk is None:
+        import copy
+        global _MASTER_LIST_CACHE
+        if _MASTER_LIST_CACHE is not None:
+            return copy.deepcopy(_MASTER_LIST_CACHE)
+        from tortoise.value_extractor import compile_value_brief
+        brief = compile_value_brief()
+        master = _build_master_from_brief(brief, PACK_NS)
+        _MASTER_LIST_CACHE = copy.deepcopy(master)
+        return master
+    from tortoise.pack_manifest_store import tenant_view
+    view = tenant_view(team_id, sdk)
+    tenant_prefixes = tuple(f"{m['namespace']}:" for m in view["tenant"])
+    return _build_master_from_brief(view["brief"], PACK_NS + tenant_prefixes)
 
 
 def master_kind_forms(master: dict) -> set[str]:
@@ -236,8 +264,11 @@ _PACK_TRIGGERS = {
     "pm:": ("project", "milestone", "pm:", "portfolio", "program"),
     "agent-ops:": ("standard operating", "protocol", "token acknowledgement",
                     "destructive action", "policy", "standing rule"),
-    "epistemic-team:": ("epistemic", "weight", "confidence", "claim",
-                        "premise", "evidence"),
+    # NOTE (#2031): the legacy "epistemic-team:" entry was removed — it
+    # referenced a pack that is not installed, so it could never fire on the
+    # default path; its presence would have trigger-gated a TENANT pack named
+    # `epistemic-team` (not a reserved namespace), silently stripping that
+    # tenant's own kinds from compact-mode prompts.
 }
 
 
@@ -265,8 +296,13 @@ def _select_pack_kinds(story: str | None, pack_kinds: dict) -> dict:
     selected = {}
     for k, v in pack_kinds.items():
         ns = k.split(":")[0] + ":"
-        triggers = _PACK_TRIGGERS.get(ns, ())
-        if any(t in low for t in triggers):
+        triggers = _PACK_TRIGGERS.get(ns)
+        # #2031: a namespace with NO trigger entry cannot be story-selected —
+        # always include it (per-tenant custom packs; dropping them would
+        # silently strip the tenant's own kinds from their compact prompt).
+        # All five starter namespaces have trigger entries, so the DEFAULT
+        # path behavior is unchanged (byte-identical).
+        if triggers is None or any(t in low for t in triggers):
             selected[k] = v
     return selected or dict(pack_kinds)  # nothing matched → all (safe)
 
@@ -526,12 +562,16 @@ tradeoffs and reasons behind) worth remembering in six months, per the
 memory-granularity rules above. If a detail won't matter then, drop it."""
 
 
-def _granularity_text() -> str:
+def _granularity_text(master: dict | None = None) -> str:
     """The S1 memory-granularity slot. E2 (D3): appends the STATE-VALUE
     CARVE-OUT so S1's granularity rules protect user-personal-state values
     from the mechanics-token filter — S1's "RESTATE, DON'T REINVENT" rule
-    then carries the value verbatim into the story."""
-    master = build_master_list()
+    then carries the value verbatim into the story.
+
+    #2031: ``master`` is the tenant-scoped master on the hosted path (so a
+    tenant pack's memory_granularity reaches the S1 prompt); None → the
+    default master (byte-identical)."""
+    master = master or build_master_list()
     g = master.get("memory_granularity", {})
     out = "\n".join(f"- {ns}: {txt}" for ns, txt in g.items())
     return f"{out}\n{STATE_VALUE_CARVE_OUT}" if out else STATE_VALUE_CARVE_OUT
@@ -589,13 +629,17 @@ def _valid_iso_date(v: str) -> bool:
 
 def run_s1(model, transcript: str, *,
            session_date: str | None = None,
-           stats: dict | None = None) -> str:
+           stats: dict | None = None,
+           master: dict | None = None) -> str:
     """S1: story summary for ONE segment. Returns the narrative text
     (the validated single-flash path). Generation is bounded at
     ``_S1_MAX_TOKENS`` (M3 #1524, D2 — capped output, truncation detected
-    via ``last_finish_reason == "length"``, never silently lost)."""
+    via ``last_finish_reason == "length"``, never silently lost).
+
+    #2031: ``master`` threads the tenant-scoped vocabulary to the S1
+    granularity slot on the hosted path (None → default master)."""
     system = (S1_TMPL
-              .replace("{memory_granularity}", _granularity_text())
+              .replace("{memory_granularity}", _granularity_text(master))
               .replace("{date_anchor}", _date_anchor(session_date)))
     return _complete(model, system, "CONVERSATION:\n" + transcript,
                      max_tokens=_stage_cap(_S1_MAX_TOKENS), stats=stats)
@@ -3536,7 +3580,8 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         try:
             chunk_stories.append(run_s1(model, _edus_to_text(chunk),
                                         session_date=session_date,
-                                        stats=stage_stats))
+                                        stats=stage_stats,
+                                        master=master))
         except Exception as e:  # per-chunk failure is non-fatal
             failed_chunks += 1
             errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")

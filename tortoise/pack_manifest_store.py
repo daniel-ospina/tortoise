@@ -105,9 +105,16 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
     if ":" in ns:
         return ManifestValidation(False, errors=["namespace must not contain ':'"])
 
-    # Tenant policy (plan §4): reserved starter namespaces.
+    # Tenant policy (plan §4): reserved namespaces. The starter set is the
+    # canonical collision surface (a tenant pack named `dev` would collide
+    # with the starter `dev` PackInstall); ``core`` and
+    # ``memory_granularity`` are reserved because the #2031 tenant-view
+    # compile overlays tenant kinds onto ``compile_value_brief``'s dicts,
+    # where a tenant ``core`` namespace would shadow the canonical core
+    # vocabulary and a ``memory_granularity`` namespace would shadow the
+    # brief's reserved granularity key.
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
-    if ns in DEFAULT_STARTER_PACKS:
+    if ns in DEFAULT_STARTER_PACKS or ns in ("core", "memory_granularity"):
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved starter pack — pick a different name"])
@@ -191,15 +198,31 @@ def _graph_identity(sdk) -> str:
 
 
 def get_tenant_manifests(sdk) -> list[dict]:
-    """Read the tenant's :PackManifest nodes (namespace/name/version/status)."""
+    """Read the tenant's :PackManifest nodes (namespace/name/version/status/
+    sha256). sha256 is the manifest content fingerprint — the #1935
+    version-hash omits it and #2031 adds it to the tenant-view cache key
+    (the cross-process staleness signal; the dirty-set is process-local)."""
     g = _target_graph(sdk, None)
     rows = g.query(
         f"MATCH (m:{PACK_MANIFEST_LABEL}) "
-        "RETURN m.namespace, m.name, m.version, m.status "
+        "RETURN m.namespace, m.name, m.version, m.status, m.sha256 "
         "ORDER BY m.namespace",
     ).result_set
-    return [{"namespace": r[0], "name": r[1], "version": r[2], "status": r[3]}
+    return [{"namespace": r[0], "name": r[1], "version": r[2], "status": r[3],
+             "sha256": r[4]}
             for r in rows]
+
+
+def _get_tenant_manifest_yamls(sdk) -> dict[str, str]:
+    """namespace → full manifest YAML text for every :PackManifest node
+    (the #2031 consumer-path vocab source — fed through
+    ``compile_value_brief(tenant_manifests=...)``, never a parallel compile)."""
+    g = _target_graph(sdk, None)
+    rows = g.query(
+        f"MATCH (m:{PACK_MANIFEST_LABEL}) RETURN m.namespace, m.yaml "
+        "ORDER BY m.namespace",
+    ).result_set
+    return {r[0]: r[1] for r in rows if r[0] and r[1]}
 
 
 def delete_tenant_manifest(sdk, namespace: str) -> bool:
@@ -222,24 +245,40 @@ def tenant_view(team_id: str, sdk) -> dict:
     """The tenant's pack view: shared catalog + tenant manifests, memoized.
 
     Cache key: (graph_identity, pack_config_version) where the version is a
-    hash of the tenant's (namespace, version, sha256) manifest tuples.
-    Invalidated by any :PackManifest write (dirty-set). The shared catalog
-    is read from the global registry (read-only, safe to share — #1154).
+    hash of the tenant's (namespace, version, sha256) manifest tuples
+    (sha256 in the key since #2031 — the view is the hosted extraction
+    vocabulary source, and the hash is the only cross-process staleness
+    signal; the dirty-set is process-local). Invalidated by any
+    :PackManifest write (dirty-set). The shared catalog is read from the
+    global registry (read-only, safe to share — #1154).
+
+    #2031 consumer wiring: the memoized view now also carries the manifest
+    YAMLs (``yaml``) and the COMPILED value brief (``brief`` — shared
+    catalog + this tenant's manifests, via ``compile_value_brief`` per the
+    epic plan §4 "no parallel compile path"). ``build_master_list`` reads
+    the brief on the hosted path, so the compile happens once per
+    (graph_identity, pack_config_version) — the #1350 perf guard rides the
+    memo.
     """
     gid = _graph_identity(sdk)
     manifests = get_tenant_manifests(sdk)
     version = hashlib.sha1(
-        repr(sorted((m["namespace"], m["version"]) for m in manifests)).encode()
+        repr(sorted((m["namespace"], m["version"], m["sha256"])
+                    for m in manifests)).encode()
     ).hexdigest()[:12]
     key = (gid, version)
     with _TENANT_VIEWS_GUARD:
         if key in _TENANT_VIEWS and gid not in _TENANT_VIEW_DIRTY:
             return _TENANT_VIEWS[key]
-    # Compile: shared catalog summaries + tenant manifests.
+    # Compile: shared catalog summaries + tenant manifests + the value brief.
     from tortoise.domain_loader import _get_registry
     reg = _get_registry()
     catalog = reg.pack_summaries() if reg is not None else {}
-    view = {"catalog": catalog, "tenant": manifests}
+    yamls = _get_tenant_manifest_yamls(sdk)
+    from tortoise.value_extractor import compile_value_brief
+    brief = compile_value_brief(tenant_manifests=yamls)
+    view = {"catalog": catalog, "tenant": manifests, "yaml": yamls,
+            "brief": brief}
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.discard(gid)
         _TENANT_VIEWS[key] = view

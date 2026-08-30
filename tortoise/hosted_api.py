@@ -4800,8 +4800,27 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         try:
+            # #2031: hosted extraction compiles the vocabulary from the
+            # tenant's pack view (shared catalog + THIS team's custom packs,
+            # memoized per (graph_identity, pack_config_version) — #1154/
+            # #1350) so the tenant's pack kinds reach the prompts and write
+            # gates. Only team["team_id"] is consumed (the MCP tool passes a
+            # minimal team dict). Fail-open: a vocab-compile hiccup must
+            # never block capture — the run proceeds with the default
+            # vocabulary and the minted-kind report then flags the tenant
+            # kinds, surfacing the degradation.
+            tenant_master = None
+            try:
+                from tortoise.extractor_v2 import build_master_list
+                tenant_master = build_master_list(
+                    team_id=team["team_id"], sdk=sdk)
+            except Exception as e:  # noqa: BLE001, RUF100
+                _logger.warning(
+                    "tenant vocabulary compile failed for %s — capture "
+                    "proceeds with the default vocabulary: %s",
+                    team.get("team_id"), e)
             extracted, meta = sdk._extract_session_v2(
-                windowed, session_id, now)
+                windowed, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 
