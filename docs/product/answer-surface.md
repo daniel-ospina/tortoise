@@ -29,7 +29,7 @@ ownedBy: epistemic-team
 |---|---|---|
 | `POST /v1/ask` (hosted) | `tortoise/hosted_api.py` | **GATED (#2013): not registered unless `TORTOISE_ENABLE_ASK=1` — 404 by default.** Team-scoped (tt_ key or session JWT), budgeted (60/min/team → 429 + Retry-After), metered per-query |
 | `TortoiseSDK.ask()` | `tortoise/sdk.py` | **GATED/EXPERIMENTAL (#2013): the eval's reader path — stays shipped, not for production use until the reader-model decision.** Local lane (embedded/selfhost, BYOK) — full pipeline, no hosted API; hosted mode when `TORTOISE_API_URL` is set |
-| MCP `tortoise_ask` | `tortoise/mcp_server.py` | **GATED (#2013): own curation group `"ask"`, excluded from the default hosted /mcp surface unless `TORTOISE_ENABLE_ASK=1`; an explicit `tool_group="ask"` server (dev/eval) serves it.** Read-classified; same budget bounds |
+| MCP `tortoise_ask` | `tortoise/mcp_server.py` | **GATED (#2013): own curation group `"ask"`, excluded from the default hosted /mcp surface unless `TORTOISE_ENABLE_ASK=1`; an explicit `tool_group="ask"` server (dev/eval) serves it.** Read-classified; same budget bounds. The selfhost /mcp DEFAULT surface is gated identically (list hidden + call ERR_EXCLUDED); selfhost MCP opt-in is `tool_group="ask"` (`TORTOISE_TOOL_GROUP=ask`), while selfhost REST /v1/ask stays unmetered |
 | `POST /v1/ask` (self-host REST) | `tortoise/selfhost_api.py` | Stays — the local-lane REST parity surface. Static-key auth; local lane; NO team budget; unmetered (zero records) |
 | `GET /v1/team` ask-usage | `tortoise/hosted_api.py` | `ask_calls/ask_tokens_in/ask_tokens_out/ask_cost_usd` for the current period; zeros for fresh teams |
 

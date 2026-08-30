@@ -68,14 +68,24 @@ print(json.dumps(out))
 
 def _probe() -> dict:
     """Run the 4-state gating probe in ONE fresh subprocess (production-like
-    env, no test-session leaks) and return the per-flag verdicts."""
+    env, no test-session leaks) and return the per-flag verdicts.
+
+    The gate-off baseline pins TORTOISE_ENABLE_ASK to the EMPTY string
+    (never popped): the child's import-time _load_dotenv() must not re-fill
+    the key from a repo-root .env and silently flip the verdict."""
     env = {
         k: v for k, v in os.environ.items()
         if not k.startswith("TORTOISE_TEST_")
     }
     env.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
     env.setdefault("RATE_LIMIT_DISABLED", "1")
-    env.pop("TORTOISE_ENABLE_ASK", None)
+    # Gate-off baseline: PIN the flag to the empty string rather than POPPING
+    # it — mcp_server.py's import-time _load_dotenv() re-fills repo-root .env
+    # keys (`if key and key not in os.environ`), so a future .env containing
+    # TORTOISE_ENABLE_ASK=1 would defeat an "unset" verdict. An empty string
+    # is never overridden by _load_dotenv (the key already exists) and the
+    # strict == "1" parse treats it as off.
+    env["TORTOISE_ENABLE_ASK"] = ""
     out = subprocess.run(
         [sys.executable, "-c", _GATING_PROBE.format(root=_REPO_ROOT)],
         capture_output=True, text=True, env=env, timeout=300,

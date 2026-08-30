@@ -634,14 +634,19 @@ def _reject_server_managed_props(props: dict) -> str | None:
 
 
 
-def _http_excluded_error() -> dict:
-    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
+def _http_excluded_error(message: str | None = None) -> dict:
+    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
+
+    ``message`` overrides the default guidance (used by the #2013 ask gate,
+    where the hosted REST /v1/ask is ALSO gated off — the default text's
+    "hosted REST API" hint would be wrong for that caller)."""
     return {
         "jsonrpc": "2.0",
         "error": {
             "code": ERR_EXCLUDED,
-            "message": "This tool is not available over HTTP. "
-                        "Use the hosted REST API or stdio MCP.",
+            "message": message or (
+                "This tool is not available over HTTP. "
+                "Use the hosted REST API or stdio MCP."),
         },
         "id": None,
     }
@@ -1030,7 +1035,7 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
     retrieval_degraded}.
 
-    COST PROFILE (group="memory" co-curation, #523): unlike tortoise_search
+    COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
     (LLM-free), tortoise_ask consumes LLM tokens against the team's
     per-minute ask budget (60/min) — budget-exhausted calls return the
     structured error {"error": {"code": "quota_exceeded", "retry_after": …}}
@@ -1055,7 +1060,10 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     if (_transport_mode.get() == "http"
             and _tool_group.get() != _ASK_TOOL_GROUP
             and not ask_exposure_enabled()):
-        return _http_excluded_error()
+        return _http_excluded_error(
+            message="The ask tool is not served on this server: the hosted ask "
+                    "exposure is gated off (#2013). Use stdio MCP or an "
+                    "explicit tool_group=\"ask\" server.")
     from tortoise.exceptions import (
         AskQuotaExceeded,
         AskReaderUnavailable,

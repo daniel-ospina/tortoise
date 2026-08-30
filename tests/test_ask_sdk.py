@@ -628,6 +628,25 @@ def test_post_ask_status_mapping(monkeypatch):
             server.stop()
 
 
+def test_post_ask_404_is_reader_unavailable(monkeypatch):
+    """#2013: a code-less 404 on /v1/ask is the EXPECTED gated state
+    (the route is NOT registered when the hosted ask exposure is gated
+    off) — it maps to AskReaderUnavailable, never AskValidationError
+    (the default code-less 4xx map would mislabel it invalid_question)."""
+    server = _FakeAskServer()
+    server.status = 404
+    server.responses = [{}]
+    server.start(monkeypatch)
+    try:
+        sdk = _new_sdk()
+        with pytest.raises(AskReaderUnavailable) as ei:
+            sdk.ask("q")
+        assert ei.value.status_code == 404
+        assert "not enabled" in str(ei.value)
+    finally:
+        server.stop()
+
+
 def test_post_ask_429_unparseable_header_falls_back_to_body(monkeypatch):
     """A 429 with a non-numeric (HTTP-date) Retry-After header and a numeric
     body ``retry_after`` → AskQuotaExceeded.retry_after == 42.0 (the header

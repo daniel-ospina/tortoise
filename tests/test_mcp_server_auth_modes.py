@@ -251,8 +251,13 @@ class TestAskExposureGating:
         tc = make_client(auth_mode="none")
         body = self._call_tool(tc, "tortoise_ask", {"question": ""})
         text = self._result_text(body)
-        assert "-32004" in text or "not available over HTTP" in text, \
+        assert "-32004" in text, \
             f"expected ERR_EXCLUDED, got: {body}"
+        # the ask-gate message is gated-specific (the default
+        # _http_excluded_error text's "hosted REST API" hint would be wrong
+        # — /v1/ask is gated off too, #2013)
+        assert "gated off (#2013)" in text, \
+            f"expected the ask-gated message, got: {body}"
         # the pipeline must NOT run — local-lane validation (invalid_question)
         # would prove the gate was skipped
         assert "invalid_question" not in text, \

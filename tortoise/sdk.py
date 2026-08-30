@@ -10815,6 +10815,14 @@ class TortoiseSDK:
             raise AskReaderUnavailable(
                 "provider billing 402 (status retained)",
                 status_code=status)
+        if status == 404:
+            # #2013: /v1/ask is NOT registered when the hosted ask exposure is
+            # gated off (TORTOISE_ENABLE_ASK unset) — a 404 is the EXPECTED
+            # gated state, not an invalid question (the default code-less 4xx
+            # map would mislabel it invalid_question).
+            raise AskReaderUnavailable(
+                "ask exposure is not enabled on this server",
+                status_code=status)
         if 400 <= status < 500:
             if code in (CODE_INVALID_QUESTION, CODE_QUESTION_TOO_LONG,
                         CODE_INVALID_QUESTION_TYPE, CODE_INVALID_QUESTION_DATE,

@@ -7,6 +7,15 @@ and the MCP auth layer can import without a cycle (``mcp_auth`` imports
 ``tortoise.sdk``, so ``sdk``/``metering``/``quota`` cannot import
 ``tortoise.mcp_auth``).
 
+The module ALSO hosts the product-level ask-exposure gate
+``ask_exposure_enabled()`` (#2013) precisely because it is the cycle-free,
+stdlib-only, neutral import point shared by ``hosted_api.py`` (the /v1/ask
+route gate) and ``mcp_server.py`` (the MCP listing/call-time gates) — a
+product gate must not live in either importer, and any other home would
+re-import one of them. The zero-import/stdlib-only/neutral contract is
+load-bearing: nothing here may grow an import, and both importers must
+stay importable from the other's context.
+
 Why a dedicated flag (not the team_id VALUE, not ``_transport_mode``):
 
   * hosted team ids are RAW — only graph names are ``team_``-prefixed

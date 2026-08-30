@@ -38,6 +38,7 @@ ownedBy: epistemic-team
 | `TortoiseSDK.ask()` | **Stays** — the eval's reader path; docstring marks it GATED/EXPERIMENTAL (not for production use until the reader-model decision) | `tortoise/sdk.py` |
 | `POST /v1/ask` (hosted) | **GATED OFF by default** — route not registered (404) unless `TORTOISE_ENABLE_ASK=1` (tests/dev); handler + error translation stay, tested, ready | `tortoise/hosted_api.py` |
 | MCP `tortoise_ask` | **GATED OFF by default** — own curation group `"ask"`, excluded from the default hosted /mcp surface unless `TORTOISE_ENABLE_ASK=1`; explicit `tool_group="ask"` (dev/eval) serves it | `tortoise/mcp_server.py`, `tortoise/tool_registry.py` |
+| MCP `tortoise_ask` (selfhost) | **GATED identically** — the selfhost /mcp DEFAULT surface hides the tool + ERR_EXCLUDEDs the call; selfhost MCP opt-in is `tool_group="ask"` (`TORTOISE_TOOL_GROUP=ask` env), while selfhost REST /v1/ask stays unmetered | `tortoise/mcp_server.py` |
 | `POST /v1/ask` (self-host REST) | **Stays** — the local-lane REST parity surface (mirrors the SDK local lane; no team budget, unmetered) | `tortoise/selfhost_api.py` |
 
 **Follow-up (tracked, not blocking):** (1) the ask reader-model upgrade —
