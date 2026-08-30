@@ -73,8 +73,8 @@ def unauth_client(tmp_path):
 
     def _patched(self, db_path_arg=None, *, namespace=None, **kw):
         # Isolate EVERY SDK construction (registry included) to the fixture's
-        # temp DB (see the client fixture — the closure var must not shadow
-        # `db_path`).
+        # temp DB (see the client fixture — the closure var is
+        # `fixture_db_path` so a `db_path` parameter could never shadow it).
         orig_init(self, db_path=fixture_db_path, namespace=namespace)
 
     TortoiseSDK.__init__ = _patched
