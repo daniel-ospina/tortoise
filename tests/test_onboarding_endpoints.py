@@ -49,6 +49,9 @@ def client(tmp_path):
     app.dependency_overrides[get_current_team] = lambda: {
         "team_id": "test-team-1", "tier": "free", "key_id": "k1",
         "max_users": 1, "max_graphs": 1, "max_teams": 1,
+        # #1922: the demo seed is now quota-gated — the team dict must carry
+        # max_points (the fail-closed points cap) or the check 500s.
+        "max_points": 10000,
         # #1748: the onboarding sub-team is provisioned on the USER path —
         # the session user becomes the owner member (get_current_team_session
         # attaches session_user_id for session JWT auth; tests seed it here).
@@ -130,6 +133,63 @@ class TestPublicDemo:
         r2 = client.post("/v1/demo")
         assert r1.status_code == 200
         assert r2.status_code == 200  # no crash on re-run
+
+    def test_demo_seed_402_at_cap(self, client):
+        """#1922 quota: a team at the points cap gets 402 — the demo seed
+        must not be the quota bypass (MCP twin gates the same write).
+
+        Uses a per-test unique TEAM id (not test-*): under the docker-lane
+        redirect (epic #1647) a test-* namespace maps to a shared verbatim
+        server graph, so a fresh graph per test requires a unique team id
+        (the per-path redirect derivation isolates it)."""
+        import uuid
+
+        from tortoise.hosted_api import _make_sdk, app, get_current_team
+        tid = f"team-demo-{uuid.uuid4().hex[:8]}"
+        app.dependency_overrides[get_current_team] = lambda tid=tid: {
+            "team_id": tid, "tier": "free", "key_id": "k1",
+            "max_users": 1, "max_graphs": 1, "max_teams": 1,
+            "max_points": 0,  # at cap — count(0) >= limit(0)
+        }
+        r = client.post("/v1/demo")
+        assert r.status_code == 402, r.text
+        # Nothing may have been written: no sentinel, no metering record.
+        sdk = _make_sdk(namespace=tid)
+        sent = sdk._get_proj().g.query(
+            "MATCH (p:Point {id: '_demo_sentinel'}) RETURN p.id"
+        ).result_set
+        assert not sent, "quota-gated demo seed must not write points"
+        rows = _make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (m:MeteringRecord {team_id:$tid}) RETURN m.write_ops",
+            params={"tid": tid},
+        ).result_set
+        assert not rows, "quota-gated demo seed must not record write ops"
+
+    def test_demo_seed_records_write_ops(self, client):
+        """#1922 metering: a successful demo seed records one write op with
+        the seeded node count (12 points + the _demo_sentinel). Uses a
+        per-test unique team id so the docker-lane redirect derives a fresh
+        per-path server graph (see test_demo_seed_402_at_cap)."""
+        import uuid
+
+        from tortoise.hosted_api import _make_sdk, app, get_current_team
+        tid = f"team-demo-{uuid.uuid4().hex[:8]}"
+        app.dependency_overrides[get_current_team] = lambda tid=tid: {
+            "team_id": tid, "tier": "free", "key_id": "k1",
+            "max_users": 1, "max_graphs": 1, "max_teams": 1,
+            "max_points": 10000,
+        }
+        r = client.post("/v1/demo")
+        assert r.status_code == 200, r.text
+        rows = _make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (m:MeteringRecord {team_id:$tid}) "
+            "RETURN m.write_ops, m.nodes_written",
+            params={"tid": tid},
+        ).result_set
+        assert rows, "expected a MeteringRecord after demo seed"
+        write_ops, nodes_written = int(rows[0][0]), int(rows[0][1])
+        assert write_ops == 1
+        assert nodes_written == 13  # 12 seeded points + _demo_sentinel
 
 
 # ── Session recording toggle ────────────────────────────────────

@@ -838,13 +838,14 @@ def _pid_alive_for(pid):
 
 # ── Task 3: CLI, singleton lock, timeout ────────────────────────────
 
-def _run_cli(*args, timeout=120):
+def _run_cli(*args, timeout=600):
     """Run the reaper CLI as a subprocess; return (rc, stdout, stderr).
 
-    Default timeout matches the CLI's own --timeout default (120s): on a
-    shared dev box under concurrent-suite churn, reap()'s serial CLIENT
-    LIST double-check can take tens of seconds against hung servers — the
-    CLI is budgeted, not speed-tested.
+    Default timeout matches the reaping budget the slow --no-dry-run tests
+    pass via ``--timeout`` (600s): reap() serially probes + kills every
+    orphan the carve-out process has accumulated by the time the reaper
+    suite runs last, which comfortably exceeds the CLI's own 120s default
+    on a loaded runner (#1988). The CLI is budgeted, not speed-tested.
     """
     import subprocess as sp
     import sys as _sys
@@ -885,7 +886,7 @@ def test_cli_no_dry_run_kills(monkeypatch):
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     sock = _spawn_orphan()
     try:
-        rc, out, err = _run_cli("--no-dry-run")  # noqa: RUF059
+        rc, out, err = _run_cli("--no-dry-run", "--timeout", "600")  # noqa: RUF059
         assert rc == 0
         from tortoise.embedded_reaper import discover
         found = discover()
@@ -922,7 +923,8 @@ def test_cli_batch_size_limits_kills(monkeypatch):
     monkeypatch.setenv("TORTOISE_REAPER_MIN_UPTIME", "0")
     socks = [_spawn_orphan() for _ in range(2)]
     try:
-        rc, out, err = _run_cli("--no-dry-run", "--batch-size", "1")  # noqa: RUF059
+        rc, _out, _err = _run_cli("--no-dry-run", "--batch-size", "1",
+                                 "--timeout", "600")
         assert rc == 0
         from tortoise.embedded_reaper import discover
         found = discover()
@@ -945,7 +947,8 @@ def test_cli_singleton_lock_prevents_concurrent(monkeypatch):
     lock = _ReaperLock()
     assert lock.acquire(), "could not acquire lock for test"
     try:
-        rc, out, err = _run_cli("--no-dry-run", timeout=120)
+        rc, out, err = _run_cli("--no-dry-run", "--timeout", "600",
+                                timeout=600)
         assert rc == 0
         assert "already running" in (out + err).lower()
     finally:
@@ -972,7 +975,8 @@ def test_cli_singleton_lock_released_on_sigkill(monkeypatch):
     holder.kill()  # SIGKILL while holding lock
     holder.wait(timeout=5)
     time.sleep(1)
-    rc, out, err = _run_cli("--no-dry-run", timeout=120)
+    rc, out, err = _run_cli("--no-dry-run", "--timeout", "600",
+                            timeout=600)
     # should run normally (lock released via kernel), not 'already running'
     assert rc == 0
     assert "already running" not in (out + err).lower()

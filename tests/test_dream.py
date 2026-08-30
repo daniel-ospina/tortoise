@@ -143,6 +143,44 @@ class TestWritePathsMarkDirty:
         sdk.delete_point(p["id"])
         assert p["id"] in sdk._dirty_roots
 
+    def test_delete_point_dirties_neighbors_and_recomputes(self, sdk):
+        """#1916: delete_point must dirty the deleted point's neighbors — the
+        post-delete reverse-BFS can no longer see the node's edges, so without
+        pre-capturing the neighbors no dream fires and their stored
+        confidences stay at pre-delete values.
+
+        Two strong sources: deleting one must both dirty the surviving claim
+        (reverse-BFS capture before the DETACH DELETE) and, once a dream
+        fires, drop its stored confidence to the single-source posterior.
+        """
+        ev_a = _make_claim(sdk, "source A")
+        ev_b = _make_claim(sdk, "source B")
+        claim = _make_claim(sdk, "conclusion")
+        sdk.set_point_baseline(ev_a["id"], 10.0, 1.0)
+        sdk.set_point_baseline(ev_b["id"], 10.0, 1.0)
+        sdk.create_operator("IMPL", ev_a["id"], [claim["id"]])
+        sdk.create_operator("IMPL", ev_b["id"], [claim["id"]])
+        # Stabilize: claim confidence is evidence-driven (two strong sources).
+        sdk.dream(dirty_only=True, require_calibration=False)
+        assert sdk._dirty_roots == set()
+        conf_before = sdk.get_confidence(claim["id"], require_calibration=False)
+
+        sdk._dirty_roots.clear()
+        sdk.delete_point(ev_a["id"])
+
+        # Indicator 1: the surviving neighbor is dirtied — captured BEFORE
+        # the DETACH DELETE removed the deleted point's edges (#1916).
+        assert claim["id"] in sdk._dirty_roots
+
+        # Indicator 2: a dream fires and the neighbor's stored confidence
+        # recomputes — with one source gone it falls back toward the
+        # single-source posterior.
+        sdk.dream(dirty_only=True, require_calibration=False)
+        conf_after = sdk.get_confidence(claim["id"], require_calibration=False)
+        assert conf_after["mean"] < conf_before["mean"], (
+            "claim confidence should drop when one evidence source is deleted"
+        )
+
     def test_invalidate_marks_dirty(self, sdk):
         old = _make_claim(sdk, "old")
         new = _make_claim(sdk, "new")
