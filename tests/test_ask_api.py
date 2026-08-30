@@ -355,6 +355,10 @@ def test_reader_timeout_504(client, monkeypatch):
 
     monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _Hung)
     monkeypatch.setattr(quota_mod, "_ASK_TIMEOUT_S", 0.5)
+    # The exec floor must be BELOW the timeout, else acquire_timeout =
+    # max(0, 0.5-5.0) = 0 and wait_for(timeout<=0) cancels even a free-
+    # semaphore acquire (504-at-acquire, never reaching the reader).
+    monkeypatch.setattr(quota_mod, "_ASK_EXEC_FLOOR_S", 0.1)
     r = client.post("/v1/ask", json={"question": "q"})
     assert r.status_code == 504, r.text
     assert r.json() == {"error": {"code": "timeout"}}
