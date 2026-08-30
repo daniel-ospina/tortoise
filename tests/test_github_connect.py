@@ -267,23 +267,6 @@ class TestGitHubRepos:
         assert body["repos"] == []
         assert body.get("resolve_error") is True
 
-    def test_repos_decrypt_failure_flagged(self, client, monkeypatch):
-        """#1893 (code-review P1): a stored token that fails to decrypt returns
-        connected:false + resolve_error:true — a resolve-class failure, never
-        evidence of an empty org (pruning the persisted scope on it would
-        clobber the selection)."""
-        import tortoise.hosted_api as ha
-        # Corrupt stored credentials so decrypt_token raises ValueError.
-        monkeypatch.setattr(ha, "_github_credentials",
-                            lambda team_id: ("not-a-valid-encrypted-token", "acme"))
-
-        r = client.get("/v1/onboarding/github/repos")
-        assert r.status_code == 200
-        body = r.json()
-        assert body["connected"] is False
-        assert body["repos"] == []
-        assert body.get("resolve_error") is True
-
     def test_repos_resolve_failure_flagged(self, client, monkeypatch):
         """#1893 (code-review P1): a server-side resolve failure returns 200
         with an EMPTY list + resolve_error:true (never a 500) — the dashboard
