@@ -7971,7 +7971,7 @@ def _check_foreign_kinds(payload: dict) -> None:
         # that do not cover every kind in the dump (partial/orphaned state).
         # Kinds are truncated per-entry to bound the audit/422 reason size
         # (payload-controlled strings; owner-only surface but bounded).
-        listed = sorted(k[:80] for k in foreign)[:5]
+        listed = sorted({k[:80] for k in foreign})[:5]
         if pc is None:
             raise ValueError(
                 "artifact predates pack-config (v1.1) but references unknown "

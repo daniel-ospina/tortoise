@@ -170,7 +170,7 @@ class TestForeignKindsGuard:
                              for i, k in enumerate(foreign)]}
         with pytest.raises(ValueError) as ei:
             _check_foreign_kinds(payload)
-        # message lists exactly 5 (sorted(foreign)[:5])
+        # message lists exactly 5 (sorted deduped/truncated kinds [:5])
         assert "ns0:kind0" in str(ei.value) and "ns5:kind1" not in str(ei.value)
 
     def test_self_contained_packmanifest_passes(self):
