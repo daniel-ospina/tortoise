@@ -1962,6 +1962,11 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_last_error_pi": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
+    # #1893: persisted GitHub source-scope keys (written by the dashboard's
+    # scope selectors via PATCH — [] = all repos; registered here so the
+    # allowlist filter never drops them).
+    "github_issues_scope": [],  # list of short repo names; [] = all repos
+    "github_docs_scope": [],    # list of {repo, branch}; [] = all repos
 }
 
 
@@ -10312,6 +10317,11 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_last_error_pi": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
+    # #1893: persisted GitHub source-scope keys (dashboard scope selectors
+    # PATCH these; [] = all repos). Registered in BOTH default dicts + the
+    # PATCH model — the state-key registration test pins all four surfaces.
+    "github_issues_scope": [],  # list of short repo names; [] = all repos
+    "github_docs_scope": [],    # list of {repo, branch}; [] = all repos
 }
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
@@ -10350,7 +10360,7 @@ def _get_onboarding_state(team_id: str) -> dict:
         stored = _sb_state(get_control_plane(), team_id)
         # None = team row missing — mirror the registry MATCH-no-op: read as
         # defaults, don't write.
-        return stored if stored is not None else dict(_ONBOARDING_DEFAULT_STATE)
+        return stored if stored is not None else _onboarding_defaults()
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -10358,16 +10368,27 @@ def _get_onboarding_state(team_id: str) -> dict:
         params={"id": team_id},
     ).result_set
     if not rows or rows[0][0] is None:
-        state = dict(_ONBOARDING_DEFAULT_STATE)
+        state = _onboarding_defaults()
         _write_onboarding_state(team_id, state)
         return state
     try:
         stored = _json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
     except (TypeError, ValueError):
         stored = {}
-    state = dict(_ONBOARDING_DEFAULT_STATE)
+    state = _onboarding_defaults()
     state.update(stored)
     return state
+
+
+def _onboarding_defaults() -> dict:
+    """Fresh default-state dict (code-review P2): the list-typed keys
+    (github_issues_scope / github_docs_scope) must NOT be shared across teams
+    — a shallow ``dict()`` copy shares the same list objects, so an in-place
+    mutation (``append``/``remove``) on one team's state would leak into
+    every team's defaults. List values are copied per-read; scalars are
+    immutable and safe to share."""
+    return {k: (list(v) if isinstance(v, list) else v)
+            for k, v in _ONBOARDING_DEFAULT_STATE.items()}
 
 
 def _write_onboarding_state(team_id: str, state: dict) -> None:
@@ -10474,6 +10495,13 @@ class OnboardingStatePatchRequest(BaseModel):
     # #235's artifact_copied schema verbatim (align cycle-3 conformance).
     harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
     section: str | None = None   # "config"|"prompt"|"both"|"setup"
+    # #1893: persisted GitHub source-scope keys — registered so the keys
+    # round-trip through the PATCH surface (parametrized registration test)
+    # and the dashboard can persist + rehydrate the scope selectors.
+    # [] = explicit clear (all repos) — a VALID value, never dropped.
+    # (appended at class end for #1894 merge hygiene — keep append-only)
+    github_issues_scope: list[str] | None = None
+    github_docs_scope: list[dict] | None = None
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -10521,6 +10549,10 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
         _track_analytics_event(team["team_id"], "artifact_copied",
                                {"harness": harness, "section": section})
+    # #1893: validate the persisted source-scope keys at the PATCH boundary
+    # (400 on invalid; valid values stored in NORMALIZED form — issues
+    # strip/dedupe, docs ""/None branch → null; [] = explicit clear).
+    updates = _validate_scope_payload(updates)
     state = _update_onboarding_state(team["team_id"], **updates)
     # #1765 review (onboarding dual-auth): a SESSION-authed call's email
     # belongs on the USER anchor (auth.users — managed via the profile
@@ -11203,6 +11235,13 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     Returns SHORT repo names (owner prefix stripped) — the /v1/index/*
     endpoints already construct ``f"{org}/{repo}"`` from the short name, so
     sending a full_name would double-prefix the org.
+
+    #1893 (code-review P1): any response whose repos are EMPTY because of a
+    FAILURE (resolve exception, decrypt failure) carries ``resolve_error:
+    true`` so the dashboard never treats a failed fetch as a genuinely-empty
+    org (pruning the persisted scope on it would clobber the selection).
+    ``connected: false`` + ``resolve_error`` is the "stored-but-now-failing"
+    shape; a clean disconnect returns connected:false WITHOUT the flag.
     """
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
@@ -11211,19 +11250,31 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     try:
         token = decrypt_token(encrypted)
     except ValueError:
-        return {"connected": False, "org": None, "repos": []}
+        # decrypt failure = the stored token is unusable — a resolve-class
+        # failure, not evidence of an empty org (the dashboard gates
+        # hydration on this flag exactly like a resolve exception).
+        return {"connected": False, "org": None, "repos": [], "resolve_error": True}
     org = await _heal_github_org(team["team_id"], encrypted, org)
     from tortoise.indexer.github_indexer import GitHubIndexer
     indexer = GitHubIndexer(token)
+    resolve_error = False
     try:
         resolved = await indexer.resolve_repos(org)
     except Exception:
+        # resolve failure → empty list (selector still renders "All repos"),
+        # but FLAG it: the dashboard must not treat a failed resolve as a
+        # genuinely-empty org — pruning the persisted scope on it would
+        # clobber the stored selection (#1893, code-review P1).
         resolved = []
+        resolve_error = True
     finally:
         await indexer._close()
     # short names (owner prefix stripped) — see the endpoint docstring.
     repos = [r.split("/", 1)[1] if "/" in r else r for r in resolved]
-    return {"connected": True, "org": org, "repos": repos}
+    payload = {"connected": True, "org": org, "repos": repos}
+    if resolve_error:
+        payload["resolve_error"] = True
+    return payload
 
 
 @app.get("/v1/onboarding/github/branches")
@@ -11371,6 +11422,54 @@ class GitHubRepollRequest(BaseModel):
     repo: str | None = None
 
 
+# #1893: the SHORT-repo-name charset is shared between the persisted-scope
+# validator and _validate_repo_scope — legacy inline copies also exist at
+# other index-surface call sites; new validators MUST use this constant
+# (keep-in-sync — a charset change lands in ALL copies).
+_SHORT_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_scope_payload(updates: dict) -> dict:
+    """#1893: PATCH-boundary validation for the persisted source-scope keys
+    (github_issues_scope / github_docs_scope). Same conservative surface as
+    the index endpoints — _validate_repo_scope for issues (short names,
+    deduped), _is_safe_branch for docs branches. [] is a VALID value
+    (explicit clear = all repos) and is stored as-is — the persist path
+    NEVER omits empty (unlike the job builders, where absent = all)."""
+    if "github_issues_scope" in updates and updates["github_issues_scope"] is not None:
+        repos = _validate_repo_scope(updates["github_issues_scope"])
+        updates["github_issues_scope"] = repos if repos is not None else []
+    if "github_docs_scope" in updates and updates["github_docs_scope"] is not None:
+        scopes: list[dict] = []
+        seen_repos: set[str] = set()  # FIRST-WINS dedupe (API boundary — see note)
+        # ⚠️ dedupe asymmetry (intentional): the server dedupes FIRST-WINS
+        # (raw API boundary — the client already serializes unique repos),
+        # while the dashboard's reconcileDocsScope dedupes LAST-WINS
+        # (defensive corrupt-data path). Do NOT "align" one to the other —
+        # tests pin each contract (test_scope_keys_normalized_at_patch /
+        # sourceScope.test.js dedup-last-wins).
+        for s in updates["github_docs_scope"]:
+            if not isinstance(s, dict) or not isinstance(s.get("repo"), str):
+                raise HTTPException(status_code=400, detail="Invalid repo scope")
+            repo = s["repo"].strip()
+            if not _SHORT_REPO_NAME_RE.match(repo):
+                raise HTTPException(status_code=400, detail="Invalid repo name")
+            branch = s.get("branch")
+            if branch == "" or branch is None:
+                branch = None
+            else:
+                if not isinstance(branch, str):  # non-str branch → 400, never 500
+                    raise HTTPException(status_code=400, detail="Invalid branch")
+                branch = branch.strip()  # normalize like repo (padded branches never persist)
+                if not _is_safe_branch(branch):
+                    raise HTTPException(status_code=400, detail="Invalid branch")
+            if repo not in seen_repos:
+                seen_repos.add(repo)
+                scopes.append({"repo": repo, "branch": branch})
+        updates["github_docs_scope"] = scopes
+    return updates
+
+
 def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
     """#1845 (review P1): allowlist SHORT repo names (the ONE
     client-supplied value that reaches the GitHub URL path). Rejects (400)
@@ -11387,7 +11486,7 @@ def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
         r = r.strip()
         if not r:
             raise HTTPException(status_code=400, detail="Invalid repo name")
-        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", r):
+        if not _SHORT_REPO_NAME_RE.match(r):
             raise HTTPException(status_code=400, detail="Invalid repo name")
         if r not in out:
             out.append(r)
