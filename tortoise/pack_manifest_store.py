@@ -62,11 +62,20 @@ _ONTOLOGY_ONLY_KEYS = ("connectors", "tools")
 # ── Tenant-view memoization (#1154 + #1350) ────────────────────────────────
 # Key: (tenant_identity, pack_config_version) → compiled view. The shared
 # catalog is NOT in the key (it is cached-global read-only, safe to share);
-# the tenant's manifest set IS (isolation + invalidation).
+# the tenant's manifest set IS (isolation + invalidation). tenant_identity
+# = the SDK's resolved graph name (team_{team_id}) — the #2031 consumer
+# path derives it from the tenant-scoped SDK, never from a caller-supplied
+# id (a mismatched id/identity pairing is structurally impossible).
 _TENANT_VIEWS: dict[tuple[str, str], dict] = {}
 _TENANT_VIEWS_GUARD = Lock()
 # Monotonic bump: any :PackManifest write invalidates the tenant's entry.
 _TENANT_VIEW_DIRTY: set[str] = set()
+# Fleet bound (#2031 review): the memo keeps one entry per (gid, version)
+# and is never evicted beyond the per-gid prune — a long-lived multi-tenant
+# process would otherwise accumulate one compiled brief + manifest YAML set
+# per tenant ever seen. Cap the distinct-gid count; a dropped tenant simply
+# recompiles on its next capture (the dirty-set + sha256 key stay intact).
+_MAX_TENANT_VIEWS = 1024
 
 
 @dataclass(frozen=True)
@@ -127,12 +136,23 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
                     "(letters, digits, '_', '-', '.')"])
 
 
-    # Tenant policy (plan §4): reserved starter namespaces.
+    # Tenant policy (plan §4): reserved namespaces. The starter set is the
+    # canonical collision surface (a tenant pack named `dev` would collide
+    # with the starter `dev` PackInstall); ``core`` and
+    # ``memory_granularity`` are reserved because the #2031 tenant-view
+    # compile overlays tenant kinds onto ``compile_value_brief``'s dicts,
+    # where a tenant ``core`` namespace would shadow the canonical core
+    # vocabulary and a ``memory_granularity`` namespace would shadow the
+    # brief's reserved granularity key.
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
     if ns in DEFAULT_STARTER_PACKS:
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved starter pack — pick a different name"])
+    if ns in ("core", "memory_granularity"):
+        return ManifestValidation(
+            False, namespace=ns,
+            errors=[f"namespace '{ns}' is a reserved namespace — pick a different name"])
 
     # Ontology-only v1: reject connector/tool entrypoints (code surfaces).
     for key in _ONTOLOGY_ONLY_KEYS:
@@ -209,23 +229,51 @@ def upsert_tenant_manifest(sdk, manifest_yaml: str) -> dict:
 
 
 def _graph_identity(sdk) -> str:
-    """Physical graph identity for the tenant-view cache key."""
+    """Physical graph identity for the tenant-view cache key.
+
+    #2031 review fix: ``_resolved_graph_name`` takes ``(sdk, graph_name)`` —
+    passing ``None`` resolves the SDK's namespace-scoped graph name (e.g.
+    ``team_team-xxx``). The pre-#2031 one-arg call TypeError'd into the
+    catch-all, collapsing EVERY tenant's key to "default" (one shared memo
+    entry + one global dirty flag) — activated once tenant_view gained its
+    first real consumer on the hosted capture hot path. The fallback is
+    logged (never silent): if graph resolution ever fails again, the
+    collapse is visible in the logs rather than quietly reinstated."""
     try:
-        return _resolved_graph_name(sdk)
-    except Exception:
+        return _resolved_graph_name(sdk, None)
+    except Exception as e:  # noqa: BLE001, RUF100
+        log.warning("tenant-view graph identity resolution failed — "
+                    "falling back to 'default' (cross-tenant memo key "
+                    "collapse risk): %s", e)
         return "default"
 
 
 def get_tenant_manifests(sdk) -> list[dict]:
-    """Read the tenant's :PackManifest nodes (namespace/name/version/status)."""
+    """Read the tenant's :PackManifest nodes (namespace/name/version/status/
+    sha256). sha256 is the manifest content fingerprint — the #1935
+    version-hash omits it and #2031 adds it to the tenant-view cache key
+    (the cross-process staleness signal; the dirty-set is process-local)."""
     g = _target_graph(sdk, None)
     rows = g.query(
         f"MATCH (m:{PACK_MANIFEST_LABEL}) "
-        "RETURN m.namespace, m.name, m.version, m.status "
+        "RETURN m.namespace, m.name, m.version, m.status, m.sha256 "
         "ORDER BY m.namespace",
     ).result_set
-    return [{"namespace": r[0], "name": r[1], "version": r[2], "status": r[3]}
+    return [{"namespace": r[0], "name": r[1], "version": r[2], "status": r[3],
+             "sha256": r[4]}
             for r in rows]
+
+
+def _get_tenant_manifest_yamls(sdk) -> dict[str, str]:
+    """namespace → full manifest YAML text for every :PackManifest node
+    (the #2031 consumer-path vocab source — fed through
+    ``compile_value_brief(tenant_manifests=...)``, never a parallel compile)."""
+    g = _target_graph(sdk, None)
+    rows = g.query(
+        f"MATCH (m:{PACK_MANIFEST_LABEL}) RETURN m.namespace, m.yaml "
+        "ORDER BY m.namespace",
+    ).result_set
+    return {r[0]: r[1] for r in rows if r[0] and r[1]}
 
 
 def delete_tenant_manifest(sdk, namespace: str) -> bool:
@@ -244,29 +292,67 @@ def delete_tenant_manifest(sdk, namespace: str) -> bool:
 
 # ── Tenant-view compile (#1154/#1350) ──────────────────────────────────────
 
-def tenant_view(team_id: str, sdk) -> dict:
+def tenant_view(sdk) -> dict:
     """The tenant's pack view: shared catalog + tenant manifests, memoized.
 
     Cache key: (graph_identity, pack_config_version) where the version is a
-    hash of the tenant's (namespace, version, sha256) manifest tuples.
-    Invalidated by any :PackManifest write (dirty-set). The shared catalog
-    is read from the global registry (read-only, safe to share — #1154).
+    hash of the tenant's (namespace, version, sha256) manifest tuples
+    (sha256 in the key since #2031 — the view is the hosted extraction
+    vocabulary source, and the hash is the only cross-process staleness
+    signal; the dirty-set is process-local). Invalidated by any
+    :PackManifest write (dirty-set). The shared catalog is read from the
+    global registry (read-only, safe to share — #1154).
+
+    The tenant identity is the SDK's resolved graph name — callers must
+    pass the tenant-scoped SDK (``_make_sdk(namespace=team_id)``); there is
+    no separate identity argument to mismatch (#2031 review: the pre-#2031
+    ``team_id`` parameter was dead — every caller could pair any id with
+    any sdk).
+
+    #2031 consumer wiring: the memoized view now also carries the manifest
+    YAMLs (``yaml``) and the COMPILED value brief (``brief`` — shared
+    catalog + this tenant's manifests, via ``compile_value_brief`` per the
+    epic plan §4 "no parallel compile path"). ``build_master_list`` reads
+    the brief on the hosted path, so the compile happens once per
+    (graph_identity, pack_config_version) — the #1350 perf guard rides the
+    memo.
     """
     gid = _graph_identity(sdk)
     manifests = get_tenant_manifests(sdk)
     version = hashlib.sha1(
-        repr(sorted((m["namespace"], m["version"]) for m in manifests)).encode()
+        repr(sorted((m["namespace"], m["version"], m["sha256"])
+                    for m in manifests)).encode()
     ).hexdigest()[:12]
     key = (gid, version)
     with _TENANT_VIEWS_GUARD:
         if key in _TENANT_VIEWS and gid not in _TENANT_VIEW_DIRTY:
             return _TENANT_VIEWS[key]
-    # Compile: shared catalog summaries + tenant manifests.
+    # Compile: shared catalog summaries + tenant manifests + the value brief.
     from tortoise.domain_loader import _get_registry
     reg = _get_registry()
     catalog = reg.pack_summaries() if reg is not None else {}
-    view = {"catalog": catalog, "tenant": manifests}
+    yamls = _get_tenant_manifest_yamls(sdk)
+    from tortoise.value_extractor import compile_value_brief
+    brief = compile_value_brief(tenant_manifests=yamls)
+    view = {"catalog": catalog, "tenant": manifests, "yaml": yamls,
+            "brief": brief}
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.discard(gid)
+        # #2031 review fix: evict this tenant's prior (gid, version) entries
+        # on insert — the sha256-in-key change makes every content revision a
+        # NEW key, so without eviction a churn-heavy tenant accumulates one
+        # compiled brief + YAML set per revision forever. The versioned key
+        # only needs the CURRENT entry for the dirty-set to work.
+        for old_key in [k for k in _TENANT_VIEWS if k[0] == gid]:
+            del _TENANT_VIEWS[old_key]
         _TENANT_VIEWS[key] = view
+        # Fleet bound (#2031 review): evict oldest gids past the cap (dict
+        # insertion order = recency) and drop their dirty flags (a stale
+        # dirty flag only forces a recompile, but the set should stay
+        # bounded with the memo). pop() returns the VALUE — extract the gid
+        # from the KEY tuple before deleting.
+        while len(_TENANT_VIEWS) > _MAX_TENANT_VIEWS:
+            evicted_key = next(iter(_TENANT_VIEWS))
+            _TENANT_VIEW_DIRTY.discard(evicted_key[0])
+            del _TENANT_VIEWS[evicted_key]
     return view

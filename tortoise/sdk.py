@@ -2273,6 +2273,7 @@ class TortoiseSDK:
         conversation: list[dict[str, str]],
         session_id: str,
         now: str,
+        master: dict | None = None,
     ) -> tuple[list[dict], dict]:
         """v2 LLM extraction over a conversation (#1350) — the 5-stage
         pipeline for hosted/self-hosted capture, replacing the M2 two-stage
@@ -2297,6 +2298,12 @@ class TortoiseSDK:
         NOT accepted — the adapter cannot consume it, #1530 gate match) or the
         TORTOISE_SESSION_LLM_MOCK=1 offline seam (hosted e2e runs the seam
         with provider keys scrubbed, #1468).
+
+        #2031: ``master`` is the optional pre-compiled master list — the
+        hosted capture passes the tenant-scoped master
+        (``build_master_list(sdk)`` — the tenant-scoped SDK) so tenant pack kinds reach the
+        prompts and write gates; None → the default master (self-host
+        unchanged, byte-identical).
         """
         # #1530: the inner gate checks exactly what the adapter consumes —
         # a routing-usable key (DEEPSEEK/OPENROUTER via resolve_extractor_provider)
@@ -2332,7 +2339,7 @@ class TortoiseSDK:
                                          max_tokens=None, temperature=0.0))
 
         out = extract_session_v2(model, conversation, sdk=self,
-                                 session_id=session_id)
+                                 session_id=session_id, master=master)
         payload = out.get("payload") or {}
         # P1 #1529 (D1/D4): consult out["errors"]/out["warnings"] — the
         # issue's "_extract_session_v2 discards out[errors]" checklist item.

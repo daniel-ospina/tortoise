@@ -516,11 +516,11 @@ class TestDeploymentGateAndView:
     def test_tenant_view_memoized_and_invalidated(self, client):
         from tortoise.pack_manifest_store import tenant_view
         sdk = _team_sdk()
-        v1 = tenant_view(TEST_TEAM_ID, sdk)
-        v2 = tenant_view(TEST_TEAM_ID, sdk)
+        v1 = tenant_view(sdk)
+        v2 = tenant_view(sdk)
         assert v1 is v2, "memoized view must be cached"
         client.post("/v1/packs/manifests",
                     json={"manifest_yaml": VALID_MANIFEST})
-        v3 = tenant_view(TEST_TEAM_ID, sdk)
+        v3 = tenant_view(sdk)
         assert any(m["namespace"] == "tenant-ops" for m in v3["tenant"]), \
             "view must refresh after a :PackManifest write"

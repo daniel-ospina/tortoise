@@ -261,6 +261,7 @@ surfaces:
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
   - test_pack_manifest_store.py
+  - test_pack_manifest_store_extraction.py
   - test_pack_shipping.py
   - test_pack_shipping_wheel.py
   - test_pack_state.py

@@ -4813,6 +4813,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # deterministically keyed; re-running would mint fresh nodes). The turn
     # loop above re-MERGEd the same {session_id}_t{i} ids (0 new). The
     # response reports extraction_mode "replayed" — honest about what ran.
+    # #2031: set on the v2 branch's fail-open path when the tenant vocab
+    # compile fails with manifests present (surfaced as an additive capture
+    # warning below — the default vocabulary produces no minted kinds to
+    # flag, so a log line alone would leave the degradation invisible).
+    tenant_vocab_warning: str | None = None
     if session_existed:
         meta = {"errors": [], "warnings": [], "mode": "replayed",
                 "route": None, "provider": None}
@@ -4832,8 +4837,42 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         try:
+            # #2031: hosted extraction compiles the vocabulary from the
+            # tenant's pack view (shared catalog + THIS team's custom packs,
+            # memoized per (graph_identity, pack_config_version) — #1154/
+            # #1350) so the tenant's pack kinds reach the prompts and write
+            # gates. The tenant identity comes from the tenant-scoped sdk
+            # (only team["team_id"] is consumed — the MCP tool passes a
+            # minimal team dict). Fail-open: a vocab-compile hiccup must
+            # never block capture — the run proceeds with the default
+            # vocabulary and the degradation is surfaced as an ADDITIVE
+            # capture warning (visible in resp["warnings"]) when the team
+            # actually has manifests (an empty-tenant no-op stays silent).
+            tenant_master = None
+            try:
+                from tortoise.extractor_v2 import build_master_list
+                tenant_master = build_master_list(sdk=sdk)
+            except Exception as e:  # noqa: BLE001, RUF100
+                _logger.warning(
+                    "tenant vocabulary compile failed for %s — capture "
+                    "proceeds with the default vocabulary: %s",
+                    team.get("team_id"), e)
+                # Best-effort visibility: the warning fires when the team has
+                # manifests. If THIS manifests check also fails (e.g. the
+                # same transient graph outage that broke the compile), the
+                # degradation is log-only — the log line above is the
+                # guaranteed trace.
+                try:
+                    from tortoise.pack_manifest_store import get_tenant_manifests
+                    if get_tenant_manifests(sdk):
+                        tenant_vocab_warning = (
+                            "tenant pack vocabulary unavailable — capture used "
+                            "the default vocabulary; tenant pack kinds were "
+                            "not applied")
+                except Exception:  # noqa: BLE001, RUF100
+                    pass
             extracted, meta = sdk._extract_session_v2(
-                windowed, session_id, now)
+                windowed, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -4845,6 +4884,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if not session_existed:
         extraction_errors = list(meta.get("errors") or [])
         extraction_warnings = list(meta.get("warnings") or [])
+        # #2031 review: surface the tenant-vocab degradation as an additive
+        # capture warning (set by the v2 branch's fail-open path) — the
+        # default vocabulary produces no minted kinds to flag, so a log line
+        # alone would leave the degradation response-invisible.
+        if tenant_vocab_warning:
+            extraction_warnings.append(tenant_vocab_warning)
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and stamp its eventId onto the extracted
