@@ -115,6 +115,11 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
         raw = yaml.safe_load(manifest_yaml) or {}
     except yaml.YAMLError as e:
         return ManifestValidation(False, errors=[f"invalid YAML: {e}"])
+    except RecursionError:
+        # #2040 Task 4: a deeply-nested payload-controlled yaml raises
+        # RecursionError (NOT a YAMLError subclass) through safe_load — catch
+        # it as a clean validation failure (422-class), never a 500 post-swap.
+        return ManifestValidation(False, errors=["invalid YAML: nesting too deep"])
     if not isinstance(raw, dict):
         return ManifestValidation(False, errors=["manifest must be a YAML mapping"])
     ns = str(raw.get("namespace", "")).strip()

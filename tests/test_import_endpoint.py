@@ -678,6 +678,327 @@ class TestImportForeignKindsGuard:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
+# #2040 — malformed pack_config shape → 422 PRE-RESTORE (never 500)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestImportPackConfigShape422:
+    """#2040 Indicator 1: a malformed ``pack_config`` shape must 422
+    fail-closed PRE-RESTORE — live graph untouched (``ids == []``),
+    ``last_import_sha256`` unstamped, ``last_import_quarantined_sha256``
+    stamped, ``quarantined_import`` audit recorded. Never a post-swap 500
+    (AttributeError) or a silent 200 with the config dropped."""
+
+    @pytest.mark.parametrize("pc", [
+        {"packs": [42]},          # entry not dict → AttributeError 500 pre-fix
+        {"packs": 42},            # non-list packs
+        "x",                      # non-dict pack_config
+        {"schema_version": 2, "packs": []},  # unsupported schema_version
+    ], ids=["entry-not-dict", "packs-not-list", "pc-not-dict",
+           "schema-version-2"])
+    def test_malformed_pack_config_422_pre_restore(self, sb_client, as_user,
+                                                   capture_audit, pc):
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=1, n_edges=0)
+        payload["pack_config"] = pc
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "pack_config" in r.json()["detail"]
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
+        assert _counts(db_path)["ids"] == []  # nothing landed (pre-restore)
+        # ledger NOT stamped; quarantine prop IS stamped
+        row = fake.tables["teams"][0]
+        assert not row.get("last_import_sha256")
+        assert row.get("last_import_quarantined_sha256")
+
+    def test_malformed_pack_config_cli_form_422(self, sb_client, as_user,
+                                                capture_audit):
+        """The CLI artifact form (single canonical JSON with blob_b64)
+        funnels through the same ``_validate_import_envelope`` gate — a
+        malformed pack_config must 422 there too (shared path lock)."""
+        from tortoise.export import artifact_bytes, build_artifact
+
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=1, n_edges=0)
+        payload["pack_config"] = {"packs": [42]}
+        artifact = artifact_bytes(build_artifact(payload, key=key))
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "pack_config" in r.json()["detail"]
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
+        assert _counts(db_path)["ids"] == []
+        assert not fake.tables["teams"][0].get("last_import_sha256")
+
+    def test_dual_fault_shape_fires_before_foreign_kind_guard(
+            self, sb_client, as_user, capture_audit):
+        """DUAL-FAULT payload: malformed pc ({"packs": 42}) AND a foreign
+        kind (tenant-ops:contract). The envelope shape gate fires BEFORE
+        ``_check_foreign_kinds`` — the 422 detail + quarantine reason must
+        carry the SHAPE error (locks the envelope-before-guard precedence)."""
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = _build_payload(n_points=1, n_edges=0)
+        payload["nodes"][0]["props"]["pointKind"] = "tenant-ops:contract"
+        payload["pack_config"] = {"packs": 42}
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        # SHAPE reason in detail (gate fires before the guard) — pinned check
+        # order: {"packs": 42} lacks schema_version, so the shape error is
+        # "schema_version must be 1". The lock is: pack_config shape reason,
+        # NOT the foreign-kind guard reason ("predates pack-config").
+        assert "pack_config" in r.json()["detail"]
+        assert "predates pack-config" not in r.json()["detail"]
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
+        assert _counts(db_path)["ids"] == []
+        assert not fake.tables["teams"][0].get("last_import_sha256")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #2040 Indicator 2 — pack-application failures must not stamp the ledger
+# (failures CLEAR it → same-artifact retry and rollback both converge)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestImportPackConfigApplyFailures:
+    """#2040 Indicator 2: a pack-application failure 422s with the swap
+    landed but ``last_import_sha256`` NOT stamped (CLEARED) — the same
+    artifact re-imports with the REAL reason (never ``{"already": true}``
+    wedge); a fixed artifact converges; rollback to a prior artifact
+    re-swaps. Success stamps the ledger + clears the quarantine prop.
+
+    Success/failure fixtures MUST reuse ``CUSTOM_MANIFEST`` (declared ns
+    ``tenant-ops`` == yaml ``namespace: tenant-ops``) so Task 3's ns↔yaml
+    guard does not trip the fixture for the wrong reason."""
+
+    def _payload(self, manifest_yaml, *, ns: str = "tenant-ops",
+                 n_points: int = 1) -> dict:
+        payload = _build_payload(n_points=n_points, n_edges=0)
+        payload["pack_config"] = {"schema_version": 1, "packs": [
+            {"namespace": ns, "version": "0.1.0", "activated": True,
+             "yaml": manifest_yaml}]}
+        return payload
+
+    def test_invalid_manifest_422_ledger_clear_retryable(self, sb_client,
+                                                         as_user, capture_audit):
+        """Invalid custom-manifest yaml → 422 "invalid YAML" AFTER the swap
+        (the pack upsert fails post-restore) with the ledger CLEARED: re-
+        import of the same artifact 422s again with the real reason (never
+        ``already``)."""
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = self._payload("namespace: [broken")
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "invalid YAML" in r.json()["detail"]
+        assert any(e["operation"] == "quarantined_import" for e in capture_audit)
+        # swap LANDED (pack failure is post-swap) but ledger NOT stamped
+        assert _counts(db_path)["ids"] == ["pt-0"]
+        row = fake.tables["teams"][0]
+        assert not row.get("last_import_sha256")  # cleared / never stamped
+        expected = hashlib.sha256(_canonical(payload)).hexdigest()
+        assert row.get("last_import_quarantined_sha256") == expected
+        # same-artifact retry → 422 again with the real reason (never already)
+        r2 = _post_import(tc, artifact, key)
+        assert r2.status_code == 422, r2.text
+        assert "invalid YAML" in r2.json()["detail"]
+        assert r2.json() == r.json() or "already" not in r2.text
+
+    def test_unknown_starter_422_ledger_clear_retryable(self, sb_client,
+                                                        as_user):
+        """Unknown starter reference (yaml null, ns not in starters) → 422 +
+        ledger clear; the same artifact re-422s (never already)."""
+        tc, fake, db_path = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = self._payload(None, ns="not-a-real-pack")
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "unknown starter pack" in r.json()["detail"]
+        assert _counts(db_path)["ids"] == ["pt-0"]
+        assert not fake.tables["teams"][0].get("last_import_sha256")
+        r2 = _post_import(tc, artifact, key)
+        assert r2.status_code == 422, r2.text
+        assert "unknown starter pack" in r2.json()["detail"]
+
+    def test_deeply_nested_manifest_yaml_422_not_500(self, sb_client,
+                                                     as_user):
+        """Deeply-nested payload-controlled yaml → 422 (clean validation
+        failure via the Task 4 RecursionError catch — REQUIRES Task 4), NOT a
+        500; ledger clear."""
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = self._payload("{" * 1500 + "}" * 1500)
+        artifact = _build_artifact(payload, key)
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "nesting too deep" in r.json()["detail"]
+        assert not fake.tables["teams"][0].get("last_import_sha256")
+
+    def test_rollback_prior_artifact_after_pack_failure(self, sb_client,
+                                                        as_user):
+        """Import A (200, stamped A) → import B broken (422, ledger CLEARED
+        immediately after the 422) → re-import A → 200 ``imported: true``
+        (RE-SWAP, not ``already``) — the rollback-to-prior-artifact path
+        converges."""
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload_a = self._payload(_CUSTOM_MANIFEST, n_points=1)
+        artifact_a = _build_artifact(payload_a, key)
+        r_a = _post_import(tc, artifact_a, key)
+        assert r_a.status_code == 200, r_a.text
+        assert r_a.json()["imported"] is True
+        sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
+        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        # B: broken pack config (invalid manifest) — same key, new sha
+        payload_b = self._payload("namespace: [broken", n_points=2)
+        artifact_b = _build_artifact(payload_b, key)
+        r_b = _post_import(tc, artifact_b, key)
+        assert r_b.status_code == 422, r_b.text
+        assert "invalid YAML" in r_b.json()["detail"]
+        # ledger CLEARED (distinguishes clear-from-reorder-only: B's sha is
+        # NOT what sits in last_import_sha256 — it must be falsy)
+        row = fake.tables["teams"][0]
+        assert not row.get("last_import_sha256")  # cleared, not A and not B
+        # re-import A → RE-SWAP (imported true), not already
+        r_a2 = _post_import(tc, artifact_a, key)
+        assert r_a2.status_code == 200, r_a2.text
+        assert r_a2.json()["imported"] is True
+        assert r_a2.json()["already"] is False
+        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+
+    def test_clear_path_stamp_failure_still_422(self, sb_client, as_user,
+                                                monkeypatch, caplog):
+        """The pack-failure ledger CLEAR is best-effort (try/except →
+        warning): if the clear stamp raises (control-plane blip), the import
+        still 422s (not 500) and the retry still 422s (quarantine
+        consultation keeps the already-fast-path off)."""
+        import logging
+
+        real_stamp = ha_mod._stamp_import_prop
+
+        def _boom(source, team_id, prop, value):
+            if prop == "last_import_sha256" and value == "":
+                raise RuntimeError("simulated clear failure")
+            return real_stamp(source, team_id, prop, value)
+
+        monkeypatch.setattr(ha_mod, "_stamp_import_prop", _boom)
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = self._payload("namespace: [broken")
+        artifact = _build_artifact(payload, key)
+        with caplog.at_level(logging.WARNING, logger="tortoise.hosted_api"):
+            r = _post_import(tc, artifact, key)
+        assert r.status_code == 422, r.text
+        assert "invalid YAML" in r.json()["detail"]
+        assert any("ledger" in rec.message.lower() for rec in caplog.records)
+        # retry still 422s (quarantine consultation) — never already
+        r2 = _post_import(tc, artifact, key)
+        assert r2.status_code == 422, r2.text
+
+    def test_same_sha_fail_then_success_returns_already(self, sb_client,
+                                                        as_user, monkeypatch):
+        """Sticky-quarantine regression: fail-then-succeed on the SAME sha
+        (transient apply failure then fixed env) → the success clears the
+        quarantine prop, so a THIRD import returns ``already: true`` (not a
+        perpetual re-swap loop)."""
+        real_apply = ha_mod._apply_import_pack_config
+        state = {"calls": 0}
+
+        def _flaky(sdk, payload):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise ValueError("transient pack env failure")
+            return real_apply(sdk, payload)
+
+        monkeypatch.setattr(ha_mod, "_apply_import_pack_config", _flaky)
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = self._payload(_CUSTOM_MANIFEST)
+        artifact = _build_artifact(payload, key)
+        sha = hashlib.sha256(_canonical(payload)).hexdigest()
+        # 1: transient apply failure → 422, quarantined
+        r1 = _post_import(tc, artifact, key)
+        assert r1.status_code == 422, r1.text
+        assert "transient pack env failure" in r1.json()["detail"]
+        assert fake.tables["teams"][0].get("last_import_quarantined_sha256") == sha
+        # 2: same sha, env fixed → 200 imported; quarantine cleared
+        r2 = _post_import(tc, artifact, key)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["imported"] is True
+        row = fake.tables["teams"][0]
+        assert row.get("last_import_sha256") == sha
+        assert not row.get("last_import_quarantined_sha256")
+        # 3: same sha → already (quarantine consultation passes)
+        r3 = _post_import(tc, artifact, key)
+        assert r3.status_code == 200, r3.text
+        assert r3.json()["already"] is True
+
+    def test_registry_mode_clear_stamps_empty(self, tmp_path):
+        """Registry-mode ``_stamp_import_prop`` clear: the SET path must store
+        the "" sentinel verbatim on the Team node (the clear is
+        falsy-safe for every ledger consumer)."""
+        from tortoise.hosted_api import _stamp_import_prop
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(db_path=str(tmp_path / "reg.db"),
+                          namespace="registry")
+        try:
+            g = sdk._get_registry()
+            g.query("CREATE (t:Team {id:$id})", params={"id": TEAM_ID})
+            _stamp_import_prop(g, TEAM_ID, "last_import_sha256", "")
+            rows = g.query(
+                "MATCH (t:Team {id:$id}) RETURN t.last_import_sha256",
+                params={"id": TEAM_ID},
+            )
+            assert rows.result_set[0][0] == ""
+        finally:
+            sdk.close()
+
+    def test_import_with_pack_config_success_ledger_stamped(self, sb_client,
+                                                            as_user):
+        """Well-formed pack_config + valid manifest → 200; ledger stamped;
+        quarantine prop cleared; re-import ``already: true``."""
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = self._payload(_CUSTOM_MANIFEST)
+        artifact = _build_artifact(payload, key)
+        sha = hashlib.sha256(_canonical(payload)).hexdigest()
+        r = _post_import(tc, artifact, key)
+        assert r.status_code == 200, r.text
+        assert r.json()["imported"] is True
+        row = fake.tables["teams"][0]
+        assert row.get("last_import_sha256") == sha
+        assert not row.get("last_import_quarantined_sha256")
+        r2 = _post_import(tc, artifact, key)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["already"] is True
+
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Happy path (S5) — temp→verify→swap; counts + Point IDs match; audited
 # ═══════════════════════════════════════════════════════════════════════════
 

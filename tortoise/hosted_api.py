@@ -7630,7 +7630,7 @@ async def export_team(team_id: str, request: Request,
 # (produced by the export CLI, #1388) into the team graph: owner-only auth,
 # streaming size cap, per-IP rate limit, fail-closed validation chain
 # (format → blob sha256 → key fingerprint → decrypt → payload sha256 →
-# counts), then restore into a TEMP graph → verify → atomic swap via the
+# counts → pack_config shape), then restore into a TEMP graph → verify → atomic swap via the
 # shared ``_restore_into_temp_verify_swap`` helper (extracted from
 # ``restore_backup``). Any verify/restore failure quarantines the artifact
 # (audit + ``last_import_quarantined_sha256``) — the live graph is NEVER
@@ -7798,6 +7798,55 @@ def _split_import_artifact(blob: bytes) -> tuple[dict, bytes]:
     return header, enc_blob
 
 
+def _pack_config_shape_error(pc) -> str | None:
+    """#2040: shared ``pack_config`` legality matrix — single source of truth.
+
+    Check order pinned: dict → schema_version → packs → entry → ns → yaml.
+    Returns a human-readable error string for the FIRST violation (the check
+    order matters — an operator must get the earliest broken contract), or
+    ``None`` when the shape is legal. Used by BOTH the import envelope gate
+    (pre-restore fail-closed 422) and ``_apply_import_pack_config`` (ValueError
+    drift-defense for direct callers) so the matrix cannot diverge between
+    the two sites.
+
+    Legal families: absent/``None`` pack_config (pre-v1.1 artifacts have no
+    pack_config key — ``payload.get("pack_config")`` yields ``None`` for both
+    absent and explicit-null); ``packs: []``; well-formed entries incl. int
+    ``version``, ``activated: "anything"``, unknown keys, and yaml
+    absent/``None``. ``version``/``activated``/unknown keys are unconstrained;
+    entry-level messages interpolate the concrete index + offending type.
+    """
+    if pc is None:
+        return None  # absent/None pack_config is LEGAL (pre-v1.1 artifacts)
+    if not isinstance(pc, dict):
+        return "pack_config must be an object"
+    schema_version = pc.get("schema_version")
+    if (not isinstance(schema_version, int) or isinstance(schema_version, bool)
+            or schema_version != 1):
+        return "pack_config schema_version must be 1"
+    if "packs" not in pc:
+        return "pack_config packs is required and must be a list"
+    packs = pc.get("packs")
+    if not isinstance(packs, list):
+        return "pack_config packs must be a list"
+    for i, pack in enumerate(packs):
+        if not isinstance(pack, dict):
+            return f"pack_config packs[{i}] must be an object"
+        ns = pack.get("namespace")
+        if not isinstance(ns, str) or not ns.strip():
+            return (f"pack_config packs[{i}] must declare a non-empty string "
+                    "namespace")
+        yaml_text = pack.get("yaml")
+        if yaml_text is not None and not (
+                isinstance(yaml_text, str) and yaml_text):
+            if yaml_text == "":
+                return (f"pack_config packs[{i}] yaml must be a non-empty "
+                        "string or null")
+            return (f"pack_config packs[{i}] yaml must be a non-empty string "
+                    f"or null (got {type(yaml_text).__name__})")
+    return None
+
+
 def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
     """Fail-closed validation chain (#1230 plan Task 2 — order matters):
 
@@ -7807,6 +7856,9 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
       4. decrypt the blob with the supplied key
       5. payload_sha256 (inner envelope) matches the recomputed canonical hash
       6. node_count/edge_count fields match len(nodes)/len(edges)
+      7. pack_config shape legality (#2040) — a malformed pack_config must
+         422 FAIL-CLOSED here (pre-restore, live graph untouched, ledger
+         unstamped), never a post-swap 500 / silent 200 with config dropped
 
     Accepts both artifact serializations (see ``_split_import_artifact``): the
     wire form (header line + raw blob) and the CLI form ``tortoise export``
@@ -7859,6 +7911,13 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
         raise _ImportVerifyError("payload missing nodes/edges", payload_sha)
     if payload.get("node_count") != len(nodes) or payload.get("edge_count") != len(edges):
         raise _ImportVerifyError("payload node_count/edge_count mismatch", payload_sha)
+    # #2040: shared pack_config shape gate — malformed shapes 422 fail-closed
+    # here (pre-restore: live graph untouched, last_import_sha256 unstamped).
+    # Single source of truth: the same validator drives _apply_import_pack_config's
+    # ValueError drift-defense, so the matrix cannot diverge between the sites.
+    pc_err = _pack_config_shape_error(payload.get("pack_config"))
+    if pc_err is not None:
+        raise _ImportVerifyError(pc_err, payload_sha)
     return {
         "header": header,
         "inner": inner,
@@ -7939,22 +7998,48 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       hoisted pre-restore call in the import flow already ran this check on
       the same payload (same sticky process-global registry → it cannot
       diverge).
+
+    #2040 defense role: the SHARED ``_pack_config_shape_error`` validator
+    runs first (single source of truth with the envelope gate — the matrix
+    cannot drift between the two sites; a malformed shape raises ValueError,
+    422-class, instead of crashing AttributeError → 500 or silently
+    no-opping), and a declared pack namespace that disagrees with its
+    manifest's yaml namespace fails LOUDLY pre-write (no stray residue).
     """
     from tortoise.domain_loader import _get_registry
-    from tortoise.pack_manifest_store import upsert_tenant_manifest
+    from tortoise.pack_manifest_store import (
+        upsert_tenant_manifest,
+        validate_manifest,
+    )
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
 
     pc = payload.get("pack_config")
     if pc is None:
         _check_foreign_kinds(payload)
         return
-    packs = pc.get("packs", []) if isinstance(pc, dict) else []
+    # #2040: shared shape gate — malformed shapes raise ValueError (drift-
+    # locked to the envelope's pre-restore 422; direct callers cannot bypass).
+    pc_err = _pack_config_shape_error(pc)
+    if pc_err is not None:
+        raise ValueError(pc_err)
+    packs = pc.get("packs", [])
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
             continue
         yaml_text = pack.get("yaml")
         if yaml_text:
+            # #2040 pre-write ns↔yaml guard: validate first and compare the
+            # manifest's yaml-declared namespace vs the declared one BEFORE
+            # any upsert — a crafted mismatch must fail loudly with zero
+            # residue. The ok-ness check is deliberately NOT duplicated:
+            # upsert_tenant_manifest re-validates unconditionally before any
+            # graph write with the identical message + zero residue.
+            result = validate_manifest(yaml_text)
+            if result.ok and result.namespace != ns:
+                raise ValueError(
+                    f"pack_config pack namespace {ns!r} does not match "
+                    f"manifest namespace {result.namespace!r}")
             # Validated upsert — ValueError (invalid manifest) quarantines.
             upsert_tenant_manifest(sdk, yaml_text)
         else:
@@ -8002,6 +8087,12 @@ def _check_foreign_kinds(payload: dict) -> None:
     graphs whose custom kinds have no PackInstall records); (c) v1.1 whose
     usable packs do NOT cover every namespaced kind in the dump
     (partial/orphaned pack state). Each gets a distinct quarantine reason.
+    #2040: the envelope gate now rejects malformed pack_config SHAPES
+    (non-dict pc, non-list/absent packs, non-dict entries, bad ns/yaml)
+    PRE-RESTORE in _validate_import_envelope — so the class-(b) path above
+    covers ONLY the legal empty-`packs: []` shape from the endpoint; the
+    audit-reason taxonomy must not mislead operators into remediating a
+    shape error here.
 
     Documented boundaries: (a) only NAMESPACED foreign kinds are detectable —
     legacy un-namespaced pack kinds are indistinguishable from core vocab and
@@ -8083,6 +8174,9 @@ def _check_foreign_kinds(payload: dict) -> None:
                 "lost; re-export with a newer tortoise version")
         if not isinstance(pc, dict) or not isinstance(pc.get("packs"), list) \
                 or not pc.get("packs"):
+            # #2040: malformed shapes (non-dict pc, non-list packs, non-dict
+            # entries, bad ns/yaml) are rejected pre-restore by the envelope
+            # gate — this branch is the LEGAL empty-`packs: []` shape only.
             raise ValueError(
                 "pack_config declares no packs but the artifact references "
                 f"unknown pack kinds {listed} — the vocabulary "
@@ -8129,6 +8223,12 @@ async def import_team(team_id: str, request: Request,
     name is NOT matched server-side (import-mode override, logged) — cross-
     team isolation is enforced by auth. Re-import of the same payload sha256
     → 200 {"imported": false, "already": true}. Runs on a worker thread.
+
+    #2040 post-swap carve-out: ``last_import_sha256`` means "fully applied
+    incl. vocabulary" — the stamp moves AFTER successful pack application,
+    and a pack failure CLEARS it ("" sentinel) so failed imports stay
+    retryable/rollback-able; a pack-application failure 422s AFTER the swap
+    (the graph holds the restored dump, the vocabulary is not live).
     """
     await _check_sensitive_op_rate_limit(request, "import")
     team_node = await _team_node(team_id)
@@ -8169,9 +8269,16 @@ async def import_team(team_id: str, request: Request,
     lock = await _team_restore_lock(team_id)
     async with lock:
         # Idempotency ledger (re-read inside the lock — a concurrent import
-        # may have stamped the ledger while we validated).
+        # may have stamped the ledger while we validated). #2040: the
+        # already-fast-path ALSO requires the sha to NOT be quarantined — a
+        # quarantined sha re-runs validation (422s with the real reason if
+        # still broken, or succeeds and clears), so a same-artifact retry
+        # stays retryable even if the post-failure clear failed (control-
+        # plane blip). The success path is unaffected given the quarantine
+        # clear below.
         fresh = await _team_node(team_id)
-        if fresh is not None and fresh.get("last_import_sha256") == sha:
+        if fresh is not None and fresh.get("last_import_sha256") == sha \
+                and fresh.get("last_import_quarantined_sha256") != sha:
             await _async_audit(
                 request, team_id, "team_import",
                 resource_type="team", resource_id=team_id,
@@ -8246,18 +8353,15 @@ async def import_team(team_id: str, request: Request,
                     "index rebuild after import failed for team %s: %s", team_id, e
                 )
 
-            # Idempotency ledger stamp — best-effort; a crash between the swap
-            # and this stamp is the documented double-import convergence case
-            # (#1230: idempotency is convergence, not strict-once).
-            # #2040: this stamp runs BEFORE _apply_import_pack_config, so a
-            # pack-application failure (invalid manifest, unknown starter)
-            # 422s with the ledger already stamped → re-import converges to
-            # `already` with the vocabulary never applied. Deferred to #2040
-            # (pre-existing #1936 ordering); the #2028 guard call above is
-            # pre-restore and does not stamp.
-            await asyncio.to_thread(
-                _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
-            )
+            # #2040 ordering: the stamp runs AFTER successful pack
+            # application — a pack-application failure (invalid manifest,
+            # unknown starter, deeply-nested yaml) must NOT stamp
+            # last_import_sha256 (the except block below clears it), so the
+            # same-artifact retry and rollback-to-prior-artifact both
+            # converge (never the pre-fix `already` wedge with the vocabulary
+            # never applied). The pre-restore #2028 guard call above does not
+            # stamp.
+            #
             # #1936: apply the payload's pack config (custom manifests +
             # starter activations) so the migrated vocabulary is live. Any
             # pack failure quarantines the import (fail-loudly, never silent
@@ -8268,7 +8372,48 @@ async def import_team(team_id: str, request: Request,
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
+                # #2040: CLEAR the success ledger so the failed import is
+                # retryable (same-artifact retry re-422s with the real
+                # reason; rollback re-swaps) — never the `already` wedge.
+                # Best-effort: a control-plane blip here must not mask the
+                # 422 (the in-lock quarantine consultation keeps the
+                # already-fast-path off even if the clear failed).
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_sha256", "",
+                    )
+                except Exception as ex:
+                    _logger.warning(
+                        "import ledger clear on pack failure failed for "
+                        "team %s: %s", team_id, ex,
+                    )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
+            # Idempotency ledger stamp — best-effort; a crash between the swap
+            # and this stamp is the documented double-import convergence case
+            # (#1230: idempotency is convergence, not strict-once). Runs only
+            # after successful pack application (#2040).
+            await asyncio.to_thread(
+                _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
+            )
+            # #2040: clear the quarantine prop on SUCCESS (best-effort — a
+            # control-plane blip must not fail an already-durable import).
+            # REQUIRED: last_import_quarantined_sha256 is sticky (only
+            # _quarantine_import writes it, never cleared) — without this
+            # clear, a sha that was quarantined then succeeded would have
+            # BOTH props == sha, so the in-lock short-circuit's quarantine
+            # consultation would block `already` forever (every re-import
+            # re-swaps).
+            try:
+                await asyncio.to_thread(
+                    _stamp_import_prop, cp_source, team_id,
+                    "last_import_quarantined_sha256", "",
+                )
+            except Exception as e:
+                _logger.warning(
+                    "quarantine-ledger clear after import failed for team %s: %s",
+                    team_id, e,
+                )
             await _async_audit(
                 request, team_id, "team_import",
                 resource_type="team", resource_id=team_id,
