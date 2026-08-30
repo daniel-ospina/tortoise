@@ -224,6 +224,9 @@ class TestGitHubRepos:
         assert body["connected"] is False
         assert body["org"] is None
         assert body["repos"] == []
+        # #1893 (code-review P1): a CLEAN disconnect carries NO resolve_error
+        # flag — the flag is a positive-only resolve-failure signal.
+        assert "resolve_error" not in body
 
     def test_repos_lists_short_names(self, client, monkeypatch):
         import tortoise.hosted_api as ha
@@ -246,6 +249,40 @@ class TestGitHubRepos:
         # full_names are stripped to SHORT names (the /v1/index/* endpoints
         # already re-add the org/ prefix from the stored org).
         assert body["repos"] == ["repo1", "repo2", "solo-repo"]
+
+    def test_repos_decrypt_failure_flagged(self, client, monkeypatch):
+        """#1893 (code-review P1): a stored token that fails to decrypt returns
+        connected:false + resolve_error:true — a resolve-class failure, never
+        evidence of an empty org (pruning the persisted scope on it would
+        clobber the selection)."""
+        import tortoise.hosted_api as ha
+        # Corrupt stored credentials so decrypt_token raises ValueError.
+        monkeypatch.setattr(ha, "_github_credentials",
+                            lambda team_id: ("not-a-valid-encrypted-token", "acme"))
+
+        r = client.get("/v1/onboarding/github/repos")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["connected"] is False
+        assert body["repos"] == []
+        assert body.get("resolve_error") is True
+
+    def test_repos_decrypt_failure_flagged(self, client, monkeypatch):
+        """#1893 (code-review P1): a stored token that fails to decrypt returns
+        connected:false + resolve_error:true — a resolve-class failure, never
+        evidence of an empty org (pruning the persisted scope on it would
+        clobber the selection)."""
+        import tortoise.hosted_api as ha
+        # Corrupt stored credentials so decrypt_token raises ValueError.
+        monkeypatch.setattr(ha, "_github_credentials",
+                            lambda team_id: ("not-a-valid-encrypted-token", "acme"))
+
+        r = client.get("/v1/onboarding/github/repos")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["connected"] is False
+        assert body["repos"] == []
+        assert body.get("resolve_error") is True
 
     def test_repos_resolve_failure_flagged(self, client, monkeypatch):
         """#1893 (code-review P1): a server-side resolve failure returns 200

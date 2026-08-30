@@ -11235,6 +11235,13 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     Returns SHORT repo names (owner prefix stripped) — the /v1/index/*
     endpoints already construct ``f"{org}/{repo}"`` from the short name, so
     sending a full_name would double-prefix the org.
+
+    #1893 (code-review P1): any response whose repos are EMPTY because of a
+    FAILURE (resolve exception, decrypt failure) carries ``resolve_error:
+    true`` so the dashboard never treats a failed fetch as a genuinely-empty
+    org (pruning the persisted scope on it would clobber the selection).
+    ``connected: false`` + ``resolve_error`` is the "stored-but-now-failing"
+    shape; a clean disconnect returns connected:false WITHOUT the flag.
     """
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
@@ -11243,7 +11250,10 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     try:
         token = decrypt_token(encrypted)
     except ValueError:
-        return {"connected": False, "org": None, "repos": []}
+        # decrypt failure = the stored token is unusable — a resolve-class
+        # failure, not evidence of an empty org (the dashboard gates
+        # hydration on this flag exactly like a resolve exception).
+        return {"connected": False, "org": None, "repos": [], "resolve_error": True}
     org = await _heal_github_org(team["team_id"], encrypted, org)
     from tortoise.indexer.github_indexer import GitHubIndexer
     indexer = GitHubIndexer(token)
