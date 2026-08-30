@@ -1,0 +1,125 @@
+name: ai-review-gate
+
+# Hard GitHub-enforced AI review merge gate (#2055).
+# Branch protection requires the `ai-review-gate` status check on every PR to
+# main. It passes only when the PR body carries a FRESH, SIGNED AI-review
+# evidence marker produced by record-review.sh:
+#   review recorded: reviews/<PR>.json verdict=clean @ <full-sha> (<owner/repo>) sig=<hmac>
+# The signature is HMAC-SHA256 over the marker text, keyed by the
+# AI_REVIEW_GATE_KEY repo secret (the agent machine holds the same key at
+# ~/.pi/agent/.ai-review-gate-key). A marker without a valid signature cannot
+# pass, so the gate cannot be satisfied by editing the PR body.
+#
+# Provenance: record-review.sh is invoked by the code-review skill only after
+# its review gate converges clean, so a green check means a recorded AI review
+# exists for exactly this head sha (full 40-char, bound into the signed text).
+# Stale evidence (head moved after review) is rejected, forcing a re-record on
+# the final head.
+#
+# Security: runs via pull_request_target so the workflow file is always the
+# trusted main-branch copy. It NEVER checks out PR code and NEVER executes
+# anything from the PR — it only reads event-payload env vars and the PR body
+# via the REST API, then computes an HMAC with the repo secret. No
+# code-injection or secret-exfiltration vector.
+#
+# ⛔ FUTURE EDITORS: never add `if:` conditions, path filters, or `needs:` to
+# this job. A SKIPPED job reports as Success and would silently pass the
+# required check without any review evidence. This job must always run and
+# always evaluate the evidence itself.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: ai-review-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  ai-review-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate signed AI review evidence in PR body
+        shell: bash
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO_NAME: ${{ github.event.repository.full_name }}
+          GATE_SECRET: ${{ secrets.AI_REVIEW_GATE_KEY }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GATE_SECRET:-}" ]; then
+            echo "::error::AI_REVIEW_GATE_KEY repo secret is not configured — the gate cannot verify signatures."
+            exit 1
+          fi
+          # Normalize the key (matches the producer's key-file load).
+          GATE_SECRET="$(printf '%s' "$GATE_SECRET" | tr -d '[:space:]')"
+
+          # Full PR body. The env-var form truncates at ~48KB — fetch via the
+          # REST API (pull-requests: read) and fall back to the env var.
+          body="${PR_BODY:-}"
+          fetched="$(gh api "repos/${REPO_NAME}/pulls/${PR_NUMBER}" --jq .body 2>/dev/null || true)"
+          [ -n "$fetched" ] && [ "$fetched" != "null" ] && body="$fetched"
+
+          # Fresh marker = one whose recorded FULL sha matches the current head,
+          # for this repo, correctly signed. Escape ERE metachars in the repo
+          # name before interpolating into the pattern.
+          expected="${HEAD_SHA}"
+          repo_esc="$(printf '%s' "$REPO_NAME" | sed 's/[.[\*^$()+?{|]/\\&/g')"
+
+          # Collect ALL candidate markers for this PR at this head sha and pass
+          # if ANY has a valid signature (robust to decoy lines and re-review
+          # accumulation).
+          candidates="$(printf '%s\n' "$body" \
+            | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ ${expected} \(${repo_esc}\) sig=[0-9a-f]{64}$" \
+            || true)"
+          candidates="$(printf '%s\n' "$candidates" | sed '/^$/d')"
+
+          if [ -z "$candidates" ]; then
+            latest="$(printf '%s\n' "$body" \
+              | grep -E "^review recorded: reviews/${PR_NUMBER}\.json verdict=clean(-micro)? @ " \
+              | tail -n 1 || true)"
+            if [ -z "$latest" ]; then
+              echo "::error::No AI review evidence found in PR #${PR_NUMBER} body."
+              echo "::error::The code-review gate requires a recorded AI review. Run:"
+              echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+            else
+              latest_sha="$(printf '%s' "$latest" | sed -E 's/.*@ ([0-9a-f]{40}) .*/\1/')"
+              if [ "$latest_sha" = "$expected" ]; then
+                echo "::error::AI review evidence for the current head exists but is not signed or not for ${REPO_NAME}."
+                echo "::error::Re-record with a record-review.sh that has AI_REVIEW_GATE_KEY configured:"
+                echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              else
+                echo "::error::AI review evidence is stale: latest recorded ${latest_sha} — expected ${expected}."
+                echo "::error::Re-run the code-review skill after the latest push, then re-record:"
+                echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+              fi
+            fi
+            exit 1
+          fi
+
+          marker=""
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+            sig="$(printf '%s' "${line##* sig=}")"
+            computed="$(printf '%s' "${line% sig=*}" | openssl dgst -sha256 -hmac "$GATE_SECRET" | awk '{print $NF}')"
+            if [ "$computed" = "$sig" ]; then
+              marker="$line"
+              break
+            fi
+          done <<< "$candidates"
+
+          if [ -z "$marker" ]; then
+            echo "::error::AI review marker signature mismatch — none of the markers for the current head verify."
+            echo "::error::Evidence was not produced by record-review.sh with the matching key. Re-run the code-review skill and re-record:"
+            echo "::error::  record-review.sh ${PR_NUMBER} ${HEAD_SHA} clean ${REPO_NAME}"
+            exit 1
+          fi
+
+          echo "AI review gate passed: ${marker% sig=*}"
