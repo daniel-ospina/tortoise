@@ -321,6 +321,11 @@ MALFORMED_PC_CASES = [
     # (7) yaml empty-string case
     ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": ""}]},
      "yaml must be a non-empty string or null"),
+    # (7) yaml whitespace-only → same empty-str message (pre-restore shape
+    # error, consistent with the ns `" "` handling — a guaranteed-fail
+    # artifact must not 422 post-swap with a misleading reason)
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": " "}]},
+     "yaml must be a non-empty string or null"),
     # (7) yaml non-str (typed) case
     ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": 0}]},
      "yaml must be a non-empty string or null (got int)"),

@@ -7838,8 +7838,8 @@ def _pack_config_shape_error(pc) -> str | None:
                     "namespace")
         yaml_text = pack.get("yaml")
         if yaml_text is not None and not (
-                isinstance(yaml_text, str) and yaml_text):
-            if yaml_text == "":
+                isinstance(yaml_text, str) and yaml_text.strip()):
+            if isinstance(yaml_text, str):  # "" or whitespace-only
                 return (f"pack_config packs[{i}] yaml must be a non-empty "
                         "string or null")
             return (f"pack_config packs[{i}] yaml must be a non-empty string "
@@ -7918,6 +7918,33 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
     pc_err = _pack_config_shape_error(payload.get("pack_config"))
     if pc_err is not None:
         raise _ImportVerifyError(pc_err, payload_sha)
+    # #2040 code-review: pre-restore ns↔yaml consistency — a declared pack
+    # namespace that disagrees with its manifest's yaml-declared namespace is
+    # a crafted artifact (the exporter reads both from the same
+    # PackInstall/PackManifest row, so legit exports cannot diverge). Reject
+    # it HERE so the 422 is pre-restore (live graph untouched), not a
+    # post-swap ValueError from _apply_import_pack_config. Parse the yaml
+    # namespace cheaply (safe_load only — no tempdir registry; a malformed
+    # yaml defers to apply-time validation, which owns the precise error).
+    pc = payload.get("pack_config")
+    if isinstance(pc, dict):
+        for pack in pc.get("packs") or []:
+            if not isinstance(pack, dict):
+                continue  # shape gate already rejected this class
+            ns = pack.get("namespace")
+            yaml_text = pack.get("yaml")
+            if not isinstance(ns, str) or not isinstance(yaml_text, str):
+                continue
+            try:
+                import yaml as _yaml
+                raw = _yaml.safe_load(yaml_text)
+            except Exception:  # defer to apply-time validation
+                continue
+            if isinstance(raw, dict) and isinstance(raw.get("namespace"), str) \
+                    and raw["namespace"] != ns:
+                raise _ImportVerifyError(
+                    f"pack_config pack namespace {ns!r} does not match "
+                    f"manifest namespace {raw['namespace']!r}", payload_sha)
     return {
         "header": header,
         "inner": inner,
@@ -8270,15 +8297,24 @@ async def import_team(team_id: str, request: Request,
     async with lock:
         # Idempotency ledger (re-read inside the lock — a concurrent import
         # may have stamped the ledger while we validated). #2040: the
-        # already-fast-path ALSO requires the sha to NOT be quarantined — a
-        # quarantined sha re-runs validation (422s with the real reason if
-        # still broken, or succeeds and clears), so a same-artifact retry
-        # stays retryable even if the post-failure clear failed (control-
-        # plane blip). The success path is unaffected given the quarantine
-        # clear below.
+        # already-fast-path ALSO requires the quarantine prop to be empty OR
+        # equal to this sha. Rationale:
+        #  - Q != sha AND non-empty → SOME other sha failed since the last
+        #    success; the ledger may hold a STALE prior sha (a pack-failure
+        #    ledger-clear blip), so `already` could silently no-op a rollback
+        #    while the live graph holds the failed artifact's dump. Refuse
+        #    `already` → the re-import re-swaps (documented destructive-retry
+        #    convergence model).
+        #  - Q == sha → this sha was quarantined then fully applied, and the
+        #    success-path quarantine clear failed (persistent control-plane
+        #    write failure) — L==sha proves the import fully applied (the
+        #    stamp runs only after successful pack application), so `already`
+        #    is correct and the re-swap loop is broken (each re-import would
+        #    otherwise destructively re-swap a fully-applied sha forever).
         fresh = await _team_node(team_id)
         if fresh is not None and fresh.get("last_import_sha256") == sha \
-                and fresh.get("last_import_quarantined_sha256") != sha:
+                and (not fresh.get("last_import_quarantined_sha256")
+                     or fresh.get("last_import_quarantined_sha256") == sha):
             await _async_audit(
                 request, team_id, "team_import",
                 resource_type="team", resource_id=team_id,
@@ -8389,6 +8425,27 @@ async def import_team(team_id: str, request: Request,
                         "team %s: %s", team_id, ex,
                     )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
+            except (OSError, RuntimeError) as e:
+                # #2040 code-review: a server-side pack-apply failure
+                # (registry/query/tempdir — NOT an artifact defect) must not
+                # escape as an unquarantined 500 with the ledger left
+                # stale. Mirror the swap-failure handling: 503 (retryable)
+                # + quarantine + ledger clear so the retry converges and the
+                # audit trail records the attempt.
+                await _quarantine_import(
+                    request, team_id, user, sha256=sha, reason=str(e)
+                )
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_sha256", "",
+                    )
+                except Exception as ex:
+                    _logger.warning(
+                        "import ledger clear on pack failure failed for "
+                        "team %s: %s", team_id, ex,
+                    )
+                raise HTTPException(status_code=503, detail=f"Import failed: {e}")  # noqa: B904
             # Idempotency ledger stamp — best-effort; a crash between the swap
             # and this stamp is the documented double-import convergence case
             # (#1230: idempotency is convergence, not strict-once). Runs only

@@ -956,6 +956,104 @@ class TestImportPackConfigApplyFailures:
         assert r3.status_code == 200, r3.text
         assert r3.json()["already"] is True
 
+    def test_success_clear_failure_reimport_still_already(self, sb_client,
+                                                          as_user, monkeypatch):
+        """Success-path quarantine-clear failure (persistent control-plane
+        write failure) leaves BOTH props == sha. The in-lock consultation
+        must still return ``already`` (L==sha proves full application — the
+        stamp runs only after pack application succeeds), breaking the
+        destructive re-swap loop. (Reviewer finding: without the
+        ``Q == sha`` allowance, every re-import of a fully-applied sha
+        re-swaps forever.)
+
+        Scenario: fail-then-succeed on the same sha with the SUCCESS-path
+        quarantine clear broken — first import quarantines (Q=sha), second
+        import succeeds (L=sha) but the clear fails → Q stays sha."""
+        real_stamp = ha_mod._stamp_import_prop
+
+        def _clear_boom(source, team_id, prop, value):
+            if prop == "last_import_quarantined_sha256" and value == "":
+                raise RuntimeError("simulated persistent clear failure")
+            return real_stamp(source, team_id, prop, value)
+
+        monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
+        # Transient apply failure on the FIRST import (fail-then-succeed).
+        real_apply = ha_mod._apply_import_pack_config
+        state = {"calls": 0}
+
+        def _flaky(sdk, payload):
+            state["calls"] += 1
+            if state["calls"] == 1:
+                raise ValueError("transient pack env failure")
+            return real_apply(sdk, payload)
+
+        monkeypatch.setattr(ha_mod, "_apply_import_pack_config", _flaky)
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        payload = self._payload(_CUSTOM_MANIFEST)
+        artifact = _build_artifact(payload, key)
+        sha = hashlib.sha256(_canonical(payload)).hexdigest()
+        # 1: transient apply failure → 422, quarantine stamped (Q=sha)
+        r1 = _post_import(tc, artifact, key)
+        assert r1.status_code == 422, r1.text
+        assert fake.tables["teams"][0].get("last_import_quarantined_sha256") == sha
+        # 2: same sha, env fixed → 200 imported; L=sha, clear FAILS → Q stays sha
+        r2 = _post_import(tc, artifact, key)
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["imported"] is True
+        row = fake.tables["teams"][0]
+        assert row.get("last_import_sha256") == sha
+        assert row.get("last_import_quarantined_sha256") == sha  # clear failed
+        # 3: re-import → already (L==sha AND Q==sha are both this sha — the
+        # stamp-after-apply proves the vocabulary is live; no re-swap loop)
+        r3 = _post_import(tc, artifact, key)
+        assert r3.status_code == 200, r3.text
+        assert r3.json()["already"] is True
+
+    def test_rollback_after_pack_failure_clear_blip_200(self, sb_client,
+                                                        as_user, monkeypatch):
+        """Rollback wedge (reviewer finding): import A succeeds (L=A), then
+        import B fails post-swap with the pack-failure ledger-CLEAR ALSO
+        failing (control-plane blip) → L stays STALE=A while the live graph
+        holds B's dump. Re-importing A must RE-SWAP (200 imported), not
+        short-circuit to ``already`` — the consultation refuses ``already``
+        for a non-empty quarantine of a DIFFERENT sha."""
+        real_stamp = ha_mod._stamp_import_prop
+
+        def _clear_boom(source, team_id, prop, value):
+            if prop == "last_import_sha256" and value == "":
+                raise RuntimeError("simulated ledger-clear failure")
+            return real_stamp(source, team_id, prop, value)
+
+        monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        # A: valid artifact → 200, L=A, Q cleared
+        payload_a = self._payload(_CUSTOM_MANIFEST, n_points=1)
+        artifact_a = _build_artifact(payload_a, key)
+        sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
+        r_a = _post_import(tc, artifact_a, key)
+        assert r_a.status_code == 200, r_a.text
+        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        # B: broken manifest → 422 post-swap; ledger-clear FAILS → L stays A
+        payload_b = self._payload("namespace: [broken", n_points=2)
+        artifact_b = _build_artifact(payload_b, key)
+        r_b = _post_import(tc, artifact_b, key)
+        assert r_b.status_code == 422, r_b.text
+        assert "invalid YAML" in r_b.json()["detail"]
+        row = fake.tables["teams"][0]
+        assert row.get("last_import_sha256") == sha_a  # STALE (clear failed)
+        assert row.get("last_import_quarantined_sha256") != sha_a
+        # re-import A → RE-SWAP (200 imported), NOT already (Q != A non-empty)
+        r_a2 = _post_import(tc, artifact_a, key)
+        assert r_a2.status_code == 200, r_a2.text
+        assert r_a2.json()["imported"] is True
+        assert r_a2.json()["already"] is False
+
     def test_registry_mode_clear_stamps_empty(self, tmp_path):
         """Registry-mode ``_stamp_import_prop`` clear: the SET path must store
         the "" sentinel verbatim on the Team node (the clear is
