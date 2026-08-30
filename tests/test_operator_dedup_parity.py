@@ -115,7 +115,7 @@ def test_operator_replay_with_event_input_creates_edges(s1919):
     edges (pass 2), so the Event node resolves at edge time. NO manual
     _emit_event is needed — pre-#2061 this test supplied the missing
     journal line by hand."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     pa = sdk.create_point("statement", "A")["id"]
     eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
     # create_event journals the EventRecorded automatically (#2061); then
@@ -148,7 +148,7 @@ def test_operator_live_vs_replay_edge_stats_equal(s1919):
     IDENTICAL edge_stats (operators/impl/nand/input). Pre-fix live had
     input_edges=0 while the replay produced one INPUT edge per input
     (fold-parity violation)."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
     pc = sdk.create_point("statement", "C")["id"]
@@ -170,7 +170,7 @@ def test_operator_live_vs_replay_edge_stats_equal(s1919):
 def test_operator_live_input_edge_shape_matches_replay(s1919):
     """P2-10 shape leg: the live INPUT edges carry the same (idx) property the
     replay MERGE writes — (s)-[:INPUT {idx}]->(o) per input, in input order."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
     op = sdk.create_operator("IMPL", pa, [pb])["id"]
@@ -201,7 +201,7 @@ def test_create_event_journals_event_recorded(s1919):
     _session_event_write convention. Pre-fix, create_event routed through
     _create_entity → proj.apply only (no _emit_event), so the JSONL carried
     no record of the Event and rebuild_all could not restore it."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
     journal = _read_journal(events)
     recs = [ev for ev in journal if ev.get("type") == "EventRecorded"]
@@ -220,7 +220,7 @@ def test_create_entity_event_journals_single_line(s1919):
     _create_entity Event branch, so the alias path can never double-emit.
     Caller-supplied props ride the journal AND survive the rebuild onto the
     restored node (replay persistence parity — _persist_extra_props)."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     node = sdk.create_entity(
         "event", "Board review",
         eventKind="review", status="scheduled")["node"]
@@ -274,7 +274,7 @@ def test_operator_event_input_replay_edge_stats_parity(s1919):
     never upserted the Event → _create_edges warned "input source ... does
     not resolve to an existing Point or Event — INPUT edge skipped" and the
     rebuilt graph diverged from live."""
-    events, sdk = s1919  # noqa: RUF059
+    events, sdk = s1919
     pa = sdk.create_point("statement", "A")["id"]
     pb = sdk.create_point("statement", "B")["id"]
     eid = sdk.create_event("Launch party", "sessionCaptured")["eventId"]
