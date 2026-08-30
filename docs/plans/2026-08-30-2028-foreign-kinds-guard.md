@@ -37,7 +37,7 @@ ownedBy: epistemic-team
 | Dump-native PackManifest absorption | labels/props of dump nodes | unit | self-contained manifest passes; mismatched namespace still raises |
 | Real `dump_graph` output | sdk graph → dump | unit (integration w/ embedded FalkorDB) | real-shape foreign kind raises; clean graph passes |
 | Import endpoint 422 + quarantine | hosted import API | endpoint (test_import_endpoint.py) | pre-v1.1 foreign kind → 422 + quarantine audit + live graph untouched |
-| Post-v1.1 gate (`pack_config` present) | import API | endpoint | post-v1.1 custom-pack artifact still imports 200 (guard gated off; manifest upsert) |
+| Post-v1.1 gate (covering packs) | import API | endpoint | post-v1.1 custom-pack artifact still imports 200 (guard runs; declared pack namespaces absorbed) |
 | Registry known-set | shared catalog (packs dir) | n/a — unchanged logic | determinism verified: tenant-ops ∉ catalog; starter namespaces present |
 
 ### Verification Plan
@@ -337,11 +337,11 @@ git commit -m "test(hosted): guard against real dump_graph output (#2028)"
 
     def test_import_post_v1_1_custom_pack_passthrough_200(self, sb_client,
                                                           as_user):
-        """Post-v1.1 artifact (pack_config with packs present) with a custom-
-        pack kind → guard gated off; restore + manifest upsert succeed →
-        200. Locks the gate: WITHOUT packs the same kinds 422 (see
-        test_import_pre_v1_1_foreign_kind_422 and
-        test_import_v1_1_empty_packs_foreign_kind_422); WITH them they import.
+        """Post-v1.1 artifact (pack_config declaring a covering pack) with a
+        custom-pack kind → the guard RUNS and passes because `tenant-ops` is
+        absorbed from the declared pack_config (locks the absorption, not a
+        presence gate); restore + manifest upsert succeed → 200. Contrast:
+        WITHOUT a covering pack the same kinds 422 (see the two 422 tests).
 
         No _seed_live_graph — no additional long-held holder (same pattern as
         the unskipped json-body-form / fresh-team tests)."""

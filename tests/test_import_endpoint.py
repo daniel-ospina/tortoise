@@ -653,10 +653,11 @@ class TestImportForeignKindsGuard:
 
     def test_import_post_v1_1_custom_pack_passthrough_200(self, sb_client,
                                                           as_user):
-        """Post-v1.1 artifact (pack_config present) with a custom-pack kind →
-        guard gated off (falsy-check); restore + manifest upsert succeed →
-        200. Locks the gate: WITHOUT the pack_config the same kinds 422 (see
-        test_import_pre_v1_1_foreign_kind_422); WITH it they import.
+        """Post-v1.1 artifact (pack_config declaring a covering pack) with a
+        custom-pack kind → the guard RUNS and passes because `tenant-ops` is
+        absorbed from the declared pack_config (locks the absorption, not a
+        presence gate); restore + manifest upsert succeed → 200. Contrast:
+        WITHOUT a covering pack the same kinds 422 (see the two 422 tests).
 
         No _seed_live_graph — no additional long-held holder (same pattern as
         the unskipped json-body-form / fresh-team tests)."""

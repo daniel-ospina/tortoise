@@ -223,14 +223,24 @@ class TestForeignKindsGuard:
             _check_foreign_kinds(payload)
 
     def test_malformed_packs_list_gets_accurate_reason(self):
-        """pack_config present with a truthy NON-list packs → the guard
-        still rejects foreign kinds, labeled as not-covered (not mislabeled
-        pre-v1.1) (#2028 code-review)."""
+        """pack_config present with an unusable `packs` value → the guard
+        still rejects foreign kinds without crashing, labeled as declaring no
+        usable packs (not mislabeled pre-v1.1) (#2028 code-review)."""
         from tortoise.hosted_api import _check_foreign_kinds
         payload = {"pack_config": {"schema_version": 1, "packs": "junk"},
                     "nodes": [{"dump_id": 1, "labels": ["Object"],
                                 "props": {"objectKind": "tenant-ops:contract"}}]}
-        with pytest.raises(ValueError, match="does not cover"):
+        with pytest.raises(ValueError, match="declares no packs"):
+            _check_foreign_kinds(payload)
+
+    def test_non_iterable_packs_value_no_crash(self):
+        """Truthy non-iterable `packs` (e.g. 5) must not TypeError → 500 —
+        the absorption loop guards the container shape (#2028 code-review)."""
+        from tortoise.hosted_api import _check_foreign_kinds
+        payload = {"pack_config": {"schema_version": 1, "packs": 5},
+                    "nodes": [{"dump_id": 1, "labels": ["Object"],
+                                "props": {"objectKind": "tenant-ops:contract"}}]}
+        with pytest.raises(ValueError, match="declares no packs"):
             _check_foreign_kinds(payload)
 
     def test_real_dump_graph_foreign_kind_raises(self, sdk):

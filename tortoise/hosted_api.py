@@ -7830,7 +7830,11 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       packs (yaml null) get their activation record ensured.
     - ``pack_config`` ABSENT (pre-v1.1 artifact): loud-mismatch guard — if
       the dump references namespaced kinds NOT in the shared catalog or
-      starter set, the vocabulary would be silently dropped → raise.
+      starter set, the vocabulary would be silently dropped → raise. This
+      call is retained as idempotent defense-in-depth post-#2028 — the
+      hoisted pre-restore call in the import flow already ran this check on
+      the same payload (same sticky process-global registry → it cannot
+      diverge).
     """
     from tortoise.domain_loader import _get_registry
     from tortoise.pack_manifest_store import upsert_tenant_manifest
@@ -7889,9 +7893,10 @@ def _check_foreign_kinds(payload: dict) -> None:
     silently dropped on import → raise ValueError (→ 422 quarantine).
 
     Fires for three artifact classes: (a) pre-v1.1 (no pack_config); (b)
-    v1.1 with a pack_config declaring no/malformed packs (exporter-emittable
-    for graphs whose custom kinds have no PackInstall records); (c) v1.1
-    whose declared packs do NOT cover every namespaced kind in the dump
+    v1.1 with a pack_config declaring no usable packs (absent, non-dict,
+    non-list, or empty packs — the exporter-emittable `packs: []` shape for
+    graphs whose custom kinds have no PackInstall records); (c) v1.1 whose
+    usable packs do NOT cover every namespaced kind in the dump
     (partial/orphaned pack state). Each gets a distinct quarantine reason.
 
     Documented boundaries: (a) only NAMESPACED foreign kinds are detectable —
@@ -7929,7 +7934,10 @@ def _check_foreign_kinds(payload: dict) -> None:
     # legitimately known; only namespaces in the dump but in NO source of
     # truth (catalog, starters, dump manifests, declared packs) are foreign.
     if isinstance(pc, dict):
-        for p in pc.get("packs") or []:
+        packs = pc.get("packs") or []
+        if not isinstance(packs, list):
+            packs = []  # malformed (e.g. truthy non-iterable) — no usable packs
+        for p in packs:
             if isinstance(p, dict):
                 ns = p.get("namespace")
                 if isinstance(ns, str) and ns:
@@ -7949,13 +7957,19 @@ def _check_foreign_kinds(payload: dict) -> None:
                     foreign.add(kind)
     if foreign:
         # Accurate quarantine reason per artifact class — an operator reading
-        # the audit trail must get the right remediation.
-        if not isinstance(pc, dict):
+        # the audit trail must get the right remediation. Class (a): no
+        # pack_config at all (pre-v1.1). Class (b): pack_config present but
+        # declaring NO usable packs (absent, non-dict, non-list, or empty
+        # packs — the exporter-emittable `packs: []` shape for graphs whose
+        # custom kinds have no PackInstall records). Class (c): usable packs
+        # that do not cover every kind in the dump (partial/orphaned state).
+        if pc is None:
             raise ValueError(
                 "artifact predates pack-config (v1.1) but references unknown "
                 f"pack kinds {sorted(foreign)[:5]} — the vocabulary would be "
                 "lost; re-export with a newer tortoise version")
-        if not pc.get("packs"):
+        if not isinstance(pc, dict) or not isinstance(pc.get("packs"), list) \
+                or not pc.get("packs"):
             raise ValueError(
                 "pack_config declares no packs but the artifact references "
                 f"unknown pack kinds {sorted(foreign)[:5]} — the vocabulary "
@@ -8126,7 +8140,7 @@ async def import_team(team_id: str, request: Request,
             # pack-application failure (invalid manifest, unknown starter)
             # 422s with the ledger already stamped → re-import converges to
             # `already` with the vocabulary never applied. Deferred to #2040
-            # (pre-existing #1936 ordering); the #2028 guard path below is
+            # (pre-existing #1936 ordering); the #2028 guard call above is
             # pre-restore and does not stamp.
             await asyncio.to_thread(
                 _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
