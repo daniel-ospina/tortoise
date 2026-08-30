@@ -3202,24 +3202,49 @@ async def upload_pack_manifest(
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
     idempotent MERGE + per-(graph, namespace) lock #1307).
 
-    Response matrix: no auth → 401; invalid/malformed → 422 {errors};
-    oversized (>64KB) → 413; success → 201 {activated, namespace}.
+    Response matrix: no auth → 401; request body over the wire cap
+    (~196KB — checked BEFORE any parse) → 413 "manifest request body
+    exceeds the size cap"; malformed JSON / empty body → 500; missing
+    manifest_yaml / invalid manifest → 422 {errors}; manifest over 64KB
+    → 413 "manifest exceeds 64KB"; success → 201 {activated, namespace}.
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
     team_id = team.get("team_id")
     if not team_id:
         raise HTTPException(status_code=401, detail="Authentication required")
-    body = await request.json()
-    manifest_yaml = (body or {}).get("manifest_yaml") if isinstance(body, dict) else None
-    if not manifest_yaml or not isinstance(manifest_yaml, str):
-        raise HTTPException(status_code=422,
-                            detail="missing required field: manifest_yaml")
     from tortoise.pack_manifest_store import (
         MAX_MANIFEST_BYTES,
         upsert_tenant_manifest,
         validate_manifest,
     )
+    # #2029: reject oversized request bodies BEFORE buffering/parsing them —
+    # the 64KB check below alone only fires after request.json() has buffered
+    # the entire body (memory-DoS on a tenant-authenticated surface).
+    # Content-Length is only an early-exit OPTIMIZATION, never a trust
+    # boundary: Transfer-Encoding beats Content-Length (RFC 7230 §3.3.3) and
+    # HTTP/2 has no CL framing, so the body is ALWAYS stream-read under a
+    # hard cap, mirroring _read_import_body.
+    # Wire cap = 3x the yaml cap + slack: JSON escaping doubles `"`/`\`/
+    # newlines and triples non-ASCII (ensure_ascii \uXXXX), so every valid
+    # <=64KB manifest clears the wire layers; the exact
+    # len(manifest_yaml.encode()) check below remains the authoritative gate.
+    body_cap = MAX_MANIFEST_BYTES * 3 + 4096
+    wire_detail = "manifest request body exceeds the size cap"
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            too_large = int(content_length) > body_cap
+        except ValueError:
+            too_large = False  # malformed header → the streaming cap below
+        if too_large:
+            raise HTTPException(status_code=413, detail=wire_detail)
+    raw = await _read_capped_body(request, body_cap, wire_detail)
+    body = _json.loads(raw)
+    manifest_yaml = (body or {}).get("manifest_yaml") if isinstance(body, dict) else None
+    if not manifest_yaml or not isinstance(manifest_yaml, str):
+        raise HTTPException(status_code=422,
+                            detail="missing required field: manifest_yaml")
     if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
         raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
     result = validate_manifest(manifest_yaml)
@@ -7558,6 +7583,25 @@ class _ImportVerifyError(Exception):
         self.sha256 = sha256
 
 
+async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> bytes:
+    """Read the raw request body under a HARD streaming cap.
+
+    Content-Length alone is spoofable (a client can claim a small length and
+    stream unbounded bytes) — the cap is enforced while draining the stream,
+    so an oversized body 413s before any buffering or parse work. Shared by
+    the import-artifact path (_read_import_body) and the pack-manifest upload
+    path (#2029).
+    """
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail=detail)
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def _read_import_body(request: Request) -> bytes:
     """Read the raw request body under a HARD streaming cap.
 
@@ -7565,17 +7609,11 @@ async def _read_import_body(request: Request) -> bytes:
     stream unbounded bytes) — the cap is enforced while draining the stream,
     so an oversized artifact 413s before any buffering or decrypt work.
     """
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in request.stream():
-        total += len(chunk)
-        if total > _IMPORT_MAX_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail="Import artifact exceeds the size cap (64 MiB)",
-            )
-        chunks.append(chunk)
-    return b"".join(chunks)
+    return await _read_capped_body(
+        request,
+        _IMPORT_MAX_BYTES,
+        "Import artifact exceeds the size cap (64 MiB)",
+    )
 
 
 def _decode_import_key(key_b64: str, blob: bytes) -> bytes:

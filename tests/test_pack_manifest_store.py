@@ -19,6 +19,7 @@ Docker lane (default): TORTOISE_DB_URI must be set (epic #1647 P4).
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -181,6 +182,9 @@ class TestUploadEndpoint:
         big = "namespace: big\nname: X\n# " + "x" * (70 * 1024)
         r = client.post("/v1/packs/manifests", json={"manifest_yaml": big})
         assert r.status_code == 413
+        # Wire size ~70KB < ~196KB wire cap → this must be the YAML gate,
+        # not the wire layers (pins the ordering of the two 413 paths).
+        assert r.json()["detail"] == "manifest exceeds 64KB"
 
     def test_upload_401_unauthenticated(self):
         from tortoise.hosted_api import get_current_team as _gt
@@ -204,6 +208,164 @@ class TestUploadEndpoint:
         assert r.status_code == 200
         ns = [p["namespace"] for p in r.json()["packs"]]
         assert "tenant-ops" in ns
+
+
+# ── Body-size cap before parse (#2029) ────────────────────────────────────
+
+class TestUploadBodyCap:
+    """#2029: oversized request bodies are rejected BEFORE buffering/parsing.
+
+    The pre-fix endpoint buffered the whole body via request.json() before
+    the 64KB manifest cap applied — a memory-DoS on a tenant-authenticated
+    surface. The wire layers (Content-Length early-exit + unconditional
+    streaming cap mirroring _read_import_body) reject bodies over the wire
+    cap (~196KB) without ever buffering them.
+    """
+
+    @staticmethod
+    def _wire_cap() -> int:
+        from tortoise.pack_manifest_store import MAX_MANIFEST_BYTES
+        return MAX_MANIFEST_BYTES * 3 + 4096
+
+    def test_upload_413_spoofed_content_length_not_read(self, client):
+        """Content-Length over the wire cap → 413 with the body UNREAD.
+        The payload is a VALID JSON envelope — a read+parse would 201, so
+        413 uniquely proves the header pre-check fired before the body was
+        ever touched. CL is comfortably oversized (1GiB) to pin the contract
+        (oversized CL → 413 wire detail), not the cap formula."""
+        r = client.post(
+            "/v1/packs/manifests",
+            content=json.dumps({"manifest_yaml": VALID_MANIFEST}).encode(),
+            headers={"content-length": str(1 << 30)},
+        )
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_413_chunked_streaming_cap(self, client):
+        """Unknown-length (chunked) oversized body → 413 via the streaming
+        cap BEFORE parse — the chunks are invalid JSON, so a parse attempt
+        would raise JSONDecodeError (→ 500), not 413."""
+        def _stream():
+            for _ in range(12):
+                yield b"not-json-" * 8192  # 9-byte prefix × 8192, no CL
+        r = client.post("/v1/packs/manifests", content=_stream())
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_201_chunked_valid(self, client):
+        """A valid manifest streamed WITHOUT Content-Length still parses and
+        activates — the streaming path is not just a cap."""
+        def _stream():
+            payload = json.dumps({"manifest_yaml": VALID_MANIFEST}).encode()
+            for i in range(0, len(payload), 97):
+                yield payload[i:i + 97]
+        r = client.post("/v1/packs/manifests", content=_stream())
+        assert r.status_code == 201, r.text
+        body = r.json()
+        assert body["activated"] is True and body["namespace"] == "tenant-ops"
+
+    def test_upload_201_exact_64kb_yaml_boundary(self, client):
+        """A manifest of EXACTLY 64KB yaml bytes clears the wire layers and
+        the authoritative yaml gate (strict `>` → 65536 is not > 65536) →
+        201. Guards against the cap shifting from yaml bytes to wire bytes."""
+        pad = 65536 - len(VALID_MANIFEST.encode()) - 2
+        manifest = VALID_MANIFEST + "# " + "x" * pad
+        assert len(manifest.encode()) == 65536
+        r = client.post("/v1/packs/manifests", json={"manifest_yaml": manifest})
+        assert r.status_code == 201, r.text
+
+    def test_upload_wire_cap_boundary(self, client):
+        """Strict `>` at the wire cap: exactly body_cap bytes passes both
+        cap checks (→ parse → 201); body_cap+1 → 413. Pins the off-by-one
+        semantics of the CL pre-check and the streaming cap."""
+        envelope = json.dumps({"manifest_yaml": VALID_MANIFEST}).encode()
+        body_cap = self._wire_cap()
+        assert len(envelope) < body_cap
+        exact = envelope + b" " * (body_cap - len(envelope))  # JSON: trailing ws ok
+        r = client.post("/v1/packs/manifests", content=exact)
+        assert r.status_code == 201, r.text
+        r = client.post("/v1/packs/manifests", content=exact + b" ")
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_201_malformed_content_length_falls_back(self, client):
+        """Malformed Content-Length is ignored (the header is never a trust
+        boundary) → the streaming path reads and parses the valid manifest."""
+        r = client.post(
+            "/v1/packs/manifests",
+            content=json.dumps({"manifest_yaml": VALID_MANIFEST}).encode(),
+            headers={"content-length": "abc"},
+        )
+        assert r.status_code == 201, r.text
+
+    def test_upload_413_malformed_content_length_still_capped(self, client):
+        """With a malformed Content-Length, the unconditional streaming cap
+        still rejects an oversized chunked body → 413."""
+        def _stream():
+            for _ in range(12):
+                yield b"not-json-" * 8192
+        r = client.post(
+            "/v1/packs/manifests",
+            content=_stream(),
+            headers={"content-length": "abc"},
+        )
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_malformed_json_500(self, client):
+        """Malformed JSON → 500 (JSONDecodeError → generic exception
+        handler, detail "Internal server error") — byte-parity with the
+        pre-fix request.json() path. raise_server_exceptions=False so the
+        500 is returned, not re-raised (precedent: tests/test_hosted_api.py)."""
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            r = tc.post("/v1/packs/manifests", content=b"{not json")
+        assert r.status_code == 500
+        assert r.json()["detail"] == "Internal server error"
+
+    def test_upload_empty_body_500(self, client):
+        """Empty body → 500 (json.loads(b"") raises JSONDecodeError), same
+        as request.json() on the pre-fix path."""
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            r = tc.post("/v1/packs/manifests", content=b"")
+        assert r.status_code == 500
+        assert r.json()["detail"] == "Internal server error"
+
+    def test_upload_413_spoofed_small_content_length_still_capped(self, client):
+        """A SMALL Content-Length with an oversized actual stream must still
+        hit the streaming cap — the CL check is an optimization, never a
+        trust boundary (RFC 7230 §3.3.3: Transfer-Encoding beats CL). Pins
+        the under-claim direction of the threat model: a future "optimization"
+        that skips the streaming read when CL is small would silently
+        reintroduce the memory-DoS while every other test still passes."""
+        def _stream():
+            for _ in range(12):
+                yield b"not-json-" * 8192
+        r = client.post(
+            "/v1/packs/manifests",
+            content=_stream(),
+            headers={"content-length": "100"},
+        )
+        assert r.status_code == 413
+        assert r.json()["detail"] == "manifest request body exceeds the size cap"
+
+    def test_upload_422_missing_or_invalid_manifest_yaml(self, client):
+        """Missing-field guard sub-branches: empty dict, dict without
+        manifest_yaml, empty string, non-string value, non-dict JSON — all
+        422. A refactor dropping the isinstance(manifest_yaml, str) guard
+        would route {"manifest_yaml": 123} to .encode() → AttributeError
+        → 500."""
+        payloads = [
+            b"null",
+            b"{}",
+            b'{"foo": 1}',
+            b'{"manifest_yaml": ""}',
+            b'{"manifest_yaml": 123}',
+            b"[1, 2, 3]",
+        ]
+        for payload in payloads:
+            r = client.post("/v1/packs/manifests", content=payload)
+            assert r.status_code == 422, (payload, r.text)
+            assert "manifest_yaml" in r.json()["detail"]
 
 
 # ── Cross-tenant isolation (structural — graph namespace) ──────────────────
