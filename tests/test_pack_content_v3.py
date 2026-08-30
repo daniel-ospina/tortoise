@@ -9,7 +9,7 @@ Loads the REAL packs from the repo and verifies the converted manifests:
     architectureDoc link note).
   - marketing: campaign→content→channel chain (real kind names).
   - pm: kindDefs enrichment for issue/sprint/card.
-  - All 4 packs compile with zero validation errors (whole-registry compile,
+  - All 5 packs compile with zero validation errors (whole-registry compile,
     R-16) and versions bumped to 0.2.0.
 """
 from __future__ import annotations
@@ -29,10 +29,11 @@ REPO_PACKS_DIR = Path(__file__).resolve().parents[1] / "packs"
 
 @pytest.fixture(scope="module")
 def registry():
-    """The real repo registry — all 4 packs, converted to manifest v3."""
+    """The real repo registry — all 5 packs (agent-ops joined dev, marketing,
+    product-strategy, project-management), converted to manifest v3."""
     r = PackRegistry(REPO_PACKS_DIR)
     n = r.load_all()
-    assert n == 4, f"expected 4 packs to load, got {n}"
+    assert n == 5, f"expected 5 packs to load, got {n}"
     assert not r.errors, f"whole-registry compile must be clean: {r.errors}"
     return r
 
@@ -42,11 +43,13 @@ class TestWholeRegistryCompile:
 
     def test_all_four_packs_load_with_zero_errors(self, registry):
         assert set(registry.packs) == {
-            "dev", "marketing", "product-strategy", "pm",
+            "agent-ops", "dev", "marketing", "product-strategy", "pm",
         }
         assert not registry.errors
 
     def test_all_versions_bumped_to_0_2_0(self, registry):
+        # the four legacy packs were bumped to 0.2.0; agent-ops (#1933) is
+        # new at 0.1.0
         for ns in ("dev", "marketing", "product-strategy", "pm"):
             assert registry.get_pack(ns).version == "0.2.0", ns
 
