@@ -252,6 +252,7 @@ surfaces:
   - test_ops_safety.py
   - test_orient_direct_consolidation.py
   - test_p1_differentiators.py
+  - test_pack_cli.py
   - test_pack_content_v3.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
