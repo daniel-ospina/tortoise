@@ -1329,8 +1329,17 @@ function claimIntentInFlight() {
       loadRepos()
     }
     prevConnectedRef.current = githubConnected
+    // #1893 (code-review P2, round-4): currentTeamId in deps — a team switch
+    // while the PREVIOUS team's repos fetch is in-flight leaves the reset in
+    // switchTeam a no-op (reposLoaded/reposLoadFailed already false) and the
+    // stale response is dropped by the identity guard, so without the team dep
+    // the effect never re-fires and the NEW team's selectors stay empty (every
+    // toggle silently fails to persist). The team dep re-fires loadRepos with
+    // teamIdRef already updated to the new team; githubConnected (stale until
+    // refreshOnboarding resolves) keeps the transient fetch gated to the
+    // connected surface, and the _teamAtCall guard drops any stale response.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [githubConnected, reposLoaded, reposLoadFailed])
+  }, [githubConnected, reposLoaded, reposLoadFailed, currentTeamId])
   // #1893 (code-review P2): a repos-fetch failure must not permanently close
   // the persist gate — once onboarding resolves, the user's REAL toggles
   // should still persist (only PRUNING stays gated on reposLoadFailed via
