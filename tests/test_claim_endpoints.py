@@ -795,3 +795,38 @@ class TestClaimEmailResolveOutage503:
                         headers={"Authorization": "Bearer abc.def.ghi"})
         assert r.status_code == 503, r.text
         assert r.json().get("detail", {}).get("error_code") == "control_plane_unavailable"
+
+
+# ── #2032 body-sweep cap ────────────────────────────────────────────────────
+
+
+def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
+    """Chunked generator, NO content-length — forces the streaming-cap path."""
+    for _ in range(n_chunks):
+        yield b"x" * step
+
+
+class TestClaimBodySweepCap:
+    def test_claim_oversized_413(self, client, monkeypatch):
+        """claim_team — after the JWT + confirmed-email gates, an oversized
+        chunked body → 413 (not remapped into the {} coerce)."""
+        monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+        _patch_verify(monkeypatch, _jwt(_U_X, email="cap@example.com",
+                                        providers=["email"]))
+        r = client.post(
+            "/v1/claim", content=_oversized_chunked(),
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "content-type": "application/json"})
+        assert r.status_code == 413
+        assert r.json()["detail"] == ha_mod._BODY_413_DETAIL
+
+    def test_claim_malformed_coerced_400_preserved(self, client, monkeypatch):
+        """Malformed JSON → {} coerce → missing api_key → 400 (unchanged)."""
+        _patch_verify(monkeypatch, _jwt(_U_X, email="cap@example.com",
+                                        providers=["email"]))
+        r = client.post(
+            "/v1/claim", content=b"{oops",
+            headers={"Authorization": "Bearer abc.def.ghi",
+                     "content-type": "application/json"})
+        assert r.status_code == 400
+        assert "api_key" in r.json()["detail"]

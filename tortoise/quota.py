@@ -205,6 +205,7 @@ def resolve_team_limits(team_id: str) -> dict:
     from tortoise.supabase_control import (  # noqa: I001
         _QUOTA_SELECT,
         _TEAM_ADDITIVE_0015_TIER,
+        _TEAM_ADDITIVE_2040_TIER,
         _TEAM_ADDITIVE_BILLING_TIER,
         _TEAM_ADDITIVE_DKL_TIER,
         _TEAM_ADDITIVE_IMPORT_TIER,
@@ -216,10 +217,16 @@ def resolve_team_limits(team_id: str) -> dict:
         # the max_points column (20260817000001) is ADDITIVE; a direct
         # select 400s on a schema one migration behind, which would turn a
         # degrade-to-tier-defaults into a hard failure. Same additive
-        # ladder as resolve_api_key / _session_user_team.
+        # ladder as resolve_api_key / _session_user_team, newest migration
+        # dropped FIRST — incl. the #2040 marker tier so a schema missing
+        # only the marker column degrades just the marker (quota keeps
+        # reading max_points; a missing tier would 400 every rung down to
+        # the terminal base-only read → hard failure on drift, the exact
+        # #1832 class).
         row = _teams_row_fail_soft(
             get_control_plane(), team_id, select=_QUOTA_SELECT,
-            additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER,
+            additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+                            _TEAM_ADDITIVE_IMPORT_TIER,
                             _TEAM_ADDITIVE_DKL_TIER,
                             _TEAM_ADDITIVE_0015_TIER,
                             _TEAM_ADDITIVE_BILLING_TIER],

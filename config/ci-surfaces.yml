@@ -21,6 +21,7 @@ surfaces:
   - test_auth.py
   - test_auth_flip.py
   - test_billing.py
+  - test_body_cap_sweep.py
   - test_bridge_mcp.py
   - test_claim_endpoints.py
   - test_user_identity_authority.py

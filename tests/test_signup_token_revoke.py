@@ -783,3 +783,64 @@ class TestCmdTokenRevoke:
         assert "recovery token comes from" in err
         assert str(proj / ".tortoise") in err
         assert str(d / "credentials.json") in err
+
+
+# ── #2032 body-sweep cap ────────────────────────────────────────────────────
+
+
+def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
+    """Chunked generator, NO content-length — forces the streaming-cap path."""
+    for _ in range(n_chunks):
+        yield b"x" * step
+
+
+class TestRevokeBodySweepCap:
+    """agent_token_revoke — auth runs before the cap (401 first via the
+    get_current_team override honored by get_current_team_session); the 413
+    then fires at the body read. Own TestClient with
+    raise_server_exceptions=False so the malformed→500 pin observes the
+    REAL 500 response (the app's #1591 handler logs the traceback via
+    logging.exception and returns a plain 500 JSON)."""
+
+    @pytest.fixture
+    def sweep_client(self):
+        from fastapi.testclient import TestClient
+        with TestClient(app, raise_server_exceptions=False) as tc:
+            yield tc
+
+    def test_revoke_oversized_413(self, sweep_client, monkeypatch):
+        from tortoise.hosted_api import get_current_team
+        app.dependency_overrides[get_current_team] = lambda: {
+            "team_id": "team-001", "tier": "free", "key_id": "k1",
+            "max_users": 1, "max_graphs": 1, "max_points": 10000,
+            "max_api_keys": 2, "max_sessions": 1000,
+        }
+        try:
+            monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+            # NO tt_ Bearer header: a tt_ key routes get_current_team_session
+            # into the key-auth branch, which calls get_current_team DIRECTLY
+            # (bypassing the override). The no-auth path honors the override.
+            r = sweep_client.post(
+                "/v1/agent/token/revoke", content=_oversized_chunked(),
+                headers={"content-type": "application/json"})
+            assert r.status_code == 413
+            assert r.json()["detail"] == ha_mod._BODY_413_DETAIL
+        finally:
+            app.dependency_overrides.pop(get_current_team, None)
+
+    def test_revoke_malformed_json_500_preserved(self, sweep_client, monkeypatch):
+        """JSON content-type + malformed → uncaught → 500 (unchanged —
+        the conditional read has no try)."""
+        from tortoise.hosted_api import get_current_team
+        app.dependency_overrides[get_current_team] = lambda: {
+            "team_id": "team-001", "tier": "free", "key_id": "k1",
+            "max_users": 1, "max_graphs": 1, "max_points": 10000,
+            "max_api_keys": 2, "max_sessions": 1000,
+        }
+        try:
+            r = sweep_client.post(
+                "/v1/agent/token/revoke", content=b"{oops",
+                headers={"content-type": "application/json"})
+            assert r.status_code == 500
+        finally:
+            app.dependency_overrides.pop(get_current_team, None)
