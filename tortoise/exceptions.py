@@ -152,8 +152,12 @@ class AskInFlightLimit(RuntimeError):
 
 class AskReaderUnavailable(RuntimeError):
     """502 ``reader_unavailable`` — the LLM reader failed with no surviving
-    lane (also used for a code-less 402 — a SERVER-side provider-billing
-    condition, never mislabeled ``invalid_question``, P2-3)."""
+    lane. Also used for the code-less variants that must never be
+    mislabeled ``invalid_question``: a code-less 402 (SERVER-side
+    provider-billing condition, P2-3), a code-less 404 (hosted ask
+    exposure gated off — ``TORTOISE_ENABLE_ASK`` unset, #2013), and the
+    pre-existing connection-refused ``status_code=None`` case (hosted ask
+    server unreachable)."""
 
     code = "reader_unavailable"
 

@@ -21,8 +21,11 @@ Key contracts:
     product path; callers may override with an explicit ``question_type``.
   * ``_looks_abstained`` is the best-effort heuristic abstained label
     (measurement/UX sugar, NEVER a gate — the two-phase prompt is
-    authoritative). Blank/whitespace output substitutes the canonical
-    ``NO_EVIDENCE_TEXT`` and labels ``abstained=True``.
+    authoritative). ``LLMReader.answer`` returns the raw stripped
+    completion and labels abstained via ``_looks_abstained`` only —
+    blank/whitespace output is NOT substituted inside the reader; the
+    canonical ``NO_EVIDENCE_TEXT`` substitution is the SDK/ask-lane
+    surface's responsibility (pinned in tests/test_ask_api.py).
   * ``PROBE_SYSTEM`` is the preflight ping prompt (moved from the eval's
     ``tools/longmem_eval/preflight.py``).
 """
@@ -271,10 +274,12 @@ _TYPE_FRAGMENTS: dict[str, str] = {
 }
 
 #: The canonical no-evidence answer text (NEW product code, #1987 Task 1 —
-#: pinned to the A1 abstention phrasing). Substituted when the reader
-#: abstains (``_looks_abstained``) or returns blank output; the ``abstained``
-#: label is best-effort heuristic sugar — the two-phase prompt is
-#: authoritative.
+#: pinned to the A1 abstention phrasing). NOT substituted by the reader —
+#: ``LLMReader.answer`` returns the raw stripped completion and labels
+#: abstained via ``_looks_abstained``; the substitution is the
+#: SDK/ask-lane surface's responsibility (pinned in tests/test_ask_api.py).
+#: The ``abstained`` label is best-effort heuristic sugar — the two-phase
+#: prompt is authoritative.
 NO_EVIDENCE_TEXT = (
     "The memory context does not contain the information needed to answer "
     "this question."

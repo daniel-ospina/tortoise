@@ -1574,6 +1574,12 @@ def test_real_model_commits_on_present_value():
     print(f"[probe] reval3 commit rate: {commits}/{valid}")
 
 
+# #2013 (code-review P2): the clean single-hit context differs from the
+# runbook's full-haystack (d) record — gpt4_8279ba02 "commits purchase
+# date, no day count" (runbook 1987-ask-abstention-check) is a retrieval
+# + reader-MODEL content error, not a reader-clause failure. The hard
+# assert is intentional: the _DerivedCommitModel red→green legs pin the
+# clause contract; this probe pins real-model behavior on the clean shape.
 def test_real_model_no_abstention_on_present_dated_evidence():
     """#2027 real-lane probe (the gpt4_8279ba02 journey — runbook
     evidence shape): the smoker-purchase session date IS in the rendered
