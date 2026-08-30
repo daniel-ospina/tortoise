@@ -4825,6 +4825,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     "tenant vocabulary compile failed for %s — capture "
                     "proceeds with the default vocabulary: %s",
                     team.get("team_id"), e)
+                # Best-effort visibility: the warning fires when the team has
+                # manifests. If THIS manifests check also fails (e.g. the
+                # same transient graph outage that broke the compile), the
+                # degradation is log-only — the log line above is the
+                # guaranteed trace.
                 try:
                     from tortoise.pack_manifest_store import get_tenant_manifests
                     if get_tenant_manifests(sdk):

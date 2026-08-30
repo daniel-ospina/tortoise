@@ -2301,7 +2301,7 @@ class TortoiseSDK:
 
         #2031: ``master`` is the optional pre-compiled master list — the
         hosted capture passes the tenant-scoped master
-        (``build_master_list(team_id, sdk)``) so tenant pack kinds reach the
+        (``build_master_list(sdk)`` — the tenant-scoped SDK) so tenant pack kinds reach the
         prompts and write gates; None → the default master (self-host
         unchanged, byte-identical).
         """

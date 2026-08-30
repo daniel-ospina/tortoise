@@ -321,7 +321,10 @@ def tenant_view(sdk) -> dict:
             del _TENANT_VIEWS[old_key]
         _TENANT_VIEWS[key] = view
         # Fleet bound (#2031 review): evict oldest gids past the cap (dict
-        # insertion order = recency).
+        # insertion order = recency) and drop their dirty flags (a stale
+        # dirty flag only forces a recompile, but the set should stay
+        # bounded with the memo).
         while len(_TENANT_VIEWS) > _MAX_TENANT_VIEWS:
-            _TENANT_VIEWS.pop(next(iter(_TENANT_VIEWS)))
+            evicted_gid = _TENANT_VIEWS.pop(next(iter(_TENANT_VIEWS)))[0]
+            _TENANT_VIEW_DIRTY.discard(evicted_gid)
     return view
