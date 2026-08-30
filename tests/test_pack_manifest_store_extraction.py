@@ -9,7 +9,7 @@ exercised through the consumer path (cache hit on repeat, invalidation on
 write — including the sha256-in-key cross-process signal).
 
 Covers:
-- tenant-scoped master (build_master_list(team_id, sdk)) includes tenant
+- tenant-scoped master (build_master_list(sdk)) includes tenant
   kinds (declared + kindDef'd) and never touches the global _MASTER_LIST_CACHE
 - hosted capture for tenant A with a custom pack mints A's kind (positive)
 - tenant B's extraction never sees A's kinds (negative, both prompts+graph)
@@ -184,19 +184,19 @@ def _upload(client_, manifest_yaml: str) -> int:
 
 class TestTenantMaster:
     def test_tenant_master_includes_tenant_kinds(self, client):
-        """build_master_list(team_id, sdk) compiles the tenant's pack kinds
+        """build_master_list(sdk) compiles the tenant's pack kinds
         (declared + kindDef'd) into pack_kinds; the default path never sees
         them and the global _MASTER_LIST_CACHE stays untouched (#1154)."""
         from tortoise.extractor_v2 import build_master_list
         assert _upload(client, VALID_MANIFEST) == 201
         sdk = _team_sdk()
-        master = build_master_list(team_id=TEST_TEAM_ID, sdk=sdk)
+        master = build_master_list(sdk=sdk)
         assert "tenant-ops:contract" in master["pack_kinds"], \
             "tenant declared kind must reach the tenant master"
         # Default path: no tenant kinds, and unchanged by the tenant call.
         default_before = build_master_list()
         assert "tenant-ops:contract" not in default_before["pack_kinds"]
-        build_master_list(team_id=TEST_TEAM_ID, sdk=sdk)  # repeat tenant call
+        build_master_list(sdk=sdk)  # repeat tenant call
         assert build_master_list() == default_before, \
             "tenant-scoped compile must not poison _MASTER_LIST_CACHE"
 
@@ -225,7 +225,7 @@ class TestTenantMaster:
         match must not strip the tenant's own kinds (verifier P3)."""
         from tortoise.extractor_v2 import _select_pack_kinds, build_master_list
         assert _upload(client, VALID_MANIFEST) == 201
-        master = build_master_list(team_id=TEST_TEAM_ID, sdk=_team_sdk())
+        master = build_master_list(sdk=_team_sdk())
         # A story matching ONLY a starter trigger (dev words, no tenant words).
         selected = _select_pack_kinds(
             "the epic issue was deployed after the code review",
@@ -330,9 +330,7 @@ class TestCrossTenantNegative:
                     "tenant B's graph must never mint tenant A's kinds"
                 # B's master lacks A's kinds.
                 from tortoise.extractor_v2 import build_master_list
-                b_master = build_master_list(
-                    team_id=TEST_TEAM_B["team_id"],
-                    sdk=ha_mod._make_sdk(namespace=TEST_TEAM_B["team_id"]))
+                b_master = build_master_list(sdk=ha_mod._make_sdk(namespace=TEST_TEAM_B["team_id"]))
                 assert "tenant-ops:contract" not in b_master["pack_kinds"], \
                     "tenant B's master must not contain tenant A's kinds"
             finally:
@@ -363,17 +361,17 @@ class TestMemoization:
         from tortoise.extractor_v2 import build_master_list
         from tortoise.pack_manifest_store import tenant_view
         sdk = _team_sdk()
-        v1 = tenant_view(TEST_TEAM_ID, sdk)
-        assert tenant_view(TEST_TEAM_ID, sdk) is v1, "memo hit must be cached"
+        v1 = tenant_view(sdk)
+        assert tenant_view(sdk) is v1, "memo hit must be cached"
         assert _upload(client, VALID_MANIFEST) == 201
-        v2 = tenant_view(TEST_TEAM_ID, sdk)
+        v2 = tenant_view(sdk)
         assert v2 is not v1, "view must recompile after a :PackManifest write"
-        master = build_master_list(team_id=TEST_TEAM_ID, sdk=sdk)
+        master = build_master_list(sdk=sdk)
         assert "tenant-ops:contract" in master["pack_kinds"]
         # Second upload (version bump + new kind) invalidates again and the
         # new kind reaches the tenant master.
         assert _upload(client, VALID_MANIFEST_V2) == 201
-        master2 = build_master_list(team_id=TEST_TEAM_ID, sdk=sdk)
+        master2 = build_master_list(sdk=sdk)
         assert "tenant-ops:sla" in master2["pack_kinds"], \
             "write invalidation must surface new tenant kinds"
 
@@ -392,7 +390,7 @@ class TestMemoization:
             pms._TENANT_VIEWS.clear()
             pms._TENANT_VIEW_DIRTY.clear()
         assert _upload(client, VALID_MANIFEST) == 201
-        tenant_view(TEST_TEAM_ID, sdk)
+        tenant_view(sdk)
         keys_before = set(pms._TENANT_VIEWS)
         # Simulate the cross-process case: this worker never saw the write.
         with pms._TENANT_VIEWS_GUARD:
@@ -404,6 +402,6 @@ class TestMemoization:
         assert _upload(client, same_version_new_content) == 201
         with pms._TENANT_VIEWS_GUARD:
             pms._TENANT_VIEW_DIRTY.discard(pms._graph_identity(sdk))
-        tenant_view(TEST_TEAM_ID, sdk)
+        tenant_view(sdk)
         assert set(pms._TENANT_VIEWS) != keys_before, \
             "sha256 in the cache key must invalidate same-version re-uploads"

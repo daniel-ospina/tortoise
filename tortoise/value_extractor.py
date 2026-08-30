@@ -80,32 +80,44 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     if tenant_manifests:
         _DECLARED_KIND_ATTRS = ("objectKinds", "documentKinds", "eventKinds")
         for ns, manifest_yaml in tenant_manifests.items():
-            raw = yaml.safe_load(manifest_yaml) or {}
-            if not isinstance(raw, dict):
-                continue
-            onto = raw.get("ontology") or {}
-            kd = onto.get("kindDefs") or {}
-            declared: set[str] = set()
-            for attr in _DECLARED_KIND_ATTRS:
-                for k in (onto.get(attr) or []):
-                    if isinstance(k, str):
-                        declared.add(k)
-            for k, spec in kd.items():
-                kinds[f"{ns}:{k}"] = {
-                    "description": spec.get("description", ""),
-                    "nearMisses": spec.get("nearMisses", []),
-                }
-                declared.discard(k)
-            # Declared-but-kindDefs-less kinds (the #1935 fixture shape:
-            # objectKinds: [contract] with no kindDef) — empty semantics so
-            # they ride the master's pack_kinds and the write gates accept
-            # them (FIX M parity; _PACK_*_FORMS only serve the shared
-            # catalog, never tenant packs).
-            for k in sorted(declared):
-                kinds.setdefault(f"{ns}:{k}", {"description": "", "nearMisses": []})
-            g = onto.get("memory_granularity")
-            if g:
-                granularity[ns] = g
+            # #2031 review: per-namespace isolation — one malformed/legacy
+            # node (hand-inserted, backfilled, corrupt) must degrade only its
+            # own namespace, never the whole tenant's vocabulary compile
+            # (mirrors the missing-yaml skip in _get_tenant_manifest_yamls).
+            try:
+                raw = yaml.safe_load(manifest_yaml) or {}
+                if not isinstance(raw, dict):
+                    continue
+                onto = raw.get("ontology") or {}
+                if not isinstance(onto, dict):
+                    continue
+                kd = onto.get("kindDefs") or {}
+                if not isinstance(kd, dict):
+                    kd = {}
+                declared: set[str] = set()
+                for attr in _DECLARED_KIND_ATTRS:
+                    for k in (onto.get(attr) or []):
+                        if isinstance(k, str):
+                            declared.add(k)
+                for k, spec in kd.items():
+                    spec = spec if isinstance(spec, dict) else {}
+                    kinds[f"{ns}:{k}"] = {
+                        "description": spec.get("description", ""),
+                        "nearMisses": spec.get("nearMisses", []),
+                    }
+                    declared.discard(k)
+                # Declared-but-kindDefs-less kinds (the #1935 fixture shape:
+                # objectKinds: [contract] with no kindDef) — empty semantics so
+                # they ride the master's pack_kinds and the write gates accept
+                # them (FIX M parity; _PACK_*_FORMS only serve the shared
+                # catalog, never tenant packs).
+                for k in sorted(declared):
+                    kinds.setdefault(f"{ns}:{k}", {"description": "", "nearMisses": []})
+                g = onto.get("memory_granularity")
+                if g:
+                    granularity[ns] = g
+            except Exception:  # noqa: BLE001, RUF100 — never let one node
+                continue  # take down the whole tenant's vocabulary
 
     core = {
         "core:Project": "A project",

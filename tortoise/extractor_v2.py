@@ -191,7 +191,7 @@ def _build_master_from_brief(brief: dict,
     }
 
 
-def build_master_list(team_id: str | None = None, sdk=None) -> dict:
+def build_master_list(sdk=None) -> dict:
     """The v2 master list: compile_value_brief() kinds + the §3 additions
     (subjects, points, events, chains, memory_granularity). Section values
     are {kind: description} dicts — rendered as readable text in prompts.
@@ -200,17 +200,20 @@ def build_master_list(team_id: str | None = None, sdk=None) -> dict:
     re-reading + YAML-parsing every manifest per chunk cost 12.2s of a 14.3s
     60-chunk run. Returns a deep copy so callers can't mutate the cache.
 
-    #2031 hosted tenant path (``team_id`` + ``sdk``): the master compiles
-    from the memoized tenant view's brief (shared catalog + THIS tenant's
+    #2031 hosted tenant path (``sdk``): the master compiles from the
+    memoized tenant view's brief (shared catalog + THIS tenant's
     :PackManifest manifests) with the pack_kinds allowlist extended to the
     tenant's namespaces — so tenant A's pack kinds reach A's extraction
-    prompts and write gates while tenant B's never do. The tenant path
-    NEVER reads or writes the process-global ``_MASTER_LIST_CACHE`` (#1154:
-    a tenant-scoped compile must not poison the shared memo); the #1350
-    perf guard rides the tenant-view memo (per (graph_identity,
-    pack_config_version), invalidated on :PackManifest write) instead.
+    prompts and write gates while tenant B's never do. The tenant identity
+    is the SDK's resolved graph (pass the tenant-scoped SDK,
+    ``_make_sdk(namespace=team_id)`` — no separate identity argument to
+    mismatch). The tenant path NEVER reads or writes the process-global
+    ``_MASTER_LIST_CACHE`` (#1154: a tenant-scoped compile must not poison
+    the shared memo); the #1350 perf guard rides the tenant-view memo (per
+    (graph_identity, pack_config_version), invalidated on :PackManifest
+    write) instead.
     """
-    if team_id is None and sdk is None:
+    if sdk is None:
         import copy
         global _MASTER_LIST_CACHE
         if _MASTER_LIST_CACHE is not None:
@@ -221,7 +224,7 @@ def build_master_list(team_id: str | None = None, sdk=None) -> dict:
         _MASTER_LIST_CACHE = copy.deepcopy(master)
         return master
     from tortoise.pack_manifest_store import tenant_view
-    view = tenant_view(team_id, sdk)
+    view = tenant_view(sdk)
     tenant_prefixes = tuple(f"{m['namespace']}:" for m in view["tenant"])
     return _build_master_from_brief(view["brief"], PACK_NS + tenant_prefixes)
 

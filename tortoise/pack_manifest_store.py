@@ -53,11 +53,20 @@ _ONTOLOGY_ONLY_KEYS = ("connectors", "tools")
 # ── Tenant-view memoization (#1154 + #1350) ────────────────────────────────
 # Key: (tenant_identity, pack_config_version) → compiled view. The shared
 # catalog is NOT in the key (it is cached-global read-only, safe to share);
-# the tenant's manifest set IS (isolation + invalidation).
+# the tenant's manifest set IS (isolation + invalidation). tenant_identity
+# = the SDK's resolved graph name (team_{team_id}) — the #2031 consumer
+# path derives it from the tenant-scoped SDK, never from a caller-supplied
+# id (a mismatched id/identity pairing is structurally impossible).
 _TENANT_VIEWS: dict[tuple[str, str], dict] = {}
 _TENANT_VIEWS_GUARD = Lock()
 # Monotonic bump: any :PackManifest write invalidates the tenant's entry.
 _TENANT_VIEW_DIRTY: set[str] = set()
+# Fleet bound (#2031 review): the memo keeps one entry per (gid, version)
+# and is never evicted beyond the per-gid prune — a long-lived multi-tenant
+# process would otherwise accumulate one compiled brief + manifest YAML set
+# per tenant ever seen. Cap the distinct-gid count; a dropped tenant simply
+# recompiles on its next capture (the dirty-set + sha256 key stay intact).
+_MAX_TENANT_VIEWS = 1024
 
 
 @dataclass(frozen=True)
@@ -201,10 +210,15 @@ def _graph_identity(sdk) -> str:
     ``team_team-xxx``). The pre-#2031 one-arg call TypeError'd into the
     catch-all, collapsing EVERY tenant's key to "default" (one shared memo
     entry + one global dirty flag) — activated once tenant_view gained its
-    first real consumer on the hosted capture hot path."""
+    first real consumer on the hosted capture hot path. The fallback is
+    logged (never silent): if graph resolution ever fails again, the
+    collapse is visible in the logs rather than quietly reinstated."""
     try:
         return _resolved_graph_name(sdk, None)
-    except Exception:
+    except Exception as e:  # noqa: BLE001, RUF100
+        log.warning("tenant-view graph identity resolution failed — "
+                    "falling back to 'default' (cross-tenant memo key "
+                    "collapse risk): %s", e)
         return "default"
 
 
@@ -252,7 +266,7 @@ def delete_tenant_manifest(sdk, namespace: str) -> bool:
 
 # ── Tenant-view compile (#1154/#1350) ──────────────────────────────────────
 
-def tenant_view(team_id: str, sdk) -> dict:
+def tenant_view(sdk) -> dict:
     """The tenant's pack view: shared catalog + tenant manifests, memoized.
 
     Cache key: (graph_identity, pack_config_version) where the version is a
@@ -262,6 +276,12 @@ def tenant_view(team_id: str, sdk) -> dict:
     signal; the dirty-set is process-local). Invalidated by any
     :PackManifest write (dirty-set). The shared catalog is read from the
     global registry (read-only, safe to share — #1154).
+
+    The tenant identity is the SDK's resolved graph name — callers must
+    pass the tenant-scoped SDK (``_make_sdk(namespace=team_id)``); there is
+    no separate identity argument to mismatch (#2031 review: the pre-#2031
+    ``team_id`` parameter was dead — every caller could pair any id with
+    any sdk).
 
     #2031 consumer wiring: the memoized view now also carries the manifest
     YAMLs (``yaml``) and the COMPILED value brief (``brief`` — shared
@@ -300,4 +320,8 @@ def tenant_view(team_id: str, sdk) -> dict:
         for old_key in [k for k in _TENANT_VIEWS if k[0] == gid]:
             del _TENANT_VIEWS[old_key]
         _TENANT_VIEWS[key] = view
+        # Fleet bound (#2031 review): evict oldest gids past the cap (dict
+        # insertion order = recency).
+        while len(_TENANT_VIEWS) > _MAX_TENANT_VIEWS:
+            _TENANT_VIEWS.pop(next(iter(_TENANT_VIEWS)))
     return view
