@@ -5228,6 +5228,7 @@ function MemorySources(props) {
           role="switch"
           aria-checked={docsOn}
           data-on={docsOn ? 'true' : 'false'}
+          data-locked-on={docsIndexed ? 'true' : undefined}  // #1894: terminal indexed docs switch — full-opacity ON (CSS scopes on this attr; the generic disabled busy-dim stays for busy windows)
           aria-label="GitHub docs as a memory source"
           onClick={() => onToggleDocs(!docsOn)}
           disabled={memoryBusy === 'docs' || docsIndexed}  // #1835: connect-inline like issues — not connected just reveals the CTA; review P1-1: docs indexed ⇒ the switch is terminal (re-index refreshes, never un-indexes)

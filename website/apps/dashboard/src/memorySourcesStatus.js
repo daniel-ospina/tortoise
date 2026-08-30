@@ -20,6 +20,13 @@ export function formatRelativeTime(isoAt, nowMs) {
 // indexed teams have no timestamp — honest omission, no fabricated time).
 // Deliberately does NOT depend on githubConnected — the label is a
 // historical claim about indexing, not current connectivity.
+// SEMANTICS (parity with the github_docs_indexed bool): the timestamp is
+// stamped whenever indexing "made progress" (>=1 repo processed) — incl.
+// quota-partial / mid-walk-error runs that the job card shows as failed.
+// The label reads "Indexed · just now" beside a failed card on purpose:
+// content WAS indexed before the run errored (resumable-cursor behavior,
+// same claim the bool already made pre-#1894). The job card is the
+// failure surface; this label is the progress surface.
 export function docsIndexedLabel(state, nowMs) {
   if (!state || !state.github_docs_indexed) return null
   const rel = formatRelativeTime(state.github_docs_indexed_at, nowMs)
@@ -56,20 +63,29 @@ export function jobStatusLine(job, nowMs) {
   if (elapsed) parts.push(elapsed)
   const processed = job.repos_processed
   const total = job.repos_total
-  if (processed != null && total != null) {
+  // Repos count only when the total is MEANINGFUL: the docs job is
+  // pre-seeded with repos_processed=0/repos_total=0, so the pre-first-write
+  // window would render a fabricated-looking "0/0 repos" (the github job
+  // mints with NO repos fields — elapsed-only there; total===0 mirrors
+  // that absent-fields path).
+  if (processed != null && total != null && total > 0) {
     parts.push(`${processed}/${total} repos`)
-    if (total > 0 && job.progress != null && job.progress > 0 && job.progress < 100) {
+    if (job.progress != null && job.progress > 0 && job.progress < 100) {
       const remain = 100 - job.progress
       const secs = jobElapsedSecs(job, nowMs)
       if (secs != null && secs > 5) {
         const eta = Math.round((secs / job.progress) * remain)
-        parts.push(`~${fmtElapsed(eta)} left`)
+        // ETA floor: a per-repo rate extrapolation with a tiny remainder
+        // (progress 99 + one slow tail repo) reads "~0s/~3s left" while
+        // the walk runs on — fake precision. Suppress any ETA < 5s so the
+        // line degrades to elapsed + "N/M repos" (never a false countdown).
+        if (eta >= 5) parts.push(`~${fmtElapsed(eta)} left`)
       }
     }
   }
-  // No repos fields → elapsed only. A bare % is never rendered: backend
-  // writes progress + repos_processed + repos_total TOGETHER (live `_job`
-  // writes), so progress-without-repos never occurs and rendering a bare
-  // percentage would be a half-truth.
+  // No repos fields (or total 0) → elapsed only. A bare % is never
+  // rendered: backend writes progress + repos_processed + repos_total
+  // TOGETHER (live `_job` writes), so progress-without-repos never occurs
+  // and rendering a bare percentage would be a half-truth.
   return parts.length ? parts.join(' · ') : null
 }

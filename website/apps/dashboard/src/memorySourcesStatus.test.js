@@ -116,6 +116,16 @@ test('progress 0 WITH repos fields → elapsed + "0/N repos", still NO ETA', () 
       repos_processed: 0, repos_total: 2 }, NOW),
     '30s · 0/2 repos')
 })
+// #1894 review F1: the docs job is PRE-SEEDED with repos_processed=0 /
+// repos_total=0, so the pre-first-write poll shape renders elapsed-ONLY —
+// a fabricated-looking "0/0 repos" count would contradict the module's
+// own "never fabricated" contract (github mints with no repos fields).
+test('total 0 (docs pre-seeded 0/0 shape) → elapsed only, no count', () => {
+  assert.equal(jobStatusLine(
+    { status: 'started', progress: 0, started_at: NOW / 1000 - 30,
+      repos_processed: 0, repos_total: 0 }, NOW),
+    '30s')
+})
 test('progress 50 with 60s elapsed → elapsed + repos + ETA', () => {
   assert.equal(jobStatusLine(
     { status: 'started', progress: 50, started_at: NOW / 1000 - 60,
@@ -157,19 +167,40 @@ test('elapsed exactly 5s still suppresses the ETA (strict > 5 gate)', () => {
       repos_processed: 1, repos_total: 2 }, NOW),
     '5s · 1/2 repos')
 })
+// #1894 review F2: ETA floor — a per-repo extrapolation with a tiny
+// remainder (progress 99 + one slow tail repo) must NOT read "~0s left"
+// while the walk runs on (fake precision). Any ETA < 5s is suppressed.
+test('progress 99 with a slow tail repo → NO tiny-ETA countdown', () => {
+  assert.equal(jobStatusLine(
+    { status: 'started', progress: 99, started_at: NOW / 1000 - 300,
+      repos_processed: 99, repos_total: 100 }, NOW),
+    '5m 0s · 99/100 repos')
+})
+test('extrapolated ETA below the 5s floor → suppressed (4s case)', () => {
+  assert.equal(jobStatusLine(
+    { status: 'started', progress: 90, started_at: NOW / 1000 - 40,
+      repos_processed: 9, repos_total: 10 }, NOW),
+    '40s · 9/10 repos')
+})
+test('extrapolated ETA at exactly 5s still renders (>= 5 gate)', () => {
+  assert.equal(jobStatusLine(
+    { status: 'started', progress: 50, started_at: NOW / 1000 - 6,
+      repos_processed: 1, repos_total: 2 }, NOW),
+    '6s · 1/2 repos · ~6s left')
+})
 
 // ── CSS-rule assertion (#1894 render-layer gate — the rule lives in
 // index.css; a regression to the dimmed disabled-switch would fail here) ──
 test('index.css keeps the disabled-but-on switch full-opacity', () => {
   const css = readFileSync(new URL('./index.css', import.meta.url), 'utf8')
-  const ruleIdx = css.indexOf(".switch[disabled][data-on='true']")
-  assert.ok(ruleIdx !== -1, '.switch[disabled][data-on=\'true\'] rule must exist in index.css')
-  // POSITIVE pin: the on-state must render at full opacity — any dim value
-  // (0.4/0.5/0.6/shorthand .6) fails the test. A negative probe on one
-  // literal (0.6) would let every other dim regression pass while the
+  const ruleIdx = css.indexOf(".switch[disabled][data-on='true'][data-locked-on]")
+  assert.ok(ruleIdx !== -1, '.switch[disabled][data-on=\'true\'][data-locked-on] rule must exist in index.css')
+  // POSITIVE pin: the terminal docs switch must render at full opacity — any
+  // dim value (0.4/0.5/0.6/shorthand .6) fails the test. A negative probe on
+  // one literal (0.6) would let every other dim regression pass while the
   // visual bug (an on-state switch that looks off) persists.
   const blockEnd = css.indexOf('}', ruleIdx)
   const block = css.slice(ruleIdx, blockEnd)
   assert.match(block, /opacity:\s*1\b/,
-               `disabled-on rule must set full opacity, got: ${block}`)
+               `locked-on rule must set full opacity, got: ${block}`)
 })
