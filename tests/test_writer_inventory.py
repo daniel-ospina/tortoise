@@ -484,6 +484,30 @@ class TestCreateTeam:
                if m["user_id"] == _USER1 and m["team_id"] == body["team_id"]]
         assert len(mem) == 1 and mem[0]["role"] == "owner"
 
+    def test_create_team_keyless_no_api_keys_row(self, user_client):
+        """#1921: POST /v1/teams provisions KEYLESS — no tt_ mint, no
+        api_keys row. The old per-call mint persisted only the hash and
+        never returned the plaintext — a dead key permanently counted
+        against max_api_keys (2 free teams exhausted the cap with zero
+        usable keys). Mirror of create_onboarding_team's #1716 keyless
+        provision: all-NULL key params → teams + membership, NO key row."""
+        tc, fake, _ = user_client
+        r = tc.post("/v1/teams", json={"name": "keyless"})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "key" not in body  # the response never carries a key
+        tid = body["team_id"]
+        fn, p = fake.rpc_calls[0]
+        assert fn == "provision_team"
+        # all-or-none key guard (migration 20260825214233): all-NULL =
+        # keyless — no api_keys row, no max_api_keys slot consumed.
+        assert p["p_api_key"] is None
+        assert p["p_key_hash"] is None
+        assert p["p_lookup_hash"] is None
+        assert p["p_key_prefix"] is None
+        rows = [k for k in fake.tables["api_keys"] if k["team_id"] == tid]
+        assert rows == [], "create_team must not mint a dead api_keys row"
+
     def test_duplicate_name_409(self, user_client):
         tc, fake, _ = user_client
         fake.seed("teams", [{"id": "t-acme", "name": "acme"}])

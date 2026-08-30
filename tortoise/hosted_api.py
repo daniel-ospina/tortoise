@@ -6134,7 +6134,6 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     from datetime import datetime
     from datetime import timedelta as _td
 
-    from tortoise.auth import lookup_hash
     from tortoise.supabase_control import (
         membership_count_since,
         provision_team,
@@ -6168,7 +6167,12 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
 
     team_id = str(_uuid.uuid4().hex[:26])
     graph_name = f"team_{team_id}"  # stored name == data-plane namespace (team_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.team_create keeps team_{name} — registry lane tracked in #2023)
-    api_key = f"tt_{_uuid.uuid4().hex}"
+    # #1921: keyless provisioning — NO tt_ mint. The old per-call mint was
+    # a dead key: plaintext never returned (hash-only at rest), counted
+    # against max_api_keys, unclaimable (#1082) — 2 free teams exhausted
+    # the cap with zero usable keys. Mirror create_onboarding_team's #1716
+    # fix: the team stays keyless until a session-key mint (POST
+    # /v1/session/key writes the api_keys row itself).
     # Eager default-graph TeamMeta FIRST (register_user's documented
     # ordering — review P2, PR #874): an orphaned graph namespace is
     # harmless, an orphaned teams row is not (provision-then-graph would
@@ -6181,14 +6185,18 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     # #1686: journal the minted team_* graph (session sweep drops it).
     _journal_append_product(graph_name)
     try:
+        # #1921: all-NULL key params → the RPC writes teams + membership but
+        # NO api_keys row (all-or-none guard, migration 20260825214233) —
+        # mirroring create_onboarding_team's #1716 keyless provision.
         provision_team(cp, **{
             "p_user_id": user["user_id"],
             "p_identity": None,
             "p_team_id": team_id,
             "p_team_name": name,
-            "p_api_key": api_key,
-            "p_key_hash": hash_api_key(api_key),
-            "p_lookup_hash": lookup_hash(api_key),
+            "p_api_key": None,
+            "p_key_hash": None,
+            "p_lookup_hash": None,
+            "p_key_prefix": None,
             "p_graph_name": graph_name,
             "p_tier": "free",
         })
@@ -6247,7 +6255,12 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
             detail="Create another team requires a paid plan — upgrade an existing team first")
 
     try:
-        result = sdk.team_create(name, owner_user_id=user["user_id"])
+        # #1921: mint_key=False — the registry twin of the Supabase lane's
+        # all-NULL key provision (create_onboarding_team's #1716 keyless
+        # parity). The old default minted a tt_ key whose plaintext was
+        # never returned — a dead credential counted against max_api_keys.
+        result = sdk.team_create(name, mint_key=False,
+                                 owner_user_id=user["user_id"])
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
             raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904

@@ -327,6 +327,35 @@ class TestRegistryEntitlement:
         assert r.status_code == 409
         assert "already exists" in r.json()["detail"]
 
+    def test_create_team_keyless_registry(self, reg_client):
+        """#1921 registry-lane parity: POST /v1/teams provisions KEYLESS
+        (mint_key=False, the create_onboarding_team #1716 shape) — no tt_
+        mint, no api_key hash on the Team node, no APIKey node. The old
+        default mint persisted a hash whose plaintext was never returned
+        — a dead key counted against max_api_keys."""
+        tc, reg = reg_client
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _USER1, "email": "owner@example.com"}
+        try:
+            r = tc.post("/v1/teams", json={"name": "keyless"})
+        finally:
+            app.dependency_overrides.clear()
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert "key" not in body  # the response never carries a key
+        tid = body["team_id"]
+        rows = reg.query(
+            "MATCH (t:Team {id:$tid}) RETURN t.id, t.api_key",
+            params={"tid": tid},
+        ).result_set
+        assert len(rows) == 1
+        assert rows[0][1] is None  # no dead key hash on the Team node
+        n_keys = reg.query(
+            "MATCH (k:APIKey {team_id:$tid}) RETURN count(k)",
+            params={"tid": tid},
+        ).result_set[0][0]
+        assert n_keys == 0  # no APIKey node minted for the team
+
     def test_create_membership_primed_by_team_create(self, reg_client):
         """#1877 second-model P1: the owner Membership is created INSIDE
         team_create (no post-hoc swallow) — so after a 0-team create, the
