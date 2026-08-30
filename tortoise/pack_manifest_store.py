@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,6 +47,14 @@ log = logging.getLogger(__name__)
 
 PACK_MANIFEST_LABEL = "PackManifest"
 MAX_MANIFEST_BYTES = 64 * 1024  # 64KB cap (plan §6)
+
+# #2029: wire cap for POST /v1/packs/manifests — 6x the yaml cap + slack.
+# 6x covers the WORST legal JSON escape inflation (control chars U+0000..1F
+# → \uXXXX = 6 bytes per 1-byte char; non-ASCII ≤3x; `"`/`\`/newline 2x), so
+# every legal JSON encoding of any <=64KB manifest clears the wire layers
+# (the exact len(manifest_yaml.encode()) check remains the authoritative
+# gate). Memory bound ~397KB/request — trivial vs the 64MiB import cap.
+MANIFEST_WIRE_CAP_BYTES = MAX_MANIFEST_BYTES * 6 + 4096
 
 # Ontology-only v1: tenant uploads must not carry code entrypoints.
 _ONTOLOGY_ONLY_KEYS = ("connectors", "tools")
@@ -104,6 +113,19 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
         return ManifestValidation(False, errors=["missing required field: namespace"])
     if ":" in ns:
         return ManifestValidation(False, errors=["namespace must not contain ':'"])
+    # #2029 review gate (security P1): ns becomes a DIRECTORY NAME in the
+    # temp registry below — a traversal namespace ("../x", "a/b", "..")
+    # would mkdir/write OUTSIDE the tempdir (arbitrary file write for an
+    # authenticated tenant). Charset guard is the first line; the
+    # resolve()+is_relative_to containment check backstops it regardless —
+    # a single regex is one bug away from admitting a `..` component (or a
+    # future relaxation), so containment is defense in depth, not ceremony.
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", ns):
+        return ManifestValidation(
+            False, namespace=ns,
+            errors=["namespace must be a safe identifier "
+                    "(letters, digits, '_', '-', '.')"])
+
 
     # Tenant policy (plan §4): reserved starter namespaces.
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
@@ -122,7 +144,11 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
 
     # Shared validator via temp-dir registry (schema + cross-pack).
     with tempfile.TemporaryDirectory(prefix="tortoise-manifest-") as td:
-        pack_dir = Path(td) / ns
+        td_root = Path(td).resolve()
+        pack_dir = (td_root / ns).resolve()
+        if not pack_dir.is_relative_to(td_root):
+            return ManifestValidation(False, namespace=ns,
+                                      errors=["invalid namespace path"])
         pack_dir.mkdir(parents=True)
         (pack_dir / "manifest.yaml").write_text(manifest_yaml)
         from tortoise.pack_registry import PackRegistry
