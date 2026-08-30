@@ -2917,6 +2917,10 @@ def _cmd_export(args) -> int:
 
     try:
         dump = dump_graph(proj.g, graph_name=proj.graph_name)
+        # #1936: pack-config block rides INSIDE the payload (same integrity
+        # hash as the dump — additive v1.1, never an envelope sibling).
+        from tortoise.export import collect_pack_config
+        dump["pack_config"] = collect_pack_config(proj)
     except Exception as e:
         print(f"Error: graph dump failed: {e}", file=sys.stderr)
         proj.close()
