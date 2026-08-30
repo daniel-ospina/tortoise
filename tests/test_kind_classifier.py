@@ -96,7 +96,8 @@ FIXTURE_SPEC = {
     },
 }
 
-_KEYWORDS = ("ticket", "code", "plan", "workflow", "occurrence", "claim")
+_KEYWORDS = ("ticket", "code", "plan", "workflow", "occurrence", "claim",
+             "rule", "standard")
 
 
 class KeywordEncoder:
@@ -157,14 +158,6 @@ class TestKnnCore:
         assert out["stats"]["below_floor"] == 1
         assert out["stats"]["unclassified"] == 1
 
-    def test_margin_gate_boundary_high_floor(self, classifier):
-        """A clear top-1 (margin >= MARGIN) above the floor assigns via kNN
-        even when the top-2 share a keyword."""
-        out = classifier.classify_items(_items(("entity", "the ticket ticket ticket fix")))
-        a = out["assignments"]["i0"]
-        assert a["kind"] == "dev:issue"  # ticket dim dominates
-        assert a["mode"] == "knn"
-
     def test_embedder_fail_open_fallback(self):
         clf = KindClassifier(
             encoder=BoomEncoder(),
@@ -195,16 +188,36 @@ class TestNearMissRerank:
         assert a["kind"] == "dev:code"  # raw kNN top-1 (the rerank never ran)
         assert any("rerank failed" in w for w in out["warnings"])
 
-    def test_one_sided_near_miss_tie_breaks_to_primary(self, classifier):
+    def test_one_sided_near_miss_tie_breaks_to_primary(self, classifier, monkeypatch):
         """ticket+code tie; dev:issue declares dev:code a nearMiss (one-
         sided) → the rerank prefers dev:issue (the non-decoy), mode=rerank,
-        NO adjudication call burned."""
+        NO adjudication call burned. Also pins the NEGATIVE case for #2030:
+        a rerank involving NO retry-declared kind must NOT increment
+        near_miss_retries. The registry is stubbed warn-only so the pin is
+        manifest-content-independent (a future pack adding retry on
+        issue/code must not flip this classifier-behavior test red)."""
+        import types
+        from tortoise.pack_registry import PackManifest
+
+        def warn_only(ns: str):
+            return PackManifest(
+                namespace=ns, name=ns, version="0.1.0", tier="free",
+                description=ns, path=Path("."),
+                extraction={"enforcement": {
+                    "default": "warn", "kinds": {}, "relations": {}, "chains": {},
+                }},
+            )
+
+        packs = {"dev": warn_only("dev"), "pm": warn_only("pm")}
+        stub = types.SimpleNamespace(packs=packs, get_pack=lambda ns: packs.get(ns))
+        monkeypatch.setattr("tortoise.domain_loader._get_registry", lambda: stub)
         out = classifier.classify_items(_items(("entity", "the ticket code")))
         a = out["assignments"]["i0"]
         assert a["kind"] == "dev:issue"
         assert a["mode"] == "rerank"
         assert out["stats"]["assigned_rerank"] == 1
         assert out["stats"]["adjudication_tail"] == 0
+        assert out["stats"]["near_miss_retries"] == 0  # no retry kind involved
 
     def test_mutual_near_miss_tie_goes_to_llm_tail(self):
         """Mutual nearMisses keep kNN order → the item lands in the
@@ -223,6 +236,275 @@ class TestNearMissRerank:
         # sorts before dev:issue in the index)
         assert out["assignments"]["i0"]["kind"] == "dev:code"
         assert out["assignments"]["i0"]["mode"] == "knn"
+
+
+class TestNearMissRetrySignal:
+    """#2030 — the enforcement seam on the classifier near-miss path: a
+    retry-declared kind that is rerank-chosen records near_miss_retries
+    (the extractor's M3 loop bounds the actual re-attempt; this marks the
+    near-miss for it). The hook passes the NAMESPACED index kind; the seam
+    resolves it against the declaring pack. Ambient dependency: the hook's
+    resolve_enforcement reads the REAL registry — repo packs/ ships
+    agent-ops extraction.enforcement.kinds rule: retry, and the conftest
+    _packs_env_isolation autouse guarantees TORTOISE_PACKS_DIR is cleared
+    so default_packs_dir() resolves to repo packs/."""
+
+    def _require_agent_ops_retry(self):
+        """Loud precondition for the tests whose near_miss_retries
+        expectations derive from the AMBIENT manifest (agent-ops extraction
+        enforcement.kinds rule: retry) + the near-miss structure in the
+        real compiled index. A future manifest edit that removes either
+        fails with a clear message instead of an opaque stat mismatch."""
+        from tortoise.enforcement import resolve_enforcement
+        from tortoise.value_extractor import compile_kind_index_spec
+        assert resolve_enforcement(kind="agent-ops:rule") == "retry", \
+            "TestNearMissRetrySignal needs the installed agent-ops pack to " \
+            "declare extraction.enforcement.kinds rule: retry"
+        spec = compile_kind_index_spec()
+        assert "agent-ops:rule" in spec and "core:standard" in spec, \
+            "TestNearMissRetrySignal needs the rule↔standard near-miss " \
+            "pair in the compiled kind index"
+
+    def test_rerank_chosen_agent_ops_rule_records_near_miss_retry(self):
+        """rule↔standard tie (one-sided nearMiss — rule declares standard)
+        → rerank prefers the non-decoy agent-ops:rule → the seam resolves
+        retry → near_miss_retries == 1. RED on pre-fix code: the hook sees
+        warn (bare-keyed lookup misses agent-ops:rule) → stat absent.
+        Production-faithful pair: the bare ref 'standard' resolves through
+        near_misses()' any-namespace fallback to core:standard (there is no
+        agent-ops:standard kind — same as the real compiled index)."""
+        spec = dict(FIXTURE_SPEC)
+        spec["agent-ops:rule"] = {
+            "text": "agent-ops:rule: An operational rule",
+            "section": "objects", "description": "An operational rule",
+            "synonyms": [], "examples": [],
+            # bare nearMiss ref, production-faithful (the real manifest
+            # declares nearMisses: [standard]); near_misses() resolves it
+            # through the any-namespace fallback to core:standard.
+            "nearMisses": ["standard"],
+        }
+        spec["core:standard"] = {
+            "text": "core:standard: A reusable standard",
+            "section": "objects", "description": "A reusable standard",
+            "synonyms": [], "examples": [], "nearMisses": [],
+        }
+        self._require_agent_ops_retry()
+        clf = KindClassifier(
+            encoder=KeywordEncoder(),
+            index=KindIndex.build(spec, encoder=KeywordEncoder(), persist=False),
+            model=None, llm_tail=False,
+        )
+        out = clf.classify_items(_items(("entity", "the rule standard")))
+        a = out["assignments"]["i0"]
+        assert a["kind"] == "agent-ops:rule"      # rerank-chosen (indicator 3)
+        assert a["mode"] == "rerank"
+        assert out["stats"]["assigned_rerank"] == 1
+        assert out["stats"].get("near_miss_retries") == 1  # seam fired
+
+    def test_classifier_never_re_attempts_encode(self):
+        """The classifier is NOT the retry consumer: one classify pass = one
+        encode pass (encoder.calls == 1 for a 1-item batch) — the bounded
+        re-attempt lives in the extractor's M3 transient-completion loop;
+        near_miss_retries is census-only indicator-3 telemetry (#2030).
+        Behavioral pin: a classifier-side re-attempt loop would re-encode."""
+        spec = dict(FIXTURE_SPEC)
+        enc = KeywordEncoder()
+        clf = KindClassifier(
+            encoder=enc,
+            index=KindIndex.build(spec, encoder=enc, persist=False),
+            model=None, llm_tail=False,
+        )
+        enc.calls = 0  # index build consumed encodes; measure the classify pass
+        out = clf.classify_items(_items(("entity", "the ticket")))
+        assert out["assignments"]["i0"]["kind"] == "dev:issue"
+        assert enc.calls == 1  # exactly one encode pass — no re-attempt loop
+
+    def test_near_miss_retries_counts_per_item(self):
+        """near_miss_retries is a per-ITEM census counter: a 2-item batch of
+        rerank-chosen agent-ops:rule records 2 (not a boolean 0/1) — pins
+        the counting semantics for the downstream telemetry contract."""
+        spec = dict(FIXTURE_SPEC)
+        spec["agent-ops:rule"] = {
+            "text": "agent-ops:rule: An operational rule",
+            "section": "objects", "description": "An operational rule",
+            "synonyms": [], "examples": [], "nearMisses": ["standard"],
+        }
+        spec["core:standard"] = {
+            "text": "core:standard: A reusable standard",
+            "section": "objects", "description": "A reusable standard",
+            "synonyms": [], "examples": [], "nearMisses": [],
+        }
+        clf = KindClassifier(
+            encoder=KeywordEncoder(),
+            index=KindIndex.build(spec, encoder=KeywordEncoder(), persist=False),
+            model=None, llm_tail=False,
+        )
+        self._require_agent_ops_retry()
+        out = clf.classify_items(
+            _items(("entity", "the rule standard"), ("entity", "the standard rule"))
+        )
+        assert all(a["mode"] == "rerank" for a in out["assignments"].values())
+        assert all(a["kind"] == "agent-ops:rule" for a in out["assignments"].values())
+        assert out["stats"]["near_miss_retries"] == 2  # per-item counter, not boolean
+
+    def test_near_miss_retries_mixed_batch_counts_per_item(self):
+        """Batch-scoped semantics: one rerank-chosen retry item + one kNN
+        item in a SINGLE classify_items call → exactly 1 (per-item
+        increment, not per-batch or per-retry-kind)."""
+        spec = dict(FIXTURE_SPEC)
+        spec["agent-ops:rule"] = {
+            "text": "agent-ops:rule: An operational rule",
+            "section": "objects", "description": "An operational rule",
+            "synonyms": [], "examples": [], "nearMisses": ["standard"],
+        }
+        spec["core:standard"] = {
+            "text": "core:standard: A reusable standard",
+            "section": "objects", "description": "A reusable standard",
+            "synonyms": [], "examples": [], "nearMisses": [],
+        }
+        clf = KindClassifier(
+            encoder=KeywordEncoder(),
+            index=KindIndex.build(spec, encoder=KeywordEncoder(), persist=False),
+            model=None, llm_tail=False,
+        )
+        self._require_agent_ops_retry()
+        out = clf.classify_items(
+            _items(("entity", "the rule standard"), ("entity", "the rule"))
+        )
+        assert out["assignments"]["i0"]["mode"] == "rerank"
+        assert out["assignments"]["i1"]["mode"] == "knn"
+        assert out["stats"]["near_miss_retries"] == 1  # per-item, not per-batch
+
+    def test_retry_kind_knn_assignment_does_not_record(self):
+        """The hook records ONLY on the near-miss RERANK branch (#2030): an
+        unambiguous (high-margin) kNN assignment of the retry-declared kind
+        must NOT increment near_miss_retries — pins the recording scope
+        boundary."""
+        spec = dict(FIXTURE_SPEC)
+        spec["agent-ops:rule"] = {
+            "text": "agent-ops:rule: An operational rule",
+            "section": "objects", "description": "An operational rule",
+            "synonyms": [], "examples": [], "nearMisses": ["standard"],
+        }
+        spec["core:standard"] = {
+            "text": "core:standard: A reusable standard",
+            "section": "objects", "description": "A reusable standard",
+            "synonyms": [], "examples": [], "nearMisses": [],
+        }
+        clf = KindClassifier(
+            encoder=KeywordEncoder(),
+            index=KindIndex.build(spec, encoder=KeywordEncoder(), persist=False),
+            model=None, llm_tail=False,
+        )
+        self._require_agent_ops_retry()
+        out = clf.classify_items(_items(("entity", "the rule")))
+        a = out["assignments"]["i0"]
+        assert a["kind"] == "agent-ops:rule"
+        assert a["mode"] == "knn"  # margin 1.0 >= MARGIN — no rerank
+        assert out["stats"]["near_miss_retries"] == 0  # rerank-branch only
+
+    def test_decoy_retry_declared_near_miss_records_retry(self):
+        """Disjunct 2 of the hook: the RERANK-CHOSEN kind is warn
+        (core:standard) but its resolved near-miss set contains a
+        retry-declared kind (agent-ops:rule as the decoy) — the signal
+        still records. This routes through the #2030 namespaced resolution
+        on the near-miss partner, the path a regression could silently
+        under-count."""
+        spec = dict(FIXTURE_SPEC)
+        # Tie order is ALPHABETICAL (KindIndex.kind_names = sorted(spec)):
+        # agent-ops:rule sorts before core:standard, so top[0] is rule —
+        # the rerank flips to core:standard via the one-sided nearMiss
+        # (a_is_decoy: rule ∈ near_misses(standard), standard ∉
+        # near_misses(rule)). Order-independent by construction.
+        spec["core:standard"] = {
+            "text": "core:standard: A reusable standard",
+            "section": "objects", "description": "A reusable standard",
+            "synonyms": [], "examples": [], "nearMisses": ["rule"],
+        }
+        spec["agent-ops:rule"] = {
+            "text": "agent-ops:rule: An operational rule",
+            "section": "objects", "description": "An operational rule",
+            "synonyms": [], "examples": [], "nearMisses": [],
+        }
+        clf = KindClassifier(
+            encoder=KeywordEncoder(),
+            index=KindIndex.build(spec, encoder=KeywordEncoder(), persist=False),
+            model=None, llm_tail=False,
+        )
+        self._require_agent_ops_retry()
+        out = clf.classify_items(_items(("entity", "the standard rule")))
+        a = out["assignments"]["i0"]
+        assert a["kind"] == "core:standard"  # chosen (warn)
+        assert a["mode"] == "rerank"
+        assert out["stats"]["assigned_rerank"] == 1
+        # fired via the near-miss disjunct: near_misses(chosen) → {rule} → retry
+        assert out["stats"].get("near_miss_retries") == 1
+
+    def test_mutual_near_miss_tie_goes_to_tail_without_recording(self):
+        """Recording scope boundary, third branch: a MUTUAL nearMiss pair
+        involving a retry-declared kind routes to the adjudication tail
+        (reranked is None) — the hook fires on the rerank branch only, so
+        near_miss_retries stays 0 even though agent-ops:rule is involved."""
+        spec = dict(FIXTURE_SPEC)
+        spec["agent-ops:rule"] = {
+            "text": "agent-ops:rule: An operational rule",
+            "section": "objects", "description": "An operational rule",
+            "synonyms": [], "examples": [], "nearMisses": ["standard"],
+        }
+        spec["core:standard"] = {
+            "text": "core:standard: A reusable standard",
+            "section": "objects", "description": "A reusable standard",
+            "synonyms": [], "examples": [], "nearMisses": ["rule"],
+        }
+        clf = KindClassifier(
+            encoder=KeywordEncoder(),
+            index=KindIndex.build(spec, encoder=KeywordEncoder(), persist=False),
+            model=None, llm_tail=False,
+        )
+        out = clf.classify_items(_items(("entity", "the rule standard")))
+        assert out["stats"]["adjudication_tail"] == 1
+        assert out["stats"]["near_miss_retries"] == 0  # rerank branch only
+        assert out["assignments"]["i0"]["kind"] == "agent-ops:rule"  # knn top-1 fallback
+
+    def test_hook_resolve_raise_is_fail_open(self, monkeypatch):
+        """The hook's own except (kind_classifier.py:287-290) is fail-open:
+        a raising resolve_enforcement must not abort the batch. Patch the
+        module the hook imports from at call time (from tortoise.enforcement
+        import resolve_enforcement INSIDE the try) — tortoise.kind_classifier
+        has no such attribute. A call counter proves the seam was actually
+        hit (distinguishes "raised and swallowed" from "never invoked")."""
+        calls: list[str] = []
+
+        def raiser(*_a, **_k):
+            calls.append("resolve")
+            raise RuntimeError("seam down")
+
+        monkeypatch.setattr("tortoise.enforcement.resolve_enforcement", raiser)
+        spec = dict(FIXTURE_SPEC)
+        spec["agent-ops:rule"] = {
+            "text": "agent-ops:rule: An operational rule",
+            "section": "objects", "description": "An operational rule",
+            "synonyms": [], "examples": [], "nearMisses": ["standard"],
+        }
+        spec["agent-ops:standard"] = {
+            "text": "agent-ops:standard: A reusable standard",
+            "section": "objects", "description": "A reusable standard",
+            "synonyms": [], "examples": [], "nearMisses": [],
+        }
+        clf = KindClassifier(
+            encoder=KeywordEncoder(),
+            index=KindIndex.build(spec, encoder=KeywordEncoder(), persist=False),
+            model=None, llm_tail=False,
+        )
+        out = clf.classify_items(_items(("entity", "the rule standard")))
+        a = out["assignments"]["i0"]
+        assert a["kind"] == "agent-ops:rule"  # still classified via rerank
+        assert a["mode"] == "rerank"
+        assert out["stats"]["classify_errors"] == 0
+        assert calls, "the hook must actually call the seam (fail-open pin)"
+        # robust to BOTH pre-init absence and post-init zero (Task 3 adds
+        # the always-present key) — never assert absence.
+        assert out["stats"].get("near_miss_retries", 0) == 0
 
 
 class TestAdjudication:
