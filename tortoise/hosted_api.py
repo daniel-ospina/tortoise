@@ -3212,7 +3212,12 @@ async def upload_pack_manifest(
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
     idempotent MERGE + per-(graph, namespace) lock #1307). Per-IP rate
     budget (429) — checked BEFORE the body is read (cheapest rejection,
-    mirrors import #1389/#1230).
+    mirrors import #1389/#1230). Check-time charging (the sensitive-op
+    family doctrine; #1719's deferred terminal charge is session-login
+    only) — a server fault (503) consumes budget; a family-wide
+    defer_charge migration is tracked separately. The MCP install tool
+    (tortoise_pack_install) calls upsert_tenant_manifest in-process and
+    is NOT covered by this REST budget (tracked separately).
 
     Response matrix: no auth → 401; request body over the wire cap
     (~397KB — checked BEFORE any parse) → 413 "manifest request body
