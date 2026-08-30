@@ -9,6 +9,9 @@ import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
 import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
+// #1894: indexed-state + job-progress derivations — pure, node --test
+// unit-tested (memorySourcesStatus.test.js).
+import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
 // #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
 // unit-tested); imported under an alias to avoid an ESM redeclaration collision
 // with the local isSessionKey wrapper below.
@@ -1432,7 +1435,12 @@ function claimIntentInFlight() {
         url: `/v1/index/github/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
         onStatus: setIndexJob,
-        onDone: setIndexJob,
+        // #1894: refresh onboarding state on terminal so the newly-stamped
+        // github_indexed_at appears WITHOUT a manual reload.
+        onDone: (job) => { setIndexJob(job); refreshOnboarding().catch(() => {}) },
+        // #1894: docs re-index ≈90s is tight at the 40×3s default; index
+        // jobs report live progress, so give them a 300s window (bounded).
+        maxTries: 100,
       })
     } catch (e) {
       setRowError('issues', (e && e.message) || 'Could not start GitHub indexing — try again.')
@@ -1468,7 +1476,11 @@ function claimIntentInFlight() {
         url: `/v1/index/docs/${jobId}`,
         isTerminal: (j) => j && (j.status === 'completed' || j.status === 'failed'),
         onStatus: setDocsJob,
-        onDone: setDocsJob,
+        // #1894: refresh onboarding state on terminal so the newly-stamped
+        // github_docs_indexed_at appears WITHOUT a manual reload.
+        onDone: (job) => { setDocsJob(job); refreshOnboarding().catch(() => {}) },
+        // #1894: 300s bounded window for live-progress index jobs.
+        maxTries: 100,
       })
     } catch (e) {
       setRowError('docs', (e && e.message) || 'Could not start docs indexing — try again.')
@@ -5089,6 +5101,15 @@ function MemorySources(props) {
     onDocsScopeChange, onIssuesScopeChange, onLoadBranches,
   } = props
 
+  // #1894: relative-time ticker — keeps "Indexed · 2 min ago" and the job
+  // status lines fresh WITHOUT a poll or reload. Declared BEFORE the early
+  // returns (hooks rules: loading/state guards return early).
+  const [now, setNow] = React.useState(Date.now())
+  React.useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000)
+    return () => clearInterval(t)
+  }, [])
+
   if (loading) {
     return <div className="memory-sources"><p className="dim">Loading memory sources…</p></div>
   }
@@ -5107,6 +5128,11 @@ function MemorySources(props) {
   // connected+indexing. The switch reads connected OR the user's intent.
   const issuesOn = githubConnected || issuesWantOn
   const docsOn = docsWantOn || docsIndexed
+  // #1894: "Indexed · <relative time>" (honest — no time when the persisted
+  // timestamp is absent, e.g. legacy indexed teams). Independent of
+  // connectivity: the label is a historical claim about indexing.
+  const docsLabel = docsIndexedLabel(state, now)
+  const githubLastIndexed = formatRelativeTime(state.github_indexed_at, now)
 
   const status = (h) => captureStatusForHarness(state, h)
   const lastError = (h) => lastErrorForHarness(state, h)
@@ -5132,6 +5158,7 @@ function MemorySources(props) {
             <>
               <p className="dim small" aria-live="polite">
                 {github.repos != null ? `Connected — ${github.repos} repos available. ` : 'Connected. '}
+                {githubLastIndexed ? `Last indexed ${githubLastIndexed}. ` : ''}
                 <button type="button" className="small" onClick={onReindexGithub} disabled={memoryBusy === 'issues' || (indexJob && indexJob.status === 'started')}>
                   {indexJob && indexJob.status === 'started' ? 'Indexing…' : 'Re-index'}
                 </button>
@@ -5188,7 +5215,7 @@ function MemorySources(props) {
               to bring issues in as memory sources.
             </p>
           ) : null}
-          {indexJob && <GithubIndexStatus job={indexJob} />}
+          {indexJob && <GithubIndexStatus job={indexJob} now={now} />}
           {memoryErrors.issues && <p className="error" role="alert">{memoryErrors.issues}</p>}
         </div>
       </div>
@@ -5208,18 +5235,18 @@ function MemorySources(props) {
         <div className="toggle-body">
           <h4>GitHub docs</h4>
           <p>Your repos' docs/ folders are fetched server-side and indexed as Sources.</p>
-          {!githubConnected && docsWantOn ? (
+          {!githubConnected && !docsIndexed && docsWantOn ? (
             <p className="dim small">
               <button type="button" className="small" onClick={onConnectGithub} disabled={github.busy}>
                 {github.busy ? 'Connecting…' : 'Connect GitHub'}
               </button>{' '}
               to index docs/ as memory sources.
             </p>
-          ) : !githubConnected ? (
+          ) : !githubConnected && !docsIndexed ? (
             <p className="dim small">Connect GitHub first to index docs.</p>
           ) : null}
-          {docsIndexed && githubConnected && (
-            <p className="dim small">Docs are indexed and active as a source. Use "Re-index docs" to refresh.</p>
+          {docsIndexed && docsLabel && (
+            <p className="memory-source-state" aria-live="polite">{docsLabel}</p>
           )}
           {githubConnected && (docsWantOn || docsIndexed) && !docsJob && (
             <>
@@ -5311,7 +5338,7 @@ function MemorySources(props) {
               </p>
             </>
           )}
-          {docsJob && <DocsIndexStatus job={docsJob} />}
+          {docsJob && <DocsIndexStatus job={docsJob} now={now} />}
           {memoryErrors.docs && <p className="error" role="alert">{memoryErrors.docs}</p>}
         </div>
       </div>
@@ -5366,12 +5393,15 @@ function MemorySources(props) {
 // "indexing complete (N issues)" success + "indexing failed — retry"
 // (exhausted); eviction-expired = "status expired — re-check" (never a retry
 // loop); aria-live on the region.
-function GithubIndexStatus({ job }) {
+function GithubIndexStatus({ job, now }) {
   if (!job) return null
   if (job.status === 'starting' || job.status === 'started') {
     // review P2-10: 'starting' is the pre-POST state (job id not yet known) —
     // render the same in-progress line so the ~2s gap isn't silent.
-    return <p className="dim small" aria-live="polite">Indexing in progress…</p>
+    // #1894: live progress line (elapsed + repos + ETA from REAL signal —
+    // ETA suppressed until progress > 0, never fabricated).
+    const line = jobStatusLine(job, now)
+    return <p className="dim small" aria-live="polite">{line ? `Indexing… · ${line}` : 'Indexing in progress…'}</p>
   }
   if (job.status === 'completed') {
     const repos = job.repos_processed != null ? ` across ${job.repos_processed} repos` : ''
@@ -5394,11 +5424,13 @@ function GithubIndexStatus({ job }) {
 // #1728 (Task 16/17): docs-job status line — terminal states distinct: "N
 // documents indexed" success / failed-with-reason (in-flight | base-unset |
 // exhausted — distinct copy, never a retry loop) / "status expired — re-check".
-function DocsIndexStatus({ job }) {
+function DocsIndexStatus({ job, now }) {
   if (!job) return null
   if (job.status === 'starting' || job.status === 'started') {
     // review P2-10: 'starting' is the pre-POST state — same in-progress line.
-    return <p className="dim small" aria-live="polite">Indexing docs in progress…</p>
+    // #1894: live progress line (elapsed + repos + ETA).
+    const line = jobStatusLine(job, now)
+    return <p className="dim small" aria-live="polite">{line ? `Docs indexing… · ${line}` : 'Indexing docs in progress…'}</p>
   }
   if (job.status === 'completed') {
     const quota = job.quota_hit ? ' (plan quota reached)' : ''

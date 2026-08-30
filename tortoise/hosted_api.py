@@ -1934,10 +1934,12 @@ DEFAULT_ONBOARDING_STATE = {
     "github_org": None,
     "github_connected_at": None,
     "github_indexed": False,
+    "github_indexed_at": None,            # #1894: last github index completion (ISO, parity with github_indexed)
     "github_index_job_id": None,
     "github_index_cursor": None,          # #1725: per-repo composite (updated_at, number) diff cursor
     "github_legacy_backfill_done": False,  # #1725: one-time legacy `-closed` backfill marker
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
+    "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "demo_created": False,
     "team_created": False,
@@ -10474,7 +10476,9 @@ async def issue_insight(title: str, body: str | None = None,
 _ONBOARDING_DEFAULT_STATE = {
     "github_connected": False,
     "github_indexed": False,
+    "github_indexed_at": None,            # #1894: last github index completion (ISO, parity with github_indexed)
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
+    "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "demo_created": False,
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "team_created": False,
@@ -10645,6 +10649,7 @@ _PATCH_FIELD_TO_STATE_KEY: dict[str, str] = {
 class OnboardingStatePatchRequest(BaseModel):
     github_connected: bool | None = None
     github_indexed: bool | None = None
+    github_indexed_at: str | None = None  # #1894: last github index completion (ISO timestamp, server-stamped)
     demo_created: bool | None = None
     session_recording: bool | None = None
     team_created: bool | None = None
@@ -10679,6 +10684,7 @@ class OnboardingStatePatchRequest(BaseModel):
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so
     # the key round-trips through the PATCH surface.
     github_docs_indexed: bool | None = None
+    github_docs_indexed_at: str | None = None  # #1894: last docs index completion (ISO timestamp, server-stamped)
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
@@ -11846,6 +11852,16 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
             # issues_beyond_window estimate with no per-repo signal).
             if result.get("cleared_truncated"):
                 totals["cleared_truncated"] = True
+            # #1894: live per-repo progress — the poll surfaces honest
+            # mid-walk state (progress/repos/points) so the dashboard can
+            # render an ETA from REAL signal (never fabricated). Written
+            # AFTER the increment so the quota-hit repo (which breaks BEFORE
+            # it) is never counted as processed.
+            _job(progress=round(totals["repos_processed"] * 100
+                                / max(len(walk_repos), 1)),
+                 points_created=totals["points_created"],
+                 repos_processed=totals["repos_processed"],
+                 repos_total=len(walk_repos))
 
         _job(status="completed", progress=100,
              points_created=totals["points_created"],
@@ -11886,6 +11902,12 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
         updates: dict = {"github_index_cursor": cursors}
         if totals["repos_processed"] > 0:
             updates["github_indexed"] = True
+            # #1894: stamp the last-indexed timestamp in the SAME branch that
+            # flips the bool (parity semantics — "last time indexing ran and
+            # made progress", incl. quota-partial/mid-walk-error runs with >=1
+            # repo processed, mirroring github_indexed's resumable-cursor
+            # behavior).
+            updates["github_indexed_at"] = datetime.now(UTC).isoformat()
         _update_onboarding_state(team_id, **updates)
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).
@@ -12191,6 +12213,14 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
                         totals["blobs_skipped_binary"] += walk["skipped_binary"]
                         totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
                     totals["repos_processed"] += 1
+                    # #1894: live per-repo progress ("indexed so far" — the
+                    # document count trails by one repo because the current
+                    # repo's ingest runs after this write).
+                    _job(progress=round(totals["repos_processed"] * 100
+                                        / max(totals["repos_total"], 1)),
+                         documents_indexed=totals["documents_indexed"],
+                         repos_processed=totals["repos_processed"],
+                         repos_total=totals["repos_total"])
                 else:
                     walk = await indexer.walk_repo(
                         team_id, repo_name, branch=scope_branch or "main")
@@ -12198,6 +12228,12 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
                     totals["blobs_skipped_binary"] += walk["skipped_binary"]
                     totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
                     totals["repos_processed"] += 1
+                    # #1894: live per-repo progress (see above).
+                    _job(progress=round(totals["repos_processed"] * 100
+                                        / max(totals["repos_total"], 1)),
+                         documents_indexed=totals["documents_indexed"],
+                         repos_processed=totals["repos_processed"],
+                         repos_total=totals["repos_total"])
             except GitHubFetchError as e:
                 # Fix 4: a bad repo must not starve the others — record and
                 # continue; already-staged repos are ingested below.
@@ -12253,6 +12289,11 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
         updates: dict = {}
         if totals["repos_processed"] > 0:
             updates["github_docs_indexed"] = True
+            # #1894: stamp the last-indexed timestamp in the SAME branch that
+            # flips the bool (parity semantics — see _run_indexing; a
+            # quota-partial docs run with >=1 repo processed counts as "made
+            # progress").
+            updates["github_docs_indexed_at"] = datetime.now(UTC).isoformat()
         _update_onboarding_state(team_id, **updates)
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).

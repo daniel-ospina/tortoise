@@ -552,6 +552,10 @@ class TestRegister:
 # value is PATCHed and must round-trip (bool keys take True; timestamp keys
 # take an ISO string; scope keys take a small non-empty sample).
 _STATE_KEY_TABLE: dict[str, tuple[str, object]] = {
+    # #1894: last-indexed timestamps (ISO strings, server-stamped at
+    # completion — registered like every other capture/state key).
+    "github_indexed_at": ("github_indexed_at", "2026-08-25T00:00:00Z"),
+    "github_docs_indexed_at": ("github_docs_indexed_at", "2026-08-25T00:00:00Z"),
     "capture_revised": ("capture_revised", True),
     "capture_ask_shown": ("capture_ask_shown", True),
     "session_capture_receipt": ("session_capture_receipt", "2026-08-25T00:00:00Z"),
