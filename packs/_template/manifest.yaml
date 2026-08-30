@@ -79,6 +79,16 @@ ontology:
   #       enforcement: retry
   kindDefs: {}
 
+  # ── memory_granularity (epic #1891 #1931) ──────────────────────────────
+  # REQUIRED-ish guidance: what the extractor should treat as DURABLE (keep)
+  # vs EPHEMERAL (strip) for this domain. The value-brief compiler
+  # (value_extractor.compile_value_brief) reads `ontology.memory_granularity`
+  # and puts it in the S1 story-summarizer prompt. Place it UNDER `ontology:`
+  # (NOT top-level — top-level is silently ignored).
+  # Example:
+  #   memory_granularity: 'Durable: the rule text and the reasoning behind it.
+  #     Ephemeral: mechanics, logistics, tool workarounds.'
+
   # ── Manifest v3 (epic #909 / research-r6 §3.2): business-logic chains ──
   # Ordered kind sequences the extractor must respect. Steps may be this
   # pack's kinds (bare), other packs (`ns:kind`), or core kinds (bare, e.g.
