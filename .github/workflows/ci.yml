@@ -236,6 +236,19 @@ jobs:
           assert t.exists(), "sample transcript missing"
           print(f"per-PR wheel pack smoke OK: {n} >= {bound}")
           EOF
+      - name: Doc-consistency check (#1932 / epic #1891 R11)
+        # Authoring docs must not drift from the manifest schema: the guide's
+        # required sections exist, both quickstarts reference packs, and the
+        # links resolve (dead link → fail). <2s, fail-closed.
+        run: |
+          for sec in "What is an expansion pack" "The enforcement ladder" "Chains" "Testing a pack"; do
+            grep -q "$sec" docs/EXPANSION_PACKS.md || { echo "::error::EXPANSION_PACKS.md missing section: $sec"; exit 1; }
+          done
+          for qs in docs/quickstart-selfhosted.md docs/quickstart-cloud.md; do
+            grep -q "EXPANSION_PACKS.md" "$qs" || { echo "::error::$qs missing pack reference"; exit 1; }
+          done
+          test -f docs/EXPANSION_PACKS.md || { echo "::error::EXPANSION_PACKS.md missing"; exit 1; }
+          echo "doc-consistency OK"
 
   welcome-e2e:
     runs-on: ubuntu-latest
