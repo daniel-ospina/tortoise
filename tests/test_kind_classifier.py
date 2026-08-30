@@ -208,6 +208,7 @@ class TestNearMissRerank:
         manifest-content-independent (a future pack adding retry on
         issue/code must not flip this classifier-behavior test red)."""
         import types
+
         from tortoise.pack_registry import PackManifest
 
         def warn_only(ns: str):
