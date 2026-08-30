@@ -8122,25 +8122,24 @@ class TortoiseSDK:
                         "confidences": {}, "diagnostic": "no_factors"}
         confidences = {}
         proj = self._get_proj()
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # #395 (delta C): the write-back set == the run set — consume
         # ep._last_affected (stashed by run, assigned before its early
         # returns) instead of re-running the BFS with a default depth.
         for claim_id in (ep._last_affected or set()):
             conf = ep.compute_confidence(claim_id)
             confidences[claim_id] = conf
-        # Batch write-back via UNWIND (drops the per-claim SET loop; only the
-        # updatedAt stamp + full-precision mean are unique to the loop —
-        # n.confidence itself is already batch-written by _flush_cache).
+        # Batch write-back via UNWIND (drops the per-claim SET loop; the
+        # full-precision mean is the loop's only unique write — n.confidence
+        # itself is also batch-written by _flush_cache).
+        # #1915: a READ never moves the freshness signal — no updatedAt stamp
+        # here (get_confidence passes stamp_dreamed_at=False for the same
+        # reason); the dream write-back owns the write-path stamp.
         if confidences:
             proj.g.query(
                 "UNWIND $params AS p "
-                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c, "
-                "n.updatedAt = $now",
+                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c",
                 params={"params": [{"id": cid, "c": conf["mean"]}
-                                    for cid, conf in confidences.items()],
-                        "now": now},
+                                    for cid, conf in confidences.items()]},
             )
         result = {"iterations": iterations, "converged": converged,
                   "confidences": confidences}

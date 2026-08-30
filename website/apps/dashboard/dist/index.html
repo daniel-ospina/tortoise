@@ -37,16 +37,25 @@
           // /auth. Exempt callback fragments: the async mount check owns the
           // outcome (ingest → session → dashboard; stale → /auth).
           var hasCallbackFragment = /[?#&](access_token|code)=/.test(window.location.search + window.location.hash);
+          // #1909: a DENIED provider round-trip lands on this origin as
+          // #error=…&error_code=… (supabase-js implicit flow). Preserve ONLY
+          // error fragments on the /auth bounce — never a live token fragment
+          // (re-ingested by the destination, #1566) — so /auth's banner can
+          // render the reason instead of a bare login card.
+          var errFragment = /[?#&](?:error|error_code|error_description)=/.test(window.location.hash) &&
+            !/[?&#](?:access_token|refresh_token|code)=/.test(window.location.hash)
+            ? window.location.hash : '';
           if (!hasSession && !claimIntent && !hasCallbackFragment) {
             // #1224/#1566: preserve OAuth error params (they land on this
-            // origin now that signups redirect here) for /auth's banner.
-            if (typeof window.bounceToAuth === "function") window.bounceToAuth(window.location.search);
-            else window.location.replace("https://tortoise.premiselabs.co/auth" + window.location.search);
+            // origin now that signups redirect here) for /auth's banner —
+            // search AND any #1909 error fragment.
+            if (typeof window.bounceToAuth === "function") window.bounceToAuth(window.location.search, errFragment);
+            else window.location.replace("https://tortoise.premiselabs.co/auth" + window.location.search + errFragment);
           }
         } catch (e) { /* best-effort — the app's async check still applies */ }
       })();
     </script>
-    <script type="module" crossorigin src="/assets/index-gBup8Vxm.js"></script>
+    <script type="module" crossorigin src="/assets/index-BbxqMHm8.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-CZzDJ9fM.css">
   </head>
   <body>

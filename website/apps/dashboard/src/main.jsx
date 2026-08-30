@@ -136,6 +136,28 @@ const supabaseStorage = {
   },
 }
 
+// #1909: supabase-js implicit flow returns OAuth error params in the URL
+// FRAGMENT (#error=…&error_code=…) — not just the search string (a denied
+// claim OAuth round-trip returns as ?claim=1#error=… on this origin). The
+// client consumes the fragment during init, so snapshot it FIRST (mirrors
+// welcome.html's landingHash) and read error params from BOTH surfaces.
+const landingHash = window.location.hash
+function oauthErrorParams() {
+  const p = new URLSearchParams(window.location.search)
+  const h = new URLSearchParams(landingHash.replace(/^#/, ''))
+  const get = (k) => p.get(k) || h.get(k) || ''
+  return { error: get('error'), error_code: get('error_code'), error_description: get('error_description') }
+}
+// #1909: the /auth bounce may carry an OAuth error FRAGMENT (#error=…).
+// Forward it to /auth ONLY when it holds error params — a live token
+// fragment (access_token / refresh_token / code) must never be re-ingested
+// by the destination (the #1566 invariant).
+function oauthErrorHash() {
+  if (!landingHash) return ''
+  if (/[?&#](?:access_token|refresh_token|code)=/.test(landingHash)) return ''
+  return /[?&#](?:error|error_code|error_description)=/.test(landingHash) ? landingHash : ''
+}
+
 let supabaseClient = null
 try {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -1425,13 +1447,13 @@ function claimIntentInFlight() {
         // banner reads ?error=... (the mount gate already passes
         // window.location.search on its bounce; the bare call here dropped
         // them, so an OAuth failure during provisioning silently lost the
-        // banner's cause).
-        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
+        // banner's cause). #1909: an error FRAGMENT rides along too.
+        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
         // #1860 (P3-5, review P2-1): the degraded fallback must preserve the
         // params too — mirror the mount gate's fallback exactly, or the
         // OAuth-error banner's cause is lost precisely when the bridge is
         // blocked/unavailable.
-        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
         return { routedAway: true }
       }
       if (response && response.ok) {
@@ -1624,15 +1646,28 @@ function claimIntentInFlight() {
           // on /auth, not a dashboard credential.
           const claimIntent = claimIntentInFlight()
           if (!claimIntent) {
-            // #1224/#1566: OAuth state-expiry errors land as ?error=… on the
-            // app origin now — preserve the SEARCH so /auth renders the
-            // banner (never the hash: a live #access_token must not be
+            // #1224/#1566: OAuth state-expiry errors land as ?error=… (or,
+            // #1909, as #error=… in the fragment) on the app origin now —
+            // preserve the SEARCH and any ERROR fragment so /auth renders the
+            // banner (never a live #access_token fragment: it must not be
             // re-ingested by the destination).
-            if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
-            else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+            if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
+            else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
             return
           }
           // Claim-intent: render the claim-paste screen (no session, no team).
+          // #1909: a denied claim OAuth round-trip returns with
+          // ?claim=1#error=… — surface the reason on the paste screen
+          // (fragment params, not just search).
+          const urlErr = oauthErrorParams()
+          if (urlErr.error || urlErr.error_code) {
+            const code = urlErr.error_code || ''
+            const desc = urlErr.error_description || ''
+            setClaimError(
+              code === 'bad_oauth_state' || /state/i.test(desc)
+                ? 'Your sign-in session expired while you were on the claim screen. Please try again.'
+                : 'Sign-in failed' + (desc ? `: ${desc}` : '. Please try again.'))
+          }
           setAuthMode('apikey')
           setChecking(false); return
         }

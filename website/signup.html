@@ -15,14 +15,18 @@
        destination WITHOUT seeing the auth card flash. The shared
        readValidSession enforces STRICT validity (missing/past expires_at =
        invalid — the stale-session leak class); location.replace keeps Back
-       from returning here. Skipped when ?error/?error_code present — the
-       #1224 OAuth state-expiry banner must render. Falls back to the async
-       getSession bounce below. -->
+       from returning here. Skipped when ?error/?error_code present (search
+       or #1909 fragment) — the #1224 OAuth state-expiry banner must render.
+       Falls back to the async getSession bounce below. -->
   <script>
     (function () {
       try {
         var p = new URLSearchParams(window.location.search);
-        if (p.get("error") || p.get("error_code")) return;
+        // #1909: supabase-js implicit flow returns OAuth errors in the URL
+        // FRAGMENT (#error=…) — read both surfaces or a denied round-trip
+        // bounces a signed-in visitor past the banner that explains it.
+        var h = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+        if (p.get("error") || p.get("error_code") || h.get("error") || h.get("error_code")) return;
         var s = (typeof window.readValidSession === "function") ? window.readValidSession() : null;
         if (!s) return;  // no VALID session → stay on the auth card
         var claim = /(?:^|; )tt_claim_pending=/.test(document.cookie);
@@ -608,16 +612,30 @@
     // Guard: check if the anon key placeholder was replaced at deploy time
     const isConfigured = supabaseAnonKey && !supabaseAnonKey.includes("{{");
 
+    // ── #1909: OAuth errors land in the URL FRAGMENT, not just search ─────
+    // supabase-js implicit flow returns a denied/expired provider round-trip
+    // as #error=…&error_code=… (welcome.html forwards the hash to /auth).
+    // The client consumes the fragment during init, so snapshot it FIRST
+    // (mirrors welcome.html's landingHash) and read error params from BOTH
+    // surfaces.
+    const landingHash = window.location.hash;
+    function oauthErrorParams() {
+      var p = new URLSearchParams(window.location.search);
+      var h = new URLSearchParams(landingHash.replace(/^#/, ""));
+      var get = function (k) { return p.get(k) || h.get(k) || ""; };
+      return { error: get("error"), code: get("error_code"), desc: get("error_description") };
+    }
+
     // ── OAuth state-expiry recovery (#1224) ───────────────────────────────
     // A slow login can expire the Supabase OAuth state; the provider callback
     // redirects with ?error=...&error_code=bad_oauth_state (to the landing or
     // back here). Surface it on this retry surface with a clear message.
     (function () {
       try {
-        var p = new URLSearchParams(window.location.search);
-        if (!p.get("error") && !p.get("error_code")) return;
-        var code = p.get("error_code") || "";
-        var desc = p.get("error_description") || "";
+        var e = oauthErrorParams();
+        if (!e.error && !e.code) return;
+        var code = e.code;
+        var desc = e.desc;
         var msg;
         if (code === "bad_oauth_state" || /state/.test(desc)) {
           msg = "Your sign-in session expired while you were on the login page. Please try again.";
@@ -680,8 +698,8 @@
           // welcome gate's validity check).
           var s = r.data.session;
           if (!s.expires_at || s.expires_at * 1000 <= Date.now()) return;
-          var p = new URLSearchParams(window.location.search);
-          if (!p.get("error") && !p.get("error_code")) {
+          var e = oauthErrorParams();
+          if (!e.error && !e.code) {
             window.location.href = claimRedirectTarget();
           }
         }
