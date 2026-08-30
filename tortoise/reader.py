@@ -475,12 +475,12 @@ def _looks_abstained(answer: str | None) -> bool:
         # attribute reference ("the context does not mention his age").
         # The possessive carve-out is NARROW: it exempts only the #2027
         # hedge shape — a possessive paired with "not mention"/"not
-        # mentioned"/"does not contain" ("the context does not mention
-        # his age"). A flat refusal that merely mentions a possessive
-        # ("I don't know the date of his birth.") is NOT exempt.
+        # mentioned"/"does not contain"/"doesn't contain" ("the context
+        # does not mention his age"). A flat refusal that merely mentions
+        # a possessive ("I don't know the date of his birth.") is NOT exempt.
         possessive_hedge = bool(
             re.search(r"\b(?:his|her|its|their)\b", c)
-            and re.search(r"(?:not mention|not mentioned|does not contain)", c))
+            and re.search(r"(?:not mention|not mentioned|does not contain|doesn't contain)", c))
         if c == clauses[-1] and "though" not in c and not possessive_hedge:
             return True
     return False

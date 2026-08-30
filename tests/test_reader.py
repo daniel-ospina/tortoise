@@ -380,7 +380,7 @@ class TestLooksAbstained:
         assert _looks_abstained("3 days ago.") is False
 
     def test_separator_only_output_not_abstained(self) -> None:
-        """Separator-only output (".", "...", "!?", "—", "./") has no
+        """Separator-only output (".", "...", "!?", "—", ",") has no
         clause to match — NOT abstained (pre-cycle-2 behavior; the
         cycle-2 clause filter must not crash on an empty clause list —
         this label gates NO_EVIDENCE_TEXT substitution upstream, so an
@@ -390,6 +390,9 @@ class TestLooksAbstained:
         assert _looks_abstained(".") is False
         assert _looks_abstained("!?") is False
         assert _looks_abstained("—") is False
+        # "./" is NOT separator-only — it splits to a non-empty clause
+        # list (["/"]), so it never exercises the empty-clause guard;
+        # non-separator residue with no matching phrase, still False.
         assert _looks_abstained("./") is False
         assert _looks_abstained(",") is False
 

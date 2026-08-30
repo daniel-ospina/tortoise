@@ -4,8 +4,8 @@ The single source of truth for the ask surface's boundary RULES and
 canonical error-code strings, referenced by BOTH the SDK local-lane
 validator (``TortoiseSDK.ask``) and the ``AskRequest`` field validators
 (Task 7) — no duplicated boundary literals (P2-14). Also re-exports the SDK
-typed ask exceptions (defined in ``tortoise/exceptions.py``) so Tasks 9/11
-have ONE import surface.
+typed ask exceptions AND the canonical error-code vocabulary (defined in
+``tortoise/exceptions.py``) so Tasks 9/11 have ONE import surface.
 """
 from __future__ import annotations
 
@@ -77,19 +77,33 @@ def ask_question_is_punctuation_only(question: str) -> bool:
     )
 
 
-# ── Canonical error-code vocabulary (10 codes — one vocabulary, two ────────
-# ── surfaces: the wire body + the SDK exception ``code`` attributes) ───────
+# ── Canonical error-code vocabulary + SDK exception re-export ──────────────
+# (one import surface for Tasks 9/11)
+# The CODE_* constants live in ``tortoise/exceptions.py`` — the typed ask
+# exception ``code`` class attributes reference them there — and are
+# re-exported here so the wire body and the SDK exception share ONE
+# vocabulary (a drift between the two surfaces is impossible by
+# construction; the previous literal duplication here was the manual drift
+# invariant). The typed ask exceptions are re-exported too.
 
-CODE_UNAUTHORIZED = "unauthorized"
-CODE_QUOTA_EXCEEDED = "quota_exceeded"
-CODE_IN_FLIGHT_LIMIT = "in_flight_limit"
-CODE_READER_UNAVAILABLE = "reader_unavailable"
-CODE_RETRIEVAL_UNAVAILABLE = "retrieval_unavailable"
-CODE_TIMEOUT = "timeout"
-CODE_INVALID_QUESTION = "invalid_question"
-CODE_INVALID_QUESTION_TYPE = "invalid_question_type"
-CODE_INVALID_QUESTION_DATE = "invalid_question_date"
-CODE_QUESTION_TOO_LONG = "question_too_long"
+from tortoise.exceptions import (  # noqa: E402
+    CODE_IN_FLIGHT_LIMIT,
+    CODE_INVALID_QUESTION,
+    CODE_INVALID_QUESTION_DATE,
+    CODE_INVALID_QUESTION_TYPE,
+    CODE_QUESTION_TOO_LONG,
+    CODE_QUOTA_EXCEEDED,
+    CODE_READER_UNAVAILABLE,
+    CODE_RETRIEVAL_UNAVAILABLE,
+    CODE_TIMEOUT,
+    CODE_UNAUTHORIZED,
+    AskInFlightLimit,
+    AskQuotaExceeded,
+    AskReaderUnavailable,
+    AskRetrievalUnavailable,
+    AskTimeout,
+    AskValidationError,
+)
 
 ASK_ERROR_CODES: tuple[str, ...] = (
     CODE_UNAUTHORIZED, CODE_QUOTA_EXCEEDED, CODE_IN_FLIGHT_LIMIT,
@@ -113,17 +127,6 @@ def valid_question_types() -> str:
     body (the 4 fragment types; None is the default)."""
     return "|".join(t for t in ASK_QUESTION_TYPES if t)
 
-
-# ── SDK typed exception re-export (one import surface for Tasks 9/11) ──────
-
-from tortoise.exceptions import (  # noqa: E402
-    AskInFlightLimit,
-    AskQuotaExceeded,
-    AskReaderUnavailable,
-    AskRetrievalUnavailable,
-    AskTimeout,
-    AskValidationError,
-)
 
 __all__ = [
     "ASK_ERROR_CODES",

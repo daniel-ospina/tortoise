@@ -587,8 +587,14 @@ def test_abstained_label_clause_scoped_pin():
         # cycle-3 pin: the possessive carve-out is NARROW — a possessive
         # attribute reference exempts ONLY the #2027 hedge shape
         # (possessive + "not mention"/"not mentioned"/"does not
-        # contain", e.g. the "context does not mention his age" clause);
-        # a non-though committed hedge in that shape still labels False.
+        # contain"/"doesn't contain", e.g. the "context does not mention
+        # his age" clause); a non-though committed hedge in that shape
+        # still labels False.
         "The party is on Friday. The context does not mention his age.",
+        # cycle-4 pin: the contracted variant "doesn't contain" is in
+        # _ABSTAINED_PHRASES and must get the SAME carve-out as the
+        # expanded "does not contain" — identical hedge shape, identical
+        # label (False), never a contraction-dependent flip.
+        "The party is on Friday. The context doesn't contain his age.",
     ):
         assert _looks_abstained(committed) is False, committed
