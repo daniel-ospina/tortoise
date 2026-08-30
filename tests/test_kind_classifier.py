@@ -159,11 +159,11 @@ class TestKnnCore:
         assert out["stats"]["unclassified"] == 1
 
     def test_margin_gate_boundary_high_floor(self, classifier):
-        """A clear top-1 (margin >= MARGIN) above the floor assigns via kNN
-        even when the top-2 share a keyword — the margin gate wins over
-        shared-keyword ambiguity (reinstated 2026-08-30 after a code-review
-        cycle flagged its removal as unexplained; it passes unchanged on the
-        post-#2030 classifier)."""
+        """A dominant top-1 keyword (margin >= MARGIN) above the floor
+        assigns via kNN — the margin gate wins over the nearMiss rerank and
+        unclassified fallbacks. (Reinstated 2026-08-30 after a code-review
+        cycle flagged its removal as unexplained; passes unchanged on the
+        post-#2030 classifier.)"""
         out = classifier.classify_items(_items(("entity", "the ticket ticket ticket fix")))
         a = out["assignments"]["i0"]
         assert a["kind"] == "dev:issue"  # ticket dim dominates

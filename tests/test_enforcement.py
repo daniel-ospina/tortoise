@@ -440,12 +440,12 @@ class TestCreateOperatorWarnNotBlock:
 class TestClassifierRetrySignalM3Bound:
     def test_retry_count_key_is_bounded_by_m3_loop(self):
         """The seam records near_miss_retries; the ACTUAL bounded re-attempt
-        is the extractor's M3 loop (≤3 attempts, _COMPLETE_RETRIES=2) —
-        near-miss accounting is census telemetry, never a loop (the
-        classifier never re-encodes; pinned behaviorally by
+        is the extractor's M3 loop (_COMPLETE_RETRIES=2 → 3 total attempts,
+        range(1, retries+2)) — near-miss accounting is census telemetry,
+        never a loop (the classifier never re-encodes; pinned behaviorally by
         test_classifier_never_re_attempts_encode in test_kind_classifier.py)."""
         import tortoise.extractor_v2 as v2
-        assert getattr(v2, "_COMPLETE_RETRIES", 2) <= 3
+        assert getattr(v2, "_COMPLETE_RETRIES", 2) <= 2  # M3 loop runs retries+1 ≤ 3 attempts
 
 # ── Chain rewire regression guard (behavioral, not byte-identical) ─────────
 
