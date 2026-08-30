@@ -956,19 +956,20 @@ class TestImportPackConfigApplyFailures:
         assert r3.status_code == 200, r3.text
         assert r3.json()["already"] is True
 
-    def test_success_clear_failure_reimport_still_already(self, sb_client,
-                                                          as_user, monkeypatch):
-        """Success-path quarantine-clear failure (persistent control-plane
-        write failure) leaves BOTH props == sha. The in-lock consultation
-        must still return ``already`` (L==sha proves full application — the
-        stamp runs only after pack application succeeds), breaking the
-        destructive re-swap loop. (Reviewer finding: without the
-        ``Q == sha`` allowance, every re-import of a fully-applied sha
-        re-swaps forever.)
+    def test_success_quarantine_clear_failure_reimport_still_already(self, sb_client,
+                                                                     as_user, monkeypatch):
+        """Success-path QUARANTINE-clear failure (control-plane write blip)
+        leaves Q==sha while L==sha. The already-fast-path consults the
+        POST-SWAP PACK-FAILURE MARKER (not the audit-only quarantine prop) —
+        the marker cleared on success, so re-import returns ``already``
+        (L==sha proves full application; the stamp runs only after pack
+        application succeeds). Locks the marker-vs-Q consultation split
+        (#2040 review round 2).
 
         Scenario: fail-then-succeed on the same sha with the SUCCESS-path
         quarantine clear broken — first import quarantines (Q=sha), second
-        import succeeds (L=sha) but the clear fails → Q stays sha."""
+        import succeeds (L=sha) but the quarantine clear fails → Q stays sha;
+        the pack-failure marker STILL clears → already fires."""
         real_stamp = ha_mod._stamp_import_prop
 
         def _clear_boom(source, team_id, prop, value):
@@ -999,18 +1000,120 @@ class TestImportPackConfigApplyFailures:
         r1 = _post_import(tc, artifact, key)
         assert r1.status_code == 422, r1.text
         assert fake.tables["teams"][0].get("last_import_quarantined_sha256") == sha
-        # 2: same sha, env fixed → 200 imported; L=sha, clear FAILS → Q stays sha
+        # 2: same sha, env fixed → 200 imported; L=sha, Q-clear FAILS → Q stays sha;
+        # the pack-failure marker still clears (independent best-effort writes)
         r2 = _post_import(tc, artifact, key)
         assert r2.status_code == 200, r2.text
         assert r2.json()["imported"] is True
         row = fake.tables["teams"][0]
         assert row.get("last_import_sha256") == sha
-        assert row.get("last_import_quarantined_sha256") == sha  # clear failed
-        # 3: re-import → already (L==sha AND Q==sha are both this sha — the
-        # stamp-after-apply proves the vocabulary is live; no re-swap loop)
+        assert row.get("last_import_quarantined_sha256") == sha  # Q clear failed
+        assert not row.get("last_import_pack_failed_sha256")  # marker cleared
+        # 3: re-import → already (marker != sha proves no post-swap failure)
         r3 = _post_import(tc, artifact, key)
         assert r3.status_code == 200, r3.text
         assert r3.json()["already"] is True
+
+    def test_pre_restore_quarantine_other_sha_still_already(self, sb_client,
+                                                            as_user):
+        """#2040 review round 2 (P1 regression lock): a PRE-RESTORE
+        rejection of a DIFFERENT artifact (foreign kind — graph untouched,
+        only Q stamped, no post-swap marker) must NOT block ``already`` for
+        the fully-applied sha. The marker-based consultation restores the
+        documented idempotent re-import contract ("Re-import of the same
+        payload sha256 → already") that the round-1 Q-consultation broke."""
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        # A: valid artifact → 200, L=A, marker cleared
+        payload_a = self._payload(_CUSTOM_MANIFEST, n_points=1)
+        artifact_a = _build_artifact(payload_a, key)
+        sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
+        r_a = _post_import(tc, artifact_a, key)
+        assert r_a.status_code == 200, r_a.text
+        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        # B: pre-restore rejection (foreign kind, no pack_config) — Q=B stamped,
+        # graph untouched, NO pack-failure marker
+        payload_b = _build_payload(n_points=1, n_edges=0)
+        payload_b["nodes"][0]["props"]["pointKind"] = "tenant-ops:contract"
+        artifact_b = _build_artifact(payload_b, key)
+        r_b = _post_import(tc, artifact_b, key)
+        assert r_b.status_code == 422, r_b.text
+        row = fake.tables["teams"][0]
+        assert row.get("last_import_quarantined_sha256") != sha_a
+        assert not row.get("last_import_pack_failed_sha256")
+        assert row.get("last_import_sha256") == sha_a  # A untouched
+        # re-import A → already (marker != sha_a; no post-swap failure)
+        r_a2 = _post_import(tc, artifact_a, key)
+        assert r_a2.status_code == 200, r_a2.text
+        assert r_a2.json()["already"] is True
+        assert r_a2.json()["imported"] is False
+
+    def test_pack_failure_marker_blocks_already_after_mirror_history(
+            self, sb_client, as_user, monkeypatch):
+        """#2040 review round 2 (P2 mirror-history lock): success→
+        different-sha-quarantine→same-sha-failure must NOT return ``already``.
+        A succeeded (L=A), B failed post-swap with the L-clear ALSO blipping
+        (L stays stale=A, marker=B), then a re-import of A fails post-swap
+        again (marker=A). The marker==sha blocks ``already`` — the last
+        attempt at this sha failed post-swap, so the vocabulary may not be
+        live despite L==sha."""
+        real_stamp = ha_mod._stamp_import_prop
+
+        def _clear_boom(source, team_id, prop, value):
+            if prop == "last_import_sha256" and value == "":
+                raise RuntimeError("simulated ledger-clear failure")
+            return real_stamp(source, team_id, prop, value)
+
+        monkeypatch.setattr(ha_mod, "_stamp_import_prop", _clear_boom)
+        real_apply = ha_mod._apply_import_pack_config
+        # Fail ONLY the SECOND application of artifact A (B's failed apply
+        # also funnels through this seam — key on the CUSTOM_MANIFEST yaml).
+        a_calls = {"n": 0}
+
+        def _fail_apply_second(sdk, payload):
+            pc = payload.get("pack_config") or {}
+            packs = pc.get("packs") or []
+            if any(p.get("yaml") == _CUSTOM_MANIFEST for p in packs):
+                a_calls["n"] += 1
+                if a_calls["n"] == 2:
+                    raise ValueError("pack env failure on A re-import")
+            return real_apply(sdk, payload)
+
+        monkeypatch.setattr(ha_mod, "_apply_import_pack_config", _fail_apply_second)
+        tc, fake, _ = sb_client
+        _seed_team(fake)
+        as_user()
+        key = os.urandom(32)
+        # A: valid → 200, L=A
+        payload_a = self._payload(_CUSTOM_MANIFEST, n_points=1)
+        artifact_a = _build_artifact(payload_a, key)
+        sha_a = hashlib.sha256(_canonical(payload_a)).hexdigest()
+        r_a = _post_import(tc, artifact_a, key)
+        assert r_a.status_code == 200, r_a.text
+        assert fake.tables["teams"][0].get("last_import_sha256") == sha_a
+        # B: broken manifest → 422 post-swap; L-clear blips → L stays A (stale),
+        # marker=B
+        payload_b = self._payload("namespace: [broken", n_points=2)
+        artifact_b = _build_artifact(payload_b, key)
+        r_b = _post_import(tc, artifact_b, key)
+        assert r_b.status_code == 422, r_b.text
+        row = fake.tables["teams"][0]
+        assert row.get("last_import_sha256") == sha_a  # stale (clear blipped)
+        assert row.get("last_import_pack_failed_sha256") != sha_a
+        # re-import A: swap lands, pack apply FAILS (2nd call) → 422; marker=A
+        r_a2 = _post_import(tc, artifact_a, key)
+        assert r_a2.status_code == 422, r_a2.text
+        assert "pack env failure on A re-import" in r_a2.json()["detail"]
+        row = fake.tables["teams"][0]
+        assert row.get("last_import_pack_failed_sha256") == sha_a  # marker=A
+        # re-import A again → NOT already (marker==sha_a blocks the lie) → re-swap
+        a_calls["n"] = 0  # reset so the third import applies cleanly
+        r_a3 = _post_import(tc, artifact_a, key)
+        assert r_a3.status_code == 200, r_a3.text
+        assert r_a3.json()["imported"] is True
+        assert r_a3.json()["already"] is False
 
     def test_rollback_after_pack_failure_clear_blip_200(self, sb_client,
                                                         as_user, monkeypatch):

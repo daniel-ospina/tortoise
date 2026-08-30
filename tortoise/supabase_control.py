@@ -94,7 +94,10 @@ _TEAM_ADDITIVE_SELECT = [
     "dashboard_key_login",
     # #1230: import idempotency ledger + quarantine record + points-cap
     # override (see _TEAM_ADDITIVE_IMPORT_TIER).
-    "last_import_sha256", "last_import_quarantined_sha256", "max_points",
+    "last_import_sha256", "last_import_quarantined_sha256",
+    # #2040 post-swap pack-failure marker (consulted by the import
+    # already-fast-path through the same fail-soft seam).
+    "last_import_pack_failed_sha256", "max_points",
     # #1623: Stripe billing state (0012 migration — the webhook's store) so
     # /v1/team can render plan state + the dashboard Billing page.
     "subscription_status", "customer_email",
@@ -107,6 +110,9 @@ _TEAM_ADDITIVE_SELECT = [
 _TEAM_ADDITIVE_IMPORT_TIER = [
     # #1230 import idempotency ledger + quarantine record (Team-node props).
     "last_import_sha256", "last_import_quarantined_sha256",
+    # #2040 post-swap pack-failure marker (consulted by the import
+    # already-fast-path — must be readable through the same fail-soft seam).
+    "last_import_pack_failed_sha256",
     # points-cap override (the plan's max_points / graph_size_cap source).
     "max_points",
 ]

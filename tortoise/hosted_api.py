@@ -1996,7 +1996,8 @@ _IMPORT_ARTIFACT_VERSION = 1
 # an unbounded body through to buffering/decrypt; #1230 plan S4).
 _IMPORT_MAX_BYTES = 64 * 1024 * 1024
 # Idempotency-ledger / quarantine props on the Team node (control plane).
-_IMPORT_LEDGER_PROPS = ("last_import_sha256", "last_import_quarantined_sha256")
+_IMPORT_LEDGER_PROPS = ("last_import_sha256", "last_import_quarantined_sha256",
+                         "last_import_pack_failed_sha256")
 
 _SENSITIVE_OP_LIMITS = {"export": 20, "team_delete": 5, "import": 5}  # per hour per IP
 _SENSITIVE_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
@@ -7935,6 +7936,14 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
             yaml_text = pack.get("yaml")
             if not isinstance(ns, str) or not isinstance(yaml_text, str):
                 continue
+            # #2040 code-review: bound the parse with the SAME 64KB cap the
+            # validator enforces before parsing (validate_manifest) — a
+            # crafted artifact must not trigger an unbounded parse here
+            # (memory amplification under the 64MiB body cap); oversized
+            # yaml defers to apply-time validation, which owns the message.
+            from tortoise.pack_manifest_store import MAX_MANIFEST_BYTES as _MAX_MB
+            if len(yaml_text.encode()) > _MAX_MB:
+                continue
             try:
                 import yaml as _yaml
                 raw = _yaml.safe_load(yaml_text)
@@ -8297,24 +8306,30 @@ async def import_team(team_id: str, request: Request,
     async with lock:
         # Idempotency ledger (re-read inside the lock — a concurrent import
         # may have stamped the ledger while we validated). #2040: the
-        # already-fast-path ALSO requires the quarantine prop to be empty OR
-        # equal to this sha. Rationale:
-        #  - Q != sha AND non-empty → SOME other sha failed since the last
-        #    success; the ledger may hold a STALE prior sha (a pack-failure
-        #    ledger-clear blip), so `already` could silently no-op a rollback
-        #    while the live graph holds the failed artifact's dump. Refuse
-        #    `already` → the re-import re-swaps (documented destructive-retry
-        #    convergence model).
-        #  - Q == sha → this sha was quarantined then fully applied, and the
-        #    success-path quarantine clear failed (persistent control-plane
-        #    write failure) — L==sha proves the import fully applied (the
-        #    stamp runs only after successful pack application), so `already`
-        #    is correct and the re-swap loop is broken (each re-import would
-        #    otherwise destructively re-swap a fully-applied sha forever).
+        # already-fast-path ALSO requires the post-swap pack-failure marker
+        # to be UNSET.
+        #
+        # Ledger semantics (post-#2040):
+        #  - last_import_sha256 == sha means the import fully applied
+        #    (stamp runs AFTER successful pack application).
+        #  - last_import_pack_failed_sha256 (SET == a sha) means the MOST
+        #    RECENT import attempt failed AFTER the swap (pack application)
+        #    — the live graph holds that dump but its vocabulary may not be
+        #    live. ANY set marker invalidates the already-fast-path: with a
+        #    stale L (the pack-failure L-clear blipped), L==sha alone would
+        #    be a lie — the graph may hold a different dump or the vocab
+        #    may be missing. Cleared only by a successful import. Pre-
+        #    restore rejections do NOT set this marker (the graph is
+        #    untouched — a prior applied sha legitimately short-circuits),
+        #    which is exactly the state the Q-consultation could not
+        #    distinguish.
+        #  - the quarantine prop (last_import_quarantined_sha256) is an
+        #    AUDIT record for pre-restore + post-swap failures alike and is
+        #    NOT consulted by the fast-path (it cannot distinguish the two
+        #    classes; the pack-failure marker can).
         fresh = await _team_node(team_id)
         if fresh is not None and fresh.get("last_import_sha256") == sha \
-                and (not fresh.get("last_import_quarantined_sha256")
-                     or fresh.get("last_import_quarantined_sha256") == sha):
+                and not fresh.get("last_import_pack_failed_sha256"):
             await _async_audit(
                 request, team_id, "team_import",
                 resource_type="team", resource_id=team_id,
@@ -8412,7 +8427,7 @@ async def import_team(team_id: str, request: Request,
                 # retryable (same-artifact retry re-422s with the real
                 # reason; rollback re-swaps) — never the `already` wedge.
                 # Best-effort: a control-plane blip here must not mask the
-                # 422 (the in-lock quarantine consultation keeps the
+                # 422 (the in-lock pack-failure consultation keeps the
                 # already-fast-path off even if the clear failed).
                 try:
                     await asyncio.to_thread(
@@ -8422,6 +8437,24 @@ async def import_team(team_id: str, request: Request,
                 except Exception as ex:
                     _logger.warning(
                         "import ledger clear on pack failure failed for "
+                        "team %s: %s", team_id, ex,
+                    )
+                # #2040 code-review: stamp the POST-SWAP pack-failure marker
+                # so the already-fast-path refuses `already` for this sha
+                # even if the ledger clear above failed (the live graph
+                # holds this dump but the vocabulary is not live). Cleared
+                # on success. Best-effort — the consultation stays safe as
+                # long as the marker write fails closed (unset ≠ sha → the
+                # stale-ledger rollback path re-swaps, the documented
+                # convergence model).
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_pack_failed_sha256", sha,
+                    )
+                except Exception as ex:
+                    _logger.warning(
+                        "import pack-failure marker stamp failed for "
                         "team %s: %s", team_id, ex,
                     )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
@@ -8445,6 +8478,16 @@ async def import_team(team_id: str, request: Request,
                         "import ledger clear on pack failure failed for "
                         "team %s: %s", team_id, ex,
                     )
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_pack_failed_sha256", sha,
+                    )
+                except Exception as ex:
+                    _logger.warning(
+                        "import pack-failure marker stamp failed for "
+                        "team %s: %s", team_id, ex,
+                    )
                 raise HTTPException(status_code=503, detail=f"Import failed: {e}")  # noqa: B904
             # Idempotency ledger stamp — best-effort; a crash between the swap
             # and this stamp is the documented double-import convergence case
@@ -8453,14 +8496,15 @@ async def import_team(team_id: str, request: Request,
             await asyncio.to_thread(
                 _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
             )
-            # #2040: clear the quarantine prop on SUCCESS (best-effort — a
-            # control-plane blip must not fail an already-durable import).
-            # REQUIRED: last_import_quarantined_sha256 is sticky (only
-            # _quarantine_import writes it, never cleared) — without this
-            # clear, a sha that was quarantined then succeeded would have
-            # BOTH props == sha, so the in-lock short-circuit's quarantine
+            # #2040: clear the quarantine + post-swap-failure marker props on
+            # SUCCESS (best-effort, INDEPENDENT — one write failing must not
+            # skip the other). REQUIRED: last_import_quarantined_sha256 is
+            # sticky (only _quarantine_import writes it, never cleared) —
+            # without this clear, a sha that was quarantined then succeeded
+            # would have BOTH props == sha, so the in-lock short-circuit's
             # consultation would block `already` forever (every re-import
-            # re-swaps).
+            # re-swaps). The pack-failure marker must clear for the same
+            # reason (a fail-then-succeed sha must reach `already`).
             try:
                 await asyncio.to_thread(
                     _stamp_import_prop, cp_source, team_id,
@@ -8469,6 +8513,16 @@ async def import_team(team_id: str, request: Request,
             except Exception as e:
                 _logger.warning(
                     "quarantine-ledger clear after import failed for team %s: %s",
+                    team_id, e,
+                )
+            try:
+                await asyncio.to_thread(
+                    _stamp_import_prop, cp_source, team_id,
+                    "last_import_pack_failed_sha256", "",
+                )
+            except Exception as e:
+                _logger.warning(
+                    "pack-failure-marker clear after import failed for team %s: %s",
                     team_id, e,
                 )
             await _async_audit(
