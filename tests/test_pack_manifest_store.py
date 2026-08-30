@@ -33,7 +33,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
-from tortoise.hosted_api import app, get_current_team
+from tortoise.hosted_api import app, get_current_team, get_current_user
 
 TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
@@ -238,6 +238,115 @@ class TestUploadEndpoint:
         assert r.status_code == 200
         ns = [p["namespace"] for p in r.json()["packs"]]
         assert "tenant-ops" in ns
+
+
+class TestUploadRateLimit:
+    """#2038: per-IP hourly budget for manifest uploads (pack_manifest).
+
+    Mirrors the import path's sensitive-op doctrine (#1389/#1230) — see
+    test_import_endpoint.py::test_import_rate_limited_429 and
+    test_import_rate_limit_independent_of_export.
+    """
+
+    def test_upload_rate_limited_429(self, client, monkeypatch):
+        """Per-IP hourly budget for pack_manifest (2): exhausted → 429.
+
+        Pins the cheapest-rejection ordering (docstring: "checked BEFORE
+        the body is read"): with the budget exhausted, a would-be-500
+        malformed body still gets 429 — the check fires before the body
+        is parsed (test_upload_malformed_json_500 pins the would-be 500).
+        """
+        # production wiring: the default entry must exist — _check_sensitive
+        # _op_rate_limit .get() would otherwise no-op and silently disable
+        # the limiter in prod while injected-limit tests stay green.
+        assert ha_mod._SENSITIVE_OP_LIMITS.get("pack_manifest", 0) > 0
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 2)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        try:
+            # valid uploads consume the budget; a third within the hour → 429
+            for _ in range(2):
+                r = client.post("/v1/packs/manifests",
+                                json={"manifest_yaml": VALID_MANIFEST})
+                assert r.status_code == 201, r.text
+            r = client.post("/v1/packs/manifests",
+                            json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 429
+            assert r.json()["detail"] == (
+                "Rate limit exceeded for pack_manifest. Please try again later.")
+            assert r.headers["Retry-After"] == "3600"
+            # ordering pin: budget exhausted → malformed body gets 429, not
+            # 500 (HTTPException is handled; a JSONDecodeError would be
+            # re-raised by the client fixture). Proves the check precedes
+            # the body read/parse, not just the validation stage.
+            r = client.post("/v1/packs/manifests", content=b"{not json")
+            assert r.status_code == 429
+            # before-READ precedence: exhausted budget → oversized chunked
+            # stream gets 429, not the would-be 413 wire cap
+            # (test_upload_413_chunked_streaming_cap pins the would-be 413).
+            def _oversized():
+                for _ in range(12):
+                    yield b"not-json-" * 8192
+            r = client.post("/v1/packs/manifests", content=_oversized())
+            assert r.status_code == 429
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_upload_rate_limit_independent_of_export(self, client, monkeypatch):
+        """pack_manifest has its own budget — export calls don't consume it."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 1)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "export", 1)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        # export's dependency is get_current_user — override it so the
+        # endpoint body runs (unknown team → 403 authz-first, budget
+        # consumed either way; mirrors test_import_endpoint.py).
+        app.dependency_overrides[get_current_user] = lambda: {"user_id": "u-2038"}
+        try:
+            tc = client
+            # export consumes its OWN budget on the authz-first 403 path —
+            # the second call's 429 proves the first one charged the export
+            # bucket (unknown team → 403, budget consumed either way;
+            # mirrors test_import_endpoint.py). Coupling note: this 403→429
+            # progression assumes export charges on the 403 (check-time
+            # charging); under the #1719 deferred-terminal doctrine the 403
+            # is still a terminal outcome, so the progression holds there
+            # too — only moving export's check AFTER authz breaks it (a
+            # real doctrine regression worth catching).
+            assert tc.get("/v1/teams/nope/export").status_code == 403
+            assert tc.get("/v1/teams/nope/export").status_code == 429
+            # export didn't consume the pack bucket → budget still left
+            r = tc.post("/v1/packs/manifests",
+                        json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 201, r.text
+            r = tc.post("/v1/packs/manifests",
+                        json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 429
+        finally:
+            app.dependency_overrides.pop(get_current_user, None)
+            ha_mod._SENSITIVE_BUCKETS.clear()
+
+    def test_upload_401_does_not_consume_budget(self, client, monkeypatch):
+        """Unauthenticated POSTs (dependency 401, before the body) must not
+        burn the per-IP budget — a shared-IP spammer can't lock out the
+        tenant (the limiter lives in the endpoint body, after the
+        get_current_team dependency)."""
+        monkeypatch.delenv("RATE_LIMIT_DISABLED", raising=False)
+        monkeypatch.setitem(ha_mod._SENSITIVE_OP_LIMITS, "pack_manifest", 1)
+        ha_mod._SENSITIVE_BUCKETS.clear()
+        app.dependency_overrides.pop(get_current_team, None)
+        try:
+            for _ in range(3):
+                r = client.post("/v1/packs/manifests",
+                                json={"manifest_yaml": VALID_MANIFEST})
+                assert r.status_code == 401
+            # bucket untouched → a legitimate upload still succeeds
+            app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
+            r = client.post("/v1/packs/manifests",
+                            json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 201, r.text
+        finally:
+            ha_mod._SENSITIVE_BUCKETS.clear()
 
 
 # ── Body-size cap before parse (#2029) ────────────────────────────────────
