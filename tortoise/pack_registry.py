@@ -13,12 +13,27 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import yaml
 
 log = logging.getLogger(__name__)
+
+# Warn-once sentinel (epic #1891 WF-2, #1930): fallback/isolation warnings on
+# the resolution hot path must fire once per key, not per call — keyed by
+# (category, value...). Cleared per test via tests/conftest.py so caplog
+# assertions are deterministic.
+_WARN_ONCE: set[tuple] = set()
+
+
+def _warn_packs_once(key: tuple, msg: str, *args) -> None:
+    """Log a warning at most once per ``key`` (module-level sentinel)."""
+    if key in _WARN_ONCE:
+        return
+    _WARN_ONCE.add(key)
+    log.warning(msg, *args)
 
 # ── Canonical kind vocabularies (ONTOLOGY_v2.5 §1.1) ──────────────────────
 
@@ -269,15 +284,82 @@ class PackManifest:
 # ── Registry ──────────────────────────────────────────────────────────────
 
 
-def default_packs_dir() -> Path:
-    """Resolve the default packs directory (packaged → repo root).
+def env_packs_dir_value() -> str:
+    """Raw stripped ``TORTOISE_PACKS_DIR`` value ('' when unset/blank).
 
-    The resolution order (epic #1891 plan §5; #1930 adds the
-    TORTOISE_PACKS_DIR env leg in front):
+    Blank/whitespace is treated as unset (config.py precedent for
+    ``TORTOISE_DB_PATH``) — a blank value must never resolve to the process
+    CWD (``Path('') == Path('.')``).
+    """
+    return os.environ.get("TORTOISE_PACKS_DIR", "").strip()
 
+
+def _has_loadable_manifests(d: Path) -> bool:
+    """True when the dir holds at least one loadable pack manifest.
+
+    Applies the SAME namespace skip rules as ``PackRegistry.load_all``
+    (``_``/``.``-prefixed dirs are scaffolding — e.g. ``packs/_template/``)
+    so the resolver's emptiness definition can never diverge from the
+    loader's: a dir with only ``_template/manifest.yaml`` is EMPTY and must
+    fall through, never resolve (the silent-empty G1 class).
+    """
+    return any(
+        m.is_file()
+        for child in d.glob("*")
+        if not child.name.startswith(("_", "."))
+        for m in child.glob("manifest.yaml")
+    )
+
+
+def env_packs_dir() -> Path | None:
+    """Resolve the ``TORTOISE_PACKS_DIR`` env leg (#1930, epic #1891 WF-2).
+
+    Returns the dir when set+valid (exists, is a directory, holds ≥1 loadable
+    manifest). Returns ``None`` when unset/blank (no warning) or when set but
+    missing / not-a-dir / empty (logged warning, warn-once per value — the
+    caller falls back to ``default_packs_dir()``). A set-but-broken value
+    must never silently resolve to an empty registry (G1 class): the warning
+    is the operator's diagnostic; ``registry.errors`` (and the all-broken
+    fallback in ``domain_loader._get_registry``) cover manifest-level
+    failures.
+    """
+    val = env_packs_dir_value()
+    if not val:
+        return None
+    env_dir = Path(val).expanduser()
+    if not env_dir.exists():
+        _warn_packs_once(
+            ("env-dir", val, "missing"),
+            "TORTOISE_PACKS_DIR=%r does not exist — falling back to the "
+            "default pack catalog", val)
+        return None
+    if not env_dir.is_dir():
+        _warn_packs_once(
+            ("env-dir", val, "not-a-dir"),
+            "TORTOISE_PACKS_DIR=%r is not a directory — falling back to the "
+            "default pack catalog", val)
+        return None
+    if not _has_loadable_manifests(env_dir):
+        _warn_packs_once(
+            ("env-dir", val, "empty"),
+            "TORTOISE_PACKS_DIR=%r contains no pack manifests — falling back "
+            "to the default pack catalog", val)
+        return None
+    return env_dir
+
+
+def default_packs_dir(*, _skip_env: bool = False) -> Path:
+    """Resolve the default packs directory (env → packaged → repo root).
+
+    The resolution order (epic #1891 plan §5, WF-2; #1930):
+
+    0. ``TORTOISE_PACKS_DIR`` (env) — self-host custom pack directory, when
+       set+valid (exists + holds ≥1 loadable manifest). Set-but-missing /
+       not-a-dir / empty → warn-once + fall through (never silent empty).
     1. Packaged default — ``<package>/packs`` (``site-packages/tortoise/packs``
        on a wheel install, where package-data ships the catalog). Chosen ONLY
-       when it actually contains manifests: the source tree's
+       when it actually contains loadable manifests (same skip rules as
+       ``load_all`` — ``_template`` alone is not a catalog): the source tree's
        ``tortoise/packs/`` holds the discovery stub (no yamls), so in dev and
        in the Docker build context this leg falls through.
     2. Repo root — ``<package>/../packs`` (dev/editable installs, and the
@@ -287,9 +369,18 @@ def default_packs_dir() -> Path:
     (previously each hardcoded ``Path(__file__).parent.parent / "packs"`` —
     which on a wheel install resolves ``site-packages/packs`` → zero packs,
     the silent empty-registry defect G1, #1929).
+
+    ``_skip_env`` is the internal escape hatch for the registry-level
+    all-broken fallback (``domain_loader._get_registry``): it re-resolves the
+    default chain WITHOUT the env leg after the env dir proved unusable. Pure
+    kwarg — no env/global mutation, safe on concurrent callers.
     """
+    if not _skip_env:
+        env_dir = env_packs_dir()
+        if env_dir is not None:
+            return env_dir
     packaged = Path(__file__).resolve().parent / "packs"
-    if any(packaged.glob("*/manifest.yaml")):
+    if _has_loadable_manifests(packaged):
         return packaged
     repo_root = Path(__file__).resolve().parent.parent / "packs"
     if packaged.is_dir() and not repo_root.exists():
@@ -298,7 +389,8 @@ def default_packs_dir() -> Path:
         # the silent empty-registry defect class (G1). Keep the fallback
         # (dev/Docker must not break) but say it out loud; the publish
         # smokes are the hard gate.
-        log.warning(
+        _warn_packs_once(
+            ("packaged-stub", str(packaged), str(repo_root)),
             "packaged packs dir %s contains no manifests and repo-root "
             "fallback %s does not exist — registry will load 0 packs",
             packaged, repo_root,
@@ -320,6 +412,10 @@ class PackRegistry:
         self.packs_dir = Path(packs_dir)
         self.packs: dict[str, PackManifest] = {}
         self.errors: dict[str, list[str]] = {}  # namespace → error messages
+        # #1930: set by domain_loader._get_registry when the TORTOISE_PACKS_DIR
+        # leg was unusable (0 valid packs / load failure) and the registry
+        # fell back to the default catalog — a queryable diagnostic for ops.
+        self.fallback_note: str | None = None
 
     # ── Load ──────────────────────────────────────────────────────────
 
@@ -371,6 +467,17 @@ class PackRegistry:
                 del self.packs[ns]
                 count -= 1
         self._build_kind_expansions()
+        # #1930 (epic #1891 WF-2 / E2E-2): a pack isolated by R-16 must never
+        # be silent — every consumer surfaces the startup warning (registry.errors
+        # stays the supplementary diagnostic). Warn-once per (dir, error-set)
+        # signature so repeated loads of the same broken dir do not spam.
+        if self.errors:
+            _warn_packs_once(
+                ("load-errors", str(self.packs_dir), tuple(sorted(self.errors))),
+                "pack registry %s: %d pack(s) failed validation and were "
+                "isolated (see registry.errors): %s",
+                self.packs_dir, len(self.errors), ", ".join(sorted(self.errors)),
+            )
         return count
 
     def _load_one(self, path: Path) -> PackManifest:
