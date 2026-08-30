@@ -3167,10 +3167,74 @@ async def list_packs(team: dict = Depends(get_current_team)):  # noqa: B008
         # to_thread (contextvars-propagating, py3.9+) — never
         # run_in_executor (does NOT propagate; cpython#78195).
         packs = await asyncio.to_thread(get_tenant_packs, sdk)
+        # #1935: merge tenant-authored manifests (name/version from the
+        # :PackManifest node — richer than the PackInstall join alone).
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        manifests = await asyncio.to_thread(get_tenant_manifests, sdk)
+        by_ns = {m["namespace"]: m for m in manifests}
+        merged = []
+        for p in packs:
+            m = by_ns.get(p["namespace"])
+            if m and p.get("source") == "custom":
+                p = {**p, "name": m.get("name", p.get("name")),
+                     "version": m.get("version", p.get("version"))}
+            merged.append(p)
+        packs = merged
     except Exception:
         _logger.exception("pack introspection failed for team %s", team_id)
         raise HTTPException(status_code=503, detail="Pack catalog unavailable")  # noqa: B904
     return {"packs": packs}
+
+
+@app.post("/v1/packs/manifests", status_code=201)
+async def upload_pack_manifest(
+    request: Request,
+    team: dict = Depends(get_current_team),  # noqa: B008
+):
+    """#1935 (epic #1891 slice 4): per-tenant custom pack upload.
+
+    Body: ``{manifest_yaml: str}`` — the namespace is read from the
+    manifest's REQUIRED field (no redundant payload field). Validates
+    against the SHARED registry validator (schema + cross-pack vs
+    core+starter), then applies the tenant policy: reserved starter
+    namespace → 422, connector/tool entrypoints (ontology-only v1) → 422.
+    Stores the manifest graph-natively in the tenant's graph
+    (``:PackManifest``) and activates it (``PackInstall`` source='custom',
+    idempotent MERGE + per-(graph, namespace) lock #1307).
+
+    Response matrix: no auth → 401; invalid/malformed → 422 {errors};
+    oversized (>64KB) → 413; success → 201 {activated, namespace}.
+    Cross-tenant isolation is structural (tenant graph namespace — no
+    tenant selector exists on any surface).
+    """
+    team_id = team.get("team_id")
+    if not team_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    body = await request.json()
+    manifest_yaml = (body or {}).get("manifest_yaml") if isinstance(body, dict) else None
+    if not manifest_yaml or not isinstance(manifest_yaml, str):
+        raise HTTPException(status_code=422,
+                            detail="missing required field: manifest_yaml")
+    from tortoise.pack_manifest_store import (
+        MAX_MANIFEST_BYTES,
+        upsert_tenant_manifest,
+        validate_manifest,
+    )
+    if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
+        raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
+    result = validate_manifest(manifest_yaml)
+    if not result.ok:
+        raise HTTPException(status_code=422,
+                            detail={"errors": result.errors or ["invalid manifest"]})
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        record = await asyncio.to_thread(upsert_tenant_manifest, sdk, manifest_yaml)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail={"errors": [str(e)]})  # noqa: B904
+    except Exception:
+        _logger.exception("pack manifest upload failed for team %s", team_id)
+        raise HTTPException(status_code=503, detail="Pack catalog unavailable")  # noqa: B904
+    return {"activated": True, **record}
 
 
 def _team_is_anon(team_id: str) -> bool:
