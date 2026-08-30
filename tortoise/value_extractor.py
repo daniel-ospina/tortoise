@@ -125,13 +125,15 @@ def compile_value_brief(packs_dir: Path | str | None = None,
         "core:goal": "A goal state (commitment-state family)",
         "core:target": "A target state (commitment-state family)",
     }
-    # The core vocabulary is merged LAST so it can never be shadowed by a
-    # kind key (a legacy/bypass :PackManifest node with namespace `core`
-    # would otherwise override canonical core kinds — the write gate
-    # rejects that namespace, this is defense-in-depth). On the default path
-    # kinds keys are all namespaced (starter packs), so the order flip is a
-    # no-op there (byte-identical).
-    return {**kinds, **core, "memory_granularity": granularity}
+    # The core vocabulary is merged FIRST and kinds keys that would collide
+    # with it are filtered out, so canonical core kinds can never be shadowed
+    # by a kind key (a legacy/bypass :PackManifest node with namespace `core`
+    # would otherwise override them — the write gate rejects that namespace,
+    # this is defense-in-depth). This also preserves the pre-#2031 brief key
+    # ORDER (core kinds first — the default path's brief is byte-identical,
+    # key order included).
+    return {**core, **{k: v for k, v in kinds.items() if k not in core},
+            "memory_granularity": granularity}
 
 
 def compile_kind_index_spec(packs_dir: Path | str | None = None) -> dict:

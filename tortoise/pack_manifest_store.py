@@ -114,10 +114,14 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
     # vocabulary and a ``memory_granularity`` namespace would shadow the
     # brief's reserved granularity key.
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
-    if ns in DEFAULT_STARTER_PACKS or ns in ("core", "memory_granularity"):
+    if ns in DEFAULT_STARTER_PACKS:
         return ManifestValidation(
             False, namespace=ns,
             errors=[f"namespace '{ns}' is a reserved starter pack — pick a different name"])
+    if ns in ("core", "memory_granularity"):
+        return ManifestValidation(
+            False, namespace=ns,
+            errors=[f"namespace '{ns}' is a reserved namespace — pick a different name"])
 
     # Ontology-only v1: reject connector/tool entrypoints (code surfaces).
     for key in _ONTOLOGY_ONLY_KEYS:
@@ -190,9 +194,16 @@ def upsert_tenant_manifest(sdk, manifest_yaml: str) -> dict:
 
 
 def _graph_identity(sdk) -> str:
-    """Physical graph identity for the tenant-view cache key."""
+    """Physical graph identity for the tenant-view cache key.
+
+    #2031 review fix: ``_resolved_graph_name`` takes ``(sdk, graph_name)`` —
+    passing ``None`` resolves the SDK's namespace-scoped graph name (e.g.
+    ``team_team-xxx``). The pre-#2031 one-arg call TypeError'd into the
+    catch-all, collapsing EVERY tenant's key to "default" (one shared memo
+    entry + one global dirty flag) — activated once tenant_view gained its
+    first real consumer on the hosted capture hot path."""
     try:
-        return _resolved_graph_name(sdk)
+        return _resolved_graph_name(sdk, None)
     except Exception:
         return "default"
 
@@ -281,5 +292,12 @@ def tenant_view(team_id: str, sdk) -> dict:
             "brief": brief}
     with _TENANT_VIEWS_GUARD:
         _TENANT_VIEW_DIRTY.discard(gid)
+        # #2031 review fix: evict this tenant's prior (gid, version) entries
+        # on insert — the sha256-in-key change makes every content revision a
+        # NEW key, so without eviction a churn-heavy tenant accumulates one
+        # compiled brief + YAML set per revision forever. The versioned key
+        # only needs the CURRENT entry for the dirty-set to work.
+        for old_key in [k for k in _TENANT_VIEWS if k[0] == gid]:
+            del _TENANT_VIEWS[old_key]
         _TENANT_VIEWS[key] = view
     return view

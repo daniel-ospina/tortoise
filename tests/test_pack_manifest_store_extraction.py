@@ -33,9 +33,10 @@ from typing import ClassVar
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
-# #2031: the hosted capture's v2 branch runs through the mock seam — without
-# it the provider gate fails closed (503) and the positive test cannot run.
-os.environ.setdefault("TORTOISE_SESSION_LLM_MOCK", "1")
+# NOTE (#2031 review): TORTOISE_SESSION_LLM_MOCK is deliberately NOT set at
+# import time — a module-level setdefault would leak the mock seam into the
+# whole pytest session (test_hosted_api/test_capture_session share the
+# process). It is set per-test via the mock_extractor fixture.
 
 import pytest
 from fastapi.testclient import TestClient
@@ -119,7 +120,10 @@ class _TenantAwareMock:
 
 @pytest.fixture
 def mock_extractor(monkeypatch):
-    """Route the v2 mock seam to the prompt-reading _TenantAwareMock."""
+    """Route the v2 mock seam to the prompt-reading _TenantAwareMock.
+    Sets TORTOISE_SESSION_LLM_MOCK=1 per-test (the hosted capture's provider
+    gate fails closed without it) and resets the recorded prompts."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     _TenantAwareMock.s1_prompts = []
     _TenantAwareMock.s2_prompts = []
     monkeypatch.setattr(sdk_mod, "_V2SessionMock", _TenantAwareMock)
@@ -339,6 +343,19 @@ class TestCrossTenantNegative:
 # ── Tenant-view memoization through the consumer path ──────────────────────
 
 class TestMemoization:
+    def test_graph_identity_is_per_team(self, client):
+        """#2031 review fix: ``_graph_identity`` resolves the SDK's
+        namespace-scoped graph name (the pre-fix one-arg call TypeError'd
+        into the catch-all and collapsed EVERY tenant's memo key to
+        'default' — one shared memo entry + one global dirty flag, activated
+        once tenant_view gained its hosted-consumer)."""
+        import tortoise.pack_manifest_store as pms
+        assert pms._graph_identity(_team_sdk()) != "default"
+        assert (pms._graph_identity(_team_sdk())
+                != pms._graph_identity(
+                    ha_mod._make_sdk(namespace=TEST_TEAM_B["team_id"]))), \
+            "each tenant must own a distinct memo key"
+
     def test_view_memo_hit_and_write_invalidation(self, client):
         """The consumer path rides the tenant-view memo: cache hit on repeat
         (view identity), write invalidation (new kinds reach the tenant
