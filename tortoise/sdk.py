@@ -10772,14 +10772,22 @@ class TortoiseSDK:
             # (retry_after=None — NEVER AskValidationError, P2-15).
             # The hosted server emits Retry-After in the HTTP HEADER (never
             # the body) — prefer the header, fall back to the body field.
-            retry_after = err.get("retry_after") if isinstance(err, dict) else None
+            # Parse the header FIRST; RFC 7231 allows an HTTP-date
+            # (float() raises → None) — only then fall back to the body.
+            retry_after = None
             header_ra = r.headers.get("Retry-After")
             if header_ra is not None:
-                retry_after = header_ra
-            try:
-                retry_after = float(retry_after) if retry_after is not None else None
-            except (TypeError, ValueError):
-                retry_after = None
+                try:
+                    retry_after = float(header_ra)
+                except (TypeError, ValueError):
+                    retry_after = None
+            if retry_after is None:
+                body_ra = err.get("retry_after") if isinstance(err, dict) else None
+                if body_ra is not None:
+                    try:
+                        retry_after = float(body_ra)
+                    except (TypeError, ValueError):
+                        retry_after = None
             raise AskQuotaExceeded("ask quota exceeded",
                                    retry_after=retry_after,
                                    status_code=status)

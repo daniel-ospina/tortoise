@@ -360,6 +360,48 @@ def test_reader_timeout_504(client, monkeypatch):
     assert r.json() == {"error": {"code": "timeout"}}
 
 
+def test_ask_exec_floor_guarantees_execution(monkeypatch):
+    """#1987 P2: a queued ask released before the queue-wait cap gets a real
+    execution window (completes) rather than a near-zero remaining budget; a
+    request released past the cap 504s at acquire WITHOUT starting the call
+    (no wasted model call)."""
+    import asyncio
+    import tortoise.quota as quota_mod
+
+    monkeypatch.setattr(quota_mod, "_ASK_TIMEOUT_S", 3.0)
+    monkeypatch.setattr(quota_mod, "_ASK_EXEC_FLOOR_S", 1.0)
+
+    calls = {"n": 0}
+
+    def _fn():
+        calls["n"] += 1
+        return "ok"
+
+    async def _queue_and_release(release_at: float):
+        loop = asyncio.get_running_loop()
+        sem = quota_mod._ask_state_for_loop(loop)["sem"]
+        # hold all 8 global slots → the ask queues behind the semaphore
+        for _ in range(quota_mod._ASK_GLOBAL_SEMAPHORE_SIZE):
+            await sem.acquire()
+        task = asyncio.ensure_future(quota_mod.run_ask_bounded(_fn, None))
+        await asyncio.sleep(release_at)
+        for _ in range(quota_mod._ASK_GLOBAL_SEMAPHORE_SIZE):
+            sem.release()
+        return await task
+
+    # released at ~1.5s (< the 2.0s queue-wait cap) → acquires, remaining
+    # ~1.5s >= the 1.0s execution floor → completes (no bogus 504)
+    assert asyncio.run(_queue_and_release(1.5)) == "ok"
+    assert calls["n"] == 1
+
+    # control: released at ~2.5s (> the 2.0s cap) → 504 at acquire, the call
+    # never starts (no wasted model call)
+    calls["n"] = 0
+    with pytest.raises(quota_mod.AskBoundedTimeoutError):
+        asyncio.run(_queue_and_release(2.5))
+    assert calls["n"] == 0
+
+
 def test_metered_exactly_once_per_hosted_ask(client, monkeypatch):
     """Meter record written exactly once per hosted ask (the single call
     site: sdk.ask with team_id from get_current_team)."""

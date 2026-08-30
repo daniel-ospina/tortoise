@@ -628,6 +628,24 @@ def test_post_ask_status_mapping(monkeypatch):
             server.stop()
 
 
+def test_post_ask_429_unparseable_header_falls_back_to_body(monkeypatch):
+    """A 429 with a non-numeric (HTTP-date) Retry-After header and a numeric
+    body ``retry_after`` → AskQuotaExceeded.retry_after == 42.0 (the header
+    fails float() and the body survives — RFC 7231 allows an HTTP-date)."""
+    server = _FakeAskServer()
+    server.status = 429
+    server.responses = [{"error": {"code": "quota_exceeded", "retry_after": 42}}]
+    server.headers = {"Retry-After": "Wed, 21 Oct 2015 07:28:00 GMT"}
+    server.start(monkeypatch)
+    try:
+        sdk = _new_sdk()
+        with pytest.raises(AskQuotaExceeded) as ei:
+            sdk.ask("q")
+        assert ei.value.retry_after == 42.0
+    finally:
+        server.stop()
+
+
 def test_post_ask_timeout_mapping(monkeypatch):
     """504 → AskTimeout with source='server'; a client-fired timeout maps to
     AskTimeout with source='client' (monkeypatched SHORT client timeout)."""

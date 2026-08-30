@@ -623,6 +623,7 @@ class AskBoundedTimeoutError(Exception):
 #: and the injectable module-level timeout (monkeypatched in tests — no real
 #: 60s sleeps).
 _ASK_TIMEOUT_S = 60
+_ASK_EXEC_FLOOR_S = 5.0     # a started ask is guaranteed >= this much execution time
 _ASK_GLOBAL_SEMAPHORE_SIZE = 8
 _ASK_TEAM_IN_FLIGHT_CAP = 4
 
@@ -734,9 +735,14 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
         inflight[team_id] += 1
     future = None
     t_start = time.monotonic()
+    # The SEMAPHORE-ACQUIRE window is bounded by the REMAINDER of the total
+    # budget after reserving the execution floor: a request that cannot be
+    # acquired within ``_ASK_TIMEOUT_S - _ASK_EXEC_FLOOR_S`` 504s at acquire
+    # WITHOUT starting (no wasted model call).
+    acquire_timeout = max(0.0, _ASK_TIMEOUT_S - _ASK_EXEC_FLOOR_S)
     try:
         try:
-            await asyncio.wait_for(sem.acquire(), timeout=_ASK_TIMEOUT_S)
+            await asyncio.wait_for(sem.acquire(), timeout=acquire_timeout)
         except (TimeoutError, asyncio.CancelledError) as e:
             # wait_for fired during the queue wait — no future exists; the
             # counter decrements here (never a leaked counter).
@@ -744,7 +750,7 @@ async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
                 inflight[team_id] -= 1
             if isinstance(e, asyncio.TimeoutError):
                 raise AskBoundedTimeoutError(
-                    f"ask queued past {_ASK_TIMEOUT_S}s (8 in flight)") from e
+                    f"ask queued past {acquire_timeout}s (8 in flight)") from e
             raise
         try:
             future = loop.run_in_executor(None, _call_sync, fn, args, fn_kwargs)
