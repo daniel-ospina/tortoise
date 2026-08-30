@@ -11466,7 +11466,7 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
     totals = {"points_created": 0, "statements_superseded": 0,
               "events_minted": 0, "issues_beyond_window": 0,
               "repos_processed": 0, "errors": [], "quota_hit": False,
-              "backfill_minted": 0}
+              "backfill_minted": 0, "cleared_truncated": False}
     try:
         team_sdk = _make_sdk(namespace=team_id)
 
@@ -11531,6 +11531,12 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
                 totals["quota_hit"] = True
                 break
             totals["repos_processed"] += 1
+            # #1989 review round 2: surface the DRAIN→DIFF heal so an
+            # operator can distinguish a fully-drained backlog from a stuck
+            # one (the job body would otherwise only show an inflated
+            # issues_beyond_window estimate with no per-repo signal).
+            if result.get("cleared_truncated"):
+                totals["cleared_truncated"] = True
 
         _job(status="completed", progress=100,
              points_created=totals["points_created"],
@@ -11541,6 +11547,7 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
              issues_beyond_window=totals["issues_beyond_window"],
              backfill_minted=totals["backfill_minted"],
              quota_hit=totals["quota_hit"],
+             cleared_truncated=totals["cleared_truncated"],
              errors=totals["errors"],
              error=None)
         # #1727 Slice 2 (Task 12, T1-P15): re-run the entity-linking pass

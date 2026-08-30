@@ -8,6 +8,8 @@ Simulates the GitHub Issues API surface the indexer walks:
 """
 from __future__ import annotations
 
+from urllib.parse import urlencode
+
 import httpx
 
 
@@ -60,7 +62,10 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
                  failures: list[tuple[int, int]] | None = None,
                  respect_since: bool = True,
                  page_size: int | None = None,
-                 resolve_repos_404: bool = False):
+                 resolve_repos_404: bool = False,
+                 shuffle_within_second: bool = False,
+                 seed: int = 1895,
+                 drop_next_after_page: int | None = None):
         self.issues_by_repo = issues_by_repo or {}
         if issues is not None:
             self.issues_by_repo["acme/repo1"] = issues
@@ -74,6 +79,21 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
         # When set, BOTH orgs/ and users/ repo resolution return 404 —
         # resolve_repos must fail the job (P2, PR #1792).
         self.resolve_repos_404 = resolve_repos_404
+        # #1895: deterministic within-second tie-order shuffle — GitHub's
+        # sort=updated tie order within one exact updated_at SECOND is
+        # unspecified; this mode shuffles each equal-second run with a
+        # fixed Random(seed) so the mock exercises an ARBITRARY (but
+        # reproducible) tie order. The indexer's second-buffered ASC flush
+        # must behave identically under any tie order.
+        self.shuffle_within_second = shuffle_within_second
+        self.seed = seed
+        # #1989 review round 2: when set, pages >= this number OMIT the
+        # rel="next" link while KEEPING rel="last" — simulating a truncated
+        # Link header / gateway 200-with-partial-body that makes the walk
+        # end prematurely (the API still claims more pages exist). The
+        # indexer's walk-completeness check must prevent a truncated-clear
+        # on such a walk (silent-loss guard).
+        self.drop_next_after_page = drop_next_after_page
         self.requests: list[httpx.Request] = []
         self._fail_idx = 0
         self._since_last: dict[str, str] = {}
@@ -129,24 +149,69 @@ class MockGitHubTransport(httpx.AsyncBaseTransport):
             # sort updated desc (mirror the pinned fetch params)
             items.sort(key=lambda i: (i.get("updated_at") or "", i.get("number") or 0),
                        reverse=True)
+            # #1895: deterministic within-second tie-order shuffle. NOTE:
+            # rng.shuffle(items[i:j]) would shuffle a slice COPY (a silent
+            # no-op) — assign the shuffled slice back instead. The same
+            # Random(seed) is re-created per request, so identical input
+            # lists re-produce the SAME permutation and pagination stays
+            # consistent across page boundaries. #1989 review round 2: the
+            # mock's Link next-URLs now carry the original query params
+            # (including `since`) — mirroring real GitHub, which the
+            # indexer's DIFF walk depends on — so every page request
+            # filters the same base list before shuffling; the permutation
+            # base is identical across pages even on since-bounded walks
+            # (previously page 1 filtered while page 2+ did not, which
+            # could skip/duplicate across the boundary under shuffle).
+            if self.shuffle_within_second:
+                import random
+                rng = random.Random(self.seed)
+                i = 0
+                while i < len(items):
+                    j = i + 1
+                    while (j < len(items)
+                           and (items[j].get("updated_at")
+                                == items[i].get("updated_at"))):
+                        j += 1
+                    sub = items[i:j]
+                    rng.shuffle(sub)
+                    items[i:j] = sub
+                    i = j
             headers: dict[str, str] = {}
             if self.page_size:
                 total = len(items)
                 last_page = max(1, -(-total // self.page_size))
                 page = max(1, min(int(params.get("page", "1") or 1), last_page))
                 page_items = items[(page - 1) * self.page_size:page * self.page_size]
+                # Carry the original query params (NOT page) into the Link
+                # URLs — real GitHub echoes `since` into pagination links,
+                # and the indexer's DIFF walk relies on the since-bounded
+                # chain (#1989 review round 2). The DRAIN walk strips
+                # `since` from next URLs itself, so this stays faithful for
+                # both regimes.
+                # #1989 review round 3: build with urlencode (doseq) so
+                # values like `since=...+00:00` are percent-encoded — a raw
+                # `+` in the URL would be decoded as a space by parse_qs on
+                # the receiving side, silently corrupting the since bound.
+                base_q = urlencode(
+                    {k: v for k, v in params.items() if k != "page"},
+                    doseq=True)
+                suffix = (f"?{base_q}&" if base_q else "?") + "page={p}"
                 links = []
-                if page < last_page:
+                if page < last_page and (self.drop_next_after_page is None
+                                         or page < self.drop_next_after_page):
                     links.append(
-                        f'<https://api.github.com/repos/{repo}/issues?page={page + 1}>; '
+                        f'<https://api.github.com/repos/{repo}/issues'
+                        f'{suffix.format(p=page + 1)}>; '
                         'rel="next"')
                 if page > 1:
                     links.append(
-                        f'<https://api.github.com/repos/{repo}/issues?page={page - 1}>; '
+                        f'<https://api.github.com/repos/{repo}/issues'
+                        f'{suffix.format(p=page - 1)}>; '
                         'rel="prev"')
                 if page < last_page:
                     links.append(
-                        f'<https://api.github.com/repos/{repo}/issues?page={last_page}>; '
+                        f'<https://api.github.com/repos/{repo}/issues'
+                        f'{suffix.format(p=last_page)}>; '
                         'rel="last"')
                 if links:
                     headers["Link"] = ", ".join(links)
