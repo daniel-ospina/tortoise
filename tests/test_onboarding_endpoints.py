@@ -774,6 +774,24 @@ def test_scope_keys_normalized_at_patch(client):
     assert r.json()["onboarding"]["github_docs_scope"] == [{"repo": "ok", "branch": "dev"}]
 
 
+def test_onboarding_defaults_fresh_lists(client):
+    """#1893 (code-review P2): the list-typed default keys must NOT be shared
+    across teams — _onboarding_defaults() returns fresh list objects per
+    call, so an in-place mutation on one team's state never leaks into
+    another team's defaults (or the module-level constant)."""
+    from tortoise.hosted_api import _onboarding_defaults
+    a = _onboarding_defaults()
+    b = _onboarding_defaults()
+    assert a["github_issues_scope"] == [] and b["github_issues_scope"] == []
+    assert a["github_issues_scope"] is not b["github_issues_scope"]
+    assert a["github_docs_scope"] is not b["github_docs_scope"]
+    # mutating one default must not touch the module-level constant
+    a["github_issues_scope"].append("leak")
+    from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
+    assert _ONBOARDING_DEFAULT_STATE["github_issues_scope"] == []
+    assert b["github_issues_scope"] == []
+
+
 # ── #1727 Slice 2 (Task 14, T2-P1): install-probe round-trip ────────────
 
 

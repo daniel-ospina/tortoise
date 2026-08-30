@@ -359,6 +359,12 @@ function claimIntentInFlight() {
   // clobber newer selections with the stale server value.
   const hydratedTeamIdRef = React.useRef(null)
   const scopeReadyRef = React.useRef(false)
+  // #1893 (code-review P1): onboarding state is TEAM-scoped — during a team
+  // switch the `onboarding` object is momentarily the PREVIOUS team's. This
+  // stale flag (set by switchTeam, cleared when refreshOnboarding resolves)
+  // blocks the scope hydration effect until the new team's state lands, so
+  // the new team never seeds from (or persists over) the old team's scope.
+  const onboardingStaleRef = React.useRef(false)
   // #1893 (scope-verify P1): PER-KEY pre-hydration touch tracking — a touch
   // on ONE key must never suppress seeding of the OTHER, and must never
   // persist the other key's un-seeded default over its stored server value.
@@ -370,13 +376,22 @@ function claimIntentInFlight() {
   // #1893: _update_onboarding_state is a WHOLE-STATE read-modify-write
   // (non-atomic) — issues + docs PATCHes must serialize against each other,
   // so a SINGLE shared FIFO queue (per-key queues would still race cross-key).
+  // NOTE: this serializes DASHBOARD writers only — server-side writers (the
+  // index job's cursor updates) run their own RMW and can still interleave
+  // (pre-existing infra limitation, #1827; not introduced by this PR).
   const scopePersistQueueRef = React.useRef(Promise.resolve())
 
   function persistScope(payload) {
     // fire-and-forget: a failed persist never blocks the UI; the next
     // change re-persists the full list.
+    // #1893 (code-review P1): TEAM-scoped — pin ?team_id= so multi-membership
+    // users persist to the SELECTED team's onboarding_state, never
+    // memberships[0]'s (same pattern as refreshTeam/loadAll). The persist
+    // gate + hydration both require currentTeamId, so the fallback is
+    // defensive only.
+    const _teamQ = teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
     scopePersistQueueRef.current = scopePersistQueueRef.current
-      .then(() => api('/v1/onboarding/state', { method: 'PATCH', useSession: true,
+      .then(() => api(`/v1/onboarding/state${_teamQ}`, { method: 'PATCH', useSession: true,
         body: JSON.stringify(payload) }))
       .catch(() => {})
   }
@@ -394,6 +409,13 @@ function claimIntentInFlight() {
     // toggle) can never lose the last selection (the observed production
     // incident). Timing is untestable at the pure-node layer; covered by
     // manual clickthrough (documented in the PR body).
+    // #1893 (code-review P2): value-diff guard — a same-value no-op toggle
+    // (e.g. re-clicking the already-checked "All repos" row while the repos
+    // list is still loading) must NOT mark the key touched: the hydration
+    // touched-branch would then persist the un-seeded default over the
+    // stored selection, silently clobbering it.
+    if (JSON.stringify(serializeIssuesScope(next)) ===
+        JSON.stringify(serializeIssuesScope(issuesScopeRef.current))) return
     scopeTouchedRef.current.issues = true
     issuesScopeRef.current = next
     setIssuesScope(next)
@@ -401,6 +423,9 @@ function claimIntentInFlight() {
   }
 
   function handleDocsScopeChange(next) {
+    // #1893 (code-review P2): value-diff guard — see handleIssuesScopeChange.
+    if (JSON.stringify(serializeDocsScope(next)) ===
+        JSON.stringify(serializeDocsScope(docsScopeRef.current))) return
     scopeTouchedRef.current.docs = true
     docsScopeRef.current = next
     setDocsScope(next)
@@ -534,11 +559,20 @@ function claimIntentInFlight() {
   // with the un-seeded default. Touch flags reset after hydration so a team
   // switch re-enables seeding for the new team.
   React.useEffect(() => {
+    // #1893 (code-review P1): during a team switch, `onboarding` is
+    // momentarily the PREVIOUS team's — the stale flag (set by switchTeam,
+    // cleared when refreshOnboarding resolves) blocks hydration until the
+    // new team's state lands, so the new team never seeds from (or persists
+    // over) the old team's scope.
+    if (onboardingStaleRef.current) return
     if (!shouldHydrate({ reposLoaded, onboarding, reposLoadFailed,
         currentTeamId, hydratedTeamId: hydratedTeamIdRef.current })) return
     hydratedTeamIdRef.current = currentTeamId
     if (!scopeTouchedRef.current.issues) {
-      setIssuesScope(reconcileIssuesScope(onboarding.github_issues_scope, reposList))
+      const seeded = reconcileIssuesScope(onboarding.github_issues_scope, reposList)
+      setIssuesScope(seeded)
+      issuesScopeRef.current = seeded  // mirror the ref (code-review P2 —
+      // the touched-branch serialize must never read a STALE closure)
     } else {
       // serialize from the ref mirror — never the effect closure (P2)
       persistScope({ github_issues_scope: serializeIssuesScope(issuesScopeRef.current) })
@@ -1072,8 +1106,17 @@ function claimIntentInFlight() {
           return
         }
       }
-      const st = await api('/v1/onboarding/state', { useSession: true })
+      // #1893 (code-review P1): pin the SELECTED team so multi-membership
+      // users read/write the team the scope surface shows (the server
+      // defaults to memberships[0] without it). teamIdRef mirrors
+      // currentTeamId but is set synchronously in switchTeam (no render
+      // closure race).
+      const _teamQ = teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
+      const st = await api(`/v1/onboarding/state${_teamQ}`, { useSession: true })
       if (st && st.onboarding) {
+        // code-review P1: this response is FOR the current team — clear the
+        // switch-stale flag so hydration can proceed.
+        onboardingStaleRef.current = false
         setOnboarding(st.onboarding)
         if (st.onboarding.onboarding_complete) setOnboardingComplete(true)
       }
@@ -1156,10 +1199,16 @@ function claimIntentInFlight() {
 
   // ── #1845: load the connected org's repo names for the scope selectors ──
   async function loadRepos() {
+    // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
+    const _teamQ = teamIdRef.current ? `?team_id=${encodeURIComponent(teamIdRef.current)}` : ''
     try {
-      const res = await api('/v1/onboarding/github/repos', { useSession: true })
+      const res = await api(`/v1/onboarding/github/repos${_teamQ}`, { useSession: true })
       setReposList(res && Array.isArray(res.repos) ? res.repos : [])
-      setReposLoadFailed(false)
+      // #1893 (code-review P1): a server-side resolve failure returns 200
+      // with an EMPTY list + resolve_error:true (never a 500) — that is
+      // NOT evidence of an empty org and must gate hydration exactly like
+      // a transport failure (pruning on it would clobber the stored scope).
+      setReposLoadFailed(!!(res && res.resolve_error))
     } catch {
       setReposList([])  // best-effort — the selector still shows "All repos"
       setReposLoadFailed(true)
@@ -1176,7 +1225,9 @@ function claimIntentInFlight() {
     if (Object.prototype.hasOwnProperty.call(branchLists, repo)) return  // already loaded
     try {
       const q = encodeURIComponent(repo)
-      const res = await api(`/v1/onboarding/github/branches?repo=${q}`, { useSession: true })
+      // #1893 (code-review P1): pin the SELECTED team (see refreshOnboarding).
+      const _teamQ = teamIdRef.current ? `&team_id=${encodeURIComponent(teamIdRef.current)}` : ''
+      const res = await api(`/v1/onboarding/github/branches?repo=${q}${_teamQ}`, { useSession: true })
       const branches = res && Array.isArray(res.branches) ? res.branches : []
       const defaultBranch = (res && res.default_branch) || ''
       setBranchLists((prev) => ({ ...prev, [repo]: { branches, defaultBranch } }))
@@ -1219,7 +1270,17 @@ function claimIntentInFlight() {
       // serializes docsScopeRef.current (never the effect closure), so a
       // healed/reset value must be visible there or a team-switch persist
       // could re-persist the stale branch it just healed.
-      if (changed) docsScopeRef.current = next
+      if (changed) {
+        docsScopeRef.current = next
+        // #1893 (code-review P2): persist the healed value so the server
+        // converges — a stale persisted branch would otherwise re-hydrate +
+        // re-heal on every session (UI-only fix; the stored value never
+        // converges until the next manual docs toggle). Gated on the persist
+        // gate (post-hydration) so the un-seeded default is never written.
+        if (shouldPersist(scopeReadyRef.current)) {
+          persistScope({ github_docs_scope: serializeDocsScope(next) })
+        }
+      }
       return next
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1230,11 +1291,23 @@ function claimIntentInFlight() {
   const githubConnected = !!(onboarding && onboarding.github_connected)
   const prevConnectedRef = React.useRef(false)
   React.useEffect(() => {
-    if (githubConnected && (!reposLoaded || (githubConnected && !prevConnectedRef.current))) {
+    if (githubConnected && (!reposLoaded || reposLoadFailed || (githubConnected && !prevConnectedRef.current))) {
       loadRepos()
     }
     prevConnectedRef.current = githubConnected
-  }, [githubConnected, reposLoaded]) // eslint-disable-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [githubConnected, reposLoaded, reposLoadFailed])
+  // #1893 (code-review P2): a repos-fetch failure must not permanently close
+  // the persist gate — once onboarding resolves, the user's REAL toggles
+  // should still persist (only PRUNING stays gated on reposLoadFailed via
+  // shouldHydrate; a failed fetch is never evidence of an empty org). The
+  // connected-flip effect above retries loadRepos whenever reposLoadFailed
+  // flips, so hydration re-arms on the next successful fetch.
+  React.useEffect(() => {
+    if (onboarding && currentTeamId && reposLoadFailed && !scopeReadyRef.current) {
+      scopeReadyRef.current = true
+    }
+  }, [onboarding, currentTeamId, reposLoadFailed]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function toggleSessionRecording(next) {
     if (memoryBusy) return
@@ -2482,6 +2555,8 @@ function claimIntentInFlight() {
     hydratedTeamIdRef.current = null
     scopeReadyRef.current = false
     scopeTouchedRef.current = { issues: false, docs: false }
+    issuesScopeRef.current = { repos: [] }
+    docsScopeRef.current = { repos: [], branches: {} }
     setReposLoadFailed(false)
     setReposLoaded(false)
     setReposList([])
@@ -2679,6 +2754,23 @@ function claimIntentInFlight() {
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
+    // #1893 (code-review P1): onboarding state is TEAM-scoped — the switch
+    // must re-hydrate the NEW team's persisted scope, never the old team's.
+    // The stale flag blocks the hydration effect until refreshOnboarding
+    // resolves the new team's state; the scope latches + repos are reset so
+    // the new team's repos load fresh (connected-flip effect below re-fires
+    // loadRepos when reposLoadFailed/reposLoaded reset).
+    onboardingStaleRef.current = true
+    hydratedTeamIdRef.current = null
+    scopeReadyRef.current = false
+    scopeTouchedRef.current = { issues: false, docs: false }
+    issuesScopeRef.current = { repos: [] }
+    docsScopeRef.current = { repos: [], branches: {} }
+    setReposLoadFailed(false)
+    setReposLoaded(false)
+    setReposList([])
+    setDocsScope({ repos: [], branches: {} })
+    setIssuesScope({ repos: [] })
     try {
       // P1/P2 (code-review): overview cards + header tier badge read the
       // API-key's team — mint (or reuse) a data-plane key for the selected
@@ -2719,6 +2811,11 @@ function claimIntentInFlight() {
       }
       if (teamIdRef.current !== teamId) return
       await Promise.all([loadAll(key), loadBackups(key)])
+      // #1893 (code-review P1): re-fetch the new team's onboarding state —
+      // the stale flag set above clears only when refreshOnboarding resolves
+      // (the scope hydration for the new team is blocked until then), and
+      // the connected-flip effect re-loads the new team's repos.
+      await refreshOnboarding().catch(() => {})
       // members + graphs load via the currentTeamId effect (JWT team-scoped;
       // both loaders carry their own staleness guard).
     } catch (e) {
@@ -2738,6 +2835,11 @@ function claimIntentInFlight() {
           teamIdRef.current = prevTeamId
           setTeam(null)
           setStaleFired(false) // #1858: the revert re-attaches the previous team — clear the latch so the restored team's skeleton gets a fresh floor (team is already null here, so the reset effect won't fire)
+          // #1893 (code-review P1): the revert re-attaches the PREVIOUS
+          // team — its onboarding is the pre-switch object (still current),
+          // so clear the switch-stale flag and let hydration re-run for the
+          // restored team (the latches/repos were reset at switch top).
+          onboardingStaleRef.current = false
           await refreshTeam(restoreKey).catch(() => {})
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.

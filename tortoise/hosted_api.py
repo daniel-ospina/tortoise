@@ -10360,7 +10360,7 @@ def _get_onboarding_state(team_id: str) -> dict:
         stored = _sb_state(get_control_plane(), team_id)
         # None = team row missing — mirror the registry MATCH-no-op: read as
         # defaults, don't write.
-        return stored if stored is not None else dict(_ONBOARDING_DEFAULT_STATE)
+        return stored if stored is not None else _onboarding_defaults()
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -10368,16 +10368,27 @@ def _get_onboarding_state(team_id: str) -> dict:
         params={"id": team_id},
     ).result_set
     if not rows or rows[0][0] is None:
-        state = dict(_ONBOARDING_DEFAULT_STATE)
+        state = _onboarding_defaults()
         _write_onboarding_state(team_id, state)
         return state
     try:
         stored = _json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
     except (TypeError, ValueError):
         stored = {}
-    state = dict(_ONBOARDING_DEFAULT_STATE)
+    state = _onboarding_defaults()
     state.update(stored)
     return state
+
+
+def _onboarding_defaults() -> dict:
+    """Fresh default-state dict (code-review P2): the list-typed keys
+    (github_issues_scope / github_docs_scope) must NOT be shared across teams
+    — a shallow ``dict()`` copy shares the same list objects, so an in-place
+    mutation (``append``/``remove``) on one team's state would leak into
+    every team's defaults. List values are copied per-read; scalars are
+    immutable and safe to share."""
+    return {k: (list(v) if isinstance(v, list) else v)
+            for k, v in _ONBOARDING_DEFAULT_STATE.items()}
 
 
 def _write_onboarding_state(team_id: str, state: dict) -> None:
@@ -11236,15 +11247,24 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     org = await _heal_github_org(team["team_id"], encrypted, org)
     from tortoise.indexer.github_indexer import GitHubIndexer
     indexer = GitHubIndexer(token)
+    resolve_error = False
     try:
         resolved = await indexer.resolve_repos(org)
     except Exception:
+        # resolve failure → empty list (selector still renders "All repos"),
+        # but FLAG it: the dashboard must not treat a failed resolve as a
+        # genuinely-empty org — pruning the persisted scope on it would
+        # clobber the stored selection (#1893, code-review P1).
         resolved = []
+        resolve_error = True
     finally:
         await indexer._close()
     # short names (owner prefix stripped) — see the endpoint docstring.
     repos = [r.split("/", 1)[1] if "/" in r else r for r in resolved]
-    return {"connected": True, "org": org, "repos": repos}
+    payload = {"connected": True, "org": org, "repos": repos}
+    if resolve_error:
+        payload["resolve_error"] = True
+    return payload
 
 
 @app.get("/v1/onboarding/github/branches")

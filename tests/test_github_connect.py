@@ -247,6 +247,51 @@ class TestGitHubRepos:
         # already re-add the org/ prefix from the stored org).
         assert body["repos"] == ["repo1", "repo2", "solo-repo"]
 
+    def test_repos_resolve_failure_flagged(self, client, monkeypatch):
+        """#1893 (code-review P1): a server-side resolve failure returns 200
+        with an EMPTY list + resolve_error:true (never a 500) — the dashboard
+        must not treat it as a genuinely-empty org (pruning the persisted
+        scope on it would clobber the stored selection)."""
+        import tortoise.hosted_api as ha
+        from tortoise.crypto import encrypt_token
+        monkeypatch.setattr(ha, "_github_credentials",
+                            lambda team_id: (encrypt_token("fake-token"), "acme"))
+        from tortoise.indexer.github_indexer import GitHubIndexer
+
+        async def fake_resolve_fail(self, org):
+            raise RuntimeError("github down")
+
+        monkeypatch.setattr(GitHubIndexer, "resolve_repos", fake_resolve_fail)
+
+        r = client.get("/v1/onboarding/github/repos")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["connected"] is True
+        assert body["org"] == "acme"
+        assert body["repos"] == []
+        assert body.get("resolve_error") is True
+
+    def test_repos_success_no_resolve_error(self, client, monkeypatch):
+        """#1893 (code-review P1): a successful resolve carries NO
+        resolve_error flag (absent, not false) — the dashboard's flag check
+        stays a positive-only signal."""
+        import tortoise.hosted_api as ha
+        from tortoise.crypto import encrypt_token
+        monkeypatch.setattr(ha, "_github_credentials",
+                            lambda team_id: (encrypt_token("fake-token"), "acme"))
+        from tortoise.indexer.github_indexer import GitHubIndexer
+
+        async def fake_resolve(self, org):
+            return [f"{org}/repo1"]
+
+        monkeypatch.setattr(GitHubIndexer, "resolve_repos", fake_resolve)
+
+        r = client.get("/v1/onboarding/github/repos")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["repos"] == ["repo1"]
+        assert "resolve_error" not in body
+
     def test_repos_heals_legacy_team_id_org(self, client, monkeypatch):
         """#1845 (regression): a team whose stored github_org is the internal
         team_id UUID (the pre-#1845 connect bug) self-heals to the token's
