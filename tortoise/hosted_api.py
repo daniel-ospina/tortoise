@@ -7683,9 +7683,13 @@ _BODY_MAX_BYTES = 256 * 1024
 _COMMIT_SESSION_MAX_BYTES = 8 * 1024 * 1024
 _STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
 
-# detail strings derive the byte count from the cap constants (never a
-# literal that can silently drift from the enforced cap — the #2033
-# wire_detail precedent: the 413 message stays truthful under cap changes).
+# Detail strings derive the byte count from the cap constants at IMPORT
+# time (never a literal that can silently drift from the enforced cap —
+# the #2033 wire_detail precedent). Note: the per-site 413 tests
+# monkeypatch the caps at RUNTIME (the message then intentionally diverges
+# from the enforced test cap); production caps are import-time constants,
+# so the message stays truthful under source-level cap changes. The literal
+# values are pinned by TestDetailConstantsPinned (test_body_cap_sweep.py).
 _BODY_413_DETAIL = f"request body exceeds the size cap ({_BODY_MAX_BYTES // 1024} KiB)"
 _COMMIT_SESSION_413_DETAIL = (
     f"commit session request body exceeds the size cap "

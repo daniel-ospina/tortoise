@@ -107,6 +107,27 @@ def supabase_client(monkeypatch, tmp_path):
         yield tc
 
 
+# ── 413 detail literals (import-time derivation pin) ───────────────────
+
+
+class TestDetailConstantsPinned:
+    """#2032 review (second-model gate P2): the 413 detail strings derive
+    their byte counts from the cap constants at IMPORT time. Pin the exact
+    literals here (no monkeypatched caps) so a derivation regression — or a
+    source-level cap change that alters the message — is caught; the per-site
+    413 tests above assert `detail == ha_mod._BODY_413_DETAIL` (constant
+    reference), which cannot catch message drift."""
+
+    def test_body_detail_literals(self):
+        import tortoise.hosted_api as ha_mod
+        assert ha_mod._BODY_413_DETAIL == (
+            "request body exceeds the size cap (256 KiB)")
+        assert ha_mod._COMMIT_SESSION_413_DETAIL == (
+            "commit session request body exceeds the size cap (8 MiB)")
+        assert ha_mod._STRIPE_WEBHOOK_413_DETAIL == (
+            "Stripe webhook body exceeds the size cap (1 MiB)")
+
+
 # ── /v1/register ────────────────────────────────────────────────────────
 
 
