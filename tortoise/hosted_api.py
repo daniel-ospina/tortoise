@@ -1934,10 +1934,12 @@ DEFAULT_ONBOARDING_STATE = {
     "github_org": None,
     "github_connected_at": None,
     "github_indexed": False,
+    "github_indexed_at": None,            # #1894: last github index completion (ISO, parity with github_indexed)
     "github_index_job_id": None,
     "github_index_cursor": None,          # #1725: per-repo composite (updated_at, number) diff cursor
     "github_legacy_backfill_done": False,  # #1725: one-time legacy `-closed` backfill marker
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
+    "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "demo_created": False,
     "team_created": False,
@@ -1962,6 +1964,11 @@ DEFAULT_ONBOARDING_STATE = {
     "session_capture_last_error_pi": None,
     "install_probe_claude": None,
     "install_probe_pi": None,
+    # #1893: persisted GitHub source-scope keys (written by the dashboard's
+    # scope selectors via PATCH — [] = all repos; registered here so the
+    # allowlist filter never drops them).
+    "github_issues_scope": [],  # list of short repo names; [] = all repos
+    "github_docs_scope": [],    # list of {repo, branch}; [] = all repos
 }
 
 
@@ -3202,24 +3209,51 @@ async def upload_pack_manifest(
     (``:PackManifest``) and activates it (``PackInstall`` source='custom',
     idempotent MERGE + per-(graph, namespace) lock #1307).
 
-    Response matrix: no auth → 401; invalid/malformed → 422 {errors};
-    oversized (>64KB) → 413; success → 201 {activated, namespace}.
+    Response matrix: no auth → 401; request body over the wire cap
+    (~397KB — checked BEFORE any parse) → 413 "manifest request body
+    exceeds the size cap"; malformed JSON / empty body → 500; missing
+    manifest_yaml → 422 "missing required field: manifest_yaml"; invalid
+    manifest → 422 {errors}; manifest over 64KB → 413 "manifest exceeds
+    64KB"; success → 201 {activated, namespace}.
     Cross-tenant isolation is structural (tenant graph namespace — no
     tenant selector exists on any surface).
     """
     team_id = team.get("team_id")
     if not team_id:
         raise HTTPException(status_code=401, detail="Authentication required")
-    body = await request.json()
-    manifest_yaml = (body or {}).get("manifest_yaml") if isinstance(body, dict) else None
-    if not manifest_yaml or not isinstance(manifest_yaml, str):
-        raise HTTPException(status_code=422,
-                            detail="missing required field: manifest_yaml")
     from tortoise.pack_manifest_store import (
+        MANIFEST_WIRE_CAP_BYTES,
         MAX_MANIFEST_BYTES,
         upsert_tenant_manifest,
         validate_manifest,
     )
+    # #2029: reject oversized request bodies BEFORE buffering/parsing them —
+    # the 64KB check below alone only fires after request.json() has buffered
+    # the entire body (memory-DoS on a tenant-authenticated surface).
+    # Content-Length is an early-exit OPTIMIZATION for genuinely CL-framed
+    # HTTP/1.x messages only: when Transfer-Encoding is present it overrides
+    # Content-Length (RFC 7230 §3.3.3), and HTTP/2 has no CL framing — so a
+    # body can always exceed its header. The streaming cap below is therefore
+    # UNCONDITIONAL: it is the sole arbiter for chunked / TE / h2 / no-CL /
+    # under-claimed bodies and must never be skipped based on CL.
+    wire_detail = "manifest request body exceeds the size cap"
+    content_length = request.headers.get("content-length")
+    transfer_encoding = request.headers.get("transfer-encoding")
+    http_version = request.scope.get("http_version", "1.1")
+    if (content_length is not None and transfer_encoding is None
+            and http_version.startswith("1")):
+        try:
+            too_large = int(content_length) > MANIFEST_WIRE_CAP_BYTES
+        except ValueError:
+            too_large = False  # malformed header → the streaming cap below
+        if too_large:
+            raise HTTPException(status_code=413, detail=wire_detail)
+    raw = await _read_capped_body(request, MANIFEST_WIRE_CAP_BYTES, wire_detail)
+    body = _json.loads(raw)
+    manifest_yaml = (body or {}).get("manifest_yaml") if isinstance(body, dict) else None
+    if not manifest_yaml or not isinstance(manifest_yaml, str):
+        raise HTTPException(status_code=422,
+                            detail="missing required field: manifest_yaml")
     if len(manifest_yaml.encode()) > MAX_MANIFEST_BYTES:
         raise HTTPException(status_code=413, detail="manifest exceeds 64KB")
     result = validate_manifest(manifest_yaml)
@@ -4781,6 +4815,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # deterministically keyed; re-running would mint fresh nodes). The turn
     # loop above re-MERGEd the same {session_id}_t{i} ids (0 new). The
     # response reports extraction_mode "replayed" — honest about what ran.
+    # #2031: set on the v2 branch's fail-open path when the tenant vocab
+    # compile fails with manifests present (surfaced as an additive capture
+    # warning below — the default vocabulary produces no minted kinds to
+    # flag, so a log line alone would leave the degradation invisible).
+    tenant_vocab_warning: str | None = None
     if session_existed:
         meta = {"errors": [], "warnings": [], "mode": "replayed",
                 "route": None, "provider": None}
@@ -4800,8 +4839,42 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             raise HTTPException(status_code=503, detail=str(e)) from e
     else:
         try:
+            # #2031: hosted extraction compiles the vocabulary from the
+            # tenant's pack view (shared catalog + THIS team's custom packs,
+            # memoized per (graph_identity, pack_config_version) — #1154/
+            # #1350) so the tenant's pack kinds reach the prompts and write
+            # gates. The tenant identity comes from the tenant-scoped sdk
+            # (only team["team_id"] is consumed — the MCP tool passes a
+            # minimal team dict). Fail-open: a vocab-compile hiccup must
+            # never block capture — the run proceeds with the default
+            # vocabulary and the degradation is surfaced as an ADDITIVE
+            # capture warning (visible in resp["warnings"]) when the team
+            # actually has manifests (an empty-tenant no-op stays silent).
+            tenant_master = None
+            try:
+                from tortoise.extractor_v2 import build_master_list
+                tenant_master = build_master_list(sdk=sdk)
+            except Exception as e:  # noqa: BLE001, RUF100
+                _logger.warning(
+                    "tenant vocabulary compile failed for %s — capture "
+                    "proceeds with the default vocabulary: %s",
+                    team.get("team_id"), e)
+                # Best-effort visibility: the warning fires when the team has
+                # manifests. If THIS manifests check also fails (e.g. the
+                # same transient graph outage that broke the compile), the
+                # degradation is log-only — the log line above is the
+                # guaranteed trace.
+                try:
+                    from tortoise.pack_manifest_store import get_tenant_manifests
+                    if get_tenant_manifests(sdk):
+                        tenant_vocab_warning = (
+                            "tenant pack vocabulary unavailable — capture used "
+                            "the default vocabulary; tenant pack kinds were "
+                            "not applied")
+                except Exception:  # noqa: BLE001, RUF100
+                    pass
             extracted, meta = sdk._extract_session_v2(
-                windowed, session_id, now)
+                windowed, session_id, now, master=tenant_master)
         except ValueError as e:
             raise HTTPException(status_code=503, detail=str(e)) from e
 
@@ -4813,6 +4886,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if not session_existed:
         extraction_errors = list(meta.get("errors") or [])
         extraction_warnings = list(meta.get("warnings") or [])
+        # #2031 review: surface the tenant-vocab degradation as an additive
+        # capture warning (set by the v2 branch's fail-open path) — the
+        # default vocabulary produces no minted kinds to flag, so a log line
+        # alone would leave the degradation response-invisible.
+        if tenant_vocab_warning:
+            extraction_warnings.append(tenant_vocab_warning)
 
     # Ontology v3.1 §4.5/§3.2 (#7882): also create an episodic :Event node
     # (eventKind: sessionCaptured) and stamp its eventId onto the extracted
@@ -6134,7 +6213,6 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     from datetime import datetime
     from datetime import timedelta as _td
 
-    from tortoise.auth import lookup_hash
     from tortoise.supabase_control import (
         membership_count_since,
         provision_team,
@@ -6168,7 +6246,12 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
 
     team_id = str(_uuid.uuid4().hex[:26])
     graph_name = f"team_{team_id}"  # stored name == data-plane namespace (team_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.team_create keeps team_{name} — registry lane tracked in #2023)
-    api_key = f"tt_{_uuid.uuid4().hex}"
+    # #1921: keyless provisioning — NO tt_ mint. The old per-call mint was
+    # a dead key: plaintext never returned (hash-only at rest), counted
+    # against max_api_keys, unclaimable (#1082) — 2 free teams exhausted
+    # the cap with zero usable keys. Mirror create_onboarding_team's #1716
+    # fix: the team stays keyless until a session-key mint (POST
+    # /v1/session/key writes the api_keys row itself).
     # Eager default-graph TeamMeta FIRST (register_user's documented
     # ordering — review P2, PR #874): an orphaned graph namespace is
     # harmless, an orphaned teams row is not (provision-then-graph would
@@ -6181,14 +6264,18 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     # #1686: journal the minted team_* graph (session sweep drops it).
     _journal_append_product(graph_name)
     try:
+        # #1921: all-NULL key params → the RPC writes teams + membership but
+        # NO api_keys row (all-or-none guard, migration 20260825214233) —
+        # mirroring create_onboarding_team's #1716 keyless provision.
         provision_team(cp, **{
             "p_user_id": user["user_id"],
             "p_identity": None,
             "p_team_id": team_id,
             "p_team_name": name,
-            "p_api_key": api_key,
-            "p_key_hash": hash_api_key(api_key),
-            "p_lookup_hash": lookup_hash(api_key),
+            "p_api_key": None,
+            "p_key_hash": None,
+            "p_lookup_hash": None,
+            "p_key_prefix": None,
             "p_graph_name": graph_name,
             "p_tier": "free",
         })
@@ -6247,7 +6334,12 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
             detail="Create another team requires a paid plan — upgrade an existing team first")
 
     try:
-        result = sdk.team_create(name, owner_user_id=user["user_id"])
+        # #1921: mint_key=False — the registry twin of the Supabase lane's
+        # all-NULL key provision (create_onboarding_team's #1716 keyless
+        # parity). The old default minted a tt_ key whose plaintext was
+        # never returned — a dead credential counted against max_api_keys.
+        result = sdk.team_create(name, mint_key=False,
+                                 owner_user_id=user["user_id"])
     except Exception as e:
         if isinstance(e, ControlPlaneError) and "already exists" in str(e):
             raise HTTPException(status_code=409, detail="Team name already exists")  # noqa: B904
@@ -7558,24 +7650,36 @@ class _ImportVerifyError(Exception):
         self.sha256 = sha256
 
 
-async def _read_import_body(request: Request) -> bytes:
+async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> bytes:
     """Read the raw request body under a HARD streaming cap.
 
     Content-Length alone is spoofable (a client can claim a small length and
     stream unbounded bytes) — the cap is enforced while draining the stream,
-    so an oversized artifact 413s before any buffering or decrypt work.
+    so an oversized body 413s before the ENTIRE body is buffered or any parse
+    work. Shared by the import-artifact path (_read_import_body) and the
+    pack-manifest upload path (#2029).
     """
     chunks: list[bytes] = []
     total = 0
     async for chunk in request.stream():
         total += len(chunk)
-        if total > _IMPORT_MAX_BYTES:
-            raise HTTPException(
-                status_code=413,
-                detail="Import artifact exceeds the size cap (64 MiB)",
-            )
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail=detail)
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def _read_import_body(request: Request) -> bytes:
+    """Read the raw import-artifact body under a HARD streaming cap (64 MiB).
+
+    Delegates to ``_read_capped_body`` with the import cap — the streaming
+    rationale lives on the shared helper.
+    """
+    return await _read_capped_body(
+        request,
+        _IMPORT_MAX_BYTES,
+        "Import artifact exceeds the size cap (64 MiB)",
+    )
 
 
 def _decode_import_key(key_b64: str, blob: bytes) -> bytes:
@@ -7830,7 +7934,11 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       packs (yaml null) get their activation record ensured.
     - ``pack_config`` ABSENT (pre-v1.1 artifact): loud-mismatch guard — if
       the dump references namespaced kinds NOT in the shared catalog or
-      starter set, the vocabulary would be silently dropped → raise.
+      starter set, the vocabulary would be silently dropped → raise. This
+      call is retained as idempotent defense-in-depth post-#2028 — the
+      hoisted pre-restore call in the import flow already ran this check on
+      the same payload (same sticky process-global registry → it cannot
+      diverge).
     """
     from tortoise.domain_loader import _get_registry
     from tortoise.pack_manifest_store import upsert_tenant_manifest
@@ -7869,32 +7977,120 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
                 )
 
 
-def _check_foreign_kinds(payload: dict) -> None:
-    """Loud-mismatch guard for pre-v1.1 artifacts (no pack_config).
+# Kind-carrying prop keys on dump nodes — the 6 live writer keys
+# (sdk.py:9659-9660 kind_field: point/event/subject/document/object/source) plus
+# `kind` (extractor_v2 legacy-compat) and `actionKind` (pack-declared bucket,
+# no current node carrier — future-proof). `op_type` is deliberately NOT here:
+# operator types are a fixed non-namespaced set (IMPL/NAND/MITIGATES).
+_KIND_PROP_KEYS = ("pointKind", "objectKind", "eventKind", "documentKind",
+                   "subjectKind", "sourceKind", "actionKind", "kind")
 
-    Scans the dump's node kinds for ``ns:kind`` values where ns is neither a
-    starter namespace nor a shared-catalog pack — such a vocabulary would be
-    silently dropped on import. Raises ValueError (→ 422 quarantine).
+
+def _check_foreign_kinds(payload: dict) -> None:
+    """Loud-mismatch guard against unknown pack vocabulary on import.
+
+    Scans the dump's node kinds for ``ns:kind`` values whose namespace is in
+    NONE of: starter packs, the shared catalog, the dump's own PackManifest
+    nodes (self-contained vocabulary — a restored manifest makes the vocab
+    live), or the artifact's own ``pack_config`` declared packs (v1.1+ — the
+    manifest upsert establishes those namespaces). Such vocabulary would be
+    silently dropped on import → raise ValueError (→ 422 quarantine).
+
+    Fires for three artifact classes: (a) pre-v1.1 (no pack_config); (b)
+    v1.1 with a pack_config declaring no usable packs (absent, non-dict,
+    non-list, or empty packs — the exporter-emittable `packs: []` shape for
+    graphs whose custom kinds have no PackInstall records); (c) v1.1 whose
+    usable packs do NOT cover every namespaced kind in the dump
+    (partial/orphaned pack state). Each gets a distinct quarantine reason.
+
+    Documented boundaries: (a) only NAMESPACED foreign kinds are detectable —
+    legacy un-namespaced pack kinds are indistinguishable from core vocab and
+    require re-export via migrate_kinds; (b) known-set membership is catalog
+    presence, not activation — non-starter CATALOG-pack kinds in a pre-v1.1
+    artifact still lose activation (no manifest in the artifact); (c) a None
+    registry collapses known to starter + PackManifest (fail-closed bias);
+    (d) nested-dict kinds inside props are not scanned (FalkorDB props are
+    scalar/array in real dumps); (e) a declared pack's `namespace` must equal
+    its manifest's yaml-declared namespace — enforced by the exporter
+    (collect_pack_config reads both from the same PackInstall/PackManifest
+    row); a hand-crafted mismatch rejects fail-loudly.
     """
     from tortoise.domain_loader import _get_registry
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
 
+    pc = payload.get("pack_config")
     reg = _get_registry()
     known = set(DEFAULT_STARTER_PACKS)
     if reg is not None:
         known |= set(reg.pack_summaries())
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        nodes = []  # defensive — the import envelope validates list-ness upstream
+    # Absorb namespaces carried by the dump's OWN PackManifest nodes — a
+    # self-contained artifact restores its vocabulary and must not be
+    # rejected (PackManifest is exported; see _is_export_skip_node).
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        labels = node.get("labels") or []
+        if isinstance(labels, list) and "PackManifest" in labels:
+            props = node.get("props") or {}
+            if isinstance(props, dict):
+                ns = props.get("namespace")
+                if isinstance(ns, str) and ns:
+                    known.add(ns)
+    # Absorb the artifact's OWN declared pack namespaces (v1.1+) — the
+    # post-swap manifest upsert establishes those vocabularies, so they are
+    # legitimately known; only namespaces in the dump but in NO source of
+    # truth (catalog, starters, dump manifests, declared packs) are foreign.
+    if isinstance(pc, dict):
+        packs = pc.get("packs") or []
+        if not isinstance(packs, list):
+            packs = []  # malformed (e.g. truthy non-iterable) — no usable packs
+        for p in packs:
+            if isinstance(p, dict):
+                ns = p.get("namespace")
+                if isinstance(ns, str) and ns:
+                    known.add(ns)
     foreign: set[str] = set()
-    for node in payload.get("nodes", []) or []:
-        kind = node.get("kind") or node.get("pointKind") or node.get("objectKind")
-        if isinstance(kind, str) and ":" in kind:
-            ns = kind.split(":", 1)[0]
-            if ns not in known and ns not in ("core",):
-                foreign.add(kind)
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        props = node.get("props") or {}
+        if not isinstance(props, dict):
+            continue
+        for key in _KIND_PROP_KEYS:
+            kind = props.get(key)
+            if isinstance(kind, str) and ":" in kind:
+                ns = kind.split(":", 1)[0]
+                if ns not in known and ns != "core":
+                    foreign.add(kind)
     if foreign:
+        # Accurate quarantine reason per artifact class — an operator reading
+        # the audit trail must get the right remediation. Class (a): no
+        # pack_config at all (pre-v1.1). Class (b): pack_config present but
+        # declaring NO usable packs (absent, non-dict, non-list, or empty
+        # packs — the exporter-emittable `packs: []` shape for graphs whose
+        # custom kinds have no PackInstall records). Class (c): usable packs
+        # that do not cover every kind in the dump (partial/orphaned state).
+        # Kinds are truncated per-entry to bound the audit/422 reason size
+        # (payload-controlled strings; owner-only surface but bounded).
+        listed = sorted({k[:80] for k in foreign})[:5]
+        if pc is None:
+            raise ValueError(
+                "artifact predates pack-config (v1.1) but references unknown "
+                f"pack kinds {listed} — the vocabulary would be "
+                "lost; re-export with a newer tortoise version")
+        if not isinstance(pc, dict) or not isinstance(pc.get("packs"), list) \
+                or not pc.get("packs"):
+            raise ValueError(
+                "pack_config declares no packs but the artifact references "
+                f"unknown pack kinds {listed} — the vocabulary "
+                "would be lost; install the pack and re-export")
         raise ValueError(
-            "artifact predates pack-config (v1.1) but references unknown pack "
-            f"kinds {sorted(foreign)[:5]} — the vocabulary would be lost; "
-            "re-export with a newer tortoise version")
+            "pack_config does not cover the artifact's pack kinds "
+            f"{listed} — the vocabulary would be lost; install "
+            "the referenced pack and re-export")
 
 
 def _rebuild_import_indexes(sdk, graph_name: str) -> None:
@@ -8007,6 +8203,16 @@ async def import_team(team_id: str, request: Request,
                 parsed["payload"].get("graph_name"), graph_name,
             )
             try:
+                # #2028: run the foreign-kind guard BEFORE any restore/swap so
+                # a rejection 422s with the live graph untouched and
+                # last_import_sha256 unstamped (retries converge). The guard
+                # absorbs the artifact's own pack_config declared namespaces
+                # AND dump-native PackManifest namespaces into its known-set,
+                # so every legitimate artifact (pre-v1.1 core/starter, v1.1
+                # with covering packs, self-contained manifests) passes and
+                # only genuinely undeclared foreign vocabulary 422s —
+                # fail-loudly, never silent partial.
+                await asyncio.to_thread(_check_foreign_kinds, parsed["payload"])
                 result = await asyncio.to_thread(
                     _restore_into_temp_verify_swap,
                     sdk._get_proj().db, parsed["payload"],
@@ -8043,6 +8249,12 @@ async def import_team(team_id: str, request: Request,
             # Idempotency ledger stamp — best-effort; a crash between the swap
             # and this stamp is the documented double-import convergence case
             # (#1230: idempotency is convergence, not strict-once).
+            # #2040: this stamp runs BEFORE _apply_import_pack_config, so a
+            # pack-application failure (invalid manifest, unknown starter)
+            # 422s with the ledger already stamped → re-import converges to
+            # `already` with the vocabulary never applied. Deferred to #2040
+            # (pre-existing #1936 ordering); the #2028 guard call above is
+            # pre-restore and does not stamp.
             await asyncio.to_thread(
                 _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
             )
@@ -10264,7 +10476,9 @@ async def issue_insight(title: str, body: str | None = None,
 _ONBOARDING_DEFAULT_STATE = {
     "github_connected": False,
     "github_indexed": False,
+    "github_indexed_at": None,            # #1894: last github index completion (ISO, parity with github_indexed)
     "github_docs_indexed": False,         # #1726: docs staged + ingested (Slice 1)
+    "github_docs_indexed_at": None,       # #1894: last docs index completion (ISO, parity with github_docs_indexed)
     "demo_created": False,
     "session_recording": True,            # #1927: default-ON (ToS-covered) — optional off-switch, not a consent gate
     "team_created": False,
@@ -10299,6 +10513,11 @@ _ONBOARDING_DEFAULT_STATE = {
     "session_capture_last_error_pi": None,
     "install_probe_claude": None,          # Task 14: harness + timestamp, no content
     "install_probe_pi": None,
+    # #1893: persisted GitHub source-scope keys (dashboard scope selectors
+    # PATCH these; [] = all repos). Registered in BOTH default dicts + the
+    # PATCH model — the state-key registration test pins all four surfaces.
+    "github_issues_scope": [],  # list of short repo names; [] = all repos
+    "github_docs_scope": [],    # list of {repo, branch}; [] = all repos
 }
 
 _ALLOWED_STATE_KEYS = set(_ONBOARDING_DEFAULT_STATE.keys())
@@ -10337,7 +10556,7 @@ def _get_onboarding_state(team_id: str) -> dict:
         stored = _sb_state(get_control_plane(), team_id)
         # None = team row missing — mirror the registry MATCH-no-op: read as
         # defaults, don't write.
-        return stored if stored is not None else dict(_ONBOARDING_DEFAULT_STATE)
+        return stored if stored is not None else _onboarding_defaults()
     import json as _json
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
@@ -10345,16 +10564,27 @@ def _get_onboarding_state(team_id: str) -> dict:
         params={"id": team_id},
     ).result_set
     if not rows or rows[0][0] is None:
-        state = dict(_ONBOARDING_DEFAULT_STATE)
+        state = _onboarding_defaults()
         _write_onboarding_state(team_id, state)
         return state
     try:
         stored = _json.loads(rows[0][0]) if isinstance(rows[0][0], str) else rows[0][0]
     except (TypeError, ValueError):
         stored = {}
-    state = dict(_ONBOARDING_DEFAULT_STATE)
+    state = _onboarding_defaults()
     state.update(stored)
     return state
+
+
+def _onboarding_defaults() -> dict:
+    """Fresh default-state dict (code-review P2): the list-typed keys
+    (github_issues_scope / github_docs_scope) must NOT be shared across teams
+    — a shallow ``dict()`` copy shares the same list objects, so an in-place
+    mutation (``append``/``remove``) on one team's state would leak into
+    every team's defaults. List values are copied per-read; scalars are
+    immutable and safe to share."""
+    return {k: (list(v) if isinstance(v, list) else v)
+            for k, v in _ONBOARDING_DEFAULT_STATE.items()}
 
 
 def _write_onboarding_state(team_id: str, state: dict) -> None:
@@ -10419,6 +10649,7 @@ _PATCH_FIELD_TO_STATE_KEY: dict[str, str] = {
 class OnboardingStatePatchRequest(BaseModel):
     github_connected: bool | None = None
     github_indexed: bool | None = None
+    github_indexed_at: str | None = None  # #1894: last github index completion (ISO timestamp, server-stamped)
     demo_created: bool | None = None
     session_recording: bool | None = None
     team_created: bool | None = None
@@ -10453,6 +10684,7 @@ class OnboardingStatePatchRequest(BaseModel):
     # #1726 (Slice 1): docs staged + ingested — server-written; registered so
     # the key round-trips through the PATCH surface.
     github_docs_indexed: bool | None = None
+    github_docs_indexed_at: str | None = None  # #1894: last docs index completion (ISO timestamp, server-stamped)
     # E2E-5 (plan Task 6): email read-patch from the control plane (teams
     # row in Supabase mode, Team node in registry mode). #764 review P2.
     email: str | None = None
@@ -10461,6 +10693,13 @@ class OnboardingStatePatchRequest(BaseModel):
     # #235's artifact_copied schema verbatim (align cycle-3 conformance).
     harness: str | None = None   # "claude"|"codex"|"cursor"|"pi"
     section: str | None = None   # "config"|"prompt"|"both"|"setup"
+    # #1893: persisted GitHub source-scope keys — registered so the keys
+    # round-trip through the PATCH surface (parametrized registration test)
+    # and the dashboard can persist + rehydrate the scope selectors.
+    # [] = explicit clear (all repos) — a VALID value, never dropped.
+    # (appended at class end for #1894 merge hygiene — keep append-only)
+    github_issues_scope: list[str] | None = None
+    github_docs_scope: list[dict] | None = None
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -10508,6 +10747,10 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
         _track_analytics_event(team["team_id"], "artifact_copied",
                                {"harness": harness, "section": section})
+    # #1893: validate the persisted source-scope keys at the PATCH boundary
+    # (400 on invalid; valid values stored in NORMALIZED form — issues
+    # strip/dedupe, docs ""/None branch → null; [] = explicit clear).
+    updates = _validate_scope_payload(updates)
     state = _update_onboarding_state(team["team_id"], **updates)
     # #1765 review (onboarding dual-auth): a SESSION-authed call's email
     # belongs on the USER anchor (auth.users — managed via the profile
@@ -10702,8 +10945,27 @@ async def public_demo(team: dict = Depends(get_current_team)):  # noqa: B008
                                 source="demo", point_count=15)
         return {"status": "already_seeded", "team_id": team["team_id"]}
 
+    # #1922: quota-gate the seed like the MCP twin
+    # (tortoise_onboarding_demo_create → _enforce_quota("points")). The demo
+    # seed writes ~13 Points, so it must consume the points quota like any
+    # other Point-creating write — the REST surface was the 0-quota bypass
+    # (bug-hunt 2026-08-28 server P2-13). Idempotent re-calls short-circuit
+    # above and skip the gate (no write).
+    _check_team_limit(team, "points")
+
     # Call the shared demo seeder (extracted from /internal/demo)
     created = _seed_demo_graph(team["team_id"])
+
+    # #1922: meter the seed that actually ran — one write op billing 12
+    # seeded points + the _demo_sentinel Point (net-new non-episodic nodes,
+    # the value-first commit cost driver epic #909 §4.4). A concurrent
+    # request may have completed the seed first (sentinel now present) —
+    # then the seeder returns already_seeded without a points count and
+    # the OTHER request already recorded the op (guard on status so the
+    # idempotent re-call never 500s on the missing key).
+    if created.get("status") == "demo_created":
+        _record_write_op(team, nodes_written=created.get("points", 0) + 1)
+
     _update_onboarding_state(team["team_id"], demo_created=True)
     return {"status": "seeded", "team_id": team["team_id"],
             "points_created": created}
@@ -11190,6 +11452,13 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     Returns SHORT repo names (owner prefix stripped) — the /v1/index/*
     endpoints already construct ``f"{org}/{repo}"`` from the short name, so
     sending a full_name would double-prefix the org.
+
+    #1893 (code-review P1): any response whose repos are EMPTY because of a
+    FAILURE (resolve exception, decrypt failure) carries ``resolve_error:
+    true`` so the dashboard never treats a failed fetch as a genuinely-empty
+    org (pruning the persisted scope on it would clobber the selection).
+    ``connected: false`` + ``resolve_error`` is the "stored-but-now-failing"
+    shape; a clean disconnect returns connected:false WITHOUT the flag.
     """
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
@@ -11198,19 +11467,31 @@ async def github_repos(team: dict = Depends(get_current_team_session_ungated)): 
     try:
         token = decrypt_token(encrypted)
     except ValueError:
-        return {"connected": False, "org": None, "repos": []}
+        # decrypt failure = the stored token is unusable — a resolve-class
+        # failure, not evidence of an empty org (the dashboard gates
+        # hydration on this flag exactly like a resolve exception).
+        return {"connected": False, "org": None, "repos": [], "resolve_error": True}
     org = await _heal_github_org(team["team_id"], encrypted, org)
     from tortoise.indexer.github_indexer import GitHubIndexer
     indexer = GitHubIndexer(token)
+    resolve_error = False
     try:
         resolved = await indexer.resolve_repos(org)
     except Exception:
+        # resolve failure → empty list (selector still renders "All repos"),
+        # but FLAG it: the dashboard must not treat a failed resolve as a
+        # genuinely-empty org — pruning the persisted scope on it would
+        # clobber the stored selection (#1893, code-review P1).
         resolved = []
+        resolve_error = True
     finally:
         await indexer._close()
     # short names (owner prefix stripped) — see the endpoint docstring.
     repos = [r.split("/", 1)[1] if "/" in r else r for r in resolved]
-    return {"connected": True, "org": org, "repos": repos}
+    payload = {"connected": True, "org": org, "repos": repos}
+    if resolve_error:
+        payload["resolve_error"] = True
+    return payload
 
 
 @app.get("/v1/onboarding/github/branches")
@@ -11358,6 +11639,54 @@ class GitHubRepollRequest(BaseModel):
     repo: str | None = None
 
 
+# #1893: the SHORT-repo-name charset is shared between the persisted-scope
+# validator and _validate_repo_scope — legacy inline copies also exist at
+# other index-surface call sites; new validators MUST use this constant
+# (keep-in-sync — a charset change lands in ALL copies).
+_SHORT_REPO_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_scope_payload(updates: dict) -> dict:
+    """#1893: PATCH-boundary validation for the persisted source-scope keys
+    (github_issues_scope / github_docs_scope). Same conservative surface as
+    the index endpoints — _validate_repo_scope for issues (short names,
+    deduped), _is_safe_branch for docs branches. [] is a VALID value
+    (explicit clear = all repos) and is stored as-is — the persist path
+    NEVER omits empty (unlike the job builders, where absent = all)."""
+    if "github_issues_scope" in updates and updates["github_issues_scope"] is not None:
+        repos = _validate_repo_scope(updates["github_issues_scope"])
+        updates["github_issues_scope"] = repos if repos is not None else []
+    if "github_docs_scope" in updates and updates["github_docs_scope"] is not None:
+        scopes: list[dict] = []
+        seen_repos: set[str] = set()  # FIRST-WINS dedupe (API boundary — see note)
+        # ⚠️ dedupe asymmetry (intentional): the server dedupes FIRST-WINS
+        # (raw API boundary — the client already serializes unique repos),
+        # while the dashboard's reconcileDocsScope dedupes LAST-WINS
+        # (defensive corrupt-data path). Do NOT "align" one to the other —
+        # tests pin each contract (test_scope_keys_normalized_at_patch /
+        # sourceScope.test.js dedup-last-wins).
+        for s in updates["github_docs_scope"]:
+            if not isinstance(s, dict) or not isinstance(s.get("repo"), str):
+                raise HTTPException(status_code=400, detail="Invalid repo scope")
+            repo = s["repo"].strip()
+            if not _SHORT_REPO_NAME_RE.match(repo):
+                raise HTTPException(status_code=400, detail="Invalid repo name")
+            branch = s.get("branch")
+            if branch == "" or branch is None:
+                branch = None
+            else:
+                if not isinstance(branch, str):  # non-str branch → 400, never 500
+                    raise HTTPException(status_code=400, detail="Invalid branch")
+                branch = branch.strip()  # normalize like repo (padded branches never persist)
+                if not _is_safe_branch(branch):
+                    raise HTTPException(status_code=400, detail="Invalid branch")
+            if repo not in seen_repos:
+                seen_repos.add(repo)
+                scopes.append({"repo": repo, "branch": branch})
+        updates["github_docs_scope"] = scopes
+    return updates
+
+
 def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
     """#1845 (review P1): allowlist SHORT repo names (the ONE
     client-supplied value that reaches the GitHub URL path). Rejects (400)
@@ -11374,7 +11703,7 @@ def _validate_repo_scope(repos: list[str] | None) -> list[str] | None:
         r = r.strip()
         if not r:
             raise HTTPException(status_code=400, detail="Invalid repo name")
-        if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", r):
+        if not _SHORT_REPO_NAME_RE.match(r):
             raise HTTPException(status_code=400, detail="Invalid repo name")
         if r not in out:
             out.append(r)
@@ -11542,6 +11871,16 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
             # issues_beyond_window estimate with no per-repo signal).
             if result.get("cleared_truncated"):
                 totals["cleared_truncated"] = True
+            # #1894: live per-repo progress — the poll surfaces honest
+            # mid-walk state (progress/repos/points) so the dashboard can
+            # render an ETA from REAL signal (never fabricated). Written
+            # AFTER the increment so the quota-hit repo (which breaks BEFORE
+            # it) is never counted as processed.
+            _job(progress=round(totals["repos_processed"] * 100
+                                / max(len(walk_repos), 1)),
+                 points_created=totals["points_created"],
+                 repos_processed=totals["repos_processed"],
+                 repos_total=len(walk_repos))
 
         _job(status="completed", progress=100,
              points_created=totals["points_created"],
@@ -11582,6 +11921,12 @@ async def _run_indexing(job_id: str, team_id: str, org: str,
         updates: dict = {"github_index_cursor": cursors}
         if totals["repos_processed"] > 0:
             updates["github_indexed"] = True
+            # #1894: stamp the last-indexed timestamp in the SAME branch that
+            # flips the bool (parity semantics — "last time indexing ran and
+            # made progress", incl. quota-partial/mid-walk-error runs with >=1
+            # repo processed, mirroring github_indexed's resumable-cursor
+            # behavior).
+            updates["github_indexed_at"] = datetime.now(UTC).isoformat()
         _update_onboarding_state(team_id, **updates)
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).
@@ -11887,6 +12232,14 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
                         totals["blobs_skipped_binary"] += walk["skipped_binary"]
                         totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
                     totals["repos_processed"] += 1
+                    # #1894: live per-repo progress ("indexed so far" — the
+                    # document count trails by one repo because the current
+                    # repo's ingest runs after this write).
+                    _job(progress=round(totals["repos_processed"] * 100
+                                        / max(totals["repos_total"], 1)),
+                         documents_indexed=totals["documents_indexed"],
+                         repos_processed=totals["repos_processed"],
+                         repos_total=totals["repos_total"])
                 else:
                     walk = await indexer.walk_repo(
                         team_id, repo_name, branch=scope_branch or "main")
@@ -11894,6 +12247,12 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
                     totals["blobs_skipped_binary"] += walk["skipped_binary"]
                     totals["blobs_skipped_oversized"] += walk["skipped_oversized"]
                     totals["repos_processed"] += 1
+                    # #1894: live per-repo progress (see above).
+                    _job(progress=round(totals["repos_processed"] * 100
+                                        / max(totals["repos_total"], 1)),
+                         documents_indexed=totals["documents_indexed"],
+                         repos_processed=totals["repos_processed"],
+                         repos_total=totals["repos_total"])
             except GitHubFetchError as e:
                 # Fix 4: a bad repo must not starve the others — record and
                 # continue; already-staged repos are ingested below.
@@ -11949,6 +12308,11 @@ async def _run_docs_indexing(job_id: str, team_id: str, org: str,
         updates: dict = {}
         if totals["repos_processed"] > 0:
             updates["github_docs_indexed"] = True
+            # #1894: stamp the last-indexed timestamp in the SAME branch that
+            # flips the bool (parity semantics — see _run_indexing; a
+            # quota-partial docs run with >=1 repo processed counts as "made
+            # progress").
+            updates["github_docs_indexed_at"] = datetime.now(UTC).isoformat()
         _update_onboarding_state(team_id, **updates)
         # Evict after an hour (T1-P14: eviction-expired polls render
         # honestly).

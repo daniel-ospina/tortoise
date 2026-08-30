@@ -96,6 +96,22 @@ jobs:
         with:
           args: --no-progress ${{ steps.changed.outputs.files }}
 
+  dashboard-js-tests:
+    # #1894: the dashboard's pure-derivation + CSS-rule test suite (node
+    # --test, zero deps — no npm ci needed) must run PRE-merge. The
+    # deploy-pages.yml vite build is post-merge and syntax-level only; it
+    # would never catch a regression in the memory-source derivations or
+    # the disabled-switch opacity rule these tests pin.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Dashboard JS unit tests (node --test, zero deps)
+        run: node --test src/*.test.js
+        working-directory: website/apps/dashboard
+
   uv-lock-check:
     # #493: the committed uv.lock is the dev-environment source of truth —
     # gate on lockfile/pyproject drift. The suite itself runs in the

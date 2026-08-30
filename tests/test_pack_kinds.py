@@ -872,7 +872,7 @@ class TestV3BackwardCompatibility:
         """§6.2a regression: the CURRENT registry packs (v2) load unchanged."""
         registry = PackRegistry(REPO_PACKS_DIR)
         loaded = registry.load_all()
-        assert loaded == 5  # agent-ops, dev, marketing, product-strategy, project-management
+        assert loaded == 5  # dev, marketing, product-strategy, project-management, agent-ops (#1933)
         assert not registry.errors, f"v2 packs must load clean: {registry.errors}"
 
 

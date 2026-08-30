@@ -19,6 +19,7 @@ os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 import sys
 import time
 from contextlib import suppress
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -203,13 +204,16 @@ def test_state_keys_registered():
     in BOTH live default-state dicts + _ALLOWED_STATE_KEYS + the PATCH model
     — an unregistered key is silently dropped by _update_onboarding_state."""
     import tortoise.hosted_api as ha
-    for key in ("github_index_cursor", "github_legacy_backfill_done"):
+    for key in ("github_index_cursor", "github_legacy_backfill_done",
+                "github_indexed_at", "github_docs_indexed_at"):
         assert key in _ONBOARDING_DEFAULT_STATE
         assert key in _ALLOWED_STATE_KEYS
         assert key in ha.DEFAULT_ONBOARDING_STATE
     # PATCH model fields (the live OnboardingStatePatchRequest)
     assert "github_index_cursor" in ha.OnboardingStatePatchRequest.model_fields
     assert "github_legacy_backfill_done" in ha.OnboardingStatePatchRequest.model_fields
+    assert "github_indexed_at" in ha.OnboardingStatePatchRequest.model_fields
+    assert "github_docs_indexed_at" in ha.OnboardingStatePatchRequest.model_fields
 
 
 def test_state_keys_survive_patch_roundtrip(client, provisioned):
@@ -315,6 +319,111 @@ def test_second_run_full_org_with_cursors(provisioned, mock_github):
     # the diff re-run produced 0 new points (cursor-stopped walk)
     assert body["points_created"] == 0
     assert body["events_minted"] == 0
+
+
+def test_live_progress_written_during_walk(provisioned, mock_github, monkeypatch):
+    """#1894: the job poll surfaces LIVE per-repo progress mid-walk (not
+    just 0 → 100 at terminal) — the dashboard's ETA derives from REAL
+    signal. Pump-aware: the portal runs background tasks only while
+    servicing a request, so the walk is advanced by interleaved GETs and
+    the hold is a loop-friendly `asyncio.sleep` (never a threading barrier,
+    which would block the portal loop and deadlock)."""
+    import asyncio as _asyncio
+
+    # Defeat the first-run ONE-repo bound (mock resolves BOTH repos) so the
+    # org-wide re-poll walks both.
+    r0 = provisioned.tc.patch("/v1/onboarding/state",
+                              json={"github_indexed": True})
+    assert r0.status_code == 200, r0.text
+
+    orig_index_repo = GitHubIndexer.index_repo
+
+    async def _slow_repo2(self, sdk, repo, *, cursor=None):
+        # _run_indexing calls index_repo(team_sdk, repo_name, cursor=...) —
+        # do NOT pass cap/quota_check explicitly (None would break the
+        # `len(items) >= cap` default); delegate to inherit the contract.
+        if repo.endswith("/repo2"):
+            await _asyncio.sleep(1.0)  # loop-friendly hold on the 2nd repo
+        return await orig_index_repo(self, sdk, repo, cursor=cursor)
+
+    monkeypatch.setattr(GitHubIndexer, "index_repo", _slow_repo2)
+    r = provisioned.tc.post("/v1/index/github/re-poll")
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    # Interleave request pumps with polls of the LIVE JOB DICT VIA THE PUBLIC
+    # POLL ENDPOINT (the same GET the dashboard's bounded poll consumes —
+    # `{job_id, **job}`) — the portal advances _run_indexing WHILE servicing
+    # a request, so the poll GET both pumps and observes (mirrors _drain_jobs).
+    mid = {"seen": False, "repos_processed": 0, "progress": 0,
+           "repos_total": 0}
+    deadline = time.time() + 10.0
+    while time.time() < deadline:
+        rp = provisioned.tc.get(f"/v1/index/github/{job_id}")
+        body = rp.json()
+        if (body.get("repos_processed", 0) >= 1
+                and 0 < body.get("progress", 0) < 100):
+            mid["seen"] = True
+            mid["repos_processed"] = body["repos_processed"]
+            mid["progress"] = body["progress"]
+            mid["repos_total"] = body.get("repos_total", 0)
+            break
+        time.sleep(0.02)
+
+    assert mid["seen"], (
+        "mid-walk live progress never observed — _job() must write "
+        "repos_processed/progress after each repo")
+    assert mid["repos_processed"] == 1
+    assert mid["repos_total"] == 2
+    assert 0 < mid["progress"] < 100  # 1 of 2 repos → 50
+    assert mid["progress"] == 50
+
+    # the run still settles to a normal terminal state with full totals
+    body = _poll_until(provisioned.tc, job_id, "completed")
+    assert body["repos_processed"] == 2
+    assert body["repos_total"] == 2
+
+
+def test_midwalk_fetch_error_stamps_indexed_at(provisioned, mock_github,
+                                               monkeypatch):
+    """#1894 parity: a MID-WALK GitHubFetchError (repo2 fails AFTER repo1
+    processed) is "made progress" — the finally flips github_indexed AND
+    stamps github_indexed_at (the guard is repos_processed > 0, not "no
+    errors"). #1844 made github ingest object-only (no points quota), so the
+    mid-walk fetch error is now the ONLY github partial-progress path — the
+    docs side pins its quota-partial equivalent in test_index_docs_api."""
+    from tortoise.indexer.github_indexer import GitHubFetchError
+
+    # Defeat the first-run ONE-repo bound (mock resolves BOTH repos) so the
+    # org-wide re-poll walks both.
+    r0 = provisioned.tc.patch("/v1/onboarding/state",
+                              json={"github_indexed": True})
+    assert r0.status_code == 200, r0.text
+
+    orig_index_repo = GitHubIndexer.index_repo
+
+    async def _fail_repo2(self, sdk, repo, *, cursor=None):
+        if repo.endswith("/repo2"):
+            raise GitHubFetchError("injected 429 on repo2 (test)")
+        return await orig_index_repo(self, sdk, repo, cursor=cursor)
+
+    monkeypatch.setattr(GitHubIndexer, "index_repo", _fail_repo2)
+    r = provisioned.tc.post("/v1/index/github/re-poll")
+    assert r.status_code == 200, r.text
+    body = _poll_until(provisioned.tc, r.json()["job_id"], "failed")
+    assert body["status"] == "failed"
+    assert "injected 429" in body["error"]
+    assert body["repos_processed"] == 1  # repo1 walked, repo2 failed
+
+    state = provisioned.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert state["github_indexed"] is True, \
+        ">=1 repo processed = made progress — the bool flips on partial runs"
+    # #1894 parity: the timestamp stamps in the SAME branch as the bool — a
+    # resumable partial run shows a truthful "Last indexed".
+    assert state["github_indexed_at"], \
+        "mid-walk-error partial runs stamp github_indexed_at (parity with " \
+        "the bool — resumable-cursor semantics)"
+    datetime.fromisoformat(state["github_indexed_at"])  # ISO, strict parse
 
 
 # ── Auto-index after connect (Task 5) ─────────────────────────────
@@ -464,6 +573,11 @@ def test_cursor_and_backfill_marker_persisted(provisioned, mock_github):
     assert cursor and "acme/repo1" in cursor
     assert cursor["acme/repo1"]["updated_at"]
     assert "number" in cursor["acme/repo1"]
+    # #1894: completion stamps the last-indexed timestamp (parity with the
+    # bool — a progress-y run flips BOTH). Strict ISO parse (fromisoformat
+    # rejects malformed strings, not just epoch floats).
+    assert state["github_indexed_at"], "github_indexed_at must be stamped on completion"
+    datetime.fromisoformat(state["github_indexed_at"])  # ISO, not an epoch float
 
 
 def test_repoll_drains_and_clears_truncated_persisted(client, tmp_path,
@@ -572,6 +686,13 @@ def test_resolve_repos_404_fails_job(client, tmp_path, monkeypatch):
     assert not state["github_indexed"], \
         "a 0-repo 404 failure must leave github_indexed UNSET — the next " \
         "run keeps the ONE-repo bounded first-run pacing (P2, PR #1792)"
+    # #1894 parity: a 0-progress failure must NOT stamp the timestamp either
+    # (it lives in the same repos_processed>0 branch as the bool) — a
+    # regression moving the stamp outside the guard would show a fabricated
+    # "Last indexed" on the dashboard.
+    assert not state.get("github_indexed_at"), \
+        "a 0-repo 404 failure must leave github_indexed_at UNSET (parity " \
+        "with the bool — no stamp on zero progress)"
 
 
 def test_issue_ingest_no_longer_consumes_points_quota(client, tmp_path,
