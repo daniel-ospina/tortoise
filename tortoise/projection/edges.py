@@ -28,7 +28,10 @@ class _EdgeHandlers:
 
     def _create_edges(self, p: dict) -> None:
         """Create typed edges for an operator Point. Auto-creates stub nodes
-        for missing source Points referenced by short IDs (#6713)."""
+        for missing source endpoints referenced by short IDs (#6713).
+        Operator endpoints may be Point OR Event nodes (A1b #1272) — the
+        existence checks and edge MERGEs match both (#1919 fold-parity: live
+        create_operator writes the same typed + INPUT edges this replay does)."""
         op = p.get("operator")
         if not isinstance(op, dict):
             # #331 (review r4): a truthy non-dict operator value must
@@ -46,11 +49,12 @@ class _EdgeHandlers:
             # skip (len()/Cypher param would raise).
             if not isinstance(src, str):
                 continue
-            # ponytail: auto-create stub if source Point doesn't exist.
+            # ponytail: auto-create stub if source endpoint doesn't exist.
             # Short numeric IDs are orphan refs from cross-file wiring scripts.
             if len(src) < 20:  # short IDs (non-ULID) are suspect
                 exists = self.g.query(
-                    "MATCH (s:Point {id:$sid}) RETURN count(s) > 0",
+                    "MATCH (s) WHERE (s:Point OR s:Event) "
+                    "AND s.id = $sid RETURN count(s) > 0",
                     params={"sid": src}
                 ).result_set[0][0]
                 if not exists:
@@ -77,21 +81,23 @@ class _EdgeHandlers:
                 # A source that doesn't resolve would silently match nothing
                 # in the MERGE below; warn instead of dropping the input.
                 exists = self.g.query(
-                    "MATCH (s:Point {id:$sid}) RETURN count(s) > 0",
+                    "MATCH (s) WHERE (s:Point OR s:Event) "
+                    "AND s.id = $sid RETURN count(s) > 0",
                     params={"sid": src},
                 ).result_set[0][0]
                 if not exists:
                     _log.warning(
                         "input source %r (id length %d >= 20) does not "
-                        "resolve to an existing Point — INPUT edge skipped",
+                        "resolve to an existing Point or Event — INPUT edge "
+                        "skipped",
                         src, len(src),
                     )
                     continue
             if rel_type is not None:
                 # Known op_type → typed edge + reverse INPUT
                 self.g.query(
-                    f"MATCH (o:Point {{id:$oid}}) "
-                    f"MATCH (s:Point {{id:$sid}}) "
+                    f"MATCH (o:Point {{id:$oid}}), (s) "
+                    f"WHERE (s:Point OR s:Event) AND s.id = $sid "
                     f"MERGE (o)-[:{rel_type} {{idx:$idx}}]->(s) "
                     f"MERGE (s)-[:INPUT {{idx:$idx}}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
@@ -99,8 +105,8 @@ class _EdgeHandlers:
             else:
                 # Unknown op_type → INPUT edge only (convention: source → operator)
                 self.g.query(
-                    "MATCH (o:Point {id:$oid}) "
-                    "MATCH (s:Point {id:$sid}) "
+                    "MATCH (o:Point {id:$oid}), (s) "
+                    "WHERE (s:Point OR s:Event) AND s.id = $sid "
                     "MERGE (s)-[:INPUT {idx:$idx}]->(o)",
                     params={"oid": p["id"], "sid": src, "idx": idx},
                 )
