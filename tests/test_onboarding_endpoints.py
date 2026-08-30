@@ -143,7 +143,8 @@ class TestPublicDemo:
         server graph, so a fresh graph per test requires a unique team id
         (the per-path redirect derivation isolates it)."""
         import uuid
-        from tortoise.hosted_api import app, get_current_team, _make_sdk
+
+        from tortoise.hosted_api import _make_sdk, app, get_current_team
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
         app.dependency_overrides[get_current_team] = lambda tid=tid: {
             "team_id": tid, "tier": "free", "key_id": "k1",
@@ -170,7 +171,8 @@ class TestPublicDemo:
         per-test unique team id so the docker-lane redirect derives a fresh
         per-path server graph (see test_demo_seed_402_at_cap)."""
         import uuid
-        from tortoise.hosted_api import app, get_current_team, _make_sdk
+
+        from tortoise.hosted_api import _make_sdk, app, get_current_team
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
         app.dependency_overrides[get_current_team] = lambda tid=tid: {
             "team_id": tid, "tier": "free", "key_id": "k1",
