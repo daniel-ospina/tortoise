@@ -93,7 +93,10 @@ include = ["tortoise*", "benchmarks*", "battery*"]
 # #1929: `../tests/sample_transcript.txt` lands at the wheel root as
 # `tests/sample_transcript.txt` → `site-packages/tests/sample_transcript.txt`
 # on install — exactly where `tortoise.__main__._cmd_demo` resolves it.
-tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt"]
+tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
+          # #1932: the authoring guide ships in the wheel (E2E-3 artifact-
+          # delivery assertion — a wheel install can read it at site-packages/docs/).
+          "../docs/EXPANSION_PACKS.md"]
 # Quoted key (TOML dot-key): ships every packs/<ns>/manifest.yaml as
 # tortoise/packs/<ns>/manifest.yaml in the wheel (recursive glob — a pack
 # added by a later slice, e.g. #1933 agent-ops, needs no pyproject change).

@@ -1,0 +1,11 @@
+# E2E-5 fixture — content confusable between `agent-ops:rule` and the core
+# `standard` kind (issue #1933, epic #1891). Consumed by issue #1934
+# (enforcement slice, E2E-5): with `extraction.enforcement.kinds: {rule:
+# retry}` declared, the kind classifier near-misses this content and must
+# retry (bounded) before classifying or recording the near-miss. This slice
+# only creates the fixture — the retry WIRING is #1934's.
+# Conversation transcript (role: content).
+
+assistant: Every deploy follows the standard operating procedure.
+assistant: The standard says: always back up before migrating.
+assistant: It is the accepted standard across all teams.

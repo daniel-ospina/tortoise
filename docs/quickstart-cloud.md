@@ -171,6 +171,21 @@ tortoise create-point "The decision was approved" --kind statement   # individua
 
 For bulk, use the REST API (`POST /v1/points`) or the SDK — both accept the same content.
 
+
+## 6.5 Expansion packs (optional)
+
+Tortoise ships five starter packs by default (`dev`, `marketing`,
+`product-strategy`, `pm`, `agent-ops`) — declarative YAML that extends the
+core ontology with domain vocabulary, chains, and extraction guidance.
+`tortoise_packs_list` shows your active packs.
+
+- **Install a custom pack per team:** `POST /v1/packs/manifests` with the
+  manifest YAML (or the `tortoise_pack_install` MCP tool) — validated against
+  the shared schema; ontology-only v1 (no connectors/tools on tenant packs).
+  Reserved starter namespaces are rejected.
+- **Author one:** same manifest format as self-host
+  ([docs/EXPANSION_PACKS.md](EXPANSION_PACKS.md)).
+
 ## 7. Beta feedback & bug reports
 
 Part of the beta cohort? Bugs and feedback go through two channels (see [beta-feedback.md](beta-feedback.md) for the full guide and triage path):

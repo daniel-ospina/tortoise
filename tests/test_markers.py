@@ -124,6 +124,11 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
     },
     "test_writer_inventory.py": {
         '"team_myapp"': "endpoint-constrained",  # seed write — backup dumps teams.graph_name
+        # #1903 graph_name-parity sites: raw select_graph(f"team_{team_id}")
+        # seed + restore probes on the test team's own graph (#2025 merge
+        # freshness — main added the literals without routing; gate reds
+        # otherwise, #1970 main hygiene).
+        'f"team_{team_id}"': "endpoint-constrained",
     },
     "test_pack_state.py": {
         "legacy_graph": "read-only",  # variable — legacy-graph PackInstall assert

@@ -136,6 +136,28 @@ const supabaseStorage = {
   },
 }
 
+// #1909: supabase-js implicit flow returns OAuth error params in the URL
+// FRAGMENT (#error=…&error_code=…) — not just the search string (a denied
+// claim OAuth round-trip returns as ?claim=1#error=… on this origin). The
+// client consumes the fragment during init, so snapshot it FIRST (mirrors
+// welcome.html's landingHash) and read error params from BOTH surfaces.
+const landingHash = window.location.hash
+function oauthErrorParams() {
+  const p = new URLSearchParams(window.location.search)
+  const h = new URLSearchParams(landingHash.replace(/^#/, ''))
+  const get = (k) => p.get(k) || h.get(k) || ''
+  return { error: get('error'), error_code: get('error_code'), error_description: get('error_description') }
+}
+// #1909: the /auth bounce may carry an OAuth error FRAGMENT (#error=…).
+// Forward it to /auth ONLY when it holds error params — a live token
+// fragment (access_token / refresh_token / code) must never be re-ingested
+// by the destination (the #1566 invariant).
+function oauthErrorHash() {
+  if (!landingHash) return ''
+  if (/[?&#](?:access_token|refresh_token|code)=/.test(landingHash)) return ''
+  return /[?&#](?:error|error_code|error_description)=/.test(landingHash) ? landingHash : ''
+}
+
 let supabaseClient = null
 try {
   supabaseClient = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
@@ -476,6 +498,12 @@ function claimIntentInFlight() {
   const [inviteEmail, setInviteEmail] = React.useState('')
   const [inviteRole, setInviteRole] = React.useState('member')
   const [backupInfo, setBackupInfo] = React.useState(null)
+  // #1923: terminal backups status — mirrors graphsStatus/membersStatus so a
+  // failed /backups resolves to an immediate '—' card (not an eternal
+  // skeleton-then-'—' after frameStale) and counts as complete for the
+  // Overview loaded announce. null backupInfo alone could not distinguish
+  // 'still loading' from 'failed'.
+  const [backupsStatus, setBackupsStatus] = React.useState('loading')
   const [newGraphName, setNewGraphName] = React.useState('')
   const teamIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
@@ -1419,13 +1447,13 @@ function claimIntentInFlight() {
         // banner reads ?error=... (the mount gate already passes
         // window.location.search on its bounce; the bare call here dropped
         // them, so an OAuth failure during provisioning silently lost the
-        // banner's cause).
-        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
+        // banner's cause). #1909: an error FRAGMENT rides along too.
+        if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
         // #1860 (P3-5, review P2-1): the degraded fallback must preserve the
         // params too — mirror the mount gate's fallback exactly, or the
         // OAuth-error banner's cause is lost precisely when the bridge is
         // blocked/unavailable.
-        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+        else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
         return { routedAway: true }
       }
       if (response && response.ok) {
@@ -1618,15 +1646,28 @@ function claimIntentInFlight() {
           // on /auth, not a dashboard credential.
           const claimIntent = claimIntentInFlight()
           if (!claimIntent) {
-            // #1224/#1566: OAuth state-expiry errors land as ?error=… on the
-            // app origin now — preserve the SEARCH so /auth renders the
-            // banner (never the hash: a live #access_token must not be
+            // #1224/#1566: OAuth state-expiry errors land as ?error=… (or,
+            // #1909, as #error=… in the fragment) on the app origin now —
+            // preserve the SEARCH and any ERROR fragment so /auth renders the
+            // banner (never a live #access_token fragment: it must not be
             // re-ingested by the destination).
-            if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search)
-            else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search)
+            if (typeof window.bounceToAuth === 'function') window.bounceToAuth(window.location.search, oauthErrorHash())
+            else window.location.replace('https://tortoise.premiselabs.co/auth' + window.location.search + oauthErrorHash())
             return
           }
           // Claim-intent: render the claim-paste screen (no session, no team).
+          // #1909: a denied claim OAuth round-trip returns with
+          // ?claim=1#error=… — surface the reason on the paste screen
+          // (fragment params, not just search).
+          const urlErr = oauthErrorParams()
+          if (urlErr.error || urlErr.error_code) {
+            const code = urlErr.error_code || ''
+            const desc = urlErr.error_description || ''
+            setClaimError(
+              code === 'bad_oauth_state' || /state/i.test(desc)
+                ? 'Your sign-in session expired while you were on the claim screen. Please try again.'
+                : 'Sign-in failed' + (desc ? `: ${desc}` : '. Please try again.'))
+          }
           setAuthMode('apikey')
           setChecking(false); return
         }
@@ -2316,6 +2357,7 @@ function claimIntentInFlight() {
     sessionTokenRef.current = null      // Round-4: never reuse the previous user's JWT
     setError('')                        // Round-4: stale error banner must not survive
     setBackupInfo(null)                 // Round-5: no cross-session backup data leak
+    setBackupsStatus('loading')         // #1923: mirror the backupInfo reset
     fallbackTeamIdRef.current = null    // Round-5: no stale team adoption across users
     teamIdRef.current = null            // Round-5: hygiene (inert, but consistent)
     setCheckoutPending(false)           // Round-6: no stuck 'Opening checkout…' for the next user
@@ -2496,6 +2538,7 @@ function claimIntentInFlight() {
     setKeys([])
     setSessions([])
     setBackupInfo(null)
+    setBackupsStatus('loading') // #1923: mirror the backupInfo reset
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
@@ -2780,7 +2823,18 @@ function claimIntentInFlight() {
       if (teamIdRef.current !== _teamAtCall) return // stale switch response
       const list = b.backups || []
       setBackupInfo(list.length ? { latest: list[0], count: list.length } : { count: 0 })
-    } catch { /* tier-gated (Pro) — leave null */ }
+      setBackupsStatus('ok')
+    } catch {
+      // #1923: a transient 503/network failure is TERMINAL — the Backups card
+      // flips to '—' immediately (no eternal skeleton) and the Overview loaded
+      // announce still fires. Guard on the at-call team: a stale failure from a
+      // previous team must not land under the new one. Clear any stale data too
+      // — the '—' card must never read as a previous team's count.
+      if (teamIdRef.current === _teamAtCall) {
+        setBackupInfo(null)
+        setBackupsStatus('error')
+      }
+    }
   }
 
   // Load team-scoped data whenever the active team changes. Members + graphs
@@ -2808,7 +2862,11 @@ function claimIntentInFlight() {
   // "Overview loaded" instead of reading "Loading overview…" forever while
   // the Graphs card shows terminal '—' (mirrors members/backups terminal
   // handling).
-  const overviewDataComplete = !!team && graphsStatus !== 'loading' && membersStatus !== 'loading' && backupInfo !== null
+  // #1923: backups counts as complete on ANY terminal state — 'error' included —
+  // so a failed /backups still announces "Overview loaded" instead of reading
+  // "Loading overview…" forever while the Backups card shows terminal '—'
+  // (mirrors graphsStatus/membersStatus terminal handling).
+  const overviewDataComplete = !!team && graphsStatus !== 'loading' && membersStatus !== 'loading' && backupsStatus !== 'loading'
   const [overviewAnnounced, setOverviewAnnounced] = React.useState(false)
   React.useEffect(() => {
     if (!overviewAnnounced && overviewDataComplete) setOverviewAnnounced(true)
@@ -2855,7 +2913,7 @@ function claimIntentInFlight() {
   // latch staleFired while NO skeleton was ever on screen, then open the
   // dashboard on '—' for a load that just started.
   const overviewSkeletonLive = authed && tab === 'overview' && !welcomeMode &&
-    (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupInfo === null)
+    (team === null || graphsStatus === 'loading' || membersStatus === 'loading' || backupsStatus === 'loading')
   // clockStale: raw 15s check against the frame start. frameStale: what the
   // render reads — latched once the floor has ever fired for this load.
   const clockStale = frameStartRef.current !== null && (now - frameStartRef.current) > STALE_LOADING_MS
@@ -4275,7 +4333,7 @@ function claimIntentInFlight() {
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
               <div className="card"><div className="card-val">{graphsStatus === 'ok' ? graphs.length : (graphsStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Graphs</div></div>
               <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : (membersStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Users</div></div>
-              <div className="card"><div className="card-val">{backupInfo ? (backupInfo.count || 'none') : (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />)}</div><div className="card-label">Backups</div></div>
+              <div className="card"><div className="card-val">{backupsStatus === 'ok' ? (backupInfo.count || 'none') : (backupsStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Backups</div></div>
               <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
               <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
             </div>

@@ -111,6 +111,17 @@ CORE_SOURCE_KINDS: frozenset[str] = frozenset(
     KNOWN_SOURCE_TYPES | set(SOURCE_KIND_DEFAULTS) | {"agentSession"}
 )
 
+# The canonical core event-kind set (ONTOLOGY §5 + the derived session
+# events). #1933 (epic #1891): this module-level set is the CORE BASE the
+# pack-aware Layer-1 event vocabulary unions with (it used to be a local
+# inside validate_layer1; hoisted so Vocab can reference it).
+EVENT_KINDS: frozenset[str] = frozenset({
+    "decision", "occurrence", "deployment", "review",
+    "extraction", "meeting", "experiment", "friction", "turn",
+    "sessionCaptured", "AgentSession", "documentCreated",
+    "roleCreated", "pointAdded", "humanApproval",
+})
+
 
 @dataclass(frozen=True)
 class Vocab:
@@ -118,9 +129,14 @@ class Vocab:
 
     point_kinds: frozenset[str]
     source_kinds: frozenset[str]
+    # #1933 (epic #1891): pack event kinds — the Layer-1 event gate used a
+    # HARDCODED set, so a mined pack event (e.g. agent-ops:ruleRevised →
+    # bare ``ruleRevised`` after the extractor's FIX-A stripping) 422'd.
+    event_kinds: frozenset[str] = frozenset(EVENT_KINDS)
 
     def __contains__(self, kind: str) -> bool:  # pragmatic: Vocab ⊇ kind
-        return kind in self.point_kinds or kind in self.source_kinds
+        return (kind in self.point_kinds or kind in self.source_kinds
+                or kind in self.event_kinds)
 
 
 def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
@@ -132,7 +148,9 @@ def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
     the namespaced one — pack_registry.list_all_kinds). Source kinds =
     ontology §5 source-type vocabulary (KNOWN_SOURCE_TYPES ∪ registered
     SOURCE_KIND_DEFAULTS incl. tier forms ∪ ``agentSession``) ∪ pack-declared
-    extraction sourceTypes.
+    extraction sourceTypes. Event kinds = the canonical core set ∪ each
+    pack's declared eventKinds in BOTH bare and ``ns:kind`` form (#1933 —
+    the extractor strips event kinds to bare form in the payload).
     """
     if packs_dir is None:
         from tortoise.pack_registry import default_packs_dir
@@ -141,13 +159,17 @@ def compile_vocab(packs_dir: Path | str | None = None) -> Vocab:
     registry.load_all()
     pack_point: set[str] = set()
     pack_sources: set[str] = set()
+    pack_events: set[str] = set()
     for ns, pack in registry.packs.items():
         pack_point.update(pack.point_kinds)
         pack_point.update(f"{ns}:{k}" for k in pack.point_kinds)
         pack_sources.update(pack.extraction.get("sourceTypes") or [])
+        pack_events.update(pack.event_kinds)
+        pack_events.update(f"{ns}:{k}" for k in pack.event_kinds)
     return Vocab(
         point_kinds=frozenset(CORE_POINT_KINDS | pack_point),
         source_kinds=frozenset(CORE_SOURCE_KINDS | pack_sources),
+        event_kinds=frozenset(EVENT_KINDS | pack_events),
     )
 
 
@@ -701,14 +723,12 @@ def validate_layer1(
         (o.src, o.dst, o.op_type) for o in payload.operators
     }
 
-    # Events (#1013): eventKind in the closed event vocab; about_entities
-    # referential; source_ref required.
-    EVENT_KINDS = {"decision", "occurrence", "deployment", "review",
-                   "extraction", "meeting", "experiment", "friction", "turn",
-                   "sessionCaptured", "AgentSession", "documentCreated",
-                   "roleCreated", "pointAdded", "humanApproval"}
+    # Events (#1013): eventKind in the closed event vocab (core ∪ pack
+    # eventKinds — #1933, epic #1891: the Layer-1 gate used a hardcoded
+    # local set, so a mined pack event like ``ruleRevised`` 422'd);
+    # about_entities referential; source_ref required.
     for i, ev in enumerate(payload.events):
-        if ev.eventKind not in EVENT_KINDS:
+        if ev.eventKind not in vocab.event_kinds:
             add(f"events[{i}].eventKind",
                 f"eventKind {ev.eventKind!r} not in the ontology event vocabulary")
         for name in ev.about_entities:

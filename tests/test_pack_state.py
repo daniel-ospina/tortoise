@@ -142,6 +142,37 @@ class TestEnsureTenantPacks:
         assert [r[0] for r in rows] == ["dev", "marketing"]
         assert len(rows) == 2  # no uninstall, no dupe
 
+    def test_old_4pack_tenant_converges_to_agent_ops_after_upgrade(self, tmp_path, monkeypatch):
+        """R8 (#1933, epic #1891): an EXISTING tenant with the old 4-pack
+        starter set (dev/marketing/product-strategy/pm) converges to
+        agent-ops active after upgrade with no manual intervention — the
+        idempotent additive MERGE of ensure_tenant_packs (the self-heal /
+        provisioning read path) adds the new namespace. The CI smoke bound
+        derives from len(DEFAULT_STARTER_PACKS), so the starter set is 5."""
+        monkeypatch.delenv("TORTOISE_STARTER_PACKS", raising=False)
+        assert "agent-ops" in DEFAULT_STARTER_PACKS
+        assert len(DEFAULT_STARTER_PACKS) == 5
+        sdk = TortoiseSDK(db_path=str(tmp_path / "up.db"), namespace=f"test_pack_team_up_{os.urandom(4).hex()}")
+        # pre-upgrade tenant: the OLD 4-pack starter set
+        old = ensure_tenant_packs(sdk, starter=["dev", "marketing", "product-strategy", "pm"])
+        assert len(old) == 4
+        pre_names = sorted(r[0] for r in _read_installs(sdk))
+        assert pre_names == ["dev", "marketing", "pm", "product-strategy"]
+        assert "agent-ops" not in pre_names
+        # post-upgrade: the next ensure_tenant_packs access (self-heal read
+        # path) uses the new 5-default — agent-ops MERGEs in additively
+        ensure_tenant_packs(sdk)
+        rows = _read_installs(sdk)
+        names = sorted(r[0] for r in rows)
+        assert names == sorted(DEFAULT_STARTER_PACKS)
+        assert "agent-ops" in names
+        assert len(rows) == len(set(names))  # idempotent — no duplicates
+        assert all(r[2] == "active" and r[3] == "starter" for r in rows)
+        # the introspection surface agrees (converged, no drift)
+        packs = get_tenant_packs(sdk)
+        assert "agent-ops" in [p["namespace"] for p in packs]
+        assert len(packs) == 5
+
 
 class TestGetTenantPacks:
     def test_joins_catalog_metadata_sorted(self, tmp_path):

@@ -1545,6 +1545,26 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
+        # Points enter as draft, go live when first edge is created (#131).
+        # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
+        # hit must never forward the caller's status into update_point (which
+        # rejects any non-'live' status — a gated re-ingest of the same draft
+        # item raised a raw ValueError mid-batch, stranding earlier bundle
+        # items as committed). Popping up front also keeps vocabulary
+        # validation uniform for both paths: an invalid status raises even
+        # when the point already exists (no silent-ignore asymmetry).
+        status = props.pop("status", "draft")
+        # Fail-closed vocabulary validation (mirrors update_point): a
+        # non-canonical status (case variant, junk, non-str, typo) would
+        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
+        # (which excludes only exact 'draft') — a silent-promotion hole
+        # (PR #1073 review P0/P1). isinstance guard keeps the error a
+        # ValueError for unhashable values (list/dict) too.
+        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
+            raise ValueError(
+                f"Invalid status {status!r}. Valid statuses: "
+                f"{sorted(POINT_STATUS_VALUES)}"
+            )
         if dedup:
             ch = _content_hash(content)
             # P1 #49: dedup by content_hash + pointKind (NOT context, which is no longer written)
@@ -1610,19 +1630,6 @@ class TortoiseSDK:
             pid = explicit_id
         else:
             pid = ulid()
-        # Points enter as draft, go live when first edge is created (#131)
-        status = props.pop("status", "draft")
-        # Fail-closed vocabulary validation (mirrors update_point): a
-        # non-canonical status (case variant, junk, non-str, typo) would
-        # otherwise be stored verbatim and treated as EP-LIVE by _live_only
-        # (which excludes only exact 'draft') — a silent-promotion hole
-        # (PR #1073 review P0/P1). isinstance guard keeps the error a
-        # ValueError for unhashable values (list/dict) too.
-        if not isinstance(status, str) or status not in POINT_STATUS_VALUES:
-            raise ValueError(
-                f"Invalid status {status!r}. Valid statuses: "
-                f"{sorted(POINT_STATUS_VALUES)}"
-            )
 
         # Compute embedding (Phase 1A, #7698) — stored as Point property
         embedding = None
@@ -3888,6 +3895,23 @@ class TortoiseSDK:
             raise ValueError(
                 f"op_type must be 'IMPL', 'NAND', or a part/whole type, got {op_type!r}"
             )
+        # #1934 (epic #1891 slice 3): relation-level write validation —
+        # warn-not-block (governance D1/D2). An undeclared domain label is
+        # warned (structured) and the write proceeds; the violations event
+        # feeds the future governance app. Consults the pack registry's
+        # declared relation predicates — the ladder is no longer dead config.
+        warnings: list[dict] = []
+        if label:
+            from tortoise.domain_loader import _get_registry
+            from tortoise.enforcement import emit_violation, warning_for_relation
+            reg = _get_registry()
+            declared = set()
+            if reg is not None:
+                declared = {r.get("predicate") for r in reg.list_relations()}
+            if label not in declared and label not in ("IMPL", "NAND", "MITIGATES"):
+                warnings.append(warning_for_relation(label))
+                emit_violation(code="undeclared_relation", relation=label,
+                               detail=f"op_type={op_type}")
         # Direction default (CYCLE-25 per-op_type, ontology v3.6 #5):
         # direction-absent canonicalizes per op_type — IMPL → "bidirectional"
         # (unchanged), NAND → "unidirectional" (extraction default — ingest IS
@@ -3965,6 +3989,10 @@ class TortoiseSDK:
         # (a formerly operator-less claim now has an operator). Drop seeds.
         self._get_ep().invalidate_messages(inputs)
         result = self.get_point(pid)
+        # #1934: merge the structured warnings into the result (warn-not-block
+        # contract — consumers may surface or ignore; the shape is stable).
+        if warnings:
+            result["warnings"] = warnings
         # #432+#548 unified: domain payload + full point snapshot for both
         # the :GraphEvent store (subscriptions/poll) and JSONL (rebuild_all).
         event_point = dict(result)
@@ -4155,6 +4183,15 @@ class TortoiseSDK:
         to surface tombstones. #1391: the default exclusion now covers ALL
         terminal statuses (retracted, superseded, outdated, archived).
         """
+        # #1914: invalid pagination params fail cleanly instead of looping
+        # (limit=0 → hasMore = skip + 0 < total always True on non-empty
+        # graphs → infinite pagination loop) or passing raw negatives into
+        # Cypher. Mirrors the guard in tortoise_query (mcp_server.py) and
+        # the other paginators (list_drafts, belief_timeline).
+        if skip < 0:
+            raise ValueError(f"skip must be >= 0, got {skip}")
+        if limit < 1:
+            raise ValueError(f"limit must be >= 1, got {limit}")
         proj = self._get_proj()
         clauses = ["n.is_operator = false"]
         params: dict[str, Any] = {}
@@ -8085,25 +8122,24 @@ class TortoiseSDK:
                         "confidences": {}, "diagnostic": "no_factors"}
         confidences = {}
         proj = self._get_proj()
-        from datetime import datetime, timezone
-        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
         # #395 (delta C): the write-back set == the run set — consume
         # ep._last_affected (stashed by run, assigned before its early
         # returns) instead of re-running the BFS with a default depth.
         for claim_id in (ep._last_affected or set()):
             conf = ep.compute_confidence(claim_id)
             confidences[claim_id] = conf
-        # Batch write-back via UNWIND (drops the per-claim SET loop; only the
-        # updatedAt stamp + full-precision mean are unique to the loop —
-        # n.confidence itself is already batch-written by _flush_cache).
+        # Batch write-back via UNWIND (drops the per-claim SET loop; the
+        # full-precision mean is the loop's only unique write — n.confidence
+        # itself is also batch-written by _flush_cache).
+        # #1915: a READ never moves the freshness signal — no updatedAt stamp
+        # here (get_confidence passes stamp_dreamed_at=False for the same
+        # reason); the dream write-back owns the write-path stamp.
         if confidences:
             proj.g.query(
                 "UNWIND $params AS p "
-                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c, "
-                "n.updatedAt = $now",
+                "MATCH (n:Point {id: p.id}) SET n.confidence = p.c",
                 params={"params": [{"id": cid, "c": conf["mean"]}
-                                    for cid, conf in confidences.items()],
-                        "now": now},
+                                    for cid, conf in confidences.items()]},
             )
         result = {"iterations": iterations, "converged": converged,
                   "confidences": confidences}

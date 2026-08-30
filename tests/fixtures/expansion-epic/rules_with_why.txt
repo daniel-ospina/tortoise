@@ -1,0 +1,11 @@
+# E2E-4 fixture — a rule stated WITH reasoning (issue #1933, epic #1891).
+# The rules-with-why pattern: a durable operational rule + the rationale
+# that grounds it. Mining this transcript must mint the rule Object
+# (agent-ops:rule), the rationale Point, and the groundedIn IMPL link.
+# Conversation transcript (role: content).
+
+assistant: I need to establish a standing rule for the ops rotation.
+assistant: Destructive actions require a verbal token acknowledgement.
+assistant: The reason for the rule: a prior incident of unacknowledged destructive action caused rollback loss, and that is why the rule exists.
+assistant: So the protocol is — before any destructive action, the operator states a verbal token and waits for the acknowledgment.
+assistant: We are adopting that as the standard operating procedure going forward.

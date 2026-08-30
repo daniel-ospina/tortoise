@@ -851,3 +851,31 @@ def _embedded_only_skip_hook(request):
     Delegates to the named helper `_embedded_only_skip` (cycle-5 P2-12) so
     the marker-semantics test drives the exact hook."""
     _embedded_only_skip(request)
+
+
+# ── #1930: ambient TORTOISE_PACKS_DIR isolation ───────────────────────────
+# The pack-dir env leg (epic #1891 WF-2) makes the whole suite
+# ambient-env-sensitive: a developer/CI/operator machine that exports
+# TORTOISE_PACKS_DIR must never silently redirect pack resolution in ANY
+# test module. Cleared per test so caplog warn assertions are deterministic
+# regardless of ordering (the warn-once sentinel is module-level).
+@pytest.fixture(autouse=True)
+def _packs_env_isolation(monkeypatch):
+    """#1930: reset pack-resolution env + module state before each test.
+
+    TORTOISE_PACKS_DIR is deleted unless a test sets it explicitly
+    (monkeypatch restores after). domain_loader module state (_registry /
+    _env_fallback_key / _PACKS_DIR) and the warn-once sentinel are reset so
+    no test leaks pack-resolution state into the next.
+    """
+    monkeypatch.delenv("TORTOISE_PACKS_DIR", raising=False)
+    import tortoise.pack_registry as pack_registry
+    from tortoise import domain_loader
+    domain_loader._registry = None
+    domain_loader._env_fallback_key = None
+    domain_loader._PACKS_DIR = None
+    getattr(pack_registry, "_WARN_ONCE", set()).clear()
+    yield
+    domain_loader._registry = None
+    domain_loader._env_fallback_key = None
+    domain_loader._PACKS_DIR = None

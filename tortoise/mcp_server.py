@@ -872,6 +872,40 @@ def tortoise_packs_list() -> list[dict]:
     return _safe(lambda: get_tenant_packs(_get_team_sdk()))
 
 
+def tortoise_pack_install(manifest_yaml: str) -> dict:
+    """#1935: install a custom expansion pack on the HOSTED surface.
+
+    Validates against the shared registry validator (schema + cross-pack)
+    plus the tenant policy (reserved starter namespace + ontology-only v1),
+    stores the manifest graph-natively in the tenant's graph
+    (``:PackManifest``) and activates it (idempotent).
+
+    DEPLOYMENT-GATED (#1935 R10): on SELF-HOST this tool is an actionable
+    stub — self-host configures packs via the filesystem packs dir
+    (``TORTOISE_PACKS_DIR``) + the ``tortoise pack`` CLI instead. The gate
+    is the serving app: ``tortoise.hosted_api`` is only imported in the
+    hosted deployment.
+    """
+    import sys as _sys
+
+    from tortoise.pack_manifest_store import upsert_tenant_manifest
+    if _sys.modules.get("tortoise.hosted_api") is None:
+        return {
+            "installed": False,
+            "error": "tortoise_pack_install is HOSTED-only — on self-host add "
+                      "custom packs via the filesystem packs dir "
+                      "(TORTOISE_PACKS_DIR) + the 'tortoise pack' CLI.",
+        }
+    if _transport_mode.get() != "http":
+        return {"installed": False,
+                "error": "pack install requires the HTTP transport."}
+    try:
+        record = upsert_tenant_manifest(_get_team_sdk(), manifest_yaml)
+    except ValueError as e:
+        return {"installed": False, "validation_errors": [str(e)]}
+    return {"installed": True, **record}
+
+
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
     Alias → overview(section='tags') (epic #888 W3)."""
