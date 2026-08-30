@@ -890,7 +890,8 @@ async def provision_tenant(request: Request):
                    "disabled in Supabase control-plane mode (#765).",
         )
 
-    body = await request.json()
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
     team_id = body.get("team_id")
     team_name = body.get("team_name")
     api_key_hash = body.get("api_key_hash")
@@ -2945,7 +2946,10 @@ async def session_login(request: Request):
     hour-long 429.
     """
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         body = {}
     # Security review r2 (P3): a non-dict JSON body ([1,2,3], "abc", 42)
@@ -3330,7 +3334,8 @@ async def register_user(request: Request, response: Response):
     """
     await _check_register_rate_limit(request)
 
-    body = await request.json()
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
     # #308 (R6): Turnstile siteverify — fail-open only when secret unset.
     await _check_turnstile(request, body if isinstance(body, dict) else {})
     try:
@@ -3754,7 +3759,10 @@ async def email_signup(request: Request):
         raise
 
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(  # noqa: B904
             status_code=422,
@@ -4041,7 +4049,8 @@ async def create_demo_graph(request: Request):
     """
     _check_internal(request)
 
-    body = await request.json()
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
     team_id = body.get("team_id")
     if not team_id:
         raise HTTPException(status_code=400, detail="Missing team_id")
@@ -4069,8 +4078,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # failure mode for a mint.
     name = None
     try:
-        payload = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        payload = _json.loads(raw)
         name = _clean_key_label(payload.get("name")) if isinstance(payload, dict) else None
+    except HTTPException:
+        raise
     except Exception:
         name = None
     import uuid
@@ -5662,7 +5674,11 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     # semantic violations with field reasons). The derived payload has NO
     # turns — the legacy turn cap (POST /v1/sessions) does not apply.
     try:
-        raw = await request.json()
+        raw_bytes = await _read_capped_body(
+            request, _COMMIT_SESSION_MAX_BYTES, _COMMIT_SESSION_413_DETAIL)
+        raw = _json.loads(raw_bytes)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(  # noqa: B904
             status_code=400, detail="Request body must be a JSON object")
@@ -7650,6 +7666,28 @@ class _ImportVerifyError(Exception):
         self.sha256 = sha256
 
 
+# ── Request-body size caps for JSON/form surfaces (#2032) ─────────────────
+# Streaming cap applied to every remaining `request.json()`/`request.body()`
+# site via `_read_capped_body` (the #2029 helper): reject oversized bodies
+# BEFORE buffering/parsing — the memory-DoS class #2029 closed on the import
+# + manifest paths. 256 KiB covers every small JSON/form surface (register,
+# login, signup, claim, oauth, keys); commit_session carries session-content
+# payloads (8 MiB — schema-bounded portion ~150-300 KB but summary/story_arc
+# are schema-UNBOUNDED, so the cap clears any spec-valid derived commit);
+# Stripe webhook events are signed JSON of Stripe-controlled size (typically
+# up to ~256 KB per webhook guides, well under the 1 MiB cap even for
+# expanded invoice/dispute payloads — the bound primarily protects the
+# HMAC/verify path and defends against oversized replay bodies; note a 413
+# is non-2xx, so Stripe retries with backoff, hence the generous headroom) (1 MiB).
+_BODY_MAX_BYTES = 256 * 1024
+_COMMIT_SESSION_MAX_BYTES = 8 * 1024 * 1024
+_STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
+
+_BODY_413_DETAIL = "request body exceeds the size cap (256 KiB)"
+_COMMIT_SESSION_413_DETAIL = "commit session request body exceeds the size cap (8 MiB)"
+_STRIPE_WEBHOOK_413_DETAIL = "Stripe webhook body exceeds the size cap (1 MiB)"
+
+
 async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> bytes:
     """Read the raw request body under a HARD streaming cap.
 
@@ -8869,7 +8907,12 @@ async def agent_signup(request: Request):
     # A token-present request is possession-authenticated recovery, never a
     # mint: it must neither consume nor be blocked by the 2/24h signup bucket
     # (it gets the shared recovery limiter instead — compensating control).
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    # #2032: the capped read sits INSIDE the content-type branch — non-JSON
+    # bodies are never drained/capped (ignored exactly as today).
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
@@ -9065,7 +9108,10 @@ async def agent_recover(request: Request):
     for malformed/unknown/revoked/soft-deleted; 403 _suspended_detail() for
     a suspended team (fail-closed — no fresh mint, no orphaning).
     """
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
@@ -9102,7 +9148,10 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
     auth-scoped self-harm only — a caller can only kill their own team's
     token).
     """
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
@@ -9264,7 +9313,10 @@ async def claim_team(request: Request):
 
     # 3. pasted key — the key-possession anchor.
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         body = {}
     api_key = (body or {}).get("api_key") or ""
@@ -13420,7 +13472,8 @@ async def webhooks_stripe(request: Request):
         """redact_error + scrub known secret values (review fix 9)."""
         return _scrub_secrets(redact_error(exc))
 
-    raw = await request.body()
+    raw = await _read_capped_body(
+        request, _STRIPE_WEBHOOK_MAX_BYTES, _STRIPE_WEBHOOK_413_DETAIL)
     sig = request.headers.get("stripe-signature")
     try:
         event = StripeClient().verify_webhook_signature(raw, sig)
@@ -13668,7 +13721,10 @@ async def oauth_consent(request: Request):
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")  # noqa: B904
     if not isinstance(body, dict):
@@ -13718,8 +13774,10 @@ async def oauth_token(request: Request):
         raise HTTPException(status_code=503, detail="OAuth not configured")
     from urllib.parse import parse_qs
     try:
-        raw = await request.body()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     grant = body.get("grant_type")
@@ -13745,8 +13803,10 @@ async def oauth_revoke(request: Request):
         raise HTTPException(status_code=503, detail="OAuth not configured")
     from urllib.parse import parse_qs
     try:
-        raw = await request.body()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     try:
@@ -13774,7 +13834,10 @@ async def oauth_dcr_register(request: Request):
         detail="Too many client registrations from this IP. Please try again later.",
         retry_after_s=3600)
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")  # noqa: B904
     try:

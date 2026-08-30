@@ -1552,3 +1552,44 @@ class TestE1EventStartedAt:
             "MATCH (p:Point {id:$pid}) RETURN p.when",
             params={"pid": pt2}).result_set
         assert rows2 and not rows2[0][0]
+
+
+# ── #2032 body-sweep cap ────────────────────────────────────────────────────
+
+
+def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
+    """Chunked generator, NO content-length — forces the streaming-cap path."""
+    for _ in range(n_chunks):
+        yield b"x" * step
+
+
+class TestCommitBodySweepCap:
+    def test_commit_oversized_chunked_413(self, client, monkeypatch):
+        """commit_session — oversized chunked body → 413 with the commit
+        detail (auth-gated: the get_current_team override fires 401-free
+        first). The 413 must NOT be remapped into the 400 catch-all."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_COMMIT_SESSION_MAX_BYTES", 8192)
+        r = client.post(
+            "/v1/sessions/commit", content=_oversized_chunked(),
+            headers={"content-type": "application/json"})
+        assert r.status_code == 413
+        assert r.json()["detail"] == ha_mod._COMMIT_SESSION_413_DETAIL
+
+    def test_commit_malformed_400_preserved(self, client):
+        """Malformed JSON → 400 'Request body must be a JSON object'
+        (unchanged — empty body lands here too, via json.loads(b''))."""
+        r = client.post(
+            "/v1/sessions/commit", content=b"{",
+            headers={"content-type": "application/json"})
+        assert r.status_code == 400
+        assert r.json()["detail"] == "Request body must be a JSON object"
+
+    def test_commit_empty_400_preserved(self, client):
+        """Empty body → 400 (unchanged — Starlette's request.json() raises on
+        empty; json.loads(b'') raises the same class into the same catch)."""
+        r = client.post(
+            "/v1/sessions/commit", content=b"",
+            headers={"content-type": "application/json"})
+        assert r.status_code == 400
+        assert r.json()["detail"] == "Request body must be a JSON object"
