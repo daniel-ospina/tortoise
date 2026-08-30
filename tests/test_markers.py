@@ -87,6 +87,9 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_quota.py": {"registry": "prod-coupled"},
     "test_sdk_legacy_coverage.py": {"team-beta": "assertion"},
     "test_writer_inventory.py": {"registry": "prod-coupled"},
+    "test_ask_sdk.py": {
+        "team-a": "assertion", "team-b": "assertion",
+    },
     "test_session_key_http.py": {"registry": "prod-coupled"},
     "test_signup_token_revoke.py": {"registry": "prod-coupled"},
     "test_suspension_parity.py": {
