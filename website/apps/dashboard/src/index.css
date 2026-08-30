@@ -342,6 +342,17 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .switch::after { border: 1px solid rgba(255,255,255,0.4); }
 /* #1148-ux review P4-1: busy state for the toggle */
 .switch[disabled] { opacity: 0.6; cursor: not-allowed; }
+/* #1894: an indexed docs switch is disabled but ON — never dim it to look
+   off (the docs source is terminal once indexed; a dimmed cyan switch reads
+   as "off" — the exact ambiguity this fix removes). Scoped to the docs
+   switch's terminal case via data-locked-on (set only when docsIndexed) so
+   the generic .switch[disabled] busy-dim (#1148-ux review P4-1) still
+   applies to other switches while their toggle is busy. */
+.switch[disabled][data-on='true'][data-locked-on] { opacity: 1; cursor: not-allowed; }
+
+/* #1894: the docs indexed-state label — emphasized (non-dim) so an
+   indexed source is unmistakably ON, with the last-indexed relative time. */
+.memory-source-state { font-size: 13px; margin: 4px 0 0; color: var(--accent, #06b6d4); font-weight: 600; }
 
 /* #1148-ux review P3-2: banner title is the first top-level heading in the
    authed view (no h1 there) — render it at h2 weight but visually prominent. */

@@ -18,6 +18,7 @@ os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 
 import time
 from contextlib import suppress
+from datetime import datetime
 
 import httpx
 import pytest
@@ -222,6 +223,12 @@ def test_github_docs_indexed_state_key_registered():
     assert "github_docs_indexed" in _ALLOWED_STATE_KEYS
     assert "github_docs_indexed" in ha.DEFAULT_ONBOARDING_STATE
     assert "github_docs_indexed" in ha.OnboardingStatePatchRequest.model_fields
+    # #1894: the docs last-indexed timestamp rides the same registration
+    # table (allowlist-filtered like every state key).
+    assert "github_docs_indexed_at" in _ONBOARDING_DEFAULT_STATE
+    assert "github_docs_indexed_at" in _ALLOWED_STATE_KEYS
+    assert "github_docs_indexed_at" in ha.DEFAULT_ONBOARDING_STATE
+    assert "github_docs_indexed_at" in ha.OnboardingStatePatchRequest.model_fields
 
 
 def test_github_docs_indexed_round_trip(client, provisioned):
@@ -253,7 +260,130 @@ def test_docs_job_poll_completed(provisioned, mock_github, ingest_base):
     assert body["repos_total"] == 2
     state = provisioned.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert state["github_docs_indexed"] is True
+    # #1894: completion stamps the last-indexed timestamp. Strict ISO parse
+    # (fromisoformat rejects malformed strings, not just epoch floats).
+    assert state["github_docs_indexed_at"], "github_docs_indexed_at must be stamped on completion"
+    datetime.fromisoformat(state["github_docs_indexed_at"])  # ISO format
     assert _docs_count(provisioned) == 4
+
+
+def test_docs_live_progress_written_during_walk(provisioned, mock_github,
+                                                ingest_base, monkeypatch):
+    """#1894: the docs job poll surfaces LIVE per-repo progress mid-walk —
+    a placement regression in the SINGLE-BRANCH (default walk) increment
+    site must fail the suite (terminal-only coverage would miss it; the
+    all-branches increment site is pinned by
+    test_docs_live_progress_all_branches_site). Pump-aware: portal runs
+    background tasks only while servicing a request; the hold is a
+    loop-friendly asyncio.sleep, never a barrier."""
+    import asyncio as _asyncio
+
+    orig_walk = GitHubDocsIndexer.walk_repo
+
+    async def _slow_repo2(self, team_id, repo, *, branch="main"):
+        if repo.endswith("/repo2"):
+            await _asyncio.sleep(1.0)  # loop-friendly hold on the 2nd repo
+        return await orig_walk(self, team_id, repo, branch=branch)
+
+    monkeypatch.setattr(GitHubDocsIndexer, "walk_repo", _slow_repo2)
+    r = provisioned.tc.post("/v1/index/docs", json={"org": "acme"})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    # Pump + observe via the PUBLIC poll endpoint (the dashboard's surface) —
+    # the portal advances the walk while servicing the GET.
+    mid = {"seen": False, "repos_processed": 0, "progress": 0,
+           "repos_total": 0}
+    deadline = time.time() + 12.0
+    while time.time() < deadline:
+        rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
+        body = rp.json()
+        if (body.get("repos_processed", 0) >= 1
+                and 0 < body.get("progress", 0) < 100):
+            mid["seen"] = True
+            mid["repos_processed"] = body["repos_processed"]
+            mid["progress"] = body["progress"]
+            mid["repos_total"] = body.get("repos_total", 0)
+            break
+        time.sleep(0.02)
+
+    assert mid["seen"], (
+        "docs mid-walk live progress never observed — _job() must write "
+        "repos_processed/progress after each repo in the single-branch site")
+    assert mid["repos_processed"] == 1
+    assert mid["repos_total"] == 2
+    assert mid["progress"] == 50  # 1 of 2 repos
+
+    body = _poll_until(provisioned.tc, job_id, "completed")
+    assert body["repos_processed"] == 2
+    assert body["repos_total"] == 2
+
+
+def test_docs_live_progress_all_branches_site(provisioned, mock_github,
+                                              ingest_base, monkeypatch):
+    """#1894: the docs 'all branches' increment site (scope_branch == 'all')
+    also writes LIVE per-repo progress — a placement regression in THAT site
+    must fail the suite. Two repos scoped branch='all' so the first repo's
+    increment lands mid-walk (progress 50) before the second repo's slow
+    branch walk completes. Pump-aware (portal advances while servicing the
+    poll GET)."""
+    import asyncio as _asyncio
+
+    entries_main, blobs_main = _mk_files("docs/README.md")
+    entries_dev, blobs_dev = _mk_files("docs/DEV.md")
+    mock_github.trees["acme/repo1"] = {
+        "main": {"sha": "tree-main", "entries": entries_main},
+        "dev": {"sha": "tree-dev", "entries": entries_dev},
+    }
+    mock_github.trees["acme/repo2"] = {
+        "main": {"sha": "tree2-main", "entries": entries_main},
+        "dev": {"sha": "tree2-dev", "entries": entries_dev},
+    }
+    mock_github.blobs.update(blobs_main)
+    mock_github.blobs.update(blobs_dev)
+
+    orig_walk = GitHubDocsIndexer.walk_repo
+
+    async def _slow_repo2(self, team_id, repo, *, branch="main"):
+        if repo.endswith("/repo2"):
+            await _asyncio.sleep(1.0)  # loop-friendly hold on the 2nd repo
+        return await orig_walk(self, team_id, repo, branch=branch)
+
+    monkeypatch.setattr(GitHubDocsIndexer, "walk_repo", _slow_repo2)
+    r = provisioned.tc.post("/v1/index/docs", json={
+        "org": "acme",
+        "repos": [{"repo": "repo1", "branch": "all"},
+                   {"repo": "repo2", "branch": "all"}]})
+    assert r.status_code == 200, r.text
+    job_id = r.json()["job_id"]
+
+    mid = {"seen": False, "repos_processed": 0, "progress": 0,
+           "repos_total": 0}
+    deadline = time.time() + 12.0
+    while time.time() < deadline:
+        rp = provisioned.tc.get(f"/v1/index/docs/{job_id}")
+        body = rp.json()
+        if (body.get("repos_processed", 0) >= 1
+                and 0 < body.get("progress", 0) < 100):
+            mid["seen"] = True
+            mid["repos_processed"] = body["repos_processed"]
+            mid["progress"] = body["progress"]
+            mid["repos_total"] = body.get("repos_total", 0)
+            break
+        time.sleep(0.02)
+
+    assert mid["seen"], (
+        "all-branches site mid-walk progress never observed — _job() must "
+        "write repos_processed/progress after the scope_branch=='all' "
+        "increment")
+    assert mid["repos_processed"] == 1  # repo1 fully walked (both branches)
+    assert mid["repos_total"] == 2
+    assert mid["progress"] == 50
+
+    body = _poll_until(provisioned.tc, job_id, "completed")
+    assert body["status"] == "completed"
+    assert body["repos_processed"] == 2
+    assert _docs_count(provisioned) == 4  # 2 files x 2 repos (branch-qualified)
 
 
 def test_docs_job_single_repo_and_unchanged_rerun_zero_new(
@@ -306,6 +436,12 @@ def test_docs_job_unresolvable_org_fails(provisioned, ingest_base,
         "/v1/onboarding/state").json()["onboarding"]
     assert not state.get("github_docs_indexed"), \
         "an unresolved org is not progress — the state key must not flip"
+    # #1894 parity: a 0-progress failure must NOT stamp the timestamp either
+    # (same repos_processed>0 branch as the bool) — no fabricated
+    # "Indexed · <time>" for a failed team.
+    assert not state.get("github_docs_indexed_at"), \
+        "an unresolved org must leave github_docs_indexed_at UNSET (parity " \
+        "with the bool — no stamp on zero progress)"
 
 
 def test_docs_job_token_undecryptable(client, ingest_base):
@@ -347,6 +483,13 @@ def test_docs_job_midwalk_quota_hit(provisioned, mock_github, ingest_base,
     assert body["documents_indexed"] == 2, \
         "only repo1's docs are ingested — the overshoot is ONE repo, not the org"
     assert _docs_count(provisioned) == 2
+    # #1894 parity policy: a quota-PARTIAL run with >=1 repo processed is
+    # "made progress" — the bool AND the timestamp both stamp (the docs
+    # DOCUMENTS gate runs AFTER the increment, so repo2 IS counted).
+    state = provisioned.tc.get("/v1/onboarding/state").json()["onboarding"]
+    assert state["github_docs_indexed"] is True
+    assert state["github_docs_indexed_at"], \
+        "quota-partial runs stamp github_docs_indexed_at (parity with the bool)"
 
 
 # ── documents gate (derived-constant cap) ────────────────────────
@@ -469,6 +612,10 @@ def test_unset_base_fails_closed(client, tmp_path, monkeypatch):
     state = client.tc.get("/v1/onboarding/state").json()["onboarding"]
     assert not state.get("github_docs_indexed"), \
         "no writes, no state flip on an unset sandbox"
+    # #1894 parity: no progress → no stamp (see the 404-org failure test).
+    assert not state.get("github_docs_indexed_at"), \
+        "an unset sandbox must leave github_docs_indexed_at UNSET (no stamp " \
+        "on zero progress)"
 
 
 # ── cross-team isolation + kind-scoped single-flight ─────────────
