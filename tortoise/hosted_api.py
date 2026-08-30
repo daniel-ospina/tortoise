@@ -543,7 +543,7 @@ async def _ask_path_scoped_validation_handler(request: Request,
     """Malformed JSON body on /v1/ask → 400 ``invalid_question`` (raised at
     body-PARSE time, before any field validator runs — P1-3); other paths
     keep FastAPI's default 422 behavior via the captured default handler."""
-    from tortoise.schemas import CODE_INVALID_QUESTION  # noqa: I001
+    from tortoise.schemas import CODE_INVALID_QUESTION
     if request.url.path == "/v1/ask":
         return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
                             status_code=400)

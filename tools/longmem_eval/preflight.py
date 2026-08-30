@@ -30,8 +30,6 @@ from tortoise.model_adapters import (
     classify_llm_error,
 )
 
-from .reader import _parse_model_spec
-
 # ── S1-shaped billing probe (D3) ──────────────────────────────────────────
 # The extractor ping IS the billing probe: one completion shaped like a real
 # S1 story-digest call (mirrors S1_TMPL's digest instruction at ~1/10 scale
@@ -44,7 +42,9 @@ from .reader import _parse_model_spec
 # The PROBE_SYSTEM constant is PRODUCT-owned now (#1987 Task 1 — moved to
 # tortoise/reader.py); this module re-exports it so the preflight gate and
 # LLMReader.ping stay on the exact shipped text.
-from tortoise.reader import PROBE_SYSTEM  # noqa: E402
+from tortoise.reader import PROBE_SYSTEM
+
+from .reader import _parse_model_spec
 
 PROBE_USER = (
     "user: I think we should go with the apartment near the park — it's "

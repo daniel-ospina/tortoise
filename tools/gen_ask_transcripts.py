@@ -22,14 +22,14 @@ import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tortoise.retrieval import (  # noqa: E402
+from tortoise.reader import reader_prompt_constants
+from tortoise.retrieval import (
     DEFAULT_CONTEXT_ITEM_CAP,
     DEFAULT_CONTEXT_TOKEN_CAP,
     assemble_context,
     render_context,
 )
-from tortoise.reader import reader_prompt_constants, system_prompt_for  # noqa: E402
-from tortoise.sdk import TortoiseSDK  # noqa: E402
+from tortoise.sdk import TortoiseSDK
 
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT_DIR = os.path.join(_REPO_ROOT, "tests", "fixtures", "ask_llm_transcripts")

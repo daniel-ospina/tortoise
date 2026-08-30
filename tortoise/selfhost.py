@@ -167,7 +167,7 @@ async def _selfhost_ask_http_handler(request, exc):
 async def _selfhost_ask_validation_handler(request, exc):
     """Malformed JSON on /v1/ask → 400 ``invalid_question`` (parity with
     hosted, P1-3); other paths keep FastAPI's default 422."""
-    from tortoise.schemas import CODE_INVALID_QUESTION  # noqa: I001
+    from tortoise.schemas import CODE_INVALID_QUESTION
     if request.url.path == "/v1/ask":
         return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
                             status_code=400)

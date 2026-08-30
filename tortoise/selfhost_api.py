@@ -300,7 +300,7 @@ async def dream(full: bool = False, mode: str | None = None,
 
 
 @router.post("/ask", dependencies=[Depends(_require_key)])
-async def ask_question(body: AskRequest):  # noqa: B008
+async def ask_question(body: AskRequest):
     """Self-host answer surface — REST parity with hosted /v1/ask (#1987
     Task 9): the LOCAL SDK lane (no team registry, NO budget — unmetered,
     ZERO metering records: ``team_id=None`` flows through the ``not team_id``
@@ -310,12 +310,12 @@ async def ask_question(body: AskRequest):  # noqa: B008
     502 ``reader_unavailable`` / ``retrieval_unavailable``, 504 ``timeout``,
     400 canonical codes from the SHARED ``AskRequest`` validators (identical
     input-boundary behavior to hosted — P2-8)."""
-    from tortoise.exceptions import (  # noqa: I001
+    from tortoise.exceptions import (
         AskReaderUnavailable,
         AskRetrievalUnavailable,
         AskValidationError,
     )
-    from tortoise.quota import (  # noqa: I001
+    from tortoise.quota import (
         AskBoundedTimeoutError,
         run_ask_bounded,
     )

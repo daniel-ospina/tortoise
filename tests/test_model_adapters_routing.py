@@ -1042,6 +1042,7 @@ def test_concurrent_rotation_state(monkeypatch):
     first K calls to one provider raise 402 → every call succeeds, the 402
     count is exactly K, and no call is lost (rotation handles the race)."""
     import threading
+
     from tortoise.model_adapters import RotatingModel
 
     class _BillingOnce(_TokensAdapter):
@@ -1068,7 +1069,7 @@ def test_concurrent_rotation_state(monkeypatch):
         barrier.wait()
         try:
             results.append(rm.complete(system="s", user="u"))
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             results.append(f"ERR:{e}")
 
     threads = [threading.Thread(target=_worker) for _ in range(6)]

@@ -398,7 +398,7 @@ def assemble_context(
     # so ``len(evidence) <= byte_cap`` is a HARD invariant (not just the
     # block bytes). ``+2`` per accepted block is deliberately conservative
     # (over-counts the last block's absent trailing separator by 2 bytes).
-    bytes_used = (len(f"Current Date: {question_date}".encode("utf-8")) + 2) \
+    bytes_used = (len(f"Current Date: {question_date}".encode()) + 2) \
         if question_date else 0
     for h in pool:
         if len(selected) >= item_bound:

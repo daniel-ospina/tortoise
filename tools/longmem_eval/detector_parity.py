@@ -30,9 +30,9 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import sys as _sys
 from collections import Counter
 
-import sys as _sys
 _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
