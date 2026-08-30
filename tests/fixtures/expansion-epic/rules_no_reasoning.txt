@@ -1,0 +1,11 @@
+# E2E-4 negative-variant fixture — the SAME rule stated WITHOUT reasoning
+# (issue #1933, epic #1891). The rules-with-why chain is incomplete: a rule
+# is emitted but the rationale (the why) is never stated. Mining this
+# transcript must NOT mint a rationale Point, and the chain-completeness
+# check must warn on the ruleLifecycle chain (enforcement: warn).
+# Conversation transcript (role: content).
+
+assistant: I need to establish a standing rule for the ops rotation.
+assistant: Destructive actions require a verbal token acknowledgement.
+assistant: That is the rule. No exceptions.
+assistant: We are adopting that as the standard operating procedure going forward.

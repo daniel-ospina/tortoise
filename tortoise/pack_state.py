@@ -62,7 +62,11 @@ PACK_INSTALL_LABEL = "PackInstall"
 # catalog's canonical ids (note: the project-management pack dir declares
 # namespace `pm`, not `project-management`). Unknown names (env typo or a
 # renamed pack) are skipped with a logged warning — never a failure.
-DEFAULT_STARTER_PACKS: tuple[str, ...] = ("dev", "marketing", "product-strategy", "pm")
+# #1933 (epic #1891): agent-ops joins the starter set (defaults become 5 —
+# dev, marketing, product-strategy, pm, agent-ops); the CI smoke bound
+# derives from len(DEFAULT_STARTER_PACKS) so it self-adjusts. Existing
+# tenants converge additively via ensure_tenant_packs (idempotent MERGE — R8).
+DEFAULT_STARTER_PACKS: tuple[str, ...] = ("dev", "marketing", "product-strategy", "pm", "agent-ops")
 
 # Test-only escape hatch (#318 coherence P1): disable the read-path
 # self-heal so tests can exercise the PURE eager activation path
