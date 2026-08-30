@@ -149,10 +149,11 @@ class TestValidateManifest:
     def test_traversal_namespace_rejected(self, tmp_path, monkeypatch):
         """#2029 review gate (security P1): a traversal namespace must never
         escape the temp registry dir — no mkdir/write outside it. The
-        charset guard rejects ../ and /, the resolve-containment check
-        backstops `..` (defense in depth)."""
+        charset guard rejects most vectors; the resolve-containment check
+        backstops it (defense in depth against a charset regression)."""
         import tempfile as _tempfile
         from pathlib import Path as _Path
+
         from tortoise.pack_manifest_store import validate_manifest
 
         class _FixedTempDir:
@@ -163,9 +164,8 @@ class TestValidateManifest:
                 self._root.mkdir(parents=True, exist_ok=True)
                 return str(self._root)
 
-            def __exit__(self, *exc):  # noqa: ANN002
+            def __exit__(self, *exc):
                 return False
-
         monkeypatch.setattr(_tempfile, "TemporaryDirectory",
                             lambda prefix="": _FixedTempDir(tmp_path / "td"))
         for bad in ("../escape", "a/b", "a\\b", "..", "-", "x:y"):
@@ -212,7 +212,7 @@ class TestUploadEndpoint:
         big = "namespace: big\nname: X\n# " + "x" * (70 * 1024)
         r = client.post("/v1/packs/manifests", json={"manifest_yaml": big})
         assert r.status_code == 413
-        # Wire size ~70KB < ~196KB wire cap → this must be the YAML gate,
+        # Wire size ~70KB < ~397KB wire cap → this must be the YAML gate,
         # not the wire layers (pins the ordering of the two 413 paths).
         assert r.json()["detail"] == "manifest exceeds 64KB"
 
@@ -249,7 +249,7 @@ class TestUploadBodyCap:
     the 64KB manifest cap applied — a memory-DoS on a tenant-authenticated
     surface. The wire layers (Content-Length early-exit + unconditional
     streaming cap mirroring _read_import_body) reject bodies over the wire
-    cap (~196KB) without ever buffering them.
+    cap (~397KB) without ever buffering them.
     """
 
     @staticmethod
@@ -305,6 +305,24 @@ class TestUploadBodyCap:
         assert len(manifest.encode()) == 65536
         r = client.post("/v1/packs/manifests", json={"manifest_yaml": manifest})
         assert r.status_code == 201, r.text
+
+    def test_upload_201_escaped_wire_inflation_within_cap(self, client):
+        """#2029: a <=64KB manifest with EVERY char \\uXXXX-escaped (~6x wire
+        inflation — the worst legal JSON escaping) must still clear the wire
+        cap → 201. Pins the 6x MANIFEST_WIRE_CAP_BYTES bound independently
+        of the constant's arithmetic: a future 6x→3x "optimization" would
+        fail this test."""
+        from tortoise.pack_manifest_store import MANIFEST_WIRE_CAP_BYTES
+        yaml_body = ("namespace: esc6x\nname: X\nversion: 0.1.0\ntier: free\n"
+                     + "# " + "x" * (64 * 1024))
+        yaml_body = yaml_body[:64 * 1024]  # exactly 64KB yaml bytes
+        assert len(yaml_body.encode()) == 65536
+        escaped = "".join(f"\\u{ord(c):04x}" for c in yaml_body)
+        payload = ('{"manifest_yaml": "' + escaped + '"}').encode()
+        assert len(payload) < MANIFEST_WIRE_CAP_BYTES
+        r = client.post("/v1/packs/manifests", content=payload)
+        assert r.status_code == 201, r.text
+        assert r.json()["namespace"] == "esc6x"
 
     def test_upload_wire_cap_boundary(self, client):
         """Strict `>` at the wire cap: exactly body_cap bytes passes both

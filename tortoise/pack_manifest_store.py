@@ -116,9 +116,10 @@ def validate_manifest(manifest_yaml: str) -> ManifestValidation:
     # #2029 review gate (security P1): ns becomes a DIRECTORY NAME in the
     # temp registry below — a traversal namespace ("../x", "a/b", "..")
     # would mkdir/write OUTSIDE the tempdir (arbitrary file write for an
-    # authenticated tenant). Restrict to a safe dir-name charset AND verify
-    # containment after resolve() (defense in depth — never trust a single
-    # regex; ".." passes the charset but must fail containment).
+    # authenticated tenant). Charset guard is the first line; the
+    # resolve()+is_relative_to containment check backstops it regardless —
+    # a single regex is one bug away from admitting a `..` component (or a
+    # future relaxation), so containment is defense in depth, not ceremony.
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", ns):
         return ManifestValidation(
             False, namespace=ns,
