@@ -7906,7 +7906,10 @@ def _check_foreign_kinds(payload: dict) -> None:
     artifact still lose activation (no manifest in the artifact); (c) a None
     registry collapses known to starter + PackManifest (fail-closed bias);
     (d) nested-dict kinds inside props are not scanned (FalkorDB props are
-    scalar/array in real dumps).
+    scalar/array in real dumps); (e) a declared pack's `namespace` must equal
+    its manifest's yaml-declared namespace — enforced by the exporter
+    (collect_pack_config reads both from the same PackInstall/PackManifest
+    row); a hand-crafted mismatch rejects fail-loudly.
     """
     from tortoise.domain_loader import _get_registry
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
@@ -7916,10 +7919,13 @@ def _check_foreign_kinds(payload: dict) -> None:
     known = set(DEFAULT_STARTER_PACKS)
     if reg is not None:
         known |= set(reg.pack_summaries())
+    nodes = payload.get("nodes")
+    if not isinstance(nodes, list):
+        nodes = []  # defensive — the import envelope validates list-ness upstream
     # Absorb namespaces carried by the dump's OWN PackManifest nodes — a
     # self-contained artifact restores its vocabulary and must not be
     # rejected (PackManifest is exported; see _is_export_skip_node).
-    for node in payload.get("nodes", []) or []:
+    for node in nodes:
         if not isinstance(node, dict):
             continue
         labels = node.get("labels") or []
@@ -7943,7 +7949,7 @@ def _check_foreign_kinds(payload: dict) -> None:
                 if isinstance(ns, str) and ns:
                     known.add(ns)
     foreign: set[str] = set()
-    for node in payload.get("nodes", []) or []:
+    for node in nodes:
         if not isinstance(node, dict):
             continue
         props = node.get("props") or {}
@@ -7963,20 +7969,23 @@ def _check_foreign_kinds(payload: dict) -> None:
         # packs — the exporter-emittable `packs: []` shape for graphs whose
         # custom kinds have no PackInstall records). Class (c): usable packs
         # that do not cover every kind in the dump (partial/orphaned state).
+        # Kinds are truncated per-entry to bound the audit/422 reason size
+        # (payload-controlled strings; owner-only surface but bounded).
+        listed = sorted(k[:80] for k in foreign)[:5]
         if pc is None:
             raise ValueError(
                 "artifact predates pack-config (v1.1) but references unknown "
-                f"pack kinds {sorted(foreign)[:5]} — the vocabulary would be "
+                f"pack kinds {listed} — the vocabulary would be "
                 "lost; re-export with a newer tortoise version")
         if not isinstance(pc, dict) or not isinstance(pc.get("packs"), list) \
                 or not pc.get("packs"):
             raise ValueError(
                 "pack_config declares no packs but the artifact references "
-                f"unknown pack kinds {sorted(foreign)[:5]} — the vocabulary "
+                f"unknown pack kinds {listed} — the vocabulary "
                 "would be lost; install the pack and re-export")
         raise ValueError(
             "pack_config does not cover the artifact's pack kinds "
-            f"{sorted(foreign)[:5]} — the vocabulary would be lost; install "
+            f"{listed} — the vocabulary would be lost; install "
             "the referenced pack and re-export")
 
 
