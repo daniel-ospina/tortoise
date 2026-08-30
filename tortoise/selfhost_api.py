@@ -19,7 +19,12 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 from tortoise.domain_loader import known_kinds
-from tortoise.schemas import AskRequest  # noqa: E402 — the /v1/ask body (#1987 Task 9, imported from the shared constant layer)
+from tortoise.schemas import (  # the /v1/ask body (#1987 Task 9, shared constant layer)
+    CODE_READER_UNAVAILABLE,
+    CODE_RETRIEVAL_UNAVAILABLE,
+    CODE_TIMEOUT,
+    AskRequest,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -325,13 +330,14 @@ async def ask_question(body: AskRequest):  # noqa: B008
     except AskValidationError as e:
         raise HTTPException(status_code=400, detail=e.code) from e
     except AskBoundedTimeoutError:
-        raise HTTPException(status_code=504, detail="timeout") from None
+        raise HTTPException(status_code=504, detail=CODE_TIMEOUT) from None
     except AskReaderUnavailable:
         raise HTTPException(status_code=502,
-                            detail="reader_unavailable") from None
+                            detail=CODE_READER_UNAVAILABLE) from None
     except AskRetrievalUnavailable:
         raise HTTPException(status_code=502,
-                            detail="retrieval_unavailable") from None
+                            detail=CODE_RETRIEVAL_UNAVAILABLE) from None
     except Exception as e:  # noqa: BLE001, RUF100
         _logger.exception("selfhost ask failed")
-        raise HTTPException(status_code=502, detail="reader_unavailable") from e
+        raise HTTPException(status_code=502,
+                            detail=CODE_READER_UNAVAILABLE) from e

@@ -21,6 +21,13 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status)
+from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
+    CODE_IN_FLIGHT_LIMIT,
+    CODE_QUOTA_EXCEEDED,
+    CODE_READER_UNAVAILABLE,
+    CODE_RETRIEVAL_UNAVAILABLE,
+    CODE_TIMEOUT,
+)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                _transport_mode, _tool_group, _get_team_sdk,
@@ -1091,7 +1098,7 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     # skip the charge when the in-flight cap is already full (a request that
     # will 429 ``in_flight_limit`` must not burn a budget slot, P2).
     if ask_in_flight_capacity(team_id) and not ask_llm_budget_available(team_id):
-        return {"error": {"code": "quota_exceeded",
+        return {"error": {"code": CODE_QUOTA_EXCEEDED,
                           "retry_after": ask_budget_retry_after(team_id)}}
     try:
         return await run_ask_bounded(
@@ -1102,16 +1109,16 @@ async def tortoise_ask(question: str, question_type: str | None = None,
     except AskValidationError as e:
         return {"error": {"code": e.code}}
     except AskQuotaExceeded as e:
-        return {"error": {"code": "quota_exceeded",
+        return {"error": {"code": CODE_QUOTA_EXCEEDED,
                           "retry_after": e.retry_after}}
     except AskInFlightLimitError:
-        return {"error": {"code": "in_flight_limit"}}
+        return {"error": {"code": CODE_IN_FLIGHT_LIMIT}}
     except AskBoundedTimeoutError:
-        return {"error": {"code": "timeout"}}
+        return {"error": {"code": CODE_TIMEOUT}}
     except AskReaderUnavailable:
-        return {"error": {"code": "reader_unavailable"}}
+        return {"error": {"code": CODE_READER_UNAVAILABLE}}
     except AskRetrievalUnavailable:
-        return {"error": {"code": "retrieval_unavailable"}}
+        return {"error": {"code": CODE_RETRIEVAL_UNAVAILABLE}}
 
 
 def tortoise_expand_relationships(point_id: str) -> list[dict]:

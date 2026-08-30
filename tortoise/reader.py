@@ -453,6 +453,11 @@ def _looks_abstained(answer: str | None) -> bool:
     # — a trailing confidence hedge ("though…"/possessive attribute)
     # never labels abstained.
     clauses = [c for c in re.split(r"[,;:.!?—]+", low) if c]
+    if not clauses:
+        # separator-only output (".", "...", "!?", "—"): no clause to
+        # match — NOT abstained (preserves pre-cycle-2 behavior; a crash
+        # here would escape sdk.ask()'s documented Raises contract).
+        return False
     if any(p in clauses[0] for p in _ABSTAINED_PHRASES):
         return True
     for c in clauses[1:]:
@@ -468,8 +473,15 @@ def _looks_abstained(answer: str | None) -> bool:
         # committing-hedge qualifier (#2027): a "though"-attached hedge
         # ("…though I do not know if it changed since") or a possessive-
         # attribute reference ("the context does not mention his age").
-        if c == clauses[-1] and "though" not in c \
-                and not re.search(r"\b(?:his|her|its|their)\b", c):
+        # The possessive carve-out is NARROW: it exempts only the #2027
+        # hedge shape — a possessive paired with "not mention"/"not
+        # mentioned"/"does not contain" ("the context does not mention
+        # his age"). A flat refusal that merely mentions a possessive
+        # ("I don't know the date of his birth.") is NOT exempt.
+        possessive_hedge = bool(
+            re.search(r"\b(?:his|her|its|their)\b", c)
+            and re.search(r"(?:not mention|not mentioned|does not contain)", c))
+        if c == clauses[-1] and "though" not in c and not possessive_hedge:
             return True
     return False
 

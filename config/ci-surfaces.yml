@@ -381,10 +381,14 @@ surfaces:
   - test_ci_timing.py
   - test_ids.py
   - test_log.py
+  - test_longmem_reader_aggregation.py
+  - test_longmem_reader_pinning.py
+  - test_longmem_reader_prompting.py
   - test_models.py
   - test_namespace_uri_mode.py
   - test_reader.py
   - test_reader_abstention_calibration.py
+  - test_retrieval.py
   - test_sdk.py
   - test_sdk_dedup.py
   - test_search_engine_recency.py

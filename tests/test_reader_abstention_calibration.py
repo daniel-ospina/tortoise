@@ -560,6 +560,7 @@ def test_abstained_label_clause_scoped_pin():
         "I searched the memory. I cannot answer.",
         "The gym schedule is Monday. I do not know.",
         "I remember the trip. I don't know the date.",
+        "I remember the trip. I don't know the date of his birth.",
         "The memory mentions a new bicycle, but it does not contain the "
         "color.",
     ):
@@ -583,5 +584,11 @@ def test_abstained_label_clause_scoped_pin():
         "if it changed since",
         "Golden Retriever — Max's breed. The context does not mention "
         "his age.",
+        # cycle-3 pin: the possessive carve-out is NARROW — a possessive
+        # attribute reference exempts ONLY the #2027 hedge shape
+        # (possessive + "not mention"/"not mentioned"/"does not
+        # contain", e.g. the "context does not mention his age" clause);
+        # a non-though committed hedge in that shape still labels False.
+        "The party is on Friday. The context does not mention his age.",
     ):
         assert _looks_abstained(committed) is False, committed
