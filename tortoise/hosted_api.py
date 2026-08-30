@@ -6167,7 +6167,7 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
             detail="Create another team requires a paid plan — upgrade an existing team first")
 
     team_id = str(_uuid.uuid4().hex[:26])
-    graph_name = f"team_{name}"  # sdk.team_create parity (0006 note: team_{name})
+    graph_name = f"team_{team_id}"  # stored name == data-plane namespace (team_id) — export/backup/delete resolve the real graph; parity with register_user/agent_signup (#1903; sdk.team_create keeps team_{name} — registry lane tracked in #2023)
     api_key = f"tt_{_uuid.uuid4().hex}"
     # Eager default-graph TeamMeta FIRST (register_user's documented
     # ordering — review P2, PR #874): an orphaned graph namespace is
@@ -10625,7 +10625,7 @@ def _create_onboarding_team_lane(team: dict, name: str,
         import uuid as _uuid
         try:
             team_id = str(_uuid.uuid4().hex[:26])
-            graph_name = f"team_{name}"  # sdk.team_create parity
+            graph_name = f"team_{team_id}"  # stored name == data-plane namespace — parity with create_team/register_user/agent_signup (#1903)
             # #1716: keyless provisioning — all-NULL key params → the RPC
             # writes teams + membership but NO api_keys row (all-or-none
             # guard, migration 20260825214233). #1748: USER path — the
