@@ -9,6 +9,7 @@ import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
 // removed with the consent gate (default-ON, ToS-covered).
 import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
+import { setupGuide } from './setupGuide.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -43,6 +44,56 @@ const LAST_AUTH_METHOD = 'tortoise_last_auth_method'
 const CLAIM_KEY_STORAGE = 'tt_claim_key'
 const INVITE_TOKEN_STORAGE = 'tortoise.inviteToken'
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
+
+
+// #2001 (W5): the Setup-guide card mirror — ONE shared derivation
+// (setupGuide.js, node --test) of the graph-held FLOW state. Renders the
+// counted checklist (fork-aware), collapses when complete (status-driven,
+// incl. grandfathered), DEGRADED when the server reports FLOW 'unavailable'
+// (never a false checklist), LOADING during the fetch transient. The reentry
+// card defers to this one (the wizard re-opens from the empty state only).
+function SetupGuideCard({ state, loading }) {
+  const g = setupGuide(state)
+  if (loading) {
+    return (
+      <div className="card">
+        <div className="card-val"><span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /></div>
+        <div className="card-label"><span className="skeleton" style={SKEL_LABEL} aria-hidden="true" /></div>
+      </div>
+    )
+  }
+  if (g.degraded) {
+    return (
+      <div className="card">
+        <div className="card-val">Unavailable</div>
+        <div className="card-label">Setup guide</div>
+        <div className="setup-guide-degraded dim">Graph read failed — retry shortly</div>
+      </div>
+    )
+  }
+  if (g.collapsed) {
+    return (
+      <div className="card">
+        <div className="card-val" aria-label="Setup complete">✓</div>
+        <div className="card-label">Setup guide · complete</div>
+      </div>
+    )
+  }
+  return (
+    <div className="card setup-guide-card">
+      <div className="card-val">{g.done}/{g.total}</div>
+      <div className="card-label">Setup guide{g.currentStep ? ` · next: ${g.rows.find((r) => r.id === g.currentStep)?.label || g.currentStep}` : ''}</div>
+      <ul className="setup-guide-rows">
+        {g.rows.map((r) => (
+          <li key={r.id} className={r.done ? 'done' : ''} aria-label={`${r.label}${r.done ? ' — done' : ''}`}>
+            {r.done ? '✓ ' : '· '}{r.label}{r.counted ? '' : ' (info)'}
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
 
 
 // Non-secret claim-intent marker (parent domain): lets the welcome page's
@@ -4652,6 +4703,7 @@ function claimIntentInFlight() {
           <section className="overview">
             <h2>Overview</h2>
             <div className="cards">
+              <SetupGuideCard state={onboarding} loading={onboardingLoading} />
               <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
               <div className="card"><div className="card-val">{graphsStatus === 'ok' ? graphs.length : (graphsStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Graphs</div></div>
               <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : (membersStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Users</div></div>
