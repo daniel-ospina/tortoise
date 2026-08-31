@@ -316,12 +316,26 @@ class TransportModeMiddleware(BaseHTTPMiddleware):
     _transport_mode="http" (passes _safe()'s fail-closed gate — auth was
     enforced at transport: static key check or localhost-bound none mode) and
     _current_team_id="selfhost" (isolated team_selfhost graph namespace).
+
+    #1987 Task 8 (P1-2/P1-4): ALSO sets the ``_selfhost_transport`` ContextVar
+    (tortoise/transport.py) — the transport-keyed metering/budget exemption
+    channel. The selfhost HTTP MCP transport is the ONLY selfhost path whose
+    team_id is truthy ("selfhost"), so it is the only one that NEEDS the
+    flag: ``record_ask_usage`` and the ask budget helper no-op on it alongside
+    ``not team_id`` (stdio team_id=None needs no flag), closing the
+    phantom-record hole — the value "selfhost" is NEVER the exemption key (a
+    hosted team with the raw id "selfhost" is legal and must record usage).
     """
 
     async def dispatch(self, request: Request, call_next):
         _transport_mode.set("http")
         _current_team_id.set(SELFHOST_TEAM_ID)
-        return await call_next(request)
+        from tortoise.transport import _selfhost_transport
+        _selfhost_transport.set(True)
+        try:
+            return await call_next(request)
+        finally:
+            _selfhost_transport.set(False)
 
 
 class ToolGroupMiddleware(BaseHTTPMiddleware):

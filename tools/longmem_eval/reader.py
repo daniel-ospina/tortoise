@@ -1,23 +1,14 @@
 """Reader LLM — answers each LongMemEval question from retrieved context
 (issue #1144, axis 2).
 
-Uses the repo's existing provider pattern (``tortoise.ingest._PROVIDERS`` +
-``OpenAICompatModel`` — the same wiring as session LLM extraction) so the
-runner needs no new credentials machinery. Configuration is env-driven, never
-hardcoded:
-
-    TORTOISE_LME_READER_MODEL   reader model spec: ``<provider>:<model>`` or
-                                bare ``<model>`` resolved against the first
-                                configured provider key
-                                (default: ``openrouter:deepseek/deepseek-v4-flash``
-                                — the M5 pinned reader identity, #1525)
-    OPENROUTER_API_KEY / DEEPSEEK_API_KEY / OPENAI_API_KEY / GEMINI_API_KEY
-                                provider keys (existing repo pattern)
-
-The offline mock (``--mock``) returns the first evidence turn (``has_answer``
-stamp) found in the retrieved hits — a deterministic stand-in proving the
-retrieval actually delivered the evidence, with zero network and no keys
-(CI smoke).
+The eval reader is now a THIN RE-EXPORT of the product reader
+(``tortoise.reader`` — the #1987 inversion, the #1983 pattern): the product
+owns ALL reader prompt text and the ``LLMReader`` class; this module keeps
+only the eval-only layer (``READER_MODEL`` pin, ``MockReader``,
+``build_reader`` env/CLI resolution + ``OpenAICompatModel`` wiring,
+``_resolve_provider``, ``_parse_model_spec``, the preflight ping via the
+product's ``PROBE_SYSTEM``). Prompt drift between the eval and the product
+is impossible by construction.
 
 A1 (#1546 + #1762 + #1775): the universal partial-knowledge abstention
 clause (``_ABSTRACTION_FRAGMENT``) lets the reader derive unanswerability
@@ -33,24 +24,57 @@ hedging (the reval3 class).
 # tools/longmem_eval/ is a THIN MEASUREMENT LAYER over the product
 # (tortoise/): the eval calls the product's OWN engine and measures it.
 # Quality improvements belong IN tortoise/ (that is what ships to
-# customers). The READER (this module) is the single largest eval-only
-# surface — see the PRODUCT-PARITY NOTE at ``build_reader``; the product
-# has no LLM reader/QA path at all (audit G1, the biggest cohesion gap).
+# customers). The READER (this module) re-exports the PRODUCT reader
+# (tortoise/reader.py — shipped in #1987 as the /v1/ask + SDK ask() +
+# MCP tortoise_ask answer surface); the eval measures the exact shipped
+# prompts and reader class.
 # See docs/audit/2026-08-29-product-cohesion.md for the full audit.
 # ═════════════════════════════════════════════════════════════════════════
 from __future__ import annotations
 
-import logging
 import os
 import sys
-from typing import Any, Protocol
 
 from tortoise.ingest import _PROVIDERS
+
+# The product owns the reader (prompt constants + LLMReader + protocol +
+# PROBE_SYSTEM). Re-exported verbatim — the private prompt constants are
+# part of the eval-test contract (tests/test_longmem_reader_prompting.py,
+# tests/test_longmem_reader_aggregation.py, tests/test_longmem_reader_pinning.py
+# import them directly).
+from tortoise.reader import (
+    _ABSTRACTION_FRAGMENT,
+    _KNOWLEDGE_UPDATE_FRAGMENT,
+    _MULTI_SESSION_FRAGMENT,
+    _SYSTEM_PROMPT,
+    _TYPE_FRAGMENTS,
+    DEFAULT_READER_MAX_TOKENS,
+    PROBE_SYSTEM,
+    LLMReader,
+    Reader,
+    reader_prompt_constants,
+    system_prompt_for,
+)
 from tortoise.sdk import _SESSION_LLM_PROVIDER_PRIORITY
 
-from .retrieve import render_context
-
-logger = logging.getLogger(__name__)
+__all__ = [
+    "DEFAULT_READER_MAX_TOKENS",
+    "PROBE_SYSTEM",
+    "READER_MODEL",
+    "_ABSTRACTION_FRAGMENT",
+    "_KNOWLEDGE_UPDATE_FRAGMENT",
+    "_MULTI_SESSION_FRAGMENT",
+    "_SYSTEM_PROMPT",
+    "_TYPE_FRAGMENTS",
+    "LLMReader",
+    "MockReader",
+    "Reader",
+    "_parse_model_spec",
+    "_resolve_provider",
+    "build_reader",
+    "reader_prompt_constants",
+    "system_prompt_for",
+]
 
 # Pinned reader identity for the run (M5 #1525). The V2 runs were confounded
 # by reader-model drift between runs (deepseek-chat → deepseek-v4-flash); the
@@ -61,306 +85,6 @@ READER_MODEL = "openrouter:deepseek/deepseek-v4-flash"
 # Provider priority for the READER when multiple keys are set — reuse the
 # session-extraction order (sdk._SESSION_LLM_PROVIDER_PRIORITY).
 _PROVIDER_PRIORITY = _SESSION_LLM_PROVIDER_PRIORITY
-
-_SYSTEM_PROMPT = (
-    "You are a helpful assistant with access to retrieved memory context "
-    "from a user's long chat history. Answer the user's question using ONLY "
-    "the provided memory context. The context includes dated chat sessions "
-    "and, when applicable, a 'Current Date' header. When the context contains "
-    "the information needed to answer, give a direct, concrete answer — do "
-    "not hedge, refuse, or say you do not know. Only say you do not know when "
-    "the context genuinely lacks the information. Be concise; do not mention "
-    "the context."
-)
-
-# Type-specific instructions appended to the system prompt for the
-# categories that fail at the READER (issue #1366: preference 43%, temporal
-# 62% — evidence IS retrieved, the reader hedges/miscounts; A2 #1547: KU
-# answers from the superseding point, MSR aggregation needs counting
-# discipline). The generic prompt above already flips the default toward
-# committing; these fragments give the reader the exact reasoning it must
-# perform. A2's two new categories are expressed in ontology terms —
-# subject refs (same subject+attribute across entries), supersession edges
-# (the [SUPERSEDED BY]/[SUPERSES] markers = CORRECTS) and session dates
-# (the (session date YYYY-MM-DD) annotation) — no parallel mechanism, no
-# new fields.
-
-_TEMPORAL_FRAGMENT = (
-    "\n\nTEMPORAL REASONING INSTRUCTIONS: this question asks about elapsed "
-    "time or ordering (e.g. how many days/weeks/months ago). Use the "
-    "'Current Date: YYYY-MM-DD' header and the per-session 'session date "
-    "YYYY-MM-DD' annotations in the context to compute the elapsed time "
-    "between the relevant session date and the current date. Commit to a "
-    "specific numeric answer (e.g. '3 days ago') — do not hedge or refuse "
-    "when the dated evidence of the event/statement in question is present "
-    "in the context. An off-by-one error in the day count is acceptable. "
-    "However, if the context contains NO dated evidence of the event or "
-    "statement the question asks about, say you do not know rather than "
-    "guessing."
-)
-
-_PREFERENCE_FRAGMENT = (
-    "\n\nPREFERENCE INSTRUCTIONS: this question asks which option the user "
-    "prefers. Find the user's turns discussing the options and commit to "
-    "the specific option the user stated or implied a preference for "
-    "(e.g. 'X is fine but I prefer Y' → Y). Answer with that option — do "
-    "not hedge, refuse, or say you do not know when the user's preference "
-    "appears in the context."
-)
-
-# A2 (#1547): knowledge-update answer-from-newer + the date-conditional
-# rule (review P2). Consumes the reader-visible ontology state that E5
-# (#1537) + #1367/#1353 already render: the [SUPERSEDED BY]/[SUPERSES]
-# markers (CORRECTS edges) and the (session date YYYY-MM-DD) annotations
-# (E1). Current-value questions → newest/superseding point; point-in-time
-# questions → the version whose session date is the latest on/before the
-# asked date (E2E-9 chain-walk), current value rendered as context only.
-# V3 restore = E5's chain-walk — NO parallel mechanism, NO valid_at/
-# invalid_at windows (E6's, post-baseline). The abstention license (A1
-# #1546) stays open for absent versions/dates.
-_KNOWLEDGE_UPDATE_FRAGMENT = (
-    "\n\nKNOWLEDGE-UPDATE INSTRUCTIONS: this question asks about a fact "
-    "that may have changed across sessions. The context can contain several "
-    "versions of the same fact (same subject and attribute — e.g. the gym "
-    "schedule) linked by supersession edges: the replaced version carries a "
-    "'[SUPERSEDED BY: <newer value>]' marker, the newer version carries "
-    "'[SUPERSES: <replaced values>]', and every entry is annotated "
-    "'(session date YYYY-MM-DD)'.\n"
-    "- If the question asks for the CURRENT value (currently / now / these "
-    "days), answer from the NEWEST, superseding version — never from a "
-    "superseded one. Superseded entries are context only.\n"
-    "- If the question asks what the value WAS at a specific date (what "
-    "was … at/on/before <date>, back in <month>), answer from the version "
-    "whose session date is the latest on or before the asked date — walk "
-    "the supersession chain by session date. The current value may be "
-    "mentioned only as context, never as the answer.\n"
-    "- If no version's session date covers the asked date, or the newest "
-    "version is absent, say you do not know rather than guessing."
-)
-
-# A2 (#1547): multi-session aggregation discipline — count distinct events
-# ONCE (same subject+value restated in a later session is the SAME event),
-# no double-count, reconcile conflicts by session date. Consumes the same
-# ontology terms as the KU fragment (session-date annotations + supersession
-# markers when present). The A1 abstention license stays open for absent
-# asked information.
-_MULTI_SESSION_FRAGMENT = (
-    "\n\nMULTI-SESSION REASONING INSTRUCTIONS: this question spans several "
-    "dated sessions in the context. Aggregate across them with counting "
-    "discipline:\n"
-    "- Count each distinct event or decision ONCE. The same fact restated "
-    "in a later session (same subject, same value) is the SAME event — "
-    "never double-count it, and do not count mentions as events.\n"
-    "- Reconcile by date: when entries conflict, the value from the latest "
-    "session date is the current one; earlier entries remain events of "
-    "their time (entries may be linked by supersession — '[SUPERSEDED BY: "
-    "…]' / '[SUPERSES: …]' markers).\n"
-    "- Answer the specific question asked (which/where/when/how many) by "
-    "synthesizing from the distinct events — do not dump every entry.\n"
-    "- If the asked information is absent from the context, say you do not "
-    "know rather than guessing."
-)
-
-# A1 (#1546 + #1762 + #1775): the universal partial-knowledge abstention
-# clause — appended to EVERY question's system prompt (abstention
-# questions are indistinguishable by question_type: the _abs marker lives
-# only in the question_id, which never reaches the reader). It lets the
-# reader derive unanswerability from the evidence: state what IS present,
-# explicitly state the asked info is absent, never commit to a near-miss
-# decoy. The commit-side guard keeps the #1366 fix (answer directly when
-# the asked fact IS present — never abstain on present evidence).
-#
-# #1762 (V3 pilot finding #3): the pre-#1762 wording read the commit test
-# as a literal-match requirement ("EXACT information" + "do NOT commit to
-# the closest matching fact"), so a present-but-differently-phrased value
-# was downgraded to "related information" and the reader over-abstained on
-# FULL evidence — 4/4 fresh pilot failures were reader-side (6f9b354f:
-# evidence_recall@20 = 1.0 yet "does not mention repainting…"; 8a137a7f:
-# the gold string "Philips LED bulb" sat inside the hedge).
-#
-# #1775 (reval3, 2026-08-28): the #1762 calibration reduced but did NOT
-# eliminate over-abstention on the hedge class — 4 of 6 reval3 wrongs had
-# the gold string VERBATIM in a top-10 context item yet the reader
-# abstained/hedged (b86304ba 'worth triple what I paid', 75499fd8 'Golden
-# Retrievers like Max', ec81a493, 51a45a95). Root: the clause was a single
-# pass where the abstention branch fired on PARTIAL evidence (value
-# present, other details missing — "does not mention any painting of a
-# sunset, nor the amount paid" while 'worth triple what I paid' sat in
-# context). #1775 restructures the clause into an explicit, ORDERED
-# two-phase decision: PHASE 1 (PRESENCE COMMIT) commits whenever the asked
-# value is stated as the fact in any phrasing — even amid noise or with
-# other details of the question missing; PHASE 2 (ABSTENTION) runs ONLY
-# when Phase 1 finds no affirmative statement of the value (genuine
-# absence, near-miss, decoy). The same-instance scoping keeps the
-# different-value guard from licensing abstention on present same-instance
-# evidence (review-gate observation on #1768). Oscillation history:
-# #1366 → #1546 → #1762 → #1775 (this structural restructure is the
-# follow-up the #1768 review gate tracked). Run.py-owned recording gap —
-# reader_prompt_source()/hash still do not cover the A1 clause (tracked in
-# #1773).
-# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
-# The A1 two-phase presence-commit/abstention clause (#1775) is EVAL-ONLY
-# prompt engineering: the product has no reader/answer surface for it
-# (see the full note at ``build_reader``). Not shipped; tracked under the
-# open reader/QA product decision (audit G1).
-# ═════════════════════════════════════════════════════════════════════════
-_ABSTRACTION_FRAGMENT = (
-    "\n\nPARTIAL-KNOWLEDGE ABSTENTION: decide in two phases — presence "
-    "first, abstention only when the asked value is absent.\n"
-    "PHASE 1 — PRESENCE COMMIT: First decide whether the context contains "
-    "the asked fact — the concrete value the question asks for — not "
-    "whether it echoes the question's wording. If the asked value is "
-    "stated as the fact the question asks about, in any phrasing, it IS "
-    "the answer: answer directly and concretely with it. The value need "
-    "not be the sentence's subject: a value predicated of the asked "
-    "subject or instance in any grammatical role — subject, object, "
-    "complement, or apposition — is the answer. Example: 'Golden "
-    "Retrievers like Max' predicates the breed on Max — answer the "
-    "breed, do not call it a general statement. Do NOT abstain, do not "
-    "hedge, and do not weaken your answer with unrelated material. "
-    "Partial evidence is still presence: when the context states the "
-    "asked value but omits other details of the question (who, when, why, "
-    "how), or carries it amid noise, the answer is in the context — "
-    "commit to the value; never abstain because other details are "
-    "missing. A value stated for the same subject or instance the "
-    "question asks about IS the answer; a value merely mentioned "
-    "for a different instance or in passing is not the answer. A "
-    "mere mention is not the "
-
-    "answer: a negated, rejected, or hypothetical mention, or a "
-    "different value for the asked attribute, does not answer the "
-    "question and must not be committed to. Never frame the answer value "
-    "as merely related information: the 'mentions X but does not contain "
-    "the asked information' formulation is forbidden when X is the "
-    "answer.\n"
-    "PHASE 2 — ABSTENTION (only when Phase 1 found no affirmative "
-    "statement of the asked value): Abstain when the asked value is "
-    "genuinely absent — whether the context is empty, unrelated, or "
-    "holds related or near-miss information (a different value for the "
-    "asked attribute is not the answer). Then do NOT guess, do NOT "
-    "infer, and do NOT commit to a near-miss decoy; instead state what "
-    "related information IS present (briefly), then explicitly state "
-    "that the asked information is absent. When you must abstain, you "
-    "are expected to mention the related facts found in the memory — "
-    "this overrides the 'do not mention the context' instruction for "
-    "abstention answers. If the context contains nothing related, simply "
-    "state that the asked information is absent. Example — here the "
-    "bicycle is NOT the answer, so this form is correct: 'The memory "
-    "mentions a new bicycle, but it does not contain the asked favorite "
-    "color.'"
-)
-
-# question_type → the fragment that unlocks correct reasoning for it.
-_TYPE_FRAGMENTS: dict[str, str] = {
-    "temporal-reasoning": _TEMPORAL_FRAGMENT,
-    "single-session-preference": _PREFERENCE_FRAGMENT,
-    "knowledge-update": _KNOWLEDGE_UPDATE_FRAGMENT,
-    "multi-session": _MULTI_SESSION_FRAGMENT,
-}
-
-
-def reader_prompt_constants() -> tuple[str, dict[str, str]]:
-    """The run's reader prompt constants (M5): the generic system prompt +
-    the universal A1 abstention clause + type fragments, recorded verbatim
-    in report methodology so prompt drift across run cells is human-visible
-    in the report (#1768: the A1 clause — the substance of the #1762
-    calibration — now joins the recorded dict; the dict copy keeps future
-    fragment additions additive). The automated drift signal
-    (reader_prompt_hash, run.py-owned) does not yet cover the A1 clause —
-    pre-existing gap, tracked in #1773."""
-    return _SYSTEM_PROMPT, {
-        **dict(_TYPE_FRAGMENTS),
-        # the universal clause appended to EVERY question's prompt; keyed
-        # 'abstention' (the A1 name, #1546) — not a question_type
-        "abstention": _ABSTRACTION_FRAGMENT,
-    }
-
-
-def system_prompt_for(question_type: str | None) -> str:
-    """The reader system prompt for a question, type-tailored.
-
-    Unknown/absent types get the hardened generic prompt; temporal-reasoning,
-    single-session-preference (issue #1366), knowledge-update and
-    multi-session (A2 #1547) append their reasoning instructions. A1
-    (#1546 + #1762 + #1775): the partial-knowledge abstention clause is
-    appended UNIVERSALLY —
-    abstention questions are indistinguishable by question_type (the _abs
-    marker lives only in the question_id, which never reaches the reader), so
-    the reader must derive unanswerability from the evidence, never from a
-    flag. The clause is a two-phase decision (#1775): PHASE 1 commits
-    whenever the asked value is stated in the context (partial evidence is
-    still presence); PHASE 2 abstains only on genuine absence.
-    """
-    return (_SYSTEM_PROMPT + _ABSTRACTION_FRAGMENT
-            + _TYPE_FRAGMENTS.get(question_type, ""))
-
-# Official gen.py default generation length for non-CoT runs (the reader's
-# answer prompt is answered at temperature 0, max_tokens 500 — the official
-# call shape, no JSON mode; see build_reader).
-DEFAULT_READER_MAX_TOKENS = 500
-
-
-class Reader(Protocol):
-    model_id: str
-    model_spec: str | None = None
-    provider: str | None = None
-    pinned: bool | None = None
-
-    def answer(self, *, context_hits: list[dict[str, Any]], question: str,
-               question_date: str | None = None,
-               question_type: str | None = None) -> str: ...
-
-    def ping(self, probe: str) -> str: ...
-
-
-class LLMReader:
-    """Reader backed by an OpenAI-compatible chat model.
-
-    M5 (#1525): carries its resolved identity — ``model_spec`` (the full
-    ``<provider>:<model>`` spec actually used, post env/CLI resolution),
-    ``provider`` (the resolved endpoint provider — the truth about where the
-    call goes) and ``pinned`` (bool: spec == ``READER_MODEL``) — set by
-    ``build_reader`` and recorded in the report methodology.
-    """
-
-    def __init__(self, model, model_id: str, *, model_spec: str | None = None,
-                 provider: str | None = None, pinned: bool | None = None):
-        self._model = model
-        self.model_id = model_id
-        self.model_spec = model_spec or model_id
-        self.provider = provider
-        self.pinned = pinned
-
-    def answer(self, *, context_hits: list[dict[str, Any]], question: str,
-               question_date: str | None = None,
-               question_type: str | None = None) -> str:
-        # The context carries the official gen.py shape: a "Current Date:
-        # {question_date}" header + per-session date annotations (see
-        # retrieve.render_context) — temporal-reasoning questions are
-        # structurally unanswerable without them (P1 #1144). The system
-        # prompt is type-tailored (#1366): temporal-reasoning and
-        # single-session-preference get reasoning instructions that counter
-        # the reader's documented hedging/miscounting failures.
-        context = render_context(context_hits, question_date=question_date)
-        user = (
-            f"Memory context:\n{context}\n\n"
-            f"Question: {question}\n\nAnswer:"
-        )
-        raw = self._model.complete(
-            system=system_prompt_for(question_type), user=user)
-        return raw.strip()
-
-    def ping(self, probe: str) -> str:
-        """Minimal transport-health probe (M2 #1523 pre-flight).
-
-        One tiny completion through the reader's OWN model (key + endpoint +
-        model health only — prompt/context rendering is exercised on question
-        1). HTTP status errors propagate for classification; preflight.py
-        maps them via the P2 taxonomy.
-        """
-        from .preflight import PROBE_SYSTEM
-        raw = self._model.complete(system=PROBE_SYSTEM, user=probe)
-        return raw.strip()
 
 
 class MockReader:
@@ -382,7 +106,7 @@ class MockReader:
     provider = "mock"
     pinned = None
 
-    def answer(self, *, context_hits: list[dict[str, Any]], question: str,
+    def answer(self, *, context_hits: list[dict], question: str,
                question_date: str | None = None,
                question_type: str | None = None) -> str:
         # question_type is accepted for protocol parity with LLMReader (the
@@ -432,30 +156,6 @@ def _parse_model_spec(spec: str) -> tuple[str | None, str]:
     return None, spec
 
 
-# ══ PRODUCT-PARITY NOTE (eval-only) ══════════════════════════════════════
-# This is a QUALITY knob that lives in the eval harness and is NOT wired
-# into the product (tortoise/) path.
-#   Product default: NO reader/QA surface at all — the product's "answer"
-#       surfaces are retrieval-only (tortoise_search / tortoise_recall /
-#       hosted /v1/search return ranked graph content with EP annotation,
-#       no synthesis), template-based tortoise_analyze (tortoise/analyze.py),
-#       and EP-structural topic_summarize (hosted_api.py:2801-2860). A
-#       grep of tortoise/ finds no LLM retrieve-then-read path (audit G1 —
-#       the biggest cohesion gap: the benchmarked pipeline is
-#       capture→extract→store→retrieve→read→judge; the product ships
-#       capture→extract→store→retrieve).
-#   Why eval-only:   #1775 (the A1 two-phase presence-commit/abstention
-#       clause, below) is eval prompt engineering; commit aeb163ab touched
-#       only tools/longmem_eval/reader.py. It feeds the eval's judge — the
-#       product has no consumer for a reader answer.
-#   Ship-to-product: OPEN product decision — hosted /v1/ask (porting
-#       reader.py's prompt/commit discipline over the product's RRF pool)
-#       vs explicitly scoping the product as retrieval-only; being
-#       researched against competitors (audit G1).
-#   Rationale:       the harness exists to IMPROVE the product; the
-#       reader is the candidate product QA/answer surface, not a harness
-#       invention.
-# ═════════════════════════════════════════════════════════════════════════
 def build_reader(spec: str | None = None, *, mock: bool = False) -> Reader:
     """Build the reader from env/config. ``mock=True`` returns MockReader.
 

@@ -11,6 +11,7 @@ ownedBy: epistemic-team
 
 | Area | Path |
 | --- | --- |
+| Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
 | Auth architecture — standard patterns vs Tortoise (#1498/#1506) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |

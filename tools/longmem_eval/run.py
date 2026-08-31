@@ -4223,7 +4223,7 @@ JUDGE_RUBRIC_ID = "longmemeval-official"
 
 def reader_prompt_source() -> str:
     """The reader prompt content the parity module hashes. Mirrors the
-    longmem_eval reader prompt; must be kept in sync with
+    product reader prompt (tortoise/reader.py); must be kept in sync with
     battery.parity.runner (the unchanged-check compares both sides).
 
     R1 (#1540) D6/D7 + C1 (#1745): the reader consumes the budget-capped
@@ -4231,7 +4231,16 @@ def reader_prompt_source() -> str:
     bounded by the token budget AND the context item cap) — the parity
     hash changes; the #1144 baseline record is refreshed at the next
     parity run (a run-time action — no committed baseline exists).
+
+    #1773 closure (#1987 Task 10): the hash now covers the A1 universal
+    partial-knowledge abstention clause (``_ABSTRACTION_FRAGMENT`` — the
+    two-phase presence-commit/abstention wording appended to EVERY
+    question's prompt) so prompt drift on the abstention substance is
+    human-visible in the report; the clause text itself is appended below
+    and the recorded ``reader_prompt_hash`` (``_sha16(reader_prompt_source())``)
+    changes with it.
     """
+    from tortoise.reader import _ABSTRACTION_FRAGMENT as _a1
     return (
         "Current Date: {question_date} header + per-session date annotation "
         "on every retrieved chunk (question_date + haystack_dates surfaced — "
@@ -4244,7 +4253,9 @@ def reader_prompt_source() -> str:
         "date-conditional: current-value → newest/superseding point, "
         "point-in-time → chain-walk by session date — E5 CORRECTS markers + "
         "session-date annotations, no parallel mechanism), multi-session "
-        "(aggregation: distinct events, no double-count, reconcile by date)"
+        "(aggregation: distinct events, no double-count, reconcile by date); "
+        "universal A1 abstention clause (#1775 two-phase presence-commit/"
+        "abstention) appended to EVERY question: " + _a1
     )
 
 def _print_summary(report: dict[str, Any]) -> None:

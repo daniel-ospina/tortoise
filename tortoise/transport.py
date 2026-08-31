@@ -1,0 +1,54 @@
+"""Neutral transport-context module (#1987 Task 6/8).
+
+A zero-import module (stdlib only) defining the selfhost-transport signal
+for the ask lane's metering/budget exemptions — a dedicated ContextVar
+channel that both ``tortoise.sdk``/``tortoise.metering``/``tortoise.quota``
+and the MCP auth layer can import without a cycle (``mcp_auth`` imports
+``tortoise.sdk``, so ``sdk``/``metering``/``quota`` cannot import
+``tortoise.mcp_auth``).
+
+The module ALSO hosts the product-level ask-exposure gate
+``ask_exposure_enabled()`` (#2013) precisely because it is the cycle-free,
+stdlib-only, neutral import point shared by ``hosted_api.py`` (the /v1/ask
+route gate) and ``mcp_server.py`` (the MCP listing/call-time gates) — a
+product gate must not live in either importer, and any other home would
+re-import one of them. The zero-import/stdlib-only/neutral contract is
+load-bearing: nothing here may grow an import, and both importers must
+stay importable from the other's context.
+
+Why a dedicated flag (not the team_id VALUE, not ``_transport_mode``):
+
+  * hosted team ids are RAW — only graph names are ``team_``-prefixed
+    (``graph_name = f\"team_{team_id}\"``, hosted_api.py) — so a hosted team
+    legitimately named \"selfhost\" delivers the IDENTICAL team_id value to
+    the identical call site; keying the exemption on the value cannot
+    distinguish hosted from selfhost.
+  * the existing ``_transport_mode`` ContextVar is set to ``\"http\"`` on BOTH
+    the hosted MCP path AND the selfhost MCP path — it cannot distinguish
+    them either.
+
+The flag is set True ONLY by the selfhost HTTP MCP transport
+(``TransportModeMiddleware.dispatch`` — a named Task 8 deliverable on
+``tortoise/mcp_auth.py``), the only selfhost transport whose team_id is
+truthy (\"selfhost\"). The stdio bootstrap and the selfhost REST handler
+rely on ``not team_id`` (team_id=None) and do NOT need the flag.
+"""
+from __future__ import annotations
+
+import os
+from contextvars import ContextVar
+
+#: True while a SELFHOST HTTP MCP transport is serving the request. Read by
+#: ``record_ask_usage`` (tortoise/metering.py) and the shared ask budget
+#: helper (tortoise/quota.py) alongside ``not team_id`` as the exemption
+#: condition. Set ONLY by selfhost transport code.
+_selfhost_transport: ContextVar[bool] = ContextVar("_selfhost_transport",
+                                                   default=False)
+
+
+def ask_exposure_enabled() -> bool:
+    """#2013 PRODUCT-GATING: hosted ask-exposure gate — OFF by default.
+    ``TORTOISE_ENABLE_ASK=1`` (tests/dev) unlocks; unset/anything-else
+    keeps the exposure gated off. Shared by hosted_api.py (/v1/ask route
+    registration) and mcp_server.py (tortoise_ask call/listing gates)."""
+    return os.environ.get("TORTOISE_ENABLE_ASK") == "1"
