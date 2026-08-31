@@ -55,7 +55,7 @@ def test_full_self_journey_one_sitting(api):
     node exists at first read (version=1, team-named auto-satisfied);
     fork set-once; step edges keyed-MERGE with honest created/noop signals;
     the fork-aware gate completes the org (status + wire)."""
-    team_id, headers = _register(api, "self")
+    _team_id, headers = _register(api, "self")
     # first read: eager-init node (registry lane init in the SAME statement
     # as TeamMeta) — FLOW keys present, operational keys present
     st = _get_state(api, headers)
@@ -104,7 +104,7 @@ def test_full_self_journey_one_sitting(api):
 
 
 def test_dismissal_alone_never_completes(api):
-    team_id, headers = _register(api, "dismiss")
+    _team_id, headers = _register(api, "dismiss")
     _checkpoint(api, headers, {"fork": "self"})
     _checkpoint(api, headers, {"step": "harness-connected"})
     _checkpoint(api, headers, {"step": "first-points-filed"})
@@ -118,7 +118,7 @@ def test_dismissal_alone_never_completes(api):
 
 
 def test_build_fork_uses_catalog_not_decide(api):
-    team_id, headers = _register(api, "build")
+    _team_id, headers = _register(api, "build")
     _checkpoint(api, headers, {"fork": "build"})
     _checkpoint(api, headers, {"step": "harness-connected"})
     _checkpoint(api, headers, {"step": "first-points-filed"})
@@ -136,7 +136,7 @@ def test_build_fork_uses_catalog_not_decide(api):
 def test_grandfathered_wire_stable_then_node_governs(api):
     """DE2E-6: a legacy-wizard completer's wire stays true (guard); the FIRST
     agent step edge flips control to the node (documented one-way door)."""
-    team_id, headers = _register(api, "gf")
+    _team_id, headers = _register(api, "gf")
     # legacy wizard completion (the carve-out jsonb write — still active
     # until W1 removes wizardComplete)
     r = api.patch("/v1/onboarding/state", headers=headers,
@@ -153,7 +153,7 @@ def test_grandfathered_wire_stable_then_node_governs(api):
 
 
 def test_unknown_step_and_extra_rejected(api):
-    team_id, headers = _register(api, "neg")
+    _team_id, headers = _register(api, "neg")
     r = _checkpoint(api, headers, {"step": "bogus-step"})
     assert r.status == 422
     r = _checkpoint(api, headers, {"step": "capture-disclosed", "fork": "self"})
