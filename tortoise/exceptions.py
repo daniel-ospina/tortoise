@@ -1,4 +1,5 @@
 """Tortoise SDK exceptions."""
+from __future__ import annotations
 
 
 class CalibrationError(Exception):
@@ -100,4 +101,107 @@ class Phase2Error(ValueError):
 
     def __init__(self, message: str, batch_id: str | None = None):
         self.batch_id = batch_id
+        super().__init__(message)
+
+
+# ── Ask-lane typed SDK exceptions (#1987 Task 5) ───────────────────────────
+# The SDK hosted-mode ``_post_ask`` maps server statuses/body codes to these;
+# each carries a ``code`` class attribute referencing the canonical vocabulary
+# constants BELOW (single home — ``tortoise/schemas.py`` re-exports them, so
+# the wire body and the SDK exception attributes share one source of truth;
+# a drift between the two surfaces is impossible by construction).
+
+# Canonical error-code vocabulary (10 codes — one vocabulary, two surfaces:
+# the wire body + the SDK exception ``code`` attributes).
+CODE_UNAUTHORIZED = "unauthorized"
+CODE_QUOTA_EXCEEDED = "quota_exceeded"
+CODE_IN_FLIGHT_LIMIT = "in_flight_limit"
+CODE_READER_UNAVAILABLE = "reader_unavailable"
+CODE_RETRIEVAL_UNAVAILABLE = "retrieval_unavailable"
+CODE_TIMEOUT = "timeout"
+CODE_INVALID_QUESTION = "invalid_question"
+CODE_INVALID_QUESTION_TYPE = "invalid_question_type"
+CODE_INVALID_QUESTION_DATE = "invalid_question_date"
+CODE_QUESTION_TOO_LONG = "question_too_long"
+
+
+class AskValidationError(ValueError):
+    """Client-input validation failure (local lane) OR a 400/401/403/422
+    response with a canonical/code-less body (hosted lane). Carries the
+    canonical ``code`` (``invalid_question``/``question_too_long``/
+    ``invalid_question_type``/``invalid_question_date``/``unauthorized``)
+    and, for hosted mappings, the HTTP status."""
+
+    code = CODE_INVALID_QUESTION
+
+    def __init__(self, message: str, *, code: str | None = None,
+                 status_code: int | None = None):
+        self.status_code = status_code
+        if code is not None:
+            self.code = code
+        super().__init__(message)
+
+
+class AskQuotaExceeded(RuntimeError):
+    """429 ``quota_exceeded`` — the team's per-minute ask budget is spent.
+    Carries ``retry_after`` (seconds) when the server provided one."""
+
+    code = CODE_QUOTA_EXCEEDED
+
+    def __init__(self, message: str, *, retry_after: float | None = None,
+                 status_code: int | None = 429):
+        self.retry_after = retry_after
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskInFlightLimit(RuntimeError):
+    """429 ``in_flight_limit`` — the per-team in-flight ask cap is full."""
+
+    code = CODE_IN_FLIGHT_LIMIT
+
+    def __init__(self, message: str, *, status_code: int | None = 429):
+        self.retry_after = None
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskReaderUnavailable(RuntimeError):
+    """502 ``reader_unavailable`` — the LLM reader failed with no surviving
+    lane. Also used for the code-less variants that must never be
+    mislabeled ``invalid_question``: a code-less 402 (SERVER-side
+    provider-billing condition, P2-3), a code-less 404 (hosted ask
+    exposure gated off — ``TORTOISE_ENABLE_ASK`` unset, #2013), and the
+    pre-existing connection-refused ``status_code=None`` case (hosted ask
+    server unreachable)."""
+
+    code = CODE_READER_UNAVAILABLE
+
+    def __init__(self, message: str, *, status_code: int | None = 502):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskRetrievalUnavailable(RuntimeError):
+    """502 ``retrieval_unavailable`` — retrieval/annotation/context
+    assembly failed wholesale (never an untyped 500 on the ask surface)."""
+
+    code = CODE_RETRIEVAL_UNAVAILABLE
+
+    def __init__(self, message: str, *, status_code: int | None = 502):
+        self.status_code = status_code
+        super().__init__(message)
+
+
+class AskTimeout(RuntimeError):
+    """504 ``timeout`` — the bounded ask section exceeded the server's
+    ``_ASK_TIMEOUT_S`` (server-504-fired) OR the SDK client-side timeout
+    fired (wire connect/read timeout — ``source`` marks which)."""
+
+    code = CODE_TIMEOUT
+
+    def __init__(self, message: str, *, source: str = "server",
+                 status_code: int | None = 504):
+        self.source = source  # "server" (received 504 body) | "client"
+        self.status_code = status_code
         super().__init__(message)

@@ -357,6 +357,15 @@ class MockJudge:
         "do not know", "don't know", "not know", "unanswerable",
         "incomplete", "not mention", "no information", "cannot answer",
         "can't answer", "not enough", "does not contain", "doesn't contain",
+        # #2027 (calibration): the reader's canonical abstention phrasings —
+        # a strict subset of the product's ``_ABSTAINED_PHRASES`` (the
+        # census authority; plan P2-32 pins judge ⊆ product). The minimal
+        # Phase-2 abstention branch produces these forms on genuine
+        # absence; without them the judge vocabulary gap scored correct
+        # abstentions as failures (the runbook's 2 vocab-gap misses).
+        "asked information is absent", "information is absent",
+        "no mention of", "don't have that information",
+        "don't have information", "absent from the context",
     )
 
     def judge(self, *, question_type: str, question: str, answer: str,

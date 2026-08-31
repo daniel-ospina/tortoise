@@ -842,3 +842,278 @@ def test_build_extractor_pool_survives_provider_402(monkeypatch):
     assert len(venice_calls) == 1, "venice 402s once, then stays cooldowned"
     assert [p.provider for p in pool.providers] == [
         "venice", "openrouter", "deepseek-direct"]  # pool membership unchanged
+
+
+# ── #1987 Task 3: json_mode structural pin + build_reader_model ────────────
+
+def _body_capture(monkeypatch):
+    """Monkeypatch requests.post; returns (log, fake_post) capturing request
+    bodies so tests can assert on response_format presence."""
+    log = []
+
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "ok"},
+                             "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 7, "completion_tokens": 3},
+            }
+
+    def _fake_post(self_or_url, *args, **kwargs):
+        if args:  # noqa: SIM108
+            url = args[0]
+        else:
+            url = self_or_url
+        log.append((url, kwargs.get("json", {})))
+        return _FakeResp()
+
+    monkeypatch.setattr(requests.sessions.Session, "post", _fake_post)
+    return log
+
+
+_JSON_PROMPT = "Return a JSON object with the schedule."
+
+
+def test_json_mode_pin_ask_lane_never_sends_response_format(monkeypatch):
+    """(a) ask-lane model (json_mode=False) + prompt containing 'json' +
+    TORTOISE_JSON_MODE=1 → NO response_format — the structural pin beats the
+    content heuristic (the hazard class: retrieved memory mentioning 'json')."""
+    monkeypatch.setenv("TORTOISE_JSON_MODE", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    log = _body_capture(monkeypatch)
+    from tortoise.model_adapters import build_reader_model
+    model = build_reader_model()
+    model.complete(system=_JSON_PROMPT, user="memory mentions json parsing")
+    bodies = [b for _, b in log]
+    assert bodies, "a call must have been made"
+    assert all("response_format" not in b for b in bodies)
+
+
+def test_json_mode_pin_extraction_lane_unchanged(monkeypatch):
+    """(b) extraction-lane model (default None) + same prompt →
+    response_format present (default behavior unchanged)."""
+    monkeypatch.setenv("TORTOISE_JSON_MODE", "1")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    log = _body_capture(monkeypatch)
+    model = build_extractor_model()
+    model.complete(system=_JSON_PROMPT, user="extract JSON")
+    bodies = [b for _, b in log]
+    assert bodies
+    assert any("response_format" in b for b in bodies)
+
+
+def test_json_mode_true_always_sends(monkeypatch):
+    """(c) json_mode=True → always sends when the prompt requests JSON
+    (even with TORTOISE_JSON_MODE unset→default 1)."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    log = _body_capture(monkeypatch)
+    from tortoise.model_adapters import build_extractor_model
+    model = build_extractor_model(json_mode=True)
+    model.complete(system=_JSON_PROMPT, user="x")
+    bodies = [b for _, b in log]
+    assert bodies and all("response_format" in b for b in bodies)
+
+
+def test_build_reader_model_resolves_env_and_reports_spec(monkeypatch):
+    """(d) build_reader_model(model_id=None) resolves TORTOISE_ASK_MODEL
+    (fallback deepseek/deepseek-v4-flash) and RoutingModel.model reports the
+    resolved spec id."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    # env override — the RESOLVED SPEC post-normalization is the bare wire
+    # id on the direct lane (deepseek-direct primary when both keys set and
+    # TORTOISE_EXTRACTOR_PROVIDER unset): ``model`` reports the serving
+    # lane's wire id, NOT the family-prefixed input.
+    monkeypatch.setenv("TORTOISE_ASK_MODEL", "deepseek/deepseek-v4-pro")
+    m = build_reader_model()
+    assert isinstance(m, RoutingModel)
+    assert m.primary.id == "deepseek-v4-pro"  # direct lane bare wire id
+    assert m.model == "deepseek-v4-pro"
+    # fallback default
+    monkeypatch.delenv("TORTOISE_ASK_MODEL")
+    m2 = build_reader_model()
+    assert m2.primary.id == "deepseek-v4-flash"
+    assert m2.model == "deepseek-v4-flash"
+
+
+class _TokensAdapter(_StubAdapter):
+    """Stub adapter carrying the per-call usage + id attributes the wrapper
+    forwards (mirrors the real adapters' complete()-written fields)."""
+
+    def __init__(self, provider: str, wire_id: str):
+        super().__init__(provider)
+        self.id = wire_id
+        self.last_prompt_tokens = 0
+        self.last_completion_tokens = 0
+
+    def complete(self, *, system, user, max_tokens: int | None = None):
+        self.calls += 1
+        if self._exc is not None:
+            raise self._exc
+        self.last_prompt_tokens = self.calls * 10
+        self.last_completion_tokens = self.calls * 2
+        return f"{self.provider}:ok"
+
+
+def test_wrapper_forwards_usage_and_model(monkeypatch):
+    """(e) BOTH RoutingModel and RotatingModel surface the serving adapter's
+    per-call last_completion_tokens/last_prompt_tokens via forwards and
+    model reports the RESOLVED SPEC id (not a raw serving-adapter identity)."""
+    from tortoise.model_adapters import RotatingModel, RoutingModel
+    # RoutingModel
+    primary = _TokensAdapter("deepseek-direct", "deepseek-v4-flash")
+    fallback = _TokensAdapter("openrouter", "deepseek/deepseek-v4-flash")
+    m = RoutingModel(primary, fallback)
+    m.complete(system="s", user="u")
+    assert m.last_prompt_tokens == 10
+    assert m.last_completion_tokens == 2
+    assert m.model == "deepseek-v4-flash"
+    m.complete(system="s", user="u")
+    assert m.last_prompt_tokens == 20
+    assert m.last_completion_tokens == 4
+    # RotatingModel — fresh adapters with DISTINCT per-call token values so
+    # the forward is assertable regardless of which lane the weighted
+    # round-robin picks.
+    rp = _TokensAdapter("deepseek-direct", "deepseek-v4-flash")
+    rp.last_prompt_tokens = 0
+    rf = _TokensAdapter("openrouter", "deepseek/deepseek-v4-flash")
+    rf.last_prompt_tokens = 0
+    r = RotatingModel([rp, rf])
+    r.complete(system="s", user="u")
+    assert r.last_prompt_tokens == 10 and r.last_completion_tokens == 2
+    assert r.model in ("deepseek-v4-flash", "deepseek/deepseek-v4-flash")
+    # the forward matches the serving lane's id (the resolved spec)
+    serving = rp if rp.calls else rf
+    assert r.model == serving.id
+
+
+def _http_err(status: int):
+    err = requests.HTTPError(f"HTTP {status}")
+    err.response = type("R", (), {"status_code": status})()
+    return err
+
+
+def test_failover_policy_pin(monkeypatch):
+    """(f) 402 on RoutingModel → re-raised (fatal, no failover); 402 on
+    RotatingModel with >=2 providers → rotates; 429 on RoutingModel WITH a
+    fallback → FAILS OVER (transient); 429 without fallback → re-raised."""
+    from tortoise.model_adapters import RotatingModel, RoutingModel
+    # 402 fatal on RoutingModel
+    primary = _StubAdapter("deepseek-direct").fail_with(_http_err(402))
+    m = RoutingModel(primary, _StubAdapter("openrouter"))
+    with pytest.raises(requests.HTTPError):
+        m.complete(system="s", user="u")
+    # 402 on RotatingModel n>=2 rotates: the forced RNG picks venice first
+    # (its 402 is consumed exactly once), cooldown 60s skips it on the retry
+    # so the fallback answers deterministically.
+    p1 = _StubAdapter("venice").fail_with(_http_err(402))
+    p2 = _StubAdapter("openrouter")
+    rm = RotatingModel([p1, p2], cooldown_s=60)
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])  # venice → openrouter
+    try:
+        assert rm.complete(system="s", user="u") == "openrouter:s:u"
+    finally:
+        _orig = _rotating_rng(monkeypatch, [])
+        import random as _r
+        _r.random = _orig
+    assert p1.provider in rm._cooldowns
+    assert rm.route == "openrouter"
+    # 429 with fallback → failover
+    p3 = _StubAdapter("deepseek-direct").fail_with(_http_err(429))
+    m2 = RoutingModel(p3, _StubAdapter("openrouter"), cooldown_s=0)
+    out = m2.complete(system="s", user="u")
+    assert out.startswith("openrouter:")
+    assert m2.route == "openrouter"
+    # 429 without fallback → re-raised (surfaces as a reader failure → 502)
+    p4 = _StubAdapter("openrouter").fail_with(_http_err(429))
+    m3 = RoutingModel(p4, None, cooldown_s=0)
+    with pytest.raises(requests.HTTPError):
+        m3.complete(system="s", user="u")
+
+
+def test_concurrent_rotation_state(monkeypatch):
+    """(g) N threads calling complete() on a shared RotatingModel where the
+    first K calls to one provider raise 402 → every call succeeds, the 402
+    count is exactly K, and no call is lost (rotation handles the race)."""
+    import threading
+
+    from tortoise.model_adapters import RotatingModel
+
+    class _BillingOnce(_TokensAdapter):
+        def __init__(self, provider: str, wire_id: str, k: int):
+            super().__init__(provider, wire_id)
+            self.remaining = k
+            self._lock = threading.Lock()
+
+        def complete(self, *, system, user, max_tokens: int | None = None):
+            with self._lock:
+                if self.remaining > 0:
+                    self.remaining -= 1
+                    raise _http_err(402)
+            self.calls += 1
+            return "ok"
+
+    p1 = _BillingOnce("venice", "deepseek-v4-flash", k=3)
+    p2 = _TokensAdapter("openrouter", "deepseek/deepseek-v4-flash")
+    rm = RotatingModel([p1, p2], cooldown_s=0)
+    barrier = threading.Barrier(6)
+    results: list[str] = []
+
+    def _worker():
+        barrier.wait()
+        try:
+            results.append(rm.complete(system="s", user="u"))
+        except Exception as e:
+            results.append(f"ERR:{e}")
+
+    threads = [threading.Thread(target=_worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(results) == 6
+    assert all(r == "ok" or r.endswith(":ok") for r in results), results
+    # the 3 scripted 402s were consumed exactly once each (no skipped or
+    # repeated provider state) and every thread got an answer
+    assert p1.calls + p2.calls == 6, (p1.calls, p2.calls)
+
+
+def test_rotation_recovery(monkeypatch):
+    """(h) rotation-recovery: a provider fails → rotates → the NEXT ask
+    succeeds (eventually on the primary again when it recovers)."""
+    from tortoise.model_adapters import RotatingModel
+
+    class _FailingOnce(_TokensAdapter):
+        def __init__(self, provider: str, wire_id: str):
+            super().__init__(provider, wire_id)
+            self.failed = False
+
+        def complete(self, *, system, user, max_tokens: int | None = None):
+            if not self.failed:
+                self.failed = True
+                raise _http_err(402)
+            return super().complete(system=system, user=user)
+
+    p1 = _FailingOnce("venice", "deepseek-v4-flash")
+    p2 = _TokensAdapter("openrouter", "deepseek/deepseek-v4-flash")
+    rm = RotatingModel([p1, p2], cooldown_s=60)
+    _orig = _rotating_rng(monkeypatch, [0.1, 0.9])
+    try:
+        out1 = rm.complete(system="s", user="u")
+        # venice 402s once → cooldown 60s → openrouter answers.
+        assert out1 == "openrouter:ok", out1
+        assert p1.provider in rm._cooldowns
+        # subsequent call: venice still cooldowned → fallback again (the
+        # rotation window keeps the run moving while the lane recovers)
+        out2 = rm.complete(system="s", user="u")
+        assert out2 == "openrouter:ok", out2
+        assert rm.last_prompt_tokens > 0  # usage forward read after recovery
+    finally:
+        import random as _r
+        _r.random = _orig

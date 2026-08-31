@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile  # noqa: F401
+from datetime import UTC
 
 import pytest
 
@@ -453,3 +454,196 @@ class TestPricingIntegration:
     def test_overage_price_is_5_dollars_per_10k(self):
         from tortoise.pricing import overage_price_per_10k
         assert overage_price_per_10k() == 5.0
+
+
+# ── #1987 Task 6: ask metering ──────────────────────────────────────────────
+
+class TestAskMetering:
+    def test_record_shape_and_increment(self, reg_sdk):
+        sdk, tid = reg_sdk  # noqa: RUF059
+        from tortoise.metering import record_ask_usage
+        r1 = record_ask_usage(tid, tokens_in=100, tokens_out=50, cost_usd=0.001)
+        assert r1["ask_calls"] == 1
+        r2 = record_ask_usage(tid, tokens_in=200, tokens_out=10, cost_usd=0.002)
+        assert r2 is not None
+        from tortoise.metering import get_ask_usage
+        usage = get_ask_usage(tid)
+        assert usage["ask_calls"] == 2
+        assert usage["ask_tokens_in"] == 300
+        assert usage["ask_tokens_out"] == 60
+        assert abs(usage["ask_cost_usd"] - 0.003) < 1e-9
+
+    def test_none_team_id_noop(self):
+        from tortoise.metering import get_ask_usage, record_ask_usage
+        assert record_ask_usage(None, tokens_in=1) is None
+        # registry read for a nonexistent team → zeros
+        usage = get_ask_usage("no-such-team")
+        assert usage["ask_calls"] == 0
+
+    def test_selfhost_transport_exemption(self, reg_sdk, monkeypatch):
+        """Transport-keyed exemption (P1-4/P1-1): `_selfhost_transport` set
+        True → zero records; a hosted team with the RAW id "selfhost" DOES
+        record (the flag channel, never the value)."""
+        from tortoise.metering import get_ask_usage, record_ask_usage
+        from tortoise.transport import _selfhost_transport
+        sdk, tid = reg_sdk  # noqa: RUF059
+        token = _selfhost_transport.set(True)
+        try:
+            assert record_ask_usage(tid, tokens_in=5) is None
+        finally:
+            _selfhost_transport.reset(token)
+        assert get_ask_usage(tid)["ask_calls"] == 0
+        # a hosted team literally named "selfhost" records usage
+        assert record_ask_usage("selfhost", tokens_in=5) is not None
+        assert get_ask_usage("selfhost")["ask_calls"] == 1
+
+    def test_non_fatal_on_registry_failure(self, reg_sdk, monkeypatch, caplog):
+        sdk, tid = reg_sdk  # noqa: RUF059
+        from tortoise.metering import record_ask_usage
+        def _boom(*a, **k):
+            raise RuntimeError("registry down")
+        monkeypatch.setattr("tortoise.metering._reg_sdk", _boom)
+        assert record_ask_usage(tid, tokens_in=1) is None  # non-fatal
+
+    def test_concurrent_increments_sum(self, reg_sdk):
+        """Two threads calling record_ask_usage concurrently → the final
+        record equals the sum (no lost increment)."""
+        import threading
+
+        from tortoise.metering import get_ask_usage, record_ask_usage
+        sdk, tid = reg_sdk  # noqa: RUF059
+        threads = [threading.Thread(
+            target=record_ask_usage, args=(tid,),
+            kwargs={"tokens_in": 10, "tokens_out": 5})
+            for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        usage = get_ask_usage(tid)
+        assert usage["ask_calls"] == 4
+        assert usage["ask_tokens_in"] == 40
+        assert usage["ask_tokens_out"] == 20
+
+    def test_cost_bound_and_token_math(self):
+        """estimate_ask_cost_usd(8000 in, 500 out) <= 0.01; the metering
+        input identity: input_tokens == system prompt + rendered context."""
+        from tortoise.metering import ASK_METER_RATES, estimate_ask_cost_usd
+        from tortoise.reader import system_prompt_for
+        from tortoise.retrieval import estimate_tokens_ask
+        cost = estimate_ask_cost_usd(8000, 500, rates=ASK_METER_RATES)
+        assert cost <= 0.01, cost
+        rendered = "the gym schedule is monday and wednesday"
+        inp = estimate_tokens_ask(system_prompt_for(None)) + estimate_tokens_ask(rendered)
+        assert estimate_ask_cost_usd(inp, 500, rates=ASK_METER_RATES) > 0
+
+    def test_zero_record_team_read(self, reg_sdk):
+        """P2-14: a fresh team with zero ask records → get_ask_usage renders
+        ZEROS (never 500) on both the registry read and the supabase-mode
+        read."""
+        from tortoise.metering import get_ask_usage
+        sdk, tid = reg_sdk  # noqa: RUF059
+        usage = get_ask_usage(tid)
+        assert usage["ask_calls"] == 0
+        assert usage["ask_tokens_in"] == 0
+        assert usage["ask_cost_usd"] == 0.0
+
+    def test_period_rollover_straddle(self, reg_sdk, monkeypatch):
+        """P2-23: a record at T−1s lands in the OLD period; the new period
+        starts zero."""
+        from datetime import datetime
+
+        from tortoise.metering import _current_period, get_ask_usage, record_ask_usage
+        sdk, tid = reg_sdk  # noqa: RUF059
+        # freeze at the LAST second of a period
+        base = datetime(2026, 8, 31, 23, 59, 59, tzinfo=UTC)
+        frozen = {"ts": base}
+        class _FakeDT:
+            @staticmethod
+            def now(tz=None):
+                return frozen["ts"]
+        monkeypatch.setattr("tortoise.metering.datetime", _FakeDT)
+        record_ask_usage(tid, tokens_in=10)
+        old_period = _current_period()
+        assert old_period == "2026-08"
+        # roll the period
+        frozen["ts"] = datetime(2026, 9, 1, 0, 0, 1, tzinfo=UTC)
+        record_ask_usage(tid, tokens_in=20)
+        usage = get_ask_usage(tid)
+        assert usage["period"] == "2026-09"
+        assert usage["ask_tokens_in"] == 20  # old period's record is frozen
+
+    def test_migration_code_contract(self, monkeypatch):
+        """Plan Task 6 Step 1: the migration↔code contract — the RPC name
+        ``metering_increment_ask`` and the ask_* column set the CODE calls
+        MUST match the real migration file (20260829000001), so a column
+        reword or RPC rename in either direction fails loudly. Covers both
+        record_ask_usage (supabase branch → RPC body keys) and
+        get_ask_usage (supabase branch → the ask_* select)."""
+        import re as _re
+        from pathlib import Path
+        mig = (Path(__file__).resolve().parent.parent
+               / "supabase" / "migrations"
+               / "20260829000001_metering_ask_columns.sql").read_text()
+        # (a) the ADD COLUMN set the migration defines
+        cols = set(_re.findall(r"ADD COLUMN IF NOT EXISTS\s+(\w+)", mig))
+        assert cols == {"ask_calls", "ask_tokens_in", "ask_tokens_out",
+                        "ask_cost_usd"}
+        # the token counters are bigint (P2 — the ~20.7B token/month
+        # envelope is ~10x over the integer range)
+        assert "ask_tokens_in   bigint" in mig
+        assert "ask_tokens_out  bigint" in mig
+        # (b) the RPC name + parameter set the migration defines
+        rpc = _re.search(r"CREATE OR REPLACE FUNCTION public\.(\w+)\(", mig)
+        assert rpc is not None and rpc.group(1) == "metering_increment_ask"
+        params = set(_re.findall(r"p_(\w+)\s+\w+", mig))
+        assert params == {"team_id", "period", "calls", "tokens_in",
+                          "tokens_out", "cost_usd"}
+        # (c) the supabase-mode record path calls the SAME RPC with the
+        # SAME p_* body keys (FakeControlPlane records the call body)
+        from tests.fake_control_plane import FakeControlPlane
+        from tortoise import supabase_control as sc
+        from tortoise.metering import get_ask_usage, record_ask_usage
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://x.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc")
+        fake = FakeControlPlane()
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        record_ask_usage("team-1", tokens_in=100, tokens_out=50,
+                         cost_usd=0.001)
+        fn, body = fake.rpc_calls[-1]
+        assert fn == "metering_increment_ask"
+        assert set(body) == {"p_team_id", "p_period", "p_calls",
+                             "p_tokens_in", "p_tokens_out", "p_cost_usd"}
+        assert body["p_team_id"] == "team-1"
+        assert body["p_tokens_in"] == 100 and body["p_tokens_out"] == 50
+        # (d) the supabase-mode READ path selects the SAME ask_* columns
+        fake.seed("metering_records", [{"team_id": "team-1",
+                                         "period": body["p_period"],
+                                         "ask_calls": 1,
+                                         "ask_tokens_in": 100,
+                                         "ask_tokens_out": 50,
+                                         "ask_cost_usd": 0.001}])
+        usage = get_ask_usage("team-1")
+        assert usage["ask_calls"] == 1
+        assert usage["ask_tokens_in"] == 100
+        assert usage["ask_tokens_out"] == 50
+        assert abs(usage["ask_cost_usd"] - 0.001) < 1e-9
+
+
+# ── #1987 Task 6: estimate_tokens_ask ───────────────────────────────────────
+
+class TestEstimateTokensAsk:
+    def test_whitespace_parity_with_estimate_tokens(self):
+        from tortoise.retrieval import estimate_tokens, estimate_tokens_ask
+        text = "the quick brown fox jumps over the lazy dog"
+        assert estimate_tokens_ask(text) == estimate_tokens(text)
+
+    def test_cjk_run_over_estimated(self):
+        """A long unspaced CJK run is conservatively over-estimated (the
+        whitespace-based estimator under-counts it to ~0 words)."""
+        from tortoise.retrieval import estimate_tokens_ask
+        cjk = "\u4f60" * 2000
+        est = estimate_tokens_ask(cjk)
+        assert est >= 1000  # ~0.65/char conservative floor
+        assert est > estimate_tokens_ask("x" * 2000)

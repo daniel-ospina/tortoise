@@ -62,13 +62,23 @@ class OpenRouterModel:
 
     def __init__(self, model_id: str, max_tokens: int | None = None,
                  temperature: float = 0.0,
-                 thinking_budget: int = 0, disable_reasoning: bool = False):
+                 thinking_budget: int = 0, disable_reasoning: bool = False,
+                 json_mode: bool | None = None):
         self.id = model_id
         self.api_key = os.environ.get(self.key_env, "")
         self.max_tokens = max_tokens  # None = NO CAP (omit from request body)
         self.temperature = temperature
         self.thinking_budget = thinking_budget  # for reasoning models
         self.disable_reasoning = disable_reasoning  # send reasoning.effort=none
+        # json_mode (#1987 Task 3): per-instance structural pin for the JSON
+        # mode content-flip hazard (``_should_send_json_mode`` fires on the
+        # substring "json" in user-controlled retrieved context — the ask
+        # lane embeds retrieved memory, so a memory mentioning "json" would
+        # send response_format=json_object on a free-text answer and mangle
+        # it). None = unchanged behavior (the extraction lane); False = NEVER
+        # send response_format; True = always send when the prompt requests
+        # JSON.
+        self.json_mode = json_mode
         # Session per adapter so a deadline can interrupt a hung read
         # (pilot #1549: the DeepSeek/OpenRouter API stalls mid-chunked-response;
         # requests.post per-call leaks the socket — close() on deadline kills it).
@@ -117,8 +127,10 @@ class OpenRouterModel:
         # requests JSON — DeepSeek returns HTTP 400 if the mode is set but the
         # prompt doesn't contain the text "json" (case-insensitive substring).
         # Non-JSON calls (the preflight billing probe, ping, reader/judge
-        # prompts) must NOT carry the mode.
-        if _should_send_json_mode(system, user):
+        # prompts) must NOT carry the mode. #1987 Task 3: the per-instance
+        # ``json_mode=False`` pin (the ask lane) NEVER sends it — the
+        # structural override beats the content heuristic.
+        if self.json_mode is not False and _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
         # Enable thinking for reasoning models
         if self.thinking_budget > 0:
@@ -205,8 +217,10 @@ class DeepSeekDirectModel(OpenRouterModel):
         #
         # #1782: gate on the prompt actually requesting JSON — DeepSeek 400s
         # when json_object mode is set without the text "json" in the prompt
-        # (the preflight probe / ping prompts lack it).
-        if _should_send_json_mode(system, user):
+        # (the preflight probe / ping prompts lack it). #1987 Task 3: the
+        # per-instance ``json_mode=False`` pin (the ask lane) structurally
+        # overrides the content heuristic.
+        if self.json_mode is not False and _should_send_json_mode(system, user):
             body["response_format"] = {"type": "json_object"}
         # #1790: the flash family runs NON-reasoning. The legacy
         # alias (routed to v4-flash non-thinking) was retired upstream
@@ -502,6 +516,15 @@ class RoutingModel:
         self._failed_over = False
         # M3 (#1524, GATE-2): surfaced from the inner adapter after each call.
         self.last_finish_reason: str | None = None
+        # #1987 Task 3: the RESOLVED SPEC (the wire id the serving adapter
+        # carries — ``_direct_wire_id`` strips the family prefix on the direct
+        # lane; the full spec on the OpenRouter lane) + per-call usage
+        # forwards, mirrored from the serving adapter after each call (same
+        # pattern as ``last_finish_reason``). The ask response's ``model``
+        # field and per-call token capture read these.
+        self.model: str = getattr(primary, "id", "")
+        self.last_prompt_tokens: int = 0
+        self.last_completion_tokens: int = 0
 
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
@@ -528,6 +551,10 @@ class RoutingModel:
                                max_tokens=max_tokens)
         self.last_route = adapter.provider
         self.last_finish_reason = getattr(adapter, "last_finish_reason", None)
+        # #1987 Task 3: per-call usage + resolved-spec forwards.
+        self.last_prompt_tokens = getattr(adapter, "last_prompt_tokens", 0)
+        self.last_completion_tokens = getattr(adapter, "last_completion_tokens", 0)
+        self.model = getattr(adapter, "id", self.model)
         if failover:
             self.route = adapter.provider
             self.failover_used = True
@@ -595,11 +622,13 @@ def _direct_wire_id(model_id: str) -> str:
     return _strip_family_prefix(model_id)
 
 
-def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
+def _build_single(provider: str, model_id: str, *, max_tokens, temperature,
+                 json_mode: bool | None = None):
     if provider == "deepseek-direct":
         return DeepSeekDirectModel(
             _direct_wire_id(model_id),
-            max_tokens=max_tokens, temperature=temperature)
+            max_tokens=max_tokens, temperature=temperature,
+            json_mode=json_mode)
     if provider == "venice":
         # Venice's catalog serves the documented flash id (docstring). A
         # wrong id fails LOUD via preflight (config-4xx → fatal gate), never
@@ -607,8 +636,10 @@ def _build_single(provider: str, model_id: str, *, max_tokens, temperature):
         # (#1549).
         return VeniceModel(
             _strip_family_prefix(model_id),
-            max_tokens=max_tokens, temperature=temperature)
-    return OpenRouterModel(model_id, max_tokens=max_tokens, temperature=temperature)
+            max_tokens=max_tokens, temperature=temperature,
+            json_mode=json_mode)
+    return OpenRouterModel(model_id, max_tokens=max_tokens,
+                           temperature=temperature, json_mode=json_mode)
 
 
 class RotatingModel:
@@ -630,7 +661,7 @@ class RotatingModel:
     (the truncation signal — read from the serving adapter), ``close()``
     (interrupt a hung read — the #1655 fix, applied to the active adapter)."""
     def __init__(self, providers: list, *, cooldown_s: float = 300.0,
-                 weights: list[float] | None = None):
+                 weights: list[float] | None = None, model: str | None = None):
         self.providers = providers
         self.cooldown_s = cooldown_s
         # Pilot #1549 (scale research): weighted rotation — each provider's
@@ -644,6 +675,14 @@ class RotatingModel:
         self.errors: list[str] = []
         self.last_finish_reason: str | None = None
         self.route = providers[0].provider if providers else None
+        # #1987 Task 3: the resolved-spec + per-call usage forwards (mirrored
+        # from the serving adapter; ``model`` is the serving lane's wire id —
+        # NOT the raw model_id spec, so RoutingModel and RotatingModel report
+        # the SAME format).
+        self.model: str = (getattr(providers[0], "id", "")
+                           if providers else (model or ""))
+        self.last_prompt_tokens: int = 0
+        self.last_completion_tokens: int = 0
 
     @property
     def provider(self) -> str:
@@ -666,6 +705,10 @@ class RotatingModel:
                 out = p.complete(system=system, user=user, max_tokens=max_tokens)
                 self.route = p.provider
                 self.last_finish_reason = getattr(p, "last_finish_reason", None)
+                # #1987 Task 3: per-call usage + resolved-spec forwards.
+                self.last_prompt_tokens = getattr(p, "last_prompt_tokens", 0)
+                self.last_completion_tokens = getattr(p, "last_completion_tokens", 0)
+                self.model = getattr(p, "id", self.model)
                 return out
             except Exception as e:
                 last_err = e
@@ -746,7 +789,8 @@ REGISTRY_KEY_TO_ID = _REGISTRY_KEY_TO_ID
 
 def build_extractor_model(model_id: str | None = None, *,
                           max_tokens: int | None = 4000,
-                          temperature: float = 0.0) -> RoutingModel:
+                          temperature: float = 0.0,
+                          json_mode: bool | None = None) -> RoutingModel:
     """Production entry — build the routing extractor model (D7).
 
     Resolves (primary, fallback) via ``resolve_extractor_provider()`` and
@@ -758,7 +802,13 @@ def build_extractor_model(model_id: str | None = None, *,
     adapter (back-compat for direct callers / ``TestModelAdapterBounds``);
     fail-closed is enforced at the pipeline gates, not here. An explicit
     ``TORTOISE_EXTRACTOR_PROVIDER`` whose key is absent raises ValueError
-    (config error, everywhere)."""
+    (config error, everywhere).
+
+    ``json_mode`` (#1987 Task 3): threaded to every built adapter — None
+    keeps the extraction lane's content-heuristic behavior unchanged;
+    False structurally disables ``response_format`` on the ask lane;
+    True always sends it when the prompt requests JSON.
+    """
     if model_id is None:
         model_id = (os.environ.get("TORTOISE_EXTRACT_MODEL", "").strip()
                     or "deepseek/deepseek-v4-flash")
@@ -769,7 +819,7 @@ def build_extractor_model(model_id: str | None = None, *,
     if not pool_names:
         pool_names = ["openrouter"]  # lenient no-key default (D3)
     providers = [_build_single(p, model_id, max_tokens=max_tokens,
-                               temperature=temperature)
+                               temperature=temperature, json_mode=json_mode)
                  for p in pool_names]
     # Pilot #1549: 3+ configured providers → the rotating pool (spread the
     # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
@@ -784,6 +834,29 @@ def build_extractor_model(model_id: str | None = None, *,
         weights = {"venice": 0.50, "openrouter": 0.35, "deepseek-direct": 0.15}
         w = [weights.get(p.provider, 0.33) for p in ordered]
         return RotatingModel(ordered, cooldown_s=_failover_cooldown_seconds(),
-                             weights=w)
+                             weights=w, model=model_id)
     return RoutingModel(providers[0], providers[1] if len(providers) > 1 else None,
                         cooldown_s=_failover_cooldown_seconds())
+
+
+def build_reader_model(model_id: str | None = None, *,
+                       max_tokens: int = 500,
+                       temperature: float = 0.0) -> RoutingModel:
+    """Build the ask-lane reader model (#1987 Task 3).
+
+    ``model_id=None`` resolves ``TORTOISE_ASK_MODEL`` (mirroring
+    ``build_extractor_model``'s ``TORTOISE_EXTRACT_MODEL`` fallback),
+    hardcoded ``deepseek/deepseek-v4-flash`` as the final fallback.
+    The ask lane pins ``json_mode=False`` structurally — retrieved memory
+    can mention "json" and ``_should_send_json_mode`` must never fire
+    ``response_format`` on a free-text answer (the eval lane was immune via
+    ``response_format=None``). Inherits ``build_extractor_model``'s
+    routing/failover: deepseek-direct primary + OpenRouter fallback (429/5xx
+    fails over per the existing adapter policy). Official reader call shape:
+    temperature 0, bounded ``max_tokens`` (default 500).
+    """
+    if model_id is None:
+        model_id = (os.environ.get("TORTOISE_ASK_MODEL", "").strip()
+                    or "deepseek/deepseek-v4-flash")
+    return build_extractor_model(model_id, max_tokens=max_tokens,
+                                 temperature=temperature, json_mode=False)

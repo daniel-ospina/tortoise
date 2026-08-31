@@ -19,7 +19,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Hashable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
@@ -54,6 +54,7 @@ from tortoise.projection import (
 from tortoise.quota import (
     DEFAULT_MAX_SESSIONS,  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
 )
+from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     TortoiseSDK,
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
@@ -64,6 +65,7 @@ from tortoise.sdk import (
 )
 from tortoise.security import redact_error  # billing webhook + checkout error logging
 from tortoise.session_auth import get_current_user, verify_session_jwt
+from tortoise.transport import ask_exposure_enabled
 
 _logger = logging.getLogger(__name__)
 
@@ -476,6 +478,78 @@ async def _unhandled_exception_handler(request: Request, exc: Exception):
             "Access-Control-Allow-Credentials": "true",
         },
     )
+
+
+# ── #1987 Task 7: path-scoped /v1/ask exception handlers ───────────────────
+# The canonical error body ({"error": {"code": …, "retry_after": …}}) ships
+# ONLY on /v1/ask; every other path/status keeps FastAPI's default
+# {"detail": …} via the CAPTURED default handler (P1-3). Mechanism pinned:
+# (i) capture the ORIGINAL default handler BEFORE registering the override —
+# keyed on the STARLETTE HTTPException class (fastapi.HTTPException is a
+# distinct subclass; the dict lookup would KeyError — P1-4); (ii) translate
+# by STATUS with a detail check; (iii) everything else → the captured
+# default's response, awaited (the default handler is a coroutine — P1-4),
+# with exc.headers preserved; never re-raise (→ ServerErrorMiddleware → the
+# app-wide handler → 500), never middleware.
+import starlette.exceptions as _starlette_exceptions  # noqa: E402
+from fastapi.exceptions import RequestValidationError as _RequestValidationError  # noqa: E402
+
+_ask_default_http_exc_handler = app.exception_handlers[
+    _starlette_exceptions.HTTPException]
+_ask_default_validation_handler = app.exception_handlers.get(
+    _RequestValidationError)
+
+
+@app.exception_handler(_starlette_exceptions.HTTPException)
+async def _ask_path_scoped_http_handler(request: Request, exc: HTTPException):
+    """Path-scoped translation: /v1/ask → the canonical error body for the
+    ask lane's OWN statuses (401 STATUS-derived — the auth dependency's
+    401 details are non-canonical, P1-3; 400 detail-keyed only when the
+    detail IS a canonical code; 429/502/504 with a canonical detail).
+    EVERYTHING else (incl. the 403 suspended-team passthrough — the
+    ``_suspended_detail()`` DICT) → the captured default handler's response
+    with ``exc.headers`` preserved."""
+    from tortoise.schemas import (  # noqa: I001
+        ASK_ERROR_CODES, CODE_QUOTA_EXCEEDED, CODE_UNAUTHORIZED,
+    )
+    if request.url.path == "/v1/ask":
+        status = exc.status_code
+        detail = exc.detail
+        if status == 401:
+            return JSONResponse({"error": {"code": CODE_UNAUTHORIZED}},
+                                status_code=401, headers=exc.headers)
+        if (status in (400, 429, 502, 504)
+                and isinstance(detail, str) and detail in ASK_ERROR_CODES):
+            body = {"error": {"code": detail}}
+            # The documented 429 body contract ships ``retry_after`` IN THE
+            # BODY (the MCP surface reads it from the body; the SDK falls
+            # back to it when the header is unparseable) — the header alone
+            # would leave the body field absent (P2). Mirror the seconds
+            # when the Retry-After header is present.
+            if (status == 429 and detail == CODE_QUOTA_EXCEEDED
+                    and exc.headers and exc.headers.get("Retry-After")):
+                # RFC 7231 allows an HTTP-date Retry-After — the body field
+                # is omitted when it cannot be parsed as seconds.
+                with suppress(TypeError, ValueError):
+                    body["error"]["retry_after"] = int(
+                        float(exc.headers["Retry-After"]))
+            return JSONResponse(body, status_code=status, headers=exc.headers)
+    return await _ask_default_http_exc_handler(request, exc)
+
+
+@app.exception_handler(_RequestValidationError)
+async def _ask_path_scoped_validation_handler(request: Request,
+                                              exc: _RequestValidationError):
+    """Malformed JSON body on /v1/ask → 400 ``invalid_question`` (raised at
+    body-PARSE time, before any field validator runs — P1-3); other paths
+    keep FastAPI's default 422 behavior via the captured default handler."""
+    from tortoise.schemas import CODE_INVALID_QUESTION
+    if request.url.path == "/v1/ask":
+        return JSONResponse({"error": {"code": CODE_INVALID_QUESTION}},
+                            status_code=400)
+    if _ask_default_validation_handler is not None:
+        return await _ask_default_validation_handler(request, exc)
+    return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 # ── Dreaming queue (#85) ────────────────────────────────────────────────
 # Per-tenant async queue: writes enqueue the affected roots; a cooperative
@@ -1830,6 +1904,12 @@ class TeamInfoResponse(BaseModel):
     customer_email: str | None = None
     checkout_price_id: str | None = None
     checkout_price_ids: dict[str, str] = {}
+    # #1987 Task 6: per-query ask usage for the current billing period
+    # (zeros for a fresh team with no ask records — never 500, P2-14).
+    ask_calls: int = 0
+    ask_tokens_in: int = 0
+    ask_tokens_out: int = 0
+    ask_cost_usd: float = 0.0
 
 
 # ── Billing: Checkout + Portal request/response models (#310, Task 5) ───────
@@ -2819,6 +2899,128 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     return {"results": out, "count": len(out)}
 
 
+# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE is off by default ──────
+# The READER (tortoise/reader.py) stays shipped — it is the eval's reader
+# (the 500-Q LongMemEval benchmark runs through it; the eval re-exports the
+# product reader). The HOSTED ask EXPOSURE is gated: no /v1/ask route in
+# the served app unless TORTOISE_ENABLE_ASK=1 (tests/dev). The route
+# handler + the path-scoped error translation stay in the codebase,
+# tested, ready — just not served to customers until the reader-model
+# decision is made (the benchmark will use a strong reader model).
+
+
+_ASK_ROUTE_REGISTERED = False
+
+
+def _register_ask_route() -> None:
+    """Register the /v1/ask route on the module-level app (idempotent).
+    Called at import when ``TORTOISE_ENABLE_ASK=1``; tests call it to
+    exercise the ON state without a subprocess re-import."""
+    global _ASK_ROUTE_REGISTERED
+    if _ASK_ROUTE_REGISTERED:
+        return
+    app.add_api_route("/v1/ask", ask_question, methods=["POST"],
+                      response_model=None)
+    _ASK_ROUTE_REGISTERED = True
+
+
+async def ask_question(body: AskRequest,
+                       team: dict = Depends(get_current_team)):  # noqa: B008
+    """Team-scoped answer surface (#1987 Task 7): one bounded RAG pass over
+    the team's memory — retrieval → annotation → dedup → context assembly →
+    ONE LLM reader call (the two-phase commit/abstain discipline) → metered
+    per-query cost.
+
+    Budget: per-team per-minute LLM budget (60/min) → 429 ``quota_exceeded``
+    + Retry-After; per-team in-flight cap 4 → 429 ``in_flight_limit``; the
+    shared ``run_ask_bounded`` wrapper bounds concurrency (global
+    Semaphore(8)) and total per-request latency (``_ASK_TIMEOUT_S`` → 504
+    ``timeout``). Error body: ``{"error": {"code": …, "retry_after": …}}``
+    with NO provider/model internals (the #329 scrub) — via the path-scoped
+    HTTPException handler. Metering: ``sdk.ask(team_id=team["team_id"])`` —
+    the SINGLE call site (the SDK local lane records with an explicit
+    team_id; ``team["team_id"]`` from the auth dependency — the /v1/search
+    pattern, NOT ``_current_team_id.get()`` which is MCP-only, P1-2); zero
+    records when the reader/retrieval call FAILS (honest metering).
+    """
+    import logging as _ask_log  # noqa: I001
+    from datetime import datetime as _dt2
+    from tortoise.quota import (
+        AskBoundedTimeoutError,
+        AskInFlightLimitError,
+        ask_budget_retry_after,
+        ask_in_flight_capacity,
+        ask_llm_budget_available,
+        run_ask_bounded,
+    )
+    from tortoise.schemas import (
+        CODE_IN_FLIGHT_LIMIT,
+        CODE_QUOTA_EXCEEDED,
+        CODE_READER_UNAVAILABLE,
+        CODE_RETRIEVAL_UNAVAILABLE,
+        CODE_TIMEOUT,
+    )
+    from tortoise.exceptions import (
+        AskQuotaExceeded,
+        AskReaderUnavailable,
+        AskRetrievalUnavailable,
+        AskValidationError,
+    )
+
+    team_id = team.get("team_id")
+    # Budget gate (per-team per-minute — shared with the MCP handler) — BUT
+    # only charge a slot when the per-team in-flight cap still has room: a
+    # request run_ask_bounded will 429 ``in_flight_limit`` must not burn
+    # budget (P2).
+    if ask_in_flight_capacity(team_id) and not ask_llm_budget_available(team_id):
+        raise HTTPException(
+            status_code=429, detail=CODE_QUOTA_EXCEEDED,
+            headers={"Retry-After": str(int(ask_budget_retry_after(team_id)))})
+    t0 = _dt2.now(UTC)
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        result = await run_ask_bounded(
+            sdk.ask, team_id, body.question,
+            question_type=body.question_type,
+            question_date=body.question_date,
+            _sdk_team_id=team_id,
+        )
+    except AskValidationError as e:
+        raise HTTPException(status_code=400, detail=e.code) from e
+    except AskQuotaExceeded:
+        raise HTTPException(
+            status_code=429, detail=CODE_QUOTA_EXCEEDED,
+            headers={"Retry-After": str(int(ask_budget_retry_after(team_id)))}) from None
+    except AskInFlightLimitError:
+        raise HTTPException(status_code=429,
+                            detail=CODE_IN_FLIGHT_LIMIT) from None
+    except AskBoundedTimeoutError:
+        raise HTTPException(status_code=504, detail=CODE_TIMEOUT) from None
+    except AskReaderUnavailable:
+        raise HTTPException(status_code=502,
+                            detail=CODE_READER_UNAVAILABLE) from None
+    except AskRetrievalUnavailable:
+        raise HTTPException(status_code=502,
+                            detail=CODE_RETRIEVAL_UNAVAILABLE) from None
+    except Exception:
+        _ask_log.getLogger("tortoise.api").exception(
+            "ask failed (unexpected): team=%s", team_id)
+        raise
+    finally:
+        sdk.close()
+    # ``duration_ms`` = hosted wall-clock from request receipt to response.
+    result["duration_ms"] = max(0, int((_dt2.now(UTC) - t0).total_seconds() * 1000))
+    return result
+
+
+# #2013 PRODUCT-GATING: the /v1/ask route is served ONLY when the exposure
+# flag is on (the handler above is defined unconditionally — the route is
+# what is gated). TORTOISE_ENABLE_ASK=1 (tests/dev) registers it; the
+# default hosted app serves no /v1/ask (404).
+if ask_exposure_enabled():
+    _register_ask_route()
+
+
 @app.get("/v1/topics/{topic}/summary")
 async def topic_summary(
     topic: str,
@@ -2889,6 +3091,11 @@ async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # 
     from tortoise.metering import get_current_usage
     usage = get_current_usage(team["team_id"])
 
+    # #1987 Task 6: ask usage — best-effort read; any failure degrades to
+    # the zero-usage view (never 500).
+    from tortoise.metering import get_ask_usage
+    ask_usage = get_ask_usage(team["team_id"])
+
     return TeamInfoResponse(
         team_id=team["team_id"],
         tier=team["tier"],
@@ -2908,6 +3115,14 @@ async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # 
         write_ops_period=usage["period"],
         overage_eligible=usage["overage_eligible"],
         overage_cost_usd=usage["overage_cost_usd"],
+        # #1987 Task 6: ask usage for the current period — the read degrades
+        # to the zero-usage view on failure (never 500), and a fresh team
+        # with no records renders ZEROS (the MERGE only creates the record
+        # on first write — P2-14).
+        ask_calls=ask_usage.get("ask_calls", 0),
+        ask_tokens_in=ask_usage.get("ask_tokens_in", 0),
+        ask_tokens_out=ask_usage.get("ask_tokens_out", 0),
+        ask_cost_usd=ask_usage.get("ask_cost_usd", 0.0),
         # #1082 (PR1): anon flag drives the dashboard claim card — the shared
         # is_anon_team predicate (Supabase mode only; registry = False).
         anon=_team_is_anon(team["team_id"]),

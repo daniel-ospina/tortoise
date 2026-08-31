@@ -84,6 +84,31 @@ from datetime import datetime, timezone
 
 _logger = logging.getLogger(__name__)
 
+#: #1987 Task 6: per-team increment serialization — the MERGE+coalesce
+#: increment is atomic per statement on server-mode FalkorDB, but embedded
+#: FalkorDBLite connections race the read-modify-write (the pre-existing
+#: write-op path has the same shape); the ask meter closes it in-process
+#: with a per-team lock (cross-process races remain possible and are
+#: documented best-effort, mirroring the per-process budget bucket).
+import threading as _threading  # noqa: E402
+from weakref import WeakValueDictionary as _WeakValueDictionary  # noqa: E402
+
+#: Per-team increment-serialization lock registry — BOUNDED by construction:
+#: a WeakValueDictionary keeps each lock alive only while some thread holds
+#: it (a released lock with no holder is GC'd), so a fresh team id never leaks
+#: a permanent registry entry (the ask build-lock finding's mirror).
+_ask_meter_locks: _WeakValueDictionary = _WeakValueDictionary()
+_ask_meter_locks_guard = _threading.Lock()
+
+
+def _ask_meter_lock(team_id: str) -> _threading.Lock:
+    with _ask_meter_locks_guard:
+        lock = _ask_meter_locks.get(team_id)
+        if lock is None:
+            lock = _threading.Lock()
+            _ask_meter_locks[team_id] = lock
+        return lock
+
 # ── Period helpers ───────────────────────────────────────────────────────────
 
 def _current_period() -> str:
@@ -271,6 +296,161 @@ def _check_thresholds(
 def _reset_thresholds_for_tests() -> None:
     """Clear the in-memory threshold tracker (test helper only)."""
     _thresholds_fired.clear()
+
+
+# ── Ask metering (#1987 Task 6) ──────────────────────────────────────────
+
+#: Ask-lane metering rates: verified deepseek-direct published rates
+#: $0.14/M input, $0.28/M output × a single documented ×1.5 safety factor
+#: (covers the OpenRouter fallback-lane markup — the resolved lane may route
+#: some traffic there). deepseek-direct is the CHEAPEST lane, so the meter
+#: over-covers. Worst case ~9.2k in + 500 out ≈ $0.0014-0.0023/query, ~5-7×
+#: under the $0.01 target.
+ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m": 0.42}
+
+
+def estimate_ask_cost_usd(tokens_in: int, tokens_out: int,
+                          rates: dict | None = None) -> float:
+    """Estimate the per-query LLM cost at the ask-lane over-covered rates
+    (#1987 Task 6) — the producer of the response's ``cost_estimate_usd``
+    field (honestly named an ESTIMATE, never an exact bill).
+
+    ``rates`` defaults to ``ASK_METER_RATES`` (``{"prompt_per_1m": …,
+    "completion_per_1m": …}``); the consumed input quantity is
+    ``input_tokens = estimate_tokens_ask(system_prompt_for(qtype)) +
+    estimate_tokens_ask(rendered_context)`` (Task 5).
+    """
+    r = rates if rates is not None else ASK_METER_RATES
+    return (tokens_in / 1_000_000 * r["prompt_per_1m"]
+            + tokens_out / 1_000_000 * r["completion_per_1m"])
+
+
+def _selfhost_transport_active() -> bool:
+    """True while a selfhost HTTP MCP transport is serving the request — the
+    transport-keyed exemption channel (tortoise/transport.py; the value
+    "selfhost" is NEVER the exemption key — a hosted team with the raw id
+    "selfhost" is legal and MUST record usage, P1-4)."""
+    from tortoise.transport import _selfhost_transport
+    return _selfhost_transport.get()
+
+
+def record_ask_usage(team_id: str | None, tier: str | None = None, *,
+                     calls: int = 1, tokens_in: int = 0, tokens_out: int = 0,
+                     cost_usd: float = 0.0,
+                     _selfhost_transport: bool = False) -> dict | None:
+    """Record a per-query ask usage increment (#1987 Task 6).
+
+    Best-effort, non-fatal (metering failures never block the answer).
+    Extends the ``:MeteringRecord`` (registry) with additive fields
+    ``ask_calls``/``ask_tokens_in``/``ask_tokens_out``/``ask_cost_usd`` via
+    the MERGE+coalesce pattern (mirrors ``record_write_ops``); Supabase mode
+    routes through the ``metering_increment_ask`` seam.
+
+    Exemptions (no record, zero writes): ``not team_id`` (stdio/None) OR the
+    selfhost-transport ContextVar (``_selfhost_transport`` — set True ONLY
+    by the selfhost HTTP MCP transport; the SELFHOST_TEAM_ID value is never
+    the exemption key). ``tier`` stays None for the ask lane (tier-based ask
+    budgets are OUT of v1).
+
+    Returns a dict summary or None (exempt/no-op/failure).
+    """
+    if not team_id or _selfhost_transport or _selfhost_transport_active():
+        return None
+    period = _current_period()
+    now_iso = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    with _ask_meter_lock(team_id):
+        return _record_ask_usage_locked(team_id, period, now_iso,
+                                        calls=calls, tokens_in=tokens_in,
+                                        tokens_out=tokens_out,
+                                        cost_usd=cost_usd)
+
+
+def _record_ask_usage_locked(team_id: str, period: str, now_iso: str, *,
+                             calls: int, tokens_in: int, tokens_out: int,
+                             cost_usd: float) -> dict | None:
+    """The serialized increment body (under the per-team lock — embedded
+    concurrency-safe)."""
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_increment_ask,
+            )
+            metering_increment_ask(get_control_plane(), team_id, period,
+                                   calls=calls, tokens_in=tokens_in,
+                                   tokens_out=tokens_out, cost_usd=cost_usd)
+            return {"period": period, "ask_calls": calls,
+                    "ask_tokens_in": tokens_in,
+                    "ask_tokens_out": tokens_out,
+                    "ask_cost_usd": cost_usd}
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        reg.query(
+            "MERGE (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "SET m.ask_calls = coalesce(m.ask_calls, 0) + $calls, "
+            "    m.ask_tokens_in = coalesce(m.ask_tokens_in, 0) + $tin, "
+            "    m.ask_tokens_out = coalesce(m.ask_tokens_out, 0) + $tout, "
+            "    m.ask_cost_usd = coalesce(m.ask_cost_usd, 0) + $cost, "
+            "    m.updated_at = $now",
+            params={"tid": team_id, "period": period, "calls": calls,
+                    "tin": tokens_in, "tout": tokens_out, "cost": cost_usd,
+                    "now": now_iso},
+        )
+        return {"period": period, "ask_calls": calls,
+                "ask_tokens_in": tokens_in, "ask_tokens_out": tokens_out,
+                "ask_cost_usd": cost_usd}
+    except Exception as e:
+        _logger.warning(
+            "ask metering increment failed (non-fatal): team=%s period=%s "
+            "error=%s", team_id, period, e,
+        )
+        return None
+
+
+def get_ask_usage(team_id: str) -> dict:
+    """Ask usage for *team_id* in the current billing period (#1987 Task 6).
+
+    Returns ``{ask_calls, ask_tokens_in, ask_tokens_out, ask_cost_usd}`` for
+    the team's current period — ZEROS for a team with no ask records yet (a
+    successful read returning NO row is not an error; the MERGE only creates
+    the record on the first write — P2-14). Read failures degrade to the
+    zero-usage view (never 500).
+    """
+    period = _current_period()
+    zeros = {"ask_calls": 0, "ask_tokens_in": 0, "ask_tokens_out": 0,
+             "ask_cost_usd": 0.0}
+    if not team_id:
+        return {**zeros, "period": period}
+    try:
+        if _supabase_mode():
+            from tortoise.supabase_control import (  # noqa: I001
+                get_control_plane, metering_get_usage,
+            )
+            row = metering_get_usage(get_control_plane(), team_id, period)
+            return {**zeros, **{k: row.get(k, 0) for k in zeros},
+                    "period": period}
+        sdk = _reg_sdk()
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (m:MeteringRecord {team_id: $tid, period: $period}) "
+            "RETURN m.ask_calls, m.ask_tokens_in, m.ask_tokens_out, "
+            "m.ask_cost_usd",
+            params={"tid": team_id, "period": period},
+        ).result_set
+        if not rows:
+            return {**zeros, "period": period}
+        return {
+            "ask_calls": int(rows[0][0] or 0),
+            "ask_tokens_in": int(rows[0][1] or 0),
+            "ask_tokens_out": int(rows[0][2] or 0),
+            "ask_cost_usd": float(rows[0][3] or 0.0),
+            "period": period,
+        }
+    except Exception as e:
+        _logger.warning(
+            "ask usage query failed (degrading to zero view): team=%s "
+            "period=%s error=%s", team_id, period, e,
+        )
+        return {**zeros, "period": period}
 
 
 # ── Usage query ─────────────────────────────────────────────────────────────

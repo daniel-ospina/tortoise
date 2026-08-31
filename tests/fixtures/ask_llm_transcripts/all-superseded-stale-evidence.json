@@ -1,0 +1,25 @@
+{
+  "completion": "The gym schedule is Monday, Wednesday, Friday (per the superseded entry).",
+  "expect_superseded_markers": true,
+  "expected_abstained": false,
+  "fixture": "all-superseded-stale-evidence",
+  "prompt_hash": "dc4dc5e705030db076657f725b59c3ab227fe6b5ebdb932a626fecb0fdd5c7e2",
+  "qtype": null,
+  "question": "what is the current gym schedule?",
+  "question_date": "2026-08-29",
+  "seeds": [
+    {
+      "content": "The gym schedule is Monday, Wednesday, Friday.",
+      "label": "old",
+      "session_date": "2026-08-01",
+      "supersedes_into": "new"
+    },
+    {
+      "content": "The gym schedule is now Tuesday and Thursday.",
+      "label": "new",
+      "session_date": "2026-08-20"
+    }
+  ],
+  "user_message": "Memory context:\nCurrent Date: 2026-08-29\n\n[session ?] (session date 2026-08-01) [SUPERSEDED BY: The gym schedule is now Tuesday and Thursday.] The gym schedule is Monday, Wednesday, Friday.\n\n[session ?] (session date 2026-08-20) [SUPERSEDES: The gym schedule is Monday, Wednesday, Friday.] The gym schedule is now Tuesday and Thursday.\n\nQuestion: what is the current gym schedule?\n\nAnswer:",
+  "user_message_hash": "c9a977793239e68e5b36dc344906ce61e658058342833f6ac19a89547a056de3"
+}

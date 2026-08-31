@@ -84,6 +84,60 @@ class TestSearch:
             assert hits[0]["kind"] == "decision"
 
 
+class TestAsk:
+    """Self-host /v1/ask (#1987 Task 9): 200 12-field shape, canonical 400,
+    and non-ask paths keep the default error body (path-scoped handler)."""
+
+    def _install_fake_reader(self, monkeypatch, reply="selfhost answer"):
+        import tortoise.sdk as sdk_mod
+        calls = {"n": 0}
+
+        def _factory():
+            class _R:
+                last_completion_tokens = 12
+
+                def complete(self, *, system, user):
+                    calls["n"] += 1
+                    return reply
+
+                def close(self):
+                    pass
+            return _R()
+
+        monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", _factory)
+        return calls
+
+    def test_ask_returns_200_shape(self, monkeypatch, tmp_path):
+        tc = _client_for_env(monkeypatch, tmp_path)
+        calls = self._install_fake_reader(monkeypatch)
+        with tc:
+            r = tc.post("/v1/ask", json={"question": "what is the schedule?"})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert set(body) == {"answer", "abstained", "question_type",
+                                 "question_date", "evidence", "context_tokens",
+                                 "model", "provider", "route", "cost_estimate_usd",
+                                 "duration_ms", "retrieval_degraded"}
+            assert body["answer"] == "selfhost answer"
+            assert calls["n"] == 1
+
+    def test_ask_empty_question_400(self, monkeypatch, tmp_path):
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.post("/v1/ask", json={"question": ""})
+            assert r.status_code == 400, r.text
+            assert r.json() == {"error": {"code": "invalid_question"}}
+
+    def test_unknown_path_keeps_default_body(self, monkeypatch, tmp_path):
+        """Non-ask paths keep FastAPI's default {"detail": …} — the
+        path-scoped /v1/ask handler never touches them."""
+        tc = _client_for_env(monkeypatch, tmp_path)
+        with tc:
+            r = tc.get("/v1/points/nonexistent-id")
+            assert r.status_code == 404
+            assert "detail" in r.json()
+
+
 class TestStaticAuth:
     def test_no_key_401(self, monkeypatch, tmp_path):
         tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="rest-secret")
