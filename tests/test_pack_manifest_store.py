@@ -603,12 +603,32 @@ class TestIsolation:
 
 class TestConcurrency:
     def test_double_upload_single_activation(self, client):
+        """Concurrent double-upload of the same manifest converges to exactly
+        one activation (idempotent MERGE + per-(graph, namespace) lock
+        #1307). Deterministic synchronization (#2065): the barrier forces
+        the two uploads to overlap, the 201 responses are the persistence
+        barrier (upsert's MERGE completes server-side before the response is
+        sent), and a failed upload fails THIS test with its actual cause
+        instead of a misleading "expected exactly one PackManifest, got 0"
+        (the #2065 CI flake showed 0 total manifests — both writes had
+        failed, not a dedup violation).
+        """
         from tortoise.pack_manifest_store import get_tenant_manifests
-        results = []
+        results: list[int] = []
+        errors: list[BaseException] = []
+        # Both uploads must be in flight simultaneously — without the
+        # barrier the threads could (rarely) serialize and never exercise
+        # the concurrent-write path at all.
+        barrier = threading.Barrier(2)
 
         def _post():
-            r = client.post("/v1/packs/manifests",
-                            json={"manifest_yaml": VALID_MANIFEST})
+            try:
+                barrier.wait(timeout=10)
+                r = client.post("/v1/packs/manifests",
+                                json={"manifest_yaml": VALID_MANIFEST})
+            except BaseException as e:  # thread exceptions must surface in the main thread
+                errors.append(e)
+                return
             results.append(r.status_code)
 
         threads = [threading.Thread(target=_post) for _ in range(2)]
@@ -616,10 +636,20 @@ class TestConcurrency:
             t.start()
         for t in threads:
             t.join()
+
+        # The 201 responses ARE the synchronization barrier: once both
+        # uploads return, their writes are durable and visible. A failed
+        # upload would make the invariant check below vacuous — fail here
+        # with the actual cause instead.
+        assert not errors, f"upload thread raised: {errors!r}"
+        assert set(results) == {201}, \
+            f"both uploads must succeed — got statuses {results}"
+
         sdk = _team_sdk()
         ms = get_tenant_manifests(sdk)
-        assert len([m for m in ms if m["namespace"] == "tenant-ops"]) == 1, \
-            f"expected exactly one PackManifest, got {len(ms)}"
+        tenant = [m for m in ms if m["namespace"] == "tenant-ops"]
+        assert len(tenant) == 1, \
+            f"expected exactly one PackManifest, got {len(tenant)} (total {len(ms)})"
 
 
 # ── Deployment gate + tenant view ──────────────────────────────────────────
