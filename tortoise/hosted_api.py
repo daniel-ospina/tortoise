@@ -11700,13 +11700,15 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
             if body.fork not in _os.FORK_VALUES:
                 raise HTTPException(status_code=422,
                                     detail="fork must be 'self' or 'build'")
-            outcome = _os.write_fork(proj, team_id, body.fork)
+            outcome = _os.write_fork(proj, team_id, body.fork,
+                                     status_from_mirror=legacy_mirror)
             if outcome == "conflict":
                 raise HTTPException(
                     status_code=409,
                     detail={"message": "fork_already_set"})
         elif body.compact is not None:
-            outcome = _os.write_compact(proj, team_id, bool(body.compact))
+            outcome = _os.write_compact(proj, team_id, bool(body.compact),
+                                        status_from_mirror=legacy_mirror)
             if outcome == "conflict":
                 raise HTTPException(
                     status_code=409,

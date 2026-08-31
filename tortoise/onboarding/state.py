@@ -389,14 +389,16 @@ def write_completed_step(graph: Any, org_id: str, step_id: str, *,
 
 
 def write_fork(graph: Any, org_id: str, fork: str, *,
-               compact: bool = False) -> str:
+               compact: bool = False,
+               status_from_mirror: bool | None = None) -> str:
     """Set-once fork write. Returns 'set' (first write), 'same' (replay of
     the same value → 200), or 'conflict' (different value → 409).
     Atomic single statement; creates the node on write if absent (the
     create-on-write seam applies to every FLOW write)."""
     if fork not in FORK_VALUES:
         raise ValueError(f"invalid fork: {fork!r}")
-    params = {"org_id": org_id, "fork": fork}
+    status = STATUS_COMPLETE if status_from_mirror is True else STATUS_ACTIVE
+    params = {"org_id": org_id, "fork": fork, "os_status": status}
     params.update(_node_init_params(compact=compact))
     with _org_lock(org_id):
         res = _run(graph,
@@ -416,9 +418,12 @@ def write_fork(graph: Any, org_id: str, fork: str, *,
     return res.result_set[0][0]
 
 
-def write_compact(graph: Any, org_id: str, compact: bool) -> str:
+def write_compact(graph: Any, org_id: str, compact: bool, *,
+                  status_from_mirror: bool | None = None) -> str:
     """Set-once compact write (same contract as write_fork)."""
-    params = {"org_id": org_id, "compact": bool(compact)}
+    status = STATUS_COMPLETE if status_from_mirror is True else STATUS_ACTIVE
+    params = {"org_id": org_id, "compact": bool(compact),
+              "os_status": status}
     params.update(_node_init_params(compact=bool(compact)))
     with _org_lock(org_id):
         res = _run(graph,
