@@ -3517,3 +3517,53 @@ class TestEmbedderThreadSafety:
             denom = (np.linalg.norm(v0) * np.linalg.norm(vi))
             cos = float(np.dot(v0, vi) / denom) if denom else 0.0
             assert cos > 0.999, f"concurrent encodes diverged: cos={cos}"
+
+
+# ── #2032 body-sweep caps (internal + auth-gated surfaces) ─────────────────
+
+
+def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
+    """Chunked generator, NO content-length — forces the streaming-cap path."""
+    for _ in range(n_chunks):
+        yield b"x" * step
+
+
+class TestBodySweepCaps:
+    def test_provision_tenant_oversized_413(self, internal_client, monkeypatch):
+        """/internal/provision — oversized chunked body → 413 (registry lane;
+        in Supabase mode the 503 gate precedes the read, so the cap is
+        unreachable there by design)."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+        r = internal_client.post(
+            "/internal/provision", content=_oversized_chunked(),
+            headers={"Authorization": f"Bearer {_INTERNAL_KEY}"})
+        assert r.status_code == 413
+        assert r.json()["detail"] == ha_mod._BODY_413_DETAIL
+
+    def test_create_demo_graph_oversized_413(self, internal_client, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+        r = internal_client.post(
+            "/internal/demo", content=_oversized_chunked(),
+            headers={"Authorization": f"Bearer {_INTERNAL_KEY}"})
+        assert r.status_code == 413
+
+    def test_create_api_key_oversized_413(self, internal_client, monkeypatch):
+        """create_api_key — auth runs before the cap (401 first); the 413
+        must NOT be swallowed into the name=None catch-all."""
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setattr(ha_mod, "_BODY_MAX_BYTES", 256)
+        r = internal_client.post(
+            "/v1/team/keys", content=_oversized_chunked(),
+            headers={"content-type": "application/json"})
+        assert r.status_code == 413
+        assert r.json()["detail"] == ha_mod._BODY_413_DETAIL
+
+    def test_create_api_key_valid_body_still_mints(self, internal_client):
+        """An under-cap body still mints a key (the capped read is
+        byte-transparent)."""
+        r = internal_client.post(
+            "/v1/team/keys", json={"name": "sweep-label"})
+        assert r.status_code == 200, r.text
+        assert r.json()["key"].startswith("tt_")

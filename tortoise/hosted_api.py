@@ -890,7 +890,8 @@ async def provision_tenant(request: Request):
                    "disabled in Supabase control-plane mode (#765).",
         )
 
-    body = await request.json()
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
     team_id = body.get("team_id")
     team_name = body.get("team_name")
     api_key_hash = body.get("api_key_hash")
@@ -1452,6 +1453,7 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     from tortoise.supabase_control import (
         _QUOTA_SELECT,
         _TEAM_ADDITIVE_0015_TIER,
+        _TEAM_ADDITIVE_2040_TIER,
         _TEAM_ADDITIVE_BILLING_TIER,
         _TEAM_ADDITIVE_DKL_TIER,
         _TEAM_ADDITIVE_IMPORT_TIER,
@@ -1459,14 +1461,15 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     )
     row = _teams_row_fail_soft(
         cp, team_id, select=_QUOTA_SELECT,
-        # #1832: the FULL additive ladder (import tier dropped FIRST — newest
-        # migration first), same as resolve_api_key / recover_team_key. The
-        # #1230 import ledger + points-cap columns (last_import_sha256/
-        # max_points, migration 20260817000001) ride _QUOTA_SELECT; omitting
-        # the import tier made EVERY ladder attempt 400 (PGRST204) → terminal
-        # raise → HTTP 500 on /v1/team, /v1/team/keys, /v1/sessions,
-        # /v1/onboarding/state.
-        additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+        # #1832: the FULL additive ladder (newest migration tier dropped
+        # FIRST — 2040 marker, then import tier), same as resolve_api_key /
+        # recover_team_key. The #1230 import ledger + points-cap columns
+        # (last_import_sha256/max_points, migration 20260817000001) ride
+        # _QUOTA_SELECT; omitting a tier made EVERY ladder attempt 400
+        # (PGRST204) → terminal raise → HTTP 500 on /v1/team, /v1/team/keys,
+        # /v1/sessions, /v1/onboarding/state.
+        additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+                         _TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
                          _TEAM_ADDITIVE_0015_TIER,
                          _TEAM_ADDITIVE_BILLING_TIER])
     if row is None:
@@ -1996,7 +1999,8 @@ _IMPORT_ARTIFACT_VERSION = 1
 # an unbounded body through to buffering/decrypt; #1230 plan S4).
 _IMPORT_MAX_BYTES = 64 * 1024 * 1024
 # Idempotency-ledger / quarantine props on the Team node (control plane).
-_IMPORT_LEDGER_PROPS = ("last_import_sha256", "last_import_quarantined_sha256")
+_IMPORT_LEDGER_PROPS = ("last_import_sha256", "last_import_quarantined_sha256",
+                         "last_import_pack_failed_sha256")
 
 _SENSITIVE_OP_LIMITS = {
     "export": 20, "team_delete": 5, "import": 5, "pack_manifest": 5,
@@ -2948,7 +2952,10 @@ async def session_login(request: Request):
     hour-long 429.
     """
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         body = {}
     # Security review r2 (P3): a non-dict JSON body ([1,2,3], "abc", 42)
@@ -3343,7 +3350,8 @@ async def register_user(request: Request, response: Response):
     """
     await _check_register_rate_limit(request)
 
-    body = await request.json()
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
     # #308 (R6): Turnstile siteverify — fail-open only when secret unset.
     await _check_turnstile(request, body if isinstance(body, dict) else {})
     try:
@@ -3767,7 +3775,10 @@ async def email_signup(request: Request):
         raise
 
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(  # noqa: B904
             status_code=422,
@@ -4054,7 +4065,8 @@ async def create_demo_graph(request: Request):
     """
     _check_internal(request)
 
-    body = await request.json()
+    raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+    body = _json.loads(raw)
     team_id = body.get("team_id")
     if not team_id:
         raise HTTPException(status_code=400, detail="Missing team_id")
@@ -4082,8 +4094,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # failure mode for a mint.
     name = None
     try:
-        payload = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        payload = _json.loads(raw)
         name = _clean_key_label(payload.get("name")) if isinstance(payload, dict) else None
+    except HTTPException:
+        raise
     except Exception:
         name = None
     import uuid
@@ -5675,7 +5690,11 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
     # semantic violations with field reasons). The derived payload has NO
     # turns — the legacy turn cap (POST /v1/sessions) does not apply.
     try:
-        raw = await request.json()
+        raw_bytes = await _read_capped_body(
+            request, _COMMIT_SESSION_MAX_BYTES, _COMMIT_SESSION_413_DETAIL)
+        raw = _json.loads(raw_bytes)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(  # noqa: B904
             status_code=400, detail="Request body must be a JSON object")
@@ -7643,7 +7662,7 @@ async def export_team(team_id: str, request: Request,
 # (produced by the export CLI, #1388) into the team graph: owner-only auth,
 # streaming size cap, per-IP rate limit, fail-closed validation chain
 # (format → blob sha256 → key fingerprint → decrypt → payload sha256 →
-# counts), then restore into a TEMP graph → verify → atomic swap via the
+# counts → pack_config shape), then restore into a TEMP graph → verify → atomic swap via the
 # shared ``_restore_into_temp_verify_swap`` helper (extracted from
 # ``restore_backup``). Any verify/restore failure quarantines the artifact
 # (audit + ``last_import_quarantined_sha256``) — the live graph is NEVER
@@ -7663,14 +7682,51 @@ class _ImportVerifyError(Exception):
         self.sha256 = sha256
 
 
+# ── Request-body size caps for JSON/form surfaces (#2032) ─────────────────
+# Streaming cap applied to every remaining `request.json()`/`request.body()`
+# site via `_read_capped_body` (the #2029 helper): reject oversized bodies
+# BEFORE buffering/parsing — the memory-DoS class #2029 closed on the import
+# + manifest paths. 256 KiB covers every small JSON/form surface (register,
+# login, signup, claim, oauth, keys); commit_session carries session-content
+# payloads (8 MiB — schema-bounded portion ~150-300 KB but summary/story_arc
+# are schema-UNBOUNDED, so the cap clears any spec-valid derived commit);
+# Stripe webhook events are signed JSON of Stripe-controlled size (typically
+# up to ~256 KB per webhook guides, well under the 1 MiB cap even for
+# expanded invoice/dispute payloads — the bound primarily protects the
+# HMAC/verify path and defends against oversized replay bodies; note a 413
+# is non-2xx, so Stripe retries with backoff, hence the generous headroom) (1 MiB).
+_BODY_MAX_BYTES = 256 * 1024
+_COMMIT_SESSION_MAX_BYTES = 8 * 1024 * 1024
+_STRIPE_WEBHOOK_MAX_BYTES = 1024 * 1024
+
+# Detail strings derive the byte count from the cap constants at IMPORT
+# time (never a literal that can silently drift from the enforced cap —
+# the #2033 wire_detail precedent). Note: the per-site 413 tests
+# monkeypatch the caps at RUNTIME (the message then intentionally diverges
+# from the enforced test cap); production caps are import-time constants,
+# so the message stays truthful under source-level cap changes. The literal
+# values are pinned by TestDetailConstantsPinned (test_body_cap_sweep.py).
+_BODY_413_DETAIL = f"request body exceeds the size cap ({_BODY_MAX_BYTES // 1024} KiB)"
+_COMMIT_SESSION_413_DETAIL = (
+    f"commit session request body exceeds the size cap "
+    f"({_COMMIT_SESSION_MAX_BYTES // (1024 * 1024)} MiB)"
+)
+_STRIPE_WEBHOOK_413_DETAIL = (
+    f"Stripe webhook body exceeds the size cap "
+    f"({_STRIPE_WEBHOOK_MAX_BYTES // (1024 * 1024)} MiB)"
+)
+
+
 async def _read_capped_body(request: Request, max_bytes: int, detail: str) -> bytes:
     """Read the raw request body under a HARD streaming cap.
 
     Content-Length alone is spoofable (a client can claim a small length and
     stream unbounded bytes) — the cap is enforced while draining the stream,
     so an oversized body 413s before the ENTIRE body is buffered or any parse
-    work. Shared by the import-artifact path (_read_import_body) and the
-    pack-manifest upload path (#2029).
+    work. Shared by the import-artifact path (_read_import_body), the
+    pack-manifest upload path (#2029), and every request-body read swept in
+    #2032 (register/login/signup/claim/keys/agent/oauth/commit/stripe — the
+    caps + detail strings live in the constants block directly above).
     """
     chunks: list[bytes] = []
     total = 0
@@ -7811,6 +7867,55 @@ def _split_import_artifact(blob: bytes) -> tuple[dict, bytes]:
     return header, enc_blob
 
 
+def _pack_config_shape_error(pc) -> str | None:
+    """#2040: shared ``pack_config`` legality matrix — single source of truth.
+
+    Check order pinned: dict → schema_version → packs → entry → ns → yaml.
+    Returns a human-readable error string for the FIRST violation (the check
+    order matters — an operator must get the earliest broken contract), or
+    ``None`` when the shape is legal. Used by BOTH the import envelope gate
+    (pre-restore fail-closed 422) and ``_apply_import_pack_config`` (ValueError
+    drift-defense for direct callers) so the matrix cannot diverge between
+    the two sites.
+
+    Legal families: absent/``None`` pack_config (pre-v1.1 artifacts have no
+    pack_config key — ``payload.get("pack_config")`` yields ``None`` for both
+    absent and explicit-null); ``packs: []``; well-formed entries incl. int
+    ``version``, ``activated: "anything"``, unknown keys, and yaml
+    absent/``None``. ``version``/``activated``/unknown keys are unconstrained;
+    entry-level messages interpolate the concrete index + offending type.
+    """
+    if pc is None:
+        return None  # absent/None pack_config is LEGAL (pre-v1.1 artifacts)
+    if not isinstance(pc, dict):
+        return "pack_config must be an object"
+    schema_version = pc.get("schema_version")
+    if (not isinstance(schema_version, int) or isinstance(schema_version, bool)
+            or schema_version != 1):
+        return "pack_config schema_version must be 1"
+    if "packs" not in pc:
+        return "pack_config packs is required and must be a list"
+    packs = pc.get("packs")
+    if not isinstance(packs, list):
+        return "pack_config packs must be a list"
+    for i, pack in enumerate(packs):
+        if not isinstance(pack, dict):
+            return f"pack_config packs[{i}] must be an object"
+        ns = pack.get("namespace")
+        if not isinstance(ns, str) or not ns.strip():
+            return (f"pack_config packs[{i}] must declare a non-empty string "
+                    "namespace")
+        yaml_text = pack.get("yaml")
+        if yaml_text is not None and not (
+                isinstance(yaml_text, str) and yaml_text.strip()):
+            if isinstance(yaml_text, str):  # "" or whitespace-only
+                return (f"pack_config packs[{i}] yaml must be a non-empty "
+                        "string or null")
+            return (f"pack_config packs[{i}] yaml must be a non-empty string "
+                    f"or null (got {type(yaml_text).__name__})")
+    return None
+
+
 def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
     """Fail-closed validation chain (#1230 plan Task 2 — order matters):
 
@@ -7820,6 +7925,9 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
       4. decrypt the blob with the supplied key
       5. payload_sha256 (inner envelope) matches the recomputed canonical hash
       6. node_count/edge_count fields match len(nodes)/len(edges)
+      7. pack_config shape legality (#2040) — a malformed pack_config must
+         422 FAIL-CLOSED here (pre-restore, live graph untouched, ledger
+         unstamped), never a post-swap 500 / silent 200 with config dropped
 
     Accepts both artifact serializations (see ``_split_import_artifact``): the
     wire form (header line + raw blob) and the CLI form ``tortoise export``
@@ -7872,6 +7980,53 @@ def _validate_import_envelope(blob: bytes, key: bytes) -> dict:
         raise _ImportVerifyError("payload missing nodes/edges", payload_sha)
     if payload.get("node_count") != len(nodes) or payload.get("edge_count") != len(edges):
         raise _ImportVerifyError("payload node_count/edge_count mismatch", payload_sha)
+    # #2040: shared pack_config shape gate — malformed shapes 422 fail-closed
+    # here (pre-restore: live graph untouched, last_import_sha256 unstamped).
+    # Single source of truth: the same validator drives _apply_import_pack_config's
+    # ValueError drift-defense, so the matrix cannot diverge between the sites.
+    pc_err = _pack_config_shape_error(payload.get("pack_config"))
+    if pc_err is not None:
+        raise _ImportVerifyError(pc_err, payload_sha)
+    # #2040 code-review: pre-restore ns↔yaml consistency — a declared pack
+    # namespace that disagrees with its manifest's yaml-declared namespace is
+    # a crafted artifact (the exporter reads both from the same
+    # PackInstall/PackManifest row, so legit exports cannot diverge). Reject
+    # it HERE so the 422 is pre-restore (live graph untouched), not a
+    # post-swap ValueError from _apply_import_pack_config. Parse the yaml
+    # namespace cheaply (safe_load only — no tempdir registry; a malformed
+    # yaml defers to apply-time validation, which owns the precise error).
+    pc = payload.get("pack_config")
+    if isinstance(pc, dict):
+        for pack in pc.get("packs") or []:
+            if not isinstance(pack, dict):
+                continue  # shape gate already rejected this class
+            ns = pack.get("namespace")
+            yaml_text = pack.get("yaml")
+            if not isinstance(ns, str) or not isinstance(yaml_text, str):
+                continue
+            # #2040 code-review: bound the parse with the SAME 64KB cap the
+            # validator enforces before parsing (validate_manifest) — a
+            # crafted artifact must not trigger an unbounded parse here
+            # (memory amplification under the 64MiB body cap); oversized
+            # yaml defers to apply-time validation, which owns the message.
+            from tortoise.pack_manifest_store import MAX_MANIFEST_BYTES as _MAX_MB
+            if len(yaml_text.encode()) > _MAX_MB:
+                continue
+            try:
+                import yaml as _yaml
+                raw = _yaml.safe_load(yaml_text)
+            except Exception:  # defer to apply-time validation
+                continue
+            # #2040 code-review: normalize the yaml namespace with the SAME
+            # strip() validate_manifest applies (str(...).strip() — the
+            # exporter emits the verbatim manifest yaml alongside the
+            # stripped node ns, so a quoted whitespace-padded namespace must
+            # not false-positive a mismatch pre-restore).
+            if isinstance(raw, dict) and isinstance(raw.get("namespace"), str) \
+                    and str(raw["namespace"]).strip() != ns:
+                raise _ImportVerifyError(
+                    f"pack_config pack namespace {ns!r} does not match "
+                    f"manifest namespace {raw['namespace']!r}", payload_sha)
     return {
         "header": header,
         "inner": inner,
@@ -7952,22 +8107,48 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
       hoisted pre-restore call in the import flow already ran this check on
       the same payload (same sticky process-global registry → it cannot
       diverge).
+
+    #2040 defense role: the SHARED ``_pack_config_shape_error`` validator
+    runs first (single source of truth with the envelope gate — the matrix
+    cannot drift between the two sites; a malformed shape raises ValueError,
+    422-class, instead of crashing AttributeError → 500 or silently
+    no-opping), and a declared pack namespace that disagrees with its
+    manifest's yaml namespace fails LOUDLY pre-write (no stray residue).
     """
     from tortoise.domain_loader import _get_registry
-    from tortoise.pack_manifest_store import upsert_tenant_manifest
+    from tortoise.pack_manifest_store import (
+        upsert_tenant_manifest,
+        validate_manifest,
+    )
     from tortoise.pack_state import DEFAULT_STARTER_PACKS
 
     pc = payload.get("pack_config")
     if pc is None:
         _check_foreign_kinds(payload)
         return
-    packs = pc.get("packs", []) if isinstance(pc, dict) else []
+    # #2040: shared shape gate — malformed shapes raise ValueError (drift-
+    # locked to the envelope's pre-restore 422; direct callers cannot bypass).
+    pc_err = _pack_config_shape_error(pc)
+    if pc_err is not None:
+        raise ValueError(pc_err)
+    packs = pc.get("packs", [])
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
             continue
         yaml_text = pack.get("yaml")
         if yaml_text:
+            # #2040 pre-write ns↔yaml guard: validate first and compare the
+            # manifest's yaml-declared namespace vs the declared one BEFORE
+            # any upsert — a crafted mismatch must fail loudly with zero
+            # residue. The ok-ness check is deliberately NOT duplicated:
+            # upsert_tenant_manifest re-validates unconditionally before any
+            # graph write with the identical message + zero residue.
+            result = validate_manifest(yaml_text)
+            if result.ok and result.namespace != ns:
+                raise ValueError(
+                    f"pack_config pack namespace {ns!r} does not match "
+                    f"manifest namespace {result.namespace!r}")
             # Validated upsert — ValueError (invalid manifest) quarantines.
             upsert_tenant_manifest(sdk, yaml_text)
         else:
@@ -8015,6 +8196,12 @@ def _check_foreign_kinds(payload: dict) -> None:
     graphs whose custom kinds have no PackInstall records); (c) v1.1 whose
     usable packs do NOT cover every namespaced kind in the dump
     (partial/orphaned pack state). Each gets a distinct quarantine reason.
+    #2040: the envelope gate now rejects malformed pack_config SHAPES
+    (non-dict pc, non-list/absent packs, non-dict entries, bad ns/yaml)
+    PRE-RESTORE in _validate_import_envelope — so the class-(b) path above
+    covers ONLY the legal empty-`packs: []` shape from the endpoint; the
+    audit-reason taxonomy must not mislead operators into remediating a
+    shape error here.
 
     Documented boundaries: (a) only NAMESPACED foreign kinds are detectable —
     legacy un-namespaced pack kinds are indistinguishable from core vocab and
@@ -8096,6 +8283,9 @@ def _check_foreign_kinds(payload: dict) -> None:
                 "lost; re-export with a newer tortoise version")
         if not isinstance(pc, dict) or not isinstance(pc.get("packs"), list) \
                 or not pc.get("packs"):
+            # #2040: malformed shapes (non-dict pc, non-list packs, non-dict
+            # entries, bad ns/yaml) are rejected pre-restore by the envelope
+            # gate — this branch is the LEGAL empty-`packs: []` shape only.
             raise ValueError(
                 "pack_config declares no packs but the artifact references "
                 f"unknown pack kinds {listed} — the vocabulary "
@@ -8142,6 +8332,12 @@ async def import_team(team_id: str, request: Request,
     name is NOT matched server-side (import-mode override, logged) — cross-
     team isolation is enforced by auth. Re-import of the same payload sha256
     → 200 {"imported": false, "already": true}. Runs on a worker thread.
+
+    #2040 post-swap carve-out: ``last_import_sha256`` means "fully applied
+    incl. vocabulary" — the stamp moves AFTER successful pack application,
+    and a pack failure CLEARS it ("" sentinel) so failed imports stay
+    retryable/rollback-able; a pack-application failure 422s AFTER the swap
+    (the graph holds the restored dump, the vocabulary is not live).
     """
     await _check_sensitive_op_rate_limit(request, "import")
     team_node = await _team_node(team_id)
@@ -8182,9 +8378,31 @@ async def import_team(team_id: str, request: Request,
     lock = await _team_restore_lock(team_id)
     async with lock:
         # Idempotency ledger (re-read inside the lock — a concurrent import
-        # may have stamped the ledger while we validated).
+        # may have stamped the ledger while we validated). #2040: the
+        # already-fast-path ALSO requires the post-swap pack-failure marker
+        # to be UNSET.
+        #
+        # Ledger semantics (post-#2040):
+        #  - last_import_sha256 == sha means the import fully applied
+        #    (stamp runs AFTER successful pack application).
+        #  - last_import_pack_failed_sha256 (SET == a sha) means the MOST
+        #    RECENT import attempt failed AFTER the swap (pack application)
+        #    — the live graph holds that dump but its vocabulary may not be
+        #    live. ANY set marker invalidates the already-fast-path: with a
+        #    stale L (the pack-failure L-clear blipped), L==sha alone would
+        #    be a lie — the graph may hold a different dump or the vocab
+        #    may be missing. Cleared only by a successful import. Pre-
+        #    restore rejections do NOT set this marker (the graph is
+        #    untouched — a prior applied sha legitimately short-circuits),
+        #    which is exactly the state the Q-consultation could not
+        #    distinguish.
+        #  - the quarantine prop (last_import_quarantined_sha256) is an
+        #    AUDIT record for pre-restore + post-swap failures alike and is
+        #    NOT consulted by the fast-path (it cannot distinguish the two
+        #    classes; the pack-failure marker can).
         fresh = await _team_node(team_id)
-        if fresh is not None and fresh.get("last_import_sha256") == sha:
+        if fresh is not None and fresh.get("last_import_sha256") == sha \
+                and not fresh.get("last_import_pack_failed_sha256"):
             await _async_audit(
                 request, team_id, "team_import",
                 resource_type="team", resource_id=team_id,
@@ -8259,18 +8477,15 @@ async def import_team(team_id: str, request: Request,
                     "index rebuild after import failed for team %s: %s", team_id, e
                 )
 
-            # Idempotency ledger stamp — best-effort; a crash between the swap
-            # and this stamp is the documented double-import convergence case
-            # (#1230: idempotency is convergence, not strict-once).
-            # #2040: this stamp runs BEFORE _apply_import_pack_config, so a
-            # pack-application failure (invalid manifest, unknown starter)
-            # 422s with the ledger already stamped → re-import converges to
-            # `already` with the vocabulary never applied. Deferred to #2040
-            # (pre-existing #1936 ordering); the #2028 guard call above is
-            # pre-restore and does not stamp.
-            await asyncio.to_thread(
-                _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
-            )
+            # #2040 ordering: the stamp runs AFTER successful pack
+            # application — a pack-application failure (invalid manifest,
+            # unknown starter, deeply-nested yaml) must NOT stamp
+            # last_import_sha256 (the except block below clears it), so the
+            # same-artifact retry and rollback-to-prior-artifact both
+            # converge (never the pre-fix `already` wedge with the vocabulary
+            # never applied). The pre-restore #2028 guard call above does not
+            # stamp.
+            #
             # #1936: apply the payload's pack config (custom manifests +
             # starter activations) so the migrated vocabulary is live. Any
             # pack failure quarantines the import (fail-loudly, never silent
@@ -8281,7 +8496,117 @@ async def import_team(team_id: str, request: Request,
                 await _quarantine_import(
                     request, team_id, user, sha256=sha, reason=str(e)
                 )
+                # #2040: CLEAR the success ledger so the failed import is
+                # retryable (same-artifact retry re-422s with the real
+                # reason; rollback re-swaps) — never the `already` wedge.
+                # Best-effort: a control-plane blip here must not mask the
+                # 422 (the in-lock pack-failure consultation keeps the
+                # already-fast-path off even if the clear failed).
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_sha256", "",
+                    )
+                except Exception as ex:
+                    _logger.warning(
+                        "import ledger clear on pack failure failed for "
+                        "team %s: %s", team_id, ex,
+                    )
+                # #2040 code-review: stamp the POST-SWAP pack-failure marker
+                # so the already-fast-path refuses `already` for this sha
+                # even if the ledger clear above failed (the live graph
+                # holds this dump but the vocabulary is not live). Cleared
+                # on success. Best-effort — the consultation stays safe as
+                # long as the marker write fails closed (unset ≠ sha → the
+                # stale-ledger rollback path re-swaps, the documented
+                # convergence model).
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_pack_failed_sha256", sha,
+                    )
+                except Exception as ex:
+                    # #2040 review round 3: if BOTH the L-clear and the
+                    # marker stamp fail, L may hold a stale sha with the
+                    # marker unset — the already-fast-path would then fire
+                    # for a sha whose vocabulary is NOT live. ERROR (not
+                    # warning): an operator seeing repeated `already` for
+                    # this sha with this logged failure knows to force a
+                    # re-swap.
+                    _logger.error(
+                        "import pack-failure marker stamp FAILED for team %s "
+                        "(double-write failure — already-fast-path may fire "
+                        "with vocab not live): %s", team_id, ex,
+                    )
                 raise HTTPException(status_code=422, detail=f"Import rejected: {e}")  # noqa: B904
+            except (OSError, RuntimeError) as e:
+                # #2040 code-review: a server-side pack-apply failure
+                # (registry/query/tempdir — NOT an artifact defect) must not
+                # escape as an unquarantined 500 with the ledger left
+                # stale. Mirror the swap-failure handling: 503 (retryable)
+                # + quarantine + ledger clear so the retry converges and the
+                # audit trail records the attempt.
+                await _quarantine_import(
+                    request, team_id, user, sha256=sha, reason=str(e)
+                )
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_sha256", "",
+                    )
+                except Exception as ex:
+                    _logger.warning(
+                        "import ledger clear on pack failure failed for "
+                        "team %s: %s", team_id, ex,
+                    )
+                try:
+                    await asyncio.to_thread(
+                        _stamp_import_prop, cp_source, team_id,
+                        "last_import_pack_failed_sha256", sha,
+                    )
+                except Exception as ex:
+                    _logger.error(
+                        "import pack-failure marker stamp FAILED for team %s "
+                        "(double-write failure — already-fast-path may fire "
+                        "with vocab not live): %s", team_id, ex,
+                    )
+                raise HTTPException(status_code=503, detail=f"Import failed: {e}")  # noqa: B904
+            # Idempotency ledger stamp — best-effort; a crash between the swap
+            # and this stamp is the documented double-import convergence case
+            # (#1230: idempotency is convergence, not strict-once). Runs only
+            # after successful pack application (#2040).
+            await asyncio.to_thread(
+                _stamp_import_prop, cp_source, team_id, "last_import_sha256", sha
+            )
+            # #2040: clear the quarantine + post-swap-failure marker props on
+            # SUCCESS (best-effort, INDEPENDENT — one write failing must not
+            # skip the other). REQUIRED: last_import_quarantined_sha256 is
+            # sticky (only _quarantine_import writes it, never cleared) —
+            # without this clear, a sha that was quarantined then succeeded
+            # would have BOTH props == sha, so the in-lock short-circuit's
+            # consultation would block `already` forever (every re-import
+            # re-swaps). The pack-failure marker must clear for the same
+            # reason (a fail-then-succeed sha must reach `already`).
+            try:
+                await asyncio.to_thread(
+                    _stamp_import_prop, cp_source, team_id,
+                    "last_import_quarantined_sha256", "",
+                )
+            except Exception as e:
+                _logger.warning(
+                    "quarantine-ledger clear after import failed for team %s: %s",
+                    team_id, e,
+                )
+            try:
+                await asyncio.to_thread(
+                    _stamp_import_prop, cp_source, team_id,
+                    "last_import_pack_failed_sha256", "",
+                )
+            except Exception as e:
+                _logger.warning(
+                    "pack-failure-marker clear after import failed for team %s: %s",
+                    team_id, e,
+                )
             await _async_audit(
                 request, team_id, "team_import",
                 resource_type="team", resource_id=team_id,
@@ -8731,7 +9056,8 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         get_control_plane, is_supabase_enabled,
         recover_team_key, SignupTokenRecoveryError,
         _teams_row_fail_soft, _QUOTA_SELECT,
-        _TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+        _TEAM_ADDITIVE_2040_TIER, _TEAM_ADDITIVE_IMPORT_TIER,
+        _TEAM_ADDITIVE_DKL_TIER,
         _TEAM_ADDITIVE_0015_TIER, _TEAM_ADDITIVE_BILLING_TIER,
     )
 
@@ -8755,10 +9081,14 @@ async def _agent_recover_flow(request: Request, signup_token: str) -> dict:
         row = _teams_row_fail_soft(
             cp, team_id, select=_QUOTA_SELECT,
             # #1709 fixer P2.6: the FULL additive ladder (same as
-            # resolve_api_key) — the recovery emergency path must not 500 on
-            # migration skew (a schema one migration behind the newest
-            # additive drops that tier to safe defaults instead of raising).
-            additive_tiers=[_TEAM_ADDITIVE_IMPORT_TIER, _TEAM_ADDITIVE_DKL_TIER,
+            # resolve_api_key — newest migration tier dropped FIRST, incl.
+            # the #2040 marker tier) — the recovery emergency path must not
+            # 500 on migration skew (a schema one migration behind the
+            # newest additive drops that tier to safe defaults instead of
+            # raising).
+            additive_tiers=[_TEAM_ADDITIVE_2040_TIER,
+                            _TEAM_ADDITIVE_IMPORT_TIER,
+                            _TEAM_ADDITIVE_DKL_TIER,
                             _TEAM_ADDITIVE_0015_TIER,
                             _TEAM_ADDITIVE_BILLING_TIER])
         if row is None or row.get("deleted_at") is not None:
@@ -8882,7 +9212,12 @@ async def agent_signup(request: Request):
     # A token-present request is possession-authenticated recovery, never a
     # mint: it must neither consume nor be blocked by the 2/24h signup bucket
     # (it gets the shared recovery limiter instead — compensating control).
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    # #2032: the capped read sits INSIDE the content-type branch — non-JSON
+    # bodies are never drained/capped (ignored exactly as today).
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
@@ -9078,7 +9413,10 @@ async def agent_recover(request: Request):
     for malformed/unknown/revoked/soft-deleted; 403 _suspended_detail() for
     a suspended team (fail-closed — no fresh mint, no orphaning).
     """
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
@@ -9115,7 +9453,10 @@ async def agent_token_revoke(request: Request, team: dict = Depends(get_current_
     auth-scoped self-harm only — a caller can only kill their own team's
     token).
     """
-    body = await request.json() if request.headers.get("content-type", "").startswith("application/json") else {}
+    body = {}
+    if request.headers.get("content-type", "").startswith("application/json"):
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
     if not isinstance(body, dict):
         body = {}
     signup_token = body.get("signup_token")
@@ -9277,7 +9618,10 @@ async def claim_team(request: Request):
 
     # 3. pasted key — the key-possession anchor.
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         body = {}
     api_key = (body or {}).get("api_key") or ""
@@ -13452,7 +13796,8 @@ async def webhooks_stripe(request: Request):
         """redact_error + scrub known secret values (review fix 9)."""
         return _scrub_secrets(redact_error(exc))
 
-    raw = await request.body()
+    raw = await _read_capped_body(
+        request, _STRIPE_WEBHOOK_MAX_BYTES, _STRIPE_WEBHOOK_413_DETAIL)
     sig = request.headers.get("stripe-signature")
     try:
         event = StripeClient().verify_webhook_signature(raw, sig)
@@ -13700,7 +14045,10 @@ async def oauth_consent(request: Request):
     if not enabled or cp is None:
         raise HTTPException(status_code=503, detail="OAuth not configured")
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")  # noqa: B904
     if not isinstance(body, dict):
@@ -13750,8 +14098,10 @@ async def oauth_token(request: Request):
         raise HTTPException(status_code=503, detail="OAuth not configured")
     from urllib.parse import parse_qs
     try:
-        raw = await request.body()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     grant = body.get("grant_type")
@@ -13777,8 +14127,10 @@ async def oauth_revoke(request: Request):
         raise HTTPException(status_code=503, detail="OAuth not configured")
     from urllib.parse import parse_qs
     try:
-        raw = await request.body()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         body = {k: v[0] for k, v in parse_qs(raw.decode()).items()}
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid form body")  # noqa: B904
     try:
@@ -13806,7 +14158,10 @@ async def oauth_dcr_register(request: Request):
         detail="Too many client registrations from this IP. Please try again later.",
         retry_after_s=3600)
     try:
-        body = await request.json()
+        raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
+        body = _json.loads(raw)
+    except HTTPException:
+        raise
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON body")  # noqa: B904
     try:

@@ -69,6 +69,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_github_index_lifecycle.py": {"registry": "prod-coupled"},
     "test_hosted_api.py": {"registry": "prod-coupled",
                            "team-002": "team-identity"},
+    "test_import_endpoint.py": {"registry": "import-ledger"},
     "test_index_mcp.py": {"registry": "prod-coupled",
                            "e2e-900": "redirect-derived per-path"},
     "test_invites_email_http.py": {"registry": "prod-coupled"},

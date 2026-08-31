@@ -351,6 +351,92 @@ class TestResolveApiKeyFailSoft:
         assert any("api_keys base-only read failed" in r.message
                    for r in caplog.records)
 
+    def test_marker_column_drift_degrades_marker_only(self, fake, caplog):
+        """#2040 (code-review round 3): a schema missing ONLY the
+        post-swap pack-failure marker column (20260830000001) must degrade
+        just the marker (already-fast-path re-validates — convergent) while
+        the #1230 ledger + max_points stay readable. The marker's OWN tier
+        (dropped first) prevents a single missing column from dropping the
+        whole import tier (which would break the idempotency read)."""
+        from tortoise.supabase_control import team_by_id
+        fake.tables["teams"][0]["last_import_sha256"] = "sha-a"
+        fake.tables["teams"][0]["max_points"] = 999
+        fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+        with caplog.at_level("WARNING", logger="tortoise.supabase_control"):
+            team = team_by_id(fake, "team-free-001")
+        assert team is not None
+        # marker padded to safe None (its tier dropped first)
+        assert team.get("last_import_pack_failed_sha256") is None
+        # #1230 ledger + points-cap override still readable (import tier intact)
+        assert team.get("last_import_sha256") == "sha-a"
+        assert team.get("max_points") == 999
+        assert any("additive" in r.message for r in caplog.records)
+
+    def test_marker_column_drift_session_lane_keeps_suspension(self, fake):
+        """#2040 (code-review round 4): the SESSION lane's team resolver
+        (_session_user_team, hosted_api.py) runs the SAME full additive
+        ladder — a schema missing ONLY the marker column must degrade the
+        marker tier alone so the #1828 suspension gate still sees REAL
+        suspended_at data (fail-closed on drift, not fail-open)."""
+        import asyncio
+        from datetime import datetime, timezone
+
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        # hosted-mode env (session auth is hosted-only)
+        import tortoise.supabase_control as sc
+        from tortoise.hosted_api import _session_user_team
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        try:
+            fake.seed("team_memberships", [{
+                "user_id": "9f2c1a40-0000-4a00-8000-000000000001",
+                "team_id": "team-free-001", "role": "owner",
+                "status": "active", "team_name": "free-team",
+            }])
+            fake.tables["teams"][0]["suspended_at"] = \
+                datetime.now(timezone.utc).isoformat()  # noqa: UP017
+            fake.tables["teams"][0]["max_points"] = 999
+            fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+            request = Request({
+                "type": "http", "method": "GET", "path": "/v1/team",
+                "query_string": b"",
+                "headers": Headers({"cf-ipcountry": "MX"}).raw,
+            })
+            with pytest.raises(Exception) as ei:
+                asyncio.run(_session_user_team(
+                    request, {"user_id": "9f2c1a40-0000-4a00-8000-000000000001"}))
+            assert ei.type.__name__ == "HTTPException"
+            assert ei.value.status_code == 403
+            assert "suspended" in str(ei.value.detail)
+        finally:
+            monkeypatch.undo()
+
+    def test_marker_column_drift_quota_keeps_max_points(self, fake):
+        """#2040 (code-review round 5): resolve_team_limits runs the SAME
+        full additive ladder — marker-column-only drift must degrade just
+        the marker while max_points (the #1859 points-cap override) stays
+        readable; a missing 2040 tier would 400 every rung → hard 500 on
+        every quota-enforced write (the exact #1832 class)."""
+        from tortoise.quota import resolve_team_limits
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        try:
+            import tortoise.supabase_control as sc
+            monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+            fake.tables["teams"][0]["max_points"] = 999
+            fake.missing_columns = {"teams": {"last_import_pack_failed_sha256"}}
+            limits = resolve_team_limits("team-free-001")
+            assert limits["max_points"] == 999  # override survives drift
+        finally:
+            monkeypatch.undo()
+
     def test_resolve_api_key_api_keys_enabled_false_drift_fail_open(self,
                                                                    fake):
         """#1096 accepted-risk doc (code-review fix): a per-key DISABLED
