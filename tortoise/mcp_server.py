@@ -2536,8 +2536,11 @@ def _team_onboarding_complete() -> bool:
     if cached is not None and now - cached[0] < _ONBOARDING_STATE_TTL:
         return cached[1]
     try:
-        from tortoise.hosted_api import _get_onboarding_state
-        complete = bool(_get_onboarding_state(team_id).get("onboarding_complete"))
+        from tortoise.hosted_api import _get_onboarding_projection
+        # #2001 (W5): the gate reads the merged projection — node-aware wire
+        # completion; fail-open coercion (non-bool / 'unavailable' → False).
+        complete = _get_onboarding_projection(team_id).get("onboarding_complete")
+        complete = bool(complete) if isinstance(complete, bool) else False
     except Exception:
         return False  # never cache a failed read — retry next list
     _onboarding_state_cache[team_id] = (now, complete)
@@ -2545,8 +2548,9 @@ def _team_onboarding_complete() -> bool:
 
 
 def _onboarding_state() -> dict:
-    """Read this team's onboarding progress from the registry Team node."""
-    from tortoise.hosted_api import _get_onboarding_state as _read_state
+    """Read this team's onboarding progress — the merged projection (jsonb
+    OPERATIONAL keys + graph FLOW keys; graph-down FLOW 'unavailable')."""
+    from tortoise.hosted_api import _get_onboarding_projection as _read_state
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}

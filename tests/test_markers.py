@@ -80,6 +80,8 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
+    "test_onboarding_state_split.py": {"registry": "prod-coupled"},
+    "test_onboarding_state.py": {"registry": "unit-only"},
     "test_pack_state.py": {
         "tenant-a": "team-identity", "tenant-b": "team-identity",
         "team-k": "team-identity", "t-reg-2": "team-identity",
@@ -133,6 +135,10 @@ ROUTED_SELECT_GRAPH_SITES: dict[str, dict[str, str]] = {
         # freshness — main added the literals without routing; gate reds
         # otherwise, #1970 main hygiene).
         'f"team_{team_id}"': "endpoint-constrained",
+    },
+    "test_onboarding_state_split.py": {
+        'f"team_{name}"': "endpoint-constrained",  # #2001 W5 eager-init seed probes
+        'f"team_{team_id}"': "endpoint-constrained",  # #2001 W5 node read/delete probes
     },
     "test_pack_state.py": {
         "legacy_graph": "read-only",  # variable — legacy-graph PackInstall assert

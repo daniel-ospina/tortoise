@@ -11695,10 +11695,47 @@ class TortoiseSDK:
             )
         try:
             team_graph = proj.db.select_graph(graph_name)
-            team_graph.query(
+            # #2001 (W5): eager OnboardingState init in the same statement as
+            # TeamMeta (graph-side atomicity). compact = creator's prior
+            # memberships > 0 (registry Membership nodes); fork inherited from
+            # the creator's EARLIEST prior team's OnboardingState.fork with
+            # 'self' fallback (never re-asks the fork card); None when the
+            # creator has no prior orgs (fork card asked exactly once) or no
+            # user context (CLI/embedded mint).
+            from tortoise.onboarding import state as _os
+            init_fork: str | None = None
+            init_compact = False
+            prior_ids: list[str] = []
+            if owner_user_id:
+                rows = reg.query(
+                    "MATCH (m:Membership {user_id:$uid, status:'active'}) "
+                    "WHERE m.team_id <> $org "
+                    "RETURN m.team_id, m.created_at ORDER BY m.created_at",
+                    params={"uid": owner_user_id, "org": tid},
+                ).result_set
+                prior_ids = [r[0] for r in rows]
+                prior_fork = None
+                if prior_ids:
+                    try:
+                        # registry graphs are team_{name} — resolve the
+                        # earliest prior team's graph before reading its fork.
+                        _prior = reg.query(
+                            "MATCH (t:Team {id:$id}) RETURN t.graph_name",
+                            params={"id": prior_ids[0]},
+                        ).result_set
+                        if _prior and _prior[0][0]:
+                            prior_fork = _os.read_prior_org_fork(
+                                proj.db.select_graph(_prior[0][0]),
+                                prior_ids[0])
+                    except Exception:
+                        prior_fork = None
+                init_fork, init_compact = _os.resolve_init_fork_compact(
+                    bool(prior_ids), prior_fork)
+            _init_q, _init_p = _os.eager_init_query(
                 "CREATE (:TeamMeta {name:$name, created:$now})",
-                params={"name": name, "now": now},
-            )
+                {"name": name, "now": now},
+                org_id=tid, fork=init_fork, compact=init_compact)
+            team_graph.query(_init_q, params=_init_p)
             # #1686: journal the minted team_{name} graph IMMEDIATELY after
             # the TeamMeta CREATE succeeds (and before _graph_create, whose
             # failure rolls back only the registry Team node — the graph is

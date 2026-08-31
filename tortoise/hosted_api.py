@@ -48,6 +48,7 @@ from tortoise.hosted_backup import (
     restore_backup,
 )
 from tortoise.mcp_server import create_http_app
+from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
 )
@@ -1035,10 +1036,15 @@ async def provision_tenant(request: Request):
 
         # Provision FalkorDB namespace for the team
         team_graph = sdk._get_proj().db.select_graph(graph_name)
-        team_graph.query(
+        # #2001 (W5): eager OnboardingState init in the SAME statement as
+        # TeamMeta (graph-side atomicity) — first-org semantics here
+        # (selfhost single-tenant mint; fork card asked once, set-once).
+        from tortoise.onboarding import state as _os
+        _init_q, _init_p = _os.eager_init_query(
             "CREATE (:TeamMeta {name: $name, created: $now})",
-            params={"name": team_name, "now": now},
-        )
+            {"name": team_name, "now": now},
+            org_id=team_id)
+        team_graph.query(_init_q, params=_init_p)
         # #1686: journal the minted team_* graph (session sweep drops it).
         _journal_append_product(graph_name)
 
@@ -3650,10 +3656,15 @@ async def register_user(request: Request, response: Response):
         import hashlib as _hashlib
         try:
             team_graph = _make_sdk(namespace=team_id)._get_proj().db.select_graph(graph_name)
-            team_graph.query(
+            # #2001 (W5): eager OnboardingState init in the same statement as
+            # TeamMeta — first-org semantics (a fresh register has no prior
+            # memberships → fork None → the fork card is asked exactly once).
+            from tortoise.onboarding import state as _os
+            _init_q, _init_p = _os.eager_init_query(
                 "CREATE (:TeamMeta {name: $name, created: $now})",
-                params={"name": team_name, "now": now},
-            )
+                {"name": team_name, "now": now},
+                org_id=team_id)
+            team_graph.query(_init_q, params=_init_p)
             # #1686: journal the minted team_* graph (session sweep drops it).
             _journal_append_product(graph_name)
         except Exception:
@@ -3731,10 +3742,14 @@ async def register_user(request: Request, response: Response):
 
             # Provision FalkorDB namespace for the team
             team_graph = sdk._get_proj().db.select_graph(graph_name)
-            team_graph.query(
+            # #2001 (W5): eager OnboardingState init in the same statement as
+            # TeamMeta — first-org semantics (fresh register, no memberships).
+            from tortoise.onboarding import state as _os
+            _init_q, _init_p = _os.eager_init_query(
                 "CREATE (:TeamMeta {name: $name, created: $now})",
-                params={"name": team_name, "now": now},
-            )
+                {"name": team_name, "now": now},
+                org_id=team_id)
+            team_graph.query(_init_q, params=_init_p)
             # #1686: journal the minted team_* graph (session sweep drops it).
             _journal_append_product(graph_name)
 
@@ -6461,6 +6476,7 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     from datetime import timedelta as _td
 
     from tortoise.supabase_control import (
+        active_membership_team_ids,
         membership_count_since,
         provision_team,
         team_by_name,
@@ -6503,11 +6519,27 @@ async def _create_team_supabase_lane(cp, name: str, user: dict) -> dict:
     # ordering — review P2, PR #874): an orphaned graph namespace is
     # harmless, an orphaned teams row is not (provision-then-graph would
     # 500 the client with rows persisted; retry then 409s on the name).
+    # #2001 (W5): eager OnboardingState init in the same statement —
+    # compact = creator's prior memberships > 0; fork inherited from the
+    # earliest prior org ('self' fallback — never re-asks the fork card).
+    from tortoise.onboarding import state as _os
     proj = _make_sdk(namespace=team_id)._get_proj()
-    proj.db.select_graph(graph_name).query(
+    prior_team_ids = active_membership_team_ids(cp, user["user_id"])
+    prior_fork = None
+    if prior_team_ids:
+        try:
+            prior_fork = _os.read_prior_org_fork(
+                _make_sdk(namespace=prior_team_ids[0])._get_proj(),
+                prior_team_ids[0])
+        except Exception:
+            prior_fork = None
+    init_fork, init_compact = _os.resolve_init_fork_compact(
+        bool(prior_team_ids), prior_fork)
+    _init_q, _init_p = _os.eager_init_query(
         "CREATE (:TeamMeta {name: $name, created: $now})",
-        params={"name": name, "now": datetime.now(UTC).isoformat()},
-    )
+        {"name": name, "now": datetime.now(UTC).isoformat()},
+        org_id=team_id, fork=init_fork, compact=init_compact)
+    proj.db.select_graph(graph_name).query(_init_q, params=_init_p)
     # #1686: journal the minted team_* graph (session sweep drops it).
     _journal_append_product(graph_name)
     try:
@@ -11162,7 +11194,16 @@ def _onboarding_defaults() -> dict:
 def _write_onboarding_state(team_id: str, state: dict) -> None:
     """Persist onboarding state — Supabase ``teams.onboarding_state`` (jsonb —
     no string-wrapping, 0006) or the registry Team node (JSON string —
-    #498 fix: FalkorDB node properties must be primitives, not dicts)."""
+    #498 fix: FalkorDB node properties must be primitives, not dicts).
+
+    #2001 (W5): defensively STRIPS FLOW keys (fork/status/version/step
+    edges/member_progress/last_decide_attempt/compact) before persisting —
+    jsonb NEVER holds FLOW state (the router branches before the allowlist
+    filter; this is the belt-and-braces backstop the registration-split
+    negatives pin)."""
+    if any(k in state for k in _os.FLOW_KEYS) or any(k in state for k in _os.STEP_IDS):
+        state = {k: v for k, v in state.items()
+                 if k not in _os.FLOW_KEYS and k not in _os.STEP_IDS}
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -11181,18 +11222,82 @@ def _write_onboarding_state(team_id: str, state: dict) -> None:
     )
 
 
+def _team_proj(team_id: str):
+    """Tenant-graph projection handle for onboarding writes/reads."""
+    return _make_sdk(namespace=team_id)._get_proj()
+
+
+def _maybe_apply_completion(team_id: str) -> bool:
+    """Post-write gate eval (scope pin 12): reads the fresh node + step
+    edges, evaluates the fork-aware gate, and writes status 'complete' when
+    satisfied. MONOTONIC: complete can never regress; a grandfathered org's
+    first FLOW write evals to no-op (status stays complete — never
+    re-onboarded). Returns True when the org transitioned to complete
+    (the caller invalidates the MCP TTL cache)."""
+    try:
+        proj = _team_proj(team_id)
+        node = _os.read_onboarding_node(proj, team_id)
+        if node is None:
+            return False
+        if node.get("status") == _os.STATUS_COMPLETE:
+            return False
+        steps = _os.completed_steps(proj, team_id)
+        if _os.completion_gate_satisfied(
+                steps, node.get("fork"), bool(node.get("compact"))):
+            _os.write_status(proj, team_id, _os.STATUS_COMPLETE)
+            try:  # created-signal invalidates the 60s MCP TTL cache (pin 18)
+                from tortoise import mcp_server as _mcp
+                _mcp._onboarding_state_cache.pop(team_id, None)
+            except Exception:
+                pass
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def _update_onboarding_state(team_id: str, **fields) -> dict:
-    """Merge fields into onboarding state and persist. Returns new state."""
-    # #1727 follow-up (review PR #1827): this read-modify-write of the full
-    # state is NOT atomic — concurrent writers can lose keys. Assumes
-    # single-process writers (pre-existing infra). Follow-up: atomic jsonb
-    # merge. Do NOT reimplement here.
-    state = _get_onboarding_state(team_id)
+    """Per-key-type router (#2001 W5): OPERATIONAL keys → jsonb RMW (the
+    legacy whole-dict merge — its non-atomicity caveat is pre-existing
+    infra); FLOW step-edge keys → graph keyed MERGE; other FLOW scalar keys
+    → graph writers. Branches BEFORE the allowlist filter so FLOW keys can
+    never round-trip into jsonb. Unknown keys are dropped (fail-closed,
+    never default-to-FLOW). Returns the MERGED PROJECTION — the writer echo
+    can never diverge from GET.
+
+    NOTE: step-edge writes via this router (PATCH catalog-presented) trigger
+    the post-write gate eval; the checkpoint calls state.py writers directly
+    and evals via _maybe_apply_completion."""
+    jsonb_fields: dict[str, object] = {}
+    wrote_step = False
     for k, v in fields.items():
-        if k in _ALLOWED_STATE_KEYS:
+        if k in _os.STEP_IDS:
+            _os.write_completed_step(_team_proj(team_id), team_id, k)
+            wrote_step = True
+        elif k in _os.FLOW_KEYS:
+            # only step-edge keys are routable here; scalar FLOW keys are
+            # rejected by the PATCH surface / checkpoint before reaching
+            # this point (defensive: silently skip — never default-to-jsonb)
+            pass
+        elif k in _ALLOWED_STATE_KEYS:
+            jsonb_fields[k] = v
+    if jsonb_fields:
+        state = _get_onboarding_state(team_id)
+        for k, v in jsonb_fields.items():
             state[k] = v
-    _write_onboarding_state(team_id, state)
-    return state
+        _write_onboarding_state(team_id, state)
+    if wrote_step:
+        _maybe_apply_completion(team_id)
+    # Echo = the MERGED PROJECTION (writer-return-composed — GET/PATCH can
+    # never diverge), overlaid with the just-written jsonb fields: the
+    # pre-#2001 echo returned the in-memory merged state, and a missing
+    # Team row (no-op jsonb write) must not silently flip the client's
+    # just-ACKed value (test-seam + pre-existing echo semantics). The
+    # overlay is never FLOW — operational keys only.
+    echo = _get_onboarding_projection(team_id)
+    if jsonb_fields:
+        echo.update(jsonb_fields)
+    return echo
 
 
 class OnboardingStateResponse(BaseModel):
@@ -11202,6 +11307,96 @@ class OnboardingStateResponse(BaseModel):
     # the team has no email yet). #764 review P2: wires the email seam so it
     # is not dead code.
     email: str | None = None
+
+
+# #2001 (W5): node-aware wire completion is LIVE; accept-and-drop for
+# PATCH onboarding_complete on node-present orgs lands AFTER W1 (#1997)
+# removes wizardComplete (cross-PR ordering pin) — until then the legacy
+# jsonb writer stays active and the grandfathered-window guard in
+# resolve_wire_completion keeps wizard-completed orgs complete.
+_ACCEPT_AND_DROP = False  # flip to True when W1 lands (see plan T7)
+
+
+def _graph_has_team_namespace(team_id: str) -> bool:
+    """Existence check WITHOUT constructing the projection (constructing it
+    materializes an absent graph — a read-path write, banned by pin 4).
+    Uses the registry SDK's live connection to list graphs."""
+    graph_name = f"team_{team_id}"
+    try:
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(namespace="registry")
+        graphs = sdk._get_proj().db.list_graphs() or []
+        sdk.close()
+        return graph_name in graphs
+    except Exception:
+        # connection failure — treat as graph-up-unknown → the projection
+        # falls through to the read (which raises → 'unavailable' markers)
+        return True
+
+
+def _graph_available(team_id: str) -> bool:
+    """Fail-loud graph-down guard for FLOW WRITES (503 before any write).
+    Biased opposite to the READ path: a connection failure → False (the
+    write must not half-land jsonb-side without the graph leg)."""
+    try:
+        _make_sdk(namespace=team_id)._get_proj().db.list_graphs()
+        return True
+    except Exception:
+        return False
+
+
+def _get_onboarding_projection(team_id: str) -> dict:
+    """Merged onboarding state — OPERATIONAL keys from jsonb (the raw
+    reader, byte-unchanged) + FLOW keys from the OnboardingState node
+    (strictly read-only graph leg; the read path NEVER writes).
+
+    Resolution order (pin 4/13):
+    - graph exception/slow → FLOW 'unavailable' markers (200; operational
+      keys still served; gate fails open).
+    - graph up, node ABSENT (orphan / grandfathered pre-backfill) → FLOW
+      defaults, no write (banned READ-side materialization).
+    - node present → node FLOW keys + node-aware wire completion.
+
+    ONE projection site for GET + PATCH echo + the MCP gate/tool — they
+    cannot diverge."""
+    raw = _get_onboarding_state(team_id)
+    if not _graph_has_team_namespace(team_id):
+        state = dict(raw)
+        state.update(_os.flow_defaults())
+        state["onboarding_complete"] = _os.resolve_wire_completion(
+            None, bool(raw.get("onboarding_complete")), [])
+        return state
+    try:
+        proj = _make_sdk(namespace=team_id)._get_proj()
+        node = _os.read_onboarding_node(proj, team_id)
+        steps = _os.completed_steps(proj, team_id) if node is not None else []
+    except Exception:
+        state = dict(raw)
+        state.update(_os.flow_unavailable())
+        # graph-down must NEVER fabricate a completion verdict from stale
+        # legacy jsonb — 'unavailable' keeps the wire honest and the MCP
+        # gate fail-open (non-bool → tools stay visible during outages).
+        state["onboarding_complete"] = "unavailable"
+        return state
+    state = dict(raw)
+    if node is None:
+        state.update(_os.flow_defaults())
+        state["onboarding_complete"] = _os.resolve_wire_completion(
+            None, bool(raw.get("onboarding_complete")), [])
+        return state
+    state.update({
+        "fork": node.get("fork"),
+        "status": node.get("status", _os.STATUS_ACTIVE),
+        "version": node.get("version", 1),
+        "completed_steps": steps,
+        "member_progress": _os.parse_member_progress(
+            node.get("member_progress")),
+        "last_decide_attempt": node.get("last_decide_attempt"),
+        "compact": node.get("compact", False),
+    })
+    state["onboarding_complete"] = _os.resolve_wire_completion(
+        node.get("status"), bool(raw.get("onboarding_complete")), steps)
+    return state
 
 
 # #1727 (Slice 2, Task 11): PATCH-field → state-key translation for the
@@ -11272,6 +11467,36 @@ class OnboardingStatePatchRequest(BaseModel):
     # (appended at class end for #1894 merge hygiene — keep append-only)
     github_issues_scope: list[str] | None = None
     github_docs_scope: list[dict] | None = None
+    # #2001 (W5): FLOW keys DECLARED on the PATCH surface so a stray client
+    # send is REJECTED loudly (403/422) instead of silently dropped — and
+    # catalog-presented, the ONE step key the dashboard writes (W1/W8 first
+    # catalog render, step-edge MERGE). All other FLOW keys are
+    # server-owned / checkpoint-owned on this surface.
+    catalog_presented: bool | None = None
+    harness_connected: bool | None = None
+    first_points_filed: bool | None = None
+    decide_completed: bool | None = None
+    capture_disclosed: bool | None = None
+    team_named: bool | None = None
+    fork: str | None = None
+    compact: bool | None = None
+    status: str | None = None
+    version: int | None = None
+    completed_steps: list[str] | None = None
+    member_progress: dict | None = None
+    last_decide_attempt: str | None = None
+
+
+# #2001 (W5): PATCH-surface ownership table — which FLOW keys are rejected
+# where (per-step write-surface ownership, scope pin 7/8).
+_PATCH_SERVER_OWNED_KEYS = {
+    "fork", "compact", "status", "version",
+    "completed_steps", "member_progress", "last_decide_attempt",
+}
+_PATCH_REJECTED_STEP_FIELDS = {
+    "harness_connected", "first_points_filed", "decide_completed",
+    "capture_disclosed", "team_named",
+}
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -11284,7 +11509,7 @@ async def get_onboarding_state(team: dict = Depends(get_current_team_session_ung
     #1148 dashboard-login gate stays scoped to the management set (this is
     an overview read)."""
     return {
-        "onboarding": _get_onboarding_state(team["team_id"]),
+        "onboarding": _get_onboarding_projection(team["team_id"]),
         "email": _team_email(team["team_id"]),
     }
 
@@ -11323,7 +11548,53 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     # (400 on invalid; valid values stored in NORMALIZED form — issues
     # strip/dedupe, docs ""/None branch → null; [] = explicit clear).
     updates = _validate_scope_payload(updates)
+    # #2001 (W5): per-key-type write-surface ownership at the PATCH
+    # boundary — server-owned FLOW keys 403, agent-step keys 422, the one
+    # dashboard step (catalog-presented) MERGEs the step edge.
+    _sent_owned = [k for k in _PATCH_SERVER_OWNED_KEYS if k in updates]
+    if _sent_owned:
+        raise HTTPException(
+            status_code=403,
+            detail={"message": "server_owned_key", "keys": _sent_owned},
+        )
+    _sent_steps = [k for k in _PATCH_REJECTED_STEP_FIELDS if k in updates]
+    if _sent_steps:
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "unknown_step_on_patch", "keys": _sent_steps},
+        )
+    catalog = updates.pop("catalog_presented", None)
+    if catalog is True and not _graph_available(team["team_id"]):
+        # FLOW-bearing write: fail-loud when the graph is down (503 BEFORE
+        # any write — retry-safe).
+        raise HTTPException(
+            status_code=503,
+            detail="Onboarding graph unavailable — retry later",
+        )
+    # Mixed-key PATCH: jsonb-first, graph-second (scope pin 7) — a graph
+    # failure after a jsonb success surfaces as a 500 fail-closed and the
+    # retry converges (MERGE idempotent; no lost FLOW keys).
     state = _update_onboarding_state(team["team_id"], **updates)
+    if catalog is True:
+        try:
+            # grandfathered no-re-onboarding: seed the create-on-write node's
+            # status from the legacy jsonb flag (PATCH catalog is a FLOW
+            # write and can be a grandfathered org's first one).
+            legacy_mirror = bool(_get_onboarding_state(
+                team["team_id"]).get("onboarding_complete"))
+            _os.write_completed_step(
+                _team_proj(team["team_id"]), team["team_id"],
+                "catalog-presented", status_from_mirror=legacy_mirror)
+            _maybe_apply_completion(team["team_id"])
+        except Exception:
+            raise HTTPException(
+                status_code=500,
+                detail="Onboarding update failed — retry-safe") from None
+        # echo the POST-write projection (the router's echo was pre-write)
+        state = _get_onboarding_projection(team["team_id"])
+    # onboarding_complete stays a LEGACY jsonb key through the carve-out
+    # (accept-and-drop activates post-W1, #1997) — the grandfathered-window
+    # guard keeps wizard-completed orgs complete in the meantime.
     # #1765 review (onboarding dual-auth): a SESSION-authed call's email
     # belongs on the USER anchor (auth.users — managed via the profile
     # flow), never teams.email; only the KEY-authed (welcome beacon)
@@ -11333,6 +11604,166 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     return {
         "onboarding": state,
         "email": _team_email(team["team_id"]),
+    }
+
+
+# #2001 (W5): agent/internal checkpoint — the ONLY surface for the agent
+# steps + fork/compact set-once + last_decide_attempt LWW + member_progress.
+# Per-step write-surface ownership (scope pin 8): the dashboard PATCHes only
+# operational keys + catalog-presented; agents checkpoint everything else.
+_CHECKPOINT_STEPS: frozenset[str] = frozenset({
+    "harness-connected",      # W2: harness connected
+    "first-points-filed",     # W3: org-anchor Subject filed (seed)
+    "decide-completed",       # W3: real decide protocol
+    "capture-disclosed",      # W6: memory-capture disclosure
+    "catalog-presented",      # W8: catalog presented (agent path)
+})
+
+
+class OnboardingCheckpointRequest(BaseModel):
+    """One FLOW operation per call (extra="forbid" — an unknown field is a
+    422, never a silent ignore)."""
+    step: str | None = None
+    fork: str | None = None
+    compact: bool | None = None
+    last_decide_attempt: str | None = None
+    member_progress: dict | None = None
+    status: str | None = None
+    model_config = {"extra": "forbid"}
+
+
+@app.post("/v1/onboarding/state/checkpoint",
+          response_model=dict)
+async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
+                                team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Checkpoint a FLOW-state operation for the AUTH-CONTEXT team.
+
+    Dual-auth (session JWT OR tt_ key) like GET/PATCH; the team ALWAYS
+    comes from the auth context — the body never carries org_id (F2).
+
+    Contract (scope pin 8):
+    - step ∈ {harness-connected, first-points-filed, decide-completed,
+      capture-disclosed, catalog-presented} — keyed-MERGE, first-write-wins
+      (replay → noop), unknown step → 422.
+    - fork/compact → set-once (first write wins; same-value replay 200;
+      changed → 409).
+    - last_decide_attempt → LWW; 'failed' is SKIPPED once decide-completed
+      exists (dismissal alone never completes).
+    - member_progress → {user_id: [steps]} user-scoped map-merge;
+      SESSION-only: a key-authed call (no session user) must send a
+      UUID user_id, else 403 (no cross-user forgery).
+    - status → 403 (server-owned; gate-written, monotonic).
+    - graph down → 503 BEFORE any write (fail-loud, retry-safe).
+    - response {created_steps, noop_steps} = the W11 edge-new-creation
+      signal (#2001 exposes; #2006 emits events).
+    - post-write fork-aware gate eval (monotonic; grandfathered no-op).
+    """
+    team_id = team["team_id"]
+    # one operation per call
+    present = [
+        name for name, val in (
+            ("step", body.step), ("fork", body.fork),
+            ("compact", body.compact),
+            ("last_decide_attempt", body.last_decide_attempt),
+            ("member_progress", body.member_progress),
+        ) if val is not None
+    ]
+    if len(present) > 1:
+        raise HTTPException(status_code=400,
+                            detail="One operation per checkpoint call")
+    if body.status is not None:
+        raise HTTPException(
+            status_code=403,
+            detail={"message": "server_owned_key", "keys": ["status"]})
+    if not _graph_available(team_id):
+        raise HTTPException(status_code=503,
+                            detail="Onboarding graph unavailable — retry later")
+    proj = _team_proj(team_id)
+    created_steps: list[str] = []
+    noop_steps: list[str] = []
+    try:
+        # grandfathered no-re-onboarding (pin 12): the legacy jsonb
+        # onboarding_complete flag seeds the create-on-write node's status
+        # so a legacy-wizard-completed org's FIRST FLOW write never flips
+        # the wire to incomplete (the backfill alone is a race window).
+        legacy_mirror = bool(_get_onboarding_state(team_id).get(
+            "onboarding_complete"))
+        if body.step is not None:
+            if body.step not in _CHECKPOINT_STEPS:
+                raise HTTPException(status_code=422,
+                                    detail={"message": "unknown_step",
+                                            "step": body.step})
+            res = _os.write_completed_step(
+                proj, team_id, body.step, status_from_mirror=legacy_mirror)
+            (created_steps if res["created"] else noop_steps).append(body.step)
+        elif body.fork is not None:
+            if body.fork not in _os.FORK_VALUES:
+                raise HTTPException(status_code=422,
+                                    detail="fork must be 'self' or 'build'")
+            outcome = _os.write_fork(proj, team_id, body.fork,
+                                     status_from_mirror=legacy_mirror)
+            if outcome == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "fork_already_set"})
+        elif body.compact is not None:
+            outcome = _os.write_compact(proj, team_id, bool(body.compact),
+                                        status_from_mirror=legacy_mirror)
+            if outcome == "conflict":
+                raise HTTPException(
+                    status_code=409,
+                    detail={"message": "compact_already_set"})
+        elif body.last_decide_attempt is not None:
+            if body.last_decide_attempt not in ("failed", "dismissed"):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"message": "invalid_last_decide_attempt"})
+            _os.write_last_decide_attempt(
+                proj, team_id, body.last_decide_attempt,
+                status_from_mirror=legacy_mirror)
+        elif body.member_progress is not None:
+            # session-only: a key-authed call (no session user) must present
+            # a UUID user_id; a SESSION-authed call must write ONLY its own
+            # user_id (no cross-user forgery either way).
+            import uuid as _uuid
+            session_uid = team.get("session_user_id")
+            for uid in body.member_progress:
+                if session_uid:
+                    if uid != session_uid:
+                        raise HTTPException(
+                            status_code=403,
+                            detail={"message": "member_progress_self_only"})
+                else:
+                    try:
+                        _uuid.UUID(uid)
+                    except (ValueError, TypeError, AttributeError):
+                        raise HTTPException(
+                            status_code=403,
+                            detail={"message": "key_auth_session_required"}) from None
+                steps = body.member_progress[uid]
+                if not isinstance(steps, list) or not all(
+                        _os.validate_step_id(s) for s in steps):
+                    raise HTTPException(
+                        status_code=422,
+                        detail={"message": "invalid_member_progress"})
+            merged: dict = {}
+            for uid, steps in body.member_progress.items():
+                merged.update(_os.write_member_progress(
+                    proj, team_id, uid, steps,
+                    status_from_mirror=legacy_mirror))
+        # post-write fork-aware gate eval (monotonic) — step/fork/compact
+        # writes only (never member_progress)
+        if body.step is not None or body.fork is not None or body.compact is not None:
+            _maybe_apply_completion(team_id)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500,
+                            detail="Checkpoint failed — retry-safe") from None
+    return {
+        "created_steps": created_steps,
+        "noop_steps": noop_steps,
+        "onboarding": _get_onboarding_projection(team_id),
     }
 
 
