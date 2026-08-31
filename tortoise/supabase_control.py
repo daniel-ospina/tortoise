@@ -1579,6 +1579,18 @@ def purge_team_control_plane(cp, team_id: str) -> None:
 # and no writer ever falls back to the registry.
 
 
+def active_membership_team_ids(cp, user_id: str) -> list[str]:
+    """Active membership team ids for a user, oldest first (#2001 W5 — the
+    compact discriminator + fork inheritance read: a user with prior
+    memberships creates a compact org; the earliest org's fork is inherited
+    with 'self' fallback — never re-asks the fork card)."""
+    rows = cp.query("team_memberships", select=["team_id"], filters=[
+        ("user_id", "eq", user_id),
+        ("status", "eq", "active"),
+    ], order="created_at.asc")
+    return [row.get("team_id") for row in rows if row.get("team_id")]
+
+
 def provision_team(cp, **params: object) -> None:
     """Call the atomic provision_team SECURITY DEFINER RPC (migration 0010).
 
@@ -1621,6 +1633,15 @@ def provision_team(cp, **params: object) -> None:
             _logger.warning(
                 "pack activation failed for team %s — self-heals on first read",
                 team_id, exc_info=True)
+    # #2001 (W5): post-RPC OnboardingState init — covers EVERY provision_team
+    # caller (register_user, /v1/teams, onboarding sub-team). Idempotent
+    # MERGE (no-op when a lane's eager statement already ran); computes
+    # compact/fork from the caller's membership anchor (the RPC has just
+    # inserted the NEW membership — exclude the new team so the count is
+    # PRIOR memberships; the mirror reads jsonb onboarding_complete
+    # one-directionally, never clobbers).
+    if team_id:
+        _ensure_onboarding_node_after_provision(cp, team_id, params)
 
 
 # ── Agent signup tokens + keyless recovery (#1709, 20260814000001) ─────────
@@ -1645,6 +1666,55 @@ def provision_team_with_token(cp, **params: object) -> None:
     failure (fail-closed → 500).
     """
     cp.rpc("provision_team_with_token", params)
+
+    # #2001 (W5): NEW post-RPC hook (agent_signup lane) — the signup path
+    # has no eager TeamMeta statement, so the node is initialized here via
+    # the write-time create-on-write seam. Idempotent MERGE; best-effort
+    # (failure self-heals on the next FLOW write).
+    team_id = params.get("p_team_id")
+    if team_id:
+        _ensure_onboarding_node_after_provision(cp, team_id, params)
+
+
+def _ensure_onboarding_node_after_provision(cp, team_id: str,
+                                            params: dict) -> None:
+    """Best-effort OnboardingState node init after an atomic provision.
+    Never blocks provisioning (a graph failure self-heals on the next FLOW
+    write via the create-on-write seam); the mirror read is one-directional
+    (jsonb onboarding_complete → status 'complete', never clobber)."""
+    try:
+        from tortoise import hosted_api as _ha
+        from tortoise.onboarding import state as _os
+        mirror = None
+        try:
+            stored = team_onboarding_state(cp, team_id)
+            if stored:
+                mirror = stored.get("onboarding_complete")
+        except Exception:
+            mirror = None
+        creator = params.get("p_user_id") or None
+        prior_ids: list[str] = []
+        if creator:
+            prior_ids = [tid for tid in active_membership_team_ids(cp, creator)
+                         if tid != team_id]
+        prior_fork = None
+        if prior_ids:
+            try:
+                prior_fork = _os.read_prior_org_fork(
+                    _ha._make_sdk(namespace=prior_ids[0])._get_proj(),
+                    prior_ids[0])
+            except Exception:
+                prior_fork = None
+        fork, compact = _os.resolve_init_fork_compact(
+            bool(prior_ids), prior_fork)
+        _os.ensure_onboarding_state_node(
+            _ha._make_sdk(namespace=team_id)._get_proj(), team_id,
+            fork=fork, compact=compact,
+            status_from_mirror=bool(mirror))
+    except Exception:
+        _logger.warning(
+            "onboarding state init failed for team %s — self-heals on first write",
+            team_id, exc_info=True)
 
 
 def resolve_signup_token(cp, token_hash: str) -> str | None:

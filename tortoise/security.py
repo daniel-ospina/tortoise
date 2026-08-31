@@ -83,6 +83,8 @@ KNOWN_REL_TYPES: frozenset[str] = frozenset({
     # Organisational / registry / session
     "BELONGS_TO", "FOR_TEAM", "CONTAINS", "SUPPORTS",
     "INFORMED_BY", "PRODUCES",
+    # Onboarding state machine (#2001 W5): OnboardingState → OnboardingStep
+    "COMPLETED_STEP",
 })
 
 
