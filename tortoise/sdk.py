@@ -11710,7 +11710,7 @@ class TortoiseSDK:
                 rows = reg.query(
                     "MATCH (m:Membership {user_id:$uid, status:'active'}) "
                     "WHERE m.team_id <> $org "
-                    "RETURN m.team_id, m.joined_at ORDER BY m.joined_at",
+                    "RETURN m.team_id, m.created_at ORDER BY m.created_at",
                     params={"uid": owner_user_id, "org": tid},
                 ).result_set
                 prior_ids = [r[0] for r in rows]

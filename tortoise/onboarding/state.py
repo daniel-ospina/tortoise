@@ -268,7 +268,7 @@ def _node_init_params(*, fork: str | None = None, compact: bool = False,
 
 
 # ── per-org write serialization (embedded MERGE re-fire caveat,
-#    sdk.py:694-745: concurrent same-key MERGEs re-fire ON CREATE and both
+#    sdk.py:830-872: concurrent same-key MERGEs re-fire ON CREATE and both
 #    report created:1 — the per-org lock keeps the W11 created-signal honest
 #    in the embedded lane; the docker lane's bolt:// stats are honest
 #    natively) ────────────────────────────────────────────────
@@ -402,13 +402,15 @@ def write_fork(graph: Any, org_id: str, fork: str, *,
         res = _run(graph,
                    f"MERGE (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
                    "ON CREATE SET n.status = $os_status, n.version = 1, "
-                   "n.member_progress = $os_member_progress, "
-                   "n.compact = $os_compact "
-                   "WITH n, CASE WHEN n.fork IS NULL THEN 'set' "
+                   "n.member_progress = $os_member_progress "
+                   f"WITH n, CASE WHEN n.fork IS NULL THEN 'set' "
                    "WHEN n.fork = $fork THEN 'same' ELSE 'conflict' END "
                    "AS outcome "
                    "SET n.fork = CASE WHEN n.fork IS NULL THEN $fork "
                    "ELSE n.fork END "
+                   f"MERGE (s_tn:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: $org_id, step_id: 'team-named'}) "
+                   f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s_tn) "
                    "RETURN outcome",
                    params)
     return res.result_set[0][0]
@@ -422,13 +424,15 @@ def write_compact(graph: Any, org_id: str, compact: bool) -> str:
         res = _run(graph,
                    f"MERGE (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
                    "ON CREATE SET n.status = $os_status, n.version = 1, "
-                   "n.member_progress = $os_member_progress, "
-                   "n.compact = $os_compact "
-                   "WITH n, CASE WHEN n.compact IS NULL THEN 'set' "
+                   "n.member_progress = $os_member_progress "
+                   f"WITH n, CASE WHEN n.compact IS NULL THEN 'set' "
                    "WHEN n.compact = $compact THEN 'same' ELSE 'conflict' END "
                    "AS outcome "
                    "SET n.compact = CASE WHEN n.compact IS NULL THEN $compact "
                    "ELSE n.compact END "
+                   f"MERGE (s_tn:{ONBOARDING_STEP_LABEL} "
+                   "{org_id: $org_id, step_id: 'team-named'}) "
+                   f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s_tn) "
                    "RETURN outcome",
                    params)
     return res.result_set[0][0]
@@ -446,12 +450,17 @@ def decide_completed_edge_exists(graph: Any, org_id: str) -> bool:
 
 
 def write_last_decide_attempt(graph: Any, org_id: str,
-                              value: str | None) -> None:
+                              value: str | None, *,
+                              status_from_mirror: bool | None = None) -> None:
     """LWW write with the conditional guard: 'failed' is SKIPPED when the
     decide-completed edge exists (a completed decide can never regress to
-    failed — dismissal alone never completes; failed never un-completes)."""
+    failed — dismissal alone never completes; failed never un-completes).
+    Create-on-write seam first (absent-node orgs — grandfathered pre-backfill
+    — must not silently no-op)."""
     if value not in (None, "failed", "dismissed"):
         raise ValueError(f"invalid last_decide_attempt: {value!r}")
+    ensure_onboarding_state_node(graph, org_id,
+                                 status_from_mirror=status_from_mirror)
     with _org_lock(org_id):
         if value == "failed" and decide_completed_edge_exists(graph, org_id):
             return
@@ -474,10 +483,14 @@ def member_progress_map(graph: Any, org_id: str) -> dict[str, list[str]]:
 
 
 def write_member_progress(graph: Any, org_id: str, user_id: str,
-                          steps: list[str]) -> dict[str, list[str]]:
+                          steps: list[str], *,
+                          status_from_mirror: bool | None = None) -> dict[str, list[str]]:
     """User-scoped map-merge: sets {user_id: steps}, returns the merged map.
     Auth (session-only user vs key-auth) is enforced by the caller — the
-    checkpoint endpoint rejects key-auth non-UUID users (403)."""
+    checkpoint endpoint rejects key-auth non-UUID users (403). Create-on-write
+    seam first (absent-node orgs must not silently no-op)."""
+    ensure_onboarding_state_node(graph, org_id,
+                                 status_from_mirror=status_from_mirror)
     with _org_lock(org_id):
         merged = member_progress_map(graph, org_id)
         merged[user_id] = list(steps)
@@ -488,11 +501,15 @@ def write_member_progress(graph: Any, org_id: str, user_id: str,
         return merged
 
 
-def write_status(graph: Any, org_id: str, status: str) -> None:
+def write_status(graph: Any, org_id: str, status: str, *,
+                 status_from_mirror: bool | None = None) -> None:
     """Server-owned, MONOTONIC status write: 'complete' can never regress to
-    'active' (a grandfathered/first-FLOW-write org is never re-onboarded)."""
+    'active' (a grandfathered/first-FLOW-write org is never re-onboarded).
+    Create-on-write seam first (absent-node orgs must not silently no-op)."""
     if status not in STATUS_VALUES:
         raise ValueError(f"invalid status: {status!r}")
+    ensure_onboarding_state_node(graph, org_id,
+                                 status_from_mirror=status_from_mirror)
     with _org_lock(org_id):
         _run(graph,
              f"MATCH (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "

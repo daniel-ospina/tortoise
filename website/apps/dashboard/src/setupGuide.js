@@ -74,8 +74,11 @@ export function setupGuide(state) {
     total: counted.length,
     percent: counted.length ? Math.round((completedCounted / counted.length) * 100) : 0,
     currentStep: (counted.find((r) => !r.done) || {}).id || null,
-    status: state.status === 'complete' ? 'complete' : 'active',
-    collapsed: state.status === 'complete',
+    // collapse on WIRE completion too: a grandfathered org completed via the
+    // legacy wizard (jsonb onboarding_complete=true, node absent) serves
+    // status 'active' but must never render a false active checklist.
+    status: state.status === 'complete' || state.onboarding_complete === true ? 'complete' : 'active',
+    collapsed: state.status === 'complete' || state.onboarding_complete === true,
     degraded: false,
   }
 }

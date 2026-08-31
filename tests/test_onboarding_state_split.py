@@ -431,6 +431,18 @@ class TestCheckpoint:
         finally:
             tc.__exit__(None, None, None)
 
+    def test_last_decide_attempt_invalid_422(self):
+        """Invalid last_decide_attempt values are client errors (422), not
+        500s — sibling ops validate at the boundary."""
+        tc, _team_id = _registered_client()
+        try:
+            for bad in ("postponed", "completed", 42, ""):
+                r = tc.post("/v1/onboarding/state/checkpoint",
+                            json={"last_decide_attempt": bad})
+                assert r.status_code == 422, (bad, r.status_code)
+        finally:
+            tc.__exit__(None, None, None)
+
     def test_member_progress_valid_steps(self):
         import uuid
         tc, _team_id = _registered_client()
@@ -884,6 +896,42 @@ class TestCompletionWire:
             st = r.json()["onboarding"]
             assert st["onboarding_complete"] is True
             assert st["status"] == "active"
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_grandfathered_first_flow_write_never_reonboards(self):
+        """P1 regression (review-found): a legacy-wizard-completed org's FIRST
+        agent step write must NOT flip the wire to incomplete. The jsonb
+        onboarding_complete=true flag seeds the create-on-write node's status
+        from the mirror — without it, the node materializes 'active', the
+        zero-edge guard disables, and the org is re-onboarded."""
+        tc, team_id = _registered_client()
+        try:
+            # make this a grandfathered org: jsonb true, node PRESENT active
+            # with ZERO agent step edges (the eager-init node)
+            tc.patch("/v1/onboarding/state",
+                     json={"onboarding_complete": True})
+            st = tc.get("/v1/onboarding/state").json()["onboarding"]
+            assert st["onboarding_complete"] is True
+            assert st["status"] == "active"
+            # now simulate a node-ABSENT grandfathered org (pre-backfill
+            # window): drop the node, keep jsonb true, then first FLOW write.
+            import tortoise.onboarding.state as _os2
+            from tortoise.hosted_api import _make_sdk as _mk
+            proj = _mk(namespace=team_id)._get_proj()
+            _os2._run(proj,
+                      f"MATCH (n:{_os2.ONBOARDING_NODE_LABEL} "
+                      f"{{org_id: $oid}}) DETACH DELETE n",
+                      {"oid": team_id})
+            assert _os2.read_onboarding_node(proj, team_id) is None
+            # FIRST agent FLOW write — the create-on-write seam must seed
+            # status from the jsonb mirror (never re-onboard the org).
+            r = tc.post("/v1/onboarding/state/checkpoint",
+                        json={"step": "harness-connected"})
+            assert r.status_code == 200, r.text
+            body = r.json()["onboarding"]
+            assert body["onboarding_complete"] is True, body
+            assert body["status"] == "complete"
         finally:
             tc.__exit__(None, None, None)
 

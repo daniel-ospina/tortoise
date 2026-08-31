@@ -48,6 +48,7 @@ from tortoise.hosted_backup import (
     restore_backup,
 )
 from tortoise.mcp_server import create_http_app
+from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
 )
@@ -11308,8 +11309,6 @@ class OnboardingStateResponse(BaseModel):
     email: str | None = None
 
 
-from tortoise.onboarding import state as _os  # noqa: E402  # #2001 (W5) canonical FLOW-state module
-
 # #2001 (W5): node-aware wire completion is LIVE; accept-and-drop for
 # PATCH onboarding_complete on node-present orgs lands AFTER W1 (#1997)
 # removes wizardComplete (cross-PR ordering pin) — until then the legacy
@@ -11374,6 +11373,10 @@ def _get_onboarding_projection(team_id: str) -> dict:
     except Exception:
         state = dict(raw)
         state.update(_os.flow_unavailable())
+        # graph-down must NEVER fabricate a completion verdict from stale
+        # legacy jsonb — 'unavailable' keeps the wire honest and the MCP
+        # gate fail-open (non-bool → tools stay visible during outages).
+        state["onboarding_complete"] = "unavailable"
         return state
     state = dict(raw)
     if node is None:
@@ -11574,9 +11577,14 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     state = _update_onboarding_state(team["team_id"], **updates)
     if catalog is True:
         try:
+            # grandfathered no-re-onboarding: seed the create-on-write node's
+            # status from the legacy jsonb flag (PATCH catalog is a FLOW
+            # write and can be a grandfathered org's first one).
+            legacy_mirror = bool(_get_onboarding_state(
+                team["team_id"]).get("onboarding_complete"))
             _os.write_completed_step(
                 _team_proj(team["team_id"]), team["team_id"],
-                "catalog-presented")
+                "catalog-presented", status_from_mirror=legacy_mirror)
             _maybe_apply_completion(team["team_id"])
         except Exception:
             raise HTTPException(
@@ -11674,12 +11682,19 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     created_steps: list[str] = []
     noop_steps: list[str] = []
     try:
+        # grandfathered no-re-onboarding (pin 12): the legacy jsonb
+        # onboarding_complete flag seeds the create-on-write node's status
+        # so a legacy-wizard-completed org's FIRST FLOW write never flips
+        # the wire to incomplete (the backfill alone is a race window).
+        legacy_mirror = bool(_get_onboarding_state(team_id).get(
+            "onboarding_complete"))
         if body.step is not None:
             if body.step not in _CHECKPOINT_STEPS:
                 raise HTTPException(status_code=422,
                                     detail={"message": "unknown_step",
                                             "step": body.step})
-            res = _os.write_completed_step(proj, team_id, body.step)
+            res = _os.write_completed_step(
+                proj, team_id, body.step, status_from_mirror=legacy_mirror)
             (created_steps if res["created"] else noop_steps).append(body.step)
         elif body.fork is not None:
             if body.fork not in _os.FORK_VALUES:
@@ -11697,14 +11712,26 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
                     status_code=409,
                     detail={"message": "compact_already_set"})
         elif body.last_decide_attempt is not None:
-            _os.write_last_decide_attempt(proj, team_id,
-                                          body.last_decide_attempt)
+            if body.last_decide_attempt not in ("failed", "dismissed"):
+                raise HTTPException(
+                    status_code=422,
+                    detail={"message": "invalid_last_decide_attempt"})
+            _os.write_last_decide_attempt(
+                proj, team_id, body.last_decide_attempt,
+                status_from_mirror=legacy_mirror)
         elif body.member_progress is not None:
             # session-only: a key-authed call (no session user) must present
-            # a UUID user_id (no cross-user forgery).
+            # a UUID user_id; a SESSION-authed call must write ONLY its own
+            # user_id (no cross-user forgery either way).
             import uuid as _uuid
+            session_uid = team.get("session_user_id")
             for uid in body.member_progress:
-                if not team.get("session_user_id"):
+                if session_uid:
+                    if uid != session_uid:
+                        raise HTTPException(
+                            status_code=403,
+                            detail={"message": "member_progress_self_only"})
+                else:
                     try:
                         _uuid.UUID(uid)
                     except (ValueError, TypeError, AttributeError):
@@ -11720,7 +11747,8 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
             merged: dict = {}
             for uid, steps in body.member_progress.items():
                 merged.update(_os.write_member_progress(
-                    proj, team_id, uid, steps))
+                    proj, team_id, uid, steps,
+                    status_from_mirror=legacy_mirror))
         # post-write fork-aware gate eval (monotonic) — step/fork/compact
         # writes only (never member_progress)
         if body.step is not None or body.fork is not None or body.compact is not None:

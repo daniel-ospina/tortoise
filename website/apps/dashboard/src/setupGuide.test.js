@@ -82,6 +82,30 @@ test('complete status collapses the card (grandfathered + gate-complete)', () =>
   assert.equal(g.status, 'complete')
 })
 
+test('wire-complete (node-absent grandfathered) also collapses the card', () => {
+  // jsonb onboarding_complete=true with status 'active' (no backfilled node)
+  // must never render a false active checklist — the COLLAPSE flag is what
+  // governs rendering; done/total still compute the underlying checklist.
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: false,
+    onboarding_complete: true,
+    completed_steps: [],
+  })
+  assert.equal(g.collapsed, true)
+  assert.equal(g.status, 'complete')
+})
+
+test('active + onboarding_complete false renders the checklist', () => {
+  const g = setupGuide({
+    status: 'active', fork: 'self', compact: false,
+    onboarding_complete: false,
+    completed_steps: ['harness-connected'],
+  })
+  assert.equal(g.collapsed, false)
+  assert.equal(g.status, 'active')
+  assert.equal(g.total, 3)
+})
+
 test('DEGRADED: graph-down FLOW markers → unavailable, never a false checklist', () => {
   const g = setupGuide({
     status: 'unavailable', fork: 'unavailable', version: 'unavailable',
