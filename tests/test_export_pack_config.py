@@ -282,6 +282,103 @@ class TestForeignKindsGuard:
             _check_foreign_kinds(dump)
 
 
+# ── #2040: shared pack_config shape validator ───────────────────────────────
+
+# (pack_config, expected-error-substring) pairs — single-violation artifacts
+# where possible; check order pinned (dict → schema_version → packs → entry
+# → ns → yaml). Entry-level messages interpolate the concrete index.
+MALFORMED_PC_CASES = [
+    # (1) non-dict pack_config
+    ("x", "pack_config must be an object"),
+    (5, "pack_config must be an object"),
+    ([1], "pack_config must be an object"),
+    # (2) schema_version missing / 2 / "1" / True / 1.0
+    ({"packs": []}, "schema_version must be 1"),
+    ({"schema_version": 2, "packs": []}, "schema_version must be 1"),
+    ({"schema_version": "1", "packs": []}, "schema_version must be 1"),
+    ({"schema_version": True, "packs": []}, "schema_version must be 1"),
+    ({"schema_version": 1.0, "packs": []}, "schema_version must be 1"),
+    # (3) packs missing / None
+    ({"schema_version": 1}, "packs is required and must be a list"),
+    ({"schema_version": 1, "packs": None}, "packs must be a list"),
+    # (4) packs non-list
+    ({"schema_version": 1, "packs": 42}, "packs must be a list"),
+    ({"schema_version": 1, "packs": "junk"}, "packs must be a list"),
+    ({"schema_version": 1, "packs": ("a",)}, "packs must be a list"),
+    # (5) entry not dict
+    ({"schema_version": 1, "packs": [42]}, "packs[0] must be an object"),
+    ({"schema_version": 1, "packs": ["x"]}, "packs[0] must be an object"),
+    ({"schema_version": 1, "packs": [None]}, "packs[0] must be an object"),
+    # (6) ns absent / "" / " " / 42
+    ({"schema_version": 1, "packs": [{"version": "0.1.0"}]},
+     "packs[0] must declare a non-empty string namespace"),
+    ({"schema_version": 1, "packs": [{"namespace": "", "version": "0.1.0"}]},
+     "packs[0] must declare a non-empty string namespace"),
+    ({"schema_version": 1, "packs": [{"namespace": " ", "version": "0.1.0"}]},
+     "packs[0] must declare a non-empty string namespace"),
+    ({"schema_version": 1, "packs": [{"namespace": 42, "version": "0.1.0"}]},
+     "packs[0] must declare a non-empty string namespace"),
+    # (7) yaml empty-string case
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": ""}]},
+     "yaml must be a non-empty string or null"),
+    # (7) yaml whitespace-only → same empty-str message (pre-restore shape
+    # error, consistent with the ns `" "` handling — a guaranteed-fail
+    # artifact must not 422 post-swap with a misleading reason)
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": " "}]},
+     "yaml must be a non-empty string or null"),
+    # (7) yaml non-str (typed) case
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": 0}]},
+     "yaml must be a non-empty string or null (got int)"),
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": False}]},
+     "yaml must be a non-empty string or null (got bool)"),
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": []}]},
+     "yaml must be a non-empty string or null (got list)"),
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": {}}]},
+     "yaml must be a non-empty string or null (got dict)"),
+    ({"schema_version": 1, "packs": [{"namespace": "tenant-ops", "yaml": 42}]},
+     "yaml must be a non-empty string or null (got int)"),
+]
+
+# Legal families: absent (payload.get → None), explicit None, empty packs,
+# well-formed incl. int `version`, `activated: "anything"`, unknown keys,
+# and yaml absent/None — all must return None (no error).
+LEGAL_PC_CASES = [
+    None,
+    {"schema_version": 1, "packs": []},
+    {"schema_version": 1, "packs": [
+        {"namespace": "tenant-ops", "version": 1, "activated": "anything",
+         "yaml": CUSTOM_MANIFEST, "future_key": "unknown"}]},
+    {"schema_version": 1, "packs": [
+        {"namespace": "dev", "version": "0.2.0", "activated": True,
+         "yaml": None}]},
+    {"schema_version": 1, "packs": [
+        {"namespace": "tenant-ops", "version": "0.1.0", "activated": True}]},
+]
+
+
+class TestPackConfigShapeGate:
+    """#2040: shared pack_config legality matrix — single source of truth
+    used by the envelope gate (422 pre-restore) AND the apply defense
+    (ValueError), so the matrix cannot drift between the two sites."""
+
+    @pytest.mark.parametrize("pc,substr",
+                             MALFORMED_PC_CASES,
+                             ids=[f"case{i}" for i in range(len(MALFORMED_PC_CASES))])
+    def test_malformed_pack_config_returns_error(self, pc, substr):
+        from tortoise.hosted_api import _pack_config_shape_error
+        err = _pack_config_shape_error(pc)
+        assert err is not None
+        assert "pack_config" in err
+        assert substr in err
+
+    @pytest.mark.parametrize("pc",
+                             LEGAL_PC_CASES,
+                             ids=[f"legal{i}" for i in range(len(LEGAL_PC_CASES))])
+    def test_legal_pack_config_returns_none(self, pc):
+        from tortoise.hosted_api import _pack_config_shape_error
+        assert _pack_config_shape_error(pc) is None
+
+
 class TestApplyImportPackConfig:
     def test_applies_custom_manifest_and_starter(self, sdk):
         from tortoise.hosted_api import _apply_import_pack_config
@@ -317,3 +414,52 @@ class TestApplyImportPackConfig:
         ]}}
         with pytest.raises(ValueError, match="unknown starter pack"):
             _apply_import_pack_config(sdk, payload)
+
+    # ── #2040 Task 3: single-validator drift-lock (shared shape gate) ──
+
+    @pytest.mark.parametrize("pc,substr",
+                             MALFORMED_PC_CASES,
+                             ids=[f"case{i}" for i in range(len(MALFORMED_PC_CASES))])
+    def test_malformed_pack_config_raises_value_error(self, sdk, pc, substr):
+        """Every malformed shape raises ValueError through
+        ``_apply_import_pack_config`` with the SHAPE error message (pinned via
+        ``match=``) — NOT a bare ValueError (several falsy-yaml / non-str-ns
+        cases already raise "unknown starter pack" today via the starter
+        branch, so a bare raises() would pass vacuously pre-implementation)."""
+        import re
+
+        from tortoise.hosted_api import _apply_import_pack_config
+        payload = {"pack_config": pc}
+        with pytest.raises(ValueError, match=re.escape(substr)):
+            _apply_import_pack_config(sdk, payload)
+
+    def test_ns_yaml_mismatch_raises_pre_write(self, sdk):
+        """Declared pack namespace disagrees with the manifest's yaml
+        namespace → ValueError naming both namespaces BEFORE any write — no
+        PackManifest/PackInstall residue (closes the crafted-artifact
+        silent-200 class)."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        from tortoise.pack_state import get_tenant_packs
+        mismatched = CUSTOM_MANIFEST.replace("tenant-ops", "other-ns")
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0", "activated": True,
+             "yaml": mismatched},
+        ]}}
+        with pytest.raises(ValueError, match="does not match manifest namespace"):
+            _apply_import_pack_config(sdk, payload)
+        assert get_tenant_manifests(sdk) == []  # no PackManifest residue
+        assert not any(p["namespace"] == "tenant-ops"
+                       for p in get_tenant_packs(sdk))  # no PackInstall residue
+
+    def test_ns_yaml_match_applies(self, sdk):
+        """A ns↔yaml-consistent artifact still applies (guard does not trip
+        the legitimate path) — regression lock for Task 5's success fixture."""
+        from tortoise.hosted_api import _apply_import_pack_config
+        from tortoise.pack_manifest_store import get_tenant_manifests
+        payload = {"pack_config": {"schema_version": 1, "packs": [
+            {"namespace": "tenant-ops", "version": "0.1.0", "activated": True,
+             "yaml": CUSTOM_MANIFEST},
+        ]}}
+        _apply_import_pack_config(sdk, payload)
+        assert any(m["namespace"] == "tenant-ops" for m in get_tenant_manifests(sdk))

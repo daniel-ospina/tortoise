@@ -176,6 +176,20 @@ class TestValidateManifest:
         assert not (tmp_path / "escape").exists()
         assert not (tmp_path / "td" / ".." / "escape").resolve().exists()
 
+    def test_deeply_nested_yaml_recursion_error_is_validation_failure(self):
+        """#2040 Task 4: a deeply-nested payload-controlled yaml raises
+        ``RecursionError`` (NOT a YAMLError subclass) through
+        ``yaml.safe_load`` — it must be caught as a clean validation failure
+        (422-class), never escape as a 500 post-swap. The genuinely-nested
+        flow mapping ("{" * 1500 + "}" * 1500) is the form that empirically
+        raises RecursionError — the "a:" * 1000 form raises ScannerError (a
+        YAMLError subclass the existing handler already catches, so it would
+        pass vacuously)."""
+        from tortoise.pack_manifest_store import validate_manifest
+        r = validate_manifest("{" * 1500 + "}" * 1500)
+        assert not r.ok
+        assert "nesting too deep" in r.errors[0]
+
 
 # ── API surface ─────────────────────────────────────────────────────────────
 
