@@ -5083,11 +5083,14 @@ class TortoiseSDK:
     def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
         """Check 3 (endpoint half) — typed endpoints (external + bundle-local,
         cycle-2) and the direct-edge terminal-status guard (cycle-3, refined
-        cycle-17/18). Operator/direct-edge connections require plain-Point
-        endpoints; direct-edge connections (plain IMPL/NAND) additionally
-        reject terminal (superseded/retracted) endpoints. Bundle-local refs
-        resolving to EXISTING (dedup-hit) terminal points are Phase-1
-        violations (never a Phase-2 raise)."""
+        cycle-17/18). Operator-ROUTED connections (reify:true / mitigation /
+        part-whole → create_operator) accept Point OR Event endpoints (A1b
+        #1272 parity — _find_operator's dedup key collects both); direct-edge
+        connections (plain IMPL/NAND → create_direct_edge, which guards plain
+        Points) require plain-Point endpoints AND additionally reject terminal
+        (superseded/retracted) endpoints (#2062). Bundle-local refs resolving
+        to EXISTING (dedup-hit) terminal points are Phase-1 violations (never
+        a Phase-2 raise)."""
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
             for item in bundle.get(section) or []:
@@ -5110,12 +5113,20 @@ class TortoiseSDK:
         entity_labels = {"subject": "Subject", "object": "Object",
                          "event": "Event", "document": "Document"}
         for i, conn, route, vals in conns:  # noqa: B007
+            # #2062: the operator route (reify/mitigation/part-whole →
+            # create_operator) accepts Point OR Event endpoints — the direct
+            # route (plain IMPL/NAND) stays plain-Point only.
+            op_route = route == "operator"
             for v in vals:
                 if not isinstance(v, str):
                     continue
                 if v in local:
                     section, item = local[v]
-                    if section != "points" or item.get("is_operator"):
+                    plain_point = section == "points" \
+                        and not item.get("is_operator")
+                    event_item = op_route and section == "entities" \
+                        and str(item.get("type") or "").strip().lower() == "event"
+                    if not (plain_point or event_item):
                         if section == "sources":
                             label = "Source"
                         elif section == "entities":
@@ -5138,7 +5149,8 @@ class TortoiseSDK:
                             "message": f"ingest: connections[{i}] external "
                                        f"endpoint {v!r} does not exist",
                         })
-                    elif info["label"] != "Point" or info["is_operator"]:
+                    elif info["is_operator"] or (info["label"] != "Point"
+                            and not (op_route and info["label"] == "Event")):
                         got = ("operator Point" if info["is_operator"]
                                else info["label"] or "unknown node type")
                         violations.append({
@@ -5187,10 +5199,13 @@ class TortoiseSDK:
         """Phase-2 defense-in-depth (check 3): re-verify endpoints right
         before the connection write — a node deleted/superseded between
         Phase-1 validation and this write is the race class this exists for.
-        Reuses the SAME message shapes as Phase 1 (Phase-1/2 parity)."""
+        Reuses the SAME message shapes as Phase 1 (Phase-1/2 parity). #2062:
+        the operator route accepts Point OR Event endpoints (matching Phase-1
+        and create_operator's A1b #1272 contract)."""
         if not isinstance(conn, dict) or "operator" not in conn:
             return
         route = self._connection_route(conn)
+        op_route = route == "operator"
         frm = conn.get("from")
         tos = conn.get("to")
         vals = []
@@ -5208,7 +5223,8 @@ class TortoiseSDK:
                     "message": f"ingest: connections[{index}] external "
                                f"endpoint {v!r} does not exist",
                 })
-            elif info_i["label"] != "Point" or info_i["is_operator"]:
+            elif info_i["is_operator"] or (info_i["label"] != "Point"
+                    and not (op_route and info_i["label"] == "Event")):
                 got = ("operator Point" if info_i["is_operator"]
                        else info_i["label"] or "unknown node type")
                 violations.append({
@@ -5401,6 +5417,13 @@ class TortoiseSDK:
           operator-less — routed to a DIRECT edge (no operator node, see
           INGEST_CONTRACT.md §8). A connection carrying ``relation`` stays a
           PLAIN structural edge (structural edges never reify).
+        - Endpoint typing (#2062): operator-ROUTED connections (reify:
+          true/mitigation/part-whole → create_operator) accept Point OR Event
+          endpoints (A1b #1272 parity — the dedup key in _find_operator
+          collects both); bundle-local refs may address point items or
+          ``type:"event"`` entity items. DIRECT-edge connections (plain
+          IMPL/NAND → create_direct_edge, which guards plain Points) require
+          plain-Point endpoints only.
         - granularity='bulk' (default): whole bundle in one coherent pass,
           returns aggregated {created, ids, nudges}. granularity='granular':
           additionally returns per-item ``results`` for agent step-by-step
