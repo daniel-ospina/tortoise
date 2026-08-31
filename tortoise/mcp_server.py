@@ -21,13 +21,31 @@ from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
 from tortoise.sdk import (TortoiseSDK, INGEST_GRANULARITIES,
                           INGEST_PROMOTION_POLICIES, _first_non_draft_status)
+from tortoise.schemas import (  # one vocabulary, no duplicated boundary literals (P2-14)
+    CODE_IN_FLIGHT_LIMIT,
+    CODE_QUOTA_EXCEEDED,
+    CODE_READER_UNAVAILABLE,
+    CODE_RETRIEVAL_UNAVAILABLE,
+    CODE_TIMEOUT,
+)
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
-                               _transport_mode, _get_team_sdk,
+                               _transport_mode, _tool_group, _get_team_sdk,
                                HTTP_ALLOWED, ERR_UNAUTHORIZED, ERR_EXCLUDED,
                                SELFHOST_TEAM_ID)
+from tortoise.transport import ask_exposure_enabled
 
 _log = logging.getLogger(__name__)
+
+# ── #2013 PRODUCT-GATING: the hosted ask EXPOSURE (the MCP tortoise_ask
+# tool) is off by default. The READER ships (the eval's reader — the 500-Q
+# benchmark runs through it); only the customer-facing ask EXPOSURE is
+# gated until the reader-model decision is made. ``tortoise_ask`` lives in
+# its OWN curation group ("ask", see tool_registry.py GROUP_BY_NAME) so the
+# default (ungrouped) hosted /mcp surface can exclude it; an explicit
+# tool_group="ask" server (dev/eval) still serves it.
+_ASK_TOOL_GROUP = "ask"
+
 
 def _load_dotenv(path: str | None = None) -> None:
     """Tiny .env loader — repo-root .env, KEY=VALUE lines, no new deps.
@@ -623,14 +641,19 @@ def _reject_server_managed_props(props: dict) -> str | None:
 
 
 
-def _http_excluded_error() -> dict:
-    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4)."""
+def _http_excluded_error(message: str | None = None) -> dict:
+    """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
+
+    ``message`` overrides the default guidance (used by the #2013 ask gate,
+    where the hosted REST /v1/ask is ALSO gated off — the default text's
+    "hosted REST API" hint would be wrong for that caller)."""
     return {
         "jsonrpc": "2.0",
         "error": {
             "code": ERR_EXCLUDED,
-            "message": "This tool is not available over HTTP. "
-                        "Use the hosted REST API or stdio MCP.",
+            "message": message or (
+                "This tool is not available over HTTP. "
+                "Use the hosted REST API or stdio MCP."),
         },
         "id": None,
     }
@@ -1008,6 +1031,94 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
                  min_confidence=min_confidence, order_by=order_by,
                  relationship_filter=relationship_filter,
                  traversal_path=traversal_path)
+
+
+async def tortoise_ask(question: str, question_type: str | None = None,
+                       question_date: str | None = None) -> dict:
+    """Answer a question about captured memory (#1987 Task 8) — ONE bounded
+    RAG pass (retrieval → annotation → context assembly → ONE LLM reader
+    call) returning an ANSWER (not ranked hits), with the full ask response
+    shape: {answer, abstained, question_type, question_date, evidence,
+    context_tokens, model, provider, route, cost_estimate_usd, duration_ms,
+    retrieval_degraded}.
+
+    COST PROFILE (group="ask" — #2013-gated exposure): unlike tortoise_search
+    (LLM-free), tortoise_ask consumes LLM tokens against the team's
+    per-minute ask budget (60/min) — budget-exhausted calls return the
+    structured error {"error": {"code": "quota_exceeded", "retry_after": …}}
+    and are NEVER an unbounded call. Read-classified (never counted as a
+    write; NOT in _QUOTA_GATED/WRITE_TOOL_NAMES). Budget/in-flight/timeout
+    bounds are the SAME shared structures as the REST surface
+    (tortoise/quota.py run_ask_bounded — Semaphore(8) + 60s + per-team
+    in-flight cap 4); stdio/selfhost contexts are unbudgeted AND unmetered.
+    On the hosted path the MCP handler meters through the SAME single call
+    site as HTTP (``sdk.ask(team_id=_current_team_id.get())``); stdio
+    (team_id=None) and the selfhost transport (the ``_selfhost_transport``
+    flag) record nothing.
+
+    Invalid inputs (empty/oversize/bad type/bad date) surface as a
+    STRUCTURED tool error {"error": {"code": …}} with ZERO LLM calls.
+    """
+    # #2013 PRODUCT-GATING: call-time gate mirroring the listing filter —
+    # FastMCP dispatches tools/call by name without consulting the list
+    # Transform, so a listing-only gate would leak the ask exposure. Served
+    # only on (a) the default surface with TORTOISE_ENABLE_ASK=1 or (b) an
+    # explicit tool_group="ask" server (dev/eval opt-in).
+    if (_transport_mode.get() == "http"
+            and _tool_group.get() != _ASK_TOOL_GROUP
+            and not ask_exposure_enabled()):
+        return _http_excluded_error(
+            message="The ask tool is not served on this server: the hosted ask "
+                    "exposure is gated off (#2013). Use stdio MCP or an "
+                    "explicit tool_group=\"ask\" server.")
+    from tortoise.exceptions import (
+        AskQuotaExceeded,
+        AskReaderUnavailable,
+        AskRetrievalUnavailable,
+        AskValidationError,
+    )
+    from tortoise.quota import (
+        AskBoundedTimeoutError,
+        AskInFlightLimitError,
+        ask_budget_retry_after,
+        ask_in_flight_capacity,
+        ask_llm_budget_available,
+        run_ask_bounded,
+    )
+    team_id = _current_team_id.get()
+    sdk = _get_team_sdk()
+    # Local-lane validation FIRST (structured error, ZERO complete() calls)
+    # — BEFORE the budget gate, so invalid inputs never consume a budget slot
+    # (matching the HTTP path's validate-first semantics).
+    try:
+        sdk._ask_validate(question, question_type, question_date)
+    except AskValidationError as e:
+        return {"error": {"code": e.code}}
+    # Budget gate (the ONE shared bucket helper — stdio/selfhost exempt) —
+    # skip the charge when the in-flight cap is already full (a request that
+    # will 429 ``in_flight_limit`` must not burn a budget slot, P2).
+    if ask_in_flight_capacity(team_id) and not ask_llm_budget_available(team_id):
+        return {"error": {"code": CODE_QUOTA_EXCEEDED,
+                          "retry_after": ask_budget_retry_after(team_id)}}
+    try:
+        return await run_ask_bounded(
+            sdk.ask, team_id, question,
+            question_type=question_type, question_date=question_date,
+            _sdk_team_id=team_id,
+        )
+    except AskValidationError as e:
+        return {"error": {"code": e.code}}
+    except AskQuotaExceeded as e:
+        return {"error": {"code": CODE_QUOTA_EXCEEDED,
+                          "retry_after": e.retry_after}}
+    except AskInFlightLimitError:
+        return {"error": {"code": CODE_IN_FLIGHT_LIMIT}}
+    except AskBoundedTimeoutError:
+        return {"error": {"code": CODE_TIMEOUT}}
+    except AskReaderUnavailable:
+        return {"error": {"code": CODE_READER_UNAVAILABLE}}
+    except AskRetrievalUnavailable:
+        return {"error": {"code": CODE_RETRIEVAL_UNAVAILABLE}}
 
 
 def tortoise_expand_relationships(point_id: str) -> list[dict]:
@@ -2714,16 +2825,21 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
     class _HTTPToolFilter(Transform):
         """Hide HTTP-excluded tools from tools/list (D4) + optional curation
-        group scoping (#523).
+        group scoping (#523) + the #2013 gated ask group.
 
         The excluded tools (team_create/backfill_v25/ingest_corpus) remain
         registered on the shared module-level mcp instance for stdio, but are
         filtered out of the HTTP tool listing so tenants can't discover them.
         When tool_group is set, only that group's tools are listed — role-
         scoped servers keep the agent's tool-selection surface under ~20.
+
+        #2013 PRODUCT-GATING: the ask tool (group="ask") is absent from the
+        DEFAULT (ungrouped) hosted surface unless TORTOISE_ENABLE_ASK=1 — the
+        reader ships (the eval's reader), the hosted ask EXPOSURE is gated
+        off. An EXPLICIT tool_group="ask" server (dev/eval) serves it
+        regardless — deliberate opt-in.
         """
         async def list_tools(self, tools):
-            from tortoise.mcp_auth import _tool_group
             group = _tool_group.get()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
@@ -2735,7 +2851,14 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             def _visible(t):
                 if t.name not in HTTP_ALLOWED:
                     return False
-                if group and GROUP_BY_NAME.get(t.name) != group:
+                tgroup = GROUP_BY_NAME.get(t.name)
+                if group:
+                    # explicit curation-group request — serve that group's tools
+                    if tgroup != group:
+                        return False
+                elif tgroup == _ASK_TOOL_GROUP and not ask_exposure_enabled():
+                    # default (ungrouped) hosted surface: the gated ask group
+                    # is excluded unless the exposure flag is on (#2013)
                     return False
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this team's onboarding is complete (fail-open

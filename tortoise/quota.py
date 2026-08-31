@@ -94,6 +94,11 @@ MAX_OPERATOR_TARGETS = 500
 MAX_SESSION_TURNS = 500
 MAX_EXTRACTIONS_PER_TURN = 200
 MAX_ANALYZE_LLM_PER_MIN = 60
+#: #1987 Task 6: per-team per-minute LLM-call budget for the ask lane
+#: (mirrors ``MAX_ANALYZE_LLM_PER_MIN`` — the #329 pattern). Per-process
+#: (in-memory) scoping: a multi-worker uvicorn deployment scales the
+#: 60/min bound ×workers.
+MAX_ASK_LLM_PER_MIN = 60
 MAX_DREAM_FULL_PER_HOUR = 6
 
 # ── Value-first mining budget + Layer-1 payload caps (epic #909 §4.4) ────
@@ -522,3 +527,270 @@ def enforce_team_limit(limits: dict | None, resource: str, sdk=None) -> None:
         raise QuotaExceededError(
             f"Team {resource} limit reached ({limit}). Upgrade your plan to increase it."
         )
+
+
+# ── Ask lane: shared budget bucket + bounded runner (#1987 Tasks 6/7/8) ────
+#
+# The ONE shared per-team per-minute LLM budget for the ask lane, used by
+# BOTH the hosted REST handler and the hosted MCP handler (no duplicated
+# prune/check/append logic — mcp_server.py imports ``tortoise.quota``). The
+# bucket is bounded: idle team keys are pruned under a TTL + LRU cap so
+# memory stays bounded under N-teams-ask-once / M-teams-idle, and a
+# reactivated team starts clean (P2-15).
+
+import collections  # noqa: E402
+import contextlib  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+_ASK_BUDGET_TTL_S = 300.0       # idle team bucket expiry
+_ASK_BUDGET_MAX_TEAMS = 1024    # LRU bound on the bucket dict
+_ask_llm_budget: collections.OrderedDict[str, list[float]] = \
+    collections.OrderedDict()
+_ask_budget_lock = threading.Lock()
+
+
+def _selfhost_transport_active() -> bool:
+    """The transport-keyed selfhost exemption channel (tortoise/transport.py
+    — the SELFHOST_TEAM_ID VALUE is never the exemption key)."""
+    from tortoise.transport import _selfhost_transport
+    return _selfhost_transport.get()
+
+
+def ask_llm_budget_available(team_id: str | None) -> bool:
+    """True if this team still has ask LLM budget this minute.
+
+    Exemptions (always allowed): ``not team_id`` (stdio/None — mirroring
+    ``_analyze_llm_budget_available``'s ``if not team_id: return True``,
+    mcp_server.py) AND the selfhost-transport signal
+    (``_selfhost_transport.get()`` — stdio + selfhost MCP modes are
+    unbudgeted). A hosted team with the RAW id "selfhost" is budget-charged
+    (the exemption is transport-keyed, never value-keyed).
+
+    Prune → check → append (never pop between check and append — that
+    orphans the appended timestamp and silently disables the budget).
+    """
+    if not team_id or _selfhost_transport_active():
+        return True
+    now_ts = time.monotonic()
+    with _ask_budget_lock:
+        bucket = _ask_llm_budget.get(team_id)
+        if bucket is None:
+            bucket = []
+        # prune stale entries for THIS team (equal/sub-second timestamps
+        # safe — monotonic, no index errors)
+        bucket[:] = [ts for ts in bucket if now_ts - ts < 60.0]
+        if len(bucket) >= MAX_ASK_LLM_PER_MIN:
+            return False
+        bucket.append(now_ts)
+        _ask_llm_budget[team_id] = bucket
+        _ask_llm_budget.move_to_end(team_id)
+        # TTL + LRU bound: drop expired/least-recently-used team keys
+        expired = [k for k, v in _ask_llm_budget.items()
+                   if v and now_ts - v[-1] >= _ASK_BUDGET_TTL_S]
+        for k in expired:
+            del _ask_llm_budget[k]
+        while len(_ask_llm_budget) > _ASK_BUDGET_MAX_TEAMS:
+            _ask_llm_budget.popitem(last=False)
+    return True
+
+
+def _reset_ask_budget_for_tests() -> None:
+    """Test seam — clears the shared ask budget bucket."""
+    with _ask_budget_lock:
+        _ask_llm_budget.clear()
+
+
+def ask_budget_retry_after(team_id: str | None) -> float:
+    """Seconds until the team's ask budget window self-heals (Retry-After
+    for the 429 ``quota_exceeded`` response — ≈ the prune delay; 0 when no
+    budget was consumed)."""
+    if not team_id:
+        return 0.0
+    now_ts = time.monotonic()
+    with _ask_budget_lock:
+        bucket = _ask_llm_budget.get(team_id) or []
+        if not bucket:
+            return 0.0
+        oldest = min(bucket)
+        return max(0.0, 60.0 - (now_ts - oldest))
+
+
+class AskInFlightLimitError(Exception):
+    """Per-team in-flight cap hit (4 concurrent) — mapped to 429
+    ``in_flight_limit`` by the ask handlers."""
+
+
+class AskBoundedTimeoutError(Exception):
+    """The bounded ask section exceeded ``_ASK_TIMEOUT_S`` (semaphore queue
+    OR the reader call) — mapped to 504 ``timeout`` by the ask handlers."""
+
+
+#: Ask-lane bounds (#1987 Task 7): global semaphore, per-team in-flight cap,
+#: and the injectable module-level timeout (monkeypatched in tests — no real
+#: 60s sleeps).
+_ASK_TIMEOUT_S = 60
+_ASK_EXEC_FLOOR_S = 5.0     # a started ask is guaranteed >= this much execution time
+_ASK_GLOBAL_SEMAPHORE_SIZE = 8
+_ASK_TEAM_IN_FLIGHT_CAP = 4
+
+#: Loop-safe semaphore/in-flight state: keyed by the RUNNING loop object via
+#: a weak-keyed dict (entries die with their loop — a recreated loop rebinds
+#: cleanly; the size bound is one entry per live loop). Never a module-level
+#: ``asyncio.Semaphore`` bound to the first loop it is awaited in (the
+#: mcp_server.py hazard, P1-8/P2-8).
+import weakref  # noqa: E402 — the state helpers import it lazily too
+
+_ask_loop_state: weakref.WeakKeyDictionary = None  # type: ignore[assignment]
+_ask_loop_state_lock = threading.Lock()
+
+
+def _ask_state_for_loop(loop):
+    import weakref
+    global _ask_loop_state
+    if _ask_loop_state is None:
+        _ask_loop_state = weakref.WeakKeyDictionary()
+    with _ask_loop_state_lock:
+        st = _ask_loop_state.get(loop)
+        if st is None:
+            import asyncio
+            st = {"sem": asyncio.Semaphore(_ASK_GLOBAL_SEMAPHORE_SIZE),
+                  "in_flight": collections.Counter()}
+            _ask_loop_state[loop] = st
+        return st
+
+
+def _reset_ask_loop_state_for_tests() -> None:
+    """Test seam — drops the loop-keyed semaphore/in-flight state."""
+    import weakref
+    global _ask_loop_state
+    with _ask_loop_state_lock:
+        _ask_loop_state = weakref.WeakKeyDictionary()
+
+
+def _call_sync(fn, args, kwargs):
+    """Thread-pool trampoline: ``run_ask_bounded`` runs the SYNC ask lane
+    (retrieval + annotation + reader) in an executor thread."""
+    return fn(*args, **kwargs)
+
+
+def ask_in_flight_capacity(team_id: str | None) -> bool:
+    """True when the per-team in-flight ask cap still has room (or team_id
+    is None). A cheap pre-check for the budget gates (#1987 P2): a request
+    that ``run_ask_bounded`` will reject with 429 ``in_flight_limit`` must
+    not burn a budget slot. Best-effort — a benign race can still charge a
+    slot that later 429s, but the common full-cap case is skipped."""
+    if not team_id:
+        return True
+    import asyncio
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return True
+    st = _ask_state_for_loop(loop)
+    return st["in_flight"][team_id] < _ASK_TEAM_IN_FLIGHT_CAP
+
+
+async def run_ask_bounded(fn, team_id: str | None, *args, **kwargs):
+    """Shared bounded ask runner (#1987 Task 7/8/9) — the ONE wrapper the
+    hosted HTTP handler, the hosted MCP handler, and the selfhost REST
+    handler all await.
+
+    Bounds: global ``asyncio.Semaphore(8)`` + ``asyncio.wait_for(_ASK_TIMEOUT_S)``
+    wrapping the FULL bounded section (semaphore acquire + the to_thread
+    reader call) — total per-request latency is capped at ``_ASK_TIMEOUT_S``;
+    a request queued behind 8 in-flight past the budget 504s (bounded, never
+    an unbounded queue wait). The per-team in-flight cap (4) lives INSIDE
+    this wrapper (shared by HTTP + MCP): the counter increments ON ENTRY
+    (BEFORE ``Semaphore.acquire`` — queued asks count toward the team's cap
+    while waiting) and is released on the ``to_thread`` future's COMPLETION
+    (an ``add_done_callback`` — release on completion, NOT on ``wait_for``
+    firing: a timed-out ask keeps its slot until the thread finishes, so a
+    504 burst cannot leak counters/slots and the follow-up ask succeeds).
+
+    The acquire-cancelled path (wait_for fires during the queue wait — no
+    future exists) decrements the counter in the wrapper's finally.
+
+    Raises ``AskInFlightLimitError`` (per-team cap), ``AskBoundedTimeoutError``
+    (504), or the underlying exception from ``fn``.
+    """
+    import asyncio
+    loop = asyncio.get_running_loop()
+    st = _ask_state_for_loop(loop)
+    sem = st["sem"]
+    inflight = st["in_flight"]
+    # ``_sdk_team_id`` is the bound SDK lane's metering team_id (hosted
+    # HTTP/MCP handlers pass the team; selfhost passes None) — stripped here
+    # so ``fn`` (sdk.ask) receives it WITHOUT colliding with this wrapper's
+    # own ``team_id`` (the in-flight-cap key).
+    fn_kwargs = dict(kwargs)
+    sdk_team_id = fn_kwargs.pop("_sdk_team_id", team_id)
+    if sdk_team_id is not None:
+        fn_kwargs["team_id"] = sdk_team_id
+    # contextvars do NOT propagate to run_in_executor worker threads (3.12,
+    # empirically confirmed) — capture the selfhost-transport flag HERE (the
+    # asyncio context) and thread it through so the executor-thread metering
+    # exemption is honored (never a phantom :MeteringRecord).
+    from tortoise.transport import _selfhost_transport
+    if _selfhost_transport.get():
+        fn_kwargs["_selfhost_transport"] = True
+    if team_id:
+        if inflight[team_id] >= _ASK_TEAM_IN_FLIGHT_CAP:
+            raise AskInFlightLimitError(
+                f"team {team_id!r} in-flight ask cap reached "
+                f"({_ASK_TEAM_IN_FLIGHT_CAP})")
+        inflight[team_id] += 1
+    future = None
+    t_start = time.monotonic()
+    # The SEMAPHORE-ACQUIRE window is bounded by the REMAINDER of the total
+    # budget after reserving the execution floor: a request that cannot be
+    # acquired within ``_ASK_TIMEOUT_S - _ASK_EXEC_FLOOR_S`` 504s at acquire
+    # WITHOUT starting (no wasted model call).
+    acquire_timeout = max(0.0, _ASK_TIMEOUT_S - _ASK_EXEC_FLOOR_S)
+    try:
+        try:
+            await asyncio.wait_for(sem.acquire(), timeout=acquire_timeout)
+        except (TimeoutError, asyncio.CancelledError) as e:
+            # wait_for fired during the queue wait — no future exists; the
+            # counter decrements here (never a leaked counter).
+            if team_id:
+                inflight[team_id] -= 1
+            if isinstance(e, asyncio.TimeoutError):
+                raise AskBoundedTimeoutError(
+                    f"ask queued past {acquire_timeout}s (8 in flight)") from e
+            raise
+        try:
+            future = loop.run_in_executor(None, _call_sync, fn, args, fn_kwargs)
+        except BaseException:
+            # loop closed/shutting down → run_in_executor raises SYNCHRONOUSLY
+            # (no future, no done-callback): release the slot + counter NOW.
+            with contextlib.suppress(Exception):
+                sem.release()
+            if team_id:
+                inflight[team_id] -= 1
+            raise
+
+        def _release(_fut) -> None:
+            with contextlib.suppress(Exception):  # best-effort release — never blocks
+                sem.release()
+            if team_id:
+                inflight[team_id] -= 1
+
+        future.add_done_callback(_release)
+        # The SECOND window uses the REMAINING budget (the acquire above may
+        # have already consumed part of it) — total per-request latency is
+        # truly capped at ``_ASK_TIMEOUT_S``.
+        remaining = max(0.0, _ASK_TIMEOUT_S - (time.monotonic() - t_start))
+        try:
+            return await asyncio.wait_for(asyncio.shield(future),
+                                          timeout=remaining)
+        except TimeoutError as e:
+            raise AskBoundedTimeoutError(
+                f"ask exceeded {_ASK_TIMEOUT_S}s") from e
+    except AskInFlightLimitError:
+        raise
+    except AskBoundedTimeoutError:
+        raise
+    except BaseException:
+        # the future's done-callback releases slot + counter on completion
+        raise

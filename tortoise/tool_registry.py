@@ -236,6 +236,29 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         sdk_method="tortoise_fts_query",
         rest_spec=RestSpec(method="GET", path="/v1/search"),
     ),
+    # ── Ask answer surface (#1987 Task 8/9) ───────────────────────
+    # #2013 PRODUCT-GATING: group="ask" (OWN group, OFF by default — see
+    # GROUP_BY_NAME below) — an ask consumes LLM tokens + the per-minute
+    # ask budget (search is LLM-free) —
+    # documented in the tool description. Read-classified: NOT in
+    # _QUOTA_GATED / WRITE_TOOL_NAMES (introspection green). ``AskRequest``
+    # is referenced by STRING (the registry convention — no class import,
+    # avoiding the tool_registry → hosted_api → mcp_server → tool_registry
+    # cycle); the model lives in tortoise/schemas.py (P2-3).
+    ToolDefinition(
+        name="tortoise_ask",
+        description="Answer a question about captured memory — one bounded retrieve-then-"
+                    "read pass (an ANSWER, not ranked hits) with the full ask response "
+                    "shape (answer, abstained, evidence, cost_estimate_usd, ...). COST "
+                    "PROFILE: unlike tortoise_search (LLM-free), tortoise_ask consumes "
+                    "LLM tokens against the team's per-minute ask budget (60/min) — "
+                    "budget-exhausted calls return the structured quota_exceeded error.",
+        annotations=_ro(),
+        http_policy=True,
+        sdk_method="ask",
+        rest_spec=RestSpec(method="POST", path="/v1/ask",
+                           request_model="AskRequest"),
+    ),
     ToolDefinition(
         name="tortoise_expand_relationships",
         description="Full relationship payload for ONE Point, incl. each related point's "
@@ -1115,6 +1138,10 @@ class FastAPIRouterAdapter:
 #   journal   — checkpoints, diary, decisions, approvals
 #   admin     — status, health, teams, governance, migrations
 #   onboarding — hosted onboarding flows
+#   ask       — the answer surface (#2013 PRODUCT-GATING): OFF by default —
+#               excluded from the ungrouped hosted surface unless
+#               TORTOISE_ENABLE_ASK=1; served only via an explicit
+#               tool_group="ask" server
 
 GROUP_BY_NAME: dict[str, str] = {
     # memory
@@ -1127,6 +1154,11 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_invalidate": "memory", "tortoise_retract_point": "memory",
     "tortoise_list_tags": "memory",
     "tortoise_list_pointkinds": "memory", "tortoise_search": "memory",
+    # #2013 PRODUCT-GATING: the ask tool has its OWN group (no longer the
+    # "memory" default) so the hosted surface can exclude it by default —
+    # the READER ships (the eval's reader), the ask EXPOSURE is gated off
+    # until the reader-model decision is made.
+    "tortoise_ask": "ask",
     "tortoise_expand_relationships": "memory",
     "tortoise_recall": "memory",
     "tortoise_issue_insight": "memory",
