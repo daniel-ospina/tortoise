@@ -50,6 +50,32 @@ ask lane; (3) composition: the 3 SSP long-gold questions are structurally
 ungradeable by the containment judge's word-overlap bar. The gate results
 below remain the evidence base for those follow-ups.
 
+**Strong-model 500-Q config (the toutable benchmark, ready to run):** the
+500-Q LongMemEval-S baseline (run_protocol step 5) with the STRONG reader
+model that reproduced the failing commits (qwen3.8-max, verified 2026-08-30
+on the #2027 evidence):
+
+```bash
+# step 5 (full 500-Q baseline) with the strong reader + official judge:
+TORTOISE_LME_READER_MODEL='openrouter:qwen/qwen3.8-max' \
+  uv run python -m tools.longmem_eval.run_protocol run 5
+# or directly (same reader, explicit knobs):
+TORTOISE_LME_READER_MODEL='openrouter:qwen/qwen3.8-max' \
+  uv run python -m tools.longmem_eval.run --split s \
+    --checkpoint <state.json> --output <report.json>
+```
+
+Provider wiring already in place: `openrouter` is in
+`tortoise.ingest._PROVIDERS` (OpenRouter base URL + `OPENROUTER_API_KEY`),
+the spec `openrouter:qwen/qwen3.8-max` parses via `_parse_model_spec`, and
+the override records `reader_pinned=false` + warns on stderr (the M5 default
+stays `openrouter:deepseek/deepseek-v4-flash` — #1525). Requires an
+`OPENROUTER_API_KEY` (and `OPENAI_API_KEY` for the official GPT-4o judge);
+no keys were present at record time, so this config is verified up to spec
+parse + mock-run only, not executed. Cost re-measure + provider routing for
+the PRODUCT ask lane (deepseek-direct 400s on non-deepseek specs) remain the
+tracked follow-up (1) above.
+
 ---
 
 ## Procedure
