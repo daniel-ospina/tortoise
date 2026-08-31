@@ -233,6 +233,34 @@ def test_operator_route_nonexistent_event_shaped_id_rejected(sdk):
         sdk.ingest(bundle)
 
 
+def test_operator_route_eventid_only_event_rejected_cleanly(sdk):
+    """#2062 (P1 fail-closed pin, code-review #2073): an Event that resolves
+    only by eventId (no id property — the ingest_corpus DocumentCreated
+    shape) is NOT a valid operator endpoint: create_operator keys by node id,
+    so accepting it would pass validation then crash mid-write (partial
+    mutation). It must be rejected at Phase-1/Phase-2, never a raw ValueError
+    after earlier bundle items committed."""
+    g = sdk._get_proj().g
+    g.query("CREATE (e:Event {eventId:'EVT-CORPUS-1', name:'Doc', "
+            "eventKind:'DocumentCreated'})")
+    assert g.query("MATCH (e:Event {eventId:'EVT-CORPUS-1'}) "
+                   "RETURN e.id").result_set[0][0] is None  # id-less shape
+    pa = sdk.create_point("statement", "A")["id"]
+    bundle = {"points": [{"kind": "statement", "content": "B"}],
+              "connections": [
+                  {"from": pa, "to": "EVT-CORPUS-1", "operator": "IMPL",
+                   "reify": True}]}
+    viols = sdk._validate_bundle(bundle)
+    msgs = [v["message"] for v in viols]
+    assert any("must be a plain Point — got a Event endpoint" in m
+               for m in msgs), msgs
+    with pytest.raises(BundleValidationError,
+                       match="must be a plain Point — got a Event endpoint"):
+        sdk.ingest(bundle)
+    # zero partial mutation — the point item never committed
+    assert _count(sdk, "MATCH (n:Point {content:'B'}) RETURN count(n)") == 0
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # I2: Event-input operator re-ingest exact-hits _find_operator
 # ═══════════════════════════════════════════════════════════════════════
@@ -286,6 +314,36 @@ def test_bundle_local_event_ref_rededups_by_resolved_id(sdk):
     assert res2["deduped"]["connections"] == 1
     assert res2["created"]["connections"] == 0
     assert _operator_count(sdk) == 1
+
+
+def test_bundle_local_event_full_bundle_reingest_is_append_only(sdk):
+    """#2062 (documented contract pin): Event entity items are APPEND-ONLY —
+    re-ingesting the full bundle mints a new Event occurrence (new id) and
+    therefore a new operator. This is the deliberate, documented consequence
+    (INGEST_CONTRACT row 6) of the bundle-local Event surface: dedup applies
+    to id-stable external Event endpoints (or connection-only re-ingest by
+    resolved id), NOT to full-bundle re-ingest of Event entity items. The
+    operator count tracks the Event occurrence count by design."""
+    bundle = {
+        "entities": [{"ref": "evt", "type": "event", "name": "Launch party",
+                      "eventKind": "sessionCaptured"}],
+        "points": [{"ref": "p1", "kind": "statement", "content": "A claim"}],
+        "connections": [
+            {"from": "p1", "to": "evt", "operator": "IMPL", "reify": True}],
+    }
+    sdk.ingest(bundle)
+    res2 = sdk.ingest(bundle)
+    # a second Event occurrence (append-only) → a second operator, by design
+    assert _count(sdk, "MATCH (e:Event) RETURN count(e)") == 2
+    assert _operator_count(sdk) == 2
+    assert res2["created"]["connections"] == 1
+    assert res2["deduped"]["connections"] == 0
+    # each operator's dedup key is stable against its own Event id
+    p1_id = res2["ids"]["refs"]["p1"]
+    evt2_id = res2["ids"]["refs"]["evt"]
+    hit = sdk._find_operator("IMPL", [p1_id, evt2_id])
+    assert hit is not None and hit["kind"] == "exact"
+    assert hit["id"] == res2["ids"]["connections"][0]
 
 
 # ═══════════════════════════════════════════════════════════════════════

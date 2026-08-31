@@ -2170,6 +2170,10 @@ def tortoise_ingest(bundle: Any = None, granularity: str = "bulk",
     the connections between them; connections carrying 'operator' (IMPL/NAND)
     create operator Points (reification rule v3.5 §8), connections carrying
     'relation' stay plain structural edges. Local refs address bundle items.
+    Endpoint typing (#2062): operator-routed connections (reify:true /
+    mitigation / part-whole) accept plain-Point or Event endpoints (by node
+    id; eventId-only Events stay violations); direct-edge connections (plain
+    IMPL/NAND) are plain-Point-only.
 
     granularity='bulk' (default): aggregated {created, ids, nudges}.
     granularity='granular': per-item results for agent step-by-step control.
