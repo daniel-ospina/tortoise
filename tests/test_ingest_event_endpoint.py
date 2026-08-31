@@ -261,6 +261,30 @@ def test_operator_route_eventid_only_event_rejected_cleanly(sdk):
     assert _count(sdk, "MATCH (n:Point {content:'B'}) RETURN count(n)") == 0
 
 
+def test_operator_route_point_with_eventid_prop_not_resolvable(sdk):
+    """#2062 (fail-closed pin, code-review re-review): a Point's provenance
+    eventId (#1417 capture_session stamp) must NEVER become a resolvable
+    endpoint key — addressing a Point by its eventId would pass the Point
+    branch (no id-guard), then crash the id-keyed write primitives mid-write
+    (partial mutation). Such an endpoint stays 'does not exist'."""
+    p = sdk.create_point("statement", "X", eventId="PHA-1")
+    pa = sdk.create_point("statement", "A")["id"]
+    g = sdk._get_proj().g
+    assert g.query("MATCH (n:Point {id:$i}) RETURN n.eventId",
+                   params={"i": p["id"]}).result_set[0][0] == "PHA-1"
+    bundle = {"points": [{"kind": "statement", "content": "B"}],
+              "connections": [
+                  {"from": pa, "to": "PHA-1", "operator": "IMPL",
+                   "reify": True}]}
+    viols = sdk._validate_bundle(bundle)
+    msgs = [v["message"] for v in viols]
+    assert any("does not exist" in m for m in msgs), msgs
+    with pytest.raises(BundleValidationError, match="does not exist"):
+        sdk.ingest(bundle)
+    # zero partial mutation
+    assert _count(sdk, "MATCH (n:Point {content:'B'}) RETURN count(n)") == 0
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # I2: Event-input operator re-ingest exact-hits _find_operator
 # ═══════════════════════════════════════════════════════════════════════

@@ -5062,19 +5062,25 @@ class TortoiseSDK:
             "n.id, n.eventId",
             params={"vals": sorted(values)},
         ).result_set
-        # Key the result by EVERY identifier the caller could have used
-        # (id / url / eventId) so a lookup by the raw endpoint value finds
-        # the node regardless of which property it matched — the id-guard
-        # consumers apply (``info["id"] == v``) then tells the caller
-        # whether the endpoint addresses the node BY ITS id (the
-        # create_operator write key) or merely exists under another key.
+        # Key the result so a lookup by the raw endpoint value finds the
+        # node. The coalesce key covers the primary identifier; an Event may
+        # additionally be addressed by its eventId (its other canonical key,
+        # equal to id on SDK-created Events). A Point's provenance eventId
+        # (#1417 capture_session stamp) is NEVER registered as a resolvable
+        # endpoint key — a Point addressed by its eventId would pass the
+        # Point branch of the endpoint checks (which has no id-guard), then
+        # crash the id-keyed write primitives (create_operator /
+        # create_direct_edge) mid-write: partial mutation. Rows sharing a
+        # key resolve deterministically: an id-owner row (node_id == key)
+        # wins over a row matched by another property.
         out: dict[str, dict] = {}
         for key, label, is_op, status, node_id, event_id in rows:
             entry = {"label": label, "is_operator": bool(is_op),
                      "status": status, "id": node_id}
-            for k in (key, node_id, event_id):
-                if k:
-                    out[k] = entry
+            if key not in out or node_id == key:
+                out[key] = entry
+            if label == "Event" and event_id:
+                out[event_id] = entry
         return out
 
     def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
