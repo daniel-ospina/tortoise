@@ -7,7 +7,11 @@ preserves fork + completed_steps; OnboardingState/OnboardingStep are NEVER
 added to _EXPORT_SKIP_LABELS (backup-safe, scope pin 17).
 
 Runs in the docker lane (TORTOISE_DB_URI) — the graph writes land on the
-real FalkorDB test matrix graph.
+real FalkorDB test matrix graph. URI-less runs (tier-2 embedded legs,
+carve-out) SKIP at module level: these assertions exercise hosted
+registry lanes whose eager-init Cypher + keyed-MERGE writers are
+server-mode graph semantics (embedded redislite cannot satisfy them —
+#1997 tier-2 regression).
 """
 from __future__ import annotations
 
@@ -19,11 +23,19 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("TORTOISE_ENCRYPTION_KEY", "I2n-E3K857hF9ENLgrOZ8YBPkEB4tu4jyrb1aJMUtnI=")
 
 import pytest
-from fastapi.testclient import TestClient
+
+# docker-lane gate (epic #1647 P4 / #1997): URI-less embedded legs cannot
+# run these server-mode graph assertions — skip cleanly instead of failing
+# (the full-matrix docker half + local docker runs still exercise them).
+from tortoise.config import is_db_uri as _is_db_uri
+if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
+    pytest.skip("docker-lane onboarding state tests require TORTOISE_DB_URI "
+                "(tier-2 embedded legs skip)", allow_module_level=True)
 
 from tortoise.hosted_api import _make_sdk, app
 from tortoise.onboarding import state as onboarding_state
 from tortoise.sdk import TortoiseSDK
+from fastapi.testclient import TestClient
 
 
 def _read_node(team_id: str):
