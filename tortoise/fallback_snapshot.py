@@ -280,6 +280,9 @@ def search_snapshot(
             scores=SearchScores(fts=None, vector=None, structural=None, rrf=r["similarity"]),
             match_source="tfidf",
             ep=None,
+            # A5 (#2070): stored evidence mark rides the snapshot hits
+            # (snapshot points carry has_answer when the graph wrote it).
+            has_answer=bool(meta.get(r["id"], {}).get("has_answer")),
         ).to_dict()
         for r in scored
     ]

@@ -219,6 +219,13 @@ class SearchResult:
     valid_to: str = ""
     expired_at: str = ""
     subject: dict | None = None  # {id, name, kind} | None — ≤1 hop, fail-closed (D10)
+    # A5 (#2070): stored evidence mark (``has_answer`` — written by the
+    # eval ingest / fixture seeding; the product extractor does not write it
+    # yet, so production hits are False). Carried so the ask lane's
+    # ``apply_evidence_boost`` stored-mark fallback has material. Additive
+    # in to_dict (emitted only when True — the wire shape stays clean for
+    # the 99% unmarked majority).
+    has_answer: bool = False
 
     def to_dict(self) -> dict:
         """Convert to JSON-safe dict for API responses."""
@@ -261,6 +268,10 @@ class SearchResult:
             d["expired_at"] = self.expired_at
         if self.subject:
             d["subject"] = self.subject
+        # A5 (#2070): additive evidence mark — emitted ONLY when known
+        # (unmarked hits stay byte-identical on the wire).
+        if self.has_answer:
+            d["has_answer"] = True
         return d
 
 
@@ -295,6 +306,8 @@ def run_fts_query(
     graph, query: str, entity_type: str = "point", limit: int = 20,
     timeout_ms: int = 500, excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
+    keep_numeric: bool = False,
+    expansion_terms: list[str] | None = None,
 ) -> list[tuple[str, float]]:
     """Run full-text search via FalkorDB FTS index.
 
@@ -387,9 +400,14 @@ def run_fts_query(
         id_field = "id"
     # R2 (#1541) D1: OR-union tolerance for the text path — all labels
     # share the tokenizer (single-token/degenerate inputs pass the raw
-    # string through backslash-escaped).
+    # string through backslash-escaped). A1/A4 (#2070): ``keep_numeric``
+    # (the ask-lane numeric-token policy) and ``expansion_terms`` (additive
+    # pseudo-relevance-feedback aliases) thread into ``build_or_query`` —
+    # both default off, so the search lane's query bytes are unchanged.
     from .sparse import build_or_query
-    fts_query = build_or_query(query)
+    fts_query = build_or_query(
+        query, keep_numeric=keep_numeric,
+        expansion_terms=expansion_terms)
     # #689/#1391: terminal-status Points must not leak into FTS results
     # (skipped when the caller opts in via include_terminal — audit/history).
     if label == "Point":
@@ -942,6 +960,7 @@ def degradation_chain(
     vector_index_api: str | None = None,
     excluded_statuses: tuple | None = None,
     leg_trace: list[dict] | None = None,
+    keep_numeric: bool = False,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -1010,6 +1029,7 @@ def degradation_chain(
             futures[executor.submit(
                 run_fts_query, graph, query, entity_type=entity_type, limit=limit,
                 timeout_ms=runner_timeout, excluded_statuses=excluded_statuses,
+                keep_numeric=keep_numeric,
                 **_runner_kwargs("fts"),
             )] = "fts"
 
@@ -1863,6 +1883,10 @@ def fallback_tfidf(query: str, points: list[dict], limit: int = 10) -> list[dict
                 scores=SearchScores(fts=None, vector=None, structural=None, rrf=r["similarity"]),
                 match_source="tfidf",
                 ep=None,
+                # A5 (#2070): the ask-lane evidence-boost mark rides the
+                # embedded fallback hits too (``self.query`` nodes carry
+                # ``has_answer``; absent = False).
+                has_answer=bool(meta.get(r["id"], {}).get("has_answer")),
             ).to_dict()
             for r in results
         ]
