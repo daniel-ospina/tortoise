@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -36,6 +37,149 @@ from tests.test_supabase_control import (
 )
 
 TEAM_ID = "team-free-001"
+
+# ═══════════════════════════════════════════════════════════════════════
+# #2090 — keepalive-anchor churn instrumentation (Task 1, RED).
+# The fixture patches TortoiseSDK.__init__ to a per-test temp DB but never
+# pins TORTOISE_DB_PATH, so _anchor_usable (hosted_api.py:96) path-drifts on
+# every _make_sdk/_registry_anchor() call → the #1607 keepalive anchor is
+# evicted+closed per call (0-other-client windows) → a dropped seed SDK's
+# GC-NOSAVE (embedded_lifecycle.py:204-282, TORTOISE_FAST_ATEXIT=1) can kill
+# the redislite daemon → empty respawn → 403 "Requires owner role in team".
+# The counter asserts ZERO mid-test drift evictions post-fix (Task 2); pre-fix
+# it deterministically reads ≥1 — the churn-enabler demonstration (G1).
+# ═══════════════════════════════════════════════════════════════════════
+
+_EXPECTED_DRIFT_EVICTIONS = 0  # RED (Task 1): assert >= 1; GREEN (Task 2+): assert == 0
+
+# #2090 (Task 3) — held seed SDKs: never dropped, closed deterministically
+# per-test by _close_seed_sdks (function-scoped close collapses peak daemons;
+# session-scoped holding would raise the external-death resource class).
+_SEED_SDKS: list[TortoiseSDK] = []
+
+
+def _close_seed_sdks() -> None:
+    """Close held seed SDKs (per-test; runs in the fixture finally).
+
+    # mirrors tests/test_dr_endpoints.py:34-39 — keep in sync.
+    """
+    while _SEED_SDKS:
+        try:
+            _SEED_SDKS.pop().close()
+        except Exception:
+            pass
+
+
+def _computed_db_path() -> str:
+    """Replicate _make_sdk's env-path computation.
+
+    Mirrors tortoise/hosted_api.py:141-149 — keep in sync.
+    """
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    return db_path
+
+
+def _paths_same(path_a: object, path_b: str) -> bool:
+    """Mirror _anchor_usable's path comparison (hosted_api.py:114-125)."""
+    return (str(path_a) == str(path_b)) or (
+        str(path_a) != ":memory:"
+        and os.path.abspath(str(path_a)) == os.path.abspath(path_b)
+    )
+
+
+class _DriftEvictionCounter(dict):
+    """Counting-dict replacement for ha_mod._FALLBACK_KEEPALIVE.
+
+    Counts path-drift evictions (the #2090 churn enabler) during the test
+    body. Restore-time pops are excluded by setting enabled=False BEFORE
+    _restore_sdk_init. A probe-failure pop (path equal but evicted anyway —
+    the enter-pin _get_proj()-failure class) is counted WARN-only: it never
+    fails the gate but is reported so the churn rate stays observable.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.drift_evictions = 0
+        self.probe_failures = 0
+        self.unclassified = 0
+        self.enabled = True
+
+    def pop(self, key, default=None):
+        if self.enabled:
+            value = dict.get(self, key)
+            if value is not None:
+                bound = getattr(value, "_db_path", None)
+                if bound is None:
+                    self.unclassified += 1  # never silently ignore (vacuity guard)
+                elif _paths_same(bound, _computed_db_path()):
+                    self.probe_failures += 1  # path matches → probe-failure/benign
+                else:
+                    self.drift_evictions += 1  # path drift → the churn enabler
+        return dict.pop(self, key, default)
+
+
+def _install_drift_counter() -> tuple[_DriftEvictionCounter, dict]:
+    """Swap the module keepalive dict for a counting dict (fresh per test)."""
+    _orig_dict = ha_mod._FALLBACK_KEEPALIVE
+    counter = _DriftEvictionCounter(_orig_dict)
+    ha_mod._FALLBACK_KEEPALIVE = counter
+    return counter, _orig_dict
+
+
+@pytest.mark.embedded_only
+class TestDriftCounterWiring:
+    """#2090 wiring negative control — pins the counter's install + the
+    drift classification against the REAL _make_sdk eviction path, so the
+    0-guard provably stays wired (removing the counter install, or a
+    production refactor away from .pop() eviction, would fail here).
+    Embedded-only: under a URI the keepalive branch never engages, so the
+    eviction path this test exercises does not exist on the docker lane.
+    """
+
+    def test_drift_counter_classifies_real_eviction(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "wiring.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+            counter, _orig_dict = _install_drift_counter()
+            try:
+                # Deliberately drifted anchor (different path) — the next
+                # _make_sdk call must evict it (path drift) and count it.
+                other = os.path.join(tmpdir, "other.db")
+                anchor = TortoiseSDK(db_path=other, namespace="registry")
+                ha_mod._FALLBACK_KEEPALIVE["registry"] = anchor
+                ha_mod._make_sdk(namespace="registry")  # evict + close + pop
+                assert counter.drift_evictions >= 1, (
+                    f"drift eviction not counted (got {counter.drift_evictions}, "
+                    f"probe-failures: {counter.probe_failures})"
+                )
+                assert counter.probe_failures == 0
+            finally:
+                counter.enabled = False
+                ha_mod._FALLBACK_KEEPALIVE = _orig_dict
+
+    def test_drift_counter_ignores_same_path_pop(self, monkeypatch):
+        """A pop of a healthy same-path anchor must NOT count as drift
+        (the probe-failure/warn-only bucket)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "wiring.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+            counter, _orig_dict = _install_drift_counter()
+            try:
+                ha_mod._FALLBACK_KEEPALIVE["registry"] = TortoiseSDK(
+                    db_path=db_path, namespace="registry"
+                )
+                ha_mod._FALLBACK_KEEPALIVE.pop("registry", None)
+                assert counter.drift_evictions == 0
+                assert counter.probe_failures == 1  # path equal → probe bucket
+            finally:
+                counter.enabled = False
+                ha_mod._FALLBACK_KEEPALIVE = _orig_dict
 
 # #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID literals 22P02 (HTTP 400) under
@@ -106,20 +250,48 @@ def _restore_sdk_init(_orig):
     app.dependency_overrides.clear()
 
 
+def _close_keepalive_anchors(module) -> None:
+    """Deterministically close every keepalive anchor (SHUTDOWN SAVE).
+
+    # mirrors tests/test_hosted_api.py:144-153 — keep in sync.
+    """
+    for ns in list(module._FALLBACK_KEEPALIVE):
+        anchor = module._FALLBACK_KEEPALIVE.pop(ns, None)
+        if anchor is not None:
+            try:
+                anchor.close()
+            except Exception:
+                pass
+
+
 @pytest.fixture
 def sb_client(monkeypatch):
-    """Supabase-mode TestClient with a fake control plane + temp DB."""
+    """Supabase-mode TestClient with a fake control plane + temp DB.
+
+    #2090: no drift counter here (reg_client only) — supabase-mode authz is
+    control-plane-only (no SDK/anchor op before the authz short-circuit in
+    the 401/403 tests), so a >=1 RED assert would spuriously red them. The
+    pin + close-at-restore still apply (anchors created mid-test via
+    _export_graph_snapshot are reused, not evicted).
+    """
     fake = FakeControlPlane({"teams": [], "api_keys": [],
                              "team_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
         _orig = _patch_tortoise_sdk_init(db_path)
+        # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+        # forces, so _make_sdk's keepalive anchor path matches and the anchor
+        # is REUSED instead of evicted + closed on every registry access (each
+        # eviction shut the redislite daemon down mid-test, losing the seed
+        # between this fixture's write and the gate read → 403).
+        os.environ["TORTOISE_DB_PATH"] = db_path
         try:
             with TestClient(app) as tc:
                 yield tc, fake, db_path
         finally:
             _restore_sdk_init(_orig)
+            _close_seed_sdks()  # #2090: per-test seed close (after restore)
 
 
 @pytest.fixture
@@ -129,11 +301,42 @@ def reg_client(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
         _orig = _patch_tortoise_sdk_init(db_path)
+        # #1950: pin TORTOISE_DB_PATH (see sb_client) — the anchor is created
+        # pinned at TestClient enter (lifespan purge) and REUSED, not evicted.
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        counter, _orig_dict = _install_drift_counter()
         try:
             with TestClient(app) as tc:
                 yield tc, db_path
         finally:
-            _restore_sdk_init(_orig)
+            # ══ #2090 teardown (pinned — runs on body-failure paths too) ══
+            try:
+                # G3 (GREEN): zero mid-test drift evictions — the anchor is
+                # reused (path pinned), never evicted, post-fix.
+                assert counter.drift_evictions == _EXPECTED_DRIFT_EVICTIONS, (
+                    f"expected {_EXPECTED_DRIFT_EVICTIONS} drift evictions, "
+                    f"got {counter.drift_evictions} "
+                    f"(probe-failures: {counter.probe_failures}, "
+                    f"unclassified: {counter.unclassified})"
+                )
+                # #2090: the enter-pin probe-failure churn rate must be
+                # OBSERVABLE (warn-only — never fails the gate; a healthy
+                # pinned run should read 0, but a transient probe failure on a
+                # loaded runner must not red it). Surfaces in the pytest
+                # warnings summary.
+                if counter.probe_failures or counter.unclassified:
+                    warnings.warn(
+                        f"[#2090] keepalive probe-failure pops: "
+                        f"{counter.probe_failures}, unclassified: "
+                        f"{counter.unclassified} (drift: "
+                        f"{counter.drift_evictions})",
+                        UserWarning,
+                    )
+            finally:
+                counter.enabled = False  # restore-time pops must never count
+                _restore_sdk_init(_orig)
+                _close_seed_sdks()  # after restore (deterministic last-client SAVE)
+                ha_mod._FALLBACK_KEEPALIVE = _orig_dict
 
 
 @pytest.fixture
@@ -221,8 +424,15 @@ def _seed_graph(db_path: str, team_id: str = TEAM_ID, *,
 
 def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
                    deleted_at: str | None = None) -> None:
-    """Seed registry Team + owner Membership + APIKey (+ optional deleted_at)."""
+    """Seed registry Team + owner Membership + APIKey (+ optional deleted_at).
+
+    #2090: the SDK is appended to _SEED_SDKS (suspension_parity precedent) so
+    the #1475 close-on-GC finalizer can never SHUTDOWN NOSAVE the shared
+    embedded server when this helper returns (dropped-SDK data loss → empty
+    respawn → flaky registry-mode 403s).
+    """
     sdk = TortoiseSDK(db_path, namespace="registry")
+    _SEED_SDKS.append(sdk)
     reg = sdk._get_registry()
     reg.query("CREATE (t:Team {id:$id, name:$name, tier:'free'})",
               params={"id": team_id, "name": team_id})
@@ -245,9 +455,14 @@ def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
 
 def _registry_count(db_path: str, label: str, team_id: str) -> int:
     """Count registry nodes of `label` scoped to a team. Team nodes key on
-    `id`; Membership/APIKey/Invitation key on `team_id`."""
+    `id`; Membership/APIKey/Invitation key on `team_id`.
+
+    #2090: hold the read SDK in _SEED_SDKS (same dropped-SDK class as
+    _seed_registry) — closed deterministically by the fixture teardown.
+    """
     prop = "id" if label == "Team" else "team_id"
     sdk = TortoiseSDK(db_path, namespace="registry")
+    _SEED_SDKS.append(sdk)
     rows = sdk._get_registry().query(
         f"MATCH (n:{label} {{{prop}:$tid}}) RETURN count(n)",
         params={"tid": team_id},
@@ -555,6 +770,11 @@ class TestExportDeleteRegistry:
     def test_export_requires_owner_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
+        # #2090: pin the seed — this test asserts 403 for a non-member and
+        # would pass VACUOUSLY on an empty registry (the seed silently lost
+        # to a daemon respawn). Fail loud if the seed didn't land (#1950
+        # self-verify pattern).
+        assert _registry_count(db_path, "Team", "reg-team-1") == 1
         as_user(user_id=_U3)  # no membership at all
         assert tc.get("/v1/teams/reg-team-1/export").status_code == 403
 

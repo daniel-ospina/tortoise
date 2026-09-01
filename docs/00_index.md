@@ -26,6 +26,7 @@ ownedBy: epistemic-team
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |
 | Kinds classification-later deep research (#1695) | `docs/research/2026-08-26-classification-later.md` |
 | Reaper race scoping/research (#1658) | `docs/scoping/2026-08-24-1658-reaper-race-scoping.md` |
+| Test (b) lane 403/export-delete scoping (#2090) | `docs/scoping/2026-09-01-2090-test-b-lane-scoping.md` |
 | Ingest contract (`tortoise_ingest` / `sdk.ingest` bundle API) | `docs/INGEST_CONTRACT.md` |
 | Data safety — encryption in transit + at rest | `docs/data-safety.md` |
 | Quickstart — hosted | `docs/quickstart-cloud.md` |
