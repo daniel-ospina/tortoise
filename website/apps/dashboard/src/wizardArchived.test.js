@@ -54,3 +54,13 @@ test('wizardComplete no longer writes onboarding_complete (accept-and-drop, plan
   assert.ok(!/body:\s*JSON\.stringify\(\{\s*onboarding_complete:\s*true\s*\}\)/.test(src),
     'wizardComplete dropped the PATCH onboarding_complete write')
 })
+
+test('review P1: build fork marks catalog-presented in the handler (not a step-2 effect)', () => {
+  // React batches fork-chosen + advance into one render, so the render-time
+  // effect can never observe a FRESH build pick. The handler must fire the
+  // catalog-presented checkpoint on the build success path.
+  assert.ok(src.includes("if (forkId === 'build')"),
+    'handleWizardFork has a build branch')
+  assert.ok(/step: 'catalog-presented'/.test(src),
+    'catalog-presented checkpoint in the handler')
+})

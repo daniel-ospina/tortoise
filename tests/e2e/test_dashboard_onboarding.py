@@ -174,3 +174,34 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     page.get_by_role("button", name="Open my dashboard →").click()
     assert not any("onboarding_complete" in p for p in cap["state"]), \
         f"done step must NOT patch onboarding_complete: {cap['state']}"
+
+
+def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
+    """#1997 (W1, review P1 regression): picking the BUILD fork on the fork
+    card must mark catalog-presented via the checkpoint (the render-time
+    effect cannot observe the fresh pick — React batches the fork-chosen +
+    advance states — so the handler fires it directly). The build-fork gate
+    (harness-connected + first-points-filed + catalog-presented) must be
+    evaluable."""
+    _seed_cookie(page, "u-bld")
+    cap = _wire(page, provision=False)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
+    page.get_by_role("button", name="Continue setup").click()
+    expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_role("button", name="Create Organization").click()
+    # fork card — pick BUILD (the build branch renders the placeholder catalog)
+    expect(page.locator("body")).to_contain_text("Build an application on top", timeout=10_000)
+    page.get_by_role("button", name="Build an application on top").click()
+    # the placeholder catalog renders on step 2 (build stays; the user
+    # reviews what they can build on, then continues)
+    expect(page.locator("body")).to_contain_text("Build catalog", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("Session recorder", timeout=5_000)
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
+    assert any(c.get("fork") == "build" for c in cap["checkpoint"]), \
+        f"build fork not checkpointed: {cap['checkpoint']}"
+    assert any(c.get("step") == "catalog-presented" for c in cap["checkpoint"]), \
+        f"catalog-presented not marked: {cap['checkpoint']}"

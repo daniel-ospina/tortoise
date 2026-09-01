@@ -1252,14 +1252,17 @@ function claimIntentInFlight() {
   // #1997 (W1): catalog-presented is marked when the build placeholder
   // RENDERS (not just on pick) — re-entry with fork=build already set must
   // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
-  // the checkpoint is keyed-MERGE (replay no-op), but a per-session guard
-  // keeps the network quiet on re-renders.
-  const catalogMarkedRef = React.useRef(false)
+  // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
+  // the network quiet on re-renders (the latch is keyed by team id so a
+  // second build org in the same session still marks its own catalog —
+  // review P2, #1997).
+  const catalogMarkedRef = React.useRef({})
   React.useEffect(() => {
     if (wizardStep !== 2) return
+    const teamKey = teamIdRef.current || 'default'
     const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
-    if (buildFork && !catalogMarkedRef.current) {
-      catalogMarkedRef.current = true
+    if (buildFork && !catalogMarkedRef.current[teamKey]) {
+      catalogMarkedRef.current[teamKey] = true
       api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
         method: 'POST', useSession: true,
         body: JSON.stringify({ step: 'catalog-presented' }),
@@ -1636,8 +1639,13 @@ function claimIntentInFlight() {
   // inputs aren't prefilled by the first-timer provisioning path, so derive
   // the defaults from the session when the seed step is first entered
   // (ONCE — a deliberate clear + Back/Next must not re-populate).
+  // #1997 (W1): the seed step is ARCHIVED — this effect must not fire on the
+  // live connect step (wizardStep 3 is now connect-consent, not seed); gate
+  // it on LEGACY_WIZARD_ARCHIVED so the A0 rollback path stays clean
+  // (review P2).
   const seedPrefilledRef = React.useRef(false)
   React.useEffect(() => {
+    if (!LEGACY_WIZARD_ARCHIVED) return
     if (wizardStep === 3 && !seedPrefilledRef.current && !wizardSubject) {
       seedPrefilledRef.current = true
       const meta = sessionMetaRef.current || {}
@@ -2928,9 +2936,27 @@ function claimIntentInFlight() {
         body: JSON.stringify({ fork: forkId }),
       })
       setWizardForkChosen(forkId)
-      // the catalog-presented mark fires on the placeholder RENDER (the
-      // effect above) — keyed-MERGE, replay no-op
-      setWizardStep(3)
+      // review P1 (#1997): the catalog-presented mark fires HERE, not in a
+      // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
+      // into ONE render where wizardStep===3, so the effect's step-2 guard
+      // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
+      // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
+      // persisted build fork (onboarding.fork === 'build').
+      // A build pick also STAYS on step 2 so the placeholder catalog renders
+      // (the user sees what they can build on before continuing) — the
+      // Continue button appears once a fork is chosen; self picks advance.
+      if (forkId === 'build') {
+        const teamKey = teamIdRef.current || 'default'
+        if (!catalogMarkedRef.current[teamKey]) {
+          catalogMarkedRef.current[teamKey] = true
+          api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
+            method: 'POST', useSession: true,
+            body: JSON.stringify({ step: 'catalog-presented' }),
+          }).catch(() => {})
+        }
+      } else {
+        setWizardStep(3)
+      }
     } catch (e) {
       if (e?.status === 409) {
         // set-once conflict — the org already chose; refresh the projection
@@ -4073,7 +4099,7 @@ function claimIntentInFlight() {
                   <>
                     <p className="dim" style={{ marginBottom: '1rem' }}>
                       This is the only time this API key is shown — copy it now. The raw key
-                      never leaves this page ({welcomeTeamName ? `team: ${welcomeTeamName}` : ''}).
+                      never leaves this page ({welcomeTeamName ? `organization: ${welcomeTeamName}` : ''}).
                     </p>
                     <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
                       <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflowWrap: 'anywhere', fontSize: 13 }}>

@@ -11596,8 +11596,16 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     if (_ACCEPT_AND_DROP and "onboarding_complete" in updates
             and _graph_has_team_namespace(team["team_id"])):
         try:
-            _node_proj = _make_sdk(namespace=team["team_id"])._get_proj()
-            _node = _os.read_onboarding_node(_node_proj, team["team_id"])
+            # review (#1997): the SDK is explicitly closed (the projection
+            # handle leaks a connection per PATCH otherwise — the writers'
+            # _team_proj leak is pre-existing, but this block is on the hot
+            # PATCH path and must not add to it).
+            _node_sdk = _make_sdk(namespace=team["team_id"])
+            try:
+                _node = _os.read_onboarding_node(
+                    _node_sdk._get_proj(), team["team_id"])
+            finally:
+                _node_sdk.close()
         except Exception:
             _node = None
         if _node is not None:
