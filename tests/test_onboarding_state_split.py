@@ -28,14 +28,16 @@ import pytest
 # run these server-mode graph assertions — skip cleanly instead of failing
 # (the full-matrix docker half + local docker runs still exercise them).
 from tortoise.config import is_db_uri as _is_db_uri
+
 if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
     pytest.skip("docker-lane onboarding state tests require TORTOISE_DB_URI "
                 "(tier-2 embedded legs skip)", allow_module_level=True)
 
+from fastapi.testclient import TestClient
+
 from tortoise.hosted_api import _make_sdk, app
 from tortoise.onboarding import state as onboarding_state
 from tortoise.sdk import TortoiseSDK
-from fastapi.testclient import TestClient
 
 
 def _read_node(team_id: str):
