@@ -64,7 +64,7 @@ def _close_seed_sdks() -> None:
     # mirrors tests/test_dr_endpoints.py:34-39 — keep in sync.
     """
     while _SEED_SDKS:
-        try:
+        try:  # noqa: SIM105  (mirrors test_dr_endpoints.py:37)
             _SEED_SDKS.pop().close()
         except Exception:
             pass
@@ -160,6 +160,14 @@ class TestDriftCounterWiring:
                 assert counter.probe_failures == 0
             finally:
                 counter.enabled = False
+                # close any held anchors from the counter directly (uncounted)
+                for _ns in list(counter):
+                    _anchor = dict.pop(counter, _ns, None)
+                    if _anchor is not None:
+                        try:  # noqa: SIM105
+                            _anchor.close()
+                        except Exception:
+                            pass
                 ha_mod._FALLBACK_KEEPALIVE = _orig_dict
 
     def test_drift_counter_ignores_same_path_pop(self, monkeypatch):
@@ -179,6 +187,14 @@ class TestDriftCounterWiring:
                 assert counter.probe_failures == 1  # path equal → probe bucket
             finally:
                 counter.enabled = False
+                # close the same-path anchor from the counter directly (uncounted)
+                for _ns in list(counter):
+                    _anchor = dict.pop(counter, _ns, None)
+                    if _anchor is not None:
+                        try:  # noqa: SIM105
+                            _anchor.close()
+                        except Exception:
+                            pass
                 ha_mod._FALLBACK_KEEPALIVE = _orig_dict
 
 # #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
@@ -258,7 +274,7 @@ def _close_keepalive_anchors(module) -> None:
     for ns in list(module._FALLBACK_KEEPALIVE):
         anchor = module._FALLBACK_KEEPALIVE.pop(ns, None)
         if anchor is not None:
-            try:
+            try:  # noqa: SIM105  (mirrors tests/test_hosted_api.py:149)
                 anchor.close()
             except Exception:
                 pass
@@ -331,6 +347,7 @@ def reg_client(monkeypatch):
                         f"{counter.unclassified} (drift: "
                         f"{counter.drift_evictions})",
                         UserWarning,
+                        stacklevel=2,
                     )
             finally:
                 counter.enabled = False  # restore-time pops must never count

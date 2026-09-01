@@ -65,7 +65,7 @@ def _close_keepalive_anchors(module) -> None:
     for ns in list(module._FALLBACK_KEEPALIVE):
         anchor = module._FALLBACK_KEEPALIVE.pop(ns, None)
         if anchor is not None:
-            try:
+            try:  # noqa: SIM105  (mirrors tests/test_hosted_api.py:149)
                 anchor.close()
             except Exception:
                 pass
