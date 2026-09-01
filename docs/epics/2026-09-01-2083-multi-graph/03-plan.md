@@ -214,21 +214,22 @@ CREATE TABLE public.graphs (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_graphs_team_name_active
   ON public.graphs (team_id, name) WHERE status <> 'deleted';
 
--- api_keys: graph scope + scopes (allowlist) + delegation lineage
+-- api_keys: graph scope + scopes (FLAT allowlist array) + delegation lineage
 ALTER TABLE public.api_keys
   ADD COLUMN graph_id text REFERENCES public.graphs(id) ON DELETE CASCADE,   -- NULL = team-wide key → default graph; CASCADE = keys die with the graph
-  ADD COLUMN scopes  jsonb NOT NULL DEFAULT '{}'::jsonb,                    -- {"graphs":["read","write"],"team":["manage"]} — default {} = no scopes
+  ADD COLUMN scopes  jsonb NOT NULL DEFAULT '[]'::jsonb,                    -- FLAT array: ["graphs:read","graphs:write","team:manage"] — default [] = no scopes. FLAT BY DECISION (2026-09-01 verify gate): PostgreSQL `?|` on objects matches TOP-LEVEL keys only, so a nested shape would make the escalation CHECK vacuous; flat storage makes `chk_minted_key_no_escalation` fire correctly and matches the §6.2/6.3 request/response bodies
   ADD COLUMN created_by_key_id text REFERENCES public.api_keys(id) ON DELETE SET NULL,  -- NULL = minted by owner session/bootstrap
   ADD COLUMN delegation_depth integer;                                                  -- 0 = minted (deleg=0, cannot mint); NULL = owner-minted
 
 -- DB-invariant for the approved key model: MINTED keys (delegation_depth = 0) can NEVER hold
 -- escalation scopes, graph-bound OR team-wide. Only owner-minted keys (delegation_depth IS NULL) may.
+-- (Flat-array `?|` — fires on any element match.)
 ALTER TABLE public.api_keys
   ADD CONSTRAINT chk_minted_key_no_escalation
   CHECK (delegation_depth IS NULL OR NOT (scopes ?| array['graphs:create','graphs:delete','keys:manage']))
 ```
 
-- **Semantics:** `scopes` = allowlist (all-off default — Stripe rule). `graphs:write` implies `graphs:read` at enforcement. `graph_id` NULL + escalation scopes = team-management key. `graph_id` set = graph-bound key. **Delegation: `delegation_depth` 0 = minted (cannot hold escalation scopes — DB CHECK `chk_minted_key_no_escalation` covers graph-bound AND team-wide minted keys); NULL = owner-minted (may hold escalation scopes).**
+- **Semantics:** `scopes` = FLAT allowlist array (all-off default `[]` — Stripe rule; shape pinned by the verify gate so the escalation CHECK fires: `?|` on flat arrays matches any element). `graphs:write` implies `graphs:read` at enforcement. `graph_id` NULL + escalation scopes = team-management key. `graph_id` set = graph-bound key. **Delegation: `delegation_depth` 0 = minted (cannot hold escalation scopes — DB CHECK `chk_minted_key_no_escalation` covers graph-bound AND team-wide minted keys); NULL = owner-minted (may hold escalation scopes).**
 - **RLS:** service role (backend) full access; tenant-scoped reads via the established GUC pattern (`app.current_team_id` set post-key-resolution; unset GUC = 0 rows deny-by-default) — mirrors 0006/0007.
 - **Integrity:** default-graph guard is CODE-enforced in both modes (Supabase: the default is derived from `teams.graph_name` — no row exists to constrain; registry: `kind='default'` node guarded at the lifecycle layer) — no delete of the default graph. Graph delete = soft-delete (`status='deleted'` tombstone) + code-side cascade (revoke keys, drop ACL user, free quota slot); `ON DELETE CASCADE` covers the team-delete cascade + hard cleanup; the FK never silently un-scopes a key (no SET NULL). Partial unique index allows name reuse after delete.
 - **Quota:** `graph_count(team_id)` = 1 (the default graph — always present: derived in Supabase mode, `kind='default'` node in registry mode) + `count(*) WHERE kind='custom' AND status='active'`. **Delete frees the slot (deleted rows excluded); v1 has no archive.** The default ALWAYS occupies slot 1 (free=1 → default only; solo=2 → default + 1 custom) — meter and cap use this ONE definition in both modes. **Caps: free=1, solo=2 finite; pro/team unlimited (DECIDED at Human Gate #2 2026-09-01 — pricing.json as-is, no change)**. Cap checked pre-insert; atomic count-then-insert (W5). **v1 ships cap-reject (409 + X-Graph-Quota header) only — the 80% soft-warning band is deferred (unreachable at free=1/solo=2; stays dormant unless a finite pro/team cap is ever set).**
@@ -329,7 +330,7 @@ Input:  token (opaque — legacy tt_/tkm_ + new tk_ prefixes)
 Output: { team_id, key_id, tier, limits: {max_users, max_graphs, max_api_keys, max_points, max_sessions},
          graph_id: str|null,        // null = team-wide key → default graph
          graph_namespace: str|null, // team_{team_id}_{gid} or team_{team_id}
-         scopes: { graphs: [read|write|create|delete], team: [manage], keys: [manage] },  // allowlist; write implies read
+         scopes: string[],       // FLAT: ["graphs:read","graphs:write","team:manage","keys:manage"] — allowlist; write implies read
          legacy_full_access: bool,  // tkm_ class: all data-plane ops on the default graph + legacy management
          delegation_depth: int|null,// 0 = minted (cannot escalate); null = owner-minted
          key_prefix, created_via, created_by }
