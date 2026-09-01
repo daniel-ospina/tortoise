@@ -316,9 +316,18 @@ ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m": 0.42}
 # check.md §#2069).
 ASK_METER_RATES_STRONG = {"prompt_per_1m": 3.00, "completion_per_1m": 9.00}
 
-#: Family prefixes that meter at the STRONG rates (the model_adapters
-#: ``_SPEC_FAMILY_PROVIDERS`` openrouter-only families — keep in sync).
-_ASK_STRONG_FAMILIES = frozenset({"qwen", "upstage", "anthropic"})
+#: Family prefixes that meter at the STRONG rates — DERIVED from the
+#: model_adapters routing map (the openrouter-only families), so adding a
+#: family to the router automatically meters it strong (no drift possible).
+#: Lazy import keeps this module import-order-independent (model_adapters
+#: never imports metering).
+def _strong_families() -> frozenset:
+    from .model_adapters import _SPEC_FAMILY_PROVIDERS
+
+    return frozenset(
+        fam for fam, provs in _SPEC_FAMILY_PROVIDERS.items()
+        if provs == {"openrouter"}
+    )
 
 
 def select_ask_meter_rates(model_id: str | None) -> dict:
@@ -331,7 +340,7 @@ def select_ask_meter_rates(model_id: str | None) -> dict:
     markup, metering.py rates docstring).
     """
     family = (model_id or "").split("/", 1)[0]
-    if family in _ASK_STRONG_FAMILIES:
+    if family in _strong_families():
         return ASK_METER_RATES_STRONG
     return ASK_METER_RATES
 

@@ -528,7 +528,12 @@ def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
     family capability map); the env/keys-resolved order is INTERSECTED with
     it. ``TORTOISE_ASK_PROVIDER`` (default ``auto``) selects the primary;
     an explicit value without its key fails closed with ``ValueError``
-    (mirror ``resolve_extractor_provider``). An EMPTY intersection raises a
+    (mirror ``resolve_extractor_provider``). With all three provider keys
+    set, the shared builder returns the pilot #1549 ``RotatingModel`` whose
+    deterministic reorder picks the primary — the explicit provider still
+    gates the SERVABLE set (fail-closed when unkeyed) but the rotation
+    order wins the primary slot (pre-existing extraction-lane semantics,
+    byte-identical). An EMPTY intersection raises a
     build-time ``ValueError`` naming the missing key — fail-fast, NEVER a
     silent misbuild that 401s at call time. The deepseek family preserves
     the extraction lane's lenient no-key default (a single OpenRouter

@@ -539,6 +539,17 @@ PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
    `TORTOISE_EXTRACTOR_PROVIDER`); explicit provider that cannot serve the
    family (venice + qwen) → ValueError. `build_extractor_model` is
    BYTE-IDENTICAL (shared private pool-builder).
+
+> **Release note (behavior change):** the ask lane no longer reads
+> `TORTOISE_EXTRACTOR_PROVIDER` — it is decoupled by design (the ask lane
+> resolves its own provider from the family capability map + `TORTOISE_ASK_PROVIDER`).
+> A deployment that set `TORTOISE_EXTRACTOR_PROVIDER=openrouter` with a
+> deepseek key present now gets the auto order (deepseek-direct primary)
+> on the ask lane — same pool, different primary ordering. Also note: with
+> ALL THREE provider keys set, the shared pool-builder returns the pilot
+> #1549 `RotatingModel` whose deterministic reorder picks the primary
+> (rotation order wins over the explicit provider for the PRIMARY slot; the
+> explicit value still gates the servable set fail-closed).
 4. **Meter re-baseline** (`tortoise/metering.py`, `tortoise/sdk.py`):
    `ASK_METER_RATES_STRONG = {3.00, 9.00}` (qwen $2/$6 × 1.5, the same
    over-cover convention); `select_ask_meter_rates(model.model)` picks by
