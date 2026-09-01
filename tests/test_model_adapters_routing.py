@@ -1033,7 +1033,7 @@ def test_reader_colon_form_rejected(monkeypatch):
     unknown-prefix handling (openrouter:qwen → deepseek 400 → 502)."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     from tortoise.model_adapters import build_reader_model
-    with pytest.raises(ValueError, match="family-prefixed.*product form"):
+    with pytest.raises(ValueError, match=r"family-prefixed.*product form"):
         build_reader_model("openrouter:qwen/qwen3.8-max")
 
 
@@ -1114,7 +1114,7 @@ def test_ask_provider_capability_mismatch_fails_loud(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "or")
     monkeypatch.setenv("TORTOISE_ASK_PROVIDER", "venice")
     from tortoise.model_adapters import build_reader_model
-    with pytest.raises(ValueError, match="cannot serve 'qwen/qwen3.8-max'"):
+    with pytest.raises(ValueError, match=r"cannot serve 'qwen/qwen3.8-max'"):
         build_reader_model("qwen/qwen3.8-max")
 
 

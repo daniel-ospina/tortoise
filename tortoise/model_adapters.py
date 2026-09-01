@@ -1050,6 +1050,6 @@ def build_reader_model(model_id: str | None = None, *,
     # the eval's ``provider:model`` colon-form must never reach
     # ``_providers_can_serve``'s unknown-family branch).
     model_id = _normalize_ask_model_spec(model_id)
-    _primary_name, pool_names = resolve_reader_provider(model_id)  # noqa: RUF059
+    _primary_name, pool_names = resolve_reader_provider(model_id)
     return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
                                 temperature=temperature, json_mode=False)
