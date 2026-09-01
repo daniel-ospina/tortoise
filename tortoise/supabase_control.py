@@ -513,7 +513,9 @@ def resolve_api_key(cp, token: str) -> dict | None:
 
     Returns the same dict shape as the registry get_current_team path
     (team_id, key_id, tier, max_users, max_graphs, max_points, max_api_keys,
-    max_sessions) plus additive metadata (key_prefix/created_via/created_by).
+    max_sessions) plus additive metadata (key_prefix/created_via/created_by)
+    plus the C1 tenancy fields (graph_id, graph_namespace, scopes,
+    legacy_full_access, delegation_depth, created_by_key_id).
     """
     from tortoise.auth import lookup_hash
     from tortoise.quota import DEFAULT_MAX_SESSIONS
@@ -521,6 +523,16 @@ def resolve_api_key(cp, token: str) -> dict | None:
     now = datetime.now(UTC)
     h = lookup_hash(token)
     team_id = key_id = created_via = created_by = key_prefix = None
+    # C1 (#2110) tenancy fields — initialized BEFORE the row branch so the
+    # membership path (no api_keys row) resolves safe defaults. A
+    # membership-path key has no scopes/delegation → full legacy access,
+    # matching today's behavior.
+    graph_id = None
+    scopes: list = []
+    delegation_depth = None
+    created_by_key_id = None
+    legacy_full_access = True
+    graph_namespace = None
 
     # api_keys read (step 1): "enabled" is an additive column
     # (20260813000005, #1148 — dashboard key-login toggle). A schema one
@@ -532,11 +544,23 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # the teams ladder; documented in the #1096 plan). The base api_keys
     # columns (0007) stay fail-closed: a failure of the base-only retry
     # propagates.
+    #
+    # C1: graph_id/scopes/delegation_depth/created_by_key_id join the
+    # combined read as a SECOND additive tier (20260901000001). A schema
+    # one migration behind (pre-C1) 400s on them → the existing base-only
+    # fallback below resolves the pre-C1 shape (defaults above) → keys
+    # keep authenticating exactly like today (E2E-5). The declared tier
+    # constant is documentation of the additive boundary (same fail-open
+    # class as "enabled"; the existing one-tier ladder is the mechanism).
+    _API_KEY_ADDITIVE_C1_TIER = [
+        "graph_id", "scopes", "delegation_depth", "created_by_key_id",
+    ]
     _API_KEY_BASE_SELECT = ["id", "team_id", "key_prefix", "created_via",
                             "created_by", "expires_at", "revoked_at"]
     try:
         rows = cp.query(
-            "api_keys", select=_API_KEY_BASE_SELECT + ["enabled"],  # noqa: RUF005
+            "api_keys",
+            select=_API_KEY_BASE_SELECT + ["enabled"] + _API_KEY_ADDITIVE_C1_TIER,  # noqa: RUF005
             filters=[("lookup_hash", "eq", h)],
         )
     except Exception as e:
@@ -572,6 +596,18 @@ def resolve_api_key(cp, token: str) -> dict | None:
         created_via = row.get("created_via")
         created_by = row.get("created_by")
         key_prefix = row.get("key_prefix")
+        # C1 (#2110): tenancy fields from the api_keys row. Safe defaults on
+        # any additive-read degrade (pre-C1 schema → the base-only fallback
+        # above leaves these unset → the initals at the top hold).
+        graph_id = row.get("graph_id")
+        scopes = row.get("scopes") or []
+        delegation_depth = row.get("delegation_depth")
+        created_by_key_id = row.get("created_by_key_id")
+        # D2 (epic key model): legacy full-access = owner-minted (deleg NULL)
+        # with an empty allowlist — every pre-C1 key matches (E2E-5 zero
+        # migration); a MINTED key (deleg=0) with empty scopes is a no-op
+        # key, never full access. C5 enforces this flag; C1 reports it.
+        legacy_full_access = (delegation_depth is None) and (scopes == [])
     else:
         memberships = cp.query(
             "team_memberships",
@@ -617,6 +653,11 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # key-auth management for teams that never disabled it). A stored False
     # is carried as-is (the gate stays closed).
     _dkl = team_row.get("dashboard_key_login")
+    # C1 (#2110): resolve the key's graph namespace — graph-bound key → the
+    # graphs row's namespace; team-wide (graph_id NULL) → the default graph
+    # = teams.graph_name (in _TEAM_BASE_SELECT). Fail-soft on drift.
+    graph_namespace = _graph_namespace_for(
+        cp, team_id, graph_id, team_row.get("graph_name"))
     return {
         "team_id": team_id,
         "key_id": key_id,
@@ -651,7 +692,43 @@ def resolve_api_key(cp, token: str) -> dict | None:
         # renders plan state from these.
         "subscription_status": team_row.get("subscription_status"),
         "customer_email": team_row.get("customer_email"),
+        # C1 (#2110) tenancy fields — the resolution point for the multi-graph
+        # epic. graph_namespace: graph-bound key → the graphs row's namespace
+        # (fail-soft None on drift); team-wide (graph_id NULL) → the default
+        # graph = teams.graph_name (in _TEAM_BASE_SELECT).
+        "graph_id": graph_id,
+        "graph_namespace": graph_namespace,
+        "scopes": scopes,
+        "legacy_full_access": legacy_full_access,
+        "delegation_depth": delegation_depth,
+        "created_by_key_id": created_by_key_id,
     }
+
+
+def _graph_namespace_for(cp, team_id: str, graph_id: str | None,
+                         default_namespace: str | None) -> str | None:
+    """Resolve a key's graph namespace (C1 #2110).
+
+    graph_id set → the graphs row's namespace (None when the row is missing
+    — fail-soft, never raise: a drift race must not break auth). graph_id
+    NULL (team-wide key) → the default graph namespace
+    (teams.graph_name), passed by the caller.
+    """
+    if graph_id is None:
+        return default_namespace
+    if not graph_id:
+        return default_namespace
+    try:
+        rows = cp.query(
+            "graphs", select=["namespace"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+    except Exception as e:
+        _logger.warning(
+            "graphs namespace read failed — resolving default namespace "
+            "(migration 20260901000001 applied?): %s", e)
+        return default_namespace
+    return rows[0]["namespace"] if rows else default_namespace
 
 
 def update_last_used(cp, key_id: str) -> None:
@@ -2116,28 +2193,53 @@ def expired_bootstrap_keys(cp, now: str) -> list[dict]:
 
 def graph_metadata(cp, team_id: str) -> list[dict]:
     """Graph-metadata derivation for Supabase mode (reader inventory:
-    graph_list). The plan data model (0006-0009) has no graphs table —
-    team→graph 1:N metadata is not persisted; the DEFAULT graph is derived
-    from ``teams.graph_name`` (the canonical graph name — 0006 note:
-    sdk.team_create names graphs team_{name}, hosted provisioning
-    team_{team_id}). Returns the registry-shaped list
-    [{graph_id, name, kind, namespace}] with a stable deterministic
-    graph_id (``default``) — the dashboard graph switcher key. Custom
-    graphs are NOT listed in Supabase mode (their namespaces are minted
-    lazily and no table records them); create_graph still returns a
-    namespace for direct use.
+    graph_list). C1 (#2110): the graphs table (20260901000001) is the
+    hosted SOR for team→graph 1:N — this seam now returns the default graph
+    (derived from ``teams.graph_name``) PLUS custom graph rows
+    (kind='custom' AND status='active'). Registry-shaped rows
+    [{graph_id, team_id, name, kind, namespace, status}] so callers are
+    mode-agnostic (plan §4.2 shared-seam contract, surface 10).
+
+    Drift-safe: a schema one migration behind (no graphs table) degrades
+    to default-only (the historical behavior) — logged, never 500s the
+    dashboard.
     """
     rows = cp.query(
         "teams", select=["id", "graph_name"], filters=[("id", "eq", team_id)]
     )
     if not rows or not rows[0].get("graph_name"):
         return []
-    return [{
+    default = {
         "graph_id": "default",
+        "team_id": team_id,
         "name": "default",
         "kind": "default",
         "namespace": rows[0]["graph_name"],
-    }]
+        "status": "active",
+    }
+    try:
+        custom = cp.query(
+            "graphs",
+            select=["id", "team_id", "name", "kind", "namespace", "status"],
+            filters=[("team_id", "eq", team_id), ("kind", "eq", "custom"),
+                     ("status", "eq", "active")],
+        )
+    except Exception as e:
+        _logger.warning(
+            "graphs table read failed — default-only list (migration "
+            "20260901000001 applied?): %s", e)
+        return [default]
+    out = [default]
+    for r in custom:
+        out.append({
+            "graph_id": r["id"],
+            "team_id": r["team_id"],
+            "name": r["name"],
+            "kind": r.get("kind", "custom"),
+            "namespace": r["namespace"],
+            "status": r.get("status", "active"),
+        })
+    return out
 
 
 # ── Stripe webhook billing state (plan Task 10 — #771 review P1) ───────────

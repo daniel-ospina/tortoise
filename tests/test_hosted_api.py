@@ -436,6 +436,84 @@ class TestLastUsedAtTracking:
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 
+    def test_get_current_team_returns_c1_tenancy_fields(self):
+        """C1 (#2110): the registry resolve path returns graph scope + scopes +
+        legacy class + delegation (parity with resolve_api_key). Legacy key
+        (no props) → graph_id None, scopes [], legacy_full_access True;
+        minted key → scopes + deleg=0, not legacy."""
+        import asyncio  # noqa: I001
+        from unittest.mock import MagicMock
+        from tortoise.auth import hash_api_key
+        from tortoise.hosted_api import _make_sdk, get_current_team
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                sdk = _make_sdk(namespace="registry")
+                sdk._get_registry().query(
+                    "CREATE (t:Team {id: $id, tier: 'free', "
+                    "graph_name: 'team_legacy-team'})",
+                    params={"id": "legacy-team"},
+                )
+                # Legacy key: no tenancy props (pre-C1 node)
+                legacy_token = "tt_legacy_key_c1_000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
+                    params={
+                        "id": "legacy-key", "tid": "legacy-team",
+                        "kh": hash_api_key(legacy_token),
+                        "kp": legacy_token[:10], "cb": "test",
+                    },
+                )
+                request = MagicMock()
+                request.url.path = "/v1/points"
+                request.headers = {
+                    "Authorization": f"Bearer {legacy_token}"}
+                request.state = MagicMock()
+                result = asyncio.run(get_current_team(request))
+                assert result["team_id"] == "legacy-team"
+                assert result["graph_id"] is None
+                assert result["graph_namespace"] == "team_legacy-team"  # default
+                assert result["scopes"] == []
+                assert result["legacy_full_access"] is True
+                assert result["delegation_depth"] is None
+                assert result["created_by_key_id"] is None
+
+                # Minted key: scopes + deleg=0 → NOT legacy
+                minted_token = "tt_minted_key_c1_000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb, "
+                    "graph_id: 'g_abc123def4567890', "
+                    "scopes: ['graphs:read', 'graphs:write'], "
+                    "delegation_depth: 0, "
+                    "created_by_key_id: 'parent-key'})",
+                    params={
+                        "id": "minted-key", "tid": "legacy-team",
+                        "kh": hash_api_key(minted_token),
+                        "kp": minted_token[:10], "cb": "test",
+                    },
+                )
+                sdk._get_registry().query(
+                    "CREATE (g:Graph {id: 'g_abc123def4567890', "
+                    "team_id: 'legacy-team', name: 'prod', "
+                    "kind: 'custom', namespace: 'team_legacy-team_g_g_abc123def4567890'})",
+                )
+                request.headers = {
+                    "Authorization": f"Bearer {minted_token}"}
+                result2 = asyncio.run(get_current_team(request))
+                assert result2["graph_id"] == "g_abc123def4567890"
+                assert result2["graph_namespace"] == \
+                    "team_legacy-team_g_g_abc123def4567890"
+                assert result2["scopes"] == ["graphs:read", "graphs:write"]
+                assert result2["legacy_full_access"] is False
+                assert result2["delegation_depth"] == 0
+                assert result2["created_by_key_id"] == "parent-key"
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Points Endpoints

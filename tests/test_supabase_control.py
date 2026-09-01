@@ -201,6 +201,103 @@ class TestResolveApiKey:
         fake.seed("api_keys", [_key_row(lookup_hash="deadbeef" * 8)])
         assert resolve_api_key(fake, TOKEN) is None
 
+    # ── C1 (#2110): tenancy fields on the resolve dict ─────────────────────
+
+    def test_c1_legacy_key_resolves_default_graph(self, fake):
+        """E2E-5: a pre-C1 key (no graph_id/scopes/delegation columns in the
+        row) resolves as the legacy full-access class → default graph."""
+        fake.tables["teams"] = [{
+            "id": "team-free-001", "name": "Free Team", "tier": "free",
+            "max_users": 1, "max_graphs": 1, "graph_size_cap": 10000,
+            "ops_allowance": 1000, "graph_name": "team_team-free-001",
+        }]
+        fake.seed("api_keys", [_key_row()])  # no C1 columns in the row
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["graph_id"] is None           # team-wide key
+        assert team["graph_namespace"] == "team_team-free-001"  # default graph
+        assert team["scopes"] == []               # empty allowlist
+        assert team["legacy_full_access"] is True  # deleg NULL + empty = legacy
+        assert team["delegation_depth"] is None
+        assert team["created_by_key_id"] is None
+
+    def test_c1_minted_key_reports_scopes_and_no_legacy(self, fake):
+        """E2E-9: a C1-minted key (graph_id set, scopes, deleg=0) reports its
+        allowlist and is NOT legacy full-access."""
+        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.seed("api_keys", [_key_row(
+            graph_id="g_abc123def4567890",
+            scopes=["graphs:read", "graphs:write"],
+            delegation_depth=0,
+            created_by_key_id="key-000",
+        )])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] == "g_abc123def4567890"
+        assert team["scopes"] == ["graphs:read", "graphs:write"]
+        assert team["delegation_depth"] == 0
+        assert team["created_by_key_id"] == "key-000"
+        assert team["legacy_full_access"] is False  # deleg=0 → not legacy
+
+    def test_c1_membership_path_is_legacy_full_access(self, fake):
+        """A long-lived key with no api_keys row (membership path) has no
+        scopes/delegation → legacy full access (matches today)."""
+        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.seed("team_memberships", [_membership_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] is None
+        assert team["scopes"] == []
+        assert team["delegation_depth"] is None
+        assert team["legacy_full_access"] is True
+        assert team["graph_namespace"] is None  # FREE_TEAM has no graph_name
+
+    def test_c1_graph_bound_namespace_resolved_from_graphs_table(self, fake):
+        """A graph-bound key resolves its namespace from the graphs row."""
+        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.seed("api_keys", [_key_row(
+            graph_id="g_abc123def4567890",
+            scopes=["graphs:read"],
+            delegation_depth=0,
+        )])
+        fake.seed("graphs", [{
+            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_abc123def4567890",
+            "status": "active",
+        }])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_namespace"] == (
+            "team_team-free-001_g_g_abc123def4567890")
+
+    def test_c1_drift_safe_pre_c1_schema(self, fake):
+        """D3 (#1096): a schema one migration behind (no C1 columns) fails
+        soft to the pre-C1 shape — never 400s all auth."""
+        fake = FakeControlPlane(
+            {"teams": [dict(FREE_TEAM)]},
+            missing_columns={"api_keys": {
+                "graph_id", "scopes", "delegation_depth", "created_by_key_id"}})
+        fake.seed("api_keys", [_key_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["graph_id"] is None
+        assert team["scopes"] == []
+        assert team["delegation_depth"] is None
+        assert team["legacy_full_access"] is True
+
+    def test_c1_graphs_table_missing_fails_soft_to_default_namespace(self, fake):
+        """A graph-bound key whose graphs row is missing (drift race) falls
+        back to the default namespace — never raises (auth must not break)."""
+        fake.tables["teams"] = [{
+            "id": "team-free-001", "name": "Free Team", "tier": "free",
+            "max_users": 1, "max_graphs": 1, "graph_size_cap": 10000,
+            "ops_allowance": 1000, "graph_name": "team_team-free-001",
+        }]
+        fake.seed("api_keys", [_key_row(
+            graph_id="g_missingrow00", scopes=["graphs:read"],
+            delegation_depth=0)])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] == "g_missingrow00"
+        assert team["graph_namespace"] == "team_team-free-001"  # fallback
+
     def test_inactive_membership_does_not_resolve(self, fake):
         fake.seed("team_memberships",
                   [_membership_row(status="removed"), _membership_row(status="invited")])
@@ -1519,12 +1616,53 @@ class TestTask8Helpers:
         assert [r["id"] for r in got] == ["e1"]
 
     def test_graph_metadata_derives_default(self, fake):
+        """C1 (#2110): the seam emits the registry-shaped row
+        {graph_id, team_id, name, kind, namespace, status} — default derived
+        from teams.graph_name (no row needed), status active."""
         fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
         assert graph_metadata(fake, "team-free-001") == [{
-            "graph_id": "default", "name": "default", "kind": "default",
-            "namespace": "team_team-free-001"}]
+            "graph_id": "default", "team_id": "team-free-001",
+            "name": "default", "kind": "default",
+            "namespace": "team_team-free-001", "status": "active"}]
         assert graph_metadata(fake, "no-such-team") == []
         assert graph_metadata(fake, "team-free-001")[0]["graph_id"] == "default"
+
+    def test_graph_metadata_lists_custom_graphs_from_table(self, fake):
+        """C1 (#2110): custom graphs table rows (active) ride the seam after
+        the default — deleted rows excluded, missing table degrades to
+        default-only (D3 drift-safe)."""
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.seed("graphs", [{
+            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_abc123def4567890",
+            "status": "active",
+        }, {
+            "id": "g_deleted0000000", "team_id": "team-free-001",
+            "name": "old", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_deleted0000000",
+            "status": "deleted",
+        }])
+        got = graph_metadata(fake, "team-free-001")
+        assert [g["graph_id"] for g in got] == [
+            "default", "g_abc123def4567890"]
+        assert got[1]["status"] == "active"
+        # drift: missing graphs table (pre-C1 schema) → default-only, no raise
+        fake2 = FakeControlPlane({"teams": [dict(FREE_TEAM)]})
+        fake2.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        assert graph_metadata(fake2, "team-free-001")[0]["graph_id"] == "default"
+
+    def test_graph_metadata_foreign_team_sees_own_rows_only(self, fake):
+        """C1 (#2110): another team's graphs don't leak into the list."""
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.seed("graphs", [{
+            "id": "g_otherteam0001", "team_id": "team-other-000",
+            "name": "theirs", "kind": "custom",
+            "namespace": "team_team-other-000_g_g_otherteam0001",
+            "status": "active",
+        }])
+        got = graph_metadata(fake, "team-free-001")
+        assert [g["graph_id"] for g in got] == ["default"]
 
     def test_seam_helpers_fail_closed(self):
         cp = ErrorControlPlane()

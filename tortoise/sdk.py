@@ -12110,9 +12110,12 @@ class TortoiseSDK:
         gid = f"g_{_uuid.uuid4().hex[:16]}"
         ns = namespace or f"team_{team_id}_{gid}"
         now = datetime.now(_tz.utc).isoformat()  # noqa: UP017
+        # C1 (#2110): Graph node gains status (v1 lifecycle: active only —
+        # delete = soft tombstone; no archive). recording stays absent =
+        # NULL = inherit team default (back-compat with pre-C1 nodes).
         reg.query(
             "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
-            "namespace:$ns, created_at:$now})",
+            "namespace:$ns, status:'active', created_at:$now})",
             params={"gid": gid, "tid": team_id, "name": name,
                     "kind": kind, "ns": ns, "now": now},
         )
@@ -12123,10 +12126,10 @@ class TortoiseSDK:
 
         #765 (plan Task 8 reader inventory): in Supabase control-plane mode
         the default graph is derived from ``teams.graph_name`` via the seam
-        (no graphs table in the plan data model — see
-        supabase_control.graph_metadata); the registry Graph-node read stays
-        for selfhost. Registry-shaped rows (graph_id/team_id/name/kind/
-        namespace) so callers are mode-agnostic.
+        (graph_metadata — C1 now also lists custom graphs table rows); the
+        registry Graph-node read stays for selfhost. Registry-shaped rows
+        (graph_id/team_id/name/kind/namespace/status) so callers are
+        mode-agnostic.
         """
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, graph_metadata, is_supabase_enabled,
@@ -12147,10 +12150,45 @@ class TortoiseSDK:
                 "name": props.get("name"),
                 "kind": props.get("kind", "custom"),
                 "namespace": props.get("namespace"),
+                # C1 (#2110): status/recording ride the seam (pre-C1 nodes
+                # lack them → None-safe: status None = active back-compat,
+                # recording None = inherit team default).
+                "status": props.get("status"),
+                "recording": props.get("recording"),
             })
         return out
 
     def graph_count(self, team_id: str) -> int:
+        """Graph count for a team — the quota meter's source (C1 #2110).
+
+        Supabase mode: 1 (the default graph — always present, derived from
+        teams.graph_name) + count(custom active). Deleted rows excluded
+        (delete frees the slot; v1 has no archive). Registry mode: the
+        existing MATCH (team_create :12055 creates the kind='default' node,
+        so the registry count already includes the default). NOTE for C3:
+        registry graph_count has no status filter — correct while no delete
+        exists, but C3's soft-delete must filter status <> 'deleted' to
+        avoid registry↔Supabase overcount drift.
+        """
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            try:
+                rows = cp.query(
+                    "graphs", select=["id"],
+                    filters=[("team_id", "eq", team_id),
+                             ("kind", "eq", "custom"),
+                             ("status", "eq", "active")],
+                )
+            except Exception as e:
+                # Drift-safe: pre-C1 schema (no graphs table) → default-only.
+                _logger.warning(
+                    "graphs count read failed — counting default only "
+                    "(migration 20260901000001 applied?): %s", e)
+                return 1
+            return 1 + len(rows)
         reg = self._get_registry()
         return reg.query(
             "MATCH (g:Graph {team_id:$tid}) RETURN count(g)",
@@ -12436,10 +12474,20 @@ class TortoiseSDK:
                 out.append(props)
         return out
 
-    def apikey_create(self, team_id: str, created_by: str) -> dict:
+    def apikey_create(self, team_id: str, created_by: str,
+                      *, graph_id: str | None = None,
+                      scopes: list | None = None,
+                      created_by_key_id: str | None = None,
+                      delegation_depth: int | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
+
+        C1 (#2110) tenancy kwargs (all optional — absent = legacy shape,
+        back-compat for existing callers): graph_id (NULL = team-wide key
+        → default graph), scopes (FLAT allowlist, default []), mint lineage
+        (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
+        NULL = owner-minted).
         """
         import uuid  # noqa: I001
         from datetime import datetime, timezone
@@ -12457,11 +12505,25 @@ class TortoiseSDK:
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         reg = self._get_registry()
+        # C1 (#2110): include non-None tenancy props in the CREATE (absent =
+        # old callers unchanged; old registry nodes without the props resolve
+        # with safe defaults).
+        extra = ""
+        params = {"id": kid, "tid": team_id, "kh": key_hash,
+                  "kp": key_prefix, "cb": created_by, "now": now}
+        if graph_id is not None:
+            extra += ", graph_id:$gid"; params["gid"] = graph_id
+        if scopes:
+            extra += ", scopes:$sc"; params["sc"] = list(scopes)
+        if created_by_key_id is not None:
+            extra += ", created_by_key_id:$cbk"; params["cbk"] = created_by_key_id
+        if delegation_depth is not None:
+            extra += ", delegation_depth:$dd"; params["dd"] = delegation_depth
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
-            "key_prefix:$kp, created_by:$cb, created_at:$now})",
-            params={"id": kid, "tid": team_id, "kh": key_hash,
-                    "kp": key_prefix, "cb": created_by, "now": now},
+            "key_prefix:$kp, created_by:$cb, created_at:$now"
+            + (extra or "") + "})",
+            params=params,
         )
         # BELONGS_TO edge
         reg.query(
@@ -12476,12 +12538,18 @@ class TortoiseSDK:
                 "team_id": team_id, "created_at": now}
 
     def apikey_list(self, team_id: str) -> list[dict]:
-        """List API keys for a team (no plaintext or hashes)."""
+        """List API keys for a team (no plaintext or hashes).
+
+        C1 (#2110): rows gain the tenancy props (graph_id/scopes/
+        delegation_depth/created_by_key_id) — absent on pre-C1 nodes →
+        None-safe defaults (graph_id None = team-wide, scopes [] = legacy).
+        """
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (k:APIKey {team_id:$tid}) "
             "RETURN k.id, k.key_prefix, k.created_by, k.created_at, "
-            "k.last_used_at, k.revoked_at",
+            "k.last_used_at, k.revoked_at, "
+            "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
             params={"tid": team_id},
         ).result_set
         keys = []
@@ -12489,6 +12557,8 @@ class TortoiseSDK:
             keys.append({
                 "id": r[0], "key_prefix": r[1], "created_by": r[2],
                 "created_at": r[3], "last_used_at": r[4], "revoked_at": r[5],
+                "graph_id": r[6], "scopes": r[7] or [],
+                "delegation_depth": r[8], "created_by_key_id": r[9],
             })
         return keys
 
