@@ -77,7 +77,8 @@ def test_deadline_degradation_records_timeout_reason(tmp_path, monkeypatch):
     import tortoise.search_engine as se
 
     def _slow_fts(graph, query, entity_type="point", limit=20,
-                  timeout_ms=500, excluded_statuses=None, leg_trace=None):
+                  timeout_ms=500, excluded_statuses=None, leg_trace=None,
+                  keep_numeric=False, expansion_terms=None):
         import time as _t
         _t.sleep(2.0)  # exceeds the 1500 ms collective deadline
         return []

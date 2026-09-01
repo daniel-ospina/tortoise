@@ -111,6 +111,48 @@ surface — never the implicit answer path for search.
   `[SUPERSEDED BY]` markers so the reader stays honest about staleness
   (cost-bounded by the same 8k/40 caps).
 
+## Retrieval (ask lane — #2070 optimisation loop)
+
+The ask lane retrieves evidence with an optimisation-loop design: each lever
+is env-gated and measured against the baseline in `tools/ask_recall_bench.py`
+(baseline → lever → measure → keep/revert). All knobs default to the
+search-lane byte-identical posture unless the runbook's follow-up (2)
+measurement justifies a change.
+
+- **A1 `TORTOISE_ASK_NUMERIC_TOKENS` (default 1):** keep all-digit tokens
+  (money/quantity) in the ask lane's sparse query — SAME-VALUE money
+  questions become retrievable. The search lane never passes it (numeric
+  tokens still dropped there). Honest scope: a question with NO numeric
+  tokens (e.g. the #2070 `gpt4_d84a3211` sum question) is served by the
+  vector leg, not this knob.
+- **A4 `TORTOISE_ASK_SEARCH_KEYS_PRF` (default 1):** additive `search_keys`
+  pseudo-relevance-feedback expansion — a bounded second FTS pass whose
+  OR-union reserves the original query's token slots and appends aliases
+  from the retrieved pool's top-5 hits (max 12+8 terms). Never replaces
+  original tokens (the regression guard).
+- **A5 `TORTOISE_ASK_EVIDENCE_BOOST` (default 1):** evidence-mark boost
+  before assembly (stored `has_answer` marks). Product graphs currently
+  carry zero marks (the extractor does not write them) — zero marks = a
+  no-op, byte-identical order. Fixture/bench seeding writes marks so the
+  lever is measurable.
+- **A3 `TORTOISE_ASK_FUSION_WEIGHTS` / `TORTOISE_ASK_FUSION_K`:** RRF
+  weights/damping overrides. Default None/60 = the shared global
+  (`TORTOISE_FUSION_WEIGHTS` → `{"vector": 1.5}`) unchanged.
+- **A6 `TORTOISE_ASK_RETRIEVAL_LIMIT` / `_CONTEXT_ITEM_CAP` /
+  `_CONTEXT_TOKEN_CAP` (default 40/40/8000):** the retrieval-window limit
+  (the `result_ids[:limit]` cut inside `tortoise_fts_query`) is threaded IN
+  TANDEM with the assembly caps — raising only the assemble cap changes
+  nothing. Measurement-gated: defaults stay OFF until the runbook
+  baseline justifies a raise.
+- **A7 `TORTOISE_ASK_RERANK` (default OFF):** gated phase-2 product
+  cross-encoder rerank (eval R6 port, `tortoise/rerank.py`). Truthy-only;
+  needs the `embeddings` extra. Degrades to untouched on any scorer
+  failure (never raises).
+- **Vector leg (A2):** a documented runtime requirement for ask quality —
+  the lexical-trio retrieval class needs the `embeddings` extra. NEVER
+  enforced: a degraded lane keeps `retrieval_degraded=true` honestly (no
+  silent success).
+
 ## Cost & budget
 
 - **Per-query cost ≤ $0.01 target is structural:** 8000-token context cap +
