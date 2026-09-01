@@ -30,9 +30,11 @@ fallback, vector leg absent unless ``--embedder`` injects a probe) or
 installed; ``TORTOISE_DB_URI`` must be set).
 
 LEVERS: ``--levers on`` enables the ask-lane knobs (A1 numeric tokens,
-A4 search_keys PRF, A5 evidence boost, A3 fusion weights) exactly the way
-``ask()`` resolves them; ``--levers off`` (default) disables them for the
-baseline. ``--cap-limit N``/``--cap-item N`` set the A6 measurement caps.
+A4 search_keys PRF, A5 evidence boost) exactly the way ``ask()`` resolves
+them; ``--levers off`` (default) disables them for the baseline. A3 fusion
+weights/k are threaded from the env (TORTOISE_ASK_FUSION_WEIGHTS/_K) in
+BOTH postures — default None/60 = the shared global, matching ``ask()``.
+``--cap-limit N``/``--cap-item N`` set the A6 measurement caps.
 
 A2 EMBEDDER PROBE: ``--embedder <name>`` injects a same-384-dim probe model
 via ``tools.embedder_probe`` with a FRESH graph per candidate
@@ -288,7 +290,10 @@ def _scan_for_failures(data: list[dict], *, scan_limit: int,
 
 def _levers_env(levers: str) -> None:
     """Set the ask-lane env knobs to the requested lever posture so the bench
-    measures exactly what ``ask()`` would resolve (single source of truth)."""
+    measures exactly what ``ask()`` would resolve (single source of truth).
+    A3's fusion weights/k default to the shared global (None/60) in BOTH
+    postures — matching ``ask()``, which passes them through only when the
+    operator sets TORTOISE_ASK_FUSION_* explicitly."""
     if levers == "off":
         os.environ["TORTOISE_ASK_NUMERIC_TOKENS"] = "0"
         os.environ["TORTOISE_ASK_SEARCH_KEYS_PRF"] = "0"
@@ -297,6 +302,20 @@ def _levers_env(levers: str) -> None:
         os.environ["TORTOISE_ASK_NUMERIC_TOKENS"] = "1"
         os.environ["TORTOISE_ASK_SEARCH_KEYS_PRF"] = "1"
         os.environ["TORTOISE_ASK_EVIDENCE_BOOST"] = "1"
+
+
+def _resolve_bench_a3() -> tuple[dict | None, int]:
+    """Resolve the A3 fusion knobs exactly as ``ask()`` does (the env is the
+    single source of truth — TORTOISE_ASK_FUSION_WEIGHTS / _K). Default
+    None/60 = the shared global resolution, unchanged."""
+    from tortoise.retrieval import (
+        ASK_FUSION_K_ENV,
+        ASK_FUSION_WEIGHTS_ENV,
+        ask_env_int,
+        ask_env_weights,
+    )
+    return (ask_env_weights(ASK_FUSION_WEIGHTS_ENV, None),
+            ask_env_int(ASK_FUSION_K_ENV, 60))
 
 
 def main() -> int:
@@ -368,11 +387,12 @@ def main() -> int:
             logger.info("measuring %s (%s lane)", qid, lane)
             _seed_question(sdk, question, search_keys_map)
             try:
+                fw, fk = _resolve_bench_a3()
                 row = _measure_question(
                     sdk, question,
                     keep_numeric=(args.levers == "on"),
                     search_keys_prf=(args.levers == "on"),
-                    fusion_weights=None, fusion_k=60,
+                    fusion_weights=fw, fusion_k=fk,
                     cap_limit=args.cap_limit, cap_item=args.cap_item,
                     evidence_boost=(args.levers == "on"))
             finally:

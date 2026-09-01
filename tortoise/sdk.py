@@ -10133,6 +10133,12 @@ class TortoiseSDK:
                 str_limit=str_limit,
                 excluded_statuses=() if include_terminal else None,
                 leg_trace=leg_trace,
+                # P1-fix (#2070): the second pass respects the caller's A1
+                # keep_numeric — an operator who opted OUT of numeric tokens
+                # must not have them silently re-introduced by the PRF pass
+                # (the alias harvest stays numeric-aware; only the original
+                # query's re-tokenization honors the opt-out).
+                keep_numeric=keep_numeric,
             )
             if expanded_fts is not None:
                 raw_results["fts"] = expanded_fts
@@ -10516,6 +10522,7 @@ class TortoiseSDK:
         str_limit: int,
         excluded_statuses: tuple | None,
         leg_trace: list[dict] | None,
+        keep_numeric: bool = False,
     ) -> list[tuple[str, float]] | None:
         """A4 (#2070): bounded second FTS pass with ADDITIVE search_keys
         expansion terms harvested from the retrieved pool's top-5 hits.
@@ -10573,7 +10580,10 @@ class TortoiseSDK:
             expanded = run_fts_query(
                 proj.g, query, entity_type="point", limit=str_limit,
                 excluded_statuses=excluded_statuses,
-                keep_numeric=True,
+                # P1-fix: honor the caller's A1 opt-out for the original
+                # query's re-tokenization (the alias harvest below already
+                # runs numeric-aware via expansion_tokens' keep_numeric).
+                keep_numeric=keep_numeric,
                 expansion_terms=aliases,
                 leg_trace=_exp_trace,
             )
