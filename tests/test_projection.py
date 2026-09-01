@@ -1497,7 +1497,12 @@ def live_proj():
     """Live FalkorProjection on a test-prefixed graph (safe via test_guard)."""
     if not _docker_falkor_reachable():
         pytest.skip("live FalkorDB (FALKORDB_HOST:PORT) not reachable")
-    uri = os.environ.get("TORTOISE_DB_URI", "docker://:@localhost:16379/tortoise_test_proj125")
+    # #1553: the CI tier-2 env exports TORTOISE_DB_URI as an EMPTY string
+    # (set-but-empty, not unset) — os.environ.get(..., default) then returns
+    # "" and from_uri("") raises "Unsupported scheme:". Treat empty-but-set
+    # as absent (fall back to the local default).
+    uri = os.environ.get("TORTOISE_DB_URI") or \
+        "docker://:@localhost:16379/tortoise_test_proj125"
     # Epic #1647 (T7, cycle-5 P1-6): the env URI may resolve the SHARED job
     # path — bulk-DETACHing it clobbers concurrent sessions; per-test graph.
     proj = FalkorProjection.from_uri(
