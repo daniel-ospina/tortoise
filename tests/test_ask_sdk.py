@@ -266,6 +266,101 @@ def test_local_lane_pipeline(monkeypatch):
     assert fake.calls == 1  # exactly ONE model call
 
 
+def test_cost_estimate_strong_rates_for_qwen_serving_reader(monkeypatch):
+    """#2069: the response's cost_estimate_usd is metered at
+    ASK_METER_RATES_STRONG when the SERVING lane's wire id is a
+    strong-family spec (``qwen/qwen3.8-max`` via ``_LockedReader.model``)
+    — the strong lane never reports a deepseek-envelope estimate."""
+    import tortoise.sdk as sdk_mod
+    from tortoise.metering import ASK_METER_RATES_STRONG, estimate_ask_cost_usd
+    from tortoise.reader import system_prompt_for
+
+    class _StrongReader(FakeReader):
+        model = "qwen/qwen3.8-max"
+        provider = "openrouter"
+        route = "openrouter"
+        last_finish_reason = "stop"
+        last_completion_tokens = 12
+
+    sdk = _new_sdk()
+    fake = _StrongReader()
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
+    result = sdk.ask("q")
+    assert result["model"] == "qwen/qwen3.8-max"
+    inp = (estimate_tokens_ask(system_prompt_for(result["question_type"]))
+           + estimate_tokens_ask(result["evidence"]))
+    expected = estimate_ask_cost_usd(inp, 12, rates=ASK_METER_RATES_STRONG)
+    assert result["cost_estimate_usd"] == pytest.approx(expected)
+
+
+def test_cost_estimate_default_rates_for_deepseek_serving_reader(monkeypatch):
+    """#2069 regression: a deepseek-family serving wire id (the default
+    lane — bare ``deepseek-v4-flash`` on deepseek-direct) keeps the deepseek
+    envelope; the response cost_estimate_usd is unchanged for the default
+    lane."""
+    import tortoise.sdk as sdk_mod
+    from tortoise.metering import ASK_METER_RATES, estimate_ask_cost_usd
+    from tortoise.reader import system_prompt_for
+
+    class _DeepSeekReader(FakeReader):
+        model = "deepseek-v4-flash"
+        provider = "deepseek-direct"
+        route = "deepseek-direct"
+        last_completion_tokens = 12
+
+    sdk = _new_sdk()
+    fake = _DeepSeekReader()
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
+    result = sdk.ask("q")
+    assert result["model"] == "deepseek-v4-flash"
+    inp = (estimate_tokens_ask(system_prompt_for(result["question_type"]))
+           + estimate_tokens_ask(result["evidence"]))
+    expected = estimate_ask_cost_usd(inp, 12, rates=ASK_METER_RATES)
+    assert result["cost_estimate_usd"] == pytest.approx(expected)
+
+
+def test_ask_record_path_uses_strong_rates(monkeypatch):
+    """#2069: the ask() metering RECORD call site (step 7 — the pinned
+    record path) meters the cost_usd at the SERVING lane's STRONG rates — a
+    strong-lane query's cost_usd record never uses the deepseek envelope."""
+    import tortoise.metering as metering_mod
+    import tortoise.sdk as sdk_mod
+    from tortoise.metering import (
+        ASK_METER_RATES,
+        ASK_METER_RATES_STRONG,
+        estimate_ask_cost_usd,
+    )
+
+    captured = {}
+
+    def _capture(team_id, *, tokens_in=0, tokens_out=0, cost_usd=0.0, **_):
+        captured.update(tokens_in=tokens_in, tokens_out=tokens_out,
+                        cost_usd=cost_usd)
+        return None
+
+    monkeypatch.setattr(metering_mod, "record_ask_usage", _capture)
+
+    class _StrongReader(FakeReader):
+        model = "qwen/qwen3.8-max"
+        provider = "openrouter"
+        route = "openrouter"
+        last_completion_tokens = 12
+
+    sdk = _new_sdk()
+    fake = _StrongReader()
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
+    sdk.ask("q", team_id="team-x")
+    assert captured, "the record path must have run (explicit team_id)"
+    expected = estimate_ask_cost_usd(
+        captured["tokens_in"], captured["tokens_out"],
+        rates=ASK_METER_RATES_STRONG)
+    assert captured["cost_usd"] == pytest.approx(expected)
+    # never the deepseek envelope (the under-count hazard is gone)
+    under = estimate_ask_cost_usd(
+        captured["tokens_in"], captured["tokens_out"], rates=ASK_METER_RATES)
+    assert captured["cost_usd"] > under
+
+
 def test_local_lane_default_question_date_utc(monkeypatch):
     """question_date default = server-now-UTC (resolved value in the
     response); a non-UTC clock at a boundary time does not leak local date."""

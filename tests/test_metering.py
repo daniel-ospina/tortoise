@@ -537,6 +537,63 @@ class TestAskMetering:
         inp = estimate_tokens_ask(system_prompt_for(None)) + estimate_tokens_ask(rendered)
         assert estimate_ask_cost_usd(inp, 500, rates=ASK_METER_RATES) > 0
 
+    def test_strong_rates_selection_by_wire_family(self):
+        """#2069: select_ask_meter_rates picks the STRONG envelope for
+        family-prefixed strong-family wire ids (qwen/upstage/anthropic — the
+        serving ``_LockedReader.model``); deepseek specs, bare ids and None
+        stay on the deepseek envelope (the ×1.5 over-cover documents
+        OpenRouter markup)."""
+        from tortoise.metering import (
+            ASK_METER_RATES,
+            ASK_METER_RATES_STRONG,
+            select_ask_meter_rates,
+        )
+        assert select_ask_meter_rates("qwen/qwen3.8-max") == ASK_METER_RATES_STRONG
+        assert select_ask_meter_rates("upstage/solar-pro4") == ASK_METER_RATES_STRONG
+        assert select_ask_meter_rates("anthropic/claude-opus-5") == ASK_METER_RATES_STRONG
+        # deepseek family (incl. a deepseek spec forced to openrouter) stays
+        # on the default envelope — the prefixed spec is deepseek-family.
+        assert select_ask_meter_rates("deepseek/deepseek-v4-flash") == ASK_METER_RATES
+        assert select_ask_meter_rates("deepseek-v4-flash") == ASK_METER_RATES  # bare
+        assert select_ask_meter_rates(None) == ASK_METER_RATES
+        assert select_ask_meter_rates("") == ASK_METER_RATES
+
+    def test_strong_rates_bounds_and_target_break(self):
+        """#2069: at STRONG {3.00, 9.00} the worst case (~$0.032) and
+        typical (~$0.012) both EXCEED the $0.01 structural target (the
+        recorded owner decision — the strong lane breaks it); the ×1.5
+        over-cover never under-counts the REAL qwen rates ($2/$6)."""
+        from tortoise.metering import (
+            ASK_METER_RATES_STRONG,
+            estimate_ask_cost_usd,
+        )
+        worst = estimate_ask_cost_usd(9200, 500, rates=ASK_METER_RATES_STRONG)
+        typical = estimate_ask_cost_usd(3500, 150, rates=ASK_METER_RATES_STRONG)
+        assert worst == pytest.approx(0.0321)
+        assert typical == pytest.approx(0.01185)
+        # the structural $0.01/query target is broken on the strong lane
+        # (recorded in the runbook §#2069 — owner decision pending).
+        assert worst > 0.01 and typical > 0.01
+        real = {"prompt_per_1m": 2.00, "completion_per_1m": 6.00}
+        assert estimate_ask_cost_usd(9200, 500, rates=ASK_METER_RATES_STRONG) >= \
+            estimate_ask_cost_usd(9200, 500, rates=real)
+        assert estimate_ask_cost_usd(3500, 150, rates=ASK_METER_RATES_STRONG) >= \
+            estimate_ask_cost_usd(3500, 150, rates=real)
+
+    def test_strong_lane_under_count_hazard_documented(self):
+        """#2069: metering a strong-lane query at the DEFAULT envelope
+        under-counts the real qwen rates ~10× — the pre-fix hazard the
+        re-baseline removes (a strong ask must never meter at 0.21/0.42)."""
+        from tortoise.metering import (
+            ASK_METER_RATES,
+            estimate_ask_cost_usd,
+        )
+        real = {"prompt_per_1m": 2.00, "completion_per_1m": 6.00}
+        under = estimate_ask_cost_usd(9200, 500, rates=ASK_METER_RATES)
+        real_cost = estimate_ask_cost_usd(9200, 500, rates=real)
+        assert under < real_cost  # under-counts at the deepseek envelope
+        assert real_cost / under > 9  # ~10×
+
     def test_zero_record_team_read(self, reg_sdk):
         """P2-14: a fresh team with zero ask records → get_ask_usage renders
         ZEROS (never 500) on both the registry read and the supabase-mode
