@@ -55,7 +55,8 @@ def _audit() -> dict:
 
 
 def _outcome(qid: str, *, valid: bool = True,
-             error_classes: dict | None = None, label: bool = True) -> dict:
+             error_classes: dict | None = None, label: bool = True,
+             gate_reasons: list | None = None) -> dict:
     return {
         "question_id": qid, "question_type": "single-session-user",
         "question_date": "2024-01-15", "label": label, "hypothesis": "h",
@@ -68,6 +69,7 @@ def _outcome(qid: str, *, valid: bool = True,
         "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
         "pool_size": 5, "evidence_written": 1,
         "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+        "gate_reasons": gate_reasons or [],
     }
 
 
