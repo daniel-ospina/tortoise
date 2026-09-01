@@ -546,12 +546,14 @@ def resolve_api_key(cp, token: str) -> dict | None:
     # propagates.
     #
     # C1: graph_id/scopes/delegation_depth/created_by_key_id join the
-    # combined read as a SECOND additive tier (20260901000001). A schema
-    # one migration behind (pre-C1) 400s on them → the existing base-only
-    # fallback below resolves the pre-C1 shape (defaults above) → keys
-    # keep authenticating exactly like today (E2E-5). The declared tier
-    # constant is documentation of the additive boundary (same fail-open
-    # class as "enabled"; the existing one-tier ladder is the mechanism).
+    # combined read as a SECOND additive tier (20260901000001). The retry
+    # ladder drops NEWEST-FIRST (mirrors the teams _teams_row_fail_soft
+    # pattern): a pre-C1 schema (C1 columns absent, enabled present) 400s
+    # the combined select → retry base+enabled (C1 defaults hold) → only a
+    # pre-20260813000005 schema drops enabled too (the pre-existing
+    # accepted fail-open class). Never drop an OLDER gate to serve a
+    # NEWER drift (history review P1: #1705 round-1 rejected stacking
+    # additive columns on the auth read without their own rung).
     _API_KEY_ADDITIVE_C1_TIER = [
         "graph_id", "scopes", "delegation_depth", "created_by_key_id",
     ]
@@ -565,18 +567,30 @@ def resolve_api_key(cp, token: str) -> dict | None:
         )
     except Exception as e:
         _logger.warning(
-            "api_keys read failed — retrying without additive 'enabled'; is "
-            "migration 20260813000005 applied? (%s)", e)
+            "api_keys read failed — retrying without additive C1 columns; is "
+            "migration 20260901000001 applied? (%s)", e)
         try:
+            # Rung 2: pre-C1 schema (C1 columns absent) — drop only the C1
+            # tier; enabled stays enforced (#1148 gate survives the drift
+            # window).
             rows = cp.query(
-                "api_keys", select=_API_KEY_BASE_SELECT,
+                "api_keys", select=_API_KEY_BASE_SELECT + ["enabled"],  # noqa: RUF005
                 filters=[("lookup_hash", "eq", h)],
             )
         except Exception as e2:
             _logger.warning(
-                "api_keys base-only read failed — fail-closed (missing base "
-                "column or control-plane outage): %s", e2)
-            raise
+                "api_keys read failed — retrying without additive 'enabled'; is "
+                "migration 20260813000005 applied? (%s)", e2)
+            try:
+                rows = cp.query(
+                    "api_keys", select=_API_KEY_BASE_SELECT,
+                    filters=[("lookup_hash", "eq", h)],
+                )
+            except Exception as e3:
+                _logger.warning(
+                    "api_keys base-only read failed — fail-closed (missing base "
+                    "column or control-plane outage): %s", e3)
+                raise
     if rows:
         row = rows[0]
         if row.get("revoked_at") is not None:
@@ -709,13 +723,12 @@ def _graph_namespace_for(cp, team_id: str, graph_id: str | None,
                          default_namespace: str | None) -> str | None:
     """Resolve a key's graph namespace (C1 #2110).
 
-    graph_id set → the graphs row's namespace (None when the row is missing
-    — fail-soft, never raise: a drift race must not break auth). graph_id
-    NULL (team-wide key) → the default graph namespace
-    (teams.graph_name), passed by the caller.
+    graph_id set → the graphs row's namespace; a MISSING row (drift race,
+    soft-deleted graph) resolves **None — fail-closed** (the security
+    review P1: a graph-bound key must never silently widen onto the team
+    default graph). graph_id NULL/empty (team-wide key) → the default graph
+    namespace (teams.graph_name), passed by the caller.
     """
-    if graph_id is None:
-        return default_namespace
     if not graph_id:
         return default_namespace
     try:
@@ -725,10 +738,10 @@ def _graph_namespace_for(cp, team_id: str, graph_id: str | None,
         )
     except Exception as e:
         _logger.warning(
-            "graphs namespace read failed — resolving default namespace "
-            "(migration 20260901000001 applied?): %s", e)
-        return default_namespace
-    return rows[0]["namespace"] if rows else default_namespace
+            "graphs namespace read failed — graph-bound key resolves None "
+            "(fail-closed; migration 20260901000001 applied?): %s", e)
+        return None
+    return rows[0]["namespace"] if rows else None
 
 
 def update_last_used(cp, key_id: str) -> None:
@@ -2216,13 +2229,16 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
         "kind": "default",
         "namespace": rows[0]["graph_name"],
         "status": "active",
+        "recording": None,  # inherit team default (registry parity, #2110)
     }
     try:
         custom = cp.query(
             "graphs",
-            select=["id", "team_id", "name", "kind", "namespace", "status"],
+            select=["id", "team_id", "name", "kind", "namespace", "status",
+                    "recording"],
             filters=[("team_id", "eq", team_id), ("kind", "eq", "custom"),
                      ("status", "eq", "active")],
+            order="created_at",
         )
     except Exception as e:
         _logger.warning(
@@ -2238,6 +2254,7 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
             "kind": r.get("kind", "custom"),
             "namespace": r["namespace"],
             "status": r.get("status", "active"),
+            "recording": r.get("recording"),
         })
     return out
 

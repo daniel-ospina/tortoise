@@ -33,7 +33,7 @@
 -- Table: graphs (team→graph 1:N)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS public.graphs (
-    id          text PRIMARY KEY,       -- g_<16hex> — deterministic per (team_id, name) in Supabase mode (#765 zero-registry-writes)
+    id          text PRIMARY KEY,       -- g_<16hex> — RANDOM, NOT f(team_id,name): name reuse after soft-delete must not collide (partial unique index permits reuse; a deterministic id would PK-violate on re-create). #765 is satisfied by the row existing, not by id determinism.
     team_id     text NOT NULL REFERENCES public.teams(id) ON DELETE CASCADE,
     name        text NOT NULL,
     kind        text NOT NULL DEFAULT 'custom',   -- 'default' | 'custom'
@@ -98,14 +98,18 @@ COMMENT ON COLUMN public.api_keys.scopes IS
 
 -- DB-invariant for the approved key model: MINTED keys (delegation_depth = 0)
 -- can NEVER hold escalation scopes, graph-bound OR team-wide. Only owner-minted
--- keys (delegation_depth IS NULL) may. (Flat-array `?|` — fires on any element
--- match; table-level so it covers every row regardless of graph_id.)
+-- keys (delegation_depth IS NULL) may. The jsonb_typeof guard enforces FLAT
+-- storage (D1 — a nested object would make `?|` vacuous: it only matches
+-- top-level keys), and the escalation set covers ALL admin capabilities in the
+-- key-model vocabulary (graphs:create/delete, keys:manage, team:manage).
 -- DROP-then-ADD keeps re-apply idempotent (0007 precedent).
 ALTER TABLE public.api_keys
     DROP CONSTRAINT IF EXISTS chk_minted_key_no_escalation;
 ALTER TABLE public.api_keys
     ADD CONSTRAINT chk_minted_key_no_escalation
-    CHECK (delegation_depth IS NULL OR NOT (scopes ?| array['graphs:create','graphs:delete','keys:manage']));
+    CHECK (delegation_depth IS NULL OR (
+        jsonb_typeof(scopes) = 'array'
+        AND NOT (scopes ?| array['graphs:create','graphs:delete','keys:manage','team:manage'])));
 
 -- Graph-scoped key listing (dashboard/C3: keys by graph).
 CREATE INDEX IF NOT EXISTS idx_api_keys_graph_id

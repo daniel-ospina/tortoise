@@ -12086,13 +12086,15 @@ class TortoiseSDK:
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): in
         Supabase control-plane mode (TORTOISE_CONTROL_PLANE=supabase / creds
-        configured) NO registry write happens — the plan data model
-        (0006-0009) has no graphs table, so team→graph metadata is not
-        persisted; the graph_id is derived deterministically from the
-        namespace and graph_list() derives the default graph from
-        teams.graph_name. Selfhost (registry mode) keeps the registry Graph
-        node. The zero-registry-writes cutover contract (registry node count
-        == 0) requires this gate.
+        configured) NO registry write happens. Since C1 (#2110) the hosted
+        SOR is the ``graphs`` table (20260901000001) — but the INSERT path
+        into it is C2/C3 (provisioning service, out of C1 scope), so this
+        method still returns the deterministic id WITHOUT persisting; the
+        registry-shaped list seam (graph_metadata/graph_list) derives the
+        default graph from teams.graph_name and reads custom rows once they
+        exist. Selfhost (registry mode) keeps the registry Graph node. The
+        zero-registry-writes cutover contract (registry node count == 0)
+        requires this gate.
         """
         import uuid as _uuid  # noqa: I001
         import hashlib as _hashlib
@@ -12150,10 +12152,13 @@ class TortoiseSDK:
                 "name": props.get("name"),
                 "kind": props.get("kind", "custom"),
                 "namespace": props.get("namespace"),
-                # C1 (#2110): status/recording ride the seam (pre-C1 nodes
-                # lack them → None-safe: status None = active back-compat,
-                # recording None = inherit team default).
-                "status": props.get("status"),
+                # C1 (#2110): status/recording ride the seam. Pre-C1 nodes
+                # lack them → status coalesces to "active" (mode-agnostic
+                # with the Supabase seam, which always emits "active"; deep
+                # review P2: a consumer filtering status=='active' must not
+                # silently drop legacy selfhost graphs). recording None =
+                # inherit team default.
+                "status": props.get("status") or "active",
                 "recording": props.get("recording"),
             })
         return out
@@ -12686,6 +12691,12 @@ class TortoiseSDK:
             max_keys = int(team.get("max_api_keys")
                            or self._default_max_api_keys())
             kid = ulid()
+            # C1 (#2110) decision record: the recovery-mint is NOT extended
+            # with tenancy kwargs — recovery keys are the owner-level keyless
+            # path (created_via='recovery'), so by D2 they resolve as the
+            # legacy/owner full-access class (deleg NULL + no scopes). This is
+            # intended (E2E-5 zero behavior shift); C3 must NOT assume minted
+            # keys are all deleg=0 — recovery keys are owner-class.
             reg.query(
                 "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:$cb, created_via:'recovery', "

@@ -38,16 +38,20 @@ SELECT tests.assert(
    AND column_name IN ('id','team_id','name','kind','namespace','status','recording','created_at')) = 8,
   'c1: graphs has all 8 columns');
 SELECT tests.assert(
-  EXISTS (SELECT 1 FROM information_schema.columns
-          WHERE table_schema = 'public' AND table_name = 'api_keys'
-          AND column_name IN ('graph_id','scopes','created_by_key_id','delegation_depth')),
-  'c1: api_keys has the 4 new columns');
+  (SELECT count(*) FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'api_keys'
+   AND column_name IN ('graph_id','scopes','created_by_key_id','delegation_depth')) = 4,
+  'c1: api_keys has ALL 4 new columns');
 SELECT tests.assert(
   (SELECT pg_get_constraintdef(oid) FROM pg_constraint
    WHERE conname = 'chk_minted_key_no_escalation'
    AND connamespace = 'public'::regnamespace)
-  LIKE '%delegation_depth IS NULL)%OR (NOT (scopes ?| ARRAY%',
-  'c1: chk_minted_key_no_escalation exists with the escalation predicate');
+  LIKE '%jsonb_typeof(scopes) = %array%'
+  AND (SELECT pg_get_constraintdef(oid) FROM pg_constraint
+       WHERE conname = 'chk_minted_key_no_escalation'
+       AND connamespace = 'public'::regnamespace)
+      LIKE '%graphs:create%team:manage%',
+  'c1: chk_minted_key_no_escalation exists with the flat-array + escalation predicate');
 SELECT tests.assert(
   EXISTS (SELECT 1 FROM pg_indexes
           WHERE schemaname = 'public' AND tablename = 'graphs'
@@ -71,9 +75,10 @@ VALUES ('c1-graph-000000000001', 'c1-team-000000000000', 'prod', 'custom',
 INSERT INTO public.api_keys (id, team_id, lookup_hash, key_prefix, created_via)
 VALUES ('c1-key-legacy-000001', 'c1-team-000000000000',
         'sha256hexlegacy1', 'c1-legacy-', 'provisioned');
--- (remainder of section 2 runs as service_role: the api_keys inserts touch
--- the graphs FK, whose referenced-table SELECT check requires grants the
--- default role lacks after the REVOKE ALL.)
+-- (remainder of section 2 runs as service_role: authenticated has no
+-- INSERT grant on api_keys (0007 grants SELECT only); FK RI checks run as
+-- the table owner, so grants are not the constraint — this mirrors the
+-- backend-only-writes model).
 
 -- Graph-bound minted key (deleg=0) with escalation scope → VIOLATION (E2E-4)
 DO $$
@@ -99,6 +104,36 @@ BEGIN
     VALUES ('c1-key-bad2', 'c1-team-000000000000', 'sha256hexbad2', 'c1-bad2-',
             '["keys:manage"]'::jsonb, 0);
     RAISE EXCEPTION 'c1: team-wide minted escalation NOT rejected' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN
+    NULL; -- expected
+  END;
+END $$;
+
+-- team:manage is escalation too (full team-admin capability) → VIOLATION
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.api_keys (id, team_id, lookup_hash, key_prefix,
+                                 scopes, delegation_depth)
+    VALUES ('c1-key-bad4', 'c1-team-000000000000', 'sha256hexbad4', 'c1-bad4-',
+            '["team:manage"]'::jsonb, 0);
+    RAISE EXCEPTION 'c1: team:manage on minted key NOT rejected' USING ERRCODE = 'P0002';
+  EXCEPTION WHEN check_violation THEN
+    NULL; -- expected
+  END;
+END $$;
+
+-- NESTED shape ({"graphs":["create"]}) on a minted key → VIOLATION (the
+-- jsonb_typeof guard enforces FLAT storage — a nested object would make
+-- `?|` vacuous and the escalation invariant would silently die)
+DO $$
+BEGIN
+  BEGIN
+    INSERT INTO public.api_keys (id, team_id, lookup_hash, key_prefix,
+                                 scopes, delegation_depth)
+    VALUES ('c1-key-bad5', 'c1-team-000000000000', 'sha256hexbad5', 'c1-bad5-',
+            '{"graphs":["create"]}'::jsonb, 0);
+    RAISE EXCEPTION 'c1: nested scopes on minted key NOT rejected' USING ERRCODE = 'P0002';
   EXCEPTION WHEN check_violation THEN
     NULL; -- expected
   END;
@@ -192,6 +227,15 @@ VALUES ('c1-team-000000000001', 'c1-team-b', 'free', 'team_c1-team-000000000001'
 INSERT INTO public.graphs (id, team_id, name, kind, namespace, status)
 VALUES ('c1-graph-000000000010', 'c1-team-000000000001', 'b-graph', 'custom',
         'team_c1-team-000000000001_g_c1-graph-000000000010', 'active');
+-- A FOREIGN team's graph MUST be invisible to the GUC-scoped reader — the
+-- cross-tenant exclusion assertion (code-review P1: a policy that only
+-- checks the GUC is set, not that it matches team_id, would pass the
+-- count-only assertions).
+INSERT INTO public.teams (id, name, tier, graph_name)
+VALUES ('c1-team-000000000002', 'c1-team-foreign', 'free', 'team_c1-team-000000000002');
+INSERT INTO public.graphs (id, team_id, name, kind, namespace, status)
+VALUES ('c1-graph-000000000011', 'c1-team-000000000002', 'foreign-graph', 'custom',
+        'team_c1-team-000000000002_g_c1-graph-000000000011', 'active');
 RESET ROLE;
 
 -- GUC unset → 0 rows (deny-by-default for direct browser access)
@@ -201,13 +245,13 @@ SELECT tests.assert(
   'c1 RLS: authenticated with unset GUC sees 0 graphs (deny-by-default)');
 RESET ROLE;
 
--- GUC set to own team → own graphs only
+-- GUC set to own team → own graphs only, FOREIGN team's graph excluded
 SET ROLE authenticated;
 SET app.current_team_id = 'c1-team-000000000001';
 SELECT tests.assert(
   (SELECT count(id) FROM public.graphs) = 1
   AND (SELECT id FROM public.graphs LIMIT 1) = 'c1-graph-000000000010',
-  'c1 RLS: GUC-scoped read sees own team graphs only');
+  'c1 RLS: GUC-scoped read sees own team graphs only (foreign excluded)');
 RESET ROLE;
 RESET app.current_team_id;
 
@@ -228,7 +272,7 @@ RESET ROLE;
 -- ── Cleanup test rows ──────────────────────────────────────────────────────
 SET ROLE service_role;
 DELETE FROM public.teams WHERE id IN
-  ('c1-team-000000000000','c1-team-000000000001');
+  ('c1-team-000000000000','c1-team-000000000001','c1-team-000000000002');
 DELETE FROM public.graphs WHERE team_id LIKE 'c1-team-%';
 DELETE FROM public.api_keys WHERE team_id LIKE 'c1-team-%';
 RESET ROLE;

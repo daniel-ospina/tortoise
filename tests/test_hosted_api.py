@@ -511,6 +511,41 @@ class TestLastUsedAtTracking:
                 assert result2["legacy_full_access"] is False
                 assert result2["delegation_depth"] == 0
                 assert result2["created_by_key_id"] == "parent-key"
+
+                # Graph-bound key whose node is missing → fail-closed None
+                # (never widen onto the default graph; security review P1)
+                orphan_token = "tt_orphan_key_c1_000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb, "
+                    "graph_id: 'g_ghost000000000000', delegation_depth: 0})",
+                    params={
+                        "id": "orphan-key", "tid": "legacy-team",
+                        "kh": hash_api_key(orphan_token),
+                        "kp": orphan_token[:10], "cb": "test",
+                    },
+                )
+                request.headers = {
+                    "Authorization": f"Bearer {orphan_token}"}
+                result3 = asyncio.run(get_current_team(request))
+                assert result3["graph_id"] == "g_ghost000000000000"
+                assert result3["graph_namespace"] is None  # fail-closed
+                assert result3["legacy_full_access"] is False
+
+                # provision_tenant-shaped Team node (NO graph_name prop):
+                # team-wide key falls back to team_{team_id} convention
+                sdk._get_registry().query(
+                    "CREATE (t:Team {id: 'pt-team', tier: 'free'})",
+                )
+                pt_token = "tt_pt_key_c1_000000000001"
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: 'pt-key', team_id: 'pt-team', "
+                    "key_hash: $kh, key_prefix: $kp, created_by: 'x'})",
+                    params={"kh": hash_api_key(pt_token), "kp": pt_token[:10]},
+                )
+                request.headers = {"Authorization": f"Bearer {pt_token}"}
+                result4 = asyncio.run(get_current_team(request))
+                assert result4["graph_namespace"] == "team_pt-team"  # derived
             finally:
                 _restore_tortoise_sdk_init(_orig_init)
 

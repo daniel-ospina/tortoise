@@ -1420,16 +1420,19 @@ async def get_current_team(request: Request) -> dict:
         if t_suspended is not None:
             raise HTTPException(status_code=403, detail=_suspended_detail())
         # C1 (#2110): resolve the key's graph namespace — graph-bound key →
-        # the Graph node's namespace (fail-soft None on missing node);
-        # team-wide (graph_id NULL) → the default graph = t.graph_name.
-        graph_namespace = t_graph_name
+        # the Graph node's namespace (fail-closed None on missing node — a
+        # graph-bound key must never widen onto the default graph; security
+        # review P1); team-wide (graph_id NULL) → the default graph =
+        # t.graph_name, falling back to the SDK-derived convention
+        # team_{team_id} for provision_tenant/signup-shaped Team nodes that
+        # never store graph_name (history review P1).
+        graph_namespace = t_graph_name or f"team_{team_id}"
         if graph_id:
             g_rows = sdk._get_registry().query(
                 "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.namespace",
                 params={"gid": graph_id, "tid": team_id},
             ).result_set
-            if g_rows and g_rows[0][0]:
-                graph_namespace = g_rows[0][0]
+            graph_namespace = g_rows[0][0] if (g_rows and g_rows[0][0]) else None
         # D2 (epic key model): legacy full-access = deleg NULL + empty scopes.
         legacy_full_access = (delegation_depth is None) and (scopes == [])
         from tortoise.pricing import tier_limits

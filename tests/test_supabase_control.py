@@ -270,7 +270,9 @@ class TestResolveApiKey:
 
     def test_c1_drift_safe_pre_c1_schema(self, fake):
         """D3 (#1096): a schema one migration behind (no C1 columns) fails
-        soft to the pre-C1 shape — never 400s all auth."""
+        soft to the pre-C1 shape — and the #1148 enabled gate SURVIVES the
+        drift (ladder drops the C1 tier first, never `enabled`; history
+        review P1: #1705 round-1 rejected dropping an older gate)."""
         fake = FakeControlPlane(
             {"teams": [dict(FREE_TEAM)]},
             missing_columns={"api_keys": {
@@ -283,20 +285,34 @@ class TestResolveApiKey:
         assert team["delegation_depth"] is None
         assert team["legacy_full_access"] is True
 
-    def test_c1_graphs_table_missing_fails_soft_to_default_namespace(self, fake):
-        """A graph-bound key whose graphs row is missing (drift race) falls
-        back to the default namespace — never raises (auth must not break)."""
-        fake.tables["teams"] = [{
+    def test_c1_drift_preserves_enabled_gate(self):
+        """P1 fix: a pre-C1 schema (C1 columns missing, enabled present) must
+        still REJECT a disabled key — the ladder drops the C1 tier first,
+        never the #1148 enabled gate."""
+        fake = FakeControlPlane(
+            {"teams": [dict(FREE_TEAM)]},
+            missing_columns={"api_keys": {
+                "graph_id", "scopes", "delegation_depth", "created_by_key_id"}})
+        fake.seed("api_keys", [_key_row(enabled=False)])
+        assert resolve_api_key(fake, TOKEN) is None  # disabled key stays rejected
+
+    def test_c1_graph_bound_missing_row_fails_closed(self):
+        """Security review P1: a graph-bound key whose graphs row is missing
+        (drift race / soft-deleted graph) resolves graph_namespace None —
+        NEVER the team default graph (a scoped key must not widen onto the
+        default graph boundary)."""
+        fake = FakeControlPlane({"teams": [{
             "id": "team-free-001", "name": "Free Team", "tier": "free",
             "max_users": 1, "max_graphs": 1, "graph_size_cap": 10000,
             "ops_allowance": 1000, "graph_name": "team_team-free-001",
-        }]
+        }]})
         fake.seed("api_keys", [_key_row(
             graph_id="g_missingrow00", scopes=["graphs:read"],
             delegation_depth=0)])
         team = resolve_api_key(fake, TOKEN)
         assert team["graph_id"] == "g_missingrow00"
-        assert team["graph_namespace"] == "team_team-free-001"  # fallback
+        assert team["graph_namespace"] is None  # fail-closed, not default
+        assert team["legacy_full_access"] is False
 
     def test_inactive_membership_does_not_resolve(self, fake):
         fake.seed("team_memberships",
@@ -1623,9 +1639,44 @@ class TestTask8Helpers:
         assert graph_metadata(fake, "team-free-001") == [{
             "graph_id": "default", "team_id": "team-free-001",
             "name": "default", "kind": "default",
-            "namespace": "team_team-free-001", "status": "active"}]
+            "namespace": "team_team-free-001", "status": "active",
+            "recording": None}]  # recording key present both modes (#2110)
         assert graph_metadata(fake, "no-such-team") == []
         assert graph_metadata(fake, "team-free-001")[0]["graph_id"] == "default"
+
+    def test_graph_count_supabase_branch(self, fake, monkeypatch):
+        """C1 (#2110): the quota count source in Supabase mode =
+        1 (default, derived) + count(custom active). Deleted excluded;
+        missing graphs table (pre-C1 drift) degrades to default-only."""
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(db_path="unused")
+        # Force the Supabase branch (graph_count routes via
+        # is_supabase_enabled + get_control_plane).
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setattr(
+            "tortoise.supabase_control.get_control_plane", lambda: fake)
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        # default only → 1
+        assert sdk.graph_count("team-free-001") == 1
+        # default + 1 active custom; deleted excluded → 2
+        fake.seed("graphs", [{
+            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_abc123def4567890",
+            "status": "active",
+        }, {
+            "id": "g_deleted0000000", "team_id": "team-free-001",
+            "name": "old", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_deleted0000000",
+            "status": "deleted",
+        }])
+        assert sdk.graph_count("team-free-001") == 2
+        # drift: missing graphs table → default-only (count 1), no raise
+        fake2 = FakeControlPlane({"teams": [dict(FREE_TEAM)]})
+        fake2.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        monkeypatch.setattr(
+            "tortoise.supabase_control.get_control_plane", lambda: fake2)
+        assert sdk.graph_count("team-free-001") == 1
 
     def test_graph_metadata_lists_custom_graphs_from_table(self, fake):
         """C1 (#2110): custom graphs table rows (active) ride the seam after
