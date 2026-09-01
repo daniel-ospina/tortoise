@@ -1108,6 +1108,40 @@ def test_watchdog_dataset_join_error_not_hard_census_abort():
         legs_degraded=False) == "census_error"
 
 
+def test_watchdog_dataset_join_error_counts_toward_gated_coverage_bound():
+    """#1900/#1937: ``dataset_join_error`` gate-reds ARE counted toward the
+    whole-run gated-coverage bound (the ``if gate_red: _n_gated_total += 1``
+    line) even though they never trip the degradation arms — a
+    data-availability-heavy run still cannot certify. 13 of 50 outcomes
+    (13/50 > 0.25) aborts with ``gated_fraction``; 12 of 50 (12/50 =
+    0.24 <= 0.25) does not abort. Pins the count under the gate-red
+    branch (not a degradation-only branch) so a future refactor can't
+    silently lose data-availability outcomes from the bound."""
+    wd = _wd(n=50)
+    reason = None
+    for i in range(50):
+        reason = wd.record(
+            qid=f"q{i}", gate_reasons=["dataset_join_error"],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False)
+        if reason:
+            break
+    assert wd._n_gated_total == 13  # the 13th dataset_join_error crosses it
+    assert reason == "gated_fraction"
+    assert wd._n_hard_invalid == 0  # data-availability is never hard
+    # 12 of 50 (12/50 = 0.24 <= 0.25) never crosses the bound
+    wd = _wd(n=50)
+    for i in range(50):
+        assert wd.record(
+            qid=f"q{i}",
+            gate_reasons=["dataset_join_error"] if i < 12 else [],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False) is None
+    assert wd._n_gated_total == 12
+
+
 def test_watchdog_revalidate_first_timeout_aborts():
     wd = _wd(revalidate=True)
     reason = wd.record(

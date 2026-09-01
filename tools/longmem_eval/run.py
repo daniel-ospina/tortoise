@@ -2220,13 +2220,15 @@ class _RunWatchdog:
 
     Data-availability classification (#1900): the gate-red / hard-census
     arms count DEGRADATION reasons only — ``dataset_join_error`` (a
-    data-availability class in ``DATA_AVAILABILITY_GATE_REASONS``) flags a
-    question the DATASET cannot resolve/grade (fail-closed exclusion from
-    aggregates), never a truncated/missing graph. The revalidate-mode
-    first-gate-red abort and the non-revalidate hard-census abort must NOT
-    fire on it (a healthy-pool false positive aborted reval3 at finalize).
-    The whole-run gated-coverage bound keeps ALL gate-reds (a
-    data-availability-heavy run still cannot certify).
+    data-availability class in ``DATA_AVAILABILITY_GATE_REASONS``) FLAGS a
+    question the DATASET cannot resolve/grade, never a truncated/missing
+    graph. The flag is NON-ABORTING: the revalidate-mode first-gate-red
+    abort and the non-revalidate hard-census abort must NOT fire on it (a
+    healthy-pool false positive aborted reval3 at finalize). It IS still
+    counted toward the whole-run gated-coverage bound (a
+    data-availability-heavy run cannot certify), and the report grades it
+    UNCHANGED — ``error_classes={}`` / ``valid=True``, CLEAN, still in the
+    accuracy aggregate (a flag, not an exclusion).
 
     Thresholds are evaluated with a CUMULATIVE degradation accumulator —
     a recovery window does NOT reset prior degradation to zero (sawtooth

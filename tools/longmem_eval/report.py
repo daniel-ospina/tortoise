@@ -781,7 +781,12 @@ def build_report(
         plan deliberately does NOT make ``integrity.valid`` its closing
         condition — the flag's semantics are this issue's lane; the
         run-protocol step-5 gate string (run_protocol.py) states the
-        justified threshold for the 500-Q baseline.
+        justified threshold for the 500-Q baseline. The block also
+        carries ``gated_outcomes`` (#1900/#1937) — the whole-run
+        count of outcomes with a gate-red (``gate_reasons`` /
+        ``post_retrieval_reasons`` non-empty), readout-only and
+        grading-neutral: it surfaces data-availability flags
+        (``dataset_join_error``) on runs where no watchdog arm aborted.
       * ``leg_mix`` (D2) — per-leg ``match_source`` counts over the
         top_k context the reader saw + per-k over the deduped pool.
       * ``pool_size`` (D3) — live graph point count per question.
@@ -835,6 +840,19 @@ def build_report(
     # outcome junk) instead of vanishing from the record.
     n_failure_junk = sum(1 for f in (failures or []) if not isinstance(f, dict))
     outcomes = [o for o in outcomes if isinstance(o, dict)]
+    # #1900/#1937: whole-run gated-outcome count — outcomes carrying a
+    # gate-red (non-empty ``gate_reasons``/``post_retrieval_reasons``
+    # union — the watchdog ``_n_gated_total`` definition) over the FULL
+    # outcome set (dropped + shape-broken included; the watchdog counted
+    # every recorded question). Readout-only, derived from the outcomes so
+    # resumed runs count prior-session outcomes too (the watchdog's live
+    # counter only spans the current session): a revalidate-mode run has no
+    # coverage arm, so this field is the only in-report signal that
+    # data-availability flags were present. Never alters grading.
+    n_gated_outcomes = sum(
+        1 for o in outcomes
+        if (o.get("gate_reasons") or [])
+        or (o.get("post_retrieval_reasons") or []))
     # #1349: questions dropped by the vector arm (breaker_open) are excluded
     # from the means and surfaced in ``dropped`` — never recall 0. The
     # breaker_open split runs BEFORE the shape filter: dropped questions may
@@ -1317,6 +1335,15 @@ def build_report(
         # a close-blocker by itself.
         "truncated_valid_qids": truncated_valid_qids,
         "n_truncated_valid": len(truncated_valid_qids),
+        # #1900/#1937: whole-run gated-outcome count (gate-red union per
+        # outcome — the watchdog's ``_n_gated_total`` at report time, from
+        # the outcomes list so resumed runs count prior-session outcomes
+        # too). Readout-only: surfaces data-availability flags (e.g.
+        # ``dataset_join_error``) present in the run even when no arm
+        # aborted (revalidate-mode runs have no coverage arm — a wholesale
+        # join breakage would otherwise finalize valid=true with no
+        # in-report signal); ``valid`` and all grading are unaffected.
+        "gated_outcomes": n_gated_outcomes,
         "criterion": (
             "#1747 census-class-aware: valid = (n_hard_invalid == 0) AND "
             "(n_excluded_hard == 0) AND (invalid_rate <= threshold) AND "

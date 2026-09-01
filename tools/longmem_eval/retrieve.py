@@ -1460,13 +1460,18 @@ TRACKED_GATE_REASONS: tuple[str, ...] = (
     GATE_REASON_EVIDENCE_MARK_CENSUS,
 )
 
-#: Data-availability classes (#1900) — a gate-red that flags a question the
-#: DATASET cannot resolve/grade (fail-closed exclusion from aggregates),
-#: NOT graph degradation. The watchdog must never abort a (re)validation
-#: run on these (a join failure says nothing about graph health — the
-#: reval3 false positive flagged HEALTHY pools at session@20=1.0); genuine
+#: Data-availability classes (#1900) — a gate-red that FLAGS a question
+#: the DATASET cannot resolve/grade, NOT graph degradation. The flag is
+#: NON-ABORTING in the watchdog arms: the gate-red / hard-census arms count
+#: DEGRADATION reasons only, so a (re)validation run must never abort on
+#: these (a join failure says nothing about graph health — the reval3
+#: false positive flagged HEALTHY pools at session@20=1.0); genuine
 #: degradation (census faults, truncation, absent answer sessions,
-#: evidence-mark loss, overflow) still aborts.
+#: evidence-mark loss, overflow) still aborts. Data-availability gate-reds
+#: ARE still counted toward the whole-run gated-coverage bound (a
+#: data-availability-heavy run cannot certify), and the report grades them
+#: UNCHANGED — they carry ``error_classes={}`` / ``valid=True``, grade
+#: CLEAN, and remain in the accuracy aggregate (a flag, not an exclusion).
 DATA_AVAILABILITY_GATE_REASONS: tuple[str, ...] = (
     GATE_REASON_DATASET_JOIN_ERROR,
 )
