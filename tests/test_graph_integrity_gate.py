@@ -27,9 +27,12 @@ from pathlib import Path
 import pytest
 
 from tests.longmem_eval.test_vector_arm import _mini
+from tests.test_eval_report_integrity import _outcome
 from tools.longmem_eval import run as runner
+from tools.longmem_eval.dataset_audit import audit_dataset
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
+from tools.longmem_eval.report import build_report
 from tools.longmem_eval.retrieve import (
     GATE_REASON_ANSWER_SESSION_ABSENT,
     GATE_REASON_CENSUS_ERROR,
@@ -1029,6 +1032,26 @@ def _wd(n=50, revalidate=False):
     return _RunWatchdog(revalidate=revalidate, n_questions=n)
 
 
+def _gate_report(outcomes: list[dict]) -> dict:
+    """#1937: build the report over an outcome set for the whole-run
+    ``integrity.gated_outcomes`` readout — pure audit/report path (no
+    redis/FalkorDB needed), same construction as test_eval_report_integrity."""
+    return build_report(
+        outcomes,
+        dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+        reader_model="mock-reader", judge_model="mock-judge",
+        extraction_approach="deterministic session ingestion",
+        ingest_mode="deterministic", ks=(5,), top_k=5,
+        dataset_semantics_audit=audit_dataset([{
+            "question_id": "q-audit",
+            "haystack_session_ids": ["s0"],
+            "answer_session_ids": ["s0"],
+            "haystack_sessions": [[
+                {"role": "user", "content": "x", "has_answer": True}]],
+        }]),
+    )
+
+
 def test_watchdog_short_run_rolling_arms_inert():
     """Runs < 10 questions keep the rolling-window arms INERT (plan
     cycle2-P3) — a 5-Q smoke must not abort on a naturally-short small-
@@ -1116,12 +1139,21 @@ def test_watchdog_dataset_join_error_counts_toward_gated_coverage_bound():
     (13/50 > 0.25) aborts with ``gated_fraction``; 12 of 50 (12/50 =
     0.24 <= 0.25) does not abort. Pins the count under the gate-red
     branch (not a degradation-only branch) so a future refactor can't
-    silently lose data-availability outcomes from the bound."""
+    silently lose data-availability outcomes from the bound. The SAME
+    outcome set is then run through ``build_report``: the report's
+    ``integrity.gated_outcomes`` readout must mirror the watchdog count
+    (13 in the aborting case, 12 in the non-aborting case) — the
+    whole-run report field and the live counter agree (#1937)."""
+    # 13 of 50 (13/50 = 0.26 > 0.25) — the 13th crosses the bound
+    outcomes_13 = [_outcome(f"q{i}", gate_reasons=(
+        [GATE_REASON_DATASET_JOIN_ERROR] if i < 13 else []))
+        for i in range(50)]
     wd = _wd(n=50)
     reason = None
-    for i in range(50):
+    for o in outcomes_13:
         reason = wd.record(
-            qid=f"q{i}", gate_reasons=["dataset_join_error"],
+            qid=o["question_id"],
+            gate_reasons=o.get("gate_reasons") or [],
             post_retrieval_reasons=[], strategy_timeout=False,
             census_latency_ms=10.0, consec_census_error=0,
             legs_degraded=False)
@@ -1130,16 +1162,22 @@ def test_watchdog_dataset_join_error_counts_toward_gated_coverage_bound():
     assert wd._n_gated_total == 13  # the 13th dataset_join_error crosses it
     assert reason == "gated_fraction"
     assert wd._n_hard_invalid == 0  # data-availability is never hard
+    # report readout over the SAME outcomes mirrors the watchdog count
+    assert _gate_report(outcomes_13)["integrity"]["gated_outcomes"] == 13
     # 12 of 50 (12/50 = 0.24 <= 0.25) never crosses the bound
+    outcomes_12 = [_outcome(f"q{i}", gate_reasons=(
+        [GATE_REASON_DATASET_JOIN_ERROR] if i < 12 else []))
+        for i in range(50)]
     wd = _wd(n=50)
-    for i in range(50):
+    for o in outcomes_12:
         assert wd.record(
-            qid=f"q{i}",
-            gate_reasons=["dataset_join_error"] if i < 12 else [],
+            qid=o["question_id"],
+            gate_reasons=o.get("gate_reasons") or [],
             post_retrieval_reasons=[], strategy_timeout=False,
             census_latency_ms=10.0, consec_census_error=0,
             legs_degraded=False) is None
     assert wd._n_gated_total == 12
+    assert _gate_report(outcomes_12)["integrity"]["gated_outcomes"] == 12
 
 
 def test_watchdog_revalidate_first_timeout_aborts():

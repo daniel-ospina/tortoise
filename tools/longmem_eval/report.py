@@ -843,8 +843,9 @@ def build_report(
     # #1900/#1937: whole-run gated-outcome count — outcomes carrying a
     # gate-red (non-empty ``gate_reasons``/``post_retrieval_reasons``
     # union — the watchdog ``_n_gated_total`` definition) over the FULL
-    # outcome set (dropped + shape-broken included; the watchdog counted
-    # every recorded question). Readout-only, derived from the outcomes so
+    # outcome set (shape-broken dicts included (non-dict entries can't
+    # carry reasons); the watchdog counted every recorded question).
+    # Readout-only, derived from the outcomes so
     # resumed runs count prior-session outcomes too (the watchdog's live
     # counter only spans the current session): a revalidate-mode run has no
     # coverage arm, so this field is the only in-report signal that

@@ -1470,8 +1470,12 @@ TRACKED_GATE_REASONS: tuple[str, ...] = (
 #: evidence-mark loss, overflow) still aborts. Data-availability gate-reds
 #: ARE still counted toward the whole-run gated-coverage bound (a
 #: data-availability-heavy run cannot certify), and the report grades them
-#: UNCHANGED — they carry ``error_classes={}`` / ``valid=True``, grade
-#: CLEAN, and remain in the accuracy aggregate (a flag, not an exclusion).
+#: UNCHANGED — the flag adds no error classes and does not itself flip
+#: ``valid``: a join-error outcome with healthy ingest carries
+#: ``error_classes={}`` / ``valid=True`` and grades CLEAN; one whose
+#: ingest also faulted grades via its ingest errors (permanent/structural
+#: ingest faults hard; transient-only rate-limited recoverable) — a
+#: flag, not an exclusion.
 DATA_AVAILABILITY_GATE_REASONS: tuple[str, ...] = (
     GATE_REASON_DATASET_JOIN_ERROR,
 )

@@ -2227,8 +2227,12 @@ class _RunWatchdog:
     healthy-pool false positive aborted reval3 at finalize). It IS still
     counted toward the whole-run gated-coverage bound (a
     data-availability-heavy run cannot certify), and the report grades it
-    UNCHANGED — ``error_classes={}`` / ``valid=True``, CLEAN, still in the
-    accuracy aggregate (a flag, not an exclusion).
+    UNCHANGED — the flag adds no error classes and does not itself flip
+    ``valid``: a join-error outcome with healthy ingest carries
+    ``error_classes={}`` / ``valid=True`` and grades CLEAN; one whose
+    ingest also faulted grades via its ingest errors (permanent/structural
+    ingest faults hard; transient-only rate-limited recoverable) — a
+    flag, not an exclusion.
 
     Thresholds are evaluated with a CUMULATIVE degradation accumulator —
     a recovery window does NOT reset prior degradation to zero (sawtooth
