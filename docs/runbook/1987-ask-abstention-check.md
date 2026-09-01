@@ -505,3 +505,95 @@ evidence (single-sided).
 **Merge was BLOCKED pending the full (a) graded `_abs` verdict and the (d)
 live-judge spot-check ≥ 0.8.** Both now measured (2026-08-30 above): (a)
 PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
+
+---
+
+## #2069 — ask-lane provider-capability routing + strong-lane cost re-baseline (2026-08-31)
+
+> Implementation record for #2069 (the ask reader-model upgrade follow-up (1)
+> from the 2026-08-30 gate). Code + offline tests landed; the indicator runs
+> below are **PENDING LLM KEYS** (no OPENROUTER/OPENAI/DEEPSEEK keys at
+> implementation time — only the docker lane + fake transports) and are NOT
+> fabricated.
+
+### What landed (steps 1, 2-optional, 3, 5 of the scoping package)
+
+1. **Provider-capability-aware reader routing** (`tortoise/model_adapters.py`):
+   `_providers_can_serve(model_id)` — `qwen/`, `upstage/`, `anthropic/` →
+   `{"openrouter"}`; `deepseek/` + bare ids → the deepseek-direct/openrouter/
+   venice pool; unknown family prefixes → **fail-loud ValueError** (never
+   "→ all"). `build_reader_model` builds the pool ONLY from servable
+   providers — the deepseek-direct primary is structurally ABSENT from
+   non-deepseek pools (a deepseek-direct 400 on `qwen/qwen3.8-max` is now
+   impossible; the FATAL_CONFIG taxonomy is untouched).
+2. **Ask-lane spec normalization** (runs BEFORE the family parse):
+   `_ASK_MODELS_KEY_SPECS` (`qwen3.8-max`→`qwen/qwen3.8-max`,
+   `solar-pro4`→`upstage/solar-pro4`, `claude-opus-5`→`anthropic/claude-opus-5`);
+   unknown bare non-deepseek keys fail loud; the eval's colon-form
+   (`openrouter:qwen/qwen3.8-max`) is REJECTED on the ask lane with a
+   ValueError pointing at the family-prefixed form (the eval lane's
+   `_parse_model_spec` is untouched); **empty-intersection guard** — a qwen
+   spec with no `OPENROUTER_API_KEY` fails at build time naming the key.
+3. **`TORTOISE_ASK_PROVIDER`** (default `auto` | `deepseek-direct` |
+   `openrouter` | `venice`): explicit-without-key fails closed (mirror
+   `TORTOISE_EXTRACTOR_PROVIDER`); explicit provider that cannot serve the
+   family (venice + qwen) → ValueError. `build_extractor_model` is
+   BYTE-IDENTICAL (shared private pool-builder).
+
+> **Release note (behavior change):** the ask lane no longer reads
+> `TORTOISE_EXTRACTOR_PROVIDER` — it is decoupled by design (the ask lane
+> resolves its own provider from the family capability map + `TORTOISE_ASK_PROVIDER`).
+> A deployment that set `TORTOISE_EXTRACTOR_PROVIDER=openrouter` with a
+> deepseek key present now gets the auto order (deepseek-direct primary)
+> on the ask lane — same pool, different primary ordering. Also note: with
+> ALL THREE provider keys set, the shared pool-builder returns the pilot
+> #1549 `RotatingModel` whose deterministic reorder picks the primary
+> (rotation order wins over the explicit provider for the PRIMARY slot; the
+> explicit value still gates the servable set fail-closed).
+4. **Meter re-baseline** (`tortoise/metering.py`, `tortoise/sdk.py`):
+   `ASK_METER_RATES_STRONG = {3.00, 9.00}` (qwen $2/$6 × 1.5, the same
+   over-cover convention); `select_ask_meter_rates(model.model)` picks by
+   the SERVING wire id's family; BOTH `estimate_ask_cost_usd` call sites in
+   `sdk.ask` (the metering record + the response `cost_estimate_usd`) are
+   pinned to it — a strong-lane query never under-counts at 0.21/0.42
+   (~10× under-count pre-fix).
+
+### Step 4 (M5 pin flip) — GATED, NOT done
+
+`tools/longmem_eval/reader.py` `READER_MODEL` stays
+`openrouter:deepseek/deepseek-v4-flash`. The flip to
+`openrouter:qwen/qwen3.8-max` is gated on (i) the qwen-serves-via-OpenRouter
+test (landed + green in this change), (ii) the 500-Q/spot-check indicator
+run showing **0/7 content-error recurrences** (gpt4_8279ba02, gpt4_7a0daae1,
+gpt4_6ed717ea, 830ce83f, 0100672e, e831120c, b0479f84), (iii) the cost
+re-measure recorded + accepted (below). `tests/test_longmem_reader_pinning.py`
+expectations are NOT updated.
+
+### Cost re-measure (recorded; the live 500-Q run is pending keys)
+
+| Lane | Worst-case (9.2k in + 500 out) | Typical (~3.5k in, 150 out) |
+|---|---|---|
+| deepseek-direct (default envelope ×1.5, 0.21/0.42) | ≈ $0.0021 | ≈ $0.0009 |
+| qwen3.8-max via OpenRouter (real $2/$6) | **≈ $0.0214** | ≈ $0.0080 |
+| qwen METERED at STRONG {3.00, 9.00} | **≈ $0.0321** | ≈ $0.0119 |
+
+**The strong lane BREAKS the $0.01/query structural target** (worst ~$0.021
+real, ~$0.032 metered). Owner options (recorded, decision pending — blocks
+the M5 flip): (1) tighten the strong lane's context cap, (2) exploit
+OpenRouter's $0.25/M cache-read on the static prefix, (3) re-baseline the
+target for the strong lane. Dollar blast radius at 60/min grows from
+~$0.14 to ~$1.28/min/team worst case. The epic's hosted acceptance row
+(`cost_estimate_usd ≤ $0.01 (structural caps)`) is annotated in
+`docs/plans/2026-08-29-1987-ask-reader.md`.
+
+### PENDING KEYS (verification-time, NOT executed here)
+
+- 500-Q / spot-check strong-reader run (eval `TORTOISE_LME_READER_MODEL=
+  'openrouter:qwen/qwen3.8-max'` AND the product-lane spot-check with
+  `TORTOISE_ASK_MODEL=qwen/qwen3.8-max`) — target: 0/7 content-error class.
+- A9 live smoke: qwen3.8-max at the reader call shape (temp 0, max 500, no
+  response_format) — no reasoning-budget collapse; commits on the
+  gpt4_8279ba02 evidence.
+- Runbook (b) known-answer smoke re-run on the routing change (expect
+  `provider: deepseek-direct | route: deepseek-direct` unchanged — pinned by
+  `test_reader_pool_deepseek_spec_deepseek_primary` in the meantime).

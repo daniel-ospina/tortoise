@@ -27,7 +27,8 @@ def _clean_env(monkeypatch):
     for k in ("TORTOISE_EXTRACTOR_PROVIDER", "DEEPSEEK_API_KEY",
               "OPENROUTER_API_KEY", "VENICE_API_KEY",
               "TORTOISE_EXTRACT_MODEL",
-              "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN"):
+              "TORTOISE_EXTRACTOR_FAILOVER_COOLDOWN",
+              "TORTOISE_ASK_MODEL", "TORTOISE_ASK_PROVIDER"):
         monkeypatch.delenv(k, raising=False)
     yield
     _reset_failover_cooldown()
@@ -940,6 +941,224 @@ def test_build_reader_model_resolves_env_and_reports_spec(monkeypatch):
     m2 = build_reader_model()
     assert m2.primary.id == "deepseek-v4-flash"
     assert m2.model == "deepseek-v4-flash"
+
+
+# ── #2069: provider-capability ask-lane routing ────────────────────────────
+
+
+def test_reader_pool_deepseek_spec_deepseek_primary(monkeypatch):
+    """(#2069) A deepseek-family spec (default lane) keeps the
+    deepseek-direct primary with both keys — the (b) smoke regression pin."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    m = build_reader_model()
+    assert isinstance(m, RoutingModel)
+    assert m.primary.provider == "deepseek-direct"
+    assert m.fallback is not None and m.fallback.provider == "openrouter"
+    assert m.model == "deepseek-v4-flash"
+
+
+def test_reader_pool_qwen_spec_openrouter_only(monkeypatch):
+    """(#2069) A qwen-family spec builds an OpenRouter-ONLY pool — the
+    deepseek-direct adapter is structurally absent (a deepseek-direct 400
+    on the qwen spec becomes impossible), even with DEEPSEEK_API_KEY set."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("VENICE_API_KEY", "vz")
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    m = build_reader_model("qwen/qwen3.8-max")
+    assert isinstance(m, RoutingModel)
+    assert m.primary.provider == "openrouter"
+    assert m.fallback is None  # openrouter is the ONLY servable provider
+    assert m.primary.id == "qwen/qwen3.8-max"
+    assert m.model == "qwen/qwen3.8-max"
+
+
+def test_reader_bare_qwen_registry_key_normalizes_to_openrouter(monkeypatch):
+    """(#2069) A bare ``qwen3.8-max`` MODELS key (passed through unmapped by
+    ``_REGISTRY_KEY_TO_ID``) normalizes via ``_ASK_MODELS_KEY_SPECS`` to
+    ``qwen/qwen3.8-max`` BEFORE the family parse — the pool is
+    OpenRouter-only, NEVER deepseek-direct."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    m = build_reader_model("qwen3.8-max")
+    assert isinstance(m, RoutingModel)
+    assert m.primary.provider == "openrouter"
+    assert m.fallback is None
+    assert m.primary.id == "qwen/qwen3.8-max"
+    assert m.model == "qwen/qwen3.8-max"
+
+
+def test_reader_bare_upstage_and_anthropic_keys_normalize(monkeypatch):
+    """(#2069) The other bare non-deepseek MODELS keys normalize to their
+    family-prefixed specs (OpenRouter-only pools)."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    for bare, prefixed in [("solar-pro4", "upstage/solar-pro4"),
+                           ("claude-opus-5", "anthropic/claude-opus-5")]:
+        m = build_reader_model(bare)
+        assert isinstance(m, RoutingModel)
+        assert m.primary.provider == "openrouter"
+        assert m.primary.id == prefixed
+        assert m.model == prefixed
+
+
+def test_reader_unknown_bare_non_deepseek_key_fails_loud(monkeypatch):
+    """(#2069) A bare non-deepseek id absent from ``_ASK_MODELS_KEY_SPECS``
+    fails LOUD naming the family-prefixed form — never silently routed to
+    deepseek-direct."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    from tortoise.model_adapters import build_reader_model
+    with pytest.raises(ValueError, match="family-prefixed form"):
+        build_reader_model("some-fancy-model")
+
+
+def test_reader_unknown_family_prefix_fails_loud(monkeypatch):
+    """(#2069) An unknown family prefix (a typo'd family, a future family
+    not yet mapped) → ValueError naming the family — NEVER "→ all" (it
+    must not fall through to deepseek-direct and re-introduce the defect)."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    from tortoise.model_adapters import build_reader_model
+    with pytest.raises(ValueError, match="unknown model family 'mistral'"):
+        build_reader_model("mistral/mistral-large")
+
+
+def test_reader_colon_form_rejected(monkeypatch):
+    """(#2069) The eval lane's ``provider:model`` colon form (the documented
+    ``TORTOISE_LME_READER_MODEL`` value) is REJECTED on the ask lane with a
+    ValueError pointing at the family-prefixed form — it must not fall into
+    unknown-prefix handling (openrouter:qwen → deepseek 400 → 502)."""
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    from tortoise.model_adapters import build_reader_model
+    with pytest.raises(ValueError, match=r"family-prefixed.*product form"):
+        build_reader_model("openrouter:qwen/qwen3.8-max")
+
+
+def test_reader_registry_deepseek_key_backcompat(monkeypatch):
+    """(#2069) ``deepseek-flash-direct`` (the eval harness registry key)
+    normalizes to the deepseek family — back-compat preserved."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    m = build_reader_model("deepseek-flash-direct")
+    assert isinstance(m, RoutingModel)
+    assert m.primary.provider == "deepseek-direct"
+    assert m.primary.id == "deepseek-v4-flash"
+
+
+def test_reader_empty_intersection_fails_loud_naming_key(monkeypatch):
+    """(#2069) A qwen spec with NO OPENROUTER_API_KEY in auto mode →
+    build-time ValueError naming the missing key (fail-fast, NOT a silent
+    misbuild that 401s at call time)."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")  # wrong key present
+    from tortoise.model_adapters import build_reader_model
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        build_reader_model("qwen/qwen3.8-max")
+    # bare qwen registry key takes the same path
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        build_reader_model("qwen3.8-max")
+
+
+def test_reader_auto_no_keys_deepseek_lenient_openrouter(monkeypatch):
+    """(#2069) The deepseek family preserves the extraction lane's lenient
+    no-key default — a single OpenRouter adapter (no-key ask behavior
+    unchanged)."""
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    m = build_reader_model()
+    assert isinstance(m, RoutingModel)
+    assert m.primary.provider == "openrouter"
+    assert m.fallback is None
+    assert m.primary.id == "deepseek/deepseek-v4-flash"
+
+
+def test_ask_provider_openrouter_forces_deepseek_spec(monkeypatch):
+    """(#2069) ``TORTOISE_ASK_PROVIDER=openrouter`` forces the OpenRouter
+    primary even for deepseek-family specs."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("TORTOISE_ASK_PROVIDER", "openrouter")
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    m = build_reader_model()
+    assert isinstance(m, RoutingModel)
+    assert m.primary.provider == "openrouter"
+    assert m.fallback is not None and m.fallback.provider == "deepseek-direct"
+    assert m.primary.id == "deepseek/deepseek-v4-flash"
+
+
+def test_ask_provider_explicit_without_key_fails_closed(monkeypatch):
+    """(#2069) Explicit TORTOISE_ASK_PROVIDER whose key is absent →
+    ValueError naming the key (fail-closed, mirror
+    resolve_extractor_provider)."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("TORTOISE_ASK_PROVIDER", "openrouter")
+    from tortoise.model_adapters import build_reader_model
+    with pytest.raises(ValueError, match="OPENROUTER_API_KEY"):
+        build_reader_model()
+
+
+def test_ask_provider_invalid_value_lists_valid(monkeypatch):
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("TORTOISE_ASK_PROVIDER", "anthropic")
+    from tortoise.model_adapters import build_reader_model
+    with pytest.raises(ValueError, match="auto \\| deepseek-direct \\| openrouter \\| venice"):
+        build_reader_model()
+
+
+def test_ask_provider_capability_mismatch_fails_loud(monkeypatch):
+    """(#2069) Explicit ``TORTOISE_ASK_PROVIDER=venice`` with a qwen spec —
+    venice cannot serve the qwen family → empty-intersection ValueError
+    (never a silent pool build)."""
+    monkeypatch.setenv("VENICE_API_KEY", "vz")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("TORTOISE_ASK_PROVIDER", "venice")
+    from tortoise.model_adapters import build_reader_model
+    with pytest.raises(ValueError, match=r"cannot serve 'qwen/qwen3.8-max'"):
+        build_reader_model("qwen/qwen3.8-max")
+
+
+def test_reader_qwen_request_hits_openrouter_wire(monkeypatch):
+    """(#2069 real-factory fake-transport) TORTOISE_ASK_MODEL=qwen/
+    qwen3.8-max → the request hits the OpenRouter base_url with
+    ``model: qwen/qwen3.8-max``; exactly ONE complete(); the response
+    ``model/provider/route`` report the openrouter lane."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    monkeypatch.setenv("TORTOISE_ASK_MODEL", "qwen/qwen3.8-max")
+    log = _body_capture(monkeypatch)
+    from tortoise.model_adapters import RoutingModel, build_reader_model
+    m = build_reader_model()
+    assert isinstance(m, RoutingModel)
+    out = m.complete(system="s", user="u")
+    assert out == "ok"
+    assert len(log) == 1  # exactly one complete() — no dead primary call
+    url, body = log[0]
+    assert url == "https://openrouter.ai/api/v1/chat/completions"
+    assert body["model"] == "qwen/qwen3.8-max"
+    assert "response_format" not in body  # json_mode=False structural pin
+    assert m.provider == "openrouter"
+    assert m.route == "openrouter"
+    assert m.model == "qwen/qwen3.8-max"
+
+
+def test_extractor_lane_unchanged(monkeypatch):
+    """(#2069) build_extractor_model is byte-identical: default path keeps
+    the deepseek-direct primary with both keys; no-keys still degrades to a
+    single OpenRouter adapter."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "ds")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or")
+    from tortoise.model_adapters import RoutingModel, build_extractor_model
+    m = build_extractor_model()
+    assert isinstance(m, RoutingModel)
+    assert m.primary.provider == "deepseek-direct"
+    assert m.fallback is not None and m.fallback.provider == "openrouter"
+    # no keys → lenient single OpenRouter adapter (unchanged D3 default)
+    monkeypatch.delenv("DEEPSEEK_API_KEY")
+    monkeypatch.delenv("OPENROUTER_API_KEY")
+    m2 = build_extractor_model()
+    assert m2.primary.provider == "openrouter"
+    assert m2.fallback is None
 
 
 class _TokensAdapter(_StubAdapter):

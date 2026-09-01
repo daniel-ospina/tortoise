@@ -10610,7 +10610,7 @@ class TortoiseSDK:
             estimate_tokens_ask,
             render_context,
         )
-        from tortoise.metering import estimate_ask_cost_usd
+        from tortoise.metering import estimate_ask_cost_usd, select_ask_meter_rates
         from tortoise.reader import (
             NO_EVIDENCE_TEXT,
             _looks_abstained,
@@ -10709,6 +10709,9 @@ class TortoiseSDK:
             answer = NO_EVIDENCE_TEXT
 
         # 7. Metering (best-effort; ONLY with an explicit team_id).
+        # #2069: the record's cost_usd is metered at the SERVING lane's
+        # family rates (``select_ask_meter_rates`` on ``_LockedReader.model``
+        # — the strong lane never under-counts at the deepseek envelope).
         if team_id:
             try:
                 from tortoise.metering import record_ask_usage
@@ -10719,7 +10722,10 @@ class TortoiseSDK:
                 record_ask_usage(
                     team_id,
                     tokens_in=input_tokens, tokens_out=out_tokens,
-                    cost_usd=estimate_ask_cost_usd(input_tokens, out_tokens),
+                    cost_usd=estimate_ask_cost_usd(
+                        input_tokens, out_tokens,
+                        rates=select_ask_meter_rates(
+                            getattr(model, "model", None) or "")),
                     _selfhost_transport=_selfhost_transport)
             except Exception:  # noqa: BLE001, RUF100 — metering never blocks
                 pass
@@ -10736,10 +10742,16 @@ class TortoiseSDK:
             getattr(model, "route", None)
         duration_ms = int((_time.monotonic() - t0) * 1000)
         try:
+            # #2069: the response's cost_estimate_usd uses the SERVING lane's
+            # family rates (STRONG for qwen//upstage//anthropic// specs — a
+            # strong-lane ask metered at the deepseek envelope would
+            # under-count ~10×).
             cost_estimate = estimate_ask_cost_usd(
                 estimate_tokens_ask(system_prompt_for(qtype))
                 + estimate_tokens_ask(evidence),
-                getattr(model, "last_completion_tokens", 0) or 500)
+                getattr(model, "last_completion_tokens", 0) or 500,
+                rates=select_ask_meter_rates(
+                    getattr(model, "model", None) or ""))
         except Exception:  # noqa: BLE001, RUF100
             cost_estimate = 0.0
         return {
