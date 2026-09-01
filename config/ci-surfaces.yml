@@ -217,6 +217,7 @@ surfaces:
   - test_ingest_mode.py
   - test_ingest_promotion.py
   - test_ingest_rebuild_durability.py
+  - test_ingest_event_endpoint.py
   - test_ingest_safety.py
   - test_ingest_v2_consolidation.py
   - test_ingest_validation.py
@@ -381,7 +382,6 @@ surfaces:
   - test_config.py
   - test_cross_lens.py
   - test_crypto.py
-  - test_ingest_event_endpoint.py
   - test_operator_dedup_parity.py
   - test_postmerge_dedup.py
   - test_ci_timing.py

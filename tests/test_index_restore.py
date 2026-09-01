@@ -41,10 +41,16 @@ def _embedded_local_file_lane():
     the shutil.copy2(db) backup reads the never-created local file. Popping
     the URI keeps index + backup + restore on the SAME local file on BOTH
     lanes (same class as test_export_cli/test_index_cli)."""
-    os.environ.pop("TORTOISE_DB_URI", None)
-    os.environ.pop("TORTOISE_TEST_EXPECT_URI", None)
+    # #2062: restore the URI after this module — raw os.environ.pop() never
+    # restored it, so every docker-lane test AFTER this file in the same
+    # pytest process silently constructed embedded SDKs on the shared default
+    # path (writes-200/reads-miss + EmbeddedStoreBusy races). Mirror the
+    # test_export_cli pattern: MonkeyPatch auto-restores at teardown.
+    mp = pytest.MonkeyPatch()
+    mp.delenv("TORTOISE_DB_URI", raising=False)
+    mp.delenv("TORTOISE_TEST_EXPECT_URI", raising=False)
     yield
-    os.environ.pop("TORTOISE_DB_URI", None)
+    mp.undo()
 
 
 def _db(tmp_path: Path, name: str = "t.db") -> str:
