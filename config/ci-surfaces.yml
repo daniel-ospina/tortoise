@@ -376,6 +376,7 @@ surfaces:
   - test_website_static.py
   sdk:
   - test_ask_regression_llm.py
+  - test_ask_retrieval_levers.py
   - test_ask_sdk.py
   - test_ask_spotcheck_judge.py
   - test_client_surface.py

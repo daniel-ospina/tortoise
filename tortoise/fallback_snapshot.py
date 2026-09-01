@@ -44,7 +44,8 @@ _SNAPSHOT_QUERY = (
     "MATCH (n:Point) "
     "WHERE (n.is_operator = false OR n.is_operator IS NULL) "
     "RETURN n.id, n.content, n.pointKind, n.status, "
-    "       coalesce(n.outdated, false), coalesce(n.search_keys, '')"
+    "       coalesce(n.outdated, false), coalesce(n.search_keys, ''), "
+    "       coalesce(n.has_answer, false)"
 )
 
 
@@ -115,7 +116,11 @@ def build_snapshot(proj) -> dict | None:
              "status": r[3] or "", "outdated": bool(r[4]),
              # R2 (#1541) D4: search_keys joins the snapshot (flat string in
              # the graph since R2; legacy lists handled by index_text).
-             "search_keys": r[5] or ""}
+             "search_keys": r[5] or "",
+             # A5 (#2070): stored evidence mark rides the snapshot hits —
+             # wired through the degraded lane (snapshot graph carries the
+             # mark when the extractor wrote it; product graphs: zero marks).
+             "has_answer": bool(r[6])}
             for r in rows
         ]
     except Exception as e:  # noqa: BLE001, RUF100
