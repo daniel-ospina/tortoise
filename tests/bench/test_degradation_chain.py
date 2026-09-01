@@ -38,7 +38,8 @@ def test_elevated_timeout_collects_more_than_censored(monkeypatch):
     the measurement window (more strategies → more collected rows)."""
 
     def slow_fts(graph, query, entity_type="point", limit=20, timeout_ms=500,
-                 excluded_statuses=None):
+                 excluded_statuses=None, keep_numeric=False,
+                 expansion_terms=None):
         time.sleep(0.6)
         return [("p1", 1.0)]
 
@@ -83,7 +84,8 @@ def test_elevated_timeout_is_default_off(monkeypatch):
     monkeypatch.setattr(
         "tortoise.search_engine.run_fts_query",
         lambda graph, query, entity_type="point", limit=20, timeout_ms=500,
-               excluded_statuses=None: [("p1", 1.0)],
+               excluded_statuses=None, keep_numeric=False,
+               expansion_terms=None: [("p1", 1.0)],
     )
     monkeypatch.setattr(
         "tortoise.search_engine.run_vector_query",
