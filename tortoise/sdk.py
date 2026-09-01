@@ -5058,13 +5058,29 @@ class TortoiseSDK:
             "MATCH (n) WHERE n.id IN $vals OR n.url IN $vals "
             "OR n.eventId IN $vals "
             "RETURN coalesce(n.id, n.url, n.eventId) AS key, "
-            "head(labels(n)) AS label, n.is_operator, n.status",
+            "head(labels(n)) AS label, n.is_operator, n.status, "
+            "n.id, n.eventId",
             params={"vals": sorted(values)},
         ).result_set
+        # Key the result so a lookup by the raw endpoint value finds the
+        # node. The coalesce key covers the primary identifier; an Event may
+        # additionally be addressed by its eventId (its other canonical key,
+        # equal to id on SDK-created Events). A Point's provenance eventId
+        # (#1417 capture_session stamp) is NEVER registered as a resolvable
+        # endpoint key — a Point addressed by its eventId would pass the
+        # Point branch of the endpoint checks (which has no id-guard), then
+        # crash the id-keyed write primitives (create_operator /
+        # create_direct_edge) mid-write: partial mutation. Rows sharing a
+        # key resolve deterministically: an id-owner row (node_id == key)
+        # wins over a row matched by another property.
         out: dict[str, dict] = {}
-        for key, label, is_op, status in rows:
-            out[key] = {"label": label, "is_operator": bool(is_op),
-                        "status": status}
+        for key, label, is_op, status, node_id, event_id in rows:
+            entry = {"label": label, "is_operator": bool(is_op),
+                     "status": status, "id": node_id}
+            if key not in out or node_id == key:
+                out[key] = entry
+            if label == "Event" and event_id:
+                out[event_id] = entry
         return out
 
     def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
@@ -5083,11 +5099,14 @@ class TortoiseSDK:
     def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
         """Check 3 (endpoint half) — typed endpoints (external + bundle-local,
         cycle-2) and the direct-edge terminal-status guard (cycle-3, refined
-        cycle-17/18). Operator/direct-edge connections require plain-Point
-        endpoints; direct-edge connections (plain IMPL/NAND) additionally
-        reject terminal (superseded/retracted) endpoints. Bundle-local refs
-        resolving to EXISTING (dedup-hit) terminal points are Phase-1
-        violations (never a Phase-2 raise)."""
+        cycle-17/18). Operator-ROUTED connections (reify:true / mitigation /
+        part-whole → create_operator) accept Point OR Event endpoints (A1b
+        #1272 parity — _find_operator's dedup key collects both); direct-edge
+        connections (plain IMPL/NAND → create_direct_edge, which guards plain
+        Points) require plain-Point endpoints AND additionally reject terminal
+        (superseded/retracted) endpoints (#2062). Bundle-local refs resolving
+        to EXISTING (dedup-hit) terminal points are Phase-1 violations (never
+        a Phase-2 raise)."""
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
             for item in bundle.get(section) or []:
@@ -5110,12 +5129,25 @@ class TortoiseSDK:
         entity_labels = {"subject": "Subject", "object": "Object",
                          "event": "Event", "document": "Document"}
         for i, conn, route, vals in conns:  # noqa: B007
+            # #2062: the operator route (reify/mitigation/part-whole →
+            # create_operator) accepts Point OR Event endpoints — the direct
+            # route (plain IMPL/NAND) stays plain-Point only. An Event is
+            # accepted only when the endpoint addresses the node BY ITS id
+            # (the create_operator write key): an Event that resolves only by
+            # eventId (the ingest_corpus DocumentCreated shape) would pass
+            # validation but crash create_operator mid-write — partial
+            # mutation — so it stays a Phase-1 violation.
+            op_route = route == "operator"
             for v in vals:
                 if not isinstance(v, str):
                     continue
                 if v in local:
                     section, item = local[v]
-                    if section != "points" or item.get("is_operator"):
+                    plain_point = section == "points" \
+                        and not item.get("is_operator")
+                    event_item = op_route and section == "entities" \
+                        and str(item.get("type") or "").strip().lower() == "event"
+                    if not (plain_point or event_item):
                         if section == "sources":
                             label = "Source"
                         elif section == "entities":
@@ -5138,7 +5170,9 @@ class TortoiseSDK:
                             "message": f"ingest: connections[{i}] external "
                                        f"endpoint {v!r} does not exist",
                         })
-                    elif info["label"] != "Point" or info["is_operator"]:
+                    elif info["is_operator"] or (info["label"] != "Point"
+                            and not (op_route and info["label"] == "Event"
+                                     and info.get("id") == v)):
                         got = ("operator Point" if info["is_operator"]
                                else info["label"] or "unknown node type")
                         violations.append({
@@ -5187,10 +5221,16 @@ class TortoiseSDK:
         """Phase-2 defense-in-depth (check 3): re-verify endpoints right
         before the connection write — a node deleted/superseded between
         Phase-1 validation and this write is the race class this exists for.
-        Reuses the SAME message shapes as Phase 1 (Phase-1/2 parity)."""
+        Reuses the SAME message shapes as Phase 1 on the external-endpoint
+        leg (bundle-local refs resolve to external ids in Phase-2; the
+        bundle-local '{label} item' template is Phase-1-only). #2062: the
+        operator route accepts Point OR Event endpoints when the endpoint
+        addresses the node BY ITS id (matching Phase-1 and create_operator's
+        A1b #1272 contract)."""
         if not isinstance(conn, dict) or "operator" not in conn:
             return
         route = self._connection_route(conn)
+        op_route = route == "operator"
         frm = conn.get("from")
         tos = conn.get("to")
         vals = []
@@ -5208,7 +5248,9 @@ class TortoiseSDK:
                     "message": f"ingest: connections[{index}] external "
                                f"endpoint {v!r} does not exist",
                 })
-            elif info_i["label"] != "Point" or info_i["is_operator"]:
+            elif info_i["is_operator"] or (info_i["label"] != "Point"
+                    and not (op_route and info_i["label"] == "Event"
+                             and info_i.get("id") == v)):
                 got = ("operator Point" if info_i["is_operator"]
                        else info_i["label"] or "unknown node type")
                 violations.append({
@@ -5401,6 +5443,20 @@ class TortoiseSDK:
           operator-less — routed to a DIRECT edge (no operator node, see
           INGEST_CONTRACT.md §8). A connection carrying ``relation`` stays a
           PLAIN structural edge (structural edges never reify).
+        - Endpoint typing (#2062): operator-ROUTED connections (reify:
+          true/mitigation/part-whole → create_operator) accept Point OR Event
+          endpoints (A1b #1272 parity — the dedup key in _find_operator
+          collects both); bundle-local refs may address point items or
+          ``type:"event"`` entity items. An external Event endpoint must
+          address the node BY ITS id (the create_operator write key — an
+          Event that resolves only by eventId, e.g. the ingest_corpus
+          DocumentCreated shape, is rejected at validation, never a mid-write
+          crash). NOTE: Event entity items are append-only — re-ingesting a
+          FULL bundle mints a new Event occurrence (new id) and thus a new
+          operator; dedup applies to id-stable external Event endpoints (or
+          re-ingesting connection-only against the resolved id). DIRECT-edge
+          connections (plain IMPL/NAND → create_direct_edge, which guards
+          plain Points) require plain-Point endpoints only.
         - granularity='bulk' (default): whole bundle in one coherent pass,
           returns aggregated {created, ids, nudges}. granularity='granular':
           additionally returns per-item ``results`` for agent step-by-step

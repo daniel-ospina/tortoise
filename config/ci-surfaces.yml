@@ -217,6 +217,7 @@ surfaces:
   - test_ingest_mode.py
   - test_ingest_promotion.py
   - test_ingest_rebuild_durability.py
+  - test_ingest_event_endpoint.py
   - test_ingest_safety.py
   - test_ingest_v2_consolidation.py
   - test_ingest_validation.py
