@@ -258,11 +258,14 @@ verbatim anchors, true-but-routine distractors, attribution hazards) and a
 frozen, sealed answer key.
 **When:** the session→graph pipeline ingests the sessions and the benchmark
 runs against the committed baseline.
-**Then:** salient-unit survival ≥ 80% macro and ≥ 75% strict
-(point-level, REPHRASE-linked dedup accepted), 100% of sessions emitting,
-distractor leakage ≤ 1 per run (the research-recommended tolerance,
-pending sign-off item 3 — supersedes the epic's literal "zero" wording), and
-provenance accuracy + quote fidelity ≥ 80% on the graded lanes.
+**Then:** a BASELINE is established and PUBLISHED (Daniel decision
+2026-09-01: no pre-set quality bar — run the tests, get the numbers,
+compare with competitors, then decide whether/how to optimise).
+Competitor reference points for the comparison: gbrain 88.1% salient-unit
+survival (their published Cat 35), Mem0 42.9% / Supermemory 41.5%
+(HaluMem write-path, directional only — different corpora). Post-comparison
+targets (survival rate, distractor tolerance, quote fidelity) are set FROM
+the benchmark + competitor data, not before it.
 **And:** a regression (e.g. a stripped provenance field) FAILS the CI gate —
 the benchmark can fail, and the failure is publishable.
 
@@ -293,18 +296,17 @@ reranker during hermetic runs).
 ### E2E-5: Ingestion toggle — engine contract, aligned with #1976 (W5 QUALITY work; UI deferred)
 **Given:** the W5 write-path QUALITY work ships with the toggle contract
 surfaced (feature flag + disclosure semantics); #1976 owns the onboarding
-and Settings → Memory sources UI surfaces (out of scope here). Current
-shipped state (2026-09-01): ingestion EXISTS with default ON (ToS-covered
-per onboarding Q3) + the `session_recording` opt-out flag.
+and Settings → Memory sources UI surfaces (out of scope here).
 **When:** ingestion is enabled and disabled through the flag/contract, and
 a session is captured under each state.
-**Then:** the toggle contract is honored — default per current onboarding
-(default ON, ToS-covered; the default-ON-vs-OFF question is a product
-decision flagged to Daniel in the approval gate); toggling off blocks new
-capture (server rejects with 409) and remains disclosure-visible;
-toggling on runs session→graph write-back with provenance + EP belief
-updates speaking the frozen version-stamped write verb
-(protocol_version in every response).
+**Then:** session recording is **ASKED during onboarding by the agent** — an
+explicit question (per Daniel 2026-09-01; onboarding Q3 already exists for
+this), not a silent default; toggling off blocks new capture (server
+rejects with 409) and remains disclosure-visible; toggling on runs
+session→graph write-back with provenance + EP belief updates speaking the
+frozen version-stamped write verb (protocol_version in every response).
+The asked-at-onboarding consent is the gate: no capture before the question
+is answered.
 **And:** the epic's O/I/T target "both toggles reachable in ≤ 2 clicks from
 onboarding and Settings" transfers to **#1976's** E2E surface verification
 (UI reachability is not testable in this epic).
@@ -367,12 +369,14 @@ Research high / Org Infra medium / overall **complex**.
    retrieval tool.
 2. **W4 scope = existing surfaces only** — ask work is conditional on
    #2013; search/analyze are the unblocked path. Acceptable?
-3. **W2 target interpretation** — epic says "zero distractor leakage";
-   research recommends ≤ 1 distractor per run tolerance (gbrain's own
-   borderline-mention variance was 1/86) with macro ≥ 80%, strict ≥ 75%,
-   100% sessions emitting, quote fidelity ≥ 80%. Adopt the tolerance?
-4. **Ingestion default** — default OFF (opt-in) with the toggle contract
-   exposed to #1976; disclosure checkpoint mirrors #1976 precedent.
+3. **W2 targets — benchmark-first (Daniel 2026-09-01):** NO pre-set quality
+   bar. Run the tests, publish the baseline, compare with competitors
+   (gbrain 88.1%, Mem0 42.9%, Supermemory 41.5% — directional), then set
+   targets from the data. E2E-2 updated accordingly.
+4. **Ingestion consent — asked at onboarding (Daniel 2026-09-01):** session
+   recording is ASKED by the agent during onboarding (explicit question, no
+   silent default — onboarding Q3 already exists for this; aligns with
+   #1976's agent-driven onboarding). Toggle contract exposed to #1976.
 5. **Complexity ratings** — Research high is driven by the why-layer suite
    design + no-product-precedent headline, not by IR novelty (academic
    precedent found 2026-09-01 — see Axis Research Notes).
