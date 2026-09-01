@@ -570,3 +570,24 @@ Vocabulary audit: `tk_`/`tkm_` consistent everywhere; no `graphs:provision`, no 
 Pipeline position: Sub-steps 1-8 complete; per-substep gates: journeys+workflows ✓, prototype+data-model+architecture ✓ (converged), interfaces+detailed E2E ✓ (3-parallel reviewers, converged), **coherence review ✓ (3-parallel reviewers: cross-substep-drift + risk-completeness + improvement-opportunities — NO ISSUES FOUND after fix pass)**. Plan-doc status: all review gates CLEAN as of 2026-09-01.
 
 **Human Gate #2** (pending): review the plan + the OPEN decision (R8 — finite pro/team graph caps vs unlimited; pricing.json change if finite). Then → epic-decompose.
+
+---
+
+# 9. Decomposition record (epic-decompose, 2026-09-01 — MECE CLEAN)
+
+Child issues created via issue-creation, per-issue review gates converged (0 P0/P1 after fixes), MECE verification CLEAN:
+
+| Issue | Title | Complexity | Depends | Phase |
+|---|---|---|---|---|
+| #2094 | test-design integration-surface map (13 surfaces) | standard | — | pre-plan |
+| #2110 | C1 dual-mode graph + key data model | complex | — | 1 |
+| #2111 | C2 unified provisioning service + graph lifecycle | complex | 2110, 2094 | 2 |
+| #2112 | C3 key lifecycle endpoints | standard | 2110, 2111* | 2 |
+| #2113 | C4 FalkorDB per-graph ACL layer | standard | 2110, 2111* | 2 |
+| #2114 | C5 data-plane tenancy spine | complex | 2110, 2111, 2113 | 3 |
+| #2115 | C6 delivery-shape + session_recording | standard | 2110, 2114 | 3 |
+| #2116 | C7 dashboard Graphs enhancement | standard | 2111, 2112 | 4 |
+| #2117 | C8 migration runbook + docs | standard | 2110, 2111, 2114 | 4 |
+| #2118 | capstone clickthrough verification | complex | 2110–2117 | final |
+
+(* = verification-time dependency.) Key ownership carve-outs from the MECE gate: C6 owns E2E-6 + surfaces 8/9 payload (C5 = resolution slice); C1 owns the rollback drill (C8 consumes); C3 owns the shared key-mint service (C2 wires); E2E-7 split (C2 quota half / C3 revocation half); C7 does NOT depend on the spine.
