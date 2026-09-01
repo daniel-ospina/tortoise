@@ -657,14 +657,20 @@ class TestPatchRouting:
         finally:
             tc.__exit__(None, None, None)
 
-    def test_onboarding_complete_carve_out_echo(self):
-        tc, _team_id = _registered_client()
+    def test_onboarding_complete_accept_and_drop(self):
+        """#1997 (W1): accept-and-drop — a client PATCH onboarding_complete
+        on a NODE-PRESENT org is DROPPED (accepted 200; the echo is
+        node-governed — the legacy jsonb flag is inert there)."""
+        tc, team_id = _registered_client()
         try:
+            from tortoise.hosted_api import _get_onboarding_state as _raw
             r = tc.patch("/v1/onboarding/state",
                          json={"onboarding_complete": True})
             assert r.status_code == 200
-            # node present, active, ZERO edges → grandfathered-window guard
-            assert r.json()["onboarding"]["onboarding_complete"] is True
+            # dropped → node governs (active, zero edges → not complete)
+            assert r.json()["onboarding"]["onboarding_complete"] is False
+            # the jsonb flag was never written
+            assert _raw(team_id).get("onboarding_complete") is False
         finally:
             tc.__exit__(None, None, None)
 
@@ -847,11 +853,15 @@ class TestBackfill:
 class TestCompletionWire:
     def test_poisoned_new_org_negative(self):
         """A new org's legacy flag is never trusted once the agent flow
-        engages (node governs — the poisoned-TRUE the precedence kills)."""
-        tc, _team_id = _registered_client()
+        engages (node governs — the poisoned-TRUE the precedence kills).
+        The flag is raw-written (post-W1 the PATCH surface accept-and-drops)."""
+        tc, team_id = _registered_client()
         try:
-            tc.patch("/v1/onboarding/state",
-                     json={"onboarding_complete": True})
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            from tortoise.hosted_api import _write_onboarding_state as _w
+            st = _raw(team_id)
+            st["onboarding_complete"] = True
+            _w(team_id, st)
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
             st = tc.get("/v1/onboarding/state").json()["onboarding"]
@@ -887,12 +897,19 @@ class TestCompletionWire:
 
     def test_poisoned_false_guard(self):
         """The grandfathered-window guard (cycle-2 P1-1 fix): node present,
-        active, ZERO agent edges, jsonb true → wire TRUE (a legacy-wizard
-        completer is never re-onboarded)."""
-        tc, _team_id = _registered_client()
+        active, ZERO agent edges, LEGACY jsonb true (raw-written — the PATCH
+        surface accept-and-drops onboarding_complete post-W1) → wire TRUE (a
+        legacy-wizard completer is never re-onboarded)."""
+        tc, team_id = _registered_client()
         try:
-            r = tc.patch("/v1/onboarding/state",
-                         json={"onboarding_complete": True})
+            # seed the legacy jsonb flag via the RAW writer (the PATCH
+            # surface accept-and-drops it on node-present orgs, #1997)
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            from tortoise.hosted_api import _write_onboarding_state as _w
+            st = _raw(team_id)
+            st["onboarding_complete"] = True
+            _w(team_id, st)
+            r = tc.get("/v1/onboarding/state")
             st = r.json()["onboarding"]
             assert st["onboarding_complete"] is True
             assert st["status"] == "active"
@@ -907,10 +924,15 @@ class TestCompletionWire:
         zero-edge guard disables, and the org is re-onboarded."""
         tc, team_id = _registered_client()
         try:
-            # make this a grandfathered org: jsonb true, node PRESENT active
-            # with ZERO agent step edges (the eager-init node)
-            tc.patch("/v1/onboarding/state",
-                     json={"onboarding_complete": True})
+            # make this a grandfathered org: jsonb true (RAW-written — the
+            # PATCH surface accept-and-drops onboarding_complete post-W1,
+            # #1997), node PRESENT active with ZERO agent step edges (the
+            # eager-init node)
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            from tortoise.hosted_api import _write_onboarding_state as _w
+            st = _raw(team_id)
+            st["onboarding_complete"] = True
+            _w(team_id, st)
             st = tc.get("/v1/onboarding/state").json()["onboarding"]
             assert st["onboarding_complete"] is True
             assert st["status"] == "active"
@@ -932,6 +954,31 @@ class TestCompletionWire:
             body = r.json()["onboarding"]
             assert body["onboarding_complete"] is True, body
             assert body["status"] == "complete"
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_accept_and_drop_node_absent_keeps_jsonb_writer(self):
+        """#1997 (W1): node-ABSENT (grandfathered pre-backfill) orgs keep
+        the legacy jsonb writer — a client PATCH onboarding_complete still
+        lands in jsonb (their fallback until backfill)."""
+        tc, team_id = _registered_client()
+        try:
+            # drop the node → node-absent grandfathered org
+            import tortoise.onboarding.state as _os2
+            from tortoise.hosted_api import _make_sdk as _mk
+            proj = _mk(namespace=team_id)._get_proj()
+            _os2._run(proj,
+                      f"MATCH (n:{_os2.ONBOARDING_NODE_LABEL} "
+                      f"{{org_id: $oid}}) DETACH DELETE n",
+                      {"oid": team_id})
+            assert _os2.read_onboarding_node(proj, team_id) is None
+            r = tc.patch("/v1/onboarding/state",
+                         json={"onboarding_complete": True})
+            assert r.status_code == 200, r.text
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            assert _raw(team_id).get("onboarding_complete") is True
+            # wire completes via the grandfathered window (no node, jsonb true)
+            assert r.json()["onboarding"]["onboarding_complete"] is True
         finally:
             tc.__exit__(None, None, None)
 

@@ -105,7 +105,7 @@ export const HARNESS_INSTALL = {
     `claude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${key}"
 
 # Session capture (#1727 T1): recording is on by default (ToS-covered); the
-# hooks file every session to Tortoise Cloud unless your team switches it
+# hooks file every session to Tortoise Cloud unless your organization switches it
 # off (Memory sources > Agent sessions — the server returns a 409 while
 # disabled). Install from your
 # Tortoise checkout (github.com/daniel-ospina/tortoise):

@@ -11356,7 +11356,7 @@ class OnboardingStateResponse(BaseModel):
 # removes wizardComplete (cross-PR ordering pin) — until then the legacy
 # jsonb writer stays active and the grandfathered-window guard in
 # resolve_wire_completion keeps wizard-completed orgs complete.
-_ACCEPT_AND_DROP = False  # flip to True when W1 lands (see plan T7)
+_ACCEPT_AND_DROP = True  # W1 (#1997) landed — PATCH onboarding_complete is dropped on node-present orgs (plan T7)
 
 
 def _graph_has_team_namespace(team_id: str) -> bool:
@@ -11586,6 +11586,22 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     if harness in _HARNESS_ANALYTICS_VALUES and section in _SECTION_ANALYTICS_VALUES:
         _track_analytics_event(team["team_id"], "artifact_copied",
                                {"harness": harness, "section": section})
+    # #1997 (W1): accept-and-drop (plan T7) — a client PATCH
+    # onboarding_complete on a NODE-PRESENT org is DROPPED (accepted 200;
+    # the echo is node-governed — the legacy jsonb flag is inert there).
+    # Node-absent orgs (grandfathered pre-backfill) keep the jsonb writer
+    # (their fallback). Graph-down → keep the jsonb writer: the node's
+    # presence cannot be confirmed, and dropping would lose the client's
+    # intent against the legacy fallback path.
+    if (_ACCEPT_AND_DROP and "onboarding_complete" in updates
+            and _graph_has_team_namespace(team["team_id"])):
+        try:
+            _node_proj = _make_sdk(namespace=team["team_id"])._get_proj()
+            _node = _os.read_onboarding_node(_node_proj, team["team_id"])
+        except Exception:
+            _node = None
+        if _node is not None:
+            updates.pop("onboarding_complete")
     # #1893: validate the persisted source-scope keys at the PATCH boundary
     # (400 on invalid; valid values stored in NORMALIZED form — issues
     # strip/dedupe, docs ""/None branch → null; [] = explicit clear).

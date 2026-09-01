@@ -134,18 +134,21 @@ def test_build_fork_uses_catalog_not_decide(api):
 
 
 def test_grandfathered_wire_stable_then_node_governs(api):
-    """DE2E-6: a legacy-wizard completer's wire stays true (guard); the FIRST
-    agent step edge flips control to the node (documented one-way door)."""
+    """#1997 (W1, plan T7): accept-and-drop — a client PATCH
+    onboarding_complete on a node-present org is DROPPED (accepted 200,
+    echo node-governed); the wire follows the node. The raw-writer
+    grandfathered branch (legacy jsonb true, pre-W1 org) is asserted in
+    test_onboarding_state_split.py (HTTP can't raw-write)."""
     _team_id, headers = _register(api, "gf")
-    # legacy wizard completion (the carve-out jsonb write — still active
-    # until W1 removes wizardComplete)
+    # legacy wizard completion attempt — the legacy jsonb write is inert on
+    # node-present orgs post-W1 (the wizard no longer even calls it)
     r = api.patch("/v1/onboarding/state", headers=headers,
                   data={"onboarding_complete": True})
     assert r.status == 200, r.text()
     st = r.json()["onboarding"]
-    assert st["onboarding_complete"] is True      # guard: node active, zero agent edges
+    assert st["onboarding_complete"] is False   # dropped → node governs
     assert st["status"] == "active"
-    # the agent engages → the FIRST step edge flips control to the node
+    # the wire stays node-governed across a step write (no legacy flip)
     r = _checkpoint(api, headers, {"step": "harness-connected"})
     st = r.json()["onboarding"]
     assert st["onboarding_complete"] is False

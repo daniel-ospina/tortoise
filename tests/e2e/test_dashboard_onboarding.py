@@ -37,8 +37,8 @@ def _seed_cookie(page: Page, user_id: str) -> None:
 
 def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_state: dict | None = None) -> dict:  # noqa: RUF013
     """Route harness: the API mocks for the wizard journey. Returns the
-    capture dict ({objects, points, state_patches})."""
-    cap = {"objects": [], "points": [], "state": []}
+    capture dict ({objects, points, state_patches, org_create, checkpoint})."""
+    cap = {"objects": [], "points": [], "state": [], "org_create": [], "checkpoint": []}
     seed_objects = seed_objects or [{"id": "obj-1", "name": "Onboarding Test", "objectKind": "project", "status": "in_progress"}]
 
     def handle(route):
@@ -85,6 +85,25 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"onboarding_complete": True}))
                 return
+            # #1997 (W1): the org-create step posts to /v1/onboarding/team.
+            # Returning users (this journey) already created their org — the
+            # one-shot team_created guard answers 409 → the wizard advances.
+            if path.endswith("/v1/onboarding/team") and method == "POST":
+                cap["org_create"].append(json.loads(route.request.post_data or "{}"))
+                route.fulfill(status=409, content_type="application/json",
+                              body=json.dumps({"detail": "Sub-team already created"}))
+                return
+            # #1997 (W1): fork set-once + catalog-presented checkpoint writes.
+            if path.endswith("/v1/onboarding/state/checkpoint") and method == "POST":
+                body = json.loads(route.request.post_data or "{}")
+                cap["checkpoint"].append(body)
+                fork = body.get("fork")
+                onboarding = {"fork": fork, "status": "active",
+                              "onboarding_complete": False, "completed_steps": []}
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"created_steps": [], "noop_steps": [],
+                                                "onboarding": onboarding}))
+                return
             if path.endswith("/v1/onboarding/github/connect") and method == "POST":
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"auth_url": "https://github.com/login/oauth/authorize?fake"}))
@@ -114,43 +133,44 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
     return cap
 
 
-def test_first_timer_wizard_harness_to_done(page: Page) -> None:
-    """A returning-style session (team exists, empty graph) walks the wizard:
-    the re-entry card → harness tabs + copy → skills → GitHub → seed STATE →
-    done. The seed lands an Object + an aboutObject point; completion patches
-    onboarding_complete."""
+def test_first_timer_wizard_human_steps(page: Page) -> None:
+    """#1997 (W1): a returning-style session (team exists, empty graph)
+    walks the NEW 5 HUMAN steps (epic plan P1): orientation → org-create/join
+    → fork card → connect-consent → done. Org-create 409s (one-shot
+    team_created — the org already exists) → advances. The done step exits
+    WITHOUT patching onboarding_complete (accept-and-drop: the node's
+    fork-aware gate owns completion)."""
     _seed_cookie(page, "u-onb")
     cap = _wire(page, provision=False)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # Re-entry card (empty graph) → Continue setup opens the wizard at the
-    # skills step (per the plan); Back reaches the harness chooser.
+    # Re-entry card (empty graph) → Continue setup opens the wizard at
+    # step 0 (orientation — per the plan, orientation IS a wizard step).
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    expect(page.locator("body")).to_contain_text("Your agent's toolkit", timeout=15_000)
-    page.get_by_role("button", name="← Back").click()
-    # STEP 0: harness chooser — the four harness tabs + copy.
-    expect(page.locator("body")).to_contain_text("Connect your tool", timeout=15_000)
+    # STEP 0: orientation.
+    expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
+    expect(page.locator("body")).to_contain_text("What you're setting up", timeout=5_000)
+    page.get_by_role("button", name="Continue →").click()
+    # STEP 1: create/join org — name REQUIRED + editable prefill (DE2E-3);
+    # submit 409 (already created) → advance.
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("Organization name", timeout=5_000)
+    page.get_by_role("button", name="Create Organization").click()
+    expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)
+    # STEP 2: fork card — self-use (presentation fork, once per org).
+    expect(page.locator("body")).to_contain_text("Use it for your own agents", timeout=5_000)
+    page.get_by_role("button", name="Use it for your own agents").click()
+    expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
+    assert any(c.get("fork") == "self" for c in cap["checkpoint"]), f"fork not checkpointed: {cap['checkpoint']}"
+    # STEP 3: connect-consent — the universal command (harness tabs + copy).
     expect(page.locator(".harness-tab")).to_have_count(4)
     page.locator(".harness-tab", has_text="Claude Code").click()
     page.get_by_role("button", name="Copy setup").click()
-    expect(page.locator("body")).to_contain_text("Copied!", timeout=5_000)
-    # STEP 1: skills.
-    page.get_by_role("button", name="Skip →").click()
-    expect(page.locator("body")).to_contain_text("Your agent's toolkit", timeout=10_000)
-    expect(page.locator("body")).to_contain_text("tortoise-decide", timeout=5_000)
-    expect(page.locator("body")).to_contain_text("how-to-use-tortoise", timeout=5_000)
-    page.get_by_role("button", name="Next").click()
-    # STEP 2: GitHub connect.
-    expect(page.locator("body")).to_contain_text("Connect GitHub", timeout=10_000)
-    page.get_by_role("button", name="Skip →").click()
-    # STEP 3: seed STATE.
-    expect(page.locator("body")).to_contain_text("Seed your graph", timeout=10_000)
-    page.get_by_role("button", name="Seed a sample memory").click()
-    expect(page.locator("body")).to_contain_text("Seeded", timeout=10_000)
-    assert cap["objects"] and cap["objects"][0]["status"] == "in_progress", f"objects: {cap['objects']}"
-    assert cap["points"] and cap["points"][0].get("about_object") == "obj-1", f"points: {cap['points']}"
-    page.get_by_role("button", name="Finish").click()
-    # STEP 4: done.
-    expect(page.locator("body")).to_contain_text("You're set", timeout=10_000)
+    expect(page.locator("body")).to_contain_text("Copied", timeout=5_000)
+    page.get_by_role("button", name="Skip for now").click()
+    # STEP 4: done — agent takes over; NO onboarding_complete PATCH (the
+    # node's gate owns completion; accept-and-drop).
+    expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
     page.get_by_role("button", name="Open my dashboard →").click()
-    assert any("onboarding_complete" in p for p in cap["state"]), f"completion not patched: {cap['state']}"
+    assert not any("onboarding_complete" in p for p in cap["state"]), \
+        f"done step must NOT patch onboarding_complete: {cap['state']}"
