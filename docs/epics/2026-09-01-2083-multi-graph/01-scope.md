@@ -25,19 +25,20 @@ aboutObjects: tortoise-hosted-platform
 ### In Scope
 
 1. **Dual-mode graph data model (W1):** `graphs` table + migrations in Supabase mode (graph_id, team_id, name, kind default|custom, namespace, status, created_at, quota-relevant fields); registry-mode Graph node already exists (sdk `_graph_create`) — keep in sync via the shared seam; `api_keys.graph_id` (nullable — NULL = team-wide key resolving to default graph) on both modes.
-2. **Per-graph API keys + key scoping (W1/W3):** key minting scoped to a graph; `resolve_api_key` returns graph scope; key prefix scheme distinguishing team keys from graph keys; one-time plaintext reveal contract (hash-only storage already the pattern); key metadata (last_used, revoked_at, created_via extension).
-3. **Provisioning endpoint + graph lifecycle (W2):** `POST /v1/teams/{team_id}/graphs` (mint → graph + per-graph key, 201, plaintext revealed once); graph list/delete/archive endpoints; naming/namespace derivation beyond `team_<id>` (existing pattern `team_{team_id}_{gid}`); per-tier quota gate on mint; default graph non-deletable guard.
-4. **Provision capability + one-level-deep (W2/W3):** `provision: true` on team-bound keys only; graph-bound keys stamped `provision: false` by construction at mint (fixed child policy, never caller-supplied); delegation depth 0 for graph keys; revocation semantics (per-request opaque-key check → instant 401; append-only audit).
-5. **Isolation enforcement across ALL surfaces (W3):** per-graph key → graph scope resolution on ask / analyze / search / MCP / sessions / context; app-layer registry scope check as the authoritative boundary (ownership check on every `select_graph`); FalkorDB ACL as defense-in-depth (per-graph ACL user recipe: `~tenant_<gid> +GRAPH.QUERY +GRAPH.RO_QUERY +PING`, deny GRAPH.LIST/KEYS/SCAN/CONFIG, secure default user, aclfile+ACL SAVE); cross-graph test suite.
-6. **Tier gate (W1/W2):** provisioning gated to pro+ (`max_graphs_per_team` + tier check in both modes); free/solo remain single/two-graph.
-7. **Delivery-shape alignment (W4):** `/v1/context` + `POST /v1/sessions` tenancy resolves against per-graph keys (graph-scope resolution added without breaking team-scoped callers — contract-compatible with #2080 D3).
-8. **`session_recording` flag scoping decision + implementation (W4):** per-graph with team-level default (leaning, per #2082 Q5); decision recorded in the plan; keeps default-ON contract (#1927).
-9. **Billing/quota + dashboard visibility (W5):** graph-count limits enforced per tier (soft warning at 80% → hard reject at cap; 402/409 semantics); dashboard shows graph list, per-graph keys, graph-count usage; quota source built for Supabase mode (the missing piece today).
-10. **Migration + docs (W6):** primary/default graph pattern (existing team keys resolve to default graph; no forced migration, no key rotation); default graph = graph 0; registry-graph-schema.md + auth-architecture.md + pricing.json updates; migration reversible (documented + rollback path).
+2. **Unified scoped API keys — single type, permission matrix, N per graph (W1/W3):** ONE key type (`tk_`) granted any combination of scopes, **defaults ALL OFF** (Stripe allowlist). Vocabulary: graph data `graphs:read`/`graphs:write` (write implies read); graph control `graphs:create` / `graphs:delete` (SEPARATE scopes — deletion is irreversible, GitHub `delete_repo` precedent); team `team:manage` (rename, members), `keys:manage` (create/revoke keys). Each graph can have N keys with independent scopes. One-time plaintext reveal (hash-only stored); rotation (create → migrate → revoke; revoke-first on compromise); per-key metadata (last_used, revoked_at, scope, created_via); scope mutability with audit (shrink anytime; expand = revoke+recreate, never in-place on a suspect key); keys cannot mint keys (anti-escalation); a key never exceeds the owning principal's rights (GitHub rule).
+3. **Legacy team keys + back-compat (W1/W3):** existing team-scoped keys become the legacy full-access class — distinct `tkm_` prefix, marked "legacy" in the dashboard, kept valid (Cloudflare Global-key→scoped-token migration pattern); new keys are scoped `tk_`; ONE scope matrix enforces both (no parallel permission engine — the split-type trap); team management is achieved by granting scopes on any key (a "team key" = a key with `graphs:create`/`graphs:delete`/`team:manage`/`keys:manage` scopes), not a separate type.
+4. **Provisioning endpoint + graph lifecycle (W2):** `POST /v1/teams/{team_id}/graphs` (mint → graph + per-graph key, 201, plaintext revealed once — note `POST /v1/graphs` + `GET /v1/graphs` + Graphs dashboard tab ALREADY EXIST (E5/E7): create via dashboard session-user + quota check; this epic adds the key-driven mint path + per-graph key return + lifecycle); graph list/delete/archive endpoints (list exists; delete/archive new); naming/namespace derivation (existing pattern `team_{team_id}_{gid}`); per-tier quota gate on mint; default graph non-deletable guard.
+5. **Provision capability + one-level-deep (W2/W3):** `graphs:create`/`graphs:delete` scopes gate mint/delete; keys minted FOR a graph never inherit `graphs:create`/`graphs:delete`/`keys:manage` (fixed child policy at mint — SPKI deleg=1; never caller-supplied); delegation depth 0 for minted keys; revocation semantics (per-request opaque-key check → instant 401; append-only audit).
+6. **Isolation enforcement across ALL surfaces (W3):** per-graph key → graph scope resolution on ask / analyze / search / MCP / sessions / context; app-layer registry scope check as the authoritative boundary (ownership check on every `select_graph`); FalkorDB ACL as defense-in-depth (per-graph ACL user recipe: `~tenant_<gid> +GRAPH.QUERY +GRAPH.RO_QUERY +PING`, deny GRAPH.LIST/KEYS/SCAN/CONFIG, secure default user, aclfile+ACL SAVE); cross-graph test suite. Scope enforcement per key (read-only key → write denied at the boundary).
+7. **Tier gate (W1/W2):** provisioning gated to pro+ (`max_graphs_per_team` + tier check in both modes); free/solo remain single/two-graph.
+8. **Delivery-shape alignment (W4):** `/v1/context` + `POST /v1/sessions` tenancy resolves against per-graph keys (graph-scope resolution added without breaking team-scoped callers — contract-compatible with #2080 D3).
+9. **`session_recording` flag scoping decision + implementation (W4):** per-graph with team-level default (leaning, per #2082 Q5); decision recorded in the plan; keeps default-ON contract (#1927).
+10. **Billing/graph-count limits + dashboard visibility (W5):** graph-count limits enforced per tier (soft warning at 80% → hard reject at cap; 402/409 semantics); dashboard shows graph list, per-graph keys, graph-count usage (existing Graphs tab + `max_graphs` card enhanced: per-graph key management, lifecycle, quota meter, one-time reveal modal); quota source built for Supabase mode (the missing piece today).
+11. **Migration + docs (W6):** primary/default graph pattern (existing team keys resolve to default graph; no forced migration, no key rotation); default graph = graph 0; registry-graph-schema.md + auth-architecture.md + pricing.json updates; migration reversible (documented + rollback path).
 
 ### Out of Scope
 
-- **Fine-grained Principal/Scope/Capability policy layer** (agents, read/write asymmetry, statement-level provenance, per-user-inside-graph) → #2082 design, later epic. This epic is the coarse wall only.
+- **Fine-grained agent policy layer** (per-agent Principals, statement-level provenance, read≠write asymmetry for *agents inside a graph*, per-user-inside-graph) → #2082 design, later epic. **NOTE (2026-09-01, owner):** KEY-level scopes (multiple keys per graph, `graphs:read`/`graphs:write`, team management scopes) ARE in scope for this epic — the boundary is: this epic scopes *credentials* (keys), #2082 scopes *agents/principals* (who/what inside the graph).
 - **Per-user-inside-graph isolation** — replaced by provisioning-to-graph for the developer-customer path.
 - **FalkorDB instance-per-tenant escalation** (separate instances per customer) — the max-security tier; not this epic. Documented escalation path only.
 - **Per-graph billing lines** — metering stays team-level write_ops (research: nobody charges per-graph; count is a tier gate, usage is the meter).
@@ -52,13 +53,15 @@ The cut follows the product decision + research: **graph = isolation boundary, k
 
 | Scoped Capability | User-Visible Value |
 |-------------------|--------------------|
+| Dual-mode graph data model (W1) | Graphs are first-class records in hosted mode — provisioning, per-graph keys, and quota all have a source of truth to operate on (the substrate every other capability sits on) |
 | Provisioning endpoint (mint graph + per-graph key) | A developer creates an isolated memory graph for an end-customer in one API call and gets its credential — no human provisioning |
-| Per-graph API keys | Each end-customer's memory is guarded by its own key; one customer's data is never readable with another's key |
+| Per-graph API keys — multiple, scoped | Different components/customers of one app get separate credentials with read-only or read-write scope — rotate one without touching the others; a leaked read key can't write |
+| Team management via scopes | Any key granted team scopes provisions graphs and manages the team programmatically (create graph, rename team, manage keys) — full API-driven administration, no separate key type |
 | One-level-deep provision capability | Developers can mint customer graphs safely; a leaked customer key can't mint new graphs or escape its tenant |
 | Cross-graph isolation enforcement | Customers' memories are isolated at the data boundary — a key that touches another graph is denied, verified by test |
 | Tier gate (pro+) | Multi-graph is a pro/team feature — free/solo tiers keep their limits, the upgrade path is clear |
 | Graph lifecycle (list/delete/archive) | Developers manage customer graphs at scale — see what exists, retire what doesn't |
-| Quota enforcement + dashboard visibility | Teams see their graph-count usage before hitting the cap; no surprise 402s |
+| Quota visibility + dashboard enhancements | Teams see their graph-count usage before hitting the limit (existing Graphs tab gains per-graph key management, lifecycle, meter, one-time reveal) — no surprise 402s |
 | `/v1/context` + sessions per-graph tenancy | Agent hooks and session capture run against the right graph automatically — no cross-customer context bleed |
 | `session_recording` per-graph with team default | Recording can be tuned per customer graph without per-team overhead |
 | Default-graph migration (graph 0) | Existing teams and keys keep working untouched — no forced migration, no key rotation |
@@ -75,7 +78,7 @@ The cut follows the product decision + research: **graph = isolation boundary, k
 ## High-Level E2E Test Cases
 
 ### E2E-1: Provision a graph with a per-graph key
-**Given:** a pro-tier team with a team-scoped key carrying `provision: true`
+**Given:** a pro-tier team with a scoped key carrying `graphs:create`
 **When:** the developer calls `POST /v1/teams/{team_id}/graphs` with a graph name
 **Then:** a graph is created (status active) with a derived namespace, and the response contains the graph metadata + a per-graph API key whose plaintext appears exactly once (`revealed_once: true`)
 **And:** the returned per-graph key reads/writes the new graph successfully (write a point, read it back)
@@ -86,15 +89,15 @@ The cut follows the product decision + research: **graph = isolation boundary, k
 **Then:** the operation is denied at the boundary with an auth/scope error — keyA can never touch graph B's data
 **And:** the same holds with the data-layer ACL: a graph-A-scoped FalkorDB credential gets NOPERM on graph B (verified separately — defense-in-depth)
 
-### E2E-3: Tier gate — provisioning is pro+
-**Given:** a free-tier team (max_graphs=1) and a solo-tier team (max_graphs=2), each with a team key
+### E2E-3: Tier gate — provisioning is pro+ (both control-plane modes)
+**Given:** a free-tier team (max_graphs=1) and a solo-tier team (max_graphs=2), each with a team key, in BOTH control-plane modes (Supabase hosted + registry selfhost)
 **When:** either team attempts to provision beyond its tier limit (free: a 2nd graph; solo: a 3rd)
 **Then:** the mint is rejected with a quota/tier error (402/409), and the team can see its graph-count usage in the dashboard
 
-### E2E-4: One-level-deep — minted graph keys cannot provision
-**Given:** a graph key minted by provisioning (graph-bound, `provision: false` stamped at mint)
-**When:** that graph key calls the provision endpoint
-**Then:** the call is denied (403) — graph-bound keys can never mint child graphs, in either control-plane mode
+### E2E-4: One-level-deep — minted keys cannot provision
+**Given:** a key minted by provisioning (fixed child policy: no `graphs:create`/`graphs:delete`/`keys:manage` scopes, regardless of the minting key's scopes)
+**When:** that key calls the graph-create/delete or key-management endpoints
+**Then:** the call is denied (403) — minted keys can never create/delete graphs or mint sibling keys, in either control-plane mode
 
 ### E2E-5: Existing-team migration — default graph keeps working
 **Given:** a team that existed before this epic with a team-scoped key and data in its default graph
@@ -107,16 +110,26 @@ The cut follows the product decision + research: **graph = isolation boundary, k
 **When:** the key calls `GET /v1/context` and `POST /v1/sessions` (with `session_recording` inherited from the team default)
 **Then:** both resolve to graph A's memory — context is graph-A scoped, session points land in graph A, and cross-graph context is never surfaced
 
-### E2E-7: Quota + revocation lifecycle
-**Given:** a pro team at the soft-warning threshold of its graph-count quota
+### E2E-7: Quota + revocation lifecycle (both control-plane modes)
+**Given:** a pro team at the soft-warning threshold of its graph-count quota, in BOTH control-plane modes (Supabase hosted — where the quota source is built by this epic — + registry selfhost)
 **When:** the team provisions one more graph, then revokes a graph key
 **Then:** the team sees a soft warning at 80% before the cap, is rejected with a clear quota error at the cap (not silently billed), and a revoked graph key immediately returns 401 on the next request in every surface
 
+### E2E-8: Graph lifecycle — list, delete/archive, quota release
+**Given:** a pro team with 2 active custom graphs and a per-graph key for one of them
+**When:** the team lists graphs (both listed, default first), archives one graph, then deletes it
+**Then:** the archived/deleted graph no longer appears in graph_list; its per-graph key is revoked with it (401 on next use); its graph-count quota slot is released (a subsequent provision succeeds — deleted/archived graphs do not count against the tier cap); the default graph cannot be deleted
+
+### E2E-9: Key scopes + legacy team keys
+**Given:** a key with `graphs:create` + `graphs:delete` + `keys:manage` scopes, a read-only key (`graphs:read`) for graph A, and a legacy team key (`tkm_`)
+**When:** the read-only key attempts a write to graph A (create point, delete, ingest); the scoped key provisions a graph, deletes a graph, renames the team, and rotates/revokes another key; the legacy key performs a data op on the default graph
+**Then:** the read-only key's write is denied (401/403) while its reads succeed; `graphs:create` works without `graphs:delete` (separate scopes); management ops succeed via the scoped key; the minted key cannot manage keys or mint new keys; a second key minted for graph A (multiple keys per graph) works independently of the first; the legacy key still reads/writes the default graph (back-compat)
+
 ## Epic Scope Ready for Review
 
-**Scope:** 10 in-scope capabilities (dual-mode graph model, per-graph keys, provisioning, provision capability + one-level-deep, isolation across all surfaces, tier gate, delivery-shape tenancy, session_recording scoping, quota + dashboard, migration/docs) — fine-grained policy (#2082) and per-graph billing explicitly out.
-**Customer value map:** 10 capabilities mapped to user-visible outcomes.
-**E2E test cases:** 7 drafted (provision, isolation, tier gate, one-level-deep, migration, delivery-shape, quota/revocation).
+**Scope:** 11 in-scope capabilities (dual-mode graph model, unified scoped keys (multiple per graph), legacy team-key back-compat, provisioning + lifecycle, one-level-deep, isolation across all surfaces, tier gate, delivery-shape tenancy, session_recording scoping, graph-count limits + dashboard enhancements, migration/docs) — fine-grained agent policy (#2082) and per-graph billing explicitly out.
+**Customer value map:** 12 capabilities mapped to user-visible outcomes.
+**E2E test cases:** 9 drafted (provision, isolation, tier gate, one-level-deep, migration, delivery-shape, graph-count + revocation, graph lifecycle, key scopes + legacy keys).
 **Complexity:** UX medium · Architecture high · Ontology low · Accessibility low.
 
 Review the scope boundaries, customer value map, and E2E test cases.
