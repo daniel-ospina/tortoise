@@ -75,9 +75,29 @@ class TestDecideScriptSmoke:
     the live FalkorDB and asserts a clean run (ticks + EP, no ⚠ failures)."""
 
     def test_script_runs_clean(self):
+        import socket
         import subprocess
         import sys
         import uuid as _uuid
+        # This smoke test drives the SCRIPT against the LEGACY FalkorDB
+        # container (:16379) via a docker:// URI — the module-level
+        # FALKORDB_AVAILABLE probe only checks the embedded lane, so it
+        # cannot gate this dependency. Repo skip convention (#1436):
+        # docker-required tests SKIP, never ERROR on ConnectionError —
+        # mirrors the _docker_reachable probe in
+        # tests/test_round_trip_parity.py. CI provisions falkordb-legacy
+        # on :16379, so the test still RUNS there; the documented local
+        # compose (AGENTS.md) provisions only :6379 → local SKIP.
+        _s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        _s.settimeout(1.0)
+        try:
+            _s.connect(("localhost", 16379))
+        except OSError:
+            pytest.skip(
+                "Live FalkorDB legacy (:16379) not available — "
+                "skip per #1436")
+        finally:
+            _s.close()
         graph = f"test_decide_smoke_{_uuid.uuid4().hex[:8]}"
         uri = f"docker://:@localhost:16379/{graph}"
         res = subprocess.run(
