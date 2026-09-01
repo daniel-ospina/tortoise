@@ -321,11 +321,11 @@ def _scope_map(src: str) -> list[tuple[str, str | None]]:
             if re.search(r'\.fixture\b', stripped):
                 pending_fixture = True
             scopes[i] = stack[-1][1:] if stack else ("top", None)
-        elif re.match(r'^(\s*)def\s+\w+', line) and paren == 0:
+        elif re.match(r'^(\s*)(?:async\s+)?def\s+\w+', line) and paren == 0:
             ind = len(line) - len(line.lstrip())
             while stack and stack[-1][0] >= ind:
                 stack.pop()
-            name = re.match(r'^(\s*)def\s+(\w+)', line).group(2)
+            name = re.match(r'^(\s*)(?:async\s+)?def\s+(\w+)', line).group(2)
             stack.append((ind, "fixture" if pending_fixture else "fn", name))
             pending_fixture = False
             scopes[i] = stack[-1][1:]
@@ -418,7 +418,7 @@ def _fixture_body(src: str, name: str) -> str:
     restore cannot launder a class-method fixture's pop-without-restore)."""
     lines = src.split("\n")
     for i, line in enumerate(lines):
-        m = re.match(r'^(\s*)def\s+\w+', line)
+        m = re.match(r'^(\s*)(?:async\s+)?def\s+\w+', line)
         if m and re.search(r'\bdef\s+' + re.escape(name) + r'\b', line):
             def_indent = len(m.group(1))
             body = [line]
@@ -477,7 +477,7 @@ def _restoration_violations(files) -> list[str]:
             if m.lastgroup == "assign" and _URI_GET_RE.search(line):
                 continue  # self-restoring inline assignment
             scope_kind, scope_name = _scope_at(scopes, lineno)
-            if scope_kind in ("top", "fixture"):
+            if scope_kind in ("top", "fixture", "fn"):
                 sites.append((lineno, scope_kind, scope_name))
         # save-restore evidence: file-wide for fixture-site captures; the
         # TOP-LEVEL-only census for top-level sites. Both censuses skip
@@ -516,6 +516,24 @@ def _restoration_violations(files) -> list[str]:
             if _scope_at(scopes, lineno)[0] == "top":
                 top_restored.add(m.group(1))
         file_restored = top_saved & top_restored
+        # Module-level autouse save/restore fixture: bounds EVERY test in the
+        # file (runs setup+teardown around each test at any scope), so a raw
+        # fn-scope pop inside a test body is restored before the next test —
+        # the test_tortoise_client._restore_db_env pattern (#2084 review P2).
+        autouse_bounded = False
+        for m in re.finditer(
+                r'@pytest\.fixture\([^)]*autouse\s*=\s*True[^)]*\)', src):
+            # find the def name following this decorator
+            after = src[m.end():]
+            dm = re.match(r'\s*(?:async\s+)?def\s+(\w+)', after)
+            if not dm:
+                continue
+            body = _fixture_body(src, dm.group(1))
+            saved_in_body = {g for g in _URI_SAVE_RE.findall(body)}
+            restored_in_body = {g for g in _URI_RESTORE_RE.findall(body)}
+            if saved_in_body & restored_in_body:
+                autouse_bounded = True
+                break
         for lineno, scope_kind, scope_name in sites:
             if scope_kind == "top":
                 if not file_restored:
@@ -526,7 +544,7 @@ def _restoration_violations(files) -> list[str]:
                         "function) — restore the URI (try/finally or "
                         "MonkeyPatch) or the leak poisons every later test "
                         "in the pytest process (#2062)")
-            else:  # fixture
+            elif scope_kind == "fixture":
                 body = _fixture_body(src, scope_name)
                 in_body_restored = {m.group(1)
                                     for m in _URI_RESTORE_RE.finditer(body)}
@@ -540,6 +558,19 @@ def _restoration_violations(files) -> list[str]:
                         "(#2062). Save the old value and restore it in a "
                         "finally/after yield, or use monkeypatch/"
                         "pytest.MonkeyPatch + undo.")
+            else:  # fn — test/helper body
+                body = _fixture_body(src, scope_name)
+                in_body_restored = {m.group(1)
+                                    for m in _URI_RESTORE_RE.finditer(body)}
+                if not (saved & in_body_restored) and not autouse_bounded:
+                    violations.append(
+                        f"{fname}:{lineno}: fn {scope_name!r} performs a raw "
+                        "TORTOISE_DB_URI mutation with no in-body restore "
+                        "and no module-level autouse save/restore fixture "
+                        "bounding every test — the pop leaks into later "
+                        "tests in the pytest process (#2084 review P2). "
+                        "Restore in-fn (finally) or bound the module with an "
+                        "autouse save/restore fixture.")
         # bare-instance check: pytest.MonkeyPatch() in a fixture body must
         # be paired with .undo() in the same body; at module top it must be
         # paired with .undo() somewhere in the file (pytest auto-undoes
@@ -677,6 +708,42 @@ def test_module_scoped_pop_without_restore_reds():
         'mp = pytest.MonkeyPatch()\n'
         'mp.delenv("TORTOISE_DB_URI", raising=False)\n'
     )
+    # #2084 review P2: an async fixture with a pop-without-restore must red
+    # (pre-fix the scope parser missed `async def` → body classified "top"
+    # and could be laundered green by an unrelated module-level probe).
+    async_fixture_pop_no_restore = (
+        'import os\n'
+        'import pytest\n'
+        '_old_uri = os.environ.get("TORTOISE_DB_URI")\n'
+        '@pytest.fixture(scope="module", autouse=True)\n'
+        'async def _embedded_local_file_lane():\n'
+        '    os.environ.pop("TORTOISE_DB_URI", None)\n'
+        '    yield\n'
+    )
+    # #2084 review P2: a raw pop inside a TEST BODY with no in-fn restore
+    # and no module-level autouse save/restore fixture must red (the #2062
+    # leak mechanism one scope level down).
+    fn_scope_pop_no_restore = (
+        'import os\n'
+        'def test_leak():\n'
+        '    os.environ.pop("TORTOISE_DB_URI", None)\n'
+    )
+    # fn-scope pop in a module with an autouse save/restore fixture bounding
+    # every test is SAFE (the test_tortoise_client pattern) — must stay green.
+    fn_scope_pop_autouse_bounded = (
+        'import os\n'
+        'import pytest\n'
+        '@pytest.fixture(autouse=True)\n'
+        'def _restore_db_env():\n'
+        '    saved_uri = os.environ.get("TORTOISE_DB_URI")\n'
+        '    yield\n'
+        '    if saved_uri is None:\n'
+        '        os.environ.pop("TORTOISE_DB_URI", None)\n'
+        '    else:\n'
+        '        os.environ["TORTOISE_DB_URI"] = saved_uri\n'
+        'def test_leak():\n'
+        '    os.environ.pop("TORTOISE_DB_URI", None)\n'
+    )
     for label, src in (
             ("pop-without-restore", pop_without_restore),
             ("set-without-restore", set_without_restore),
@@ -689,12 +756,24 @@ def test_module_scoped_pop_without_restore_reds():
             ("top pop after same-line nested-delimiter string",
              nested_delimiter_line),
             ("top-level MonkeyPatch without undo",
-             top_level_mp_without_undo)):
+             top_level_mp_without_undo),
+            ("async fixture pop-without-restore (P2)",
+             async_fixture_pop_no_restore),
+            ("fn-scope pop without restore (P2)",
+             fn_scope_pop_no_restore)):
         violations = _restoration_violations(
             [("test_index_restore.py", src)])
         assert violations, (
             f"{label} must be flagged by the restoration guard — the "
             "#2062 class slipped through")
+    # the autouse-bounded fn-scope pop must NOT red (test_tortoise_client
+    # pattern — the module-level fixture restores around every test)
+    bounded_violations = _restoration_violations(
+        [("test_tortoise_client.py", fn_scope_pop_autouse_bounded)])
+    assert not bounded_violations, (
+        "fn-scope pop bounded by a module-level autouse save/restore "
+        "fixture must stay green (#2084 review P2): "
+        + "; ".join(bounded_violations))
 
 
 def test_bare_monkeypatch_without_undo_reds():
