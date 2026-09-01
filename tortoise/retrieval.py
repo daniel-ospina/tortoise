@@ -101,6 +101,135 @@ DEFAULT_EVIDENCE_BOOST_SOURCE = 1.15
 #: validation bound 1..10000).
 _POOL_CLAMP = (1, 10000)
 
+#: A6 (#2070): ask-lane cap env names. The retrieval-window limit and the
+#: assembly caps are threaded IN TANDEM — raising only the assemble cap
+#: changes NOTHING (the gold is cut at ``result_ids[:limit]`` INSIDE
+#: ``tortoise_fts_query`` before dedup/assemble); raising only the window
+#: floods the reader budget. Measurement-gated: default OFF = the historical
+#: 40/40/8000 (byte-identical until the Step-0/6 measurements justify a
+#: raise).
+ASK_RETRIEVAL_LIMIT_ENV = "TORTOISE_ASK_RETRIEVAL_LIMIT"
+ASK_CONTEXT_ITEM_CAP_ENV = "TORTOISE_ASK_CONTEXT_ITEM_CAP"
+ASK_CONTEXT_TOKEN_CAP_ENV = "TORTOISE_ASK_CONTEXT_TOKEN_CAP"
+
+#: A1/A4/A5 (#2070): ask-lane lever env names (all default ON for the ask
+#: lane — each is a quality fix, not a gated experiment; "0"/"false"/
+#: "no"/"off" opts out). A7's rerank is the exception (env-gated OFF,
+#: tortoise/rerank.py).
+ASK_NUMERIC_TOKENS_ENV = "TORTOISE_ASK_NUMERIC_TOKENS"
+ASK_SEARCH_KEYS_PRF_ENV = "TORTOISE_ASK_SEARCH_KEYS_PRF"
+ASK_EVIDENCE_BOOST_ENV = "TORTOISE_ASK_EVIDENCE_BOOST"
+ASK_FUSION_WEIGHTS_ENV = "TORTOISE_ASK_FUSION_WEIGHTS"
+ASK_FUSION_K_ENV = "TORTOISE_ASK_FUSION_K"
+
+#: A1/A3/A5/A6 knob env values: explicit 1/true/yes/on flips True, explicit
+#: 0/false/no/off flips False, anything else (unset OR garbage) falls back
+#: to ``default`` — a typo can never silently flip a knob.
+_ASK_TRUTHY = {"1", "true", "yes", "on"}
+_ASK_FALSY = {"0", "false", "no", "off"}
+
+
+def ask_env_bool(name: str, default: bool) -> bool:
+    """Ask-lane env bool with a caller default (A1/A4/A5/A7 knob parsing).
+    Unset/blank/garbage → ``default`` (a typo never flips a knob); explicit
+    truthy (1/true/yes/on) → True; explicit falsy (0/false/no/off) → False.
+    """
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    if raw in _ASK_TRUTHY:
+        return True
+    if raw in _ASK_FALSY:
+        return False
+    return default
+
+
+def ask_env_int(name: str, default: int, lo: int = 1, hi: int | None = None) -> int:
+    """Ask-lane env int with clamp: garbage or out-of-range values fall back
+    to ``default`` — never a crash (mirrors the eval's ``_env_int``)."""
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return default
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    if value < lo or (hi is not None and value > hi):
+        return default
+    return value
+
+
+def ask_env_weights(name: str, default: dict | None) -> dict | None:
+    """Ask-lane JSON dict parse for the weighted-RRF knob
+    (``TORTOISE_ASK_FUSION_WEIGHTS``, A3 #2070). Garbage/unparseable →
+    ``default`` (None = the shared global resolution in tortoise_fts_query
+    — the shipped ``{"vector": 1.5}``)."""
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return default
+    try:
+        import json as _json
+        val = _json.loads(raw)
+    except (TypeError, ValueError):
+        return default
+    if not isinstance(val, dict):
+        return default
+    try:
+        return {str(k): float(v) for k, v in val.items()}
+    except (TypeError, ValueError):
+        return default
+
+
+def ask_env_boost_float(name: str, default: float) -> float:
+    """Ask-lane evidence-boost multiplier env (A5 #2070): domain [1.0, inf),
+    finite — a factor < 1.0 is a rank DIVISION (0.0 → ZeroDivisionError;
+    negative → silent pool inversion; NaN/Inf → poisoned sort keys), so
+    out-of-domain values fall back to ``default`` (mirrors the eval's
+    ``_env_boost_float``)."""
+    raw = os.environ.get(name, "")
+    if not raw.strip():
+        return default
+    try:
+        value = float(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    if not (math.isfinite(value) and value >= 1.0):
+        return default
+    return value
+
+
+def resolve_ask_retrieval_caps() -> dict:
+    """A6 (#2070): resolve the ask lane's retrieval-window limit + assembly
+    caps IN TANDEM (env-gated, default OFF = 40/40/8000). Returns
+    ``{"limit", "context_item_cap", "context_token_cap"}`` — the single
+    resolution ``ask()`` threads into BOTH ``tortoise_fts_query(limit=…)``
+    (the ``result_ids[:limit]`` cut INSIDE the retrieval call) and
+    ``assemble_context``, so a cap raise can never be half-applied."""
+    return {
+        "limit": ask_env_int(ASK_RETRIEVAL_LIMIT_ENV, DEFAULT_CONTEXT_ITEM_CAP),
+        "context_item_cap": ask_env_int(
+            ASK_CONTEXT_ITEM_CAP_ENV, DEFAULT_CONTEXT_ITEM_CAP),
+        "context_token_cap": ask_env_int(
+            ASK_CONTEXT_TOKEN_CAP_ENV, DEFAULT_CONTEXT_TOKEN_CAP),
+    }
+
+
+def resolve_ask_boost_multipliers() -> dict:
+    """A5 (#2070): the ask lane's evidence-boost multipliers — the product
+    defaults (2.0 / 1.5 / 1.15) with ``TORTOISE_ASK_EVIDENCE_BOOST_*`` env
+    overrides (domain [1.0, inf), finite)."""
+    return {
+        "answer_string": ask_env_boost_float(
+            "TORTOISE_ASK_EVIDENCE_BOOST_ANSWER_STRING",
+            DEFAULT_EVIDENCE_BOOST_ANSWER_STRING),
+        "verbatim": ask_env_boost_float(
+            "TORTOISE_ASK_EVIDENCE_BOOST_VERBATIM",
+            DEFAULT_EVIDENCE_BOOST_VERBATIM),
+        "source": ask_env_boost_float(
+            "TORTOISE_ASK_EVIDENCE_BOOST_SOURCE",
+            DEFAULT_EVIDENCE_BOOST_SOURCE),
+    }
+
 
 def resolve_pool_size(
     floor: int,

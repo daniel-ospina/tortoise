@@ -54,6 +54,34 @@ CI substitute only** (see the #2071 section below for the scoring change +
 comparability note). The gate results below remain the evidence base for
 those follow-ups.
 
+## Follow-up (2) status — #2070 retrieval optimisation loop (2026-08-31)
+
+Shipped as an optimisation loop (baseline → lever → measure → keep/revert):
+- **A1** sparse numeric-token policy (ask-lane-only; SAME-VALUE money),
+- **A4** additive `search_keys` PRF expansion (OR-cap budget — original
+  tokens always keep their slots),
+- **A5** evidence-mark boost before assembly (stored `has_answer` marks;
+  product graphs currently carry none — zero marks = no-op),
+- **A3** ask-lane fusion weights/k knobs (default = shared global),
+- **A6** measurement-gated cap review (retrieval-window `limit` threaded in
+  tandem with `context_item_cap`; default OFF = 40/40/8000),
+- **A7** product cross-encoder rerank behind `TORTOISE_ASK_RERANK` (default
+  OFF, gated phase 2, degrade-to-untouched contract).
+
+**Measured baseline (embedded lane, `tools/ask_recall_bench.py`, seed 4):**
+pool@120 recall **0.750** (3/4 golds in the 120-pool), ctx@40 recall
+**0.125** (1/4 in the assembled context), ctx@cap recall 0.500. The 4
+recorded failures decompose as 1 numeric-invisible (gpt4_d84a3211 — needs
+A2's vector leg, not A1) + 2 thin-overlap rank-competition (1de5cff2,
+1d4e3b97) + 1 in-pool-outside-cap (ceb54acb).
+
+**Verified on the vector-leg lane (docker + embeddings extra):** 4/4 gold
+turns land in the assembled context (ctx@40) with A1+A4+A5 on — the
+lexical-trio class needs the vector leg (A2), a documented runtime
+prerequisite (embeddings extra), not a code defect. Acceptance fixtures:
+`tests/test_ask_retrieval_levers.py` (gold-turn-in-context on the vector
+lane; pool-membership + cap-review assertions on the degraded lane).
+
 **Strong-model 500-Q config (the toutable benchmark, ready to run):** the
 500-Q LongMemEval-S baseline (run_protocol step 5) with the STRONG reader
 model that reproduced the failing commits (qwen3.8-max, verified 2026-08-30

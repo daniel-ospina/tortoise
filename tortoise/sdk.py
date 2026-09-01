@@ -9885,6 +9885,10 @@ class TortoiseSDK:
         leg_trace: list[dict] | None = None,
         recency_field: str | None = None,
         recency_boost: float = 0.0,
+        keep_numeric: bool = False,
+        search_keys_prf: bool = False,
+        fusion_weights: dict | None = None,
+        fusion_k: int = 60,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -9958,6 +9962,24 @@ class TortoiseSDK:
             error → fail-open to plain RRF (logged, never crashes).
         recency_boost (R5 #1544): multiplier strength, clamped 0.0–10.0.
             Default 0.0 = off (byte-identical output to pre-R5).
+        keep_numeric (A1 #2070): ask-lane numeric-token policy — all-digit
+            tokens (money/quantity amounts) survive the sparse tokenizer so
+            SAME-VALUE dollar turns become retrievable. Default False = the
+            search lane stays byte-identical (numeric tokens still dropped).
+        search_keys_prf (A4 #2070): pseudo-relevance-feedback expansion — a
+            bounded SECOND FTS pass whose OR-union is the original query's
+            tokens (slots reserved) PLUS additive aliases harvested from the
+            retrieved pool's top-5 hits' ``search_keys`` (never replacing
+            original tokens; bounded raise to 12 + 8 terms). Default False =
+            single pass, byte-identical. Ask lane passes True.
+        fusion_weights (A3 #2070): explicit per-strategy RRF weights
+            override. Default None = the shared global resolution
+            (TORTOISE_FUSION_WEIGHTS env → the shipped ``{"vector": 1.5}``)
+            unchanged. Ask lane passes its own TORTOISE_ASK_FUSION_WEIGHTS
+            knob through this slot.
+        fusion_k (A3 #2070): the RRF damping constant override (the
+            historical Cormack k=60). Default 60 = unchanged. Ask lane
+            threads its TORTOISE_ASK_FUSION_K knob through this slot.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -10070,6 +10092,9 @@ class TortoiseSDK:
             vector_index_api=getattr(proj, "_vector_index_api", None),
             excluded_statuses=() if include_terminal else None,
             leg_trace=leg_trace,
+            # A1 (#2070): the ask-lane numeric-token policy threads into the
+            # sparse leg's OR-union (default False = search lane unchanged).
+            keep_numeric=keep_numeric,
         )
 
         if not raw_results:
@@ -10151,6 +10176,29 @@ class TortoiseSDK:
                         if pid not in seen)
                     raw_results["structural"] = merged
 
+        # A4 (#2070): search_keys pseudo-relevance-feedback expansion (ask
+        # lane, caller-gated). A bounded SECOND FTS pass whose OR-union is
+        # the original query's tokens (slots reserved per build_or_query's
+        # cap) PLUS additive aliases harvested from the retrieved pool's
+        # top-5 hits — never replacing original tokens. Fail-open: any fetch/
+        # query failure keeps the ORIGINAL fts leg (byte-identical); the
+        # expansion is additive recall only.
+        if search_keys_prf and raw_results.get("fts"):
+            expanded_fts = self._search_keys_prf_expansion(
+                query, raw_results["fts"],
+                str_limit=str_limit,
+                excluded_statuses=() if include_terminal else None,
+                leg_trace=leg_trace,
+                # P1-fix (#2070): the second pass respects the caller's A1
+                # keep_numeric — an operator who opted OUT of numeric tokens
+                # must not have them silently re-introduced by the PRF pass
+                # (the alias harvest stays numeric-aware; only the original
+                # query's re-tokenization honors the opt-out).
+                keep_numeric=keep_numeric,
+            )
+            if expanded_fts is not None:
+                raw_results["fts"] = expanded_fts
+
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:
             strat_name, ranked = next(iter(raw_results.items()))
@@ -10169,18 +10217,25 @@ class TortoiseSDK:
             # toward the stronger leg without abandoning the others. Env
             # override for tuning: TORTOISE_FUSION_WEIGHTS='{"vector": 2.0}'
             # (JSON; the LongMemEval-S re-burn later will refine this).
-            fusion_weights = {"vector": 1.5}
-            _fw = os.environ.get("TORTOISE_FUSION_WEIGHTS")
-            if _fw:
-                import json as _json
-                try:
-                    fusion_weights = _json.loads(_fw)
-                except (ValueError, TypeError):
-                    fusion_weights = {"vector": 1.5}
+            # A3 (#2070): the ASK lane threads its own
+            # TORTOISE_ASK_FUSION_WEIGHTS / TORTOISE_ASK_FUSION_K knobs via
+            # the ``fusion_weights``/``fusion_k`` kwargs — when the caller
+            # passes None/60 the shared resolution below is unchanged
+            # (search lane byte-identical).
+            if fusion_weights is None:
+                fusion_weights = {"vector": 1.5}
+                _fw = os.environ.get("TORTOISE_FUSION_WEIGHTS")
+                if _fw:
+                    import json as _json
+                    try:
+                        fusion_weights = _json.loads(_fw)
+                    except (ValueError, TypeError):
+                        fusion_weights = {"vector": 1.5}
             fused = rrf_fusion(
                 ranked_lists,
                 strategy_names=list(raw_results.keys()),
                 weights=fusion_weights,
+                k=fusion_k,
             )
             # Apply threshold filter to RRF scores
             if threshold > 0:
@@ -10314,7 +10369,9 @@ class TortoiseSDK:
         try:
             if entity_type == "point":
                 rows = graph.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.content, n.pointKind",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN n.id, n.content, n.pointKind, "
+                    "       coalesce(n.has_answer, false)",
                     params={"ids": result_ids},
                 ).result_set
                 for row in rows:
@@ -10322,6 +10379,10 @@ class TortoiseSDK:
                     entity_data[pid] = {
                         "content": row[1],
                         "kind": row[2],
+                        # A5 (#2070): the stored evidence mark rides the hit
+                        # payload (mirrors the eval's point_props_for_hits)
+                        # so the ask lane's evidence boost has material.
+                        "has_answer": bool(row[3]),
                     }
             elif entity_type == "event":
                 rows = graph.query(
@@ -10477,6 +10538,8 @@ class TortoiseSDK:
                 session_id=cap_session,
                 event_id=cap_event,
                 source_path=cap_source_path,
+                # A5 (#2070): stored evidence mark (additive in to_dict).
+                has_answer=pt.get("has_answer", False),
             )
             results.append(result)
 
@@ -10504,6 +10567,103 @@ class TortoiseSDK:
         # Default: RRF relevance order (already in fused order)
 
         return [r.to_dict() for r in results[:limit]]
+
+    # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
+
+    def _search_keys_prf_expansion(
+        self,
+        query: str,
+        fts_hits: list[tuple[str, float]],
+        *,
+        str_limit: int,
+        excluded_statuses: tuple | None,
+        leg_trace: list[dict] | None,
+        keep_numeric: bool = False,
+    ) -> list[tuple[str, float]] | None:
+        """A4 (#2070): bounded second FTS pass with ADDITIVE search_keys
+        expansion terms harvested from the retrieved pool's top-5 hits.
+
+        Pseudo-relevance feedback: the top hits of the FIRST pass are the
+        relevance seeds — their stored ``search_keys`` aliases (the E3
+        #1535 extractor-written vocabulary) become extra OR terms for a
+        second FTS pass, so turns that share the aliases but not the query's
+        literal tokens surface. Injection respects ``build_or_query``'s
+        OR-cap contract: the original query's tokens keep their slots
+        (``DEFAULT_MAX_OR_TERMS``) and the aliases fill ONLY the bounded
+        expansion tail (``DEFAULT_MAX_EXPANSION_TERMS``) — an alias can
+        never displace an original token, and the expansion is additive
+        recall only (never a replacement).
+
+        Fail-open contract (the pre-mortem's "budget-compatible" guard): any
+        fetch/query failure returns ``None`` and the caller keeps the
+        ORIGINAL fts leg — byte-identical behavior, and the A4 pass can
+        never turn a working lane into a broken one. Returns the MERGED fts
+        leg (expanded run first, first-pass-only ids appended in their
+        original order) when the expansion ran and returned hits; ``None``
+        when there is nothing to expand (no aliases / empty result).
+        """
+        if not fts_hits:
+            return None
+        top_ids = [pid for pid, _score in fts_hits[:5] if pid]
+        if not top_ids:
+            return None
+        proj = self._get_proj()
+        try:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.id, coalesce(n.search_keys, '')",
+                params={"ids": top_ids},
+            ).result_set
+        except Exception:
+            _logger.warning(
+                "A4 search_keys fetch failed — keeping the original fts "
+                "leg", exc_info=True)
+            return None
+        aliases: list[str] = []
+        for row in rows:
+            v = row[1]
+            if isinstance(v, (list, tuple)):
+                aliases.extend(str(x) for x in v if x)
+            elif v:
+                aliases.append(str(v))
+        aliases = [a.strip() for a in aliases if a and a.strip()]
+        if not aliases:
+            return None
+
+        from .search_engine import run_fts_query
+        _exp_trace: list[dict] = []
+        try:
+            expanded = run_fts_query(
+                proj.g, query, entity_type="point", limit=str_limit,
+                excluded_statuses=excluded_statuses,
+                # P1-fix: honor the caller's A1 opt-out for the original
+                # query's re-tokenization (the alias harvest below already
+                # runs numeric-aware via expansion_tokens' keep_numeric).
+                keep_numeric=keep_numeric,
+                expansion_terms=aliases,
+                leg_trace=_exp_trace,
+            )
+        except Exception:
+            _logger.warning(
+                "A4 expansion FTS pass failed — keeping the original fts "
+                "leg", exc_info=True)
+            return None
+        if not expanded:
+            # Empty second pass = fail-open: the ORIGINAL fts leg stays
+            # (byte-identical). P2-fix (#2070): do NOT ride the degraded
+            # entry into the shared trace — a healthy lane that got a
+            # transiently-empty expansion must not report
+            # retrieval_degraded (the A4 fail-open contract: an expansion
+            # can never turn a working lane into a broken one).
+            return None
+        if leg_trace is not None:
+            # the second pass's own per-leg entry rides the shared trace
+            # (the FIRST pass's entry was already merged by degradation_chain)
+            leg_trace.extend(_exp_trace)
+        seen = {pid for pid, _score in expanded}
+        merged = list(expanded)
+        merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
+        return merged
 
     # ── Ask lane (#1987 Task 5): the SDK answer surface ─────────────────────
 
@@ -10579,13 +10739,43 @@ class TortoiseSDK:
         the D8 supersession markers reach the reader; cost-bounded by the
         same 8k/40 caps) → ask-path annotation (session-date join + speaker)
         → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
-        → ``assemble_context`` (8000-token estimate cap AND 32 KiB byte cap,
-        whole-hit drop) → ``detect_question_type`` (or caller override) →
+        → A5 evidence-mark boost (default ON — reorders the deduped pool by
+        stored ``has_answer`` marks; zero marks = no-op) → A7 rerank
+        (env-gated OFF by default) → ``assemble_context`` (8000-token
+        estimate cap AND 32 KiB byte cap, whole-hit drop) →
+        ``detect_question_type`` (or caller override) →
         ONE reader call via ``build_reader_model()`` (never an
         LLM-skip pre-gate — exactly one model call incl. empty context) →
         ``_looks_abstained`` (blank → ``NO_EVIDENCE_TEXT``) → best-effort
         ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
         None → no-op).
+
+        #2070 retrieval knobs (ask-lane only — the search lane is
+        untouched, both-not-either preserved):
+
+          * A1 numeric tokens — ``TORTOISE_ASK_NUMERIC_TOKENS`` (default ON):
+            all-digit money/quantity tokens survive the sparse tokenizer
+            (same-value dollar questions retrieve their turns).
+          * A2 vector leg — the ``embeddings`` extra is a DOCUMENTED runtime
+            requirement for ask quality (NEVER enforced): when the embedder
+            is absent the vector strategy is never submitted and
+            ``retrieval_degraded`` stays honest (no silent success).
+          * A3 fusion — ``TORTOISE_ASK_FUSION_WEIGHTS`` (JSON; default None
+            = the shared global 1.5) + ``TORTOISE_ASK_FUSION_K`` (default 60).
+          * A4 search_keys PRF — ``TORTOISE_ASK_SEARCH_KEYS_PRF`` (default
+            ON): additive expansion terms from the retrieved pool's
+            top-5 hits' ``search_keys`` (original tokens always keep their
+            OR-cap slots).
+          * A5 evidence boost — ``TORTOISE_ASK_EVIDENCE_BOOST`` (default
+            ON) + ``TORTOISE_ASK_EVIDENCE_BOOST_ANSWER_STRING/VERBATIM/SOURCE``.
+          * A6 caps — ``TORTOISE_ASK_RETRIEVAL_LIMIT`` /
+            ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
+            ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` (default OFF = 40/40/8000;
+            the retrieval-window limit is threaded IN TANDEM with the
+            assembly caps — raising only the assemble cap changes nothing).
+          * A7 rerank — ``TORTOISE_ASK_RERANK`` (default OFF, phase 2):
+            cross-encoder + MMR port (tortoise/rerank.py), degrade-to-
+            current contract.
 
         Returns the 12-field response shape: ``{answer, abstained,
         question_type, question_date, evidence, context_tokens, model,
@@ -10602,13 +10792,15 @@ class TortoiseSDK:
         import time as _time  # noqa: I001
         from datetime import datetime as _dt2
         from tortoise.retrieval import (
-            DEFAULT_CONTEXT_ITEM_CAP,
-            DEFAULT_CONTEXT_TOKEN_CAP,
             DEFAULT_MAX_CHUNKS_PER_SESSION,
+            apply_evidence_boost,
+            ask_env_bool,
             assemble_context,
             dedup_pool,
             estimate_tokens_ask,
             render_context,
+            resolve_ask_boost_multipliers,
+            resolve_ask_retrieval_caps,
         )
         from tortoise.metering import estimate_ask_cost_usd, select_ask_meter_rates
         from tortoise.reader import (
@@ -10635,12 +10827,36 @@ class TortoiseSDK:
             question_date = _dt2.now(UTC).strftime("%Y-%m-%d")
 
         # 2. Retrieval (whole-retrieval raises → AskRetrievalUnavailable).
+        #    A1/A3/A4/A6 (#2070): the ask-lane retrieval knobs resolve ONCE
+        #    here (env-gated; defaults = historical behavior) and thread into
+        #    the one bounded RAG pass. A6's retrieval-window limit and the
+        #    assembly caps resolve IN TANDEM (``resolve_ask_retrieval_caps``)
+        #    — the gold is cut at ``result_ids[:limit]`` inside the retrieval
+        #    call BEFORE dedup/assemble, so a cap raise that does not also
+        #    raise the window changes nothing.
+        caps = resolve_ask_retrieval_caps()
+        keep_numeric = ask_env_bool(
+            "TORTOISE_ASK_NUMERIC_TOKENS", True)       # A1, default ON
+        search_keys_prf = ask_env_bool(
+            "TORTOISE_ASK_SEARCH_KEYS_PRF", True)      # A4, default ON
+        evidence_boost = ask_env_bool(
+            "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
+        from tortoise.retrieval import (  # noqa: I001
+            ASK_FUSION_WEIGHTS_ENV, ASK_FUSION_K_ENV, ask_env_int,
+            ask_env_weights,
+        )
+        fusion_weights = ask_env_weights(ASK_FUSION_WEIGHTS_ENV, None)  # A3
+        fusion_k = ask_env_int(ASK_FUSION_K_ENV, 60)                    # A3
         leg_trace: list[dict] = []
         try:
             hits = self.tortoise_fts_query(
-                question, limit=DEFAULT_CONTEXT_ITEM_CAP,
+                question, limit=caps["limit"],
                 pool_size=DEFAULT_POOL_SIZE, include_terminal=True,
-                leg_trace=leg_trace)
+                leg_trace=leg_trace,
+                keep_numeric=keep_numeric,
+                search_keys_prf=search_keys_prf,
+                fusion_weights=fusion_weights,
+                fusion_k=fusion_k)
         except AskRetrievalUnavailable:
             raise
         except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
@@ -10656,7 +10872,8 @@ class TortoiseSDK:
             raise AskRetrievalUnavailable(
                 f"annotation unavailable: {type(e).__name__}") from e
 
-        # 4. Dedup (annotated session key — P2-20) + assembly (8k/40/32KiB).
+        # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
+        #    rerank → assembly (8k/40/32KiB caps from ``caps``).
         try:
             def _ask_session_key(h: dict) -> str:
                 return (h.get("session_id")
@@ -10666,11 +10883,32 @@ class TortoiseSDK:
             deduped = dedup_pool(
                 annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
                 session_key=_ask_session_key)
+            # A5 (#2070): evidence-mark boost before assembly (mark_for=None =
+            # the stored-``has_answer`` fallback — source-session class,
+            # conservative). Zero marks → byte-identical order (all factors
+            # 1.0); the boost is a rank reorder, never a filter. Real product
+            # graphs carry zero marks until the extractor writes them
+            # (documented — the value is measured on seeded fixtures).
+            if evidence_boost:
+                boost_mult = resolve_ask_boost_multipliers()
+                deduped, _boost_stats = apply_evidence_boost(
+                    deduped,
+                    boost_answer_string=boost_mult["answer_string"],
+                    boost_verbatim=boost_mult["verbatim"],
+                    boost_source=boost_mult["source"],
+                )
+            # A7 (#2070): cross-encoder + MMR rerank (env-gated, default
+            # OFF — phase 2). Degrade-to-current: any failure keeps the
+            # deduped pool untouched; the rerank never raises.
+            from tortoise.rerank import ask_lane_rerank
+            deduped, _rerank_stats = ask_lane_rerank(
+                question, deduped, proj=self._get_proj(),
+                top_k=caps["context_item_cap"])
             assembled = assemble_context(
-                deduped, top_k=DEFAULT_CONTEXT_ITEM_CAP,
-                max_context_tokens=DEFAULT_CONTEXT_TOKEN_CAP,
+                deduped, top_k=caps["context_item_cap"],
+                max_context_tokens=caps["context_token_cap"],
                 question_date=question_date,
-                context_item_cap=DEFAULT_CONTEXT_ITEM_CAP,
+                context_item_cap=caps["context_item_cap"],
                 byte_cap=32768)
         except Exception as e:  # noqa: BLE001, RUF100
             raise AskRetrievalUnavailable(
