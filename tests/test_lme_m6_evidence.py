@@ -48,6 +48,9 @@ from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
 HEALTHY52 = Path(__file__).parent / "fixtures" / "lme_v2_healthy52.json"
+# #1901: the compact reval3 per-question evidence/chunk recall table (50
+# questions, git 7c55a03b) — the re-calibrated vacuity regression fixture.
+REVAL3_VACUITY = Path(__file__).parent / "fixtures" / "reval3_vacuity.json"
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -95,6 +98,54 @@ def _outcome(qid: str, *, er=None, tr=None, eturns: int = 0,
         "context_point_count": 3,
         "ingest": {"evidence_turns": eturns, "evidence_points": epoints},
     }
+
+
+def _reval3_outcomes() -> list[dict]:
+    """#1901: expand the committed reval3 vacuity fixture (50 questions) into
+    full build_report outcomes. The fixture carries the per-question recall
+    values the re-calibrated predicate reads (evidence_recall@k /
+    chunk_evidence_recall@k / evidence_retrieved@k / evidence_written /
+    session_recall@k / turn_recall@k / label); every other key is the
+    standard minimal shape, so the report reproduces the reval3 aggregate
+    numbers exactly (provenance in fixture._meta)."""
+    fix = json.loads(REVAL3_VACUITY.read_text(encoding="utf-8"))
+    outs = []
+    for q in fix["questions"]:
+        er = q["evidence_recall@k"]
+        cr = q["chunk_evidence_recall@k"]
+        eretr = q["evidence_retrieved@k"]
+        outs.append({
+            "question_id": q["question_id"],
+            "question_type": "single-session-user",
+            "question_date": "2024-01-15",
+            "label": q["label"],
+            "hypothesis": "h",
+            "session_recall@k": {str(k): q["session_recall@k"][str(k)]
+                                  for k in (5, 10, 20)},
+            "turn_recall@k": {str(k): q["turn_recall@k"][str(k)]
+                               for k in (5, 10, 20)},
+            "evidence_recall@k": {str(k): er[str(k)] for k in (5, 10, 20)},
+            "chunk_evidence_recall@k": {str(k): cr[str(k)]
+                                         for k in (5, 10, 20)},
+            "evidence_retrieved@k": {str(k): eretr[str(k)]
+                                      for k in (5, 10, 20)},
+            "evidence_written": q["evidence_written"],
+            "n_ingest_errors": 0,
+            "context_tokens": 100,
+            "context_point_count": 3,
+            "ingest": {"evidence_turns": 1,
+                        "evidence_points": q["evidence_written"]},
+        })
+    return outs
+
+
+def _reval3_report():
+    """#1901: build_report over the reval3 fixture outcomes (the shared
+    report builder call every reval3 vacuity test uses)."""
+    return build_report(
+        _reval3_outcomes(), dataset_id="d", split="s",
+        reader_model="r", judge_model="j", extraction_approach="x",
+        ks=(5, 10, 20), top_k=20, dataset_semantics_audit=_trusted_audit())
 
 
 # ── D1/D2: the three marks (unit) ──────────────────────────────────────────
@@ -642,6 +693,227 @@ def test_report_evidence_coverage_zero_when_no_evidence():
                           dataset_semantics_audit=_trusted_audit())
     assert report["retrieval"]["evidence_coverage"] == 0.0
     assert report["retrieval"]["evidence_recall@k"] is None
+
+
+# ── #1901: the re-calibrated vacuity ("the reader had NO usable evidence") ─
+
+def test_report_vacuity_recalibrated_predicate_matrix():
+    """The #1901 predicate semantics: a question is vacuous ONLY when the
+    top-k context carries no evidence-bearing content of any kind — no
+    marked extracted point (evidence_recall@k in {0.0, None}) AND no marked
+    raw chunk anchor (chunk_evidence_recall@k in {0.0, None}). A positive
+    evidence fraction (points surfaced), a positive chunk fraction (chunk
+    anchor present), or either None-with-other-positive = NOT vacuous (the
+    reader had something)."""
+    cases = [
+        # (qid, er, cr, expected vacuous) — er/cr at every k
+        ("zero-zero", 0.0, 0.0, True),
+        ("na-na", None, None, True),
+        ("zero-na", 0.0, None, True),
+        ("na-zero", None, 0.0, True),
+        ("point-surface", 0.5, 0.0, False),   # an evidence point IS in top-k
+        ("chunk-anchor", 0.0, 1.0, False),    # a chunk anchor IS in top-k
+        ("na-chunk", None, 1.0, False),       # chunk anchor, no points
+        ("both", 0.5, 1.0, False),
+    ]
+    outcomes = []
+    for qid, er, cr, _ in cases:
+        o = _outcome(qid, er=er, tr=er, eturns=2, epoints=5)
+        o["chunk_evidence_recall@k"] = {"5": cr, "10": cr, "20": cr}
+        o["evidence_retrieved@k"] = {"5": 0 if er == 0.0 else 2,
+                                      "10": 0 if er == 0.0 else 2,
+                                      "20": 0 if er == 0.0 else 2}
+        o["evidence_written"] = 5
+        outcomes.append(o)
+    report = build_report(outcomes, dataset_id="d", split="s",
+                          reader_model="r", judge_model="j",
+                          extraction_approach="x", ks=(5, 10, 20), top_k=20,
+                          dataset_semantics_audit=_trusted_audit())
+    rates = report["evidence"]["no_usable_evidence_rate@k"]
+    expected = round(sum(1 for _, _, _, v in cases if v) / len(cases), 4)
+    for k in ("5", "10", "20"):
+        assert rates[k] == expected
+    qids = set(report["evidence"]["no_usable_evidence_qids"])
+    assert qids == {qid for qid, _, _, v in cases if v}
+
+
+def test_report_vacuity_recalibrated_reval3_correlation():
+    """#1901 headline regression on the reval3 data: the OLD vacuity
+    predicate (evidence_retrieved@k == 0) flags 36/50 questions yet 32/36
+    are answered CORRECTLY (vacuous-acc 0.889 > non-vacuous 0.857 —
+    INVERTED, the misleading definition this issue fixes); the re-calibrated
+    predicate (no evidence point AND no chunk anchor in top-k) flags 9/50
+    and its vacuous-acc drops BELOW non-vacuous-acc at every k — the
+    predictive signal. The legacy keys stay byte-identical (additive)."""
+    report = _reval3_report()
+    ev = report["evidence"]
+    # legacy vacuity accounting unchanged (the D5 #1540 comparability pin)
+    assert ev["evidence_bearing_n"] == 17
+    assert ev["evidence_absent_n"] == 33
+    assert ev["vacuity_rate"] == round(3 / 17, 4)  # 0.1765, legacy pin
+    assert report["retrieval"]["evidence_vacuity_rate@k"] == {
+        "5": 0.1765, "10": 0.1765, "20": 0.1765}
+    # re-calibrated aggregates (computed over ALL 50 outcomes)
+    assert ev["no_usable_evidence_rate@k"] == {
+        "5": 0.34, "10": 0.2, "20": 0.18}
+    assert ev["no_usable_evidence_n@k"] == {"5": 17, "10": 10, "20": 9}
+    assert set(ev["no_usable_evidence_qids"]) == {
+        "21436231", "25e5aa4f", "5d3d2817", "75499fd8", "8550ddae",
+        "af8d2e46", "c8c3f81d", "caf9ead2", "e01b8e2f"}
+    # the correlation: re-derive the per-question classification from the
+    # report's own outcomes (the same documented predicate) and check
+    # vacuous-acc < non-vacuous-acc at every k — the re-calibrated vacuity
+    # concentrates failures, unlike the inverted legacy definition.
+    def _no_evidence(v):
+        return v is None or v == 0.0
+
+    for k in ("5", "10", "20"):
+        vac = [o for o in report["outcomes"]
+               if _no_evidence((o.get("evidence_recall@k") or {}).get(k))
+               and _no_evidence((o.get("chunk_evidence_recall@k") or {})
+                                .get(k))]
+        non = [o for o in report["outcomes"] if o not in vac]
+        assert len(vac) == ev["no_usable_evidence_n@k"][k]
+        vac_acc = sum(1 for o in vac if o["label"]) / len(vac)
+        non_acc = sum(1 for o in non if o["label"]) / len(non)
+        assert vac_acc < non_acc, f"k={k}: vacuous-acc {vac_acc} must be < " \
+            f"non-vacuous-acc {non_acc} (the re-calibrated predictive " \
+            "signal; the legacy definition inverted it 0.889 > 0.857)"
+    # reval3 provenance pins (the issue's claims, verified on the fixture):
+    # all 6 wrong answers have session@20 == 1.0 with evid@20 <= 0.25
+    # (low evidence in context is a NECESSARY condition for failure), and
+    # exactly the 2 wrong answers with NO evidence-bearing content of any
+    # kind (no point, no chunk anchor) are flagged vacuous at top_k — the
+    # other 4 failed DESPITE evidence (reader errors on present evidence,
+    # a separate diagnostic, never vacuity).
+    wrong = [o for o in report["outcomes"] if not o["label"]]
+    assert len(wrong) == 6
+    for o in wrong:
+        assert (o.get("session_recall@k") or {}).get("20") == 1.0
+        evid = (o.get("evidence_recall@k") or {}).get("20")
+        assert (evid or 0) <= 0.25
+    vac_qids = set(ev["no_usable_evidence_qids"])
+    vac_wrong = {o["question_id"] for o in wrong} & vac_qids
+    assert vac_wrong == {"5d3d2817", "75499fd8"}
+
+
+def test_report_vacuity_recalibrated_old_metric_unchanged():
+    """#1901 additive contract (the #1763 pattern): the legacy vacuity keys
+    are byte-identical whether or not the outcomes carry the chunk seam the
+    re-calibrated metric reads, and the re-calibrated keys are ABSENT when
+    the seam is missing (never fabricated from the census)."""
+    full = _reval3_outcomes()
+    stripped = []
+    for o in full:
+        o2 = dict(o)
+        o2.pop("chunk_evidence_recall@k", None)
+        stripped.append(o2)
+    with_seam = _reval3_report()
+    without_seam = build_report(
+        stripped, dataset_id="d", split="s", reader_model="r",
+        judge_model="j", extraction_approach="x", ks=(5, 10, 20),
+        top_k=20, dataset_semantics_audit=_trusted_audit())
+    # legacy aggregation byte-identical (reads evidence_retrieved@k only)
+    assert with_seam["evidence"]["vacuity_rate"] == \
+        without_seam["evidence"]["vacuity_rate"]
+    assert with_seam["retrieval"]["evidence_vacuity_rate@k"] == \
+        without_seam["retrieval"]["evidence_vacuity_rate@k"]
+    assert with_seam["evidence"]["evidence_bearing_n"] == \
+        without_seam["evidence"]["evidence_bearing_n"]
+    # no chunk seam → the re-calibrated readout is absent, never fabricated
+    assert "no_usable_evidence_rate@k" not in without_seam["evidence"]
+    assert "no_usable_evidence_n@k" not in without_seam["evidence"]
+    assert "no_usable_evidence_qids" not in without_seam["evidence"]
+
+
+def test_report_vacuity_recalibrated_absent_keys_noop():
+    """Minimal outcomes without ANY chunk-evidence keys (pre-M6 checkpoints)
+    → the re-calibrated keys stay absent and the report never crashes (the
+    metric derives only from per-outcome keys that exist)."""
+    outcomes = [
+        _outcome("q1", er=0.5, tr=0.5, eturns=2, epoints=5),
+        _outcome("q2", er=0.0, tr=0.0, eturns=1, epoints=2),
+    ]
+    report = build_report(outcomes, dataset_id="d", split="s",
+                          reader_model="r", judge_model="j",
+                          extraction_approach="x", ks=(5, 10, 20), top_k=20,
+                          dataset_semantics_audit=_trusted_audit())
+    assert "no_usable_evidence_rate@k" not in report["evidence"]
+    assert "no_usable_evidence_n@k" not in report["evidence"]
+    assert "no_usable_evidence_qids" not in report["evidence"]
+    # legacy math untouched
+    assert report["evidence"]["vacuity_rate"] == 0.0
+
+
+def test_report_vacuity_recalibrated_mixed_seam_fails_closed():
+    """#1901 fail-closed guard (review-round-1 P2): the re-calibrated keys
+    are emitted ONLY when EVERY outcome carries a COMPLETE chunk seam. A
+    mixed pre-seam/post-seam checkpoint (one outcome without the chunk key)
+    or a seam-bearing outcome whose chunk dict misses an aggregated k leaves
+    the anchor state UNKNOWN — unknown must never be counted as "no anchor"
+    (that would silently re-introduce the misleading vacuity inflation the
+    issue fixes), so the whole readout stays absent."""
+    base = [
+        _outcome("q1", er=0.0, tr=0.0, eturns=2, epoints=5),
+        _outcome("q2", er=0.5, tr=0.5, eturns=2, epoints=5),
+    ]
+    for o in base:
+        o["chunk_evidence_recall@k"] = {"5": 0.0, "10": 0.0, "20": 0.0}
+        o["evidence_retrieved@k"] = {"5": 0, "10": 0, "20": 0}
+        o["evidence_written"] = 5
+    seamless = [dict(o) for o in base]
+    for o in seamless:
+        o["question_id"] = o["question_id"] + "-preseam"
+        o.pop("chunk_evidence_recall@k", None)
+    # mixed: q1 has the seam, q1-preseam does not
+    mixed = [base[0], seamless[0]]
+    report = build_report(mixed, dataset_id="d", split="s",
+                          reader_model="r", judge_model="j",
+                          extraction_approach="x", ks=(5, 10, 20), top_k=20,
+                          dataset_semantics_audit=_trusted_audit())
+    assert "no_usable_evidence_rate@k" not in report["evidence"]
+    assert "no_usable_evidence_n@k" not in report["evidence"]
+    assert "no_usable_evidence_qids" not in report["evidence"]
+    # incomplete-k: the chunk dict is present but misses k=10 → unknown at
+    # that k → fail closed (absent) rather than classifying q1 as vacuous.
+    incomplete = [dict(o) for o in base]
+    incomplete[0]["chunk_evidence_recall@k"] = {"5": 0.0, "20": 0.0}
+    report2 = build_report(incomplete, dataset_id="d", split="s",
+                           reader_model="r", judge_model="j",
+                           extraction_approach="x", ks=(5, 10, 20),
+                           top_k=20,
+                           dataset_semantics_audit=_trusted_audit())
+    assert "no_usable_evidence_rate@k" not in report2["evidence"]
+    assert "no_usable_evidence_n@k" not in report2["evidence"]
+    assert "no_usable_evidence_qids" not in report2["evidence"]
+    # missing point-side dict (round-2 P2, symmetric guard): the chunk seam
+    # is complete but evidence_recall@k is absent → point state UNKNOWN →
+    # fail closed (absent), never a fabricated vacuous.
+    missing_evid = [dict(o) for o in base]
+    missing_evid[0].pop("evidence_recall@k", None)
+    report3 = build_report(missing_evid, dataset_id="d", split="s",
+                           reader_model="r", judge_model="j",
+                           extraction_approach="x", ks=(5, 10, 20),
+                           top_k=20,
+                           dataset_semantics_audit=_trusted_audit())
+    assert "no_usable_evidence_rate@k" not in report3["evidence"]
+    assert "no_usable_evidence_n@k" not in report3["evidence"]
+    assert "no_usable_evidence_qids" not in report3["evidence"]
+    # the complete-seam control still emits (the guard is per-run, not
+    # poisoned by the incomplete variants).
+    control = build_report(base, dataset_id="d", split="s",
+                           reader_model="r", judge_model="j",
+                           extraction_approach="x", ks=(5, 10, 20), top_k=20,
+                           dataset_semantics_audit=_trusted_audit())
+    assert control["evidence"]["no_usable_evidence_n@k"] == {
+        "5": 1, "10": 1, "20": 1}
+    # legacy accounting is untouched by the guard in all shapes — both
+    # outcomes are evidence-bearing with 0 retrieved (legacy vacuity 1.0)
+    # even when the re-calibrated readout is suppressed.
+    assert report["evidence"]["vacuity_rate"] == 1.0
+    assert report2["evidence"]["vacuity_rate"] == 1.0
+    assert report3["evidence"]["vacuity_rate"] == 1.0
+    assert control["evidence"]["vacuity_rate"] == 1.0
 
 
 # ── #1763: the re-baselined answer-string evidence_recall readout ──────────
