@@ -308,6 +308,33 @@ def _reset_thresholds_for_tests() -> None:
 #: under the $0.01 target.
 ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m": 0.42}
 
+# #2069: STRONG-lane rates — qwen3.8-max via OpenRouter at verified $2.00/M
+# in, $6.00/M out × the same documented ×1.5 over-cover convention (so the
+# meter never under-counts on the strong lane; real worst ~$0.021, METERED
+# worst ~$0.032 — the $0.01/query structural target is broken for the strong
+# lane, recorded as an owner decision, see docs/runbook/1987-ask-abstention-
+# check.md §#2069).
+ASK_METER_RATES_STRONG = {"prompt_per_1m": 3.00, "completion_per_1m": 9.00}
+
+#: Family prefixes that meter at the STRONG rates (the model_adapters
+#: ``_SPEC_FAMILY_PROVIDERS`` openrouter-only families — keep in sync).
+_ASK_STRONG_FAMILIES = frozenset({"qwen", "upstage", "anthropic"})
+
+
+def select_ask_meter_rates(model_id: str | None) -> dict:
+    """Pick the ask-lane metering rates by the SERVING wire id's family
+    (#2069): a family-prefixed strong-family spec (``qwen/qwen3.8-max`` —
+    the ``_LockedReader.model`` wire id) → ``ASK_METER_RATES_STRONG``;
+    everything else (bare ids, ``deepseek/*`` — incl. a deepseek spec
+    forced to openrouter via ``TORTOISE_ASK_PROVIDER``) stays on the
+    default deepseek envelope (the ×1.5 over-cover documents OpenRouter
+    markup, metering.py rates docstring).
+    """
+    family = (model_id or "").split("/", 1)[0]
+    if family in _ASK_STRONG_FAMILIES:
+        return ASK_METER_RATES_STRONG
+    return ASK_METER_RATES
+
 
 def estimate_ask_cost_usd(tokens_in: int, tokens_out: int,
                           rates: dict | None = None) -> float:

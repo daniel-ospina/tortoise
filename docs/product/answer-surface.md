@@ -119,6 +119,24 @@ surface — never the implicit answer path for search.
 - **Rates:** `ASK_METER_RATES = {"prompt_per_1m": 0.21, "completion_per_1m":
   0.42}` — verified deepseek-direct $0.14/$0.28 × a documented ×1.5 safety
   factor (covers the OpenRouter fallback markup). The meter over-covers.
+- **#2069 — strong-lane rates (spec-aware selection):** the ask lane meters
+  at the SERVING wire id's family: a family-prefixed strong-family spec
+  (`qwen/qwen3.8-max`, `upstage/solar-pro4`, `anthropic/claude-opus-5` —
+  OpenRouter-only families) → `ASK_METER_RATES_STRONG = {"prompt_per_1m":
+  3.00, "completion_per_1m": 9.00}` (verified qwen3.8-max $2.00/$6.00 × the
+  same ×1.5 over-cover); everything else (bare ids, `deepseek/*` — incl. a
+  deepseek spec forced to openrouter via `TORTOISE_ASK_PROVIDER`) stays on
+  the default envelope. Both `estimate_ask_cost_usd` call sites in
+  `sdk.ask` (the metering record + the response `cost_estimate_usd`) select
+  via `select_ask_meter_rates(model.model)` — a strong-lane query never
+  under-counts at the deepseek envelope (~10× under-count pre-fix).
+- **#2069 — the strong lane BREAKS the $0.01/query structural target:**
+  metered worst ~$0.032 (9.2k in + 500 out at STRONG {3.00, 9.00}), real
+  qwen rates worst ~$0.021; typical ~$0.012 at STRONG. Recorded owner
+  decision (pending, runbook §#2069): tighten the strong lane's context
+  cap, exploit OpenRouter's $0.25/M cache-read, or re-baseline the target
+  for the strong lane. The 60/min dollar blast radius grows from ~$0.14 to
+  ~$1.28/min/team worst case.
 - **Budget:** `MAX_ASK_LLM_PER_MIN = 60` per team, per process (a
   multi-worker uvicorn deployment scales the bound ×workers). Past budget →
   **429 `quota_exceeded` + Retry-After** (the window self-heals). Per-team

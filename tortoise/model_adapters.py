@@ -448,6 +448,164 @@ def resolve_extractor_provider() -> tuple[str, str | None]:
     return (None, None)
 
 
+# ── Ask-lane provider-capability routing (#2069) ───────────────────────────
+# The ask lane's reader routing is provider-capability-aware (spec declares
+# the family): a spec valid only on OpenRouter (``qwen/qwen3.8-max``) must
+# NEVER be posted to the deepseek-direct primary (HTTP 400 → correctly
+# FATAL_CONFIG → 502 — the #2069 defect). The family prefix decides the
+# servable set; ``resolve_reader_provider`` intersects it with the
+# env/keys-resolved order and honors ``TORTOISE_ASK_PROVIDER``.
+
+#: Family prefix → providers that can serve the family. OpenRouter-only
+#: families (qwen/, upstage/, anthropic/, … — the MODELS registry's
+#: judge/reader-only families); ``deepseek`` (prefixed or bare) keeps the
+#: deepseek-direct/openrouter/venice pool. An UNKNOWN family must fail loud
+#: — never "→ all" (a typo'd/future family must not fall through to
+#: deepseek-direct and re-introduce the 400-on-foreign-spec defect).
+_SPEC_FAMILY_PROVIDERS = {
+    "qwen": {"openrouter"},
+    "upstage": {"openrouter"},
+    "anthropic": {"openrouter"},
+    "deepseek": {"deepseek-direct", "openrouter", "venice"},
+}
+
+#: Ask-lane provider enum (``TORTOISE_ASK_PROVIDER`` valid values).
+_ASK_PROVIDERS = ("deepseek-direct", "openrouter", "venice")
+
+#: Provider → key env var (the empty-intersection guard names these).
+_PROVIDER_KEY_ENV = {
+    "deepseek-direct": "DEEPSEEK_API_KEY",
+    "openrouter": "OPENROUTER_API_KEY",
+    "venice": "VENICE_API_KEY",
+}
+
+#: Ordered provider chain per explicit primary (mirrors
+#: ``resolve_extractor_provider``'s ``_chain`` ordering).
+_ASK_PROVIDER_CHAIN = {
+    "deepseek-direct": ("deepseek-direct", "openrouter", "venice"),
+    "openrouter": ("openrouter", "deepseek-direct", "venice"),
+    "venice": ("venice", "openrouter", "deepseek-direct"),
+}
+
+
+def _providers_can_serve(model_id: str) -> set[str]:
+    """Provider-capability map (#2069): which providers can serve a spec.
+
+    Family = the spec's prefix (``qwen/``, ``upstage/``, ``anthropic/`` →
+    OpenRouter-only; ``deepseek/`` + bare deepseek ids → the
+    deepseek-direct/openrouter/venice pool). An UNKNOWN family prefix fails
+    LOUD with ``ValueError`` naming the family (never "→ all") — an
+    unrecognized family must never fall through to deepseek-direct and
+    re-introduce the defect (deepseek 400 on a foreign spec). The ask lane
+    normalizes MODELS keys (``_ASK_MODELS_KEY_SPECS``) and rejects the
+    eval's colon-form BEFORE this runs, so a bare ``qwen3.8-max`` or
+    ``openrouter:qwen/qwen3.8-max`` never reaches the unknown-family branch.
+    """
+    family, sep, _rest = model_id.partition("/")
+    if not sep:
+        # bare id — deepseek back-compat; a bare non-deepseek id (post
+        # ``_ASK_MODELS_KEY_SPECS`` normalization) fails loud.
+        if not family.startswith("deepseek"):
+            raise ValueError(
+                f"unknown model family for bare {model_id!r} — bare "
+                f"non-deepseek ids must use the family-prefixed form "
+                f"(e.g. 'qwen/qwen3.8-max', 'upstage/solar-pro4', "
+                f"'anthropic/claude-opus-5')")
+        family = "deepseek"
+    servable = _SPEC_FAMILY_PROVIDERS.get(family)
+    if servable is None:
+        raise ValueError(
+            f"unknown model family {family!r} in {model_id!r} — no provider "
+            f"can serve it; recognized families: "
+            f"{', '.join(sorted(_SPEC_FAMILY_PROVIDERS))}")
+    return servable
+
+
+def resolve_reader_provider(model_id: str) -> tuple[str | None, list[str]]:
+    """Resolve (primary, ordered pool) for the ASK lane (#2069).
+
+    The servable set comes from ``_providers_can_serve(model_id)`` (the
+    family capability map); the env/keys-resolved order is INTERSECTED with
+    it. ``TORTOISE_ASK_PROVIDER`` (default ``auto``) selects the primary;
+    an explicit value without its key fails closed with ``ValueError``
+    (mirror ``resolve_extractor_provider``). An EMPTY intersection raises a
+    build-time ``ValueError`` naming the missing key — fail-fast, NEVER a
+    silent misbuild that 401s at call time. The deepseek family preserves
+    the extraction lane's lenient no-key default (a single OpenRouter
+    adapter) so no-key ask behavior is unchanged.
+    """
+    explicit = (os.environ.get("TORTOISE_ASK_PROVIDER", "").strip().lower()
+                or "auto")
+    ds_key = bool(os.environ.get("DEEPSEEK_API_KEY"))
+    or_key = bool(os.environ.get("OPENROUTER_API_KEY"))
+    vz_key = bool(os.environ.get("VENICE_API_KEY"))
+    keyed = {"deepseek-direct": ds_key, "openrouter": or_key,
+             "venice": vz_key}
+    servable = _providers_can_serve(model_id)
+
+    if explicit != "auto":
+        if explicit not in _ASK_PROVIDERS:
+            raise ValueError(
+                f"TORTOISE_ASK_PROVIDER={explicit!r} invalid — valid values: "
+                f"auto | {' | '.join(_ASK_PROVIDERS)}")
+        if explicit not in servable:
+            raise ValueError(
+                f"TORTOISE_ASK_PROVIDER={explicit} cannot serve {model_id!r} "
+                f"— the {model_id.split('/', 1)[0]} family is served only by "
+                f"{', '.join(sorted(servable))}")
+        if not keyed[explicit]:
+            raise ValueError(
+                f"TORTOISE_ASK_PROVIDER={explicit} but "
+                f"{_PROVIDER_KEY_ENV[explicit]} is not set — an explicit "
+                f"provider names a key that isn't configured; never "
+                f"silently routing elsewhere (#1530 fail-closed)")
+        chain = _ASK_PROVIDER_CHAIN[explicit]
+        pool = [p for p in chain if p in servable and keyed[p]]
+        return (explicit, pool)
+
+    # auto mode: ordered servable providers that have keys configured.
+    pool = [p for p in _ASK_PROVIDER_CHAIN["deepseek-direct"]
+            if p in servable and keyed[p]]
+    if pool:
+        return (pool[0], pool)
+    # Empty intersection. The deepseek family keeps the lenient no-key
+    # default (a single OpenRouter adapter — no-key ask behavior unchanged);
+    # every other family fails LOUD at build time naming the key it needs.
+    if "deepseek-direct" in servable and not any(keyed.values()):
+        return (None, ["openrouter"])
+    missing = sorted({_PROVIDER_KEY_ENV[p] for p in servable
+                      if not keyed[p]})
+    raise ValueError(
+        f"no configured provider can serve {model_id!r}: the "
+        f"{', '.join(sorted(servable))} lane(s) need "
+        f"{' or '.join(missing)} in the environment")
+
+
+def _build_routing_model(model_id: str, pool_names: list[str], *,
+                         max_tokens, temperature, json_mode):
+    """Shared private pool-builder (#2069) — both lanes' RoutingModel /
+    RotatingModel construction (extraction behavior byte-identical)."""
+    providers = [_build_single(p, model_id, max_tokens=max_tokens,
+                               temperature=temperature, json_mode=json_mode)
+                 for p in pool_names]
+    # Pilot #1549: 3+ configured providers → the rotating pool (spread the
+    # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
+    if len(providers) >= 3:
+        # Scale-optimized weights (pilot #1549 research): order the pool
+        # Venice-first (1000 RPM backbone), OpenRouter (cheapest lane), then
+        # DeepSeek direct as the small spare (expensive + starves under load).
+        by_name = {p.provider: p for p in providers}
+        ordered = [by_name.get(name) for name in
+                   ("venice", "openrouter", "deepseek-direct")]
+        ordered = [p for p in ordered if p is not None]
+        weights = {"venice": 0.50, "openrouter": 0.35, "deepseek-direct": 0.15}
+        w = [weights.get(p.provider, 0.33) for p in ordered]
+        return RotatingModel(ordered, cooldown_s=_failover_cooldown_seconds(),
+                             weights=w, model=model_id)
+    return RoutingModel(providers[0], providers[1] if len(providers) > 1 else None,
+                        cooldown_s=_failover_cooldown_seconds())
+
+
 # ── In-process failover cooldown (D5 flap guard) ───────────────────────────
 
 _FAILOVER_COOLDOWN: dict[str, float] = {}  # provider -> last transient failure ts
@@ -787,6 +945,45 @@ _REGISTRY_KEY_TO_ID = {
 REGISTRY_KEY_TO_ID = _REGISTRY_KEY_TO_ID
 
 
+# #2069: ASK-lane MODELS-key normalization — bare non-deepseek MODELS
+# registry keys (qwen3.8-max, solar-pro4, claude-opus-5 — passed through
+# unmapped by ``_REGISTRY_KEY_TO_ID`` above, which maps deepseek-* keys
+# only) are NOT deepseek-family and must never route to deepseek-direct.
+# Resolve BEFORE the family parse: the bare key → its family-prefixed
+# spec (derived from the MODELS registry's target slugs — verified:
+# qwen3.8-max → qwen/qwen3.8-max, solar-pro4 → upstage/solar-pro4,
+# claude-opus-5 → anthropic/claude-opus-5). A bare key absent from this
+# map with a non-deepseek name fails loud in ``_providers_can_serve``.
+_ASK_MODELS_KEY_SPECS = {
+    "qwen3.8-max": "qwen/qwen3.8-max",
+    "solar-pro4": "upstage/solar-pro4",
+    "claude-opus-5": "anthropic/claude-opus-5",
+}
+
+
+def _normalize_ask_model_spec(model_id: str) -> str:
+    """Ask-lane spec normalization (#2069) — runs BEFORE the family parse:
+    (1) the eval registry-key remap (``_REGISTRY_KEY_TO_ID``, deepseek keys
+    only — back-compat); (2) colon-form REJECTION — the eval lane's
+    ``provider:model`` format (the documented ``TORTOISE_LME_READER_MODEL``
+    value) is NOT the product format, and ``openrouter:qwen/qwen3.8-max``
+    must not fall into unknown-prefix handling (it would 400 on
+    deepseek-direct → 502); the ask lane accepts ``family/model`` ONLY and
+    raises pointing at the family-prefixed form; (3) bare MODELS keys via
+    ``_ASK_MODELS_KEY_SPECS`` so a bare non-deepseek registry key never
+    routes to deepseek-direct."""
+    model_id = _REGISTRY_KEY_TO_ID.get(model_id, model_id)
+    if ":" in model_id:
+        raise ValueError(
+            f"ask-lane model spec {model_id!r} uses the eval's colon-form "
+            f"('provider:model') — the ask lane accepts the family-prefixed "
+            f"product form only (e.g. 'qwen/qwen3.8-max'); drop the provider "
+            f"prefix")
+    if "/" not in model_id:
+        model_id = _ASK_MODELS_KEY_SPECS.get(model_id, model_id)
+    return model_id
+
+
 def build_extractor_model(model_id: str | None = None, *,
                           max_tokens: int | None = 4000,
                           temperature: float = 0.0,
@@ -818,31 +1015,14 @@ def build_extractor_model(model_id: str | None = None, *,
     primary_name, pool_names = resolve_extractor_provider()  # noqa: RUF059
     if not pool_names:
         pool_names = ["openrouter"]  # lenient no-key default (D3)
-    providers = [_build_single(p, model_id, max_tokens=max_tokens,
-                               temperature=temperature, json_mode=json_mode)
-                 for p in pool_names]
-    # Pilot #1549: 3+ configured providers → the rotating pool (spread the
-    # sustained load + redundancy); 1-2 → the existing RoutingModel semantics.
-    if len(providers) >= 3:
-        # Scale-optimized weights (pilot #1549 research): order the pool
-        # Venice-first (1000 RPM backbone), OpenRouter (cheapest lane), then
-        # DeepSeek direct as the small spare (expensive + starves under load).
-        by_name = {p.provider: p for p in providers}
-        ordered = [by_name.get(name) for name in
-                   ("venice", "openrouter", "deepseek-direct")]
-        ordered = [p for p in ordered if p is not None]
-        weights = {"venice": 0.50, "openrouter": 0.35, "deepseek-direct": 0.15}
-        w = [weights.get(p.provider, 0.33) for p in ordered]
-        return RotatingModel(ordered, cooldown_s=_failover_cooldown_seconds(),
-                             weights=w, model=model_id)
-    return RoutingModel(providers[0], providers[1] if len(providers) > 1 else None,
-                        cooldown_s=_failover_cooldown_seconds())
+    return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
+                                temperature=temperature, json_mode=json_mode)
 
 
 def build_reader_model(model_id: str | None = None, *,
                        max_tokens: int = 500,
                        temperature: float = 0.0) -> RoutingModel:
-    """Build the ask-lane reader model (#1987 Task 3).
+    """Build the ask-lane reader model (#1987 Task 3, #2069).
 
     ``model_id=None`` resolves ``TORTOISE_ASK_MODEL`` (mirroring
     ``build_extractor_model``'s ``TORTOISE_EXTRACT_MODEL`` fallback),
@@ -850,13 +1030,26 @@ def build_reader_model(model_id: str | None = None, *,
     The ask lane pins ``json_mode=False`` structurally — retrieved memory
     can mention "json" and ``_should_send_json_mode`` must never fire
     ``response_format`` on a free-text answer (the eval lane was immune via
-    ``response_format=None``). Inherits ``build_extractor_model``'s
-    routing/failover: deepseek-direct primary + OpenRouter fallback (429/5xx
-    fails over per the existing adapter policy). Official reader call shape:
+    ``response_format=None``).
+
+    #2069 provider-capability routing: the pool is built ONLY from
+    providers that can serve the spec's family (``resolve_reader_provider``
+    — ``qwen/qwen3.8-max`` → OpenRouter-only; the deepseek-direct primary
+    is structurally ABSENT from non-deepseek pools, so a deepseek-direct
+    "400 on a foreign spec" is impossible). ``TORTOISE_ASK_PROVIDER``
+    (default ``auto``) selects the primary; an empty intersection (e.g. a
+    qwen spec with no ``OPENROUTER_API_KEY``) raises a build-time
+    ``ValueError`` naming the missing key. Official reader call shape:
     temperature 0, bounded ``max_tokens`` (default 500).
     """
     if model_id is None:
         model_id = (os.environ.get("TORTOISE_ASK_MODEL", "").strip()
                     or "deepseek/deepseek-v4-flash")
-    return build_extractor_model(model_id, max_tokens=max_tokens,
-                                 temperature=temperature, json_mode=False)
+    # #2069: registry-key remap + MODELS-key normalization + colon-form
+    # rejection BEFORE the family parse (a bare non-deepseek MODELS key or
+    # the eval's ``provider:model`` colon-form must never reach
+    # ``_providers_can_serve``'s unknown-family branch).
+    model_id = _normalize_ask_model_spec(model_id)
+    _primary_name, pool_names = resolve_reader_provider(model_id)  # noqa: RUF059
+    return _build_routing_model(model_id, pool_names, max_tokens=max_tokens,
+                                temperature=temperature, json_mode=False)
