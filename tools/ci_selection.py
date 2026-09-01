@@ -77,7 +77,12 @@ SOURCE_PATTERNS = {
             # exceptions.py is SHARED (cross-cutting leaf -> full matrix);
             # transport.py is dual-wired with api: its only direct unit test
             # is test_metering.py::test_selfhost_transport_exemption.
-            "tortoise/schemas.py", "tortoise/transport.py"),
+            "tortoise/schemas.py", "tortoise/transport.py",
+            # #2071: the spot-check tools are the product ask-lane QA — a
+            # spot-check-only PR selects the sdk surface (its tests live
+            # there: test_ask_spotcheck_judge.py).
+            "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
+            "tools/ask_spotcheck_probe.py"),
     "api": ("tortoise/hosted_api.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
@@ -123,6 +128,13 @@ TOOL_CARVEOUTS = (
     "tools/embedder_probe.py",
     "tools/calibrate_thresholds.py",
     "tools/pair_label_runner.py",
+    # #2071: the product-lane QA spot-check tools (ask_spotcheck + the
+    # consistency/probe harnesses) use the eval judge and own the
+    # test_ask_spotcheck_judge.py suite — a spot-check-only change must
+    # select the sdk ask-lane surface, not drop to tier-1 smoke.
+    "tools/ask_spotcheck.py",
+    "tools/ask_spotcheck_consistency.py",
+    "tools/ask_spotcheck_probe.py",
 )
 
 

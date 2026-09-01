@@ -47,8 +47,12 @@ deepseek specs and 400 is not a failover trigger) + the M5 `READER_MODEL`
 pin + cost re-measure; (2) retrieval: FTS top-40 misses gold turns on long
 haystacks (ceb5 at rank ~70) — hybrid/reranking or a reviewed top-k for the
 ask lane; (3) composition: the 3 SSP long-gold questions are structurally
-ungradeable by the containment judge's word-overlap bar. The gate results
-below remain the evidence base for those follow-ups.
+ungradeable by the containment judge's word-overlap bar — **DONE as of
+2026-08-31 (issue #2071): the spot-check grades EVERY question with the
+semantic judge (owner decision); the lexical bar is demoted to the key-free
+CI substitute only** (see the #2071 section below for the scoring change +
+comparability note). The gate results below remain the evidence base for
+those follow-ups.
 
 **Strong-model 500-Q config (the toutable benchmark, ready to run):** the
 500-Q LongMemEval-S baseline (run_protocol step 5) with the STRONG reader
@@ -241,6 +245,75 @@ reviewed top-k for the ask lane; (3) composition note: the 3 SSP
 long-gold questions are structurally ungradeable by the containment
 judge's word-overlap bar. Tracked via #2009 (detector) + a new issue for
 the reader-model/retrieval upgrade.
+
+---
+
+## Measurement fix (#2071) — spot-check full-semantic judge — 2026-08-31
+
+> **Scoring change on the QA spot-check surface (follow-up (3) landed).**
+> Owner decision 2026-08-31 (approved; scoping package
+> `docs/planning/2026-08-31-2071-scoping-package.md`): the spot-check grades
+> EVERY question with the benchmark-standard semantic judge
+> (`build_judge()` → the official gpt-4o anscheck — the same judge the
+> graded eval uses); the word-overlap bar
+> (`max(2, len(gold_words)//2)` on UNIQUE words) is REMOVED from the live
+> path and demoted to the key-free CI (MockJudge) substitute only.
+
+**Why:** the lexical bar was structurally unreachable for rubric-style
+long-gold SSP questions — d6233ab6 (79w gold: ≥28/56-unique-word overlap),
+1d4e3b97 (68w: ≥23/47), b0479f84 (63w: ≥24/49) — so a correct-but-
+paraphrased answer scored wrong. This was a measurement defect, not an
+answering defect (the graded eval already used the semantic judge; the
+published benchmark numbers were never produced by the broken bar).
+
+**What changed (files):**
+- `tools/ask_spotcheck.py::_grade` — every question routes to `build_judge()`
+  (official gpt-4o anscheck, benchmark-identical); the word-overlap bar is
+  gone from the live path; the `_abs` marker path is unchanged (precedes
+  the judge call). **No-key runtime contract:** fail-fast pre-flight in
+  `main()` verifies the judge provider key (default `OPENAI_API_KEY`;
+  `TORTOISE_LME_JUDGE_MODEL` names another provider → that provider's key)
+  BEFORE any question is graded and exits 2 naming the prerequisite —
+  NEVER a silent fallback to the removed bar (which would re-False the 3
+  long golds and produce a misleading aggregate).
+- `tools/longmem_eval/judge.py` — #2071 decision-record note in the header
+  (the #1949 pattern); `ScriptedSemanticJudge` added as the deterministic
+  scripted fake for long-gold CI fixtures (compliant-model pattern).
+- `tests/fixtures/ask_spotcheck_composition.json` — the 21-question
+  composition COMMITTED (reproducibility gap closed; the 0a995998 int
+  answer stringified); `--fixture` CLI arg / `TORTOISE_SPOTCHECK_FIXTURE`
+  env / committed fixture / `/tmp/ask_spotcheck.json` legacy fallback.
+- `tools/ask_spotcheck_consistency.py` (I2 harness) — spot-check semantic
+  verdicts vs the graded eval's semantic verdicts on the shared population
+  (same `build_judge` → agreement by construction, measured per question),
+  plus the CI-parity leg (containment vs semantic). Divergence policy:
+  (i) over-crediting a factually-wrong answer = BLOCKING; (ii) temporal
+  off-by-one (official template forbids penalizing; containment penalized
+  it — the bug) = recorded finding; (iii) `_abs` marker divergence =
+  recorded finding.
+- `tools/ask_spotcheck_probe.py` (I1 probe) — CURATED human-verified
+  correct-paraphrase answers for the 3 long-gold questions injected
+  directly (isolating the judge from reader capability; the default reader
+  cannot answer b0479f84 (#2069) or 1d4e3b97 (#2070)); live path is
+  key-gated (pending keys — offline fake-judge pin runs 3/3 True).
+- `tests/test_ask_spotcheck_judge.py` — 27 tests pinning the fixture, the
+  full-semantic routing, the fail-fast contract, provenance fields, the
+  consistency divergence policy, and the 3/3 offline probe pin.
+
+**Comparability note (IMPORTANT):** the historical spot-check aggregates
+0.38 (8/21) and 0.43 (9/21) graded the 3 long-gold questions under an
+UNREACHABLE bar and are NOT directly comparable to any future full-semantic
+spot-check aggregate. The (d) gate is MOOT by product decision (PR #2013:
+reader shipped, exposure gated), so the scoring change affects measurement
+integrity, not the gate verdict. The graded eval surface is UNTOUCHED
+(`JUDGE_RUBRIC_ID "longmemeval-official"` + fingerprint unchanged — no
+stale-checkpoint risk); `NEAR_MISS_GRADING = "strict"` (#1949) unchanged.
+
+**Runtime prerequisites (changed):** the live spot-check now REQUIRES the
+judge provider key (`OPENAI_API_KEY` for the official gpt-4o judge) in
+addition to the reader keys (DEEPSEEK/OPENROUTER/VENICE) — 21 verdicts ≈
+$0.02/run (negligible). `docs/ONTOLOGY.md` untouched (measurement-layer
+only, no graph writes).
 
 ---
 
