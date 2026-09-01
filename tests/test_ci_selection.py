@@ -170,6 +170,23 @@ def test_unrelated_tools_change_still_tier1():
     assert set(r["test_files"]) == _tier1()
 
 
+def test_ask_spotcheck_tools_change_selects_sdk_not_tier1():
+    # #2071: tools/ask_spotcheck*.py are carved out of NON_PYTHON_PREFIXES
+    # and mapped to the sdk surface — a spot-check-only change selects the
+    # ask-lane tests (test_ask_spotcheck_judge.py) instead of tier-1 smoke
+    for changed in ("tools/ask_spotcheck.py",
+                    "tools/ask_spotcheck_consistency.py",
+                    "tools/ask_spotcheck_probe.py"):
+        r = _sel([changed])
+        assert r["full"] is False, changed
+        assert "sdk" in r["surfaces"], changed
+        assert "test_ask_spotcheck_judge.py" in r["test_files"], changed
+        assert set(r["test_files"]) != _tier1()
+    # a test-file change selects its owning surface too
+    r = _sel(["tests/test_ask_spotcheck_judge.py"])
+    assert "sdk" in r["surfaces"]
+
+
 def test_backfill_script_only_change_selects_eval():
     # graph-scripts/backfill_embeddings.py is a SOURCE_PATTERNS["eval"]
     # path — a backfill-only PR selects the eval surface (its test,

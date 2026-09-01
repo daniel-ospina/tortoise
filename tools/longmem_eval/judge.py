@@ -64,6 +64,24 @@ DEFAULT_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
 # NEAR_MISS_GRADING without a new rubric decision.
 NEAR_MISS_GRADING = "strict"
 
+# Issue #2071 decision record — spot-check full-semantic grading
+# (owner decision 2026-08-31, docs/planning/2026-08-31-2071-scoping-package.md).
+#
+# The product-lane QA spot-check (tools/ask_spotcheck.py) previously graded
+# with a weaker lexical bar — word-overlap ``max(2, len(gold_words)//2)`` on
+# UNIQUE words — that is STRUCTURALLY UNREACHABLE for rubric-style long-gold
+# SSP questions (d6233ab6 79w / 1d4e3b97 68w / b0479f84 63w: a correct
+# paraphrase never clears a ≥½-unique-word overlap bar). DECISION: the
+# spot-check grades EVERY question with this semantic judge (``build_judge()``
+# → the official gpt-4o anscheck — benchmark-identical to the graded eval
+# lane); the lexical bar is DEMOTED to the key-free CI (MockJudge) substitute
+# only. The graded eval is UNTOUCHED (``JUDGE_RUBRIC_ID "longmemeval-official"``
+# and its fingerprint are unchanged — no bump). Historical spot-check
+# aggregates (0.38/0.43) graded the 3 questions under the unreachable bar and
+# are NOT directly comparable (runbook 1987-ask-abstention-check comparability
+# note). The live spot-check fails fast (exit 2, naming the judge provider
+# key) when no key is set — never a silent fallback to the removed bar.
+
 # Raw question_type values in the dataset → official answer-check template.
 _TEMPLATES = (
     "single-session-user",
@@ -379,6 +397,41 @@ class MockJudge:
         # to classify_answer so the near-miss (subset) class is pinned —
         # entity right, qualifier missing → False, consistently.
         return grade_label(answer, hypothesis)
+
+
+class ScriptedSemanticJudge:
+    """Deterministic scripted stand-in for the semantic LLM judge on offline
+    lanes (issue #2071 CI fixtures / key-free harness runs).
+
+    The live spot-check grades every question with the real semantic judge
+    (``LLMJudge`` — the official gpt-4o anscheck); an offline lane cannot
+    call an LLM, so this fake executes a pinned script of
+    (hypothesis-substring → verdict) rules. The script IS the pinned
+    expectation — a curated correct-paraphrase answer → True, a
+    factually-wrong answer → False — so a reword of the pinned answers flips
+    the fake loudly instead of silently passing (the compliant-model pattern,
+    tests/test_reader_abstention_calibration.py). It accepts the full
+    ``Judge.judge`` call shape; the script is keyed on the hypothesis only.
+    """
+
+    model_id = "scripted-semantic"
+
+    def __init__(self, *, rules=(), default: bool = False):
+        self._rules = [(needle.lower(), bool(v)) for needle, v in rules]
+        self._default = bool(default)
+
+    def judge(self, *, question_type: str, question: str, answer: str,
+              hypothesis: str, abstention: bool) -> bool:
+        del question_type, question, answer, abstention
+        low = (hypothesis or "").lower()
+        for needle, verdict in self._rules:
+            if needle in low:
+                return verdict
+        return self._default
+
+    def ping(self, probe: str) -> str:
+        del probe
+        return "scripted semantic ping ok"
 
 
 def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:

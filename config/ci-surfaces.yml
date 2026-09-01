@@ -377,6 +377,7 @@ surfaces:
   sdk:
   - test_ask_regression_llm.py
   - test_ask_sdk.py
+  - test_ask_spotcheck_judge.py
   - test_client_surface.py
   - test_config.py
   - test_cross_lens.py
