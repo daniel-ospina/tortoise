@@ -351,8 +351,15 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
             #   api_keys: revoked_at IS NULL (expired rows still count)
             #   users:    status IS NULL OR status = 'active'
             #   graphs:   the default graph derived from teams.graph_name
-            #             (no graphs table in the plan data model — custom
-            #             graphs are not tracked in Supabase mode).
+            #             PLUS custom graph rows from the ``graphs`` table
+            #             (20260901000001, C1 #2110) — custom ACTIVE graphs
+            #             count toward max_graphs; deleted rows excluded.
+            #             Pre-C1 schema (no graphs table) degrades to
+            #             default-only via the graph_metadata drift path.
+            #             NOTE: this means the EXISTING create_graph limit
+            #             gate now counts custom graphs in Supabase mode —
+            #             enforcement semantics shift the moment C2's
+            #             provisioning INSERT lands (review P2, recorded).
             # Selfhost (registry mode) keeps the registry count.
             from tortoise.supabase_control import (  # noqa: I001
                 get_control_plane, graph_metadata, is_supabase_enabled,

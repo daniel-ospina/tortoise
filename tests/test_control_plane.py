@@ -312,6 +312,91 @@ class TestAPIKeyCRUD:
             sdk.apikey_create("bad-id", "user-1")
 
 
+class TestAPIKeyC1Tenancy:
+    """C1 (#2110) registry parity — APIKey node tenancy props.
+
+    Surface 3/10 (test-design #2094): the registry APIKey node carries
+    graph_id/scopes/created_by_key_id/delegation_depth and apikey_list
+    exposes them; absent on pre-C1 nodes → None-safe legacy defaults.
+    """
+
+    def test_apikey_create_legacy_shape_unchanged(self, sdk, team):
+        """Back-compat: no kwargs → no tenancy props on the node, list shows
+        None-safe defaults (legacy class)."""
+        result = sdk.apikey_create(team["id"], "user-1")
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
+            "k.delegation_depth, k.created_by_key_id",
+            params={"id": result["id"]},
+        ).result_set
+        assert (rows[0][0], rows[0][1], rows[0][2], rows[0][3]) == (None, None, None, None)
+        listed = sdk.apikey_list(team["id"])[0]
+        assert listed["graph_id"] is None
+        assert listed["scopes"] == []
+        assert listed["delegation_depth"] is None
+        assert listed["created_by_key_id"] is None
+
+    def test_apikey_create_scoped_graph_key_stores_props(self, sdk, team):
+        """A C1-minted graph-bound key stores its tenancy props."""
+        result = sdk.apikey_create(
+            team["id"], "user-1",
+            graph_id="g_abc123def4567890",
+            scopes=["graphs:read", "graphs:write"],
+            created_by_key_id="key-parent-000",
+            delegation_depth=0,
+        )
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {id:$id}) RETURN k.graph_id, k.scopes, "
+            "k.delegation_depth, k.created_by_key_id",
+            params={"id": result["id"]},
+        ).result_set
+        assert rows[0][0] == "g_abc123def4567890"
+        assert rows[0][1] == ["graphs:read", "graphs:write"]
+        assert rows[0][2] == 0
+        assert rows[0][3] == "key-parent-000"
+        listed = sdk.apikey_list(team["id"])[0]
+        assert listed["graph_id"] == "g_abc123def4567890"
+        assert listed["scopes"] == ["graphs:read", "graphs:write"]
+        assert listed["delegation_depth"] == 0
+        assert listed["created_by_key_id"] == "key-parent-000"
+        # Still authenticates (registry parity: hash path unchanged)
+        valid = sdk.apikey_verify(result["api_key"])
+        assert valid is not None
+        assert valid["team_id"] == team["id"]
+
+
+class TestGraphC1Status:
+    """C1 (#2110) registry parity — Graph node status/recording + graph_count."""
+
+    def test_graph_create_registry_node_has_status(self, sdk, team):
+        """New Graph nodes carry status='active' (v1 lifecycle: no archive)."""
+        g = sdk._graph_create(team["id"], "prod", kind="custom")
+        reg = sdk._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {id:$id}) RETURN g.status, g.recording",
+            params={"id": g["graph_id"]},
+        ).result_set
+        assert rows and rows[0][0] == "active"
+        assert rows[0][1] is None  # recording NULL = inherit team default
+
+    def test_graph_list_emits_status_and_recording(self, sdk, team):
+        """Registry-shaped rows now carry status/recording (None-safe)."""
+        sdk._graph_create(team["id"], "prod", kind="custom")
+        graphs = sdk.graph_list(team["id"])
+        assert any(g["name"] == "prod" for g in graphs)
+        for g in graphs:
+            assert "status" in g
+            assert "recording" in g
+
+    def test_graph_count_includes_default_and_custom(self, sdk, team):
+        """Registry mode: team_create's default node + custom graph."""
+        assert sdk.graph_count(team["id"]) == 1  # default node (team_create)
+        sdk._graph_create(team["id"], "prod", kind="custom")
+        assert sdk.graph_count(team["id"]) == 2
+
+
 class TestInvitationCRUD:
     """Invitation create, list, accept, revoke, cleanup."""
 

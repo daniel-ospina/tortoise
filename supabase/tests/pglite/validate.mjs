@@ -107,7 +107,8 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260825214233_provision_team_keyless.sql',
                '20260826000001_revoke_signup_token.sql',
                '20260827000002_user_identity_profile.sql',
-               '20260827000001_blog_cms.sql'];  // appended last: timestamp prefix sorts after the 2026 batch (fresh-DB safe)
+               '20260827000001_blog_cms.sql',
+               '20260901000001_graphs_and_key_scopes.sql'];  // C1 #2110 — appended last: timestamp sorts after the 2026 batch (fresh-DB safe)
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {
@@ -132,6 +133,7 @@ const suites = [
   '20260826000001_revoke_signup_token.sql',
   '20260827000001_blog_cms.sql',
   '20260827000002_user_identity_profile.sql',
+  '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');

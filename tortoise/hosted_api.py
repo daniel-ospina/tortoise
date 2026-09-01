@@ -1321,37 +1321,50 @@ async def get_current_team(request: Request) -> dict:
             "MATCH (k:APIKey) WHERE k.key_prefix = $prefix "
             "AND k.revoked_at IS NULL "
             "AND (k.expires_at IS NULL OR k.expires_at > $now) "
-            "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+            "RETURN k.team_id, k.id, k.key_hash, k.created_by, "
+            "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
             params={"prefix": token[:10], "now": now_iso},
         ).result_set
         if not key_result:
             key_result = sdk._get_registry().query(
                 "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
                 "AND (k.expires_at IS NULL OR k.expires_at > $now) "
-                "RETURN k.team_id, k.id, k.key_hash, k.created_by",
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by, "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
                 params={"now": now_iso},
             ).result_set
         from tortoise.auth import verify_api_key
         team_id = key_id = None
         created_by = None
+        # C1 (#2110) tenancy fields — safe defaults (pre-C1 nodes lack the
+        # props → None/[]; full legacy access, matching today's behavior).
+        graph_id = None
+        scopes = []
+        delegation_depth = None
+        created_by_key_id = None
         # key_result already holds the prefix-filtered (+ expiry-filtered, #742)
         # candidate keys from the lookup above — verify each against the token.
-        for k_team_id, k_id, stored_hash, k_created_by in key_result:
+        for k_team_id, k_id, stored_hash, k_created_by, k_gid, k_sc, k_dd, k_cbk in key_result:
             if verify_api_key(token, stored_hash):
                 team_id, key_id = k_team_id, k_id
                 created_by = k_created_by
+                graph_id, scopes, delegation_depth, created_by_key_id = (
+                    k_gid, k_sc or [], k_dd, k_cbk)
                 break
         # Fallback: legacy provision_tenant keys (key_prefix=team_id[:8])
         # won't match the token[:10] prefix. In that case scan all keys.
         if team_id is None:
             key_result = sdk._get_registry().query(
                 "MATCH (k:APIKey) WHERE k.revoked_at IS NULL "
-                "RETURN k.team_id, k.id, k.key_hash, k.created_by"
+                "RETURN k.team_id, k.id, k.key_hash, k.created_by, "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id"
             ).result_set
-            for k_team_id, k_id, stored_hash, k_created_by in key_result:
+            for k_team_id, k_id, stored_hash, k_created_by, k_gid, k_sc, k_dd, k_cbk in key_result:
                 if verify_api_key(token, stored_hash):
                     team_id, key_id = k_team_id, k_id
                     created_by = k_created_by
+                    graph_id, scopes, delegation_depth, created_by_key_id = (
+                        k_gid, k_sc or [], k_dd, k_cbk)
                     break
         if team_id is None:
             await _audit_auth_failure(request, "invalid_key")
@@ -1388,22 +1401,40 @@ async def get_current_team(request: Request) -> dict:
             # page can render plan state.
             "MATCH (t:Team {id: $id}) RETURN t.tier, t.max_users, t.max_graphs, "
             "t.max_points, t.max_api_keys, t.max_sessions, t.suspended_at, "
-            "t.flagged_at, t.email, t.subscription_status, t.customer_email",
+            "t.flagged_at, t.email, t.subscription_status, t.customer_email, "
+            "t.graph_name",
             params={"id": team_id},
         )
         row = team.result_set[0] if team.result_set else None
         if row:
             (tier, mu, mg, mp, mak, ms, t_suspended, t_flagged, t_email,
-             t_sub_status, t_customer_email) = row
+             t_sub_status, t_customer_email, t_graph_name) = row
         else:
             tier, mu, mg, mp, mak, ms = ("free", None, None, None, None, None)
             t_suspended = t_flagged = t_email = None
             t_sub_status = t_customer_email = None
+            t_graph_name = None
         # #308 (R5): durable suspension check (registry mode — the
         # MemoryAbuseStore registry_write callback wired in
         # supabase_control.get_abuse_store writes these props).
         if t_suspended is not None:
             raise HTTPException(status_code=403, detail=_suspended_detail())
+        # C1 (#2110): resolve the key's graph namespace — graph-bound key →
+        # the Graph node's namespace (fail-closed None on missing node — a
+        # graph-bound key must never widen onto the default graph; security
+        # review P1); team-wide (graph_id NULL) → the default graph =
+        # t.graph_name, falling back to the SDK-derived convention
+        # team_{team_id} for provision_tenant/signup-shaped Team nodes that
+        # never store graph_name (history review P1).
+        graph_namespace = t_graph_name or f"team_{team_id}"
+        if graph_id:
+            g_rows = sdk._get_registry().query(
+                "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.namespace",
+                params={"gid": graph_id, "tid": team_id},
+            ).result_set
+            graph_namespace = g_rows[0][0] if (g_rows and g_rows[0][0]) else None
+        # D2 (epic key model): legacy full-access = deleg NULL + empty scopes.
+        legacy_full_access = (delegation_depth is None) and (scopes == [])
         from tortoise.pricing import tier_limits
         request.state.team_id = team_id
         request.state.tier = tier or "free"
@@ -1433,7 +1464,18 @@ async def get_current_team(request: Request) -> dict:
                 "customer_email": t_customer_email,
                 # #1148: dashboard key-login acceptance. Registry mode
                 # defaults true (selfhost operators control access directly).
-                "dashboard_key_login": True}
+                "dashboard_key_login": True,
+                # C1 (#2110) tenancy fields — the resolution point (registry
+                # parity with supabase_control.resolve_api_key). graph_bound
+                # key → Graph node namespace; team-wide (graph_id NULL) →
+                # default graph = t.graph_name. legacy_full_access D2: deleg
+                # NULL + empty scopes = legacy/owner full-access class.
+                "graph_id": graph_id,
+                "graph_namespace": graph_namespace,
+                "scopes": scopes,
+                "legacy_full_access": legacy_full_access,
+                "delegation_depth": delegation_depth,
+                "created_by_key_id": created_by_key_id}
         await _abuse_post_auth(request, team_dict)
         return team_dict
     except HTTPException:
