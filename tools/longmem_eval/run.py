@@ -94,6 +94,7 @@ from .report import (
 )
 from .rerank import _TRUTHY, RERANK_MODEL_DEFAULT, _env_int, rerank_enabled
 from .retrieve import (
+    DATA_AVAILABILITY_GATE_REASONS,
     DEFAULT_CONTEXT_ITEM_CAP,
     DEFAULT_CONTEXT_TOKEN_CAP,
     DEFAULT_EVIDENCE_BOOST_SOURCE,
@@ -2203,7 +2204,9 @@ class _RunWatchdog:
 
       * strategy-timeout rate >= 2 in the last 10;
       * gate-red fraction > 0.25 in the last 10 (gate-red = the UNION of
-        ``gate_reasons`` + ``post_retrieval_reasons`` — plan P1-5);
+        ``gate_reasons`` + ``post_retrieval_reasons`` EXCLUDING the
+        data-availability classes (``dataset_join_error`` — #1900: a join
+        failure flags the DATASET, never graph health; plan P1-5);
       * >= 3 consecutive ``census_error`` (per-worker by nature);
       * census-query latency p95 > 2x Q (100 ms) across the last 10
         (SUCCESSFUL-read latency only — retried reads are excluded, P2-9);
@@ -2214,6 +2217,22 @@ class _RunWatchdog:
       * leg-deadness: >= 2 consecutive questions with ANY non-by-design leg
         degraded (below F_leg / empty / exception / timeout) — the run's
         DOMINANT degradation signature (15/46 FTS-leg-empty outcomes).
+
+    Data-availability classification (#1900): the gate-red / hard-census
+    arms count DEGRADATION reasons only — ``dataset_join_error`` (a
+    data-availability class in ``DATA_AVAILABILITY_GATE_REASONS``) FLAGS a
+    question the DATASET cannot resolve/grade, never a truncated/missing
+    graph. The flag is NON-ABORTING: the revalidate-mode first-gate-red
+    abort and the non-revalidate hard-census abort must NOT fire on it (a
+    healthy-pool false positive aborted reval3 at finalize). It IS still
+    counted toward the whole-run gated-coverage bound (a
+    data-availability-heavy run cannot certify), and the report grades it
+    UNCHANGED — the flag adds no error classes and does not itself flip
+    ``valid``: a join-error outcome with healthy ingest carries
+    ``error_classes={}`` / ``valid=True`` and grades CLEAN; one whose
+    ingest also faulted grades via its ingest errors (permanent/structural
+    ingest faults hard; transient-only rate-limited recoverable) — a
+    flag, not an exclusion.
 
     Thresholds are evaluated with a CUMULATIVE degradation accumulator —
     a recovery window does NOT reset prior degradation to zero (sawtooth
@@ -2261,18 +2280,28 @@ class _RunWatchdog:
             if self._aborted:
                 return None
             gate_red = bool(gate_reasons or post_retrieval_reasons)
-            hard = [r for r in (gate_reasons or []) + (post_retrieval_reasons or [])
-                    if r in HARD_GATE_REASONS]
+            # #1900: data-availability gate-reds (``dataset_join_error`` —
+            # the DATASET cannot resolve/grade the question) are NOT
+            # degradation signals. The gate-red / hard-census arms count
+            # DEGRADATION reasons only; the whole-run gated-coverage bound
+            # keeps ALL gate-reds (a data-availability-heavy run still
+            # cannot certify).
+            _all_reasons = list(gate_reasons or []) + list(
+                post_retrieval_reasons or [])
+            degradation_red = [r for r in _all_reasons
+                               if r not in DATA_AVAILABILITY_GATE_REASONS]
+            hard = [r for r in degradation_red if r in HARD_GATE_REASONS]
             if gate_red:
-                self._gate_red_total += 1
                 self._n_gated_total += 1
+            if degradation_red:
+                self._gate_red_total += 1
             if hard:
                 self._n_hard_invalid += 1
             if strategy_timeout:
                 self._timeout_total += 1
             self._n_seen += 1
             self._window.append({
-                "gate_red": gate_red,
+                "gate_red": bool(degradation_red),
                 "timeout": bool(strategy_timeout),
                 "latency": census_latency_ms,
                 "legs_degraded": bool(legs_degraded),
