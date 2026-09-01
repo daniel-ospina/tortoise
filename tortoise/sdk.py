@@ -10592,12 +10592,18 @@ class TortoiseSDK:
                 "A4 expansion FTS pass failed — keeping the original fts "
                 "leg", exc_info=True)
             return None
+        if not expanded:
+            # Empty second pass = fail-open: the ORIGINAL fts leg stays
+            # (byte-identical). P2-fix (#2070): do NOT ride the degraded
+            # entry into the shared trace — a healthy lane that got a
+            # transiently-empty expansion must not report
+            # retrieval_degraded (the A4 fail-open contract: an expansion
+            # can never turn a working lane into a broken one).
+            return None
         if leg_trace is not None:
             # the second pass's own per-leg entry rides the shared trace
             # (the FIRST pass's entry was already merged by degradation_chain)
             leg_trace.extend(_exp_trace)
-        if not expanded:
-            return None
         seen = {pid for pid, _score in expanded}
         merged = list(expanded)
         merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
