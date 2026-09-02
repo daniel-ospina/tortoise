@@ -148,12 +148,16 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     email_confirm=true — NO confirmation email is sent). The POST must return
     200 — NOT 429 (over_email_send_rate_limit / per-IP register buckets) —
     then the page auto-signs-in (auth/v1/token?grant_type=password) and
-    redirects to /welcome.
+    redirects to the app root (signup.html:536 WELCOME_URL =
+    https://app.premiselabs.co — #1566: the post-auth destination for BOTH
+    signup and login is the CROSS-SITE app root, where first-timers are
+    provisioned in welcome mode).
 
-    The /welcome navigation is route-blocked: a live key-reveal there would
-    mint an un-deletable prod team + api_keys row + FalkorDB graph (no
-    cleanup endpoint in-repo) — the monitor only needs the signup + auto
-    sign-in to succeed.
+    The app-origin navigation is route-blocked: a live landing on the app
+    root would run the #1566 welcome-mode provisioning and mint an
+    un-deletable prod team + api_keys row + FalkorDB graph (no cleanup
+    endpoint in-repo) — the monitor only needs the signup + auto sign-in to
+    succeed, and the intercepted navigation still proves the redirect fired.
 
     Teardown deletes the created auth user via the Admin API (best-effort;
     the FK cascade removes the placeholder team_memberships row)."""
@@ -168,10 +172,14 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             token["status"] = resp.status
 
     page.on("response", _on_response)
-    # #801: the account is created pre-confirmed, so the page redirects to
-    # /welcome — block it so the welcome page's provisioning never runs.
+    # #1566: the account is created pre-confirmed, so the page redirects to
+    # the APP ROOT (signup.html WELCOME_URL = https://app.premiselabs.co) —
+    # block that origin so the app's welcome-mode provisioning (prod team +
+    # api_keys row + FalkorDB graph mint) never runs against prod. (The
+    # legacy /welcome stub is dead: nothing in the #1494/#1566 flow
+    # navigates to tortoise.premiselabs.co/welcome anymore.)
     page.route(
-        "**/welcome*",
+        "**://app.premiselabs.co/**",
         lambda route: route.fulfill(
             status=200, content_type="text/html", body="<html><body>ok</body></html>"
         ),
@@ -205,9 +213,9 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             page.wait_for_timeout(250)
         assert token["status"] is not None, "no auto sign-in (auth/v1/token) response observed"
         assert token["status"] == 200, f"auto sign-in returned {token['status']}"
-        # The flow redirects to /welcome (route-blocked stub above) — the
-        # redirect itself is the user-visible success state of #801.
-        page.wait_for_url("**/welcome*", timeout=15_000)
+        # The flow redirects to the app root (route-blocked stub above) —
+        # the redirect itself is the user-visible success state of #801.
+        page.wait_for_url("**://app.premiselabs.co/**", timeout=15_000)
         assert "email=" not in page.url and "password=" not in page.url, (
             f"credentials echoed into URL: {page.url}"
         )

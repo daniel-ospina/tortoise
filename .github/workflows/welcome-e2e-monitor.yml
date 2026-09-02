@@ -27,6 +27,14 @@ jobs:
   welcome-e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # #2140: the auto-file step POSTs to the issues API with GITHUB_TOKEN;
+    # the org's restricted default token has no write scope, so the step was
+    # 403ing ("Resource not accessible by integration") — the deaf monitor
+    # never filed issues. Grant the job the minimal scopes: contents: read
+    # for checkout, issues: write for the auto-file curl.
+    permissions:
+      contents: read
+      issues: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
