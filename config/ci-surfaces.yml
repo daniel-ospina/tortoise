@@ -371,6 +371,7 @@ surfaces:
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
   - test_onboarding_variants.py
+  - test_onboarding_w4_settings.py  # #2000 (W4): docker-lane Settings-surface toggle-persistence tests
   - test_signup_form_safety.py
   - test_waitlist_form.py
   - test_welcome_url_consolidation.py
