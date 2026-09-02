@@ -40,6 +40,7 @@ import tortoise.supabase_control as sc
 from tortoise import abuse
 from tortoise.abuse import SupabaseAbuseStore
 from tortoise.auth import lookup_hash
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 
 TEAM = "team-abuse-1"
@@ -114,31 +115,18 @@ def env(monkeypatch, fake, notified):
     app = ha.app
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "abuse.db")
-        orig = _patch_sdk_init(ha, db_path)
+        # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+        # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+        # __init__ → deterministic anchor close → clear overrides at exit.
+        # Supersedes the local _patch_sdk_init/_restore_sdk_init (restore
+        # was restore-init-only: no pin, no anchor close — the #1497/#2090
+        # gap). set_engine(None) keeps running AFTER the helper exit, same
+        # relative order as the old restore → set_engine pair.
         try:
-            yield {"fake": fake, "notified": notified, "app": app}
+            with patched_tortoise_sdk(db_path):
+                yield {"fake": fake, "notified": notified, "app": app}
         finally:
-            _restore_sdk_init(ha, orig)
             abuse.set_engine(None)
-
-
-def _patch_sdk_init(ha, db_path):
-    orig = ha.TortoiseSDK.__init__
-
-    def patched(self, db_path_arg=None, *, namespace=None, **kw):
-        orig(self, db_path, namespace=namespace)
-
-    ha.TortoiseSDK.__init__ = patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
-    return orig
-
-
-def _restore_sdk_init(ha, orig):
-    ha.TortoiseSDK.__init__ = orig
 
 
 def _auth(token=TOKEN_A):

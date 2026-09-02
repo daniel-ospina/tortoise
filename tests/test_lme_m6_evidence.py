@@ -26,6 +26,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tools.longmem_eval import evidence as ev  # noqa: E402, RUF100
 from tools.longmem_eval.dataset_audit import audit_dataset  # noqa: E402, RUF100
 from tools.longmem_eval.evidence import (  # noqa: E402, RUF100
@@ -1104,17 +1105,16 @@ def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
     team = {"team_id": "m6-test-team", "key_id": "k", "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
             "max_api_keys": 2, "max_sessions": 1000}
-    app.dependency_overrides[get_current_team] = lambda: dict(team)
-
+    # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+    # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+    # __init__ → deterministic anchor close → clear overrides at exit.
+    # Supersedes the inline _patched_init/clear/restore trio: the _make_sdk
+    # read-back runs INSIDE the helper so its anchor is still live, and the
+    # pin stops the evict/recreate churn an unset TORTOISE_DB_PATH produced
+    # on the embedded lane (#1950).
     import tortoise.hosted_api as ha_mod
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, str(tmp_path / "hosted.db"), namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    try:
+    with patched_tortoise_sdk(str(tmp_path / "hosted.db")):
+        app.dependency_overrides[get_current_team] = lambda: dict(team)
         payload = {
             "schema_version": "1",
             "session_id": "m6-hosted-session",
@@ -1162,9 +1162,6 @@ def test_session_id_written_by_hosted_commit_path(monkeypatch, tmp_path):
             params={"id": pid}).result_set
         assert rows and rows[0][0] == "m6-hosted-session", \
             "committed point missing session_id"
-    finally:
-        ha_mod.TortoiseSDK.__init__ = _orig_init
-        app.dependency_overrides.clear()
 
 
 # ── D7/D8: 52-healthy fixture shape + calibration ──────────────────────────

@@ -15,59 +15,40 @@ os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.hosted_api import app
-from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture
 def client(tmp_path):
     db_path = str(tmp_path / "github.db")
-    orig_init = TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        # hosted_api._make_sdk (onboarding SDK builder) calls
-        # TortoiseSDK(db_path=..., ...) with db_path as a KEYWORD — pop it
-        # from **kw so the forwarding doesn't produce a duplicate-kwarg
-        # TypeError (#647 sweep catch).
-        kw_db = kw.pop("db_path", None)
-        resolved = kw_db if kw_db is not None else (db_path if db_path_arg is None else db_path_arg)
-        orig_init(self, db_path=resolved, namespace=namespace, **kw)
-
-    TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": "test-team-1", "tier": "free", "key_id": "k1",
-        "max_users": 1, "max_graphs": 1, "max_teams": 1,
-    }
-    with TestClient(app) as tc:
-        yield tc
-    app.dependency_overrides.clear()
-    TortoiseSDK.__init__ = orig_init
+    # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+    # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+    # __init__ → deterministic anchor close → clear overrides at exit.
+    # Supersedes the inline kw_db-first _patched: audited — no test here
+    # constructs an SDK directly, and the only caller (hosted_api._make_sdk)
+    # passes the fixture path once the pin is set (docker-lane URI mode
+    # passes no path at all), so the old caller-path forwarding was a latent
+    # shared-/data/tortoise.db binding on the embedded lane, not a real
+    # pass-through. The helper's force-drop + pin is the #1497/#2090 fix.
+    with patched_tortoise_sdk(db_path):
+        from tortoise.hosted_api import get_current_team
+        app.dependency_overrides[get_current_team] = lambda: {
+            "team_id": "test-team-1", "tier": "free", "key_id": "k1",
+            "max_users": 1, "max_graphs": 1, "max_teams": 1,
+        }
+        with TestClient(app) as tc:
+            yield tc
 
 
 @pytest.fixture
 def unauth_client(tmp_path):
     db_path = str(tmp_path / "github_unauth.db")
-    orig_init = TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        # hosted_api._make_sdk (onboarding SDK builder) calls
-        # TortoiseSDK(db_path=..., ...) with db_path as a KEYWORD — pop it
-        # from **kw so the forwarding doesn't produce a duplicate-kwarg
-        # TypeError (#647 sweep catch).
-        kw_db = kw.pop("db_path", None)
-        resolved = kw_db if kw_db is not None else (db_path if db_path_arg is None else db_path_arg)
-        orig_init(self, db_path=resolved, namespace=namespace, **kw)
-
-    TortoiseSDK.__init__ = _patched
-    with TestClient(app) as tc:
+    # #2127 wave 2: shared helper (see the client fixture audit note — the
+    # 401-path tests never construct SDKs, but the fixture still pins +
+    # closes deterministically for uniform discipline).
+    with patched_tortoise_sdk(db_path), TestClient(app) as tc:
         yield tc
-    TortoiseSDK.__init__ = orig_init
 
 
 class TestGitHubConnect:

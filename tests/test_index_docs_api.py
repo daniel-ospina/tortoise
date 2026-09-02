@@ -25,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests._github_docs_mock import MockGitHubDocsTransport, gh_docs_entry
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.hosted_api import (
     _ALLOWED_STATE_KEYS,
     _INDEX_JOBS,
@@ -91,31 +92,28 @@ def client(tmp_path):
     import uuid
     db_path = str(tmp_path / "docs-api.db")
     team_id = f"test-docs-{uuid.uuid4().hex[:10]}"
-    orig_init = TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        kw.pop("db_path", None)
-        orig_init(self, db_path=db_path, namespace=namespace, **kw)
-
-    TortoiseSDK.__init__ = _patched
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": team_id, "tier": "free", "key_id": "k1",
-        "max_users": 1, "max_graphs": 1, "max_teams": 1,
-        "max_points": 10000,
-    }
-    _INDEX_JOBS.clear()
 
     from types import SimpleNamespace
     ctx = SimpleNamespace(tc=None, team_id=team_id, db_path=db_path)
-    with TestClient(app) as tc:
-        ctx.tc = tc
-        yield ctx
-        _drain_jobs(tc)
-    app.dependency_overrides.clear()
-    TortoiseSDK.__init__ = orig_init
+    # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+    # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+    # __init__ → deterministic anchor close → clear overrides at exit.
+    # Supersedes the inline _patched/clear/restore trio (no test passes
+    # event_log_path kwargs — dropping them is a no-op here). _drain_jobs
+    # runs INSIDE the patched context so in-flight jobs stay bound to THIS
+    # fixture's store while it is still patched.
+    with patched_tortoise_sdk(db_path):
+        from tortoise.hosted_api import get_current_team
+        app.dependency_overrides[get_current_team] = lambda: {
+            "team_id": team_id, "tier": "free", "key_id": "k1",
+            "max_users": 1, "max_graphs": 1, "max_teams": 1,
+            "max_points": 10000,
+        }
+        _INDEX_JOBS.clear()
+        with TestClient(app) as tc:
+            ctx.tc = tc
+            yield ctx
+            _drain_jobs(tc)
 
 
 @pytest.fixture
