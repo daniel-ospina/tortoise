@@ -9891,6 +9891,7 @@ class TortoiseSDK:
         search_keys_prf: bool = False,
         fusion_weights: dict | None = None,
         fusion_k: int = 60,
+        w4_enrich: bool = True,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -9992,6 +9993,12 @@ class TortoiseSDK:
             expand_structural_hops,
             _recency_factors,
             _trace_entry,
+        )
+        # W4 (#2101): the additive why-layer enrichment (shared assembly —
+        # DM-1; lazy import — why.py pulls search_engine helpers only).
+        from .why import (
+            enrich_items as w4_enrich_items,
+            w4_enrichment_enabled,
         )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
@@ -10554,7 +10561,15 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            return ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            ranked = ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            # W4 (#2101): additive why-layer enrichment (flag-gated) — search
+            # surface; recall_state's pool and the ask lane inherit it through
+            # their own calls. Zero-LLM, bounded reads, fail-open (items
+            # unchanged on any assembly error).
+            if entity_type == "point" and w4_enrich \
+                    and w4_enrichment_enabled():
+                ranked = w4_enrich_items(proj, ranked)
+            return ranked
         if order_by == "confidence":
             # #25: sort by the PERSISTED EP confidence (n.confidence, written
             # by compute_confidence), not the structural impl/(impl+nand) proxy
@@ -10568,7 +10583,13 @@ class TortoiseSDK:
             )
         # Default: RRF relevance order (already in fused order)
 
-        return [r.to_dict() for r in results[:limit]]
+        out = [r.to_dict() for r in results[:limit]]
+        # W4 (#2101): additive why-layer enrichment (flag-gated) — see the
+        # order_by=graph branch above for the contract.
+        if entity_type == "point" and w4_enrich \
+                and w4_enrichment_enabled():
+            out = w4_enrich_items(proj, out)
+        return out
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
@@ -10816,6 +10837,8 @@ class TortoiseSDK:
             AskReaderUnavailable,
             AskRetrievalUnavailable,
         )
+        # W4 (#2101): additive why-layer enrichment flag (shared resolver).
+        from .why import w4_enrichment_enabled
 
         if os.environ.get("TORTOISE_API_URL"):
             return self._post_ask(question, question_type=question_type,
@@ -10978,6 +11001,22 @@ class TortoiseSDK:
             except Exception:  # noqa: BLE001, RUF100 — degrade to False
                 degraded = False
 
+        # W4 (#2101): additive why-layer entries for the evidence pool the
+        # reader saw (flag-gated — the ``why`` key is ABSENT with the flag
+        # OFF, keeping the 12-field response byte-identical). The hits
+        # already carry the search-path enrichment; projection is a pure
+        # dict op (zero extra graph reads). Fail-open: any error → ``[]``.
+        why_entries: list[dict] = []
+        if w4_enrichment_enabled():
+            try:
+                from .why import item_to_why_entry
+                for _hit in assembled:
+                    _entry = item_to_why_entry(_hit)
+                    if _entry and _entry.get("point_id"):
+                        why_entries.append(_entry)
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open
+                _logger.warning("W4 why-layer enrichment failed (ask): %s", e)
+                why_entries = []
         serving = getattr(model, "last_route", None) or \
             getattr(model, "route", None)
         duration_ms = int((_time.monotonic() - t0) * 1000)
@@ -10994,7 +11033,7 @@ class TortoiseSDK:
                     getattr(model, "model", None) or ""))
         except Exception:  # noqa: BLE001, RUF100
             cost_estimate = 0.0
-        return {
+        resp = {
             "answer": answer,
             "abstained": abstained,
             "question_type": qtype,
@@ -11008,6 +11047,12 @@ class TortoiseSDK:
             "duration_ms": duration_ms,
             "retrieval_degraded": degraded,
         }
+        # W4 (#2101): additive why-layer entries — emitted ONLY with the W4
+        # flag ON (absent otherwise — the 12-field response stays
+        # byte-identical).
+        if w4_enrichment_enabled():
+            resp["why"] = why_entries
+        return resp
 
     @staticmethod
     def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:
@@ -11478,7 +11523,12 @@ class TortoiseSDK:
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             exclude_status=exclude_status,
-            include_terminal=include_superseded)
+            include_terminal=include_superseded,
+            # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
+            # enrichment on the PRE-rerank pool would fold + project ~30k
+            # candidates that StateRanker then discards ~2/3 of. Enrich
+            # POST-rerank on the final top-limit list instead (see below).
+            w4_enrich=False)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool)
@@ -11548,6 +11598,20 @@ class TortoiseSDK:
             contested = bool(ep.get("contested")) if isinstance(ep, dict) else False
             copy["contested"] = contested
             out.append(copy)
+        # Sec-1 (code-review gate): W4 enrichment POST-rerank on the final
+        # top-limit list (the pool call above passed w4_enrich=False) — the
+        # additive keys ride only the results the caller actually receives.
+        # Flag-gated + fail-open (unchanged on any assembly error).
+        try:
+            from .why import enrich_items as _w4_enrich_items
+            from .why import w4_enrichment_enabled as _w4_enabled
+            if _w4_enabled():
+                point_items = [i for i in out if i.get("entity_type") == "point"]
+                enriched = _w4_enrich_items(proj, point_items)
+                by_id = {i["id"]: i for i in enriched}
+                out = [by_id.get(i["id"], i) for i in out]
+        except Exception as e:  # noqa: BLE001, RUF100 — fail-open
+            _logger.warning("W4 enrichment failed (recall_state): %s", e)
         return out
 
     def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:

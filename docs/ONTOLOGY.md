@@ -1,18 +1,28 @@
 ---
-title: "Tortoise — Canonical Ontology v3.6"
+title: "Tortoise — Canonical Ontology v3.9"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-08-11
+updated: 2026-09-02
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.6
+# Tortoise — Canonical Ontology v3.9
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.9 (2026-09-02, issue #2101 / epic #2080 — §5 response-contract vocabulary, W4 why-layer DM-12):**
+> - §5: new Response-Contract Vocabulary section — additive response-contract
+>   labels (dig_deeper kinds/labels, why-block sections, conflict severity,
+>   degraded_reason), NOT new entity kinds. Registered so the W4 why-block
+>   assembly (tortoise/why.py) and the S6 contract test share one vocabulary
+>   (S15 schema-correctness review prevents drift).
+> - §5: conflict severity boundary pinned — `high` when the counter-claim's
+>   persisted EP mean ≥ 0.6, else `medium` (repo-wide high-confidence bar,
+>   analyze.py consensus pattern).
 >
 > **Changelog v3.8 (2026-08-13, issue #388 — connector Source nodes):**
 > - §3.4: connector events (GitHub/Linear/Slack poll + webhook + entity paths)
@@ -508,6 +518,22 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
 
 > **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the extensible sourceKind vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
+
+### Response-Contract Vocabulary (W4 why-layer, #2101 / epic #2080 DM-12)
+
+Additive response-contract labels — NOT new entity kinds. Registered so the
+W4 why-block assembly and the S6 contract test share one vocabulary (vocabulary
+drift is prevented by the S15 schema-correctness review).
+
+```
+dig_deeper kinds   supports | nand | superseded | tradeoff     # dig_deeper[k].kind (deterministic labels, never LLM prose)
+dig_deeper labels  read supports · read the counterargument (NAND)
+                   · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
+why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (§3.1.1/§6.1)
+conflict severity  high | medium                                # deterministic from the counter-claim's persisted EP mean
+                                                               # high ⟺ mean ≥ 0.6 (repo high-confidence bar); else medium
+degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (§3.1.3)
+```
 
 ### Point Status Vocabulary (canonical, #432/#690)
 

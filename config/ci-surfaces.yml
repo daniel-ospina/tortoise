@@ -350,6 +350,7 @@ surfaces:
   - test_source_inheritance_own.py
   - test_supersede_edges.py
   - test_supplementary.py
+  - test_w4_why_enrichment.py
   - test_weights.py
   onboarding:
   - test_github_connect.py
@@ -466,6 +467,7 @@ tier1:
 - test_supabase_control.py
 - test_taxonomy.py
 - test_tool_registry.py
+- test_w4_why_enrichment.py
 - test_weights.py
 - test_writer_inventory.py
 slow_files:
