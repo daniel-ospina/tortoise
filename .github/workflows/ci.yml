@@ -414,8 +414,19 @@ jobs:
     # minus the external-server step. Measured locally: ~60-120s suite.
     runs-on: ubuntu-latest
     concurrency:
-      group: hosted-e2e
-      cancel-in-progress: true
+      # #2108: the former repo-global `group: hosted-e2e` +
+      # cancel-in-progress: true killed in-flight hosted-e2e runs whenever a
+      # DIFFERENT PR's run entered the group (observed 2026-09-01: three
+      # cross-PR cancels in 7 min, each logged as a bogus "startup hang with
+      # zero test output" — the victim was healthy, just cancelled mid-boot).
+      # Key per event+ref (python-ci.yml precedent): on pull_request
+      # github.ref is refs/pull/N/merge, so a new commit cancels only that
+      # PR's stale run. ci.yml is pull_request-only today, so the group is
+      # strictly per-PR; the event_name dimension + conditional cancel
+      # mirror python-ci.yml and stay correct if a push/schedule trigger is
+      # ever added.
+      group: hosted-e2e-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -428,8 +439,12 @@ jobs:
       - name: Run hosted platform E2E suite (#303)
         run: |
           set -o pipefail
+          # #2108: --capture=sys (not the default fd capture) so the fixture's
+          # boot-progress heartbeats (os.write(2, ...) — see conftest _live)
+          # reach the job log live; PYTHONUNBUFFERED (step env below) so
+          # pytest's -q dots stream instead of flushing at process exit.
           RUN_HOSTED_E2E=1 python -m pytest tests/e2e/hosted/ \
-            -q -rs -p no:cacheprovider --durations=10 2>&1 | tee /tmp/hosted-e2e.log
+            -q -rs -p no:cacheprovider --durations=10 --capture=sys 2>&1 | tee /tmp/hosted-e2e.log
           # Loud-warning monitor (output-parse — NOT the #801 env-check
           # pattern, which is collect-only-safe; here we parse the run log):
           # this job ALWAYS sets the gate, so zero passed tests means the
@@ -443,6 +458,13 @@ jobs:
           # redirect would void the parity assertions) — the URI-required
           # enforcement opt-in.
           TORTOISE_TEST_CARVE_OUT: "1"
+          # #2108: pytest -q progress dots sit in Python's block buffer when
+          # stdout is a pipe (the tee below) — a healthy run emitted ZERO job
+          # output for its whole ~2 min (boot + 54 tests), flushing only at
+          # process exit. That reads as a hang and invited premature cancels.
+          # Unbuffered → dots stream live as tests complete (the boot phase
+          # is heartbeat-visible from the suite fixture — see conftest _live).
+          PYTHONUNBUFFERED: "1"
 
   flip-gate:
     # #669 pre-deploy cutover gate (plan Task 10.1, issue #771) — the gate
