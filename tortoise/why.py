@@ -143,11 +143,17 @@ def _severity(mean: float) -> str:
     return "high" if mean >= 0.6 else "medium"
 
 
-def _assemble_supports(rows: list, by_id: dict[str, dict]) -> None:
+def _assemble_supports(rows: list, by_id: dict[str, dict], *, merge: bool = False) -> None:
     """Fold support-chain rows into the blocks. Collect ALL candidates per
     point (dedup by point id), then sort by (weight desc, point_id) and
     truncate to the ≤3 cap — the selected subset is the strongest ≤3 and
-    the ordering is deterministic regardless of Cypher row order."""
+    the ordering is deterministic regardless of Cypher row order.
+
+    ``merge=True`` (the second leg) ADDS the leg's candidates into the
+    chain the first leg already built instead of overwriting it — a point
+    with BOTH operator-mediated supports AND direct statement→statement
+    IMPL edges must surface the union of both legs (mixed-edge points were
+    silently dropping the operator-mediated leg before this fix)."""
     pending: dict[str, dict[str, dict]] = {}
     for pid, sup_id, content, a, b in rows:
         if not pid or not sup_id:
@@ -162,6 +168,17 @@ def _assemble_supports(rows: list, by_id: dict[str, dict]) -> None:
     for pid, chain_map in pending.items():
         chain = sorted(chain_map.values(),
                        key=lambda s: (-s["weight"], s["point_id"]))
+        if merge and by_id[pid].get("support_chain"):
+            # Union with the first leg's already-selected candidates, then
+            # re-sort + re-cap across BOTH legs (deterministic strongest ≤3).
+            # Dedup by point_id first — a supporter reachable through both
+            # the operator-mediated and the direct edge must appear once.
+            by_sup: dict[str, dict] = {
+                s["point_id"]: s for s in by_id[pid]["support_chain"]}
+            for s in chain:
+                by_sup.setdefault(s["point_id"], s)
+            chain = sorted(by_sup.values(),
+                           key=lambda s: (-s["weight"], s["point_id"]))
         by_id[pid]["support_chain"] = chain[:W4_MAX_SUPPORT]
 
 
@@ -468,6 +485,9 @@ def assemble_why_blocks(
             logger.warning("W4 ep read failed: %s", e)
             return {}
         # 2. Support chain (≤ max_support per point) — bounded traversal.
+        #    Two legs (operator-mediated + direct statement→statement IMPL);
+        #    the SECOND leg MERGES into the first (a mixed-edge point keeps
+        #    both legs' supports — never a silent clobber of one leg).
         try:
             _assemble_supports(
                 g.query(_SUPPORT_OP_CYPHER, params={"ids": ids}).result_set,
@@ -476,6 +496,7 @@ def assemble_why_blocks(
             _assemble_supports(
                 g.query(_SUPPORT_DIRECT_CYPHER, params={"ids": ids}).result_set,
                 blocks,
+                merge=True,
             )
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open per dimension
             logger.warning("W4 support-chain read failed: %s", e)
@@ -527,13 +548,20 @@ def assemble_why_blocks(
 
 def _contested_from_item(item: dict, block: dict | None) -> bool:
     """Derive the item's contestation signal: the item's own ``ep`` wins
-    (annotate_ep_batch already computed it), else the canonical block's."""
+    (annotate_ep_batch already computed it), else the canonical block's.
+    Tolerant coercion: a non-float variance on a rogue item is treated as
+    unmeasured (False) — never raises into the recall turn."""
     ep = item.get("ep")
     if isinstance(ep, dict):
         if ep.get("contested"):
             return True
-        if ep.get("has_ep") and float(ep.get("variance") or 0.0) > CONTESTED_VARIANCE_THRESHOLD:
-            return True
+        if ep.get("has_ep"):
+            try:
+                variance = float(ep.get("variance") or 0.0)
+            except (TypeError, ValueError):
+                variance = 0.0
+            if variance > CONTESTED_VARIANCE_THRESHOLD:
+                return True
     if block and isinstance(block.get("ep"), dict):
         return bool(block["ep"].get("contested"))
     return False
@@ -560,13 +588,20 @@ def enrich_items(proj, items: list[dict]) -> list[dict]:
         logger.warning("W4 enrichment failed: %s", e)
         return items
     out: list[dict] = []
-    for item in items:
-        pid = item.get("id")
-        block = blocks.get(pid)
-        if block is None:
-            out.append(item)
-            continue
-        out.append(project_item(item, block))
+    try:
+        for item in items:
+            pid = item.get("id")
+            block = blocks.get(pid)
+            if block is None:
+                out.append(item)
+                continue
+            out.append(project_item(item, block))
+    except Exception as e:  # noqa: BLE001, RUF100 — projection fail-open
+        # A projection error (e.g. a non-float-coercible ep.variance on a
+        # rogue item) must never break the recall turn — degrade to "no
+        # enrichment keys" for the whole batch, byte-identical to flag-off.
+        logger.warning("W4 projection failed: %s", e)
+        return items
     return out
 
 

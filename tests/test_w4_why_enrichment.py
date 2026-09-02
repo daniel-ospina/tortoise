@@ -1413,3 +1413,102 @@ def test_bare_point_empty_conventions(w4_flag):
             "supersession line must mirror the flat canonical status"
     finally:
         sdk.close()
+
+
+def test_mixed_edge_support_legs_merge(w4_flag):
+    """REVIEW-FIX (code-review gate): a point with BOTH an operator-mediated
+    IMPL support AND a direct statement→statement IMPL edge must surface the
+    UNION of both legs — the direct leg's second pass used to OVERWRITE the
+    operator-mediated chain (silent clobber of one leg on mixed-edge points).
+
+    Leg 1 (operator-mediated): evidence →INPUT→ operator →IMPL→ claim.
+    Leg 2 (direct): statement →IMPL→ claim (operator-less reification edge).
+    Both supporters must appear in the ≤3 support_chain, ordered by
+    (weight desc, point_id). Dedup: a supporter reachable via BOTH legs
+    (operator-mediated AND direct edge to the same claim) appears once.
+    Cross-leg cap: with >3 candidates across both legs the strongest ≤3
+    survive the re-sort (a weak candidate is evicted, never a clobber)."""
+    sdk = _fresh_sdk()
+    try:
+        topic = "mixed-edge-topic"
+        strong_op = sdk.create_point("evidence", f"{topic} strong op-mediated record")
+        strong_direct = sdk.create_point("statement", f"{topic} strong direct support")
+        both_legs = sdk.create_point("evidence", f"{topic} reachable via both legs")
+        weak_op = sdk.create_point("evidence", f"{topic} weak op-mediated record")
+        claim = sdk.create_point("statement", f"{topic} mixed-edge belief statement")
+        # Leg 1: operator-mediated (create_operator wires source →INPUT idx0→
+        # op →IMPL→ target). strong_op and weak_op ride this leg.
+        sdk.create_operator("IMPL", strong_op["id"], [claim["id"]])
+        sdk.create_operator("IMPL", weak_op["id"], [claim["id"]])
+        # Leg 2: operator-less direct IMPL edges (reification rule, §8).
+        # strong_direct rides direct only; both_legs rides BOTH (op-mediated
+        # INPUT path AND a direct edge — the dedup branch).
+        sdk.create_direct_edge("IMPL", strong_direct["id"], claim["id"])
+        sdk.create_direct_edge("IMPL", both_legs["id"], claim["id"])
+        _set_posterior(sdk, claim["id"], 12.0, 1.0)
+        # Distinct weights to force a deterministic (weight desc) ordering:
+        # strong_op 12/1 → 0.92, strong_direct 9/1 → 0.90, both_legs 6/1 →
+        # 0.86, weak_op 1/4 → 0.20 (evicted by the cross-leg ≤3 re-cap).
+        _set_posterior(sdk, strong_op["id"], 12.0, 1.0)
+        _set_posterior(sdk, strong_direct["id"], 9.0, 1.0)
+        _set_posterior(sdk, both_legs["id"], 6.0, 1.0)
+        _set_posterior(sdk, weak_op["id"], 1.0, 4.0)
+
+        blocks = assemble_why_blocks(sdk._get_proj(), [claim["id"]])
+        chain = blocks[claim["id"]]["support_chain"]
+        sup_ids = [s["point_id"] for s in chain]
+        # Both legs survive — never a one-leg clobber.
+        assert strong_op["id"] in sup_ids, \
+            "operator-mediated supporter dropped by the direct-leg merge"
+        assert strong_direct["id"] in sup_ids, \
+            "direct supporter missing from the merged chain"
+        # Dedup: the both-legs supporter appears exactly once.
+        assert sup_ids.count(both_legs["id"]) == 1, \
+            "supporter reachable via both legs must appear once (dedup)"
+        # Cross-leg ≤3 re-cap with deterministic ordering: the strongest 3
+        # survive (weak_op at 0.20 evicted), ordered by weight desc.
+        assert len(chain) == 3, f"cross-leg re-cap must hold ≤3, got {chain}"
+        assert weak_op["id"] not in sup_ids, \
+            "weakest candidate must be evicted by the cross-leg re-cap"
+        assert sup_ids == [strong_op["id"], strong_direct["id"], both_legs["id"]], \
+            "merged chain must sort by (weight desc, point_id)"
+    finally:
+        sdk.close()
+
+
+def test_rogue_variance_coerces_and_projection_fail_open(w4_flag, monkeypatch):
+    """REVIEW-FIX (code-review gate, two hunks in the same round):
+    (1) ``_contested_from_item`` tolerantly coerces a rogue non-float
+    ``ep.variance`` (a badly-formed item from a foreign producer) instead of
+    raising into the recall turn — treated as unmeasured (False).
+    (2) ``enrich_items`` whole-batch fail-open: a projection error mid-loop
+    degrades to "no enrichment keys" for the whole batch (byte-identical to
+    flag-off) instead of a partial/raising recall."""
+    import tortoise.why as why_mod
+    sdk = _fresh_sdk()
+    try:
+        claim = sdk.create_point("statement", "rogue-variance topic belief")
+        _set_posterior(sdk, claim["id"], 12.0, 1.0)
+        block = assemble_why_blocks(sdk._get_proj(), [claim["id"]])[claim["id"]]
+
+        # (1) rogue variance: string variance + has_ep True → coerced, no raise.
+        rogue = {"id": claim["id"], "content": "rogue-variance topic belief",
+                 "ep": {"contested": False, "has_ep": True,
+                         "variance": "not-a-float", "confidence_mean": 0.9}}
+        assert why_mod._contested_from_item(rogue, block) is False, \
+            "rogue non-float variance must coerce to unmeasured, never raise"
+        # None variance → falsy, no raise, unmeasured.
+        assert why_mod._contested_from_item(
+            {"id": claim["id"], "ep": {"has_ep": True, "variance": None}}, block) is False
+        # (2) projection fail-open: a projection error degrades the WHOLE batch
+        # to the original items (byte-identical, no partial keys, no raise).
+        def _explode(item, block):  # noqa: ARG001
+            raise RuntimeError("projection exploded")
+
+        monkeypatch.setattr(why_mod, "project_item", _explode)
+        items = [{"id": claim["id"], "content": "rogue-variance topic belief"}]
+        out = why_mod.enrich_items(sdk._get_proj(), items)
+        assert out == items, \
+            "projection failure must degrade the whole batch to original items"
+    finally:
+        sdk.close()
