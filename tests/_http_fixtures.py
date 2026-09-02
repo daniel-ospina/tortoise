@@ -73,6 +73,14 @@ def patched_tortoise_sdk(db_path: str) -> Iterator[None]:
     _orig_init = ha_mod.TortoiseSDK.__init__
 
     def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
+        # Deliberately drop caller path args (db_path_arg / a db_path kwarg):
+        # _make_sdk's embedded-lane fallback constructs
+        # TortoiseSDK(db_path=<shared path>) — forwarding the caller path
+        # would re-bind the SHARED fallback DB and re-enable the #2090
+        # churn/leak class (the pass-through hazard the wave-2 onboarding
+        # :272/:309 audit names). event_log_path and other kwargs are also
+        # dropped in the fixture context (no event files in temp DBs) —
+        # mirrors the #1950 canonical (tests/test_hosted_api.py:110-113).
         _orig_init(self, db_path, namespace=namespace)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
@@ -80,11 +88,20 @@ def patched_tortoise_sdk(db_path: str) -> Iterator[None]:
     # clear() kept for parity with the #1497/#1950 precedents (a no-op after
     # the deterministic close above).
     ha_mod._FALLBACK_KEEPALIVE.clear()
+    # Snapshot-restore the pin (code-review P3): a pre-existing
+    # TORTOISE_DB_PATH from the outer env is restored at exit, never deleted
+    # for the rest of the pytest session. CI never sets it (the precedents
+    # pop unconditionally); the snapshot is strictly safer for dev shells
+    # that export it.
+    _prev_db_path = os.environ.get("TORTOISE_DB_PATH")
     os.environ["TORTOISE_DB_PATH"] = db_path
     try:
         yield
     finally:
-        os.environ.pop("TORTOISE_DB_PATH", None)
+        if _prev_db_path is None:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+        else:
+            os.environ["TORTOISE_DB_PATH"] = _prev_db_path
         ha_mod.TortoiseSDK.__init__ = _orig_init
         _close_keepalive_anchors(ha_mod)
         ha_mod.app.dependency_overrides.clear()

@@ -307,17 +307,22 @@ def reg_client(monkeypatch):
                     # anchor lives in the counter). The fixture owns the
                     # deterministic close: drain + close counter-held anchors
                     # (uncounted), verbatim mirror of TestDriftCounterWiring
-                    # :164-170.
-                    for _ns in list(counter):
-                        _anchor = dict.pop(counter, _ns, None)
-                        if _anchor is not None:
-                            try:  # noqa: SIM105
-                                _anchor.close()
-                            except Exception:
-                                pass
-                    assert not counter  # drain-completeness guard
-                    ha_mod._FALLBACK_KEEPALIVE = _orig_dict
-                    _close_seed_sdks()  # after anchor close (last-client SAVE)
+                    # :164-170. The (d) guard sits in an inner try so a RED
+                    # still restores the real dict + closes seeds (code-
+                    # review P2-2: an (a)/(d) assert RED must leave clean
+                    # module state).
+                    try:
+                        for _ns in list(counter):
+                            _anchor = dict.pop(counter, _ns, None)
+                            if _anchor is not None:
+                                try:  # noqa: SIM105
+                                    _anchor.close()
+                                except Exception:
+                                    pass
+                        assert not counter  # drain-completeness guard
+                    finally:
+                        ha_mod._FALLBACK_KEEPALIVE = _orig_dict
+                        _close_seed_sdks()  # after anchor close (last-client SAVE)
 
 
 @pytest.fixture
