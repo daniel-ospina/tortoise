@@ -9891,6 +9891,7 @@ class TortoiseSDK:
         search_keys_prf: bool = False,
         fusion_weights: dict | None = None,
         fusion_k: int = 60,
+        w4_enrich: bool = True,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -10565,7 +10566,8 @@ class TortoiseSDK:
             # surface; recall_state's pool and the ask lane inherit it through
             # their own calls. Zero-LLM, bounded reads, fail-open (items
             # unchanged on any assembly error).
-            if entity_type == "point" and w4_enrichment_enabled():
+            if entity_type == "point" and w4_enrich \
+                    and w4_enrichment_enabled():
                 ranked = w4_enrich_items(proj, ranked)
             return ranked
         if order_by == "confidence":
@@ -10584,7 +10586,8 @@ class TortoiseSDK:
         out = [r.to_dict() for r in results[:limit]]
         # W4 (#2101): additive why-layer enrichment (flag-gated) — see the
         # order_by=graph branch above for the contract.
-        if entity_type == "point" and w4_enrichment_enabled():
+        if entity_type == "point" and w4_enrich \
+                and w4_enrichment_enabled():
             out = w4_enrich_items(proj, out)
         return out
 
@@ -11520,7 +11523,12 @@ class TortoiseSDK:
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             exclude_status=exclude_status,
-            include_terminal=include_superseded)
+            include_terminal=include_superseded,
+            # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
+            # enrichment on the PRE-rerank pool would fold + project ~30k
+            # candidates that StateRanker then discards ~2/3 of. Enrich
+            # POST-rerank on the final top-limit list instead (see below).
+            w4_enrich=False)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool)
@@ -11590,6 +11598,20 @@ class TortoiseSDK:
             contested = bool(ep.get("contested")) if isinstance(ep, dict) else False
             copy["contested"] = contested
             out.append(copy)
+        # Sec-1 (code-review gate): W4 enrichment POST-rerank on the final
+        # top-limit list (the pool call above passed w4_enrich=False) — the
+        # additive keys ride only the results the caller actually receives.
+        # Flag-gated + fail-open (unchanged on any assembly error).
+        try:
+            from .why import enrich_items as _w4_enrich_items
+            from .why import w4_enrichment_enabled as _w4_enabled
+            if _w4_enabled():
+                point_items = [i for i in out if i.get("entity_type") == "point"]
+                enriched = _w4_enrich_items(proj, point_items)
+                by_id = {i["id"]: i for i in enriched}
+                out = [by_id.get(i["id"], i) for i in out]
+        except Exception as e:  # noqa: BLE001, RUF100 — fail-open
+            _logger.warning("W4 enrichment failed (recall_state): %s", e)
         return out
 
     def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:

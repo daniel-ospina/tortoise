@@ -70,6 +70,7 @@ W4_FLAG_ENV = "TORTOISE_W4_ENRICHMENT"
 # ── Budgets (plan §3.1.1 — pinned by the S6 contract test) ────────────────
 W4_MAX_SUPPORT = 3
 W4_MAX_CONFLICTS = 2
+W4_MAX_TRADEOFFS = 5
 W4_MAX_DIG_DEEPER = 3
 
 # ── Dig-deeper deterministic label registry (UXD 4 + ONTOLOGY §5) ─────────
@@ -236,9 +237,11 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
             }
     for pid, alts in pending.items():
         alt_list = list(alts.values())
-        if len(alt_list) < 2 and kinds.get(pid) != "decision":
-            continue
-        if len(alt_list) < 1:
+        # Decision points only (≥ 2 alternatives — "weigh the alternatives"
+        # is meaningless for a single option; a decision-kind point whose
+        # other alternatives were retracted degrades to NO tradeoffs rather
+        # than a one-row false decision).
+        if len(alt_list) < 2:
             continue
         if kinds.get(pid) != "decision" and not any(
                 a.get("kind") == "option" for a in alt_list):
@@ -246,12 +249,15 @@ def _assemble_tradeoffs(rows: list, by_id: dict[str, dict]) -> None:
         block = by_id[pid]
         # Contract shape: {point_id, label, ep_weight, mitigation} — the
         # option-kind marker is internal detection only, never emitted.
+        # Bounded: strongest W4_MAX_TRADEOFFS by EP weight (the other
+        # dimensions are capped; a decision with N alternatives must not
+        # make every enriched recall of it emit N entries).
         block["tradeoffs"] = sorted(
             [
                 {k: v for k, v in a.items() if k != "kind"}
                 for a in alt_list
             ],
-            key=lambda t: (-t["ep_weight"], t["point_id"]))
+            key=lambda t: (-t["ep_weight"], t["point_id"]))[:W4_MAX_TRADEOFFS]
 
 
 def _assemble_supersession(by_id: dict[str, dict],
@@ -637,6 +643,20 @@ def project_item(item: dict, block: dict) -> dict:
             if k in ("id", "content"):
                 continue
             out[k] = v
+    # §3.1.4 "top-level ep is canonical": the flag-ON enriched item's ep
+    # must be the CANONICAL posterior mean α/(α+β) — not annotate_ep_batch's
+    # edge-ratio proxy impl/(impl+nand). variance/contested/has_ep already
+    # agree (both derive from the persisted posterior); only confidence_mean
+    # diverges. Applied AFTER the contested rebuild (which re-copies from
+    # item). Copy-then-override — never mutate the caller's dict (out is a
+    # shallow copy, ep would alias item["ep"]). Cross-surface consistency:
+    # ask/analyze/search report the same belief number for the same point.
+    item_ep = item.get("ep")
+    block_ep = (block or {}).get("ep")
+    if isinstance(item_ep, dict) and isinstance(block_ep, dict) \
+            and block_ep.get("has_ep"):
+        out["ep"] = dict(item_ep)
+        out["ep"]["confidence_mean"] = block_ep["confidence_mean"]
     if block.get("support_chain"):
         out["why"] = {"support_chain": block["support_chain"]}
     if (block.get("conflicts") or {}).get("nands") or contested:

@@ -1,18 +1,28 @@
 ---
-title: "Tortoise — Canonical Ontology v3.6"
+title: "Tortoise — Canonical Ontology v3.9"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-08-11
+updated: 2026-09-02
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.6
+# Tortoise — Canonical Ontology v3.9
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.9 (2026-09-02, issue #2101 / epic #2080 — §5 response-contract vocabulary, W4 why-layer DM-12):**
+> - §5: new Response-Contract Vocabulary section — additive response-contract
+>   labels (dig_deeper kinds/labels, why-block sections, conflict severity,
+>   degraded_reason), NOT new entity kinds. Registered so the W4 why-block
+>   assembly (tortoise/why.py) and the S6 contract test share one vocabulary
+>   (S15 schema-correctness review prevents drift).
+> - §5: conflict severity boundary pinned — `high` when the counter-claim's
+>   persisted EP mean ≥ 0.6, else `medium` (repo-wide high-confidence bar,
+>   analyze.py consensus pattern).
 >
 > **Changelog v3.8 (2026-08-13, issue #388 — connector Source nodes):**
 > - §3.4: connector events (GitHub/Linear/Slack poll + webhook + entity paths)
@@ -521,6 +531,7 @@ dig_deeper labels  read supports · read the counterargument (NAND)
                    · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
 why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (§3.1.1/§6.1)
 conflict severity  high | medium                                # deterministic from the counter-claim's persisted EP mean
+                                                               # high ⟺ mean ≥ 0.6 (repo high-confidence bar); else medium
 degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (§3.1.3)
 ```
 

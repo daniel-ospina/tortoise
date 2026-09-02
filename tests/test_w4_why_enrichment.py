@@ -644,6 +644,14 @@ def test_flag_drift_all_four_surfaces(w4_flag, monkeypatch):
             "the dispute must ride the ask why entry (E2E-1 surfaced-context)"
         assert any(p["kind"] == "nand" for p in ask_entry.get("dig_deeper", [])), \
             "ask why entry must carry the nand dig-deeper pointer"
+        # §3.1.4 top-level ep is canonical: the ask-lane entry's ep carries
+        # has_ep + a real posterior-derived mean (a NON-discriminating value
+        # here — the conflicted fixture's α/(α+β) and impl/(impl+nand)
+        # coincide at 0.5; the discriminating clean-point case is pinned in
+        # test_ask_why_entry_canonical_posterior_mean (review F2)).
+        assert ask_entry["ep"]["has_ep"] is True
+        assert ask_entry["ep"]["confidence_mean"] == pytest.approx(0.5, abs=1e-3), \
+            "conflicted fixture mean must be 0.5 (α=β=2)"
     finally:
         sdk.close()
 
@@ -1437,12 +1445,14 @@ def test_mixed_edge_support_legs_merge(w4_flag):
         weak_op = sdk.create_point("evidence", f"{topic} weak op-mediated record")
         claim = sdk.create_point("statement", f"{topic} mixed-edge belief statement")
         # Leg 1: operator-mediated (create_operator wires source →INPUT idx0→
-        # op →IMPL→ target). strong_op and weak_op ride this leg.
+        # op →IMPL→ target). strong_op, weak_op AND both_legs ride this leg
+        # (both_legs is an operator source for the claim).
         sdk.create_operator("IMPL", strong_op["id"], [claim["id"]])
         sdk.create_operator("IMPL", weak_op["id"], [claim["id"]])
+        sdk.create_operator("IMPL", both_legs["id"], [claim["id"]])
         # Leg 2: operator-less direct IMPL edges (reification rule, §8).
-        # strong_direct rides direct only; both_legs rides BOTH (op-mediated
-        # INPUT path AND a direct edge — the dedup branch).
+        # strong_direct rides direct only; both_legs rides BOTH (operator-
+        # mediated INPUT path AND a direct edge — the dedup branch).
         sdk.create_direct_edge("IMPL", strong_direct["id"], claim["id"])
         sdk.create_direct_edge("IMPL", both_legs["id"], claim["id"])
         _set_posterior(sdk, claim["id"], 12.0, 1.0)
@@ -1510,5 +1520,114 @@ def test_rogue_variance_coerces_and_projection_fail_open(w4_flag, monkeypatch):
         out = why_mod.enrich_items(sdk._get_proj(), items)
         assert out == items, \
             "projection failure must degrade the whole batch to original items"
+    finally:
+        sdk.close()
+
+
+def test_single_alternative_decision_no_tradeoffs(w4_flag):
+    """REVIEW-FIX (F3, code-review gate): a decision-kind point with only
+    ONE surviving alternative emits NO tradeoffs block — "weigh the
+    alternatives" is meaningless with a single option, and a one-row false
+    decision would mislead. The old guard let decision-kind points with 1
+    alternative through (the <2 check was waived for the decision kind).
+
+    A retracted option leaves a decision-kind point with a single
+    alternative; the canonical assembly must degrade to absent (dimension
+    not computed), not a degenerate one-row tradeoffs."""
+    sdk = _fresh_sdk()
+    try:
+        topic = "single-alt-decision"
+        ev = sdk.create_point("evidence", f"{topic} support record")
+        dec = sdk.create_point("decision", f"{topic} decision point")
+        opt = sdk.create_point("option", f"{topic} the one option")
+        sdk.create_operator("IMPL", ev["id"], [dec["id"]])
+        sdk.create_operator("IMPL", dec["id"], [opt["id"]])
+        _set_posterior(sdk, dec["id"], 12.0, 1.0)
+        _set_posterior(sdk, opt["id"], 8.0, 1.0)
+        _set_posterior(sdk, ev["id"], 12.0, 1.0)
+
+        blocks = assemble_why_blocks(sdk._get_proj(), [dec["id"]])
+        block = blocks[dec["id"]]
+        assert "tradeoffs" not in block, \
+            "single-alternative decision must emit NO tradeoffs (F3)"
+        # A 2-alternative decision DOES emit tradeoffs (control arm — the
+        # guard must not have flattened all decisions).
+        ctl = _plant_decision(sdk, "control-two-alt")
+        ctrl_block = assemble_why_blocks(sdk._get_proj(), [ctl["decision"]])
+        assert "tradeoffs" in ctrl_block[ctl["decision"]], \
+            "two-alternative decision must still emit tradeoffs (control)"
+    finally:
+        sdk.close()
+
+
+def test_tradeoffs_bounded_cap(w4_flag):
+    """REVIEW-FIX (Sec-2, code-review gate): the tradeoffs dimension is
+    bounded by W4_MAX_TRADEOFFS — a decision point with N alternatives must
+    not make every enriched recall emit N entries (every other dimension is
+    capped; tradeoffs was the sole uncapped per-item list). The strongest
+    W4_MAX_TRADEOFFS by EP weight survive, deterministically ordered."""
+    import tortoise.why as why_mod
+    sdk = _fresh_sdk()
+    try:
+        topic = "many-alt-decision"
+        ev = sdk.create_point("evidence", f"{topic} support record")
+        dec = sdk.create_point("decision", f"{topic} decision point")
+        sdk.create_operator("IMPL", ev["id"], [dec["id"]])
+        # 8 alternatives with descending EP weights (8/1 strongest … 1/8
+        # weakest) — the cap must keep the strongest W4_MAX_TRADEOFFS.
+        for i in range(8):
+            o = sdk.create_point("option", f"{topic} option {i}")
+            sdk.create_operator("IMPL", dec["id"], [o["id"]])
+            w = 8 - i
+            _set_posterior(sdk, o["id"], float(w), 1.0)
+        _set_posterior(sdk, dec["id"], 12.0, 1.0)
+        _set_posterior(sdk, ev["id"], 12.0, 1.0)
+
+        blocks = assemble_why_blocks(sdk._get_proj(), [dec["id"]])
+        tradeoffs = blocks[dec["id"]]["tradeoffs"]
+        assert len(tradeoffs) == why_mod.W4_MAX_TRADEOFFS, \
+            f"tradeoffs must cap at {why_mod.W4_MAX_TRADEOFFS}, got {len(tradeoffs)}"
+        weights = [t["ep_weight"] for t in tradeoffs]
+        assert weights == sorted(weights, reverse=True), \
+            "tradeoffs must be ordered by EP weight desc"
+    finally:
+        sdk.close()
+
+
+def test_ask_why_entry_canonical_posterior_mean(w4_flag, monkeypatch):
+    """REVIEW-FIX (F2, code-review gate): the ask-lane why entry's
+    ``ep.confidence_mean`` must be the CANONICAL posterior mean α/(α+β) —
+    the same belief number analyze/the canonical block emit — never
+    annotate_ep_batch's edge-ratio proxy impl/(impl+nand).
+
+    Discriminating fixture: a CLEAN 2-IMPL/0-NAND point with a 12/1
+    posterior reads 1.0 under the structural ratio (2/2) but 12/13 ≈ 0.923
+    under the posterior mean — an agent comparing the same point across the
+    ask vs analyze surfaces must not see contradictory belief numbers."""
+    import tortoise.sdk as sdk_mod
+    fake = _FakeReader()
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory", lambda: fake)
+    _reset_ask_reader_cache_for_tests()
+
+    sdk = _fresh_sdk()
+    try:
+        g = _plant_clean(sdk, "ask-ep-topic")
+        ask = _mcp_ask(sdk, "what is the belief on ask-ep-topic?")
+        assert set(ask) == CANONICAL_ASK_KEYS | {"why"}
+        why = ask.get("why") or []
+        entry = next((e for e in why if e.get("point_id") == g["claim"]), None)
+        assert entry is not None, "ask why must include the clean point's block"
+        assert entry["ep"]["has_ep"] is True
+        # Canonical posterior 12/13 — NOT the structural 1.0 (2/2).
+        assert entry["ep"]["confidence_mean"] == pytest.approx(12 / 13, abs=1e-3), \
+            "ask ep must carry the canonical posterior mean, not the edge-ratio (F2)"
+        assert entry["ep"]["contested"] is False
+        # Same point through the analyze surface reports the SAME number
+        # (cross-surface consistency is the point of the fix).
+        ana = _mcp_analyze(sdk, "what is the consensus?")
+        why_ana = ana.get("why") or []
+        ana_entry = next((e for e in why_ana if e.get("point_id") == g["claim"]), None)
+        assert ana_entry is not None
+        assert ana_entry["ep"]["confidence_mean"] == pytest.approx(12 / 13, abs=1e-3)
     finally:
         sdk.close()
