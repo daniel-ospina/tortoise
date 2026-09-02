@@ -190,7 +190,10 @@ from what does not. This section fixes that separation.
 
 - **The write-path measurement pattern** (Cat 35) — first of its kind, and
   the 61.5% → fix-wave → 88.1% demonstration is load-bearing ("benchmarks
-  that bite back" is TRUE and durable) (brief §Adversarial, §Strategy 1).
+  that bite back" is TRUE and durable). Honest delta note: the fix-wave
+  comparison was re-anchored against a FRESH pre-wave master at 70.2% (the
+  published 61.5% baseline was 62 commits stale) — the honest delta is
+  70.2% → 88.1% (brief §Adversarial; raw-notes 10:30Z).
 - **The benchmark machinery** — sealed gold, `fixtures_hash`, receipts
   naming the commit, hermetic CI, corpus-bless mode, publish-bad-numbers-
   on-purpose, justification-to-bless (brief §Strategy 4, §Workflow Pattern).
@@ -207,7 +210,7 @@ from what does not. This section fixes that separation.
 - **Preamble slugs don't count** (codex-fragment seam): even though the
   codex seam itself is SKIPPED (no Tortoise codex integration), the
   anti-gaming rule carries — injected preamble content must never be counted
-  as a voluntary injection (brief §UX Pattern Research; plan §2.2/§2.6).
+  as a voluntary injection (brief §UX Pattern Research; plan §2.2, §1.3 J5).
 - **Seam-vs-contract drift**: contract rows do NOT measure third-party
   harness behavior — the W3 harness MUST grade real Tortoise seams (MCP
   tools, claude-hooks, session_import), never an abstract contract (brief
