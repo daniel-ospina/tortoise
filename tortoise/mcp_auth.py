@@ -148,7 +148,11 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 status=401,
             )
         token = auth[7:]
-        if not (token.startswith("tt_") or token.startswith("oat_")):
+        # C2 (#2111): accept tk_ scoped keys too. Lazy import preserves the
+        # module's documented "imports ONLY tortoise.sdk + starlette"
+        # contract (auth.py triggers pepper env checks at module import).
+        from tortoise.auth import API_KEY_PREFIXES
+        if not (token.startswith(API_KEY_PREFIXES) or token.startswith("oat_")):
             if not token:
                 return _jsonrpc_error(
                     ERR_UNAUTHORIZED,

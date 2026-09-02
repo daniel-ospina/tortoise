@@ -12236,10 +12236,10 @@ class TortoiseSDK:
         teams.graph_name) + count(custom active). Deleted rows excluded
         (delete frees the slot; v1 has no archive). Registry mode: the
         existing MATCH (team_create :12055 creates the kind='default' node,
-        so the registry count already includes the default). NOTE for C3:
-        registry graph_count has no status filter — correct while no delete
-        exists, but C3's soft-delete must filter status <> 'deleted' to
-        avoid registry↔Supabase overcount drift.
+        so the registry count already includes the default). C2 (#2111):
+        registry branch now filters status <> 'deleted' (soft-delete must
+        free the slot — E2E-8; pre-C1 nodes without the prop count as
+        active) — parity with the Supabase branch (plan-review P1 #3).
         """
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, is_supabase_enabled,
@@ -12262,9 +12262,58 @@ class TortoiseSDK:
             return 1 + len(rows)
         reg = self._get_registry()
         return reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN count(g)",
+            "MATCH (g:Graph {team_id:$tid}) "
+            "WHERE g.status IS NULL OR g.status <> 'deleted' "
+            "RETURN count(g)",
             params={"tid": team_id},
         ).result_set[0][0]
+
+    def graph_delete(self, team_id: str, graph_id: str) -> bool:
+        """Soft-delete a Graph node (status='deleted' tombstone — the v1
+        lifecycle, C2 #2111). Returns True when a non-default node was
+        tombstoned; False when unknown OR the default (callers map to
+        404/403). Pre-C1 nodes without status gain it on delete."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        if not rows:
+            return False
+        if rows[0][0] == "default":
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "SET g.status = 'deleted'",
+            params={"gid": graph_id, "tid": team_id},
+        )
+        return True
+
+    def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
+        """APIKey node ids bound to a graph — the delete-cascade source
+        (every key dies with the graph, E2E-8). Revoked or not — the
+        cascade must revoke rows that are somehow still active AND clean
+        up revoked ones (idempotent)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) RETURN k.id",
+            params={"tid": team_id, "gid": graph_id},
+        ).result_set
+        return [r[0] for r in rows]
+
+    def graph_active_key_count(self, team_id: str, graph_id: str) -> int:
+        """ACTIVE (non-revoked) APIKey nodes bound to a graph — the
+        key_count source for GET /v1/graphs (parity with the Supabase
+        count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
+        and must NOT be reused for the meter — after C3's standalone
+        revoke, counting all keys would overcount vs Supabase)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) "
+            "WHERE k.revoked_at IS NULL RETURN count(k)",
+            params={"tid": team_id, "gid": graph_id},
+        ).result_set
+        return int(rows[0][0]) if rows else 0
 
     def team_get(self, team_id: str) -> dict | None:
         """Get a team by ID. Returns None if not found."""
@@ -12516,11 +12565,11 @@ class TortoiseSDK:
         Falls back to full scan for legacy provision_tenant keys whose
         key_prefix was set to team_id[:8] (which won't match token[:10]).
         """
-        from tortoise.auth import verify_api_key
+        from tortoise.auth import API_KEY_PREFIXES, verify_api_key
         reg = self._get_registry()
 
         # #687: indexed key_prefix lookup avoids O(keys) PBKDF2 scan
-        if label == "APIKey" and plaintext.startswith("tt_"):
+        if label == "APIKey" and plaintext.startswith(API_KEY_PREFIXES):
             prefix = plaintext[:10]
             rows = reg.query(
                 f"MATCH (n:{label}) WHERE n.key_prefix = $prefix "
@@ -12549,7 +12598,8 @@ class TortoiseSDK:
                       *, graph_id: str | None = None,
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
-                      delegation_depth: int | None = None) -> dict:
+                      delegation_depth: int | None = None,
+                      prefix: str = "tt_") -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
@@ -12558,7 +12608,9 @@ class TortoiseSDK:
         back-compat for existing callers): graph_id (NULL = team-wide key
         → default graph), scopes (FLAT allowlist, default []), mint lineage
         (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
-        NULL = owner-minted).
+        NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
+        the provisioning service mint tk_ per-graph keys (epic vocabulary);
+        existing callers unchanged.
         """
         import uuid  # noqa: I001
         from datetime import datetime, timezone
@@ -12569,7 +12621,7 @@ class TortoiseSDK:
         if team is None:
             raise ControlPlaneError(f"Team {team_id!r} not found")
 
-        api_key = f"tt_{uuid.uuid4().hex}"
+        api_key = f"{prefix}{uuid.uuid4().hex}"
         key_hash = hash_api_key(api_key)
         key_prefix = api_key[:10]
         kid = ulid()

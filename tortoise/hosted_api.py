@@ -35,7 +35,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
-from tortoise.auth import hash_api_key
+from tortoise.auth import API_KEY_PREFIXES, hash_api_key
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -683,7 +683,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         gets a DEDICATED per-key bucket (``<key>@<path>``) so it is exempt
         from the general 100/min key budget (R-13). Invalid/missing keys
         fall to a per-IP bucket; no client host → no bucket (blocked)."""
-        if auth.startswith("Bearer ") and auth[7:].startswith("tt_"):
+        if auth.startswith("Bearer ") and auth[7:].startswith(API_KEY_PREFIXES):
             key = auth[7:]
             if path in self.path_limits:
                 return f"{key}@{path}"
@@ -1296,7 +1296,7 @@ async def get_current_team(request: Request) -> dict:
         await _audit_auth_failure(request, "bad_scheme")
         raise HTTPException(status_code=401, detail="Authorization header must use Bearer scheme")
     token = auth[7:]
-    if not token.startswith("tt_"):
+    if not token.startswith(API_KEY_PREFIXES):
         await _audit_auth_failure(request, "invalid_format")
         raise HTTPException(status_code=401, detail="Invalid API key format")
     # #767 (plan Task 3): hosted auth resolves from Supabase (lookup_hash)
@@ -3285,7 +3285,7 @@ async def _session_login_exchange(
         membership_for_user_team,
         mint_target_user_for_key,
     )
-    if not token.startswith("tt_"):
+    if not token.startswith(API_KEY_PREFIXES):
         await _audit_auth_failure(request, "invalid_key")
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -3315,6 +3315,23 @@ async def _session_login_exchange(
 
     team_id = team["team_id"]
     created_by = team.get("created_by")
+
+    # C2 (#2111) child-policy guard: a MINTED (deleg=0) key — per-graph or
+    # team-wide — NEVER carries login identity. The /v1/session/login
+    # exchange was designed when the only keys were owner-minted
+    # (holder == creator — exchanging was a no-op privilege); C2's minted
+    # keys exist to be handed to THIRD PARTIES (contractor/agent/customer)
+    # whose access is strictly less than the creator's — allowing the
+    # exchange would let any holder of a dashboard-minted per-graph key
+    # sign in as the OWNER (delete graphs, mint keys, read other graphs,
+    # manage billing). Reject deleg=0 here (KEY_NOT_USER_MINTED class) —
+    # consistent with the create_team_graph deleg=0 → 403 gate.
+    if team.get("delegation_depth") == 0:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "KEY_NOT_USER_MINTED",
+                    "message": "Minted keys cannot be used to sign in."},
+        )
 
     # created_by decision tree: UUID → mint the CREATOR's session; anon/
     # identity (owner-less team) → claim funnel; "api"/NULL/unknown →
@@ -4345,6 +4362,167 @@ async def create_demo_graph(request: Request):
 
     return _seed_demo_graph(team_id)
 
+
+# ── C2 (#2111): the ONE shared per-graph key mint ────────────────────────────
+# C3 (#2112) standalone key-lifecycle endpoints CONSUME this helper (D0 —
+# one implementation, never re-implemented). It stamps delegation_depth=0,
+# gates max_api_keys, filters scopes through the child policy, and reveals
+# the plaintext exactly once (hash-only stored).
+
+# Child policy (fixed, W1): a minted key can NEVER inherit escalation
+# scopes — only graph-data scopes pass the ∩ filter. The DB CHECK
+# (chk_minted_key_no_escalation) is the backstop.
+_MINTABLE_SCOPES = ("graphs:read", "graphs:write")
+
+
+class _KeyCapExceeded(Exception):
+    """max_api_keys reached — caller maps to 409 + graph rollback (D4)."""
+
+
+def _team_node_sync_limits(team_id: str) -> dict:
+    """Sync twin of _team_node + _team_limits_from_node for the sync mint
+    path (C2 #2111). Returns {} when the team is unknown (the mint then
+    skips the key-cap gate — the caller's team check already ran)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        team_by_id,
+    )
+    if is_supabase_enabled():
+        row = team_by_id(get_control_plane(), team_id)
+        return _team_limits_from_node(row) if row else {}
+    sdk = _make_sdk(namespace="registry")
+    node = sdk.team_get(team_id)
+    return _team_limits_from_node(node) if node else {}
+
+
+def _mint_graph_key(team_id: str, graph_id: str,
+                    requested_scopes: list | None,
+                    caller_key_id: str | None,
+                    session_user_id: str | None = None) -> dict:
+    """Mint a per-graph key (tk_ prefix, deleg=0) — the ONE mint.
+
+    Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
+    graph_id, created_by_key_id, created_at}. key_plaintext appears ONLY in
+    this return (reveal-once: the caller puts it in the 201 envelope and
+    nowhere else; hash-only stored). Raises _KeyCapExceeded when the team
+    is at max_api_keys (caller maps 409 + graph rollback).
+    """
+    import uuid
+
+    from tortoise.auth import lookup_hash
+    from tortoise.supabase_control import (
+        get_control_plane,
+        insert_api_key,
+        is_supabase_enabled,
+    )
+
+    # Child policy: requested ∩ mintable (escalation scopes never inherited;
+    # empty result → the safe default read-only).
+    scopes = [s for s in (requested_scopes or [])
+              if s in _MINTABLE_SCOPES] or ["graphs:read"]
+
+    # Key-cap gate (pre-check; the graph already exists at call time — the
+    # caller rolls back the graph on _KeyCapExceeded, no graph-without-key).
+    from tortoise.quota import _count_resource
+    max_keys = _team_node_sync_limits(team_id).get("max_api_keys")
+    if max_keys is not None:
+        count = _count_resource(team_id, "api_keys")
+        if count >= int(max_keys):
+            raise _KeyCapExceeded()
+
+    api_key = f"tk_{uuid.uuid4().hex}"
+    key_prefix = api_key[:10]
+    kid = _short_id()
+    now = datetime.now(UTC).isoformat()
+
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        # created_by attribution (established convention, P2 review fix):
+        # user UUID (session alias — #1511) or "api" — NEVER a key id.
+        # Key-driven mints can't resolve the caller's user at mint time and
+        # lineage already rides created_by_key_id; consumers treat
+        # created_by as user-UUID-or-"api" (first_api_call distinct_id,
+        # the session-login exchange tree).
+        created_by = session_user_id or "api"
+        insert_api_key(cp, {
+            "id": kid,
+            "team_id": team_id,
+            "lookup_hash": lookup_hash(api_key),
+            "key_prefix": key_prefix,
+            "created_via": "provisioned",
+            "created_by": created_by,
+            "created_at": now,
+            "revoked_at": None,
+            "expires_at": None,
+            # C1 columns: graph scope + allowlist + mint lineage
+            "graph_id": graph_id,
+            "scopes": scopes,
+            "created_by_key_id": caller_key_id,
+            "delegation_depth": 0,
+        })
+    else:
+        sdk = _make_sdk(namespace="registry")
+        # apikey_create generates its OWN id (ulid) AND plaintext for the
+        # node — capture BOTH so the envelope's key.id and key_plaintext
+        # match the registry node (revoke/shrink in C3 must hit the real
+        # id; a revealed plaintext must verify against the stored hash).
+        created = sdk.apikey_create(
+            team_id, session_user_id or "api",
+            graph_id=graph_id, scopes=scopes,
+            created_by_key_id=caller_key_id, delegation_depth=0,
+            prefix="tk_",
+        )
+        kid = created["id"]
+        api_key = created["api_key"]
+        key_prefix = created["key_prefix"]
+
+    # C4 (#2113) seam: ACL user created at mint (defense-in-depth). Fail-soft
+    # no-op when C4 is absent — surface-6 assertions run at capstone (#2118).
+    _acl_user_create_hook(graph_id, team_id)
+
+    return {
+        "id": kid,
+        "key_plaintext": api_key,
+        "key_prefix": key_prefix,
+        "scopes": scopes,
+        "delegation_depth": 0,
+        "graph_id": graph_id,
+        "created_by_key_id": caller_key_id,
+        "created_at": now,
+    }
+
+
+def _acl_user_create_hook(graph_id: str, team_id: str) -> None:
+    """C4 seam — create the per-graph ACL user (defense-in-depth). No-op
+    until C4 ships; failures are logged, never block the mint (the app-layer
+    scope check is authoritative)."""
+    try:
+        from tortoise.acl_graph_users import (
+            create_acl_user,  # type: ignore[import-not-found]
+        )
+        create_acl_user(graph_id, team_id)
+    except ImportError:
+        pass  # C4 not shipped — seam dormant
+    except Exception as e:
+        _logger.warning("ACL user create failed for graph %s (defense-in-depth, non-blocking): %s",
+                        graph_id, e)
+
+
+def _acl_user_drop_hook(graph_id: str) -> None:
+    """C4 seam — drop the per-graph ACL user on delete. Same fail-soft
+    contract as the create hook."""
+    try:
+        from tortoise.acl_graph_users import (
+            drop_acl_user,  # type: ignore[import-not-found]
+        )
+        drop_acl_user(graph_id)
+    except ImportError:
+        pass  # C4 not shipped — seam dormant
+    except Exception as e:
+        _logger.warning("ACL user drop failed for graph %s (non-blocking): %s", graph_id, e)
+
+
 @app.post("/v1/team/keys", response_model=CreateKeyResponse)
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Generate a new API key for the team.
@@ -4360,6 +4538,15 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     The body is optional and currently carries one field: `name` — an
     optional user-facing label (migration 20260825000001) so dashboards/CLI
     can remember which key is which. Bodies default to {} (legacy clients)."""
+    # C2 (#2111) one-level-deep guard: a MINTED (deleg=0) caller key can
+    # NEVER mint another key — the child policy (deleg=0 keys cannot
+    # escalate) covers this capability surface, not just scope columns
+    # (the DB CHECK constrains the scopes of deleg=0 rows; it cannot see
+    # POST /v1/team/keys). Mirrors the create_team_graph deleg=0 → 403
+    # gate (E2E-4). Session callers (key_id None) always pass.
+    if team.get("key_id") is not None and team.get("delegation_depth") == 0:
+        raise HTTPException(status_code=403,
+                            detail="Minted keys cannot mint new keys")
     _check_team_limit(team, "api_keys")
     # Key label (optional): read the body defensively — mint bodies are
     # usually `{}` (dashboard/CLI), so a name is best-effort, never a
@@ -6678,10 +6865,283 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
             "tier": "free", "name": name}
 
 
-@app.post("/v1/graphs")
+# ── C2 (#2111): the ONE provisioning service ───────────────────────────────
+# Both POST /v1/teams/{team_id}/graphs (key-driven) and POST /v1/graphs
+# (session alias) route through _provision_graph — one tier gate, one quota
+# gate, one mint, one rollback, one 201 envelope (epic plan §5.2/W1/§6.2).
+
+# Tier gate: only tiers whose default graph FILLS the quota are blocked
+# (free=1, anon=1 — the default occupies slot 1). Solo=2 passes and gets
+# exactly 1 custom; pro/team are unlimited (Gate #2 decision). 402 is the
+# upgrade-CTA response, checked FIRST per W1 ordering (E2E-3 pin — never
+# any-4xx).
+_GRAPH_TIER_BLOCKED = {"free", "anon"}
+
+# Per-team provisioning lock — serializes the atomic count-then-insert
+# quota gate (E2E-11 no oversubscription). Registry mode has no
+# transactions, so the lock + post-insert re-count is the mechanism.
+# Single-process caveat (documented like the signup-token lane): a
+# multi-worker selfhost degrades "exactly 1" to "0 succeed" on the
+# re-count backstop — never over-subscribes.
+_PROVISION_LOCKS: dict[str, asyncio.Lock] = {}
+_PROVISION_LOCKS_GUARD = threading.Lock()
+
+
+def _provision_lock(team_id: str) -> asyncio.Lock:
+    with _PROVISION_LOCKS_GUARD:
+        lock = _PROVISION_LOCKS.get(team_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _PROVISION_LOCKS[team_id] = lock
+        return lock
+
+
+async def _graph_quota_gate(team: dict) -> None:
+    """Quota gate — 409 + X-Graph-Quota when at cap (distinct from the
+    402 tier gate; D2/D3). Fail-closed: counting errors raise 500, never
+    a silent pass (#686). No 80% warn band in v1 (Gate #2 — unreachable
+    at free=1/solo=2, dormant until a finite pro/team cap exists)."""
+    limits = _team_limits_from_node(team)
+    max_graphs = limits.get("max_graphs")
+    if max_graphs is None:
+        return  # unlimited (pro/team)
+    try:
+        count = _make_sdk(namespace="registry").graph_count(team["id"])
+    except Exception as e:
+        _logger.error("graph count failed (fail-closed #686): team=%s error=%s",
+                      team["id"], e)
+        raise HTTPException(status_code=500,
+                            detail=f"Quota check failed: {e}") from None
+    if count >= int(max_graphs):
+        raise HTTPException(
+            status_code=409,
+            headers={"X-Graph-Quota": f"{count}/{max_graphs}"},
+            detail=("Graph limit reached. Upgrade your plan to create more "
+                    "graphs."),
+        )
+
+
+def _provision_graph(team: dict, name: str,
+                     requested_scopes: list | None,
+                     caller_key_id: str | None,
+                     session_user_id: str | None = None) -> dict:
+    """The ONE mint flow. Caller holds the per-team lock (or this is
+    called within it). Returns the 201 envelope. On ANY post-write
+    failure the graph rolls back (D11 — no orphan graph/key).
+
+    session_user_id (session alias only): recorded as the minted key's
+    creator (#1511 attribution — session mints carry the user UUID;
+    key-driven mints carry the caller key id)."""
+    sdk = _make_sdk(namespace="registry")
+    graph = None
+    minted = None
+    try:
+        # Graph write (both modes). Supabase: graphs row via the seam
+        # (C1 deferred the INSERT; C2 owns it). Registry: _graph_create
+        # persists the Graph node (status active).
+        from tortoise.supabase_control import (
+            get_control_plane,
+            insert_graph,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            gid = f"g_{_short_id()}"
+            ns = f"team_{team['id']}_{gid}"
+            now = datetime.now(UTC).isoformat()
+            insert_graph(cp, {
+                "id": gid, "team_id": team["id"], "name": name,
+                "kind": "custom", "namespace": ns, "status": "active",
+                "recording": None, "created_at": now,
+            })
+            graph = {"id": gid, "name": name, "kind": "custom",
+                     "namespace": ns, "status": "active",
+                     "created_at": now}
+        else:
+            g = sdk._graph_create(team["id"], name, kind="custom")
+            graph = {"id": g["graph_id"], "name": name, "kind": "custom",
+                     "namespace": g["namespace"], "status": "active",
+                     "created_at": datetime.now(UTC).isoformat()}
+
+        # Post-insert re-count backstop (D3/E2E-11): the per-process lock
+        # serializes count-then-insert within one worker, but a multi-worker
+        # deploy (registry selfhost or PostgREST Supabase) can interleave two
+        # pre-checks. Re-count AFTER the write; over cap → roll back the
+        # just-inserted graph + 409 (never over-subscribe — degrades to
+        # "loser rolls back" instead of a silent overshoot).
+        limits = _team_limits_from_node(team)
+        max_graphs = limits.get("max_graphs")
+        if max_graphs is not None:
+            try:
+                after = sdk.graph_count(team["id"])
+            except Exception as e:
+                _logger.error(
+                    "post-insert re-count failed (fail-closed #686): "
+                    "team=%s error=%s", team["id"], e)
+                _rollback_graph(team["id"], graph)
+                raise HTTPException(status_code=500,
+                                    detail=f"Quota check failed: {e}") from None
+            if after > int(max_graphs):
+                _rollback_graph(team["id"], graph)
+                graph = None  # rolled back — the except must not re-delete
+                raise HTTPException(
+                    status_code=409,
+                    headers={"X-Graph-Quota": f"{after}/{max_graphs}"},
+                    detail=("Graph limit reached. Upgrade your plan to create "
+                            "more graphs."),
+                )
+
+        # Key mint (scopes ∩ child policy, deleg=0, tk_) — the ONE shared
+        # mint C3 consumes. Key-cap failure raises _KeyCapExceeded → the
+        # except below rolls back the graph (no graph-without-key).
+        minted = _mint_graph_key(team["id"], graph["id"],
+                                 requested_scopes, caller_key_id,
+                                 session_user_id=session_user_id)
+        return {
+            "graph": {
+                "id": graph["id"], "name": graph["name"],
+                "kind": graph["kind"], "namespace": graph["namespace"],
+                "status": graph["status"], "created_at": graph["created_at"],
+            },
+            "key": {
+                "id": minted["id"], "graph_id": minted["graph_id"],
+                "scopes": minted["scopes"],
+                "created_at": minted["created_at"],
+            },
+            "key_plaintext": minted["key_plaintext"],
+            "revealed_once": True,
+        }
+    except _KeyCapExceeded:
+        # Roll back the graph (the key never landed) — no orphan.
+        _rollback_graph(team["id"], graph)
+        raise HTTPException(
+            status_code=409,
+            detail="API key limit reached. Delete a key or upgrade your plan "
+                   "to create more graph keys.",
+        ) from None
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Rollback: delete the graph row/node + revoke the minted key if it
+        # landed (D11 — #1686/#1748 no-orphan invariants).
+        _rollback_graph(team["id"], graph)
+        if minted is not None:
+            try:  # noqa: SIM105
+                _revoke_minted_key(team["id"], minted["id"])
+            except Exception:
+                pass
+        _logger.error("graph provisioning failed (rolled back): team=%s "
+                      "name=%s error=%s", team["id"], name, e)
+        raise HTTPException(status_code=500,
+                            detail="Graph provisioning failed") from None
+
+
+def _rollback_graph(team_id: str, graph: dict | None) -> None:
+    """Rollback a minted graph (D11). Supabase: delete the row by id.
+    Registry: DETACH DELETE the node. Best-effort — the rollback itself
+    failing must not mask the original error."""
+    if graph is None:
+        return
+    try:
+        from tortoise.supabase_control import (
+            delete_graph_row,
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            delete_graph_row(get_control_plane(), team_id, graph["id"])
+        else:
+            _make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (g:Graph {id:$gid, team_id:$tid}) DETACH DELETE g",
+                params={"gid": graph["id"], "tid": team_id},
+            )
+    except Exception as e:
+        _logger.error("graph rollback failed for %s (leak risk): %s",
+                      graph.get("id"), e)
+
+
+def _revoke_minted_key(team_id: str, key_id: str) -> None:
+    """Revoke a minted key that landed after a graph rollback (D11)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        revoke_api_key,
+    )
+    if is_supabase_enabled():
+        revoke_api_key(get_control_plane(), key_id)
+    else:
+        _make_sdk(namespace="registry").apikey_revoke(key_id)
+
+
+@app.post("/v1/teams/{team_id}/graphs", status_code=201)
+async def create_team_graph(team_id: str, body: dict,
+                            key_ctx: dict = Depends(get_current_team)):  # noqa: B008
+    """C2 (#2111) — key-driven provisioning (epic W1). Auth: a key with the
+    graphs:create scope. One-level-deep by construction: a MINTED key
+    (deleg=0) can never hold graphs:create (child policy + DB CHECK), so
+    it 403s here (E2E-4-negative)."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name required")
+    if key_ctx.get("team_id") != team_id:
+        # Cross-team key → 404 (no existence oracle, P1 #6).
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if key_ctx.get("delegation_depth") == 0 or key_ctx.get("key_id") is None:
+        # Minted/unknown key → 403 (one-level-deep: minted keys cannot
+        # provision, E2E-4).
+        raise HTTPException(status_code=403,
+                            detail="Minted keys cannot provision graphs")
+    scopes = key_ctx.get("scopes") or []
+    if "graphs:create" not in scopes and not key_ctx.get("legacy_full_access"):
+        raise HTTPException(status_code=403,
+                            detail="Missing graphs:create scope")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    # Tier gate FIRST (402 — free/anon blocked; solo+ passes, E2E-3 pin).
+    if team.get("tier", "free") in _GRAPH_TIER_BLOCKED:
+        raise HTTPException(
+            status_code=402,
+            detail="Custom graphs require the Pro plan. Upgrade to create "
+                   "multiple graphs.",
+            headers={"X-Upgrade-CTA": "pro"},
+        )
+    async with _provision_lock(team_id):
+        # Duplicate-active check INSIDE the lock (registry has no unique
+        # index — P2 from review: the app check is the registry guard).
+        existing = _make_sdk(namespace="registry").graph_list(team_id)
+        if any(g["name"] == name and g.get("status") != "deleted"
+               for g in existing):
+            raise HTTPException(status_code=409, detail="Graph name already exists")
+        await _graph_quota_gate(team)
+        provisioned = _provision_graph(team, name, body.get("scopes"),
+                                       key_ctx.get("key_id"))
+        # #528 analytics (plan Task 4 Step 6) — success-only, fire-and-
+        # forget; key-driven mints fall back to the team id as distinct_id
+        # (created_by is "api" there by convention). Never gates the mint.
+        await asyncio.to_thread(
+            api_key_created,
+            key_ctx.get("created_by") or team["id"], team["id"],
+            provisioned["key_plaintext"][:10],
+            provisioned["key"]["id"], "provision",
+        )
+        # #308 R2 key-create evaluation (the 0015 trigger recorded the
+        # event; the mint may push the team over the threshold).
+        await _abuse_evaluate_keys(team["id"])
+        return provisioned
+
+
+@app.post("/v1/graphs", status_code=201)
 async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
-    """E5 — create a graph in a team (team↔graph 1:N). Free/Solo caps
-    enforced here (402 soft-block → upgrade CTA, UX-D4)."""
+    """E5 — session-authed alias for the ONE provisioning service (C2).
+    Existing dashboard caller; the response CHANGES from the old top-level
+    {graph_id, name, kind, graph_name} to the nested 201 envelope
+    (plan §6.2 contract — verified 2026-09-02: the only in-repo consumer,
+    dashboard createGraph (main.jsx), reads status only, so the shape
+    change is safe; C7 owns any UI that surfaces the envelope). The stale
+    402 here is REMOVED: the shared service owns tier(402)+quota(409)
+    semantics (D2)."""
     team_id = body.get("team_id")
     name = (body.get("name") or "").strip()
     if not team_id or not name:
@@ -6689,42 +7149,164 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
     membership = await _membership_team(user["user_id"], team_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
-
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
-
-    # #1853: a suspended team cannot create graphs (parity with the key
-    # path) — checked here because _membership_team itself stays pure for
-    # the /v1/team/alerts appeal flow.
     _ensure_not_suspended(team)
+    if team.get("tier", "free") in _GRAPH_TIER_BLOCKED:
+        raise HTTPException(
+            status_code=402,
+            detail="Custom graphs require the Pro plan. Upgrade to create "
+                   "multiple graphs.",
+            headers={"X-Upgrade-CTA": "pro"},
+        )
+    async with _provision_lock(team_id):
+        existing = _make_sdk(namespace="registry").graph_list(team_id)
+        if any(g["name"] == name and g.get("status") != "deleted"
+               for g in existing):
+            raise HTTPException(status_code=409, detail="Graph name already exists")
+        await _graph_quota_gate(team)
+        # Session-alias mint: record WHO minted (#1511 attribution parity
+        # with create_api_key — session mints carry the user UUID, not "api").
+        provisioned = _provision_graph(team, name, body.get("scopes"), None,
+                                       session_user_id=user["user_id"])
+        # #528 analytics (plan Task 4 Step 6) — success-only; the session
+        # user is the distinct_id.
+        await asyncio.to_thread(
+            api_key_created,
+            user["user_id"], team["id"],
+            provisioned["key_plaintext"][:10],
+            provisioned["key"]["id"], "provision",
+        )
+        # #308 R2 key-create evaluation (mirror create_api_key).
+        await _abuse_evaluate_keys(team["id"])
+        return provisioned
 
-    # #683: centralized graph-limit enforcement via fail-closed quota
-    limits = _team_limits_from_node(team)
-    _check_team_limit(limits, "graphs")
 
+@app.delete("/v1/graphs/{graph_id}")
+async def delete_graph(graph_id: str, team_id: str,
+                      key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
+    """C2 (#2111) — delete lifecycle (epic W3/E2E-8). Auth: a key with the
+    graphs:delete scope, or an owner/admin session user (the dual-auth
+    dependency resolves BOTH faces: key → get_current_team; session JWT →
+    _session_user_team). Soft-delete tombstone + cascade: revoke graph keys
+    (401 next use), drop the ACL user (C4 seam), free the quota slot, allow
+    name reuse. Default graph → 403 (code guard, mode-agnostic).
+
+    The #1148 dashboard-key-login gate only rejects legacy ``tt_`` keys on
+    flag-off teams (never tk_ scoped keys or sessions) — a graphs:delete
+    tk_ key is the graph-management credential and always passes, matching
+    the provisioning face (create_team_graph uses get_current_team)."""
+    if key_ctx.get("team_id") != team_id:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    _ensure_not_suspended(team)
+    # Auth: key with graphs:delete (or legacy full access) — else the
+    # caller is a session user whose membership role must be owner/admin.
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "graphs:delete" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing graphs:delete scope")
+    else:
+        # Session-authed: the caller's membership role must be owner/admin.
+        membership = await _membership_team(
+            key_ctx.get("session_user_id") or "", team_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
     sdk = _make_sdk(namespace="registry")
-    g = sdk._graph_create(team_id, name, kind="custom")
-    return {"graph_id": g["graph_id"], "name": name, "kind": "custom",
-            "graph_name": g["namespace"]}
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        soft_delete_graph,
+    )
+    from tortoise.supabase_control import (
+        graph_key_ids as sb_graph_key_ids,
+    )
+    # Default-graph guard: the Supabase derived id is the literal
+    # 'default' (no row exists — derived from teams.graph_name); the
+    # registry kind='default' node carries a random gid. Guard BOTH: the
+    # literal id (mode-agnostic callers may use either) AND a kind lookup
+    # (else registry default → 404, P1 review note).
+    if graph_id == "default":
+        raise HTTPException(status_code=403,
+                            detail="Cannot delete the default graph")
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        rows = cp.query(
+            "graphs", select=["kind", "status"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+        kind = rows[0].get("kind") if rows else None
+    else:
+        kind_rows = sdk._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        kind = kind_rows[0][0] if kind_rows else None
+    if kind == "default":
+        raise HTTPException(status_code=403,
+                            detail="Cannot delete the default graph")
+    if kind is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if is_supabase_enabled():
+        deleted = soft_delete_graph(cp, team_id, graph_id)
+        key_ids = sb_graph_key_ids(cp, team_id, graph_id)
+    else:
+        deleted = sdk.graph_delete(team_id, graph_id)
+        key_ids = sdk.graph_key_ids(team_id, graph_id)
+    if not deleted:
+        # Kind was non-default and present a moment ago — belt-and-
+        # suspenders only (no code path reaches here).
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    # Cascade: revoke every key bound to the graph (401 on next use).
+    from tortoise.supabase_control import revoke_api_key as sb_revoke
+    for kid in key_ids:
+        if is_supabase_enabled():
+            sb_revoke(get_control_plane(), kid)
+        else:
+            sdk.apikey_revoke(kid)
+    _acl_user_drop_hook(graph_id)
+    return Response(status_code=204)
 
 
 @app.get("/v1/graphs")
 async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
-    """E7 — list graphs in a team (graph switcher)."""
+    """E7 — list graphs in a team (graph switcher). C2 (#2111): rows gain
+    status + key_count; point_count dropped (no consumer; a per-row
+    data-plane count on every list). Default-first via the seam."""
     membership = await _membership_team(user["user_id"], team_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
-    # #1853: suspended teams are locked down (alerts stays open — see
-    # _ensure_not_suspended).
     _ensure_not_suspended(team)
     sdk = _make_sdk(namespace="registry")
     graphs = sdk.graph_list(team_id)
-    return [{"graph_id": g["graph_id"], "name": g["name"],
-             "kind": g["kind"], "point_count": 0} for g in graphs]
+    from tortoise.supabase_control import (
+        count_graph_keys,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    out = []
+    for g in graphs:
+        if g.get("status") == "deleted":
+            continue  # tombstones not listed (C2 D5; C7 may add with_deleted)
+        if is_supabase_enabled():
+            key_count = count_graph_keys(
+                get_control_plane(), team_id, g["graph_id"])
+        else:
+            key_count = sdk.graph_active_key_count(team_id, g["graph_id"])
+        out.append({
+            "graph_id": g["graph_id"], "name": g["name"],
+            "kind": g["kind"], "status": g.get("status", "active"),
+            "key_count": key_count,
+        })
+    return out
 
 
 
@@ -9914,9 +10496,9 @@ async def claim_team(request: Request):
     except Exception:
         body = {}
     api_key = (body or {}).get("api_key") or ""
-    if not isinstance(api_key, str) or not api_key.startswith("tt_"):
+    if not isinstance(api_key, str) or not api_key.startswith(API_KEY_PREFIXES):
         raise HTTPException(status_code=400,
-                            detail="api_key (tt_...) is required")
+                            detail=f"api_key ({'/'.join(API_KEY_PREFIXES)}...) is required")
 
     # 4. resolve the pasted key through the SAME auth path (revocation,
     #    expiry, suspension, abuse hooks) — 401 on invalid/revoked keys.
@@ -10020,8 +10602,8 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     if not is_supabase_enabled():
         raise HTTPException(status_code=400, detail="Claim is hosted-mode only")
     api_key = body.api_key
-    if not isinstance(api_key, str) or not api_key.startswith("tt_"):
-        raise HTTPException(status_code=400, detail="api_key (tt_...) is required")
+    if not isinstance(api_key, str) or not api_key.startswith(API_KEY_PREFIXES):
+        raise HTTPException(status_code=400, detail=f"api_key ({'/'.join(API_KEY_PREFIXES)}...) is required")
     email = (body.email or "").strip().lower()
     password = body.password or ""
     if "@" not in email or len(password) < 6:
@@ -10111,7 +10693,7 @@ async def claim_status(request: Request):
     """
     session = await verify_session_jwt(request)  # 401 on invalid
     api_key = request.headers.get("X-Claim-Key")
-    if not api_key or not api_key.startswith("tt_"):
+    if not api_key or not api_key.startswith(API_KEY_PREFIXES):
         return {"claimable": False, "need_key": True}
     from tortoise.supabase_control import (
         get_control_plane,

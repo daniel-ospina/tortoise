@@ -2259,6 +2259,65 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
     return out
 
 
+# ── C2 (#2111): graph write + lifecycle seams (provisioning service) ────────
+
+def insert_graph(cp, row: dict) -> None:
+    """Insert a graphs row (Supabase-mode mint). C1 deliberately deferred
+    the INSERT; C2's provisioning service owns the write. Raises on failure
+    (a mint must not claim success for an unpersisted graph)."""
+    cp.query("graphs", method="POST", json_body=row)
+
+
+def delete_graph_row(cp, team_id: str, graph_id: str) -> None:
+    """Hard-delete a graphs row by (id, team) — the rollback path for a
+    failed mint (D11: no orphan graph). Never touches the default graph
+    (no row exists for it — it is derived from teams.graph_name)."""
+    cp.query("graphs", method="DELETE",
+             filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)])
+
+
+def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
+    """Soft-delete a graphs row (status='deleted' tombstone — the v1
+    lifecycle). Returns True when a non-default row was tombstoned, False
+    when nothing matched (unknown graph OR the default — callers
+    distinguish by a prior kind lookup for the 403 default-guard)."""
+    rows = cp.query(
+        "graphs", select=["kind"],
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+    )
+    if not rows:
+        return False
+    if rows[0].get("kind") == "default":
+        return False
+    cp.query(
+        "graphs", method="PATCH",
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        json_body={"status": "deleted"},
+    )
+    return True
+
+
+def count_graph_keys(cp, team_id: str, graph_id: str) -> int:
+    """Active (non-revoked) api_keys bound to a graph — the key_count
+    source for GET /v1/graphs (surface 5)."""
+    rows = cp.query(
+        "api_keys", select=["id"],
+        filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id),
+                 ("revoked_at", "is", None)],
+    )
+    return len(rows)
+
+
+def graph_key_ids(cp, team_id: str, graph_id: str) -> list[str]:
+    """All api_keys ids bound to a graph (revoked or not) — the delete
+    cascade source (every key dies with the graph, E2E-8)."""
+    rows = cp.query(
+        "api_keys", select=["id"],
+        filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id)],
+    )
+    return [r["id"] for r in rows]
+
+
 # ── Stripe webhook billing state (plan Task 10 — #771 review P1) ───────────
 #
 # The Stripe webhook (_webhook_apply_event) writes billing state on the
