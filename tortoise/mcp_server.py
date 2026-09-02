@@ -1796,6 +1796,10 @@ def tortoise_analyze(question: str,
     rel_filter: edge types — "IMPL", "NAND", or "IMPL|NAND" (default).
     direction: IMPL traversal — "incoming", "outgoing", or "both" (default).
     Returns {"answer": "...", "raw": [...], "pattern": "...", "query": "..."}
+    — plus, with the W4 enrichment flag ON (epic #2080), an additive ``why``
+    array of canonical why-blocks (support_chain/ep/conflicts/supersession/
+    tradeoffs/dig_deeper) for the Points surfaced in ``raw`` (zero-LLM,
+    bounded batch reads; absent with the flag OFF — byte-identical).
     """
     from tortoise.analyze import analyze
     from tortoise.navigation import entityProfile
@@ -1834,6 +1838,26 @@ def tortoise_analyze(question: str,
     # boundary too in case a future error path leaks internals.
     if isinstance(result, dict) and isinstance(result.get("answer"), str):
         result["answer"] = _scrub_analyze_answer(result["answer"])
+    # W4 (#2101): additive why-layer enrichment — the additive keys ride the
+    # ``why`` entries for the Point ids surfaced in ``raw`` (flag-gated;
+    # absent with the flag OFF — the response stays byte-identical).
+    # Zero-LLM, bounded batch reads, fail-open (no key on assembly error).
+    if isinstance(result, dict) and result.get("raw"):
+        try:
+            from tortoise.why import (  # noqa: I001
+                assemble_why_blocks, point_ids_in_raw, w4_enrichment_enabled,
+            )
+            if not w4_enrichment_enabled():
+                return result
+            _proj = _get_team_sdk()._get_proj()
+            _ids = point_ids_in_raw(result["raw"])[:20]
+            if _ids:
+                _blocks = assemble_why_blocks(_proj, _ids)
+                result["why"] = [b for pid, b in _blocks.items()
+                                  if pid in _ids]
+        except Exception as e:  # noqa: BLE001, RUF100 — fail-open, never break the turn
+            _log.warning("W4 why-layer enrichment failed (analyze): %s", e)
+            pass
     return result
 
 

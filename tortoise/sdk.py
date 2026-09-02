@@ -9993,6 +9993,12 @@ class TortoiseSDK:
             _recency_factors,
             _trace_entry,
         )
+        # W4 (#2101): the additive why-layer enrichment (shared assembly —
+        # DM-1; lazy import — why.py pulls search_engine helpers only).
+        from .why import (
+            enrich_items as w4_enrich_items,
+            w4_enrichment_enabled,
+        )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
             raise ValueError(f"entity_type must be 'point', 'event', 'subject', 'document', 'object', 'operator', or 'source', got {entity_type!r}")
@@ -10554,7 +10560,14 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            return ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            ranked = ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            # W4 (#2101): additive why-layer enrichment (flag-gated) — search
+            # surface; recall_state's pool and the ask lane inherit it through
+            # their own calls. Zero-LLM, bounded reads, fail-open (items
+            # unchanged on any assembly error).
+            if entity_type == "point" and w4_enrichment_enabled():
+                ranked = w4_enrich_items(proj, ranked)
+            return ranked
         if order_by == "confidence":
             # #25: sort by the PERSISTED EP confidence (n.confidence, written
             # by compute_confidence), not the structural impl/(impl+nand) proxy
@@ -10568,7 +10581,12 @@ class TortoiseSDK:
             )
         # Default: RRF relevance order (already in fused order)
 
-        return [r.to_dict() for r in results[:limit]]
+        out = [r.to_dict() for r in results[:limit]]
+        # W4 (#2101): additive why-layer enrichment (flag-gated) — see the
+        # order_by=graph branch above for the contract.
+        if entity_type == "point" and w4_enrichment_enabled():
+            out = w4_enrich_items(proj, out)
+        return out
 
     # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
 
@@ -10816,6 +10834,8 @@ class TortoiseSDK:
             AskReaderUnavailable,
             AskRetrievalUnavailable,
         )
+        # W4 (#2101): additive why-layer enrichment flag (shared resolver).
+        from .why import w4_enrichment_enabled
 
         if os.environ.get("TORTOISE_API_URL"):
             return self._post_ask(question, question_type=question_type,
@@ -10978,6 +10998,22 @@ class TortoiseSDK:
             except Exception:  # noqa: BLE001, RUF100 — degrade to False
                 degraded = False
 
+        # W4 (#2101): additive why-layer entries for the evidence pool the
+        # reader saw (flag-gated — the ``why`` key is ABSENT with the flag
+        # OFF, keeping the 12-field response byte-identical). The hits
+        # already carry the search-path enrichment; projection is a pure
+        # dict op (zero extra graph reads). Fail-open: any error → ``[]``.
+        why_entries: list[dict] = []
+        if w4_enrichment_enabled():
+            try:
+                from .why import item_to_why_entry
+                for _hit in assembled:
+                    _entry = item_to_why_entry(_hit)
+                    if _entry and _entry.get("point_id"):
+                        why_entries.append(_entry)
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open
+                _logger.warning("W4 why-layer enrichment failed (ask): %s", e)
+                why_entries = []
         serving = getattr(model, "last_route", None) or \
             getattr(model, "route", None)
         duration_ms = int((_time.monotonic() - t0) * 1000)
@@ -10994,7 +11030,7 @@ class TortoiseSDK:
                     getattr(model, "model", None) or ""))
         except Exception:  # noqa: BLE001, RUF100
             cost_estimate = 0.0
-        return {
+        resp = {
             "answer": answer,
             "abstained": abstained,
             "question_type": qtype,
@@ -11008,6 +11044,12 @@ class TortoiseSDK:
             "duration_ms": duration_ms,
             "retrieval_degraded": degraded,
         }
+        # W4 (#2101): additive why-layer entries — emitted ONLY with the W4
+        # flag ON (absent otherwise — the 12-field response stays
+        # byte-identical).
+        if w4_enrichment_enabled():
+            resp["why"] = why_entries
+        return resp
 
     @staticmethod
     def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:

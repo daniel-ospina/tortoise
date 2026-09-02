@@ -509,6 +509,21 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 
 > **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the extensible sourceKind vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
 
+### Response-Contract Vocabulary (W4 why-layer, #2101 / epic #2080 DM-12)
+
+Additive response-contract labels — NOT new entity kinds. Registered so the
+W4 why-block assembly and the S6 contract test share one vocabulary (vocabulary
+drift is prevented by the S15 schema-correctness review).
+
+```
+dig_deeper kinds   supports | nand | superseded | tradeoff     # dig_deeper[k].kind (deterministic labels, never LLM prose)
+dig_deeper labels  read supports · read the counterargument (NAND)
+                   · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
+why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (§3.1.1/§6.1)
+conflict severity  high | medium                                # deterministic from the counter-claim's persisted EP mean
+degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (§3.1.3)
+```
+
 ### Point Status Vocabulary (canonical, #432/#690)
 
 | Status | Kind | Write path | Transitions to | Notes |
