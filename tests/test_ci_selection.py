@@ -231,6 +231,93 @@ def test_slow_files_emitted_on_every_return_path():
         assert set(r["slow_files"]) == expected, f"bad slow_files for {changed}/{event}"
 
 
+def test_diff_gate_keys_emitted_on_every_return_path():
+    """#2147/#2148 (2026-09-02-ci-audit F1/F2): every selection mode carries
+    slow_run / slow_selected / carve_out_run — the changes job echoes them,
+    so a missing key would KeyError the echo (or the nightly run) and
+    silently mis-gate a leg. slow_selected must always be a subset of
+    slow_files - carve_out (test-slow's committed leg set)."""
+    m = load_manifest()
+    leg_set = set(m["slow_files"]) - set(m["carve_out"])
+    for changed, event in [
+        ([], "push"),
+        ([], "schedule"),
+        (["docs/README.md"], "pull_request"),
+        (["tortoise/sdk.py"], "pull_request"),
+        (["mystery-dir/x.py"], "pull_request"),
+        (["tortoise/decide.py"], "pull_request"),
+    ]:
+        r = select(changed, event, m)
+        for key in ("slow_run", "slow_selected", "carve_out_run"):
+            assert key in r, f"missing {key} for {changed}/{event}"
+        assert set(r["slow_selected"]) <= leg_set, \
+            f"slow_selected must be subset of slow_files - carve_out ({changed}/{event})"
+
+
+def test_docs_only_skips_slow_and_carve_out():
+    """#2147/#2148: docs/website-only PRs touch no slow/carve-out surface —
+    both formerly-unconditional legs (the audit's F1/F2 cost drivers) skip;
+    the tier-1 smoke still runs in the fast job."""
+    for changed in (["docs/README.md"], ["website/welcome.html"],
+                    ["docs/README.md", "website/self-hosted.html"]):
+        r = _sel(changed)
+        assert r["surfaces"] == []
+        assert r["full"] is False
+        assert r["slow_run"] is False
+        assert r["carve_out_run"] is False
+        assert r["slow_selected"] == []
+
+
+def test_full_selection_runs_both_legs_with_whole_slow_leg_set():
+    """#2147/#2148: push/schedule/unknown-path/shared-module -> full:
+    test-slow AND test-carve-out run, and slow_selected is the whole
+    committed leg set (slow_files - carve_out) — the trunk + nightly
+    backstop is never weakened by the PR-shape gates."""
+    m = load_manifest()
+    leg_set = sorted(set(m["slow_files"]) - set(m["carve_out"]))
+    for changed, event in [
+        ([], "push"),
+        ([], "schedule"),
+        (["tortoise/sdk.py"], "pull_request"),
+        ([".github/workflows/python-ci.yml"], "pull_request"),
+        (["mystery-dir/x.py"], "pull_request"),
+    ]:
+        r = select(changed, event, m)
+        assert r["full"] is True, changed
+        assert r["slow_run"] is True and r["carve_out_run"] is True, changed
+        assert r["slow_selected"] == leg_set, changed
+
+
+def test_tier2_slow_run_scoped_to_matched_surfaces():
+    """#2148: tier-2 PRs run only their matched surfaces' slow files. ep
+    owns test_dream / test_ep_sources / test_source_inheritance_own — a
+    decide.py-only PR selects exactly those (never the full 24-file leg
+    set), and the carve-out job skips (ep owns no carve-out file)."""
+    r = _sel(["tortoise/decide.py"])
+    assert r["full"] is False and r["surfaces"] == ["ep"]
+    assert r["slow_run"] is True
+    assert r["carve_out_run"] is False
+    assert r["slow_selected"] == [
+        "test_dream.py", "test_ep_sources.py", "test_source_inheritance_own.py"]
+
+
+def test_tier2_carve_out_run_when_surface_owns_carve_files():
+    """#2147: the carve-out job runs when a matched surface owns carve-out
+    files. tortoise/embedded_lifecycle.py maps to core (embedded/daemon/
+    registry/guard coverage) -> run; a carve-out TEST-file change selects
+    its owning surface -> re-runs here; an onboarding-only change owns no
+    carve-out file -> skip."""
+    r = _sel(["tortoise/embedded_lifecycle.py"])
+    assert r["full"] is False and "core" in r["surfaces"]
+    assert r["carve_out_run"] is True
+    assert r["slow_run"] is True  # core owns 15 slow-leg files too
+    r2 = _sel(["tortoise/onboarding/AGENT_ONBOARDING.md"])
+    assert r2["surfaces"] == ["onboarding"]
+    assert r2["carve_out_run"] is False and r2["slow_run"] is False
+    r3 = _sel(["tests/test_guard.py"])
+    assert r3["carve_out_run"] is True and r3["slow_run"] is True
+
+
 def test_full_mode_selection_unchanged():
     # #1371: push/schedule full mode keeps its exact contract (test_files ALL)
     # and only gains the slow_files key.
@@ -793,6 +880,48 @@ def test_carve_out_job_uri_unset_with_carve_out_flag():
     assert "needs.changes.outputs.carve_out" in run["run"], \
         "the carve-out job must consume the selector's carve_out leg"
     assert "--junitxml=/tmp/junit.xml" in run["run"]
+
+
+def test_diff_gated_jobs_consume_changes_outputs():
+    """#2147/#2148 (2026-09-02-ci-audit F1/F2): the workflow wiring pins.
+    test-slow + test-carve-out gate their runs on the changes job's
+    slow_run / carve_out_run outputs (docs/config-only PRs skip both legs);
+    the changes job emits + echoes the diff-gate outputs; test-slow's
+    manifest + run steps intersect the committed leg rows with
+    slow_selected on the tier-2 shape (full == false) so only the matched
+    surfaces' slow files run. The committed matrix rows stay literal (the
+    in-workflow drift-guard step pins their union to slow_files - carve_out)."""
+    wf = _load_python_ci()
+    # job-level gates
+    assert wf["jobs"]["test-slow"]["if"] == \
+        "needs.changes.outputs.slow_run == 'true'", \
+        "test-slow must diff-gate on slow_run (#2148)"
+    cj_if = wf["jobs"]["test-carve-out"]["if"]
+    assert "carve_out_run == 'true'" in cj_if, \
+        "test-carve-out must diff-gate on carve_out_run (#2147)"
+    # changes job: outputs + echoes
+    outs = wf["jobs"]["changes"]["outputs"]
+    for key in ("slow_run", "carve_out_run", "slow_selected"):
+        assert key in outs, f"changes job must emit {key}"
+    sel_step = next(s for s in wf["jobs"]["changes"]["steps"]
+                    if s.get("id") == "select")
+    for key in ("slow_run=", "carve_out_run=", "slow_selected="):
+        assert key in sel_step["run"], f"select step must echo {key}"
+    # test-slow tier-2 intersection (manifest + run steps must share it)
+    for want in ("Generate coverage manifest", "Run slow test suite"):
+        step = next(s for s in wf["jobs"]["test-slow"]["steps"]
+                    if s.get("name", "").startswith(want))
+        run = step["run"]
+        assert "needs.changes.outputs.slow_selected" in run, \
+            f"test-slow '{want}' must consume slow_selected (tier-2 scoping)"
+        assert 'case " $SLOW_SEL " in' in run, \
+            f"test-slow '{want}' must intersect with slow_selected"
+    # committed matrix rows remain literal file lists (drift-guard pinned)
+    rows = wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]
+    assert len(rows) == 2
+    for row in rows:
+        assert row["files"].startswith("test_"), \
+            "test-slow leg rows must stay the committed literal lists (#1471)"
 
 
 def test_canary_streak_job_consumes_half_b_artifacts_only():

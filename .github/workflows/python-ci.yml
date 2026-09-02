@@ -100,6 +100,12 @@ on:
 # protection), which aggregates the matrix. Job id `python-ci-gate` is
 # load-bearing: do NOT rename it or add a `name:` field. welcome-e2e
 # (#801 live-signup monitor) lives in its own scheduled workflow.
+# #2147/#2148 (2026-09-02-ci-audit F1/F2): the formerly-unconditional
+# test-slow + test-carve-out legs are diff-gated on the selector's
+# slow_run / carve_out_run / slow_selected outputs — docs/website/config-
+# only PRs skip both; tier-2 PRs run only their surface's slow files;
+# trunk (push) + nightly (schedule) + unknown/shared-module PRs keep the
+# full runs (the coverage backstop is never weakened).
 
 concurrency:
   # Per-PR cancel only: on `pull_request` github.ref is refs/pull/N/merge so
@@ -151,6 +157,13 @@ jobs:
       surfaces: ${{ steps.select.outputs.surfaces }}
       test_files: ${{ steps.select.outputs.test_files }}
       slow_files: ${{ steps.select.outputs.slow_files }}
+      # #2147/#2148 (2026-09-02-ci-audit F1/F2): the diff-gate contract for
+      # the two formerly-unconditional legs — slow_run (test-slow runs),
+      # carve_out_run (test-carve-out runs), slow_selected (space-joined
+      # surface-matched slow leg set; full selections carry the whole set).
+      slow_run: ${{ steps.select.outputs.slow_run }}
+      carve_out_run: ${{ steps.select.outputs.carve_out_run }}
+      slow_selected: ${{ steps.select.outputs.slow_selected }}
       matrix_a: ${{ steps.push-matrix.outputs.matrix_a }}
       matrix_b: ${{ steps.push-matrix.outputs.matrix_b }}
       carve_out: ${{ steps.push-matrix.outputs.carve_out }}
@@ -183,6 +196,14 @@ jobs:
           # config/ci-surfaces.yml (the selector emits them on every path, so
           # this echo is safe for push/schedule too).
           echo "slow_files=$(echo "$SEL" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin)["slow_files"]))')" >> "$GITHUB_OUTPUT"
+          # #2147/#2148: the selector emits the diff-gate keys on EVERY path
+          # (full selections + tier-2 + docs-only) so these echoes are safe for
+          # push/schedule too. slow_selected is space-joined BARE names (the
+          # test-slow matrix format — no .py suffix) so a leg can case-match it
+          # against ${{ matrix.files }} in the tier-2 shape.
+          echo "slow_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["slow_run"]).lower())')" >> "$GITHUB_OUTPUT"
+          echo "carve_out_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["carve_out_run"]).lower())')" >> "$GITHUB_OUTPUT"
+          echo "slow_selected=$(echo "$SEL" | python3 -c 'import json,sys; print(" ".join(x[:-3] if x.endswith(".py") else x for x in json.load(sys.stdin)["slow_selected"]))')" >> "$GITHUB_OUTPUT"
       - name: Emit push matrix (#1472)
         # #1472: the push halves are DERIVED from config/ci-surfaces.yml by the
         # selector — registration in the manifest is sufficient, no manual
@@ -744,7 +765,17 @@ jobs:
 
   test-slow:
     needs: changes
-    if: needs.changes.outputs.python == 'true'
+    # #2148 (2026-09-02-ci-audit F2): diff-gated — the full committed slow
+    # list used to run on EVERY PR (docs-only PR #2132 paid 29m43 + 29m08
+    # runner-min for a 1-file docs change). Runs when the selector says so:
+    # full selections (push to main / nightly schedule / unknown-path or
+    # shared-module PRs — the trunk + nightly backstop, NEVER dropped) or a
+    # PR whose matched surfaces own slow-leg files (slow_run). Tier-2 PRs
+    # run only their surface's slow files (slow_selected, intersected with
+    # each leg's committed list in the manifest/run steps); docs/website/
+    # config-only PRs (surfaces == [] -> slow_run == false) skip the whole
+    # job — the tier-1 smoke in the `test` job still runs.
+    if: needs.changes.outputs.slow_run == 'true'
     runs-on: ubuntu-latest
     # #1471: two parallel duration-balanced legs (matrix), mirroring the `test`
     # job's #880 pattern. Serial pytest was 37:44 (run 32241846147, 2026-08-19)
@@ -928,7 +959,20 @@ jobs:
         # construction the run step builds) -> /tmp/expected-nodeids.txt.
         run: |
           FILES=""
-          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          # #2148 tier-2 (slow_run == true, full == false): run only the
+          # surface-matched slow files (changes.outputs.slow_selected),
+          # intersected with this leg's committed list so the duration-
+          # balanced partition holds. Full selections run the whole leg.
+          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
+            for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          else
+            SLOW_SEL="${{ needs.changes.outputs.slow_selected }}"
+            for f in ${{ matrix.files }}; do
+              case " $SLOW_SEL " in
+                *" $f "*) FILES="$FILES tests/$f.py";;
+              esac
+            done
+          fi
           if [ -z "$FILES" ]; then
             echo "no slow files for this leg — no manifest (guard skips)"
             exit 0
@@ -948,8 +992,21 @@ jobs:
           # #1471: this leg's committed duration-balanced file list (measured
           # 2026-08-19, see job header); the drift guard above pins the union
           # of both legs to slow_files minus the epic #1647 carve-out.
+          # #2148 tier-2: same construction as the manifest step — surface-
+          # matched slow files only (full == false); full runs keep the whole
+          # committed leg. The two constructions must stay identical (the
+          # manifest's expected nodeids reconcile against this run's junitxml).
           FILES=""
-          for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          if [ "${{ needs.changes.outputs.full }}" = "true" ]; then
+            for f in ${{ matrix.files }}; do FILES="$FILES tests/$f.py"; done
+          else
+            SLOW_SEL="${{ needs.changes.outputs.slow_selected }}"
+            for f in ${{ matrix.files }}; do
+              case " $SLOW_SEL " in
+                *" $f "*) FILES="$FILES tests/$f.py";;
+              esac
+            done
+          fi
           if [ -z "$FILES" ]; then
             echo "no slow files selected — skipping"
             echo 0 > "${RUNNER_TEMP:-/tmp}/pytest-rc"
@@ -1367,8 +1424,22 @@ jobs:
     # embedded suites (RedisLiteServerStartError). The carve-out job now runs
     # on PRs too (fresh process) and ci_selection excludes carve-out files
     # from the tier-2 legs, so the embedded files always run here.
+    # #2147 (2026-09-02-ci-audit F1): the job ran on EVERY PR and push,
+    # diff-unaware — a docs-only PR (#2132) paid 23m31 for the full 23-file
+    # embedded set, and the job was the critical path of every main push.
+    # Diff-gated on the selector's carve_out_run: full selections (push to
+    # main / nightly schedule / unknown-path or shared-module PRs — the
+    # trunk + nightly backstop, NEVER dropped) or a PR whose matched
+    # surfaces own carve-out files (core/api/sdk/eval — the embedded /
+    # daemon / registry / guard surfaces; a carve-out TEST file change
+    # selects its owning surface, so it re-runs here too). docs/website/
+    # config-only PRs (surfaces == [] -> carve_out_run == false) skip. When
+    # it runs it still runs the FULL 23-file carve_out leg (the embedded
+    # set is one coherent E2E-4 surface — partial runs would weaken the
+    # recovery/backup/migration guarantees; tier-2 legs already exclude
+    # carve-out files, so this job is their only home on PRs).
     needs: changes
-    if: always() && needs.changes.result == 'success'
+    if: always() && needs.changes.result == 'success' && needs.changes.outputs.carve_out_run == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:

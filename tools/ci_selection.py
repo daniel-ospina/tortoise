@@ -2,7 +2,20 @@
 """Tiered test selection (#1021) — the single parameterized selection function.
 
 Consumed by python-ci.yml's `changes` job (PRs) and the nightly audit.
-Emits JSON: {surfaces: [...], full: bool, test_files: [...] | "ALL"}.
+Emits JSON: {surfaces: [...], full: bool, test_files: [...] | "ALL",
+slow_files: [...], slow_run: bool, slow_selected: [...],
+carve_out_run: bool}.
+
+#2147/#2148: the test-slow + test-carve-out jobs were the two diff-unaware
+python-ci legs (2026-09-02-ci-audit F1/F2 — a docs-only PR paid ~59 runner-
+min slow + 23.5 min carve-out). select() now emits the diff-gate contract on
+every return path: slow_run (test-slow runs), slow_selected (the slow files
+test-slow should run — surface-matched on tier-2 PRs, the whole committed
+leg set = slow_files - carve_out on full selections), carve_out_run (the
+carve-out job runs — full selections or a matched surface owns carve-out
+files). The workflow's changes job echoes these; docs/website/config-only
+PRs (surfaces == []) skip both legs, trunk (push) + nightly (schedule) +
+unknown/shared-module PRs keep full coverage.
 
 Selection rules (fail-closed, conservative):
 - push to main / schedule  -> full (tier 3 — the trunk backstop)
@@ -27,7 +40,7 @@ import re
 import sys
 from pathlib import Path
 
-SELECTION_FN_VERSION = "1.2.0"
+SELECTION_FN_VERSION = "1.3.0"
 
 REPO = Path(__file__).resolve().parent.parent
 MANIFEST = REPO / "config" / "ci-surfaces.yml"
@@ -159,15 +172,59 @@ def classify_test_file(name: str, manifest: dict) -> str | None:
     return None
 
 
+# #2147/#2148 (2026-09-02-ci-audit F1/F2): surface -> slow-leg / carve-out
+# file ownership maps. The test-slow and test-carve-out jobs were the two
+# diff-unaware python-ci legs (docs-only PR #2132 paid 29m43+29m08 slow +
+# 23m31 carve-out); select() now emits slow_run / slow_selected /
+# carve_out_run on every return path so the workflow can diff-gate them.
+def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
+    """Surface -> slow files that run in test-slow (slow minus carve-out).
+
+    The 6 slow carve-out files (test_reaper et al.) run in the dedicated
+    URI-unset carve-out job (epic #1647 E2E-4), never the docker slow legs
+    — the test-slow committed leg set is exactly slow_files - carve_out
+    (pinned by the workflow's drift-guard step, #1471)."""
+    slow = set(manifest.get("slow_files", []))
+    carve = set(manifest.get("carve_out", []))
+    by_surface: dict[str, set[str]] = {}
+    for f in sorted(slow - carve):
+        by_surface.setdefault(classify_test_file(f, manifest), set()).add(f)
+    return by_surface
+
+
+def carve_out_by_surface(manifest: dict) -> dict[str, set[str]]:
+    """Surface -> carve-out files it owns (the E2E-4 embedded set)."""
+    by_surface: dict[str, set[str]] = {}
+    for f in sorted(manifest.get("carve_out", [])):
+        by_surface.setdefault(classify_test_file(f, manifest), set()).add(f)
+    return by_surface
+
+
+def _full_selection(manifest: dict, slow: set[str]) -> dict:
+    """push/schedule/shared-module/unknown-path selection (tier 3).
+
+    The trunk + nightly backstop: full matrix AND both diff-gated legs run
+    (test-slow + test-carve-out) — main can never lose slow/carve-out
+    coverage to a PR-shape gate."""
+    carve = set(manifest.get("carve_out", []))
+    return {"surfaces": list(manifest["surfaces"]), "full": True,
+            "test_files": "ALL", "slow_files": sorted(slow),
+            # #2147/#2148: full selection always runs both legs; slow_selected
+            # carries the whole committed leg set (slow - carve-out).
+            "slow_run": True, "carve_out_run": True,
+            "slow_selected": sorted(slow - carve)}
+
+
 def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     slow = set(manifest.get("slow_files", []))
     # #1371: slow files run ONLY in the test-slow job — never in the fast
     # gate's tier-1/tier-2 selections (they are already covered there).
     # Every return path carries slow_files so the workflow's changes job can
     # always emit it (a missing key would KeyError the nightly/schedule run).
+    # #2147/#2148: every return path ALSO carries slow_run / slow_selected /
+    # carve_out_run (the test-slow + test-carve-out diff-gate contract).
     if event in ("push", "schedule"):
-        return {"surfaces": list(manifest["surfaces"]), "full": True,
-                "test_files": "ALL", "slow_files": sorted(slow)}
+        return _full_selection(manifest, slow)
 
     tier1 = set(manifest.get("tier1", [])) - slow
     # Filter out non-python-relevant paths, but RE-INCLUDE the tools carve-out
@@ -176,14 +233,16 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
                if c and (not c.startswith(NON_PYTHON_PREFIXES)
                          or c.startswith(TOOL_CARVEOUTS))]
     if not changed:
-        # docs-only PR -> tier 1 (curated smoke) only
+        # docs-only PR -> tier 1 (curated smoke) only; no slow/carve surface
+        # is touched, so both diff-gated legs skip (#2147/#2148).
         return {"surfaces": [], "full": False, "test_files": sorted(tier1),
-                "slow_files": sorted(slow)}
+                "slow_files": sorted(slow),
+                "slow_run": False, "carve_out_run": False,
+                "slow_selected": []}
 
     # Shared module -> full
     if any(c.startswith(SHARED_MODULES) for c in changed):
-        return {"surfaces": list(manifest["surfaces"]), "full": True,
-                "test_files": "ALL", "slow_files": sorted(slow)}
+        return _full_selection(manifest, slow)
 
     matched: set[str] = set()
     unknown: list[str] = []
@@ -205,8 +264,7 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
             unknown.append(c)
     if unknown:
         # New/unknown path -> fail-closed full matrix (scope v5 decision 1)
-        return {"surfaces": list(manifest["surfaces"]), "full": True,
-                "test_files": "ALL", "slow_files": sorted(slow)}
+        return _full_selection(manifest, slow)
 
     # Test-file changes select their owning surface
     for c in changed:
@@ -230,8 +288,24 @@ def select(changed_files: list[str], event: str, manifest: dict) -> dict:
     # them a fresh process. The carve-out job now runs on PRs too.
     carve = set(manifest.get("carve_out", []))
     files -= carve
+    # #2147/#2148 tier-2: test-slow runs the slow files owned by the matched
+    # surfaces (slow_selected — carve-out files excluded: they run in the
+    # carve-out job when it triggers, never the docker slow legs); test-carve-
+    # out runs when a matched surface owns any carve-out file (embedded /
+    # daemon / registry / guard coverage). Docs/website/config-only PRs
+    # (surfaces == []) already returned above with both legs skipped.
+    slow_by_surface = slow_leg_by_surface(manifest)
+    carve_by_surface = carve_out_by_surface(manifest)
+    slow_selected: set[str] = set()
+    carve_out_run = False
+    for s in surfaces:
+        slow_selected.update(slow_by_surface.get(s, set()))
+        if s in carve_by_surface:
+            carve_out_run = True
     return {"surfaces": surfaces, "full": False, "test_files": sorted(files),
-            "slow_files": sorted(slow)}
+            "slow_files": sorted(slow),
+            "slow_run": bool(slow_selected), "carve_out_run": carve_out_run,
+            "slow_selected": sorted(slow_selected)}
 
 
 def integrity(manifest: dict) -> list[str]:
@@ -688,6 +762,11 @@ def main() -> int:
         "surfaces": result["surfaces"],
         "full": result["full"],
         "selected_tests": result["test_files"],
+        # #2147/#2148: the slow/carve-out diff-gate decisions ride the
+        # artifact so the nightly recall audit can replay what ran.
+        "slow_run": result["slow_run"],
+        "slow_selected": result["slow_selected"],
+        "carve_out_run": result["carve_out_run"],
     }
     out_dir = Path(os.environ.get("CI_SELECTION_ARTIFACT_DIR", REPO / ".ci-selection"))
     out_dir.mkdir(exist_ok=True)
