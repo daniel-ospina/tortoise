@@ -31,6 +31,7 @@ import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM, TOKEN, _key_row, _membership_row,
@@ -218,66 +219,14 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
     return cp
 
 
-def _close_keepalive_anchors(module) -> None:
-    """Deterministically close every keepalive anchor (SHUTDOWN SAVE).
-
-    #2090: replaces the clear-without-close leak (each eviction shut the
-    redislite daemon down mid-test → 403). # mirrors
-    tests/test_hosted_api.py:144-153 — keep in sync.
-    """
-    for ns in list(module._FALLBACK_KEEPALIVE):
-        anchor = module._FALLBACK_KEEPALIVE.pop(ns, None)
-        if anchor is not None:
-            try:  # noqa: SIM105  (mirrors tests/test_hosted_api.py:149)
-                anchor.close()
-            except Exception:
-                pass
-
-
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make hosted_api's TortoiseSDK use a temp embedded DB (mirrors
-    test_hosted_api) so registry/team reads don't touch prod."""
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    # #1950/#2090: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
-    # forces, so _make_sdk's keepalive anchor path matches and the anchor is
-    # REUSED instead of evicted + closed on every registry access (each
-    # eviction shut the redislite daemon down mid-test, losing the seed
-    # between this fixture's write and the gate read → 403).
-    os.environ["TORTOISE_DB_PATH"] = db_path
-    return _orig
-
-
-def _restore_sdk_init(_orig):
-    # #1950 restore shape: pop the pin FIRST, restore __init__, then close
-    # every keepalive anchor deterministically (clear-without-close leaked
-    # anchors — #1950 lesson; SHUTDOWN SAVE, not GC-timed NOSAVE).
-    os.environ.pop("TORTOISE_DB_PATH", None)
-    ha_mod.TortoiseSDK.__init__ = _orig
-    _close_keepalive_anchors(ha_mod)
-    app.dependency_overrides.clear()
-
-
-def _close_keepalive_anchors(module) -> None:
-    """Deterministically close every keepalive anchor (SHUTDOWN SAVE).
-
-    # mirrors tests/test_hosted_api.py:144-153 — keep in sync.
-    """
-    for ns in list(module._FALLBACK_KEEPALIVE):
-        anchor = module._FALLBACK_KEEPALIVE.pop(ns, None)
-        if anchor is not None:
-            try:  # noqa: SIM105  (mirrors tests/test_hosted_api.py:149)
-                anchor.close()
-            except Exception:
-                pass
+# #2127: the local _patch_tortoise_sdk_init / _restore_sdk_init /
+# _close_keepalive_anchors copies are superseded by the shared helper
+# tests._http_fixtures.patched_tortoise_sdk (patch → temp DB, #1950
+# TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore __init__
+# → deterministic anchor close → clear overrides at exit). The file keeps its
+# #2090 counter/seed-hold machinery (Task 1-3 additions) and composes it
+# around the helper per the drain-linchpin trace in
+# docs/scoping/2026-09-02-2127-b-waves-scoping.md.
 
 
 @pytest.fixture
@@ -295,19 +244,21 @@ def sb_client(monkeypatch):
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
-        # forces, so _make_sdk's keepalive anchor path matches and the anchor
-        # is REUSED instead of evicted + closed on every registry access (each
-        # eviction shut the redislite daemon down mid-test, losing the seed
-        # between this fixture's write and the gate read → 403).
-        os.environ["TORTOISE_DB_PATH"] = db_path
-        try:
-            with TestClient(app) as tc:
-                yield tc, fake, db_path
-        finally:
-            _restore_sdk_init(_orig)
-            _close_seed_sdks()  # #2090: per-test seed close (after restore)
+        # #2127: shared helper — patch __init__ → temp DB, #1950 pin,
+        # close-then-clear at enter; pop-env → restore → close → clear
+        # overrides at exit. The #2090 counter is reg_client-only; the pin +
+        # close-at-restore still apply here.
+        with patched_tortoise_sdk(db_path):
+            try:
+                with TestClient(app) as tc:
+                    yield tc, fake, db_path
+            finally:
+                # sb tests never append to _SEED_SDKS (graph seeds are
+                # local-held) — keep for uniform per-test close discipline.
+                # Ordering note: seeds close here BEFORE the helper's exit-
+                # anchor-close (the helper closes last → still a deterministic
+                # SHUTDOWN SAVE; outcome-equivalent to the pre-#2127 order).
+                _close_seed_sdks()
 
 
 @pytest.fixture
@@ -316,44 +267,65 @@ def reg_client(monkeypatch):
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        # #1950: pin TORTOISE_DB_PATH (see sb_client) — the anchor is created
-        # pinned at TestClient enter (lifespan purge) and REUSED, not evicted.
-        os.environ["TORTOISE_DB_PATH"] = db_path
-        counter, _orig_dict = _install_drift_counter()
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
-        finally:
-            # ══ #2090 teardown (pinned — runs on body-failure paths too) ══
+        # #2127: shared helper (see sb_client) — the anchor is created pinned
+        # at TestClient enter (lifespan purge) and REUSED, not evicted.
+        with patched_tortoise_sdk(db_path):
+            counter, _orig_dict = _install_drift_counter()
             try:
-                # G3 (GREEN): zero mid-test drift evictions — the anchor is
-                # reused (path pinned), never evicted, post-fix.
-                assert counter.drift_evictions == _EXPECTED_DRIFT_EVICTIONS, (
-                    f"expected {_EXPECTED_DRIFT_EVICTIONS} drift evictions, "
-                    f"got {counter.drift_evictions} "
-                    f"(probe-failures: {counter.probe_failures}, "
-                    f"unclassified: {counter.unclassified})"
-                )
-                # #2090: the enter-pin probe-failure churn rate must be
-                # OBSERVABLE (warn-only — never fails the gate; a healthy
-                # pinned run should read 0, but a transient probe failure on a
-                # loaded runner must not red it). Surfaces in the pytest
-                # warnings summary.
-                if counter.probe_failures or counter.unclassified:
-                    warnings.warn(
-                        f"[#2090] keepalive probe-failure pops: "
-                        f"{counter.probe_failures}, unclassified: "
-                        f"{counter.unclassified} (drift: "
-                        f"{counter.drift_evictions})",
-                        UserWarning,
-                        stacklevel=2,
-                    )
+                with TestClient(app) as tc:
+                    yield tc, db_path
             finally:
-                counter.enabled = False  # restore-time pops must never count
-                _restore_sdk_init(_orig)
-                _close_seed_sdks()  # after restore (deterministic last-client SAVE)
-                ha_mod._FALLBACK_KEEPALIVE = _orig_dict
+                # ══ #2090 teardown (pinned — runs on body-failure paths too) ══
+                try:
+                    # G3 (GREEN): zero mid-test drift evictions — the anchor
+                    # is reused (path pinned), never evicted, post-fix. ⚠️
+                    # This assert runs with the counter ENABLED — moving
+                    # enabled=False ahead of it would silently vacate the
+                    # #2090 proof (scope-verify P2-3).
+                    assert counter.drift_evictions == _EXPECTED_DRIFT_EVICTIONS, (
+                        f"expected {_EXPECTED_DRIFT_EVICTIONS} drift evictions, "
+                        f"got {counter.drift_evictions} "
+                        f"(probe-failures: {counter.probe_failures}, "
+                        f"unclassified: {counter.unclassified})"
+                    )
+                    # #2090: the enter-pin probe-failure churn rate must be
+                    # OBSERVABLE (warn-only — never fails the gate; a healthy
+                    # pinned run should read 0, but a transient probe failure
+                    # on a loaded runner must not red it). Surfaces in the
+                    # pytest warnings summary.
+                    if counter.probe_failures or counter.unclassified:
+                        warnings.warn(
+                            f"[#2090] keepalive probe-failure pops: "
+                            f"{counter.probe_failures}, unclassified: "
+                            f"{counter.unclassified} (drift: "
+                            f"{counter.drift_evictions})",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                finally:
+                    counter.enabled = False  # restore-time pops must never count
+                    # #2127 drain-linchpin: under counter composition the
+                    # helper's exit-close is a design no-op (it closes the
+                    # RESTORED real dict, which is empty — every in-test
+                    # anchor lives in the counter). The fixture owns the
+                    # deterministic close: drain + close counter-held anchors
+                    # (uncounted), verbatim mirror of TestDriftCounterWiring
+                    # :164-170. The (d) guard sits in an inner try so a RED
+                    # still restores the real dict + closes seeds (code-
+                    # review P2-2: an (a)/(d) assert RED must leave clean
+                    # module state).
+                    try:
+                        for _ns in list(counter):
+                            _anchor = dict.pop(counter, _ns, None)
+                            if _anchor is not None:
+                                try:  # noqa: SIM105
+                                    _anchor.close()
+                                except Exception:
+                                    pass
+                        assert not counter  # drain-completeness guard
+                    finally:
+                        ha_mod._FALLBACK_KEEPALIVE = _orig_dict
+                        _close_seed_sdks()  # after anchor close (last-client SAVE)
 
 
 @pytest.fixture

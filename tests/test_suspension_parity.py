@@ -41,10 +41,10 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
-import tortoise.hosted_api as ha_mod
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM,
@@ -72,23 +72,11 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
     return cp
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make hosted_api's TortoiseSDK use a temp embedded DB (mirrors
-    test_export_delete) so registry/team reads don't touch prod."""
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
-def _restore_sdk_init(_orig):
-    ha_mod.TortoiseSDK.__init__ = _orig
-    app.dependency_overrides.clear()
-
+# #2127: local _patch_tortoise_sdk_init/_restore_sdk_init copies
+# superseded by the shared tests._http_fixtures.patched_tortoise_sdk helper
+# (patch → temp DB, #1950 pin, close-then-clear at enter; pop-env → restore
+# → deterministic close → clear overrides at exit). The old restore cleared
+# WITHOUT closing anchors — the #1950 leak the helper fixes.
 
 @pytest.fixture
 def sb_client(monkeypatch):
@@ -99,12 +87,8 @@ def sb_client(monkeypatch):
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "susp.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, fake, db_path
-        finally:
-            _restore_sdk_init(_orig)
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, fake, db_path
 
 
 @pytest.fixture
@@ -184,12 +168,8 @@ def reg_client(monkeypatch):
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "susp-reg.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
-        finally:
-            _restore_sdk_init(_orig)
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, db_path
 
 
 def _assert_suspended(r):
