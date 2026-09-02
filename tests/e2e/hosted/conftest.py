@@ -179,13 +179,16 @@ def _free_port() -> int:
 def _live(msg: str) -> None:
     """Write a boot-progress heartbeat straight to real stderr (fd 2).
 
-    #2108: pytest's capture replaces sys.stderr during session-fixture
-    setup, so print() in the hosted_env/bare boot is swallowed — and with
-    stdout piped to tee, Python block-buffers pytest's -q dots too — so the
-    CI job log showed ZERO output for the whole up-to-2-min boot phase.
-    That read as a hang and invited premature cancels of healthy runs.
-    os.write(2, ...) bypasses the capture wrapper, so the runner sees each
-    heartbeat live and a slow boot is distinguishable from a real hang."""
+    #2108: the CI pytest step runs with --capture=sys (ci.yml), which wraps
+    sys.stdout/sys.stderr but leaves fd 2 untouched — so os.write(2, ...)
+    reaches the job log live. (Under pytest's DEFAULT fd capture, fd 2 is
+    dup2-redirected into the capture buffer, which would swallow these
+    heartbeats — keep the --capture=sys pairing.) Before this fix the job
+    log showed ZERO output for the whole up-to-2-min boot phase: pytest -q
+    dots sat in Python's block buffer on the tee pipe, and print() in
+    fixture setup was captured — which read as a hang and invited premature
+    cancels of healthy runs. A slow boot is now distinguishable from a real
+    hang."""
     try:  # noqa: SIM105
         os.write(2, f"\n[hosted-e2e] {msg}\n".encode())
     except Exception:  # noqa: BLE001, RUF100 — never break the suite on a log hiccup

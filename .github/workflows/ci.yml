@@ -421,7 +421,10 @@ jobs:
       # zero test output" — the victim was healthy, just cancelled mid-boot).
       # Key per event+ref (python-ci.yml precedent): on pull_request
       # github.ref is refs/pull/N/merge, so a new commit cancels only that
-      # PR's stale run.
+      # PR's stale run. ci.yml is pull_request-only today, so the group is
+      # strictly per-PR; the event_name dimension + conditional cancel
+      # mirror python-ci.yml and stay correct if a push/schedule trigger is
+      # ever added.
       group: hosted-e2e-${{ github.event_name }}-${{ github.ref }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     timeout-minutes: 15
