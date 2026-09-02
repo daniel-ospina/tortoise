@@ -2535,6 +2535,7 @@ _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
     "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
     "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+    "tortoise_onboarding_seed",  # #1999 (W3)
 })
 
 # 60s per-team TTL cache for the tools/list gate — the onboarding-state read
@@ -2611,6 +2612,45 @@ def tortoise_onboarding_demo_create() -> dict:
 def tortoise_onboarding_state() -> dict:
     """Return this team's onboarding progress (Q6 verification step)."""
     return _onboarding_state()
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_seed(org_name: str | None = None,
+                             person_name: str | None = None) -> dict:
+    """File the two onboarding anchor Subjects for this team (#1999, W3):
+    Organization (Subject/organization) + User (Subject/naturalPerson)
+    linked memberOf — interactive, ontology-precise.
+
+    Interactive (WF-2): call WITHOUT names to discover gaps (the person
+    display name is email-derived and needs user confirmation — never
+    invented) or collisions (a same-name Subject that is not this org/user —
+    disambiguation required, never a silent merge); call WITH the
+    user-confirmed names to file. Returns status:
+    'needs_confirmation' (gaps[] — ask the user), 'collision'
+    (collisions[] — ask for a disambiguated name), or 'seeded'
+    (two Subjects + memberOf + org_subject_id + first-points-filed).
+    Compact orgs seed-lite (org-anchor Subject only, no person ask)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    from tortoise.hosted_api import (
+        HTTPException as _HTTPException,
+    )
+    from tortoise.hosted_api import (
+        _run_onboarding_seed,
+        _team_email,
+    )
+    try:
+        return _run_onboarding_seed(
+            team_id, org_name=org_name, person_name=person_name,
+            person_email=_team_email(team_id))
+    except _HTTPException as exc:
+        # 503 graph-down (fail-loud FLOW write) etc. — surfaced honestly,
+        # never a silent skip (agent retries when the graph is back).
+        return {"error": str(exc.detail),
+                "status": getattr(exc, "status_code", 500)}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"error": f"seed failed: {exc}"}
 
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))

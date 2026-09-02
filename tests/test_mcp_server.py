@@ -1049,6 +1049,7 @@ class TestStdioEntrypointToolRegistration:
                 "tortoise_onboarding_github_connect",
                 "tortoise_onboarding_github_index",
                 "tortoise_onboarding_github_status",
+                "tortoise_onboarding_seed",  # #1999 (W3)
             }
             missing = onboarding - set(names)
             assert not missing, f"missing onboarding tools: {sorted(missing)}"

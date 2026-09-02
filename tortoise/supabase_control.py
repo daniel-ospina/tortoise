@@ -1383,6 +1383,14 @@ def team_email(cp, team_id: str) -> str | None:
     return rows[0]["email"] if rows else None
 
 
+def team_name(cp, team_id: str) -> str | None:
+    """Read ``teams.name`` (the org display name) for a team (None when the
+    row is missing) — #1999 (W3) hosted seed anchor data (DM-3: org display
+    name ← teams.name, never invented)."""
+    rows = cp.query("teams", select=["name"], filters=[("id", "eq", team_id)])
+    return rows[0]["name"] if rows else None
+
+
 def update_team_email(cp, team_id: str, email: str) -> None:
     """PATCH ``teams`` SET email (onboarding flow writes the signup email)."""
     cp.query(
