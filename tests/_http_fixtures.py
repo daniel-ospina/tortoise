@@ -58,11 +58,12 @@ def patched_tortoise_sdk(db_path: str) -> Iterator[None]:
       → #2090 403).
 
     Exit (exception-safe):
-    - pop the pin FIRST, restore ``__init__``, then close every keepalive
-      anchor deterministically (clear-without-close leaked anchors — #1950
-      lesson, tests/test_hosted_api.py:135-153; SHUTDOWN SAVE, not GC-timed
-      NOSAVE), then clear ``app.dependency_overrides`` (fixture teardown
-      convention, mirrors test_export_delete ``_restore_sdk_init``).
+    - restore the pin if it was set at enter (else pop it) FIRST, restore
+      ``__init__``, then close every keepalive anchor deterministically
+      (clear-without-close leaked anchors — #1950 lesson,
+      tests/test_hosted_api.py:135-153; SHUTDOWN SAVE, not GC-timed NOSAVE),
+      then clear ``app.dependency_overrides`` (fixture teardown convention,
+      mirrors test_export_delete ``_restore_sdk_init``).
 
     Import-pure module: no module-level env writes, no hosted_api import at
     module level — the lazy ``import tortoise.hosted_api`` here is deliberate

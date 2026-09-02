@@ -255,6 +255,9 @@ def sb_client(monkeypatch):
             finally:
                 # sb tests never append to _SEED_SDKS (graph seeds are
                 # local-held) — keep for uniform per-test close discipline.
+                # Ordering note: seeds close here BEFORE the helper's exit-
+                # anchor-close (the helper closes last → still a deterministic
+                # SHUTDOWN SAVE; outcome-equivalent to the pre-#2127 order).
                 _close_seed_sdks()
 
 
