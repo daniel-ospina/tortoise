@@ -43,7 +43,7 @@ export const WIZARD_STEPS = Object.freeze([
   {
     id: 'done',
     label: "You're all set",
-    sub: 'Your agent takes over from here. Open the Overview and follow the Setup guide card for what happens next.',
+    sub: 'Your agent takes over from here. Open Settings → Setup guide to follow what happens next.',
   },
 ])
 

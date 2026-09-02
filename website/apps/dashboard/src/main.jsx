@@ -10,6 +10,10 @@ import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS
 // removed with the consent gate (default-ON, ToS-covered).
 import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
+// #2000 (W4): the Overview calm — EXACTLY 3 elements (connection status,
+// memory digest, next action), zero toggles. Pure derivations, node --test
+// unit-tested (overview.test.js).
+import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
 import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER, orgNameError } from './wizardFlow.js'
@@ -55,13 +59,24 @@ const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 // incl. grandfathered), DEGRADED when the server reports FLOW 'unavailable'
 // (never a false checklist), LOADING during the fetch transient. The reentry
 // card defers to this one (the wizard re-opens from the empty state only).
-function SetupGuideCard({ state, loading }) {
+function SetupGuideCard({ state, loading, onResume }) {
   const g = setupGuide(state)
   if (loading) {
     return (
       <div className="card">
         <div className="card-val"><span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /></div>
         <div className="card-label"><span className="skeleton" style={SKEL_LABEL} aria-hidden="true" /></div>
+      </div>
+    )
+  }
+  if (!state) {
+    // #2000 (W4) review P2-2: onboarding fetch FAILED (state never landed,
+    // loading done) → an honest error card — never a bare "0/0" checklist.
+    return (
+      <div className="card">
+        <div className="card-val">—</div>
+        <div className="card-label">Setup guide</div>
+        <div className="setup-guide-degraded dim">Couldn't load setup status — refresh to retry.</div>
       </div>
     )
   }
@@ -93,7 +108,249 @@ function SetupGuideCard({ state, loading }) {
           </li>
         ))}
       </ul>
+      {/* #2000 (W4): mid-flight resume affordance — Settings owns the Setup
+          guide home (DE2E-6); the resume button re-opens the wizard
+          (idempotent-safe re-entry: org-create 409-advance + fork replay is
+          a set-once 'same' 200). W9 owns the fork-aware step-MAPPED resume;
+          W4 names the seam. */}
+      {onResume && g.status === 'active' && (
+        <div className="setup-guide-resume" style={{ marginTop: 10 }}>
+          <button type="button" className="btn-primary small" onClick={onResume}>Resume setup →</button>
+        </div>
+      )}
     </div>
+  )
+}
+
+// #2000 (W4): the calm Overview — EXACTLY 3 elements (DE2E-2: connection
+// status, memory digest, next action), zero feature toggles, honest states
+// (loading skeleton / unavailable on graph-down, never a fabricated digest
+// or checklist). Derivation lives in overview.js (pure, node --test).
+//
+// A shared skeleton slot for the three elements (mirrors the old stat-card
+// shimmer — no CLS while the fetch resolves).
+function OverviewElementSkeleton({ label }) {
+  return (
+    <div className="card">
+      <div className="card-val"><span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /></div>
+      <div className="card-label"><span className="skeleton" style={SKEL_LABEL} aria-hidden="true" /></div>
+      <div className="card-label">{label}</div>
+    </div>
+  )
+}
+
+// Element 1 — connection status (agent reported in via the harness).
+function OverviewConnectionCard({ state, loading }) {
+  const c = overviewConnection(state)
+  // failed-fetch honesty: state never landed → an error variant, never an
+  // eternal skeleton (the old panel showed a refresh-to-retry card here).
+  if (!state && !loading) {
+    return (
+      <div className="card overview-element" aria-label="Connection status">
+        <div className="card-val">—</div>
+        <div className="card-label">Connection status</div>
+        <p className="overview-detail dim small" style={{ margin: '6px 0 0' }}>Couldn't load — refresh to retry.</p>
+      </div>
+    )
+  }
+  if (c.kind === 'loading') return <OverviewElementSkeleton label="Connection status" />
+  return (
+    <div className="card overview-element" aria-label="Connection status">
+      <div className="card-val" style={c.kind === 'connected' ? { color: 'var(--green,#4ade80)' } : undefined}>{c.value}</div>
+      <div className="card-label">Connection status</div>
+      {c.detail && <p className="overview-detail dim small" style={{ margin: '6px 0 0' }}>{c.detail}</p>}
+    </div>
+  )
+}
+
+// Element 2 — memory digest (honest in-graph point count).
+function OverviewDigestCard({ points }) {
+  const d = overviewDigest(points)
+  if (d.kind === 'unavailable') {
+    return (
+      <div className="card overview-element" aria-label="Memory digest">
+        <div className="card-val">—</div>
+        <div className="card-label">Memory digest</div>
+        <p className="overview-detail dim small" style={{ margin: '6px 0 0' }}>{d.detail}</p>
+      </div>
+    )
+  }
+  return (
+    <div className="card overview-element" aria-label="Memory digest">
+      <div className="card-val">{d.value.toLocaleString()}</div>
+      <div className="card-label">Memory digest</div>
+      <p className="overview-detail dim small" style={{ margin: '6px 0 0' }}>{d.detail}</p>
+    </div>
+  )
+}
+
+// Element 3 — next action (Setup-guide current step; same graph-held state
+// the Settings Setup guide renders — DE2E-6). Active flows get ONE calm CTA
+// into the Setup guide; done/collapsed collapses to a status; degraded is
+// honest (never a false next step).
+function OverviewNextActionCard({ state, loading, onOpenSettings }) {
+  const g = setupGuide(state)
+  const a = overviewNextAction(g)
+  if (!state && !loading) {
+    return (
+      <div className="card overview-element" aria-label="Next action">
+        <div className="card-val">—</div>
+        <div className="card-label">Next action</div>
+        <p className="overview-detail dim small" style={{ margin: '6px 0 0' }}>Couldn't load setup status — refresh to retry.</p>
+      </div>
+    )
+  }
+  if (a.kind === 'loading') return <OverviewElementSkeleton label="Next action" />
+  return (
+    <div className="card overview-element" aria-label="Next action">
+      <div className="card-val" style={{ fontSize: 20, color: (a.kind === 'active' || a.kind === 'done') ? 'var(--green,#4ade80)' : undefined }}>{a.value}</div>
+      <div className="card-label">Next action</div>
+      {a.kind === 'active' && (
+        <div style={{ marginTop: 8 }}>
+          <button type="button" className="btn-primary small" onClick={onOpenSettings}>Open Setup guide →</button>
+        </div>
+      )}
+      {a.detail && <p className="overview-detail dim small" style={{ margin: '6px 0 0' }}>{a.detail}</p>}
+    </div>
+  )
+}
+
+// #2000 (W4) review P2-6: the Backups summary relocated from the Overview to
+// the API Keys tab. It needs its OWN 15s loading floor — the old Overview
+// card's frameStale latch only ticks while the Overview tab is mounted
+// (#1842/#1923), so the relocated card can never rely on it. Local floor:
+// skeleton for 15s, then the honest '—' frame.
+function BackupsCard({ status, count }) {
+  const [stale, setStale] = React.useState(false)
+  React.useEffect(() => {
+    if (status !== 'loading') { setStale(false); return undefined }
+    const t = setTimeout(() => setStale(true), 15_000)
+    return () => clearTimeout(t)
+  }, [status])
+  const value = status === 'ok' ? (count || 'none')
+    : (status === 'loading' && !stale) ? <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />
+      : '—'
+  return (
+    <div className="card" style={{ marginTop: 16 }}>
+      <div className="card-val" style={{ fontSize: 18 }}>{value}</div>
+      <div className="card-label">Backups{status === 'error' ? ' — could not load (retry later)' : ''}</div>
+    </div>
+  )
+}
+
+// #2000 (W4): the Settings tab — the 7th tab (R2-11), FOUR homes (epic plan
+// P3): Setup guide (DE2E-6 — same graph-held state the Overview next-action
+// mirrors), GitHub connect, Memory sources (the ONLY live home of the four
+// source toggles — DE2E-2 reachability), Captured sessions (DE2E-11 home).
+// Single-owner (R2-10): W6 consumes the capture home (view/delete + DELETE
+// /v1/sessions/{id}); W9 consumes the Setup-guide home (fork-aware resume
+// mapping). W4 builds the homes + names the seams — no speculative W6/W9
+// behavior.
+function SettingsTab(props) {
+  const {
+    state, loading, onResumeSetup,
+    github, githubConnected, reposCount, onConnectGithub, githubError,
+    sessions, sessionsOn, sessionsLoading,
+    memorySourcesProps,
+  } = props
+  const reposNote = githubConnected
+    ? (github.repos != null ? `${github.repos} repos available`
+      : (reposCount != null && reposCount > 0 ? `${reposCount} repos available`
+        : 'repos available'))
+    : null
+  const fmt = (iso) => { if (!iso) return '—'; try { return new Date(iso).toLocaleString() } catch { return iso } }
+  return (
+    <section className="settings" aria-label="Settings">
+      <h2>Settings</h2>
+
+      {/* ── Home 1: Setup guide (DE2E-6) — renders the SAME graph-held
+          OnboardingState node as the Overview next-action element; the
+          card's Resume re-opens the wizard (idempotent re-entry). W9 owns
+          the fork-aware step-mapped resume. ── */}
+      <section className="settings-home" aria-labelledby="settings-setup-guide-heading">
+        <h3 id="settings-setup-guide-heading">Setup guide</h3>
+        <p className="dim small">Where your Organization is in setup — resumes exactly where it left off.</p>
+        <SetupGuideCard state={state} loading={loading} onResume={onResumeSetup} />
+      </section>
+
+      {/* ── Home 2: GitHub connect (P3 — moved off the first-run surface).
+          The source toggles + scope/re-index live under Memory sources
+          below; this home owns the OAuth connection state. Connect errors
+          surface on the issues row (one mechanism — no drift). ── */}
+      <section className="settings-home" aria-labelledby="settings-github-heading">
+        <h3 id="settings-github-heading">GitHub connect</h3>
+        {loading ? (
+          <p className="dim">Loading GitHub status…</p>
+        ) : githubConnected ? (
+          <p className="dim small">
+            <span className="live">Connected</span>{reposNote ? ` — ${reposNote}. ` : '. '}
+            Issues and docs index to this Organization's graph. Manage scope and re-index under Memory sources below.
+          </p>
+        ) : (
+          <>
+            <p className="dim small">
+              Connect GitHub to bring issues and repo docs into your Organization as memory sources.
+            </p>
+            <div style={{ marginTop: '0.5rem' }}>
+              <button type="button" className="btn-primary" onClick={onConnectGithub} disabled={github.busy}>
+                {github.busy ? 'Connecting…' : 'Connect GitHub'}
+              </button>
+            </div>
+            {/* #2000 (W4) review P2-1: connect errors surface NEXT to the
+                connect button too (the Memory-sources issues row below is
+                the same state — one mechanism, two render sites, no
+                divergence). A failed OAuth round-trip / popup block must
+                read here, not one full home down. */}
+            {githubError && <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{githubError}</p>}
+          </>
+        )}
+      </section>
+
+      {/* ── Home 3: Memory sources — the ONLY live home of the four source
+          toggles (github_connected / github_indexed / github_docs_indexed /
+          session_recording). DE2E-2: reachable only via Settings → Memory
+          sources. ── */}
+      <section className="settings-home" aria-labelledby="settings-memory-heading">
+        <h3 id="settings-memory-heading">Memory sources</h3>
+        <p className="dim small">Choose what Tortoise remembers — sources you switch on index to this Organization's graph; session recording is on by default and can be turned off any time.</p>
+        <MemorySources {...memorySourcesProps} />
+      </section>
+
+      {/* ── Home 4: Captured sessions (DE2E-11 home). W6 consumer seam:
+          W6 adds transcript view + DELETE /v1/sessions/{id} + receipt
+          cleanup into this home. W4 renders the honest state: recording
+          flag + the captured-session list (read-only). ── */}
+      <section className="settings-home" aria-labelledby="settings-capture-heading">
+        <h3 id="settings-capture-heading">Captured sessions</h3>
+        <p className="dim small">
+          When session recording is on, sessions from tools with capture installed are filed to this Organization as memory.
+        </p>
+        {/* #2000 (W4) review P2-3: honest states — never a fabricated
+            "recording is off" while the onboarding state is still loading
+            or failed to fetch (session_recording defaults ON, #1927). */}
+        {sessionsLoading ? (
+          <p className="dim">Loading capture status…</p>
+        ) : !state ? (
+          <p className="dim">Couldn't load capture status — refresh to retry.</p>
+        ) : !sessionsOn ? (
+          <p className="dim">
+            Session recording is off — new sessions are not captured. Turn it on under Memory sources above.
+          </p>
+        ) : sessions.length === 0 ? (
+          <p className="dim">No captured sessions yet — recordings appear here after your agent's first session.</p>
+        ) : (
+          <ul className="captured-sessions" style={{ listStyle: 'none', margin: '0.4rem 0 0', padding: 0 }}>
+            {sessions.map((s) => (
+              <li key={s.id} className="captured-session" style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline', padding: '0.35rem 0', borderBottom: '1px solid var(--border,#1e293b)' }}>
+                <span className="small">{fmt(s.created_at)}</span>
+                <span className="dim small">{(s.turns ?? 0)} turns · {(s.extracted ?? 0)} extracted</span>
+                <code className="dim small" style={{ marginLeft: 'auto' }}>{String(s.id).slice(0, 12)}…</code>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </section>
   )
 }
 
@@ -4301,7 +4558,7 @@ function claimIntentInFlight() {
 
                   {wizardStep === 4 && (
                     <div className="done">
-                      <p className="dim">Your agent takes over from here — connect it, and it files your decisions and findings to this Organization's graph. Follow the Setup guide card on the Overview for what happens next.</p>
+                      <p className="dim">Your agent takes over from here — connect it, and it files your decisions and findings to this Organization's graph. Open Settings → Setup guide to follow what happens next.</p>
                       <div className="wizard-nav">
                         <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
                       </div>
@@ -4647,6 +4904,10 @@ function claimIntentInFlight() {
           {/* #1623: Billing — plan, usage, upgrade/portal. Session-gated like
               the rest of the dashboard (anon teams get the Protect screen). */}
           <button className={tab === 'billing' ? 'active' : ''} onClick={() => setTab('billing')}>Billing</button>
+          {/* #2000 (W4): Settings — the 7th tab (R2-11), owner of Memory
+              sources + GitHub connect + Setup guide + capture view/delete
+              homes (P3). W6/W9 consume (single-owner R2-10). */}
+          <button className={tab === 'settings' ? 'active' : ''} data-tab="settings" onClick={() => setTab('settings')}>Settings</button>
         </nav>
         {/* #1689: always-visible — OUTSIDE the nav; reopens the wizard at
             step 0 (skills). (The nav wraps via flex-wrap on narrow windows
@@ -4897,7 +5158,7 @@ function claimIntentInFlight() {
         {tab === 'overview' && alerts.length > 0 && (
           <section className="overview" aria-label="Security alerts">
             <h2>Security alerts</h2>
-            <p className="dim small">Suspicious activity detected on this team. Revoke any key you don't recognize.</p>
+            <p className="dim small">Suspicious activity detected on this Organization. Revoke any key you don't recognize.</p>
             <ul>
               {alerts.map((a, i) => (
                 <li key={i}>
@@ -4922,17 +5183,20 @@ function claimIntentInFlight() {
           // #1842 P1 (re-review, b): frameStale — the same '—' frame after
           // the 15s skeleton floor, covering the no-error eternal shimmer
           // (loadTeams no-op / loader never ran).
+          // #2000 (W4): the skeleton mirrors the CALM Overview's EXACTLY-3
+          // element shape (DE2E-2: connection status / memory digest / next
+          // action) — never the old 6 stat-card frame.
           <section className="overview" aria-busy={!error && !frameStale}>
             <h2>Overview</h2>
             <div className="cards">
               {error || frameStale
-                ? ['Data points', 'Graphs', 'Users', 'Backups', 'API Keys', 'Plan'].map((label) => (
+                ? ['Connection status', 'Memory digest', 'Next action'].map((label) => (
                     <div className="card" key={label}>
                       <div className="card-val">—</div>
                       <div className="card-label">{label}</div>
                     </div>
                   ))
-                : ['Data points', 'Graphs', 'Users', 'Backups', 'API Keys', 'Plan'].map((label) => (
+                : ['Connection status', 'Memory digest', 'Next action'].map((label) => (
                     <div className="card" key={label}>
                       <div className="card-val"><span className="skeleton" style={SKEL_VALUE} aria-hidden="true" /></div>
                       <div className="card-label"><span className="skeleton" style={SKEL_LABEL} aria-hidden="true" /></div>
@@ -4991,7 +5255,7 @@ function claimIntentInFlight() {
               </>
             ) : (
               <p className="dim">
-                Your team is live — create an API key to connect your agent and
+                Your Organization is live — create an API key to connect your agent and
                 add your first data point. Mint one on the API Keys tab, or try
                 again above — the dashboard re-keys once a key can be minted.
               </p>
@@ -5018,51 +5282,70 @@ function claimIntentInFlight() {
           </section>
         )}
         {tab === 'overview' && team && !showReentryCard && team.graph_ready !== false && (team.point_count ?? 0) > 0 && (
-          <section className="overview">
+          // #2000 (W4): the CALM Overview — EXACTLY 3 elements (DE2E-2):
+          // connection status + memory digest + next action. ZERO feature
+          // toggles — every source toggle (github_connected, github_indexed,
+          // github_docs_indexed, session_recording) lives in Settings →
+          // Memory sources; the Setup-guide card lives in Settings → Setup
+          // guide (this grid renders the same state as its next-action
+          // element). Stat cards relocated to their tabs (Billing shows
+          // usage/points/graphs/users; Graphs/Members/API-Keys tabs show
+          // their own lists; Backups moved to the API Keys tab).
+          <section className="overview" aria-label="Overview">
             <h2>Overview</h2>
             <div className="cards">
-              <SetupGuideCard state={onboarding} loading={onboardingLoading} />
-              <div className="card"><div className="card-val">{team.point_count ?? 0}</div><div className="card-label">Data points</div></div>
-              <div className="card"><div className="card-val">{graphsStatus === 'ok' ? graphs.length : (graphsStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Graphs</div></div>
-              <div className="card"><div className="card-val">{membersStatus === 'ok' ? members.length : (membersStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Users</div></div>
-              <div className="card"><div className="card-val">{backupsStatus === 'ok' ? (backupInfo.count || 'none') : (backupsStatus === 'loading' ? (frameStale ? '—' : <span className="skeleton" style={SKEL_VALUE} aria-hidden="true" />) : '—')}</div><div className="card-label">Backups</div></div>
-              <div className="card"><div className="card-val">{keys.length}</div><div className="card-label">API Keys</div></div>
-              <div className="card"><div className="card-val">{team.tier || 'free'}</div><div className="card-label">Plan{team.subscription_status ? ` · ${team.subscription_status}` : ''}</div></div>
+              <OverviewConnectionCard state={onboarding} loading={onboardingLoading} />
+              <OverviewDigestCard points={team.point_count ?? 0} />
+              <OverviewNextActionCard state={onboarding} loading={onboardingLoading} onOpenSettings={() => setTab('settings')} />
             </div>
-            {/* #1728 Slice 3 (Task 17): the "Memory sources" panel — ONE
-                implementation shared with the wizard step-1. #1927: the re-ask
-                variant was removed with the consent gate. */}
-            <MemorySources
-              state={onboarding}
-              loading={onboardingLoading}
-              wizardHarness={null}  // review P2-6: Overview never knows the user's harness — no spurious "current" highlight
-              github={wizardGithub}
-              issuesWantOn={issuesWantOn}
-              docsWantOn={docsWantOn}
-              indexJob={indexJob}
-              docsJob={docsJob}
-              memoryBusy={memoryBusy}
-              memoryErrors={memoryErrors}
-              onToggleIssues={toggleIssues}
-              onToggleDocs={toggleDocs}
-              onToggleSessions={toggleSessionRecording}
-              onConnectGithub={wizardConnectGithub}
-              onIndexDocs={indexDocs}
-              onReindexGithub={reindexGithub}
-              reposList={reposList}
-              reposLoaded={reposLoaded}
-              reposLoadFailed={reposLoadFailed}
-              branchLists={branchLists}
-              docsScope={docsScope}
-              issuesScope={issuesScope}
-              onDocsScopeChange={handleDocsScopeChange}
-              onIssuesScopeChange={handleIssuesScopeChange}
-              onLoadBranches={loadBranches}
-            />
-            {/* #1148-ux review: Team ID / Limits / billing-actions / quickstart
-                removed — noise (the quickstart lives on the empty state; limits
-                are not actionable here). */}
           </section>
+        )}
+
+        {/* #2000 (W4): Settings — the 7th tab (R2-11), owner of Memory
+            sources + GitHub connect + Setup guide + capture view/delete
+            homes (P3). Renders when the team is loaded (mirrors the Billing
+            tab gate). W6/W9 consume later (single-owner R2-10). */}
+        {tab === 'settings' && team && (
+          <SettingsTab
+            state={onboarding}
+            loading={onboardingLoading}
+            onResumeSetup={() => { setWizardStep(0); setWelcomeMode(true) }}
+            github={wizardGithub}
+            githubConnected={!!(onboarding && onboarding.github_connected)}
+            reposCount={reposLoaded ? reposList.length : null}
+            onConnectGithub={wizardConnectGithub}
+            githubError={memoryErrors.issues}
+            sessions={sessions}
+            sessionsOn={!!(onboarding && onboarding.session_recording)}
+            sessionsLoading={onboardingLoading}
+            memorySourcesProps={{
+              state: onboarding,
+              loading: onboardingLoading,
+              wizardHarness: null,  // Settings never knows the user's harness — no spurious "current" highlight
+              github: wizardGithub,
+              issuesWantOn,
+              docsWantOn,
+              indexJob,
+              docsJob,
+              memoryBusy,
+              memoryErrors,
+              onToggleIssues: toggleIssues,
+              onToggleDocs: toggleDocs,
+              onToggleSessions: toggleSessionRecording,
+              onConnectGithub: wizardConnectGithub,
+              onIndexDocs: indexDocs,
+              onReindexGithub: reindexGithub,
+              reposList,
+              reposLoaded,
+              reposLoadFailed,
+              branchLists,
+              docsScope,
+              issuesScope,
+              onDocsScopeChange: handleDocsScopeChange,
+              onIssuesScopeChange: handleIssuesScopeChange,
+              onLoadBranches: loadBranches,
+            }}
+          />
         )}
 
         {tab === 'profile' && (
@@ -5238,6 +5521,12 @@ function claimIntentInFlight() {
                 ))}
               </tbody>
             </table>
+            {/* #2000 (W4): the Overview Backups stat card relocated here —
+                the count stays reachable now that the Overview is calm
+                (exactly 3 elements, zero toggles). BackupsCard owns its own
+                loading floor (the Overview's frameStale latch never ticks on
+                this tab — review P2-6). */}
+            <BackupsCard status={backupsStatus} count={(backupInfo && backupInfo.count) || null} />
           </section>
         )}
 
