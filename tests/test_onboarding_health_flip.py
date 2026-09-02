@@ -33,6 +33,7 @@ os.environ.setdefault("GITHUB_CLIENT_SECRET", "test-client-secret")
 from tortoise.hosted_api import app  # noqa: I001
 from tortoise.hosted_api import _ONBOARDING_DEFAULT_STATE
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row
 
@@ -44,23 +45,6 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
     return cp
-
-
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make hosted_api's TortoiseSDK use a temp embedded DB so the
-    /health/ready FalkorDB probe doesn't touch prod."""
-    import tortoise.hosted_api as ha_mod
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
 
 
 @pytest.fixture
@@ -82,29 +66,22 @@ def supabase_client(monkeypatch):
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "flip.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                tc.headers.update({"Authorization": f"Bearer {TOKEN}"})
-                yield tc, fake
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch_tortoise_sdk_init copies).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            tc.headers.update({"Authorization": f"Bearer {TOKEN}"})
+            yield tc, fake
 
 
 def _registry_client():
     """TestClient in registry mode (no Supabase creds)."""
-    import tortoise.hosted_api as ha_mod
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "reg.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc
 
 
 # ── Onboarding state (E2E-5: read-patch from teams) ─────────────────────────
@@ -276,23 +253,23 @@ class TestGithubConnectFlip:
         # real 500 in production — assert it as an HTTP response.
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "flip500.db")
-            _orig = _patch_tortoise_sdk_init(db_path)
-            try:
-                with TestClient(app, raise_server_exceptions=False) as tc:
-                    # Seed the CSRF state directly (connect itself needs auth,
-                    # which also fails closed under the error plane — the
-                    # callback is the public leg under test).
-                    import time as _time
-                    ha._GITHUB_STATES["test-state-1"] = {
-                        "team_id": "team-free-001", "org": "team-free-001",
-                        "created_at": _time.time(),
-                    }
-                    r = tc.get("/v1/onboarding/github/callback?code=test-code&state=test-state-1",
-                               follow_redirects=False)
-                    assert r.status_code == 500
-            finally:
-                ha.TortoiseSDK.__init__ = _orig
-                app.dependency_overrides.clear()
+            # #2127: shared helper — the caller path arg is deliberately
+            # dropped by the helper (documented); immaterial here (the 500
+            # fires before any SDK construction — the control-plane outage
+            # short-circuits authz).
+            with patched_tortoise_sdk(db_path), \
+                    TestClient(app, raise_server_exceptions=False) as tc:
+                # Seed the CSRF state directly (connect itself needs auth,
+                # which also fails closed under the error plane — the
+                # callback is the public leg under test).
+                import time as _time
+                ha._GITHUB_STATES["test-state-1"] = {
+                    "team_id": "team-free-001", "org": "team-free-001",
+                    "created_at": _time.time(),
+                }
+                r = tc.get("/v1/onboarding/github/callback?code=test-code&state=test-state-1",
+                           follow_redirects=False)
+                assert r.status_code == 500
 
 
 # ── Health endpoints (Task 7 / E2E-8) ───────────────────────────────────────

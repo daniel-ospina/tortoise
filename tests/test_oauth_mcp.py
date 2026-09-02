@@ -39,6 +39,7 @@ from tortoise.oauth import (  # noqa: E402, RUF100
     team_resource_url,
 )
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402, RUF100
 
 # #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
@@ -72,21 +73,6 @@ def _enable_supabase(monkeypatch, cp: FakeControlPlane) -> FakeControlPlane:
     monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc_role_key_test")
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
     return cp
-
-
-def _patch_tortoise_sdk_init(db_path: str):
-    import tortoise.hosted_api as ha_mod
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
 
 
 def _pkce() -> tuple[str, str]:
@@ -173,14 +159,13 @@ def api_client(supabase_cp):
     """TestClient over the real hosted_api app (OAuth + well-known routes)."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "oauth.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, supabase_cp
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch_tortoise_sdk_init copy).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, supabase_cp
 
 
 @pytest.fixture
@@ -336,16 +321,16 @@ class TestDynamicClientRegistration:
         monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
         monkeypatch.delenv("SUPABASE_URL", raising=False)
         monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _orig = _patch_tortoise_sdk_init(os.path.join(tmpdir, "r.db"))
-            try:
-                with TestClient(app) as tc:
-                    r = tc.post("/register", json={
-                        "client_name": "x", "redirect_uris": [REDIRECT]})
-                    assert r.status_code == 503
-            finally:
-                import tortoise.hosted_api as ha_mod
-                ha_mod.TortoiseSDK.__init__ = _orig
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patched_tortoise_sdk(os.path.join(tmpdir, "r.db")), \
+                TestClient(app) as tc:
+            # #2127: shared helper — the caller path arg is deliberately
+            # dropped by the helper (documented); immaterial here (the 503
+            # fires before any SDK construction). The helper additionally
+            # closes any lifespan anchor deterministically at exit.
+            r = tc.post("/register", json={
+                "client_name": "x", "redirect_uris": [REDIRECT]})
+            assert r.status_code == 503
 
 
 # ═══════════════════════════════════════════════════════════════════════════
