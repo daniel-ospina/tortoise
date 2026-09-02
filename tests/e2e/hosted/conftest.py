@@ -176,6 +176,22 @@ def _free_port() -> int:
     return port
 
 
+def _live(msg: str) -> None:
+    """Write a boot-progress heartbeat straight to real stderr (fd 2).
+
+    #2108: pytest's capture replaces sys.stderr during session-fixture
+    setup, so print() in the hosted_env/bare boot is swallowed — and with
+    stdout piped to tee, Python block-buffers pytest's -q dots too — so the
+    CI job log showed ZERO output for the whole up-to-2-min boot phase.
+    That read as a hang and invited premature cancels of healthy runs.
+    os.write(2, ...) bypasses the capture wrapper, so the runner sees each
+    heartbeat live and a slow boot is distinguishable from a real hang."""
+    try:  # noqa: SIM105
+        os.write(2, f"\n[hosted-e2e] {msg}\n".encode())
+    except Exception:  # noqa: BLE001, RUF100 — never break the suite on a log hiccup
+        pass
+
+
 def _build_server_env(db_path: str, jwks_url: str, *, bare: bool) -> dict:
     """Explicit env contract — inherits the parent env, then applies the
     contract and SCRUBS vars that would silently flip server behavior
@@ -266,8 +282,12 @@ class _ServerProc:
     def wait_ready(self, timeout_s: float = 60.0) -> None:
         import urllib.request
 
-        deadline = time.time() + timeout_s
+        start = time.time()
+        deadline = start + timeout_s
         last_err = "no attempt"
+        # #2108: heartbeat every ~10s so a slow-but-healthy boot is visible
+        # in the CI log (see _live) instead of looking like a hang.
+        next_beat = start + 10.0
         while time.time() < deadline:
             if self.proc.poll() is not None:
                 raise RuntimeError(
@@ -280,6 +300,11 @@ class _ServerProc:
                         return
             except Exception as e:  # noqa: BLE001, RUF100
                 last_err = str(e)
+            now = time.time()
+            if now >= next_beat:
+                _live(f"{self.name} still booting ({now - start:.0f}s) — "
+                      f"/health/ready probe: {last_err}")
+                next_beat = now + 10.0
             time.sleep(0.25)
         raise RuntimeError(
             f"{self.name} not ready after {timeout_s}s ({last_err}):\n"
@@ -312,17 +337,21 @@ class _ServerProc:
             pass
 
 
-def _boot_with_retry(factory, attempts: int = 2):
+def _boot_with_retry(name: str, factory, attempts: int = 2):
     """Boot a server via factory() -> _ServerProc; retry on boot failure.
 
     Embedded FalkorDBLite version handshake is timing-sensitive under CPU
     contention (shared CI/dev machines) — a dead/slow boot is retried
-    rather than failing the whole suite. Returns the live server."""
+    rather than failing the whole suite. Returns the live server.
+    Emits live boot-progress heartbeats (#2108) — see _live()."""
     last_exc = None
     for attempt in range(1, attempts + 1):
+        _live(f"booting {name} server (attempt {attempt}/{attempts})")
         server = factory()
         try:
+            _live(f"{name} boot log: {server._log_path}")
             server.wait_ready()
+            _live(f"{name} ready at {server.base_url}")
             return server
         except Exception as e:  # noqa: BLE001, RUF100
             last_exc = e
@@ -350,6 +379,8 @@ def hosted_env():
         return
 
     tmpdirs: list[str] = []
+    _live("hosted_env: local mode — JWKS mock + hosted server boot "
+          "(uvicorn log: <tmpdir>/hosted-uvicorn.log; boot retried on failure)")
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
 
@@ -362,7 +393,7 @@ def hosted_env():
                            os.path.join(d, "hosted.db"), jwks_url)
 
     try:
-        server = _boot_with_retry(_mk_hosted)
+        server = _boot_with_retry("hosted", _mk_hosted)
     except Exception:
         jwks_srv.shutdown()
         raise
@@ -382,6 +413,7 @@ def bare_hosted_server(hosted_env):
     if hosted_env["remote"]:
         pytest.skip("bare server is local-only (hermetic negatives)")
     tmpdirs: list[str] = []
+    _live("bare_hosted_server: local mode — JWKS mock + bare server boot")
     keys = _JWKSKeys()
     jwks_srv, jwks_url = _start_jwks_server(keys)
 
@@ -392,7 +424,7 @@ def bare_hosted_server(hosted_env):
                            os.path.join(d, "bare.db"), jwks_url, bare=True)
 
     try:
-        server = _boot_with_retry(_mk_bare)
+        server = _boot_with_retry("bare", _mk_bare)
     except Exception:
         jwks_srv.shutdown()
         raise
