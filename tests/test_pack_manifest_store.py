@@ -33,6 +33,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.hosted_api import app, get_current_team, get_current_user
 
 TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
@@ -66,28 +67,18 @@ connectors:
 """
 
 
-def _patch_sdk_init(db_path: str):
-    import tortoise.sdk as sdk_mod
-    _orig = sdk_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-    sdk_mod.TortoiseSDK.__init__ = _patched
-    return _orig
-
-
 @pytest.fixture
 def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
-        _orig = _patch_sdk_init(db_path)
-        try:
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk).
+        # Patching tortoise.sdk.TortoiseSDK == hosted_api.TortoiseSDK (same
+        # class object) — the helper's hosted_api patch applies identically;
+        # it adds the #1950 TORTOISE_DB_PATH pin + deterministic close of
+        # _make_sdk anchors at exit (this file's local helper cleared neither).
+        with patched_tortoise_sdk(db_path):
             yield TestClient(app)
-        finally:
-            app.dependency_overrides.clear()
-            import tortoise.sdk as sdk_mod
-            sdk_mod.TortoiseSDK.__init__ = _orig
 
 
 @pytest.fixture
@@ -96,13 +87,9 @@ def client_b():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test_b.db")
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM_B)
-        _orig = _patch_sdk_init(db_path)
-        try:
+        # #2127: shared helper (see client).
+        with patched_tortoise_sdk(db_path):
             yield TestClient(app)
-        finally:
-            app.dependency_overrides.clear()
-            import tortoise.sdk as sdk_mod
-            sdk_mod.TortoiseSDK.__init__ = _orig
 
 
 def _team_sdk(team_id: str = TEST_TEAM_ID):
@@ -233,17 +220,15 @@ class TestUploadEndpoint:
     def test_upload_401_unauthenticated(self):
         from tortoise.hosted_api import get_current_team as _gt
         app.dependency_overrides.pop(_gt, None)
-        with tempfile.TemporaryDirectory() as tmpdir:
-            _orig = _patch_sdk_init(os.path.join(tmpdir, "t.db"))
-            try:
-                c = TestClient(app)
-                r = c.post("/v1/packs/manifests",
-                           json={"manifest_yaml": VALID_MANIFEST})
-                assert r.status_code == 401
-            finally:
-                import tortoise.sdk as sdk_mod
-                sdk_mod.TortoiseSDK.__init__ = _orig
-                app.dependency_overrides.clear()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patched_tortoise_sdk(os.path.join(tmpdir, "t.db")):
+            # #2127: shared helper — the caller path arg is deliberately
+            # dropped by the helper (documented); immaterial here (the 401
+            # fires before any SDK construction).
+            c = TestClient(app)
+            r = c.post("/v1/packs/manifests",
+                       json={"manifest_yaml": VALID_MANIFEST})
+            assert r.status_code == 401
 
     def test_list_includes_tenant_pack(self, client):
         client.post("/v1/packs/manifests",
