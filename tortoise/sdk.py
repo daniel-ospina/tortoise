@@ -4822,8 +4822,9 @@ class TortoiseSDK:
 
     def _check_refs(self, bundle: dict, violations: list[dict]) -> None:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
-        and ULID-shadowing rejection (a ref shaped like a real ULID would
-        make refs.get(x, x) silently address an existing node)."""
+        and node-id-shadowing rejection: a ref shaped like a real node id —
+        a bare ULID OR a prefixed entity id (e.g. ``sub-<hex26>``, #1553) —
+        would make refs.get(x, x) silently address an existing node."""
         seen: dict[str, str] = {}
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
@@ -4832,12 +4833,13 @@ class TortoiseSDK:
                 ref = item.get("ref")
                 if not ref:
                     continue
-                if _is_ulid(str(ref)):
+                if _is_entity_id(str(ref)):
                     violations.append({
                         "section": section, "index": i,
                         "message": f"ingest: {section}[{i}] ref {ref!r} is "
-                                   f"shaped like a real ULID — refs are "
-                                   f"bundle-local labels, not node ids (a ULID-"
+                                   f"shaped like a real node id (ULID or "
+                                   f"prefixed entity id) — refs are bundle-"
+                                   f"local labels, not node ids (a node-id-"
                                    f"shaped ref would silently shadow an "
                                    f"existing node)",
                     })
