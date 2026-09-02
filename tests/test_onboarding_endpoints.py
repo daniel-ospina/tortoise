@@ -18,6 +18,23 @@ from tortoise.hosted_api import app, _make_sdk
 from tortoise.sdk import TortoiseSDK
 
 
+def _close_keepalive_anchors(anchors: dict) -> None:
+    """Deterministically close every keepalive anchor (SHUTDOWN SAVE).
+
+    #2090: replaces the clear-without-close leak (each eviction shut the
+    redislite daemon down mid-test → empty reads / 403s). # mirrors
+    tests/test_hosted_api.py:144-153 and tests/test_export_delete.py.
+    Accepts the ``_FALLBACK_KEEPALIVE`` dict (callers import it directly).
+    """
+    for ns in list(anchors):
+        anchor = anchors.pop(ns, None)
+        if anchor is not None:
+            try:  # noqa: SIM105
+                anchor.close()
+            except Exception:
+                pass
+
+
 @pytest.fixture
 def client(tmp_path):
     """TestClient with a temp embedded DB + registry."""
@@ -45,6 +62,10 @@ def client(tmp_path):
     # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
     from tortoise.hosted_api import _FALLBACK_KEEPALIVE
     _FALLBACK_KEEPALIVE.clear()
+    # #2090: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+    # forces, so _make_sdk's keepalive anchor path matches and the anchor is
+    # REUSED instead of evicted + closed on every registry access.
+    os.environ["TORTOISE_DB_PATH"] = fixture_db_path
     from tortoise.hosted_api import get_current_team
     app.dependency_overrides[get_current_team] = lambda: {
         "team_id": "test-team-1", "tier": "free", "key_id": "k1",
@@ -63,9 +84,11 @@ def client(tmp_path):
     TortoiseSDK.__init__ = orig_init
     # #1502-class teardown parity (mirror test_hosted_api._restore_...):
     # evict the anchor created during this test so a stale SDK bound to this
-    # test's temp DB never leaks into the next test file's run.
+    # test's temp DB never leaks into the next test file's run. Close
+    # deterministically (#2090) — never clear-without-close.
+    os.environ.pop("TORTOISE_DB_PATH", None)
     from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
+    _close_keepalive_anchors(_FALLBACK_KEEPALIVE)
 
 
 @pytest.fixture
@@ -83,11 +106,15 @@ def unauth_client(tmp_path):
     TortoiseSDK.__init__ = _patched
     from tortoise.hosted_api import _FALLBACK_KEEPALIVE
     _FALLBACK_KEEPALIVE.clear()
+    # #2090: pin TORTOISE_DB_PATH (see client fixture) — the anchor is
+    # reused, not evicted, on every registry access.
+    os.environ["TORTOISE_DB_PATH"] = fixture_db_path
     with TestClient(app) as tc:
         yield tc
+    os.environ.pop("TORTOISE_DB_PATH", None)
     TortoiseSDK.__init__ = orig_init
     from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
+    _close_keepalive_anchors(_FALLBACK_KEEPALIVE)
 
 
 # ── Onboarding state ────────────────────────────────────────────
@@ -260,7 +287,7 @@ def _invoke_session_recording_tool(tmp_path, team_id: str, enabled: bool):
         state = _get_onboarding_state(team_id)
     finally:
         _current_team_id.reset(tok)
-        _FALLBACK_KEEPALIVE.clear()
+        _close_keepalive_anchors(_FALLBACK_KEEPALIVE)
         TortoiseSDK.__init__ = orig_init
     return result, state
 
