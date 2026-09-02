@@ -149,9 +149,11 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     200 — NOT 429 (over_email_send_rate_limit / per-IP register buckets) —
     then the page auto-signs-in (auth/v1/token?grant_type=password) and
     redirects to the app root (signup.html:536 WELCOME_URL =
-    https://app.premiselabs.co — #1566: the post-auth destination for BOTH
-    signup and login is the CROSS-SITE app root, where first-timers are
-    provisioned in welcome mode).
+    https://app.premiselabs.co — #1566: the post-auth destination for the
+    SIGNUP flow is the CROSS-SITE app root, where first-timers are
+    provisioned in welcome mode). (The login path still transits legacy
+    /welcome.html — signin.html:366 — which bounces signed-in users to the
+    app root; this monitor drives signup only.)
 
     The app-origin navigation is route-blocked: a live landing on the app
     root would run the #1566 welcome-mode provisioning and mint an
@@ -172,16 +174,19 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             token["status"] = resp.status
 
     page.on("response", _on_response)
-    # #1566: the account is created pre-confirmed, so the page redirects to
-    # the APP ROOT (signup.html WELCOME_URL = https://app.premiselabs.co) —
-    # block that origin so the app's welcome-mode provisioning (prod team +
-    # api_keys row + FalkorDB graph mint) never runs against prod. (The
-    # legacy /welcome stub is dead: nothing in the #1494/#1566 flow
-    # navigates to tortoise.premiselabs.co/welcome anymore.)
+    # #1566: the account is created pre-confirmed, so the SIGNUP flow
+    # redirects to the APP ROOT (signup.html WELCOME_URL =
+    # https://app.premiselabs.co) — block that origin so the app's
+    # welcome-mode provisioning (prod team + api_keys row + FalkorDB graph
+    # mint) never runs against prod. (The legacy /welcome stub is dead for
+    # THIS flow: the signup path navigates straight cross-site;
+    # tortoise.premiselabs.co/welcome is only reached via the login path,
+    # which this monitor never drives.)
     page.route(
         "**://app.premiselabs.co/**",
         lambda route: route.fulfill(
-            status=200, content_type="text/html", body="<html><body>ok</body></html>"
+            status=200, content_type="text/html",
+            body="<html><body>LIVE-SIGNUP-ROUTE-BLOCKED</body></html>",
         ),
     )
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
@@ -216,6 +221,14 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
         # The flow redirects to the app root (route-blocked stub above) —
         # the redirect itself is the user-visible success state of #801.
         page.wait_for_url("**://app.premiselabs.co/**", timeout=15_000)
+        # Fail-closed tripwire (#2140 review): the URL match alone proves
+        # nothing — it passes whether the stub served the app-origin page or
+        # the REAL app loaded (which would run #1566 welcome-mode
+        # provisioning against prod). Assert the stub's unique marker so a
+        # glob under-match (host drift, www/port variant) fails the monitor
+        # instead of silently re-minting prod state.
+        expect(page.locator("body")).to_contain_text(
+            "LIVE-SIGNUP-ROUTE-BLOCKED", timeout=5_000)
         assert "email=" not in page.url and "password=" not in page.url, (
             f"credentials echoed into URL: {page.url}"
         )

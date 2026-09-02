@@ -77,7 +77,10 @@ jobs:
       - name: Auto-file issue on failure (monitor signal — never blocks merges)
         if: failure()
         run: |
-          curl -s -X POST \
+          # #2140: --fail-with-body so a failed issue create (403/429/etc.)
+          # fails the step loudly instead of silently skipping the file
+          # (curl -s exits 0 on HTTP errors — the deaf-monitor class).
+          curl --fail-with-body -sS -X POST \
             -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
             -H "Accept: application/vnd.github+json" \
             "https://api.github.com/repos/${{ github.repository }}/issues" \
