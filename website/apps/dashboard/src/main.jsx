@@ -10,6 +10,9 @@ import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS
 // removed with the consent gate (default-ON, ToS-covered).
 import { captureStatusForHarness, lastErrorForHarness } from './captureStatus.js'
 import { setupGuide } from './setupGuide.js'
+// #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
+// options + org-name validation, node --test unit-tested (wizardFlow.test.js).
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER, orgNameError } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -768,7 +771,7 @@ function claimIntentInFlight() {
       // checks (switchTeam re-mint) must read e.status, not message content.
       // #308: suspended teams get a dict detail — surface the appeal link.
       const sus = suspendedFromDetail(body.detail)
-      const err = new Error(sus ? (sus.message || 'Team suspended') : (typeof body.detail === 'string' ? body.detail : `HTTP ${res.status}`))
+      const err = new Error(sus ? (sus.message || 'Organization suspended') : (typeof body.detail === 'string' ? body.detail : `HTTP ${res.status}`))
       err.status = res.status
       if (sus) err.suspended = sus
       throw err
@@ -1227,7 +1230,46 @@ function claimIntentInFlight() {
   React.useEffect(() => { refreshOnboarding() }, [])  // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── #1643 wizard actions ────────────────────────────────────────────────
+  // #1997 (W1): LEGACY #1643 step labels — ARCHIVED-not-deleted (A0 rollback
+  // path, epic §8; the DE2E-1 archived-not-deleted assertion greps this +
+  // the LEGACY_WIZARD_ARCHIVED marker below). The LIVE wizard renders
+  // WIZARD_STEPS (wizardFlow.js) — 5 human steps.
   const wizardSteps = ['Connect your tool', 'Memory sources', 'Your agent\'s toolkit', 'Seed your graph', 'You\'re set']
+  // #1997 (W1): ARCHIVED flag — the legacy #1643 wizard render JSX below
+  // stays byte-identical for the A0 gate's rollback path (partial revert
+  // restores it); it is NEVER rendered by the live wizard. Flipping this
+  // back to true + re-enabling the welcomeOriented gate restores the
+  // legacy surface (rollback drill, epic §8).
+  const LEGACY_WIZARD_ARCHIVED = false
+  // #1997 (W1): org-create + fork-card state for the 5-step wizard.
+  const [wizardOrgName, setWizardOrgName] = React.useState('')
+  const [wizardOrgError, setWizardOrgError] = React.useState('')
+  const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
+  const [wizardOrgUpgrade, setWizardOrgUpgrade] = React.useState(false)
+  const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
+  const [wizardForkError, setWizardForkError] = React.useState('')
+  const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' (set once per org)
+  // #1997 (W1): catalog-presented is marked when the build placeholder
+  // RENDERS (not just on pick) — re-entry with fork=build already set must
+  // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
+  // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
+  // the network quiet on re-renders (the latch is keyed by team id so a
+  // second build org in the same session still marks its own catalog —
+  // review P2, #1997).
+  const catalogMarkedRef = React.useRef({})
+  React.useEffect(() => {
+    if (wizardStep !== 2) return
+    const teamKey = teamIdRef.current || 'default'
+    const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
+    if (buildFork && !catalogMarkedRef.current[teamKey]) {
+      catalogMarkedRef.current[teamKey] = true
+      api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ step: 'catalog-presented' }),
+      }).catch(() => {})
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
 
   function wizardCopy(text, label) {
     try { navigator.clipboard.writeText(text) } catch { /* clipboard blocked */ }
@@ -1597,8 +1639,13 @@ function claimIntentInFlight() {
   // inputs aren't prefilled by the first-timer provisioning path, so derive
   // the defaults from the session when the seed step is first entered
   // (ONCE — a deliberate clear + Back/Next must not re-populate).
+  // #1997 (W1): the seed step is ARCHIVED — this effect must not fire on the
+  // live connect step (wizardStep 3 is now connect-consent, not seed); gate
+  // it on LEGACY_WIZARD_ARCHIVED so the A0 rollback path stays clean
+  // (review P2).
   const seedPrefilledRef = React.useRef(false)
   React.useEffect(() => {
+    if (!LEGACY_WIZARD_ARCHIVED) return
     if (wizardStep === 3 && !seedPrefilledRef.current && !wizardSubject) {
       seedPrefilledRef.current = true
       const meta = sessionMetaRef.current || {}
@@ -1687,8 +1734,10 @@ function claimIntentInFlight() {
 
   async function wizardComplete() {
     setWizardDone(true)
-    api(`/v1/onboarding/state${onboardingTeamQ()}`, { method: 'PATCH', useSession: true,
-      body: JSON.stringify({ onboarding_complete: true }) }).catch(() => {})
+    // #1997 (W1): the legacy jsonb completion write is REMOVED — the done
+    // step hands off to the graph (accept-and-drop makes a client PATCH
+    // inert on node-present orgs; the node's fork-aware gate owns
+    // onboarding_complete). The wire follows the node.
     window.history.replaceState({}, '', '/')
     setWelcomeMode(false)
     // #1842 P1-1: the first-timer flow (provisionInApp → welcome wizard →
@@ -1865,7 +1914,7 @@ function claimIntentInFlight() {
       // #308: a suspended team's mint 403s with a dict detail — carry it so
       // the load path renders the suspension banner (primary load path).
       const sus = suspendedFromDetail(b.detail)
-      const err = new Error(sus ? (sus.message || 'Team suspended') : (typeof b.detail === 'string' ? b.detail : `HTTP ${res.status}`))
+      const err = new Error(sus ? (sus.message || 'Organization suspended') : (typeof b.detail === 'string' ? b.detail : `HTTP ${res.status}`))
       if (sus) err.suspended = sus
       // #1719 (Task 6, code-review P1): carry the status so the mint catch
       // renders UNAVAILABLE_COPY for 5xx (a raw "Internal server error"
@@ -2169,7 +2218,7 @@ function claimIntentInFlight() {
                 })
                 .catch(() => {})
             } else {
-              setWelcomeProvisionError('Could not create your team — try again.')
+              setWelcomeProvisionError('Could not create your organization — try again.')
               setWelcomeProvisioning(false)
             }
           }
@@ -2524,7 +2573,7 @@ function claimIntentInFlight() {
     // 403s with the claim error. No hidden localStorage fallback.
     const k = (apiKeyRef.current || '').trim()
     if (!k.startsWith('tt_')) {
-      setClaimError('Paste your tt_ API key above, then connect a login to claim your team.')
+      setClaimError('Paste your tt_ API key above, then connect a login to claim your organization.')
       return
     }
     if (!supabaseClient) {
@@ -2808,9 +2857,8 @@ function claimIntentInFlight() {
     // #1877: create-team dialog submit — validation mirrors POST /v1/teams
     // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
     // upgrade UX (the dialog explains "upgrade a team, then create" — the
-    // new team doesn't exist until the gate passes).
-    const name = createTeamName.trim()
-    if (!name) { setCreateTeamError('Team name required'); return }
+    // new team doesn't exist until the gate passes).    const name = createTeamName.trim()
+    if (!name) { setCreateTeamError('Organization name required'); return }
     if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
       setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
       return
@@ -2836,6 +2884,93 @@ function claimIntentInFlight() {
       }
     } finally {
       setCreateTeamBusy(false)
+    }
+  }
+
+  // #1997 (W1): org-create step handler — POST /v1/onboarding/team (Q5
+  // wizard lane, one-shot team_created). Name REQUIRED with editable prefill
+  // (DE2E-3); 402 → inline upgrade surface (never silent; W9 owns
+  // enforcement); 409 (already created) → advance.
+  async function handleWizardCreateOrg() {
+    const name = wizardOrgName.trim()
+    const nameErr = orgNameError(name)
+    if (nameErr) { setWizardOrgError(nameErr); return }
+    setWizardOrgBusy(true)
+    setWizardOrgError('')
+    setWizardOrgUpgrade(false)
+    try {
+      const res = await api('/v1/onboarding/team', {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ name }),
+      })
+      setWizardOrgName('')
+      await loadTeams()
+      if (res?.team_id) switchTeam(res.team_id)
+      setWizardStep(2)
+    } catch (e) {
+      if (e?.status === 402) {
+        setWizardOrgError(e.message || 'Upgrade to create another organization')
+        setWizardOrgUpgrade(true)
+      } else if (e?.status === 409) {
+        // already created — advance (one-shot team_created guard)
+        setWizardStep(2)
+      } else {
+        setWizardOrgError(e?.message || 'Could not create the organization')
+      }
+    } finally {
+      setWizardOrgBusy(false)
+    }
+  }
+
+  // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
+  // branch: the placeholder catalog render marks catalog-presented via W5's
+  // checkpoint (surface 4 write contract — the launch-slice build-fork gate
+  // is evaluable; W8 later replaces the placeholder SOURCE, not the
+  // mechanism). Fork SEMANTICS are W2-owned — W1 renders the shell only.
+  async function handleWizardFork(forkId) {
+    setWizardForkBusy(true)
+    setWizardForkError('')
+    try {
+      await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ fork: forkId }),
+      })
+      setWizardForkChosen(forkId)
+      // review P1 (#1997): the catalog-presented mark fires HERE, not in a
+      // step-2 effect — React batches setWizardForkChosen + setWizardStep(3)
+      // into ONE render where wizardStep===3, so the effect's step-2 guard
+      // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
+      // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
+      // persisted build fork (onboarding.fork === 'build').
+      // A build pick also STAYS on step 2 so the placeholder catalog renders
+      // (the user sees what they can build on before continuing) — the
+      // Continue button appears once a fork is chosen; self picks advance.
+      if (forkId === 'build') {
+        const teamKey = teamIdRef.current || 'default'
+        if (!catalogMarkedRef.current[teamKey]) {
+          catalogMarkedRef.current[teamKey] = true
+          api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
+            method: 'POST', useSession: true,
+            body: JSON.stringify({ step: 'catalog-presented' }),
+          }).catch(() => {})
+        }
+      } else {
+        setWizardStep(3)
+      }
+    } catch (e) {
+      if (e?.status === 409) {
+        // set-once conflict — the org already chose; refresh the projection
+        // so the actual fork renders (the Continue button needs it)
+        setWizardForkError('This organization already chose how it uses Tortoise.')
+        refreshOnboarding().catch(() => {})
+        setWizardStep(3)
+      } else if (e?.status === 503) {
+        setWizardForkError('The graph is temporarily unavailable — try again in a moment.')
+      } else {
+        setWizardForkError(e?.message || 'Could not save your choice — try again.')
+      }
+    } finally {
+      setWizardForkBusy(false)
     }
   }
 
@@ -3737,7 +3872,7 @@ function claimIntentInFlight() {
         </header>
         <main>
           <div className="protect-banner protect-full">
-            <h2 className="protect-banner-title">🔑 Claim your team</h2>
+            <h2 className="protect-banner-title">🔑 Claim your organization</h2>
             <p>
               Paste the key for your unclaimed team, then attach a login to
               finish setting up your account.
@@ -3936,19 +4071,19 @@ function claimIntentInFlight() {
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
                   Provisioning your Tortoise…
                 </h1>
-                <p className="dim">Creating your team and API key — one moment.</p>
+                <p className="dim">Creating your Organization and API key — one moment.</p>
               </>
             ) : welcomeProvisionError ? (
               <>
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  We couldn't finish setting up your team
+                  We couldn't finish setting up your organization
                 </h1>
                 <p className="error" role="alert">{welcomeProvisionError}</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '0.75rem' }}>
                   {/anonymous team waiting/.test(welcomeProvisionError) ? (
                     // #1566 (code-review P2): the claim-guard must not
                     // dead-end — the claim card is the escape.
-                    <a className="btn-primary" href="https://app.premiselabs.co/?claim=1">Go claim my team →</a>
+                    <a className="btn-primary" href="https://app.premiselabs.co/?claim=1">Go claim my organization →</a>
                   ) : (
                     <button className="btn-primary" onClick={() => window.location.reload()}>Try again</button>
                   )}
@@ -3964,7 +4099,7 @@ function claimIntentInFlight() {
                   <>
                     <p className="dim" style={{ marginBottom: '1rem' }}>
                       This is the only time this API key is shown — copy it now. The raw key
-                      never leaves this page ({welcomeTeamName ? `team: ${welcomeTeamName}` : ''}).
+                      never leaves this page ({welcomeTeamName ? `organization: ${welcomeTeamName}` : ''}).
                     </p>
                     <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
                       <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflowWrap: 'anywhere', fontSize: 13 }}>
@@ -3980,28 +4115,211 @@ function claimIntentInFlight() {
                   </>
                 ) : (
                   <p className="dim" style={{ marginBottom: '1.25rem' }}>
-                    Your team is set up. You can manage your API key in the dashboard anytime.
+                    Your Organization is set up. You can manage your API key in the dashboard anytime.
                   </p>
                 )}
-                {!welcomeOriented && (
-                  <div className="wizard-orient" style={{ marginBottom: '1.5rem' }}>
-                    <h2 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, fontSize: 20, marginBottom: '0.4rem' }}>
-                      What you're setting up
-                    </h2>
-                    <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                      Tortoise gives your agent a memory — a knowledge graph of what it
-                      learns. Here's what we'll set up:
-                    </p>
-                    <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
-                      <li><strong>Install the tools</strong> — an MCP server so your agent can reach Tortoise, plus the skills so it knows how to use them.</li>
-                      <li><strong>Connect your data</strong> — your first sources now; you can always add more by telling your agent.</li>
-                      <li><strong>Add you + your project</strong> — the first entities on your graph.</li>
-                      <li><strong>Start using it</strong> — ask your agent to record decisions; the graph does the rest.</li>
-                    </ol>
-                    <button className="btn-primary" onClick={() => setWelcomeOriented(true)}>Continue →</button>
+                {/* #1997 (W1): the 5 HUMAN steps (epic plan P1) — orientation
+                    → org-create/join → fork card → connect-consent → done.
+                    All other steps (install/seed/decide) are agent-side or
+                    archived. Copy from wizardFlow.js (DE2E-2: 'Organization',
+                    never 'team'/'workspace' in user-facing labels). */}
+                <div className="wizard">
+                  <div className="wizard-progress">
+                    {WIZARD_STEPS.map((s, i) => (
+                      <span key={s.id} className={'wizard-step' + (i === wizardStep ? ' active' : (i < wizardStep ? ' done' : ''))} />
+                    ))}
                   </div>
-                )}
-                {welcomeOriented && (
+                  <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
+                  <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
+                    {WIZARD_STEPS[wizardStep].sub}
+                  </p>
+
+                  {wizardStep === 0 && (
+                    <div className="wizard-orient">
+                      <ol className="wizard-intro" style={{ margin: '0 0 1rem 1.1rem', padding: 0, lineHeight: 1.7 }}>
+                        <li><strong>Install the tools</strong> — an MCP server so your agent can reach Tortoise, plus the skills so it knows how to use them.</li>
+                        <li><strong>Create your Organization</strong> — the first Subject on your graph, with you linked to it.</li>
+                        <li><strong>Choose how you'll use it</strong> — for your own agents, or to build an application on top.</li>
+                        <li><strong>Connect your agent</strong> — one universal command; your agent takes over from there.</li>
+                      </ol>
+                      <div className="wizard-nav">
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="btn-primary" onClick={() => setWizardStep(1)}>Continue →</button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep === 1 && (
+                    <div className="org-create">
+                      <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', marginBottom: '0.9rem' }}>
+                        <span className="dim small">Organization name</span>
+                        <input
+                          value={wizardOrgName || (welcomeTeamName || (team && team.team_name) || '')}
+                          onChange={(e) => setWizardOrgName(e.target.value)}
+                          placeholder="e.g. acme"
+                          aria-label="Organization name"
+                          autoFocus
+                          style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
+                        />
+                      </label>
+                      {wizardOrgError && (
+                        <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
+                      )}
+                      {wizardOrgUpgrade && (
+                        <div className="upgrade-surface" style={{ marginBottom: '0.9rem', padding: '0.6rem 0.8rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8 }}>
+                          <p className="dim small" style={{ margin: 0 }}>
+                            Free plan: one Organization per account. Upgrade to create another — or accept an invitation to join one.
+                          </p>
+                          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+                            <button type="button" className="ghost small" onClick={() => setTab('billing')}>View plans →</button>
+                          </div>
+                        </div>
+                      )}
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
+                            {wizardOrgBusy ? 'Creating…' : 'Create Organization'}
+                          </button>
+                        </div>
+                      </div>
+                      {pendingInvites && pendingInvites.length > 0 && (
+                        <div className="pending-invites" style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border,#1e293b)' }}>
+                          <p className="dim small" style={{ margin: '0 0 0.5rem' }}>Or accept an invitation to join an existing organization:</p>
+                          {pendingInvites.map((inv) => (
+                            <div key={inv.invitation_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.4rem' }}>
+                              <span className="small">{inv.team_name || 'Invitation'}</span>
+                              <div style={{ display: 'flex', gap: '0.4rem' }}>
+                                <button type="button" className="ghost small" onClick={() => acceptPendingInvite(inv)} disabled={pendingInvitesBusy === inv.invitation_id}>
+                                  {pendingInvitesBusy === inv.invitation_id ? 'Joining…' : 'Accept'}
+                                </button>
+                                <button type="button" className="ghost small" onClick={() => declinePendingInvite(inv)}>Decline</button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {wizardStep === 2 && (
+                    <div className="fork-card">
+                      {wizardForkError && (
+                        <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardForkError}</p>
+                      )}
+                      {onboarding && onboarding.fork && (
+                        <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                          This Organization is set to <strong>{onboarding.fork === 'build' ? 'build an application on top' : 'use Tortoise for your own agents'}</strong>.
+                        </p>
+                      )}
+                      <div className="fork-options" style={{ display: 'flex', flexDirection: 'column', gap: '0.6rem', marginBottom: '1rem' }}>
+                        {WIZARD_FORK_OPTIONS.map((opt) => (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            className={onboarding && onboarding.fork === opt.id ? 'fork-option active' : 'fork-option'}
+                            disabled={wizardForkBusy || (onboarding && !!onboarding.fork)}
+                            onClick={() => handleWizardFork(opt.id)}
+                            style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', textAlign: 'left', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8, background: 'var(--surface,#0d1a2d)', cursor: wizardForkBusy || (onboarding && !!onboarding.fork) ? 'default' : 'pointer' }}
+                          >
+                            <strong>{opt.label}</strong>
+                            <span className="dim small">{opt.description}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {(wizardForkChosen === 'build' || (onboarding && onboarding.fork === 'build')) && (
+                        <div className="catalog-placeholder" style={{ marginBottom: '1rem', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8 }}>
+                          <p className="dim small" style={{ margin: '0 0 0.5rem' }}><strong>Build catalog</strong> — what you can build on (preview until the full catalog ships):</p>
+                          {BUILD_CATALOG_PLACEHOLDER.map((mod) => (
+                            <div key={mod.name} style={{ marginBottom: '0.35rem' }}>
+                              <strong className="small">{mod.name}</strong>{' '}
+                              <span className="dim small">({mod.kind}) — {mod.description}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(1)}>← Back</button>
+                        <div className="wizard-nav-actions">
+                          {wizardForkChosen || (onboarding && onboarding.fork) ? (
+                            <button type="button" className="btn-primary" onClick={() => setWizardStep(3)}>Continue →</button>
+                          ) : (
+                            <p className="dim small" style={{ margin: 0 }}>Pick how you'll use Tortoise — you choose once per Organization.</p>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {wizardStep === 3 && (
+                    <div className="harness">
+                      <div className="harness-tabs">
+                        {HARNESS_ORDER.map((h) => (
+                          <button key={h} type="button"
+                            className={'harness-tab' + (wizardHarness === h ? ' active' : '')}
+                            onClick={() => { setWizardHarness(h); setWizardCopied('') }}>
+                            {HARNESS_NAMES[h]}
+                          </button>
+                        ))}
+                      </div>
+                      {!harnessKey ? (
+                        <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                          The setup command embeds your API key — create one
+                          first on the API Keys tab, then come back here to
+                          finish setup.
+                        </p>
+                      ) : (
+                        <>
+                          {HARNESS_INTRO[wizardHarness] && (
+                            <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                              {HARNESS_INTRO[wizardHarness]}
+                            </p>
+                          )}
+                          <pre className="snippet" style={{ marginTop: '0.75rem' }}>
+                            {HARNESS_INSTALL[wizardHarness](harnessKey)}
+                            {HARNESS_SKILLS(wizardHarness)}
+                            {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''}
+                          </pre>
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
+                                onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](harnessKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''), 'harness')}>
+                                {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
+                              </button>
+                              {wizardCopied === 'harness' && (
+                                <button type="button" className="btn-primary" onClick={() => setWizardStep(4)}>{HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →"}</button>
+                              )}
+                              <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {wizardStep === 4 && (
+                    <div className="done">
+                      <p className="dim">Your agent takes over from here — connect it, and it files your decisions and findings to this Organization's graph. Follow the Setup guide card on the Overview for what happens next.</p>
+                      <div className="wizard-nav">
+                        <button type="button" className="ghost" onClick={() => setWizardStep(3)}>← Back</button>
+                      </div>
+                      <div className="wizard-actions">
+                        <button type="button" className="btn-primary" onClick={wizardComplete}>Open my dashboard →</button>
+                        <a className="ghost" href="https://tortoise.premiselabs.co/docs" target="_blank" rel="noreferrer">Read the docs</a>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* ⛔ ARCHIVED — #1997 (W1): the legacy #1643 wizard render
+                    (harness chooser → memory sources → skills → seed → done).
+                    NEVER rendered while LEGACY_WIZARD_ARCHIVED is false — the
+                    A0 gate's rollback path restores it by re-enabling this
+                    gate + the welcomeOriented pre-card (epic §8). DE2E-1: the
+                    archived-not-deleted assertion greps this marker + the
+                    legacy wizardSteps labels. */}
+                {LEGACY_WIZARD_ARCHIVED && welcomeOriented && (
                 <div className="wizard">
                   <div className="wizard-progress">
                     {wizardSteps.map((s, i) => (
@@ -4484,14 +4802,14 @@ function claimIntentInFlight() {
             (#1876's team selector). */}
         {createTeamOpen && (
           <div className="modal-backdrop" onClick={() => { if (!createTeamBusy) setCreateTeamOpen(false) }}>
-            <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new team"
+            <div className="modal" role="dialog" aria-modal="true" aria-label="Create a new organization"
                  onClick={(e) => e.stopPropagation()}
                  onKeyDown={(e) => { if (e.key === 'Escape' && !createTeamBusy) setCreateTeamOpen(false) }}>
               {createTeamUpgrade ? (
                 <>
-                  <h3>Create a new team</h3>
+                  <h3>Create a new organization</h3>
                   <p className="error" role="alert">{createTeamError}</p>
-                  <p className="dim">The free plan includes one team. Upgrade an existing team to create more.</p>
+                  <p className="dim">The free plan includes one organization. Upgrade an existing organization to create more.</p>
                   <div className="row" style={{ marginTop: 12 }}>
                     <button className="btn-primary" onClick={() => { setCreateTeamOpen(false); setCreateTeamUpgrade(false); setTab('billing') }}>
                       Upgrade
@@ -4501,10 +4819,10 @@ function claimIntentInFlight() {
                 </>
               ) : (
                 <>
-                  <h3>Create a new team</h3>
+                  <h3>Create a new organization</h3>
                   <input
-                    aria-label="Team name"
-                    placeholder="Team name"
+                    aria-label="Organization name"
+                    placeholder="Organization name"
                     autoFocus
                     value={createTeamName}
                     onChange={(e) => setCreateTeamName(e.target.value)}
@@ -4513,7 +4831,7 @@ function claimIntentInFlight() {
                   {createTeamError && <p className="error" role="alert">{createTeamError}</p>}
                   <div className="row" style={{ marginTop: 12 }}>
                     <button className="btn-primary" onClick={handleCreateTeam} disabled={createTeamBusy}>
-                      {createTeamBusy ? 'Creating…' : 'Create team'}
+                      {createTeamBusy ? 'Creating…' : 'Create organization'}
                     </button>
                     <button className="ghost" onClick={() => setCreateTeamOpen(false)} disabled={createTeamBusy}>Cancel</button>
                   </div>
@@ -4630,7 +4948,7 @@ function claimIntentInFlight() {
           <section className="overview empty-state graph-missing">
             <h2>Your graph is ready for its first data point</h2>
             <p className="dim">
-              Your team and API key are live. Finish the setup to connect your
+              Your Organization and API key are live. Finish the setup to connect your
               tool, learn the three skills, and seed your graph — it only takes a
               minute.
             </p>
@@ -4653,7 +4971,7 @@ function claimIntentInFlight() {
               // (and the "key is live" copy would be false).
               <>
                 <p className="dim">
-                  Your team and API key are live — the graph is created the moment
+                  Your Organization and API key are live — the graph is created the moment
                   you add data. Connect your agent, or add a point yourself:
                 </p>
                 <div className="snippet-wrap">

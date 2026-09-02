@@ -70,12 +70,25 @@ def client(monkeypatch, supabase_env):
 
         ha_mod.TortoiseSDK.__init__ = _patched
         ha_mod._FALLBACK_KEEPALIVE.clear()
+        # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+        # forces, so _make_sdk's keepalive anchor path matches and the anchor
+        # is REUSED instead of evicted + closed on every registry access (each
+        # eviction shut the redislite daemon down mid-test, losing the seed
+        # between this fixture's write and the gate read → 403).
+        os.environ["TORTOISE_DB_PATH"] = db_path
         try:
             with TestClient(app) as tc:
                 yield tc, supabase_env
         finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
             ha_mod.TortoiseSDK.__init__ = _orig
-            ha_mod._FALLBACK_KEEPALIVE.clear()
+            for ns in list(ha_mod._FALLBACK_KEEPALIVE):
+                anchor = ha_mod._FALLBACK_KEEPALIVE.pop(ns, None)
+                if anchor is not None:
+                    try:  # noqa: SIM105
+                        anchor.close()
+                    except Exception:
+                        pass
             app.dependency_overrides.clear()
 
 
@@ -257,13 +270,23 @@ def reg_client(monkeypatch):
 
         ha_mod.TortoiseSDK.__init__ = _patched
         ha_mod._FALLBACK_KEEPALIVE.clear()
+        # #1950: pin TORTOISE_DB_PATH (see client fixture) — the anchor is
+        # reused, not evicted, on every registry access.
+        os.environ["TORTOISE_DB_PATH"] = db_path
         try:
             with TestClient(app) as tc:
                 reg = ha_mod._make_sdk(namespace="registry")._get_registry()
                 yield tc, reg
         finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
             ha_mod.TortoiseSDK.__init__ = _orig
-            ha_mod._FALLBACK_KEEPALIVE.clear()
+            for ns in list(ha_mod._FALLBACK_KEEPALIVE):
+                anchor = ha_mod._FALLBACK_KEEPALIVE.pop(ns, None)
+                if anchor is not None:
+                    try:  # noqa: SIM105
+                        anchor.close()
+                    except Exception:
+                        pass
             app.dependency_overrides.clear()
 
 

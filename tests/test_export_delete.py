@@ -58,6 +58,22 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
     return cp
 
 
+def _close_keepalive_anchors(module) -> None:
+    """Deterministically close every keepalive anchor (SHUTDOWN SAVE).
+
+    #2090: replaces the clear-without-close leak (each eviction shut the
+    redislite daemon down mid-test → 403). # mirrors
+    tests/test_hosted_api.py:144-153 — keep in sync.
+    """
+    for ns in list(module._FALLBACK_KEEPALIVE):
+        anchor = module._FALLBACK_KEEPALIVE.pop(ns, None)
+        if anchor is not None:
+            try:  # noqa: SIM105  (mirrors tests/test_hosted_api.py:149)
+                anchor.close()
+            except Exception:
+                pass
+
+
 def _patch_tortoise_sdk_init(db_path: str):
     """Make hosted_api's TortoiseSDK use a temp embedded DB (mirrors
     test_hosted_api) so registry/team reads don't touch prod."""
@@ -71,11 +87,22 @@ def _patch_tortoise_sdk_init(db_path: str):
     # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
     # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
     ha_mod._FALLBACK_KEEPALIVE.clear()
+    # #1950/#2090: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+    # forces, so _make_sdk's keepalive anchor path matches and the anchor is
+    # REUSED instead of evicted + closed on every registry access (each
+    # eviction shut the redislite daemon down mid-test, losing the seed
+    # between this fixture's write and the gate read → 403).
+    os.environ["TORTOISE_DB_PATH"] = db_path
     return _orig
 
 
 def _restore_sdk_init(_orig):
+    # #1950 restore shape: pop the pin FIRST, restore __init__, then close
+    # every keepalive anchor deterministically (clear-without-close leaked
+    # anchors — #1950 lesson; SHUTDOWN SAVE, not GC-timed NOSAVE).
+    os.environ.pop("TORTOISE_DB_PATH", None)
     ha_mod.TortoiseSDK.__init__ = _orig
+    _close_keepalive_anchors(ha_mod)
     app.dependency_overrides.clear()
 
 
