@@ -12519,13 +12519,13 @@ class TortoiseSDK:
         params = {"id": kid, "tid": team_id, "kh": key_hash,
                   "kp": key_prefix, "cb": created_by, "now": now}
         if graph_id is not None:
-            extra += ", graph_id:$gid"; params["gid"] = graph_id
+            extra += ", graph_id:$gid"; params["gid"] = graph_id  # noqa: E702 (baseline #1503)
         if scopes:
-            extra += ", scopes:$sc"; params["sc"] = list(scopes)
+            extra += ", scopes:$sc"; params["sc"] = list(scopes)  # noqa: E702 (baseline #1503)
         if created_by_key_id is not None:
-            extra += ", created_by_key_id:$cbk"; params["cbk"] = created_by_key_id
+            extra += ", created_by_key_id:$cbk"; params["cbk"] = created_by_key_id  # noqa: E702 (baseline #1503)
         if delegation_depth is not None:
-            extra += ", delegation_depth:$dd"; params["dd"] = delegation_depth
+            extra += ", delegation_depth:$dd"; params["dd"] = delegation_depth  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
