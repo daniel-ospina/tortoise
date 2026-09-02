@@ -1,0 +1,86 @@
+{
+  "conversation": [
+    {
+      "content": "Let us look at the aurora dashboard latency. The p95 on the load endpoint has been creeping up all week and it hit 4.2 seconds yesterday afternoon, which is way past what the customer-facing SLO allows.",
+      "role": "user"
+    },
+    {
+      "content": "4.2 seconds at p95 is an order of magnitude past the dashboard target. When did the creep start relative to the recent deploys?",
+      "role": "assistant"
+    },
+    {
+      "content": "The spike correlates with the October 5 release, the one that added the related-memory sidebar. Before that release the p95 was comfortably under a second. Also, thanks for the lunch recommendation, the ramen place was great.",
+      "role": "user"
+    },
+    {
+      "content": "So the sidebar feature is the prime suspect. What does the request path do when it renders the related items?",
+      "role": "assistant"
+    },
+    {
+      "content": "For every visible memory row the dashboard fires one embedding lookup to rank the related items, so a page with forty rows issues forty separate calls. The N+1 embedding calls are what blew up the p95.",
+      "role": "user"
+    },
+    {
+      "content": "Forty sequential embedding calls per page is the whole story. The embedding service is fast, but forty round-trips at even twenty milliseconds each is nearly a second before any ranking happens.",
+      "role": "assistant"
+    },
+    {
+      "content": "Right, and then the ranking runs on top of that. I want to batch the lookup into a single call per page instead of one call per row, the embedding service supports a batch endpoint.",
+      "role": "user"
+    },
+    {
+      "content": "Batch the lookup to one call per page. The other lever is caching, do the sidebar queries repeat across requests from the same team?",
+      "role": "assistant"
+    },
+    {
+      "content": "They repeat constantly, the same dashboards get opened all day by the same account managers. We should cache the embedding results in memory with a ten minute TTL and refresh them ahead of the next view.",
+      "role": "user"
+    },
+    {
+      "content": "In-memory cache with a ten-minute TTL plus refresh-ahead covers the repeat-view pattern. What is the read volume the cache has to sustain?",
+      "role": "assistant"
+    },
+    {
+      "content": "The dashboard serves about forty thousand load requests per day across all customers, and the sidebar fires on most of them. That is the volume we need to absorb.",
+      "role": "user"
+    },
+    {
+      "content": "Forty thousand requests a day with sidebar lookups on most of them. A ten-minute TTL cache will absorb nearly all of the repeat traffic, the batch call only runs on a cache miss.",
+      "role": "assistant"
+    },
+    {
+      "content": "Exactly. And I want to ship this behind a flag so we can compare the p95 before and after without a full rollout. The flag defaults off until the perf review signs off.",
+      "role": "user"
+    },
+    {
+      "content": "Flag-gated rollout with the perf review as the gate. Who runs the perf review for aurora these days?",
+      "role": "assistant"
+    },
+    {
+      "content": "Felix runs the dashboard perf review since he owns the frontend budget. He flagged the sidebar as a risk in the design review, I should have listened. The design review ran long but the notes were thorough.",
+      "role": "user"
+    },
+    {
+      "content": "Felix owns the frontend perf review. One risk with the cache: stale related items if the underlying memory changes between refreshes. How do you want to handle invalidation?",
+      "role": "assistant"
+    },
+    {
+      "content": "Invalidate the cache entry for a team whenever a write lands in that team's graph. Writes are rare compared to reads, so the invalidation traffic is tiny.",
+      "role": "user"
+    },
+    {
+      "content": "Write-triggered invalidation per team. That keeps the ten-minute TTL as a backstop rather than the primary consistency mechanism.",
+      "role": "assistant"
+    },
+    {
+      "content": "Yes. Realistically this gets the p95 back under 800 milliseconds, which is the number we promised the account teams. Honestly I am glad we finally measured it, the dashboard has been getting slower for months and nobody could point at one cause.",
+      "role": "user"
+    },
+    {
+      "content": "Target under 800 milliseconds at p95. Summary: batch the embedding lookup per page, ten-minute TTL in-memory cache with refresh-ahead, write-triggered invalidation, flag-gated rollout. Want me to draft the implementation plan?",
+      "role": "assistant"
+    }
+  ],
+  "harness": "pi",
+  "session_id": "wp04_aurora_perf"
+}

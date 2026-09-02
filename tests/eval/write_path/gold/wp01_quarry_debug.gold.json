@@ -1,0 +1,322 @@
+{
+  "attribution_hazards": [
+    {
+      "id": "wp01_quarry_debug_h_01",
+      "planted_turn": 9,
+      "quote": "The completion race is what made progress stall, every batch that finished got replayed by the second worker",
+      "source": "diego"
+    },
+    {
+      "id": "wp01_quarry_debug_h_02",
+      "planted_turn": 21,
+      "quote": "the hydrate stage was clean, I already audited it",
+      "source": "diego"
+    },
+    {
+      "id": "wp01_quarry_debug_h_03",
+      "planted_turn": 25,
+      "quote": "he knows the queue internals from the last incident",
+      "source": "diego"
+    }
+  ],
+  "distractor_leakage_tolerance": 1,
+  "distractors": [
+    {
+      "anchor": "morning standup ran over",
+      "id": "wp01_quarry_debug_d_01",
+      "planted_turn": 1,
+      "statement": "The standup ran long this morning."
+    },
+    {
+      "anchor": "staging cluster is running the latest release",
+      "id": "wp01_quarry_debug_d_02",
+      "planted_turn": 7,
+      "statement": "The staging cluster is on the latest release."
+    },
+    {
+      "anchor": "coffee from the third floor machine",
+      "id": "wp01_quarry_debug_d_03",
+      "planted_turn": 17,
+      "statement": "Routine trip to the break room coffee machine."
+    }
+  ],
+  "planted_units": [
+    {
+      "depth_bucket": "early",
+      "id": "wp01_quarry_debug_u_01",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 1,
+      "verbatim_anchor": "stuck at 62 percent since 3am"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp01_quarry_debug_u_02",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 3,
+      "verbatim_anchor": "four workers on the wire queue"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp01_quarry_debug_u_03",
+      "kind": "fact",
+      "notability": "low",
+      "planted_turn": 5,
+      "verbatim_anchor": "no lease rows at all"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp01_quarry_debug_u_04",
+      "kind": "idea",
+      "notability": "high",
+      "planted_turn": 6,
+      "verbatim_anchor": "batch ownership check was probably bypassed on the retry path"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_05",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 9,
+      "verbatim_anchor": "two workers were grabbing the same batch off the ingest queue"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_06",
+      "kind": "vibe",
+      "notability": "high",
+      "planted_turn": 9,
+      "verbatim_anchor": "dreading this backfill all week and it is a relief"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_07",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "make each batch claim a single-owner lease"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_08",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "I do not want a distributed lock service"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_09",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 13,
+      "verbatim_anchor": "retry the batch after a sixty second backoff"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_10",
+      "kind": "idea",
+      "notability": "high",
+      "planted_turn": 14,
+      "verbatim_anchor": "that gives you crash recovery for free"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_11",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 15,
+      "verbatim_anchor": "shipped before the October 15 freeze"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp01_quarry_debug_u_12",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 16,
+      "verbatim_anchor": "batches of five thousand events each"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp01_quarry_debug_u_13",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 17,
+      "verbatim_anchor": "twelve million events for Halcyon"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp01_quarry_debug_u_14",
+      "kind": "entity",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "Maya Chen owns the ingest queue service"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp01_quarry_debug_u_15",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 21,
+      "verbatim_anchor": "backfill cutoff at September 30"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp01_quarry_debug_u_16",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 23,
+      "verbatim_anchor": "maintenance window is Friday at 2am"
+    }
+  ],
+  "salient_units": [
+    {
+      "id": "wp01_quarry_debug_u_01",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "stuck at 62 percent since 3am"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_02",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "four workers on the wire queue"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_03",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "no lease rows at all"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_04",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "batch ownership check was probably bypassed on the retry path"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_05",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "two workers were grabbing the same batch off the ingest queue"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_06",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "dreading this backfill all week and it is a relief"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_07",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "make each batch claim a single-owner lease"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_08",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "I do not want a distributed lock service"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_09",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "retry the batch after a sixty second backoff"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_10",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "that gives you crash recovery for free"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_11",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "shipped before the October 15 freeze"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_12",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "batches of five thousand events each"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_13",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "twelve million events for Halcyon"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_14",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Maya Chen owns the ingest queue service"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_15",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "backfill cutoff at September 30"
+      }
+    },
+    {
+      "id": "wp01_quarry_debug_u_16",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "maintenance window is Friday at 2am"
+      }
+    }
+  ],
+  "scenario": "Diego debugs a stalled quarry (ingest pipeline) backfill replay for customer Halcyon Retail; root cause is a duplicate-processing race on the wire queue.",
+  "schema_version": 1,
+  "session_id": "wp01_quarry_debug"
+}
