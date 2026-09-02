@@ -36,31 +36,13 @@ import tortoise.hosted_api as ha_mod
 import tortoise.supabase_control as sc
 from tortoise.hosted_api import app
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 
 _SUPABASE_URL = "https://actiondual.test.supabase.co"
 
 
 # ── Fixtures ────────────────────────────────────────────────────────────────
-
-
-def _patch_tortoise_sdk_init(db_path: str):
-    """Redirect every TortoiseSDK construction to one temp embedded DB."""
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1470: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests; clear so this test's SDK re-binds
-    # to THIS test's temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
-def _restore_tortoise_sdk_init(orig):
-    ha_mod.TortoiseSDK.__init__ = orig
 
 
 @pytest.fixture
@@ -74,14 +56,18 @@ def env(monkeypatch, tmp_path):
     fake = FakeControlPlane()
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
     db_path = str(tmp_path / "action-dual.db")
-    _orig = _patch_tortoise_sdk_init(db_path)
     ha_mod._INDEX_JOBS.clear()
-    try:
-        with TestClient(app) as client:
-            yield client, fake
-    finally:
-        ha_mod._INDEX_JOBS.clear()
-        _restore_tortoise_sdk_init(_orig)
+    # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+    # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+    # clear at enter; pop-pin → restore __init__ → deterministic anchor
+    # close → clear overrides at exit (replaces the local
+    # _patch/_restore_tortoise_sdk_init copies).
+    with patched_tortoise_sdk(db_path):
+        try:
+            with TestClient(app) as client:
+                yield client, fake
+        finally:
+            ha_mod._INDEX_JOBS.clear()
 
 
 def _provision_anon(client):

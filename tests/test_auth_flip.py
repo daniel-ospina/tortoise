@@ -30,6 +30,7 @@ from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.hosted_api import app, get_current_team, get_current_user  # noqa: F401
 from tortoise.mcp_server import create_http_app
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM, TEAM_TIER_TEAM, TOKEN, _key_row, _membership_row,
@@ -65,23 +66,6 @@ def supabase_fake() -> FakeControlPlane:
     })
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make hosted_api's TortoiseSDK use a temp embedded DB (mirrors
-    test_hosted_api) so /v1/team/keys-style registry reads don't touch prod."""
-    import tortoise.hosted_api as ha_mod
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
 @pytest.fixture
 def rest_client(monkeypatch, supabase_fake):
     """TestClient over the real app with REAL get_current_team (no override)
@@ -89,14 +73,13 @@ def rest_client(monkeypatch, supabase_fake):
     _enable_supabase(monkeypatch, supabase_fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "auth.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, supabase_fake
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch_tortoise_sdk_init copy).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, supabase_fake
 
 
 # ── REST flip ───────────────────────────────────────────────────────────────
