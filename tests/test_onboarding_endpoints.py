@@ -14,6 +14,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.hosted_api import app, _make_sdk
 from tortoise.sdk import TortoiseSDK
 
@@ -39,82 +40,40 @@ def _close_keepalive_anchors(anchors: dict) -> None:
 def client(tmp_path):
     """TestClient with a temp embedded DB + registry."""
     fixture_db_path = str(tmp_path / "onboarding.db")
-    # Patch TortoiseSDK to use the temp DB (mirrors test_hosted_api.py)
-    orig_init = TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        # Isolate EVERY SDK construction (registry included) to the fixture's
-        # temp DB. The fixture path is FORCED unconditionally (caller kwargs
-        # dropped) — _make_sdk's embedded-lane fallback constructs
-        # TortoiseSDK(db_path=<shared /tmp/tortoise.db>) and forwarding that
-        # caller path binds the SHARED fallback DB, leaking team state across
-        # tests ("Sub-team already created" 409s in the URI-less tier-2 CI
-        # lane; URI-mode constructions pass no db_path and already fall to
-        # the fixture path). Same pattern as
-        # test_hosted_api._patch_tortoise_sdk_init. NOTE: the closure var
-        # must NOT be named `db_path` — a `db_path` parameter would shadow
-        # it, silently re-enabling the leak.
-        orig_init(self, db_path=fixture_db_path, namespace=namespace)
-
-    TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
-    # #2090: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
-    # forces, so _make_sdk's keepalive anchor path matches and the anchor is
-    # REUSED instead of evicted + closed on every registry access.
-    os.environ["TORTOISE_DB_PATH"] = fixture_db_path
-    from tortoise.hosted_api import get_current_team
-    app.dependency_overrides[get_current_team] = lambda: {
-        "team_id": "test-team-1", "tier": "free", "key_id": "k1",
-        "max_users": 1, "max_graphs": 1, "max_teams": 1,
-        # #1922: the demo seed is now quota-gated — the team dict must carry
-        # max_points (the fail-closed points cap) or the check 500s.
-        "max_points": 10000,
-        # #1748: the onboarding sub-team is provisioned on the USER path —
-        # the session user becomes the owner member (get_current_team_session
-        # attaches session_user_id for session JWT auth; tests seed it here).
-        "session_user_id": "user-1",
-    }
-    with TestClient(app) as tc:
-        yield tc
-    app.dependency_overrides.clear()
-    TortoiseSDK.__init__ = orig_init
-    # #1502-class teardown parity (mirror test_hosted_api._restore_...):
-    # evict the anchor created during this test so a stale SDK bound to this
-    # test's temp DB never leaks into the next test file's run. Close
-    # deterministically (#2090) — never clear-without-close.
-    os.environ.pop("TORTOISE_DB_PATH", None)
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _close_keepalive_anchors(_FALLBACK_KEEPALIVE)
+    # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+    # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+    # __init__ → deterministic anchor close → clear overrides at exit.
+    # Supersedes the inline canonical trio (patch → clear → pin → restore →
+    # pop → close) — this fixture was already #2090-canonical; the helper is
+    # the single source of truth now. The override must stay inside the
+    # helper so its exit clear covers failure paths too.
+    with patched_tortoise_sdk(fixture_db_path):
+        from tortoise.hosted_api import get_current_team
+        app.dependency_overrides[get_current_team] = lambda: {
+            "team_id": "test-team-1", "tier": "free", "key_id": "k1",
+            "max_users": 1, "max_graphs": 1, "max_teams": 1,
+            # #1922: the demo seed is now quota-gated — the team dict must
+            # carry max_points (the fail-closed points cap) or the check
+            # 500s.
+            "max_points": 10000,
+            # #1748: the onboarding sub-team is provisioned on the USER path
+            # — the session user becomes the owner member
+            # (get_current_team_session attaches session_user_id for session
+            # JWT auth; tests seed it here).
+            "session_user_id": "user-1",
+        }
+        with TestClient(app) as tc:
+            yield tc
 
 
 @pytest.fixture
 def unauth_client(tmp_path):
     """TestClient WITHOUT the auth override — real 401s."""
     fixture_db_path = str(tmp_path / "unauth.db")
-    orig_init = TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        # Isolate EVERY SDK construction (registry included) to the fixture's
-        # temp DB (see the client fixture — the closure var is
-        # `fixture_db_path` so a `db_path` parameter could never shadow it).
-        orig_init(self, db_path=fixture_db_path, namespace=namespace)
-
-    TortoiseSDK.__init__ = _patched
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
-    # #2090: pin TORTOISE_DB_PATH (see client fixture) — the anchor is
-    # reused, not evicted, on every registry access.
-    os.environ["TORTOISE_DB_PATH"] = fixture_db_path
-    with TestClient(app) as tc:
+    # #2127 wave 2: shared helper (see the client fixture — the fixture was
+    # already canonical; the helper now owns the patch/pin/close cycle).
+    with patched_tortoise_sdk(fixture_db_path), TestClient(app) as tc:
         yield tc
-    os.environ.pop("TORTOISE_DB_PATH", None)
-    TortoiseSDK.__init__ = orig_init
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _close_keepalive_anchors(_FALLBACK_KEEPALIVE)
 
 
 # ── Onboarding state ────────────────────────────────────────────
@@ -302,8 +261,19 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
     assert state["capture_revised"] is True
     # The wizard's sessions toggle-on PATCH produces the identical state
     # shape (PATCH merge with the same two keys — the single consent source).
+    # ⚠️ #2127 wave-2 audit (named block): this is a DELIBERATE db_path
+    # PASS-THROUGH patch — the PATCH flow must bind the SAME registry DB the
+    # Q3 tool block above used (the assertions below compare cross-surface
+    # state), so it is NOT migrated onto the force-db_path shared helper.
+    # GAP FIXED: the old restore restored __init__ WITHOUT closing the
+    # anchor its TestClient registry read creates while TORTOISE_DB_PATH is
+    # UNSET → bound the SHARED default path (#1497/#2090 shared-DB leak
+    # class). The finally now closes every keepalive anchor deterministically
+    # (same discipline as _invoke_session_recording_tool's restore) — the
+    # shared binding while ACTIVE is the deliberate pass-through; the anchor
+    # no longer survives into the next test.
+    from tortoise.hosted_api import _FALLBACK_KEEPALIVE, get_current_team
     from tortoise.hosted_api import app as _app
-    from tortoise.hosted_api import get_current_team
     orig_init = TortoiseSDK.__init__
 
     def _patched(self, db_path_arg=None, *, namespace=None, db_path=None, **kw):
@@ -322,6 +292,7 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
             st = r.json()["onboarding"]
     finally:
         _app.dependency_overrides.clear()
+        _close_keepalive_anchors(_FALLBACK_KEEPALIVE)
         TortoiseSDK.__init__ = orig_init
     assert st["session_recording"] is True
     assert st["capture_revised"] is True

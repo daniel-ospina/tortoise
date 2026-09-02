@@ -24,6 +24,7 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
 import pytest  # noqa: I001
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.pack_state import (
     DEFAULT_STARTER_PACKS, ensure_tenant_packs, get_tenant_packs,
 )
@@ -410,7 +411,17 @@ class TestPackInstallLockSerialization:
 
 
 def _patch_tortoise_sdk_init(db_path: str):
-    """Force every TortoiseSDK construction in-process onto one embedded DB."""
+    """Force every hosted_api TortoiseSDK construction onto one embedded DB.
+
+    #2127 wave 2: kept ONLY for the two in-body backfill-script tests below
+    (they DELENV TORTOISE_DB_URI so the script's bare tortoise.sdk
+    constructions resolve via the TORTOISE_DB_PATH env pin — the shared
+    tests._http_fixtures.patched_tortoise_sdk helper would not delete the
+    URI and its force-drop would not reach the script's bare SDKs). The
+    registry_client / supabase_client fixtures migrated onto the shared
+    helper (which adds the #1950 pin + deterministic anchor close the
+    restore-only shape here lacked).
+    """
     import tortoise.hosted_api as ha_mod
     _orig = ha_mod.TortoiseSDK.__init__
 
@@ -436,14 +447,13 @@ def registry_client(monkeypatch):
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "reg.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+        # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+        # __init__ → deterministic anchor close → clear overrides at exit
+        # (the old restore was restore-init-only — no pin, no anchor close:
+        # the #1950 clear-without-close leak shape this wave fixes).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, db_path
 
 
 @pytest.fixture
@@ -467,14 +477,10 @@ def supabase_client(monkeypatch):
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "inv.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, fake, db_path
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127 wave 2: shared helper (see registry_client — same pin +
+        # deterministic-close upgrade over the old restore-only shape).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, fake, db_path
 
 
 _INTERNAL_HEADERS = {"Authorization": "Bearer test-internal-shared-secret-xyz"}
