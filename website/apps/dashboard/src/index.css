@@ -707,3 +707,12 @@ input::placeholder, textarea::placeholder {
 .setup-guide-rows li { font-size: 12px; color: var(--text-dim); }
 .setup-guide-rows li.done { color: var(--accent); }
 .setup-guide-degraded { font-size: 11px; margin-top: 6px; }
+
+/* #2000 (W4): Settings tab — the 7th tab (R2-11), four homes (epic plan P3).
+   Homes stack as card-like sections; h3s mirror the profile-tab scale. */
+.settings-home { margin-bottom: 24px; }
+.settings-home h3 { font-size: 15px; margin: 0 0 4px; color: var(--text); }
+.settings-home > p { margin: 0 0 10px; }
+.settings-home .card { max-width: 560px; }
+.captured-sessions { margin-top: 6px; }
+.captured-session:last-child { border-bottom: none !important; }
