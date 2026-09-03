@@ -79,9 +79,12 @@ def _unit(unit_id: str, kind: str, anchor: str, *, turn: int, notability: str = 
 
     ``anchor`` MUST be a verbatim fragment of ``turns[turn - 1].content``
     (case-insensitive, whitespace-normalized) — the generator verifies it.
-    ``accepts_rephrase_linked=False`` marks numeric/date-critical anchors that
+    ``accepts_rephrase_linked=False`` marks date/numeric-critical anchors that
     must survive as the anchor-bearing point itself (a paraphrase would not
-    preserve the claim) — A1 keeps REPHRASE-linked accepted for the rest.
+    preserve the claim).  This is THIS corpus's claim-preservation carve-out on
+    the REPHRASE-link concept (borrowed from docs/epistemic-layer-eval-spec.md
+    §P5 dedup-without-deletion); survival is graded at the POINT level (the
+    research-brief/plan write-path unit assumption).
     """
     return {
         "id": unit_id,
@@ -129,7 +132,7 @@ WP01 = {
         _t("assistant", "No lease rows with active processing is a red flag. The batch ownership check was probably bypassed on the retry path. Do you have the commit that added the retry loop?"),
         _t("user", "Yes, it is the retry loop added in the batch runner. The staging cluster is running the latest release, so this is not a stale deploy artifact. I grepped the logs and every worker is retrying the same handful of batches in a loop."),
         _t("assistant", "Then you have a duplicate-processing race. Let me reproduce it against a staging queue with two workers and the same batch ids."),
-        _t("user", "Reproduced. I can see it now, two workers were grabbing the same batch off the ingest queue and both were marking it complete. Honestly I have been dreading this backfill all week and it is a relief to finally see the root cause. The completion race is what made progress stall, every batch that finished got replayed by the second worker."),
+        _t("user", "Reproduced. I can see it now, two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete. Honestly I have been losing sleep over this backfill all week and it is a relief to finally see the root cause. The completion race is what made progress stall, every batch that finished got replayed by the second worker."),
         _t("assistant", "Confirmed root cause: no lease is held before processing, so nothing prevents two workers from claiming one batch. The fix is to make ownership explicit before the work starts."),
         _t("user", "Agreed. Let us make each batch claim a single-owner lease before processing and have the claim be the only thing that can complete it. I do not want a distributed lock service, a simple lease row with an expiry is enough."),
         _t("assistant", "A lease row keyed by batch id with a thirty-second expiry and a compare-and-swap update on completion gives you single-owner semantics without a lock service. The worker that does not own the lease skips and backs off."),
@@ -153,8 +156,8 @@ WP01 = {
         _unit("u_02", "fact", "four workers on the wire queue", turn=3, notability="medium"),
         _unit("u_03", "fact", "no lease rows at all", turn=5, notability="low"),
         _unit("u_04", "idea", "batch ownership check was probably bypassed on the retry path", turn=6),
-        _unit("u_05", "fact", "two workers were grabbing the same batch off the ingest queue", turn=9, accepts_rephrase_linked=False),
-        _unit("u_06", "vibe", "dreading this backfill all week and it is a relief", turn=9),
+        _unit("u_05", "fact", "two workers grabbed the same batch twice from the ingest queue", turn=9, accepts_rephrase_linked=False),
+        _unit("u_06", "vibe", "losing sleep over this backfill all week and it is a relief", turn=9),
         _unit("u_07", "decision", "make each batch claim a single-owner lease", turn=11, accepts_rephrase_linked=False),
         _unit("u_08", "decision", "I do not want a distributed lock service", turn=11),
         _unit("u_09", "decision", "retry the batch after a sixty second backoff", turn=13, accepts_rephrase_linked=False),
@@ -457,6 +460,11 @@ def _build_session_docs(spec: dict) -> tuple[dict, dict]:
     distractors = []
     for distractor in spec["distractors"]:
         planted_turn = distractor["planted_turn"]
+        if not (1 <= planted_turn <= n_turns):
+            raise ValueError(
+                f"{spec['session_id']}: distractor {distractor['id']} planted_turn "
+                f"{planted_turn} out of range for {n_turns} turns"
+            )
         content = turns[planted_turn - 1]["content"]
         if not schema.anchor_present(distractor["anchor"], content):
             raise ValueError(
@@ -475,6 +483,11 @@ def _build_session_docs(spec: dict) -> tuple[dict, dict]:
     hazards = []
     for hazard in spec["hazards"]:
         planted_turn = hazard["planted_turn"]
+        if not (1 <= planted_turn <= n_turns):
+            raise ValueError(
+                f"{spec['session_id']}: hazard {hazard['id']} planted_turn "
+                f"{planted_turn} out of range for {n_turns} turns"
+            )
         content = turns[planted_turn - 1]["content"]
         if not schema.anchor_present(hazard["quote"], content):
             raise ValueError(
@@ -570,12 +583,22 @@ def write_corpus(outputs: dict[str, bytes] | None = None, root: Path | None = No
     ``root`` defaults to the committed write_path dir.  Tests render into a
     temp root to exercise the hash-mismatch gates without touching committed
     bytes.
+
+    ``baselines/main.json`` is NOT part of the frozen-corpus drift scope (it
+    changes legitimately when W2-b blesses a published run): the pending
+    baseline is written only when the file is missing or still first-run-
+    pending (empty metrics) — a PUBLISHED baseline (non-empty metrics, e.g.
+    the W2-b fix-wave trail) is never clobbered by a generator re-run.
     """
     root = root or corpus.WRITE_PATH_DIR
     outputs = outputs or render_corpus()
     written: list[str] = []
     for rel, data in outputs.items():
         path = root / rel
+        if rel == "baselines/main.json" and path.exists():
+            existing = schema.read_json(path)
+            if existing.get("metrics") or existing.get("history"):
+                continue  # published/blessed baseline — never clobber
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(data)
         written.append(rel)
@@ -594,6 +617,8 @@ def check_drift(root: Path | None = None) -> list[str]:
     fresh = render_corpus()
     drifted = []
     for rel, data in fresh.items():
+        if rel == "baselines/main.json":
+            continue  # outside the frozen-corpus drift scope (see _iter_committed)
         if rel not in committed:
             drifted.append(f"{rel} (missing on disk)")
         elif committed[rel].read_bytes() != data:
@@ -605,12 +630,18 @@ def check_drift(root: Path | None = None) -> list[str]:
 
 
 def _iter_committed(root: Path):
+    """Yield the frozen-corpus JSON files under ``root``.
+
+    Scope = fixtures + gold + ``_manifest.json`` — deliberately EXCLUDING
+    ``baselines/main.json``: the baseline changes legitimately when W2-b
+    blesses a published run, so it is not part of the byte-idempotency
+    guarantee (its integrity is enforced separately by ``validate_baseline``
+    and the fixtures_hash cross-check in ``validate_committed``).
+    """
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix == ".json":
             rel = path.relative_to(root).as_posix()
-            if rel in {"_manifest.json", "baselines/main.json"} or rel.startswith(
-                ("fixtures/", "gold/")
-            ):
+            if rel == "_manifest.json" or rel.startswith(("fixtures/", "gold/")):
                 yield rel, path
 
 

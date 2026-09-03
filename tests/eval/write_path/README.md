@@ -56,13 +56,15 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   `..._h_01`) are **globally unique** — session-stem prefixed — so the W2-b
   runner can aggregate across sessions without bare-id collisions.
 * `salient_units` — 1:1 with `planted_units`, carrying **point-level**
-  `survival` semantics (A1 — NOT page-level): `via_anchor` (the survival
-  predicate = verbatim-anchor substring present in a surviving point),
-  `accepts_rephrase_linked` (REPHRASE-linked point counts as survival; false
-  for date/numeric-critical anchors whose paraphrase would not preserve the
-  claim — REPHRASE operator semantics per
-  `docs/epistemic-layer-eval-spec.md` §P5), `provenance_required`,
-  `ep_update_required`.
+  `survival` semantics (the unit of analysis is the POINT — the
+  research-brief/plan write-path unit assumption; NOT eval-spec §5's
+  loopy-NAND "A1" adversarial test, and NOT page-level): `via_anchor` (the
+  survival predicate = verbatim-anchor substring present in a surviving
+  point), `accepts_rephrase_linked` (a REPHRASE-linked point counts as
+  survival; false for date/numeric-critical anchors whose paraphrase would
+  not preserve the claim — this corpus's claim-preservation carve-out on the
+  REPHRASE-link concept borrowed from `docs/epistemic-layer-eval-spec.md`
+  §P5 dedup-without-deletion), `provenance_required`, `ep_update_required`.
 * `distractor_leakage_tolerance: 1` — research-recommended ≤1/run (gbrain
   measured 1/86); supersedes the epic's literal "zero" wording.
 
@@ -85,8 +87,11 @@ uv run python tests/eval/write_path/generate_corpus.py --validate # full committ
 ```
 
 * Re-running the generator is **byte-deterministic** (sorted keys, fixed
-  indent, no timestamps) — the frozen-corpus guarantee for the fix-wave
-  protocol (re-run the SAME frozen corpus + pinned judge).
+  indent, no timestamps) for the frozen corpus = `fixtures/` + `gold/` +
+  `_manifest.json` — the fix-wave guarantee (re-run the SAME frozen corpus +
+  pinned judge).  `baselines/main.json` is deliberately OUTSIDE that drift
+  scope: it changes legitimately when W2-b blesses a published run, and the
+  generator never clobbers a published (non-pending) baseline.
 * A **gold-only edit** changes `_manifest.json` + `baselines/main.json`
   `fixtures_hash` ⇒ committed baselines are invalidated (E2E-2 negative gate:
   mismatch ⇒ `inconclusive`, never a silent pass).
@@ -97,7 +102,13 @@ uv run python tests/eval/write_path/generate_corpus.py --validate # full committ
 
 The answer key's only on-disk home is `gold/`. Judges (W2-b) never see
 verbatim anchors (judge-blindness — the salience judge gets paraphrase-level
-statements only, so scoring cannot degrade into lexical matching). Authoring
+statements only, so scoring cannot degrade into lexical matching). Per-item
+paraphrase-level statements are NOT committed in this gold (DM-4 deliberately
+carries verbatim anchors + survival flags only, per issue #2097 indicator 2):
+W2-b must supply paraphrase-level judge inputs WITHOUT leaking anchors — any
+synthesized paraphrase step must be pinned inside the judge prompt version
+(`judge_pin`) so the fix-wave protocol stays reproducible (re-run SAME frozen
+corpus + pinned judge). Authoring
 content lives in `generate_corpus.py`; every anchor/quote is verified against
 its planted turn at render time, so fixture/gold drift cannot ship silently.
 
@@ -119,4 +130,8 @@ with verbatim anchors — chosen so E2E-2's percentage-based assertions
 All people, companies, and systems are fictional (Peregrine Systems, quarry /
 lumen / ember / aurora, Halcyon Retail, Bluepeak Logistics, and the named
 engineers). No gbrain/gbrain-evals corpus files are vendored (MIT ideas only
-— learnings-map licensing gate).
+— learnings-map licensing gate). Lineage note: `wp01` deliberately
+re-embodies the write-path failure archetype of gbrain's Cat-35 real-gold
+example (a duplicate-ingest batch race — the raw-notes 10:10Z gold item) in
+a freshly re-authored fictional session; ideas reimplemented carry no license
+obligation, and no corpus file or verbatim gold text is copied.

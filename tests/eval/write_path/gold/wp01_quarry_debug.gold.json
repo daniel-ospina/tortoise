@@ -79,7 +79,7 @@
       "kind": "fact",
       "notability": "high",
       "planted_turn": 9,
-      "verbatim_anchor": "two workers were grabbing the same batch off the ingest queue"
+      "verbatim_anchor": "two workers grabbed the same batch twice from the ingest queue"
     },
     {
       "depth_bucket": "middle",
@@ -87,7 +87,7 @@
       "kind": "vibe",
       "notability": "high",
       "planted_turn": 9,
-      "verbatim_anchor": "dreading this backfill all week and it is a relief"
+      "verbatim_anchor": "losing sleep over this backfill all week and it is a relief"
     },
     {
       "depth_bucket": "middle",
@@ -213,7 +213,7 @@
         "accepts_rephrase_linked": false,
         "ep_update_required": true,
         "provenance_required": true,
-        "via_anchor": "two workers were grabbing the same batch off the ingest queue"
+        "via_anchor": "two workers grabbed the same batch twice from the ingest queue"
       }
     },
     {
@@ -222,7 +222,7 @@
         "accepts_rephrase_linked": true,
         "ep_update_required": true,
         "provenance_required": true,
-        "via_anchor": "dreading this backfill all week and it is a relief"
+        "via_anchor": "losing sleep over this backfill all week and it is a relief"
       }
     },
     {

@@ -9,7 +9,9 @@ justification-to-bless + config-mismatch ⇒ inconclusive; regeneration is
 byte-idempotent (fix-wave protocol); corpus floors (≥ 4 sessions, ≥ 60
 planted salient units with verbatim anchors) hold for stable E2E-2
 denominators; ``survival`` is defined at the POINT level with
-REPHRASE-linked acceptance (A1) per docs/epistemic-layer-eval-spec.md §P5.
+REPHRASE-linked acceptance (the point-level unit-of-analysis rule — per
+research-brief/plan, NOT eval-spec §5's loopy-NAND "A1") per
+``docs/epistemic-layer-eval-spec.md`` §P5.
 
 Pure unit/contract layer — no DB, no network, no LLM (test-design #2093 S4).
 """
@@ -162,8 +164,9 @@ def test_hazard_quotes_ground_and_carry_sources() -> None:
 
 
 def test_point_level_survival_semantics_present() -> None:
-    """S15: survival is defined at the POINT level (A1 — REPHRASE-linked
-    accepted), never page-level; anchors are the survival predicate."""
+    """S15: survival is defined at the POINT level (point-level unit-of-analysis
+    rule — REPHRASE-linked accepted), never page-level; anchors are the
+    survival predicate."""
     for session_id in COMMITTED_SESSIONS:
         gold = corpus.load_gold(session_id)
         for entry in gold["salient_units"]:
@@ -180,7 +183,7 @@ def test_point_level_survival_semantics_present() -> None:
         for session_id in COMMITTED_SESSIONS
         for entry in corpus.load_gold(session_id)["salient_units"]
     }
-    assert accepts == {True, False}, "corpus must exercise both survival paths (A1)"
+    assert accepts == {True, False}, "corpus must exercise both survival paths (REPRHASE-linked + verbatim)"
 
 
 # ── fixtures_hash covers fixture AND gold (E2E-2 negative: gold-only edit) ──
@@ -319,6 +322,61 @@ def test_compare_verdict_vocabulary() -> None:
         schema.compare_run(leaky, baseline, resolved_config=config, run_fixtures_hash=baseline["fixtures_hash"])
         == schema.VERDICT_REGRESSION
     )
+
+
+def test_pending_baseline_cannot_pin_judge() -> None:
+    baseline = copy.deepcopy(corpus.load_baseline())
+    baseline["judge_pin"] = "judge-write-path-v1"  # nothing published yet
+    issues = schema.validate_baseline(baseline)
+    assert any("judge_pin" in issue and "first-run-pending" in issue for issue in issues), issues
+
+
+def test_baseline_metric_values_are_typed_and_ranged() -> None:
+    def _with_metrics(mutator) -> list[str]:
+        baseline = _sample_published_baseline()
+        mutator(baseline["metrics"])
+        return schema.validate_baseline(baseline)
+
+    # Fraction out of range.
+    assert any("fraction in [0, 1]" in issue
+               for issue in _with_metrics(lambda m: m.__setitem__("salient_unit_survival_macro", 1.7)))
+    # Non-numeric value.
+    assert any("expected a number" in issue
+               for issue in _with_metrics(lambda m: m.__setitem__("sessions_emitting", "1.0")))
+    # Bool is not a number here.
+    assert any("expected a number" in issue
+               for issue in _with_metrics(lambda m: m.__setitem__("quote_fidelity", True)))
+    # Leakage above the gold-locked tolerance.
+    assert any("tolerance" in issue
+               for issue in _with_metrics(lambda m: m.__setitem__("distractor_leakage_per_run", 5)))
+    assert any("non-negative int" in issue
+               for issue in _with_metrics(lambda m: m.__setitem__("distractor_leakage_per_run", "1")))
+    # In-range values stay clean.
+    assert _with_metrics(lambda m: None) == []
+
+
+def test_history_entries_all_shape_validated() -> None:
+    def _with_history(mutator) -> list[str]:
+        baseline = _sample_published_baseline()
+        mutator(baseline["history"])
+        return schema.validate_baseline(baseline)
+
+    # An older entry missing its justification is flagged (not just the newest).
+    def _drop_justification(history) -> None:
+        history[0]["justification"] = None
+
+    assert any("history[0]" in issue and "justification" in issue
+               for issue in _with_history(_drop_justification))
+    # Non-string failure class.
+    def _bad_failure_classes(history) -> None:
+        history[0]["failure_classes"] = ["a", 3]
+
+    assert any("failure_classes" in issue for issue in _with_history(_bad_failure_classes))
+    # Verdict vocabulary.
+    def _bad_verdict(history) -> None:
+        history[0]["verdict"] = "inconclusive"
+
+    assert any("verdict" in issue for issue in _with_history(_bad_verdict))
 
 
 def test_compare_config_mismatch_is_inconclusive() -> None:
@@ -524,6 +582,83 @@ def test_hazard_sources_are_user_spoken_lines() -> None:
             )
 
 
+def test_hazard_role_enforced_by_shared_validator() -> None:
+    """The role==user invariant lives in the shared validator (single source of
+    truth), not just the committed-data test — an assistant-spoken hazard is a
+    validation error."""
+    fixture = corpus.load_fixture(COMMITTED_SESSIONS[0])
+    gold = copy.deepcopy(corpus.load_gold(COMMITTED_SESSIONS[0]))
+    # Point the first hazard at an ASSISTANT turn with a grounded quote.
+    assistant_idx = next(
+        i for i, t in enumerate(fixture["conversation"]) if t["role"] == "assistant"
+    )
+    assistant_content = fixture["conversation"][assistant_idx]["content"]
+    probe = assistant_content.split(".")[0]  # grounded quote from the assistant line
+    hazard = gold["attribution_hazards"][0]
+    hazard["quote"] = probe
+    hazard["planted_turn"] = assistant_idx + 1
+    issues = schema.validate_gold(gold, fixture=fixture)
+    assert any("assistant turn" in issue and "hazard" in issue for issue in issues), issues
+
+
+def test_validator_survives_malformed_fixture_turn_content() -> None:
+    """The shared validator must report (never crash on) a malformed fixture
+    turn — e.g. non-string content or a non-dict turn."""
+    fixture = copy.deepcopy(corpus.load_fixture(COMMITTED_SESSIONS[0]))
+    gold = copy.deepcopy(corpus.load_gold(COMMITTED_SESSIONS[0]))
+    fixture["conversation"][0]["content"] = 12345  # corrupted
+    issues = schema.validate_gold(gold, fixture=fixture)
+    assert any("not a string" in issue for issue in issues), issues
+
+
+def test_generator_rejects_out_of_range_planted_turns() -> None:
+    import tests.eval.write_path.generate_corpus as gen
+
+    # Distractor with planted_turn 0 would silently negative-index without the guard.
+    bad = copy.deepcopy(gen.WP01)
+    bad["distractors"][0]["planted_turn"] = 0
+    with pytest.raises(ValueError, match="out of range"):
+        gen._build_session_docs(bad)
+    # Hazard with planted_turn beyond the session length.
+    bad2 = copy.deepcopy(gen.WP01)
+    bad2["hazards"][0]["planted_turn"] = 999
+    with pytest.raises(ValueError, match="out of range"):
+        gen._build_session_docs(bad2)
+
+
+def test_generator_never_clobbers_a_published_baseline(tmp_path) -> None:
+    """Once W2-b blesses a published baseline (non-empty metrics), a generator
+    re-run must not overwrite it with the first-run-pending render."""
+    generate_corpus.write_corpus(root=tmp_path)
+    pending = corpus.load_baseline(tmp_path)
+    first_run = {
+        "fixtures_hash": pending["fixtures_hash"],
+        "judge_pin": "judge-write-path-v1",
+        "config": pending["config"],
+        "date": "2026-09-05",
+        "metrics": {
+            "salient_unit_survival_macro": 0.5,
+            "salient_unit_survival_strict": 0.44,
+            "distractor_leakage_per_run": 1,
+            "sessions_emitting": 1.0,
+            "quote_fidelity": 0.6,
+            "provenance_accuracy": 0.7,
+        },
+        "failure_classes": ["triage misses on buried-signal transcripts"],
+    }
+    blessed = schema.bless_baseline(
+        pending, first_run, justification="first published baseline (bad number, per protocol)"
+    )
+    baseline_path = tmp_path / "baselines/main.json"
+    baseline_path.write_text(json.dumps(blessed, indent=2, sort_keys=True) + "\n")
+    generate_corpus.write_corpus(root=tmp_path)  # generator re-run
+    after = corpus.load_baseline(tmp_path)
+    assert after["metrics"] == blessed["metrics"], "generator clobbered the published baseline"
+    assert after["judge_pin"] == "judge-write-path-v1"
+    # The frozen corpus itself is still drift-free (baseline excluded from scope).
+    assert generate_corpus.check_drift(tmp_path) == []
+
+
 def test_bless_refuses_inconclusive_compare() -> None:
     previous = _sample_published_baseline()
     run = {
@@ -538,16 +673,42 @@ def test_bless_refuses_inconclusive_compare() -> None:
         schema.bless_baseline(previous, run, justification="cannot bless a mismatched corpus")
 
 
+def test_first_publish_bless_rejects_corpus_drift() -> None:
+    """First publish still enforces the frozen-corpus contract: a run on a
+    drifted corpus (fixtures_hash or resolved-config mismatch vs the committed
+    pending baseline) cannot be blessed as the first baseline."""
+    pending = corpus.load_baseline()
+    run = {
+        "fixtures_hash": "sha256:drifted-corpus",
+        "judge_pin": "judge-write-path-v1",
+        "config": pending["config"],
+        "date": "2026-09-05",
+        "metrics": {"salient_unit_survival_macro": 0.5},
+        "failure_classes": [],
+    }
+    with pytest.raises(ValueError, match="corpus drift"):
+        schema.bless_baseline(pending, run, justification="first baseline on drifted corpus")
+    run_config_drift = dict(run)
+    run_config_drift["fixtures_hash"] = pending["fixtures_hash"]
+    run_config_drift["config"] = {**pending["config"], "mode": "full"}
+    with pytest.raises(ValueError, match="config"):
+        schema.bless_baseline(pending, run_config_drift, justification="first baseline on wrong config")
+
+
 # ── Regeneration idempotency (fix-wave protocol) + corpus floors ───────────
 
 
 def test_generator_is_byte_idempotent() -> None:
-    """Re-running the generator reproduces the committed corpus exactly — the
-    frozen-corpus guarantee for fix-waves and corpus-bless."""
+    """Re-running the generator reproduces the committed frozen corpus exactly
+    (fixtures + gold + manifest; the baseline is outside the drift scope by
+    design) — the fix-wave guarantee."""
     assert generate_corpus.check_drift() == []
     fresh = generate_corpus.render_corpus()
     for rel, path in generate_corpus._iter_committed(COMMITTED):
         assert path.read_bytes() == fresh[rel], f"{rel} drifted from a fresh render"
+    # While the committed baseline is still first-run-pending it must equal the
+    # deterministic render (post-publication it is legitimately blessed).
+    assert corpus.BASELINE_PATH.read_bytes() == fresh["baselines/main.json"]
 
 
 def test_corpus_floors_hold() -> None:

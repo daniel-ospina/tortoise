@@ -11,12 +11,17 @@ contract semantics the W2-b benchmark runner (#2098) grades against:
   ``planted_units`` (verbatim anchors, notability, depth_bucket,
   planted_turn), true-but-routine ``distractors``, ``attribution_hazards``,
   and ``salient_units`` carrying point-level ``survival`` semantics
-  (``via_anchor`` + REPHRASE-linked acceptance — A1; REPHRASE operator
-  semantics per ``docs/epistemic-layer-eval-spec.md`` §P5).
+  (``via_anchor`` + REPHRASE-linked acceptance).  The unit of analysis is the
+  POINT level (the research-brief/plan write-path unit assumption — NOT
+  eval-spec §5's loopy-NAND "A1" adversarial test); the REPHRASE-link
+  concept is borrowed from ``docs/epistemic-layer-eval-spec.md`` §P5
+  (dedup-without-deletion), and the numeric/date ``accepts_rephrase_linked
+  = false`` carve-out is THIS corpus's claim-preservation rule.
 * **Baseline** (DM-5) — committed ``baselines/main.json`` that the
-  ``--compare`` gate can fail against.  A regression requires a
-  ``justification`` string to bless; a resolved-config mismatch ⇒
-  ``inconclusive``, never a rubber-stamp.
+  ``--compare`` gate can fail against.  Blessing (any committed-target
+  refresh, incl. a regression) requires a ``justification`` string; a
+  resolved-config or corpus-hash mismatch ⇒ ``inconclusive``, never a
+  rubber-stamp.
 
 Validators are hand-rolled (this repo pins no JSON-schema dependency); every
 validator returns a ``list[str]`` of issues (empty = valid) so callers can
@@ -235,7 +240,15 @@ def _validate_planted_units(gold: dict, fixture: dict | None, issues: list[str])
                     f"{where}.planted_turn: {planted_turn} > {n_turns} conversation turns"
                 )
                 continue
-            content = fixture["conversation"][planted_turn - 1].get("content", "")
+            content = fixture["conversation"][planted_turn - 1].get("content")
+            # Defensive: the shared validator must never crash on a malformed
+            # fixture turn (non-string content) — report it and move on.
+            if not isinstance(content, str):
+                issues.append(
+                    f"{where}.verbatim_anchor: fixture turn {planted_turn - 1} content is "
+                    f"not a string (fixture malformed); cannot verify grounding"
+                )
+                continue
             if anchor is not None and not anchor_present(anchor, content):
                 issues.append(
                     f"{where}.verbatim_anchor: {anchor!r} is not a normalized substring of "
@@ -296,7 +309,13 @@ def _validate_distractors(gold: dict, fixture: dict | None, issues: list[str]) -
                     f"{where}.planted_turn: {planted_turn} > {n_turns} conversation turns"
                 )
                 continue
-            content = fixture["conversation"][planted_turn - 1].get("content", "")
+            content = fixture["conversation"][planted_turn - 1].get("content")
+            if not isinstance(content, str):
+                issues.append(
+                    f"{where}.anchor: fixture turn {planted_turn - 1} content is not a "
+                    f"string (fixture malformed); cannot verify grounding"
+                )
+                continue
             if anchor is not None and not anchor_present(anchor, content):
                 issues.append(
                     f"{where}.anchor: {anchor!r} is not a normalized substring of "
@@ -333,13 +352,28 @@ def _validate_hazards(gold: dict, fixture: dict | None, issues: list[str]) -> No
                     f"{where}.planted_turn: {planted_turn} > {n_turns} conversation turns"
                 )
                 continue
-            content = fixture["conversation"][planted_turn - 1].get("content", "")
+            content = fixture["conversation"][planted_turn - 1].get("content")
+            if not isinstance(content, str):
+                issues.append(
+                    f"{where}.quote: fixture turn {planted_turn - 1} content is not a "
+                    f"string (fixture malformed); cannot verify grounding"
+                )
+                continue
             # A hazard's quote must ground in the transcript (quote-fidelity
             # discipline: an ungrounded quote is a hallucination).
             if quote is not None and not anchor_present(quote, content):
                 issues.append(
                     f"{where}.quote: {quote!r} is not a normalized substring of "
                     f"conversation[{planted_turn - 1}] content (ungrounded hazard quote)"
+                )
+            # Attribution hazards quote content spoken by the named human
+            # operator (user role) — an assistant-spoken line must not carry a
+            # human ``source`` (the trap is misattributing WHO said it).
+            if fixture["conversation"][planted_turn - 1].get("role") != "user":
+                issues.append(
+                    f"{where}.source: quoted turn {planted_turn - 1} is an assistant "
+                    f"turn — hazard sources must be user-spoken lines of the named "
+                    f"human operator"
                 )
 
 
@@ -465,18 +499,83 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
 # ── Baseline (DM-5 — committed, can-fail CI gate) ───────────────────────────
 
 
+def _validate_metric_values(metrics: dict, where: str, issues: list[str]) -> None:
+    """Type/range-check one metrics snapshot (current or a history entry's).
+
+    Rate metrics (all but distractor_leakage_per_run) are fractions in [0, 1];
+    ``distractor_leakage_per_run`` is an int ≥ 0 and ≤ the gold-locked
+    ``DISTRACTOR_LEAKAGE_TOLERANCE`` (research-recommended ≤1/run).  String or
+    out-of-range committed values would otherwise crash ``compare_run`` at the
+    gate (TypeError) or bless an impossible target.
+    """
+    for key, value in metrics.items():
+        if key not in METRIC_VALUES:
+            issues.append(f"{where}: unknown metric {key!r} (vocabulary: {sorted(METRIC_VALUES)})")
+            continue
+        if key == "distractor_leakage_per_run":
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                issues.append(f"{where}.{key}: expected a non-negative int, got {value!r}")
+            elif value > DISTRACTOR_LEAKAGE_TOLERANCE:
+                issues.append(
+                    f"{where}.{key}: {value} exceeds the gold-locked tolerance "
+                    f"{DISTRACTOR_LEAKAGE_TOLERANCE} (research-recommended ≤1/run)"
+                )
+        elif isinstance(value, bool) or not isinstance(value, (int, float)):
+            issues.append(f"{where}.{key}: expected a number, got {value!r}")
+        elif not (0.0 <= float(value) <= 1.0):
+            issues.append(f"{where}.{key}: expected a fraction in [0, 1], got {value!r}")
+
+
+def _validate_history_entry(entry: dict, index: int, issues: list[str]) -> None:
+    """Shape-validate one fix-wave history entry (every entry, not just the last)."""
+    where = f"baseline.history[{index}]"
+    _reject_unknown_keys(
+        entry,
+        frozenset({"date", "values", "failure_classes", "justification", "verdict"}),
+        where,
+        issues,
+    )
+    date = entry.get("date")
+    if not isinstance(date, str) or not date.strip():
+        issues.append(f"{where}.date: expected a non-empty string (ISO date), got {date!r}")
+    values = entry.get("values")
+    if not isinstance(values, dict):
+        issues.append(f"{where}.values: expected an object (the run's metrics)")
+    else:
+        _validate_metric_values(values, f"{where}.values", issues)
+    failure_classes = entry.get("failure_classes", [])
+    if not isinstance(failure_classes, list) or not all(
+        isinstance(f, str) for f in failure_classes
+    ):
+        issues.append(f"{where}.failure_classes: expected a list of strings")
+    justification = entry.get("justification")
+    if values and (not isinstance(justification, str) or not justification.strip()):
+        issues.append(
+            f"{where}.justification: blessing a baseline (values recorded) requires a "
+            f"non-null justification string"
+        )
+    verdict = entry.get("verdict")
+    if verdict is not None and verdict not in VERDICT_VALUES - {VERDICT_INCONCLUSIVE}:
+        issues.append(
+            f"{where}.verdict: expected {VERDICT_PASS!r} or {VERDICT_REGRESSION!r} "
+            f"(first publishes record no verdict), got {verdict!r}"
+        )
+
+
 def validate_baseline(baseline: dict) -> list[str]:
     """Validate a committed baseline document + its invariants.
 
     Invariants beyond shape:
-    * first-run-pending state: ``metrics == {}`` and ``history == []`` and
-      ``judge_pin is None`` — the benchmark-first state before W2-b publishes
-      the first (expected-bad) number.
+    * first-run-pending state: ``metrics == {}`` AND ``history == []`` AND
+      ``judge_pin is None`` AND ``justification is None`` — the benchmark-first
+      state before W2-b publishes the first (expected-bad) number.  Nothing is
+      blessed and no judge is pinned pre-publication.
     * published state: non-empty ``metrics`` requires a non-null ``judge_pin``
-      (numbers are only publishable against a pinned judge prompt).
-    * blessing a regression REQUIRES a non-null ``justification`` string
-      (gbrain decision 4 — "without that discipline the gate degrades to
-      rubber-stamp within months").
+      (numbers are only publishable against a pinned judge prompt) and a
+      non-null ``justification`` (every committed-baseline refresh records its
+      rationale — blessing a regression REQUIRES one per gbrain decision 4).
+    * metric values are typed/ranged (fractions in [0, 1]; leakage int ≤ the
+      gold-locked tolerance); every history entry is shape-validated.
     """
     issues: list[str] = []
     _require_mapping(baseline, "baseline", issues)
@@ -521,9 +620,7 @@ def validate_baseline(baseline: dict) -> list[str]:
         if not isinstance(metrics, dict):
             issues.append("baseline.metrics: expected an object")
         elif metrics:
-            for key in metrics:
-                if key not in METRIC_VALUES:
-                    issues.append(f"baseline.metrics: unknown metric {key!r} (vocabulary: {sorted(METRIC_VALUES)})")
+            _validate_metric_values(metrics, "baseline.metrics", issues)
             if judge_pin is None:
                 issues.append(
                     "baseline.judge_pin: non-empty metrics require a pinned judge "
@@ -533,22 +630,23 @@ def validate_baseline(baseline: dict) -> list[str]:
         history = baseline.get("history")
         if not isinstance(history, list):
             issues.append("baseline.history: expected a list (fix-wave trail)")
-        elif history and isinstance(history[-1], dict):
-            # The newest (last) entry is the latest bless — appended by
-            # ``bless_baseline``; blessing a regression requires justification.
-            entry = history[-1]
-            values = entry.get("values")
-            if entry.get("justification") is None and isinstance(values, dict) and values:
-                issues.append(
-                    "baseline.history[-1].justification: blessing a regression requires a "
-                    "non-null justification string"
-                )
+        else:
+            for index, entry in enumerate(history):
+                if isinstance(entry, dict):
+                    _validate_history_entry(entry, index, issues)
+                else:
+                    issues.append(f"baseline.history[{index}]: expected an object")
 
         pending = (metrics == {}) and (history == [])
         if pending and justification is not None:
             issues.append(
                 "baseline.justification: a first-run-pending baseline (empty metrics) "
                 "cannot carry a justification — nothing has been blessed yet"
+            )
+        if pending and judge_pin is not None:
+            issues.append(
+                "baseline.judge_pin: a first-run-pending baseline (empty metrics) "
+                "cannot pin a judge — nothing has been published yet"
             )
         if not pending and justification is None:
             issues.append(
@@ -630,7 +728,23 @@ def bless_baseline(previous: dict, run: dict, *, justification: str) -> dict:
     previous_metrics = previous.get("metrics") or {}
     first_publish = not previous_metrics
     if first_publish:
-        verdict = None  # no committed targets to compare against (first number)
+        # No committed targets to compare against — but the pending baseline
+        # pins the frozen-corpus contract: a first publish on a drifted corpus
+        # (hash or resolved-config mismatch) must not silently re-pin the
+        # baseline to the wrong corpus (E2E-2 negative discipline).
+        if run["fixtures_hash"] != previous.get("fixtures_hash"):
+            raise ValueError(
+                "cannot bless first publish: run fixtures_hash does not match the "
+                "committed pending baseline (corpus drift) — regenerate/verify the "
+                "frozen corpus before publishing"
+            )
+        if run["config"] != previous.get("config"):
+            raise ValueError(
+                "cannot bless first publish: run config does not match the committed "
+                "baseline config snapshot (config mismatch ⇒ inconclusive, never a "
+                "rubber-stamp)"
+            )
+        verdict = None  # first number — nothing regresses against it yet
     else:
         verdict = compare_run(
             run["metrics"],

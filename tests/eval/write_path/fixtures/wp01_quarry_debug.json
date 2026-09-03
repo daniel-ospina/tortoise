@@ -33,7 +33,7 @@
       "role": "assistant"
     },
     {
-      "content": "Reproduced. I can see it now, two workers were grabbing the same batch off the ingest queue and both were marking it complete. Honestly I have been dreading this backfill all week and it is a relief to finally see the root cause. The completion race is what made progress stall, every batch that finished got replayed by the second worker.",
+      "content": "Reproduced. I can see it now, two workers grabbed the same batch twice from the ingest queue and each marked its own copy complete. Honestly I have been losing sleep over this backfill all week and it is a relief to finally see the root cause. The completion race is what made progress stall, every batch that finished got replayed by the second worker.",
       "role": "user"
     },
     {
