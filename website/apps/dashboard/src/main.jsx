@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS } from './harnesses.js'
+import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -1506,6 +1506,10 @@ function claimIntentInFlight() {
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
   const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' (set once per org)
+  // #1998 (W2): connect-consent state — the harness-connected checkpoint
+  // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
+  const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
+  const [wizardConnectError, setWizardConnectError] = React.useState('')
   // #1997 (W1): catalog-presented is marked when the build placeholder
   // RENDERS (not just on pick) — re-entry with fork=build already set must
   // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
@@ -3231,6 +3235,36 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1998 (W2): connect-consent Continue — the harness-connected checkpoint
+  // (surface 5/6 contract; W1's plan table left it "W2 owns"). The agent-side
+  // tortoise-onboarding skill writes it after tortoise_health passes (CLI
+  // harnesses via REST); Claude Desktop/Web have NO REST/curl surface, so the
+  // human's Continue writes it (session dual-auth — the checkpoint endpoint
+  // accepts session OR tt_ key). FWW keyed-MERGE → replay is a 200 no-op, so
+  // the agent write + this write (and repeat clicks) can all fire safely.
+  // Mirror handleWizardFork's failure handling: busy/disable, stay on step on
+  // 503/error (a fire-and-forget would strand Desktop/Web's gate with no
+  // retry affordance), advance on 2xx only.
+  async function wizardHarnessContinue() {
+    setWizardConnectBusy(true)
+    setWizardConnectError('')
+    try {
+      await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ step: 'harness-connected' }),
+      })
+      setWizardStep(4)
+    } catch (e) {
+      if (e?.status === 503) {
+        setWizardConnectError('The graph is temporarily unavailable — try again in a moment.')
+      } else {
+        setWizardConnectError(e?.message || 'Could not save your progress — try again.')
+      }
+    } finally {
+      setWizardConnectBusy(false)
+    }
+  }
+
   async function switchTeam(teamId) {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
@@ -4534,19 +4568,34 @@ function claimIntentInFlight() {
                             </p>
                           )}
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
-                            {HARNESS_INSTALL[wizardHarness](harnessKey)}
-                            {HARNESS_SKILLS(wizardHarness)}
-                            {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''}
+                            {UNIVERSAL_COMMAND[wizardHarness](harnessKey)}
                           </pre>
+                          {/* #1998 (W2): the universal command covers all 6
+                              harnesses — 4 self-install (Claude Code, Cursor,
+                              Codex, Pi), 2 teach-human (Claude Desktop, Claude
+                              Web). The agent self-adjudicates its harness from
+                              the tortoise-onboarding skill's table; the skill
+                              install line above fetches it. */}
+                          <p className="dim small" style={{ margin: '0.75rem 0 0', lineHeight: 1.6 }}>
+                            One universal command, all 6 harnesses — your agent
+                            self-adjudicates which it is and verifies the
+                            connection with <code>tortoise_health</code> before
+                            you continue.
+                          </p>
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                             <div className="wizard-nav-actions">
+                              {wizardConnectError && (
+                                <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>
+                              )}
                               <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
-                                onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](harnessKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''), 'harness')}>
+                                onClick={() => wizardCopy(UNIVERSAL_COMMAND[wizardHarness](harnessKey), 'harness')}>
                                 {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
                               </button>
                               {wizardCopied === 'harness' && (
-                                <button type="button" className="btn-primary" onClick={() => setWizardStep(4)}>{HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →"}</button>
+                                <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
+                                  {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →")}
+                                </button>
                               )}
                               <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
                             </div>

@@ -1,3 +1,8 @@
+> **⛔ ARCHIVED — M8 (epic #1976, W2 #1998):** this onboarding prompt is SUPERSEDED by
+> `tortoise/onboarding/SKILL.md` (the tortoise-onboarding skill) — the ONE live onboarding
+> script. Kept for history + the A0 rollback path; never re-promote while the skill is live.
+> Deployed copies (website/onboarding-prompt.md, onboarding/<harness>.md) are no longer staged.
+
 # Tortoise Onboarding — Pi setup
 
 > Harness variant of the canonical Tortoise onboarding prompt (epic #529).

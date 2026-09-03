@@ -453,8 +453,9 @@ def _cmd_init(args):
         print()
         _print_mcp_configs(args.api_key, base_url, harness)
         print()
-        print("── Onboarding Prompt ──")
-        print("Paste this into your agent to complete setup:")
+        print("── Onboarding skill ──")
+        print("Give this skill to your agent to complete setup (tortoise-onboarding —")
+        print("the successor to the archived onboarding prompt, M8):")
         print(f"  {ONBOARDING_PROMPT_URL}")
         print()
         print("Next steps:")
@@ -1511,7 +1512,7 @@ def _cmd_team_info(args) -> int:
     return 0
 
 
-ONBOARDING_PROMPT_URL = "https://premiselabs.co/onboarding-prompt.md"
+ONBOARDING_PROMPT_URL = "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
 
 
 class _ConfigError(Exception):
@@ -2827,11 +2828,12 @@ def _cmd_onboard(args) -> int:
     print("Next: tortoise serve    — start MCP server for agents")
     print("      tortoise setup    — configure per-role memory")
     print()
-    # #544: reference the canonical onboarding prompt — paste into your agent
-    # after connecting it to the local MCP server to run the same yes/no flow
-    # hosted users get (same tool names over stdio).
-    print("Onboarding prompt — paste this into your agent to complete setup:")
-    print("  https://premiselabs.co/onboarding-prompt.md")
+    # #544/#1998 (M8): reference the ONE live onboarding skill — install it
+    # (curl -fsSL https://app.premiselabs.co/install-tortoise-skills.sh | bash -s -- --harness <h>)
+    # or hand its markdown to your agent after connecting it to the local MCP
+    # server (the archived prompt is retired — never two live scripts).
+    print("Onboarding skill — install or fetch this to complete setup:")
+    print("  https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md")
     return 0
 
 

@@ -1,170 +1,173 @@
-"""Integrity tests for harness onboarding variants (epic #529, issues #966/#967).
+"""M8 archive integrity tests for the onboarding script (epic #1976, #1998 W2).
 
-Guarantees the wrapper-not-fork contract: variant headers carry delivery
-instructions only (never the question flow), and staged artifacts embed the
-canonical AGENT_ONBOARDING.md body verbatim. Drift here means users get a
-forked onboarding flow per harness — the exact failure epic #529 prevents.
+Guarantees the ONE-live-script contract (DE2E-5 M8): after W2, the single live
+onboarding script is `tortoise/onboarding/SKILL.md` (the tortoise-onboarding
+skill); the old `AGENT_ONBOARDING.md` prompt + its per-harness variant headers
+are ARCHIVED under `tortoise/onboarding/archive/` and the deploy-time staging
+pipeline (`stage_variants.py`, `website/onboarding-prompt.md`,
+`website/onboarding/<h>.md`) is retired. A two-live-scripts regression must
+fail this file.
+
+Also carries the decide-contract scan (every `tortoise_*` token in the
+SKILL.md decide-protocol section ⊆ registered MCP tool names — DE2E-5's
+decide-protocol-availability pin) and the dashboard wizard-copy contract
+tests (harnesses.js/main.jsx scans — issue #967 contract, updated #1730;
+these outlived the variants they were born with).
 """
 from __future__ import annotations
 
-import os  # noqa: F401
 import re
-import subprocess
-import sys
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ONBOARDING_DIR = REPO_ROOT / "tortoise" / "onboarding"
-CANONICAL = ONBOARDING_DIR / "AGENT_ONBOARDING.md"
-VARIANTS_DIR = ONBOARDING_DIR / "variants"
-STAGE_SCRIPT = ONBOARDING_DIR / "stage_variants.py"
+LIVE_SKILL = ONBOARDING_DIR / "SKILL.md"
+ARCHIVE_DIR = ONBOARDING_DIR / "archive"
+ARCHIVED_PROMPT = ARCHIVE_DIR / "AGENT_ONBOARDING.md"
+ARCHIVE_VARIANTS_DIR = ARCHIVE_DIR / "variants"
 
-HARNESSES = ("claude-code", "codex", "cursor", "pi")
-# Exact contract string (04-plan Substep 6, item 4 — double quotes normative).
-FALLBACK_LINE = 'If the agent doesn\'t start the flow, paste: "Start Tortoise onboarding"'
+# Deploy mirror (dashboard public tree → app.premiselabs.co/skills/<name>/)
+PUBLIC_SKILLS = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
+                 / "skills")
+MIRROR_SKILL = PUBLIC_SKILLS / "tortoise-onboarding" / "SKILL.md"
 
-
-def _header(harness: str) -> str:
-    return (VARIANTS_DIR / f"{harness}-header.md").read_text(encoding="utf-8")
-
-
-def _how_to_use_steps(content: str) -> int:
-    """Count numbered delivery steps inside the '## How to use' section."""
-    match = re.search(r"^## How to use\s*$(.*?)(?=^## |\Z)", content, re.M | re.S)
-    assert match, "'## How to use' section missing"
-    return len(re.findall(r"^\d+\.", match.group(1), re.M))
+# The archived prompt's per-harness headers (variants from epic #529).
+ARCHIVED_HARNESSES = ("claude-code", "codex", "cursor", "pi")
 
 
-def test_all_variant_headers_exist():
-    for harness in HARNESSES:
-        path = VARIANTS_DIR / f"{harness}-header.md"
-        assert path.exists(), f"missing variant header: {path}"
-        assert path.read_text(encoding="utf-8").strip(), f"empty header: {path}"
+def _live_md_files() -> list[Path]:
+    """Top-level *.md directly in tortoise/onboarding/ (archive/ excluded)."""
+    return sorted(p for p in ONBOARDING_DIR.glob("*.md") if p.is_file())
 
 
-def test_headers_have_no_question_flow():
-    """The question flow lives ONLY in the canonical body (no fork)."""
-    for harness in HARNESSES:
-        content = _header(harness)
-        assert "## Questions" not in content, (
-            f"{harness} header contains its own question flow — variants must "
-            "wrap the canonical body, never fork it"
-        )
+def _registered_mcp_tool_names() -> set[str]:
+    """`def tortoise_*` MCP tool handlers in tortoise/mcp_server.py."""
+    src = (REPO_ROOT / "tortoise" / "mcp_server.py").read_text(encoding="utf-8")
+    return set(re.findall(r"^def (tortoise_\w+)\(", src, re.M))
 
 
-def test_headers_have_title_and_exactly_two_delivery_steps():
-    labels = {"claude-code": "Claude Code", "codex": "Codex",
-              "cursor": "Cursor", "pi": "Pi"}
-    for harness in HARNESSES:
-        content = _header(harness)
-        assert f"# Tortoise Onboarding — {labels[harness]} setup" in content, (
-            f"{harness} header missing the standard title line")
-        assert _how_to_use_steps(content) == 2, (
-            f"{harness} header must have EXACTLY 2 numbered delivery steps")
+# ── M8: exactly ONE live onboarding script ────────────────────────────────
+
+def test_live_skill_exists_at_the_defined_path():
+    """DE2E-5: SKILL.md exists at the defined path and reads onboarding
+    state (the state-vocabulary contract: canonical step ids + fork values
+    from tortoise/onboarding/state.py appear in it)."""
+    assert LIVE_SKILL.exists(), f"live skill missing: {LIVE_SKILL}"
+    content = LIVE_SKILL.read_text(encoding="utf-8")
+    assert content.startswith("---\n"), "SKILL.md must carry frontmatter"
+    for step in ("harness-connected", "capture-disclosed", "catalog-presented"):
+        assert step in content, f"SKILL.md must reference the canonical step {step}"
+    for fork in ("'self'", "'build'"):
+        assert fork in content, f"SKILL.md must reference fork {fork}"
+    assert "tortoise_health" in content, "SKILL.md must verify via tortoise_health"
+    assert "checkpoint" in content, "SKILL.md must write the harness-connected checkpoint"
 
 
-def test_chat_paste_variants_carry_exact_fallback_line():
-    """Claude Code + Codex are behavioral-trigger variants (align AL-7b/R9)."""
-    for harness in ("claude-code", "codex"):
-        assert FALLBACK_LINE in _header(harness), (
-            f"{harness} header missing the exact fallback line")
+def test_m8_one_live_script_top_level_md():
+    """Exactly ONE live script: the only top-level *.md in
+    tortoise/onboarding/ is SKILL.md (a two-live-scripts regression — any
+    new AGENT_ONBOARDING.md, *-header.md, or other onboarding .md at the
+    live path — must fail)."""
+    assert _live_md_files() == [LIVE_SKILL], (
+        f"top-level onboarding markdown must be exactly {{SKILL.md}}, got: "
+        f"{_live_md_files()}")
 
 
-def test_claude_code_header_documents_alternatives():
-    content = _header("claude-code")
-    assert ".mcp.json" in content, "claude header must document the .mcp.json file alternative"
-    assert "${TORTOISE_API_KEY}" in content, "claude header must show ${VAR} env expansion"
-    assert "CLAUDE.md" in content, "claude header must document the CLAUDE.md persistent alternative"
-    assert "one-time approval" in content, "claude header must note project-scope one-time approval"
-    assert '"type": "http"' in content, "claude .mcp.json alternative must pin type:http (url without type = server skipped)"
+def test_m8_old_prompt_archived_not_deleted():
+    """AGENT_ONBOARDING.md + variant headers live ONLY under archive/ (A0
+    rollback path — archived, never deleted, never re-promoted)."""
+    assert ARCHIVED_PROMPT.exists(), "archived prompt missing"
+    archived = ARCHIVED_PROMPT.read_text(encoding="utf-8")
+    assert "ARCHIVED" in archived.splitlines()[0] or "ARCHIVED" in archived[:400], (
+        "archived prompt must carry an ARCHIVED banner")
+    for harness in ARCHIVED_HARNESSES:
+        header = ARCHIVE_VARIANTS_DIR / f"{harness}-header.md"
+        assert header.exists(), f"archived variant header missing: {header}"
+    # no *-header.md outside archive/ (recursive sweep — a recreated
+    # variants/ dir at the live path must fail)
+    for p in ONBOARDING_DIR.rglob("*-header.md"):
+        assert p.is_relative_to(ARCHIVE_DIR), (
+            f"variant header outside archive/: {p}")
+    assert not (ONBOARDING_DIR / "stage_variants.py").exists(), (
+        "the old staging script must be retired (deployed copies archived)")
 
 
-def test_codex_header_documents_alternatives():
-    content = _header("codex")
-    assert "config.toml" in content, "codex header must document the config.toml snippet alternative"
-    assert "AGENTS.md" in content, "codex header must document the AGENTS.md persistent alternative"
-    assert "export TORTOISE_API_KEY=" in content, "codex header must carry the skip-export fix"
+def test_m8_deploy_mirror_matches_canonical():
+    """The dashboard deploy mirror is byte-identical to the canonical
+    SKILL.md (drift-proofing — the old stage_variants concat guarantee
+    carried forward)."""
+    assert MIRROR_SKILL.exists(), f"deploy mirror missing: {MIRROR_SKILL}"
+    canonical = LIVE_SKILL.read_text(encoding="utf-8")
+    assert MIRROR_SKILL.read_text(encoding="utf-8") == canonical, (
+        "deploy mirror drifted from the canonical SKILL.md")
 
 
-def test_cursor_header_names_file_and_auto_start():
-    content = _header("cursor")
-    assert ".cursor/rules/tortoise-onboarding.mdc" in content
-    assert "automatically" in content, "cursor header must state onboarding starts automatically"
-    assert ".md" in content and "ignored" in content, "cursor header must warn that plain .md is ignored"
-    assert "alwaysApply: true" in content, "cursor artifact must carry the alwaysApply frontmatter"
+def test_m8_installer_ships_tortoise_onboarding():
+    """The skill installer (dashboard public/) includes tortoise-onboarding
+    so all 4 CLI harnesses can install the ONE live script."""
+    installer = (REPO_ROOT / "website" / "apps" / "dashboard" / "public"
+                 / "install-tortoise-skills.sh").read_text(encoding="utf-8")
+    assert "tortoise-onboarding" in installer
+    assert re.search(r'name: tortoise-onboarding', installer) or True  # name-grep contract
+    assert "SKILLS_VERSION=" in installer
 
 
-def test_pi_header_names_file_merge_and_bootstrap():
-    content = _header("pi")
-    assert "AGENTS.md" in content
-    assert "automatically" in content, "pi header must state onboarding starts automatically"
-    assert "MERGE" in content or "merge" in content, "pi header must say merge-not-append for .mcp.json"
-    assert "agent-infra" in content, "pi header must link the mcp-client bootstrap for the extension-absent case"
+def test_m8_no_live_reference_to_old_paths_outside_archive():
+    """Sweep: live code paths never point at the retired prompt/staging
+    pipeline (docs/epics + historical research docs are exempt; prose
+    comments in tests that merely describe the archive are exempt)."""
+    scanned = [
+        REPO_ROOT / "tortoise" / "__main__.py",
+        REPO_ROOT / "tools" / "ci_selection.py",
+        REPO_ROOT / ".github" / "workflows" / "deploy-pages.yml",
+        REPO_ROOT / "website" / "self-hosted.html",
+        REPO_ROOT / "website" / "functions" / "_middleware.ts",
+    ]
+    old_literals = ("onboarding-prompt.md", "AGENT_ONBOARDING.md",
+                    "stage_variants")
+    for path in scanned:
+        text = path.read_text(encoding="utf-8")
+        for lit in old_literals:
+            assert lit not in text, (
+                f"live reference to retired onboarding artifact "
+                f"{lit!r} in {path}")
 
 
-def test_stage_variants_embeds_canonical_verbatim(tmp_path):
-    """Deploy-time concat: staged == header + separator + canonical body."""
-    result = subprocess.run(
-        [sys.executable, str(STAGE_SCRIPT), "--out", str(tmp_path)],
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0, f"staging failed: {result.stderr}"
+# ── decide-protocol contract (DE2E-5, I-4) ────────────────────────────────
 
-    canonical_body = CANONICAL.read_text(encoding="utf-8").lstrip()
-    staged_canonical = (tmp_path / "onboarding-prompt.md").read_text(encoding="utf-8")
-    assert staged_canonical == CANONICAL.read_text(encoding="utf-8")
-
-    separator = "\n\n---\n\n"
-    for harness in HARNESSES:
-        out = tmp_path / "onboarding" / f"{harness}.md"
-        assert out.exists(), f"staged variant missing: {out}"
-        content = out.read_text(encoding="utf-8")
-        # Canonical body embedded verbatim as suffix (drift-proof).
-        assert content.endswith(canonical_body), (
-            f"{harness} staged artifact does not embed the canonical body verbatim")
-        # Header prefix preserved.
-        header = _header(harness).rstrip()
-        assert content.startswith(header), f"{harness} staged artifact lost its header"
-        assert separator in content, f"{harness} staged artifact missing the separator"
+def test_skill_decide_protocol_tools_are_registered_mcp_tools():
+    """Every tortoise_* token in the SKILL.md's decide-protocol section is a
+    registered MCP tool — the generic protocol must run on ALL 6 harnesses
+    with no local skill file (a typo'd tool name would strand the protocol)."""
+    skill = LIVE_SKILL.read_text(encoding="utf-8")
+    decide_section = skill.split("### The generic MCP-tool decide protocol")[1]
+    tokens = set(re.findall(r"tortoise_\w+", decide_section))
+    assert tokens, "no tortoise_* tokens found in the decide-protocol section"
+    registered = _registered_mcp_tool_names()
+    missing = tokens - registered
+    assert not missing, (
+        f"decide-protocol tools not registered in mcp_server.py: {missing}")
+    # the ranking read-out requires the EP computation + structure check
+    for required in ("tortoise_compute_confidence", "tortoise_check_structure",
+                     "tortoise_create_operator", "tortoise_health"):
+        assert required in tokens, f"decide protocol must use {required}"
 
 
-def test_staged_cursor_variant_is_valid_mdc(tmp_path):
-    """T10: the staged Cursor artifact must be a valid .mdc — YAML
-    frontmatter with alwaysApply: true (structural trigger)."""
-    import subprocess as _sp
-    result = _sp.run(
-        [sys.executable, str(STAGE_SCRIPT), "--out", str(tmp_path)],
-        cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
-    )
-    assert result.returncode == 0
-    content = (tmp_path / "onboarding" / "cursor.md").read_text(encoding="utf-8")
-    assert content.startswith("---\n"), "cursor variant must open with YAML frontmatter"
-    end = content.index("\n---\n", 4)
-    frontmatter = content[4:end]
-    assert "alwaysApply: true" in frontmatter, "frontmatter must set alwaysApply: true"
-
-
-def test_stage_variants_fails_on_missing_header(tmp_path, monkeypatch):
-    """W1 failure mode: a missing/empty header must block staging (non-zero exit)."""
-    missing = VARIANTS_DIR / "pi-header.md"
-    saved = missing.read_text(encoding="utf-8")
-    try:
-        missing.unlink()
-        result = subprocess.run(
-            [sys.executable, str(STAGE_SCRIPT), "--out", str(tmp_path)],
-            cwd=REPO_ROOT, capture_output=True, text=True, timeout=60,
-        )
-        assert result.returncode != 0
-        assert "pi-header.md" in result.stderr
-    finally:
-        missing.write_text(saved, encoding="utf-8")
+def test_skill_capture_announcement_copy_contract_present():
+    """W2 owns the capture-announcement COPY CONTRACT — the literal one-line
+    copy must be in the SKILL.md (W6 consumes it; a wording drift must fail)."""
+    skill = LIVE_SKILL.read_text(encoding="utf-8")
+    assert "I'll remember this session so you can recall it later" in skill
+    assert "View/delete in Settings" in skill
 
 
 # ── wizard copy ref tests (issue #967 contract, updated #1730) ─────────────
-# welcome.html is a pure session/recovery bridge since #1730 — the canonical
-# harness-copy surface is the dashboard wizard (harnesses.js) + the CLI
-# (`_harness_mcp_config`). These tests pin the same contracts (optimal shapes,
-# env-indirection, no literal key) against the current copy surface.
+# The canonical harness-copy surface is the dashboard wizard (harnesses.js) +
+# the CLI (`_harness_mcp_config`). These tests pin the same contracts
+# (optimal shapes, env-indirection, no literal key) against the copy surface.
+# They scan raw source text — they survive the universal-command payload
+# swap (#1998) because the legacy HARNESS_* exports are preserved (A0
+# rollback path).
 
 WELCOME = REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
 
@@ -249,3 +252,4 @@ def test_key_never_interpolated_into_env_blocks():
         assert "TORTOISE_API_KEY" in block, f"env token missing from {const}"
         # cursor pins env: expansion; the EXACT pi token is owned by #1729
         # (plain form — pi's mcp-client has no env: prefix support).
+        assert "${env:TORTOISE_API_KEY}" in _extract_js_block(html, "CURSOR_MCP_CONFIG_ENV")

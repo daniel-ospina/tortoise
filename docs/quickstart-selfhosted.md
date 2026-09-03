@@ -512,8 +512,9 @@ demonstrates the full mix (meeting + decision + friction).
 
 Mining details and the W-3 batch gate: `tortoise/mining.py`
 (`ConversationMiner`, `mine_conversation`, `mine_corpus`); the onboarding
-prompt teaches the same flow at `tortoise/onboarding/AGENT_ONBOARDING.md`
-(Q5b).
+skill teaches the same flow at `tortoise/onboarding/SKILL.md` (the
+AGENT_ONBOARDING.md prompt it replaced is archived under
+`tortoise/onboarding/archive/`, M8).
 
 ## Troubleshooting
 
