@@ -84,7 +84,8 @@ def make_client():
 
 
 class TestTenantModeDefault:
-    """auth_mode default "tenant" = hosted byte-identical: tt_ keys required."""
+    """auth_mode default "tenant" = hosted byte-identical: tt_/tk_ keys
+    (API_KEY_PREFIXES) are the accepted credential family."""
 
     def test_missing_bearer_401(self, make_client):
         tc = make_client()
@@ -95,6 +96,63 @@ class TestTenantModeDefault:
         tc = make_client()
         r = _mcp_post(tc, _initialize_payload(), auth_header="Bearer abc_123")
         assert r.status_code == 401
+
+    def test_tk_key_resolves_tenant_mode(self, tmp_path, monkeypatch):
+        """C2 #2111 (code-review P2): a tk_ per-graph key authenticates
+        through TeamResolutionMiddleware in tenant mode — the format gate
+        accepts API_KEY_PREFIXES (tt_/tk_) and the registry resolves the
+        key. Regression: dropping tk_ from the tuple would 401 here."""
+        from tortoise.mcp_server import create_http_app
+        from tortoise.sdk import TortoiseSDK
+        db_path = str(tmp_path / "tk-mcp.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.team_create("tk-mcp-team")
+        # Mint a tk_ key via the C2 prefix kwarg (the provisioning lane's
+        # credential class).
+        key = reg.apikey_create(team["id"], "t", prefix="tk_")["api_key"]
+        assert key.startswith("tk_")
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        with tc:
+            r = _mcp_post(tc, _initialize_payload(),
+                          auth_header=f"Bearer {key}")
+            # Auth passes → the MCP server proceeds (200/202), not 401
+            assert r.status_code in (200, 202), r.text
+            # A tt_ key on the same registry also resolves (unchanged)
+            key2 = reg.apikey_create(team["id"], "t")["api_key"]
+            r2 = _mcp_post(tc, _initialize_payload(),
+                           auth_header=f"Bearer {key2}")
+            assert r2.status_code in (200, 202), r2.text
+
+    def test_minted_deleg0_key_403_over_mcp(self, tmp_path, monkeypatch):
+        """C2 #2111 (code-review security P1, #2b): a MINTED deleg=0 per-
+        graph key must NOT drive MCP tools — MCP tools run on the
+        team-scoped SDK (whole-team namespace) with no per-graph scope
+        enforcement until C5 #2114. The REST surface gates deleg=0 on
+        management + writes; MCP must not be the fail-open lane where a
+        handed-out least-privilege key gets every write tool against all
+        team data. 403 (minted keys dormant), never 200/202."""
+        from tortoise.mcp_server import create_http_app
+        from tortoise.sdk import TortoiseSDK
+        db_path = str(tmp_path / "tk-mcp-deleg.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.team_create("tk-mcp-deleg-team")
+        # deleg=0 minted per-graph key (the provisioning lane's credential
+        # class — C2 _mint_graph_key stamps delegation_depth 0).
+        key = reg.apikey_create(team["id"], "t", prefix="tk_",
+                                delegation_depth=0)["api_key"]
+        assert key.startswith("tk_")
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        with tc:
+            r = _mcp_post(tc, _initialize_payload(),
+                          auth_header=f"Bearer {key}")
+            assert r.status_code == 403, r.text
+            assert "Minted keys cannot be used over MCP" in r.text, r.text
 
 
 class TestStaticMode:

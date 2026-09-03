@@ -5,7 +5,8 @@ mounted at /mcp on the hosted FastAPI app. Imports ONLY tortoise.sdk +
 starlette — mcp_server imports from here (one-directional; no circular import).
 
 Design: per-request team-scoped SDK via ContextVar. TeamResolutionMiddleware
-validates the Bearer tt_ token against the control plane — Supabase
+validates the Bearer tt_/tk_ token (API_KEY_PREFIXES) against the control
+plane — Supabase
 (lookup_hash, #767 plan Task 3) when SUPABASE_URL + service key are set,
 otherwise the FalkorDB registry (apikey_verify) — and sets
 _current_team_id / _transport_mode. Tools resolve the request-scoped SDK via
@@ -101,8 +102,11 @@ def _jsonrpc_error(code: int, message: str, data: dict | None = None,
 class TeamResolutionMiddleware(BaseHTTPMiddleware):
     """Bearer token → team_id ContextVar. 401 pre-tool-leak (D3, D17).
 
-    Accepts TWO credential families (#524, D3 — additive, never breaking):
-      * ``tt_<key>`` — tenant API keys (pre-existing path). Supabase-backed
+    Accepts THREE credential families (#524, C2 #2111 — additive, never
+    breaking):
+      * ``tt_<key>`` / ``tk_<key>`` — tenant API keys (tt_ = legacy/owner
+        mints; tk_ = C2 per-graph scoped keys, both in API_KEY_PREFIXES).
+        Supabase-backed
         (#767): resolves via tortoise.supabase_control.resolve_api_key
         (lookup_hash exact-match; api_keys.revoked_at authoritative;
         tier/quota from teams) — the SAME shared function REST
@@ -143,17 +147,21 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             return _jsonrpc_error(
                 ERR_UNAUTHORIZED,
                 "Unauthorized: invalid or missing Bearer token. "
-                "Expected format: Authorization: Bearer tt_<key> "
+                "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                 "(or an OAuth access token for #524 OAuth clients)",
                 status=401,
             )
         token = auth[7:]
-        if not (token.startswith("tt_") or token.startswith("oat_")):
+        # C2 (#2111): accept tk_ scoped keys too. Lazy import preserves the
+        # module's documented "imports ONLY tortoise.sdk + starlette"
+        # contract (auth.py triggers pepper env checks at module import).
+        from tortoise.auth import API_KEY_PREFIXES
+        if not (token.startswith(API_KEY_PREFIXES) or token.startswith("oat_")):
             if not token:
                 return _jsonrpc_error(
                     ERR_UNAUTHORIZED,
                     "Unauthorized: invalid or missing Bearer token. "
-                    "Expected format: Authorization: Bearer tt_<key> "
+                    "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                     "(or an OAuth access token for #524 OAuth clients)",
                     status=401,
                 )
@@ -172,6 +180,15 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # cache-invalidation signal only; durable suspended_at decides.
             from tortoise.abuse import is_suspended_signal
             if is_suspended_signal(cached[1].get("team_id") or ""):
+                cached = None
+            # C2 (#2111) defense-in-depth: a deleg=0 minted key must never
+            # ride a warm cache entry. Fresh resolution gates BEFORE the
+            # cache is written, so this can only trip on an entry cached
+            # before the mint stamped delegation_depth — a 60s TTL edge
+            # that costs one dict lookup to close.
+            if cached is not None and not is_oauth \
+                    and cached[1].get("delegation_depth") == 0:
+                self._cache.pop(token, None)
                 cached = None
         if cached and now - cached[0] < 60:
             team, limits = cached[1], cached[2]
@@ -212,8 +229,30 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 return _jsonrpc_error(
                     ERR_UNAUTHORIZED,
                     "Unauthorized: invalid API key. "
-                    "Expected format: Authorization: Bearer tt_<key>",
+                    "Expected format: Authorization: Bearer tt_<key>/tk_<key>",
                     status=401,
+                )
+            # C2 (#2111) one-level-deep guard (code-review P1, #2b): a
+            # MINTED (deleg=0) per-graph key must NOT drive MCP tools — MCP
+            # tools run on the team-scoped SDK (whole-team namespace) with
+            # no per-graph scope enforcement until C5 #2114 lands. The REST
+            # surface gates deleg=0 on management AND write paths; MCP must
+            # not be the fail-open lane where a handed-out least-privilege
+            # key gets every write tool against all team data. resolve_api_key
+            # (Supabase) and apikey_verify (registry, extended in C2) both
+            # carry delegation_depth. tk_ keys minted with deleg=NULL (an
+            # owner-minted scoped key — C3 surface) still pass.
+            if not is_oauth and team.get("delegation_depth") == 0:
+                # jsonrpc -32001 (ERR_UNAUTHORIZED) with HTTP 403 — mirrors
+                # the ERR_SUSPENDED precedent (403 status + data payload
+                # carrying a machine-readable code): MCP clients switching
+                # on the jsonrpc code get a distinct authz signal.
+                return _jsonrpc_error(
+                    ERR_UNAUTHORIZED,
+                    "Minted keys cannot be used over MCP until per-graph "
+                    "isolation ships.",
+                    {"code": "KEY_NOT_USER_MINTED"},
+                    status=403,
                 )
             # #1854 (review P2): best-effort #685 write-through on MCP
             # resolution — a recovery key used ONLY via MCP (never REST)

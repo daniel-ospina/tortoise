@@ -67,6 +67,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_export_delete.py": {"registry": "prod-coupled"},
     "test_free_team_entitlement.py": {"registry": "entitlement-gate"},   # added with ci-surfaces drift fix (#1929) — file now runs in selection
     "test_github_index_lifecycle.py": {"registry": "prod-coupled"},
+    "test_hosted_auth.py": {"registry": "prod-coupled"},   # C2 #2111 TestTkPrefixAuth mirrors test_hosted_api's registry-resolve pattern
     "test_hosted_api.py": {"registry": "prod-coupled",
                            "team-002": "team-identity"},
     "test_import_endpoint.py": {"registry": "import-ledger"},
@@ -75,6 +76,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_invites_email_http.py": {"registry": "prod-coupled"},
     "test_invites_http.py": {"registry": "prod-coupled"},
     "test_mcp_http.py": {"registry": "prod-coupled"},
+    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern
     "test_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},

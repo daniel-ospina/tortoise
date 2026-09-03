@@ -321,3 +321,68 @@ class TestSecurityBaseline:
         # Simulate restart: re-import with same pepper
         mod_b = importlib.reload(auth_mod)
         assert mod_b.verify_api_key(key, stored) is True
+
+
+from tests.test_hosted_api import (  # noqa: E402, I001 — helper reuse mid-file; matches repo test style
+    _patch_tortoise_sdk_init, _restore_tortoise_sdk_init,
+)
+
+
+# ── C2 (#2111): tk_ prefix accepted at the auth gate ─────────────────────────
+
+class TestTkPrefixAuth:
+    """C2 (#2111): the provisioning service mints tk_-prefixed per-graph
+    keys. The auth format gates must accept them (E2E-1's credential is
+    useless at 401 invalid_format). API_KEY_PREFIXES = ("tt_", "tk_")."""
+
+    def test_tk_prefix_constant_exists(self):
+        from tortoise.auth import API_KEY_PREFIXES
+        assert "tk_" in API_KEY_PREFIXES
+        assert "tt_" in API_KEY_PREFIXES
+
+    def test_tk_key_resolves_via_registry_get_current_team(self):
+        """A tk_ key authenticates through the registry resolve path (the
+        format gate must not 401 it)."""
+        import asyncio  # noqa: I001
+        import os
+        import tempfile
+        from unittest.mock import MagicMock
+        from tortoise.auth import hash_api_key
+        from tortoise.hosted_api import _make_sdk, get_current_team
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "test.db")
+            _orig_init = _patch_tortoise_sdk_init(db_path)
+            try:
+                sdk = _make_sdk(namespace="registry")
+                sdk._get_registry().query(
+                    "CREATE (t:Team {id: $id, tier: 'pro', "
+                    "graph_name: 'team_tk-team'})",
+                    params={"id": "tk-team"},
+                )
+                token = "tk_" + "a" * 40
+                sdk._get_registry().query(
+                    "CREATE (k:APIKey {id: $id, team_id: $tid, "
+                    "key_hash: $kh, key_prefix: $kp, created_by: $cb})",
+                    params={
+                        "id": "tk-key", "tid": "tk-team",
+                        "kh": hash_api_key(token), "kp": token[:10],
+                        "cb": "test",
+                    },
+                )
+                request = MagicMock()
+                request.url.path = "/v1/points"
+                request.headers = {"Authorization": f"Bearer {token}"}
+                request.state = MagicMock()
+                result = asyncio.run(get_current_team(request))
+                assert result["team_id"] == "tk-team"
+            finally:
+                _restore_tortoise_sdk_init(_orig_init)
+
+    def test_bad_prefix_still_rejected(self):
+        """An unknown prefix (e.g. 'xx_') is still 401 — the widening does
+        not loosen the format gate to arbitrary strings."""
+        from tortoise.auth import API_KEY_PREFIXES
+        assert not "xx_".startswith(API_KEY_PREFIXES)
+        # The gate itself is exercised via the 401 tests in TestAuthMatrix;
+        # this asserts the constant is the exclusive allowlist surface.
