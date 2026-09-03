@@ -1429,6 +1429,147 @@ def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
         f"name-match Object wrongly folded instead of the id match: {n!r}"
 
 
+# ── #2164 Task 7: indicator 5 (helper-routed) — the shared helper's OWN
+#    terminal rules for OUT-OF-BAND records (journal replay, hosted §6b
+#    reconcile re-runs, direct calls). Real capture can never reach these
+#    branches: S3's terminal exclusion kills record formation at the SOURCE
+#    (pinned by test_chain_pin_and_no_double_fold in
+#    tests/test_capture_session_supersession_e2e.py — re-capture is
+#    byte-unchanged). These tests pin the helper's defense-in-depth for
+#    records that arrive WITHOUT a capture: same successor → silent dedup;
+#    divergent successor → warn + keep-first (never blind-overwrite). ──────
+
+def _entity_fold_state(proj, name: str) -> tuple | None:
+    """(status, supersededBy) of one Object — None when absent."""
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+        params={"n": name}).result_set
+    return tuple(rows[0]) if rows else None
+
+
+def _object_superseded_events(proj) -> int:
+    """ObjectSuperseded events journaled to the :GraphEvent store."""
+    rows = proj.g.query(
+        "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) RETURN count(e)",
+    ).result_set
+    return int(rows[0][0])
+
+
+def test_apply_supersessions_same_payload_idempotent(sdk):
+    """#2164 (Task 7, indicator 5 — helper-routed idempotency): calling the
+    shared helper with the SAME supersession record twice — records arriving
+    OUT-OF-BAND (journal replay, hosted §6b reconcile re-runs, direct calls)
+    — is idempotent at the helper's OWN layer. First call folds Object A
+    (status='superseded', supersededBy='successor-B', applied=1, ONE
+    ObjectSuperseded event); the SECOND call is a SILENT no-op (applied=0 —
+    the same-successor terminal branch: A's supersededBy already equals the
+    record's successor): no second fold, no second journal line, NO new
+    warning. This branch can never fire through real capture (S3 excludes
+    terminal Objects, so record formation dies at the source — see
+    test_chain_pin_and_no_double_fold in
+    tests/test_capture_session_supersession_e2e.py for the source-side
+    pin); this test pins the helper's own defense-in-depth for the
+    out-of-band path.
+
+    Absorbents (the full dedup stack, capture→commit): (1) reconcile-merge
+    delta-0 — a re-reconcile whose payload has no diff produces no
+    supersession records; (2) the S3 terminal probe — a folded Object stops
+    resolving, so record formation dies at the source; (3) the helper's
+    terminal rules — pt_ records hit the terminal probe, entity records hit
+    this same-successor silent no-op; (4) the idempotent SET fold
+    (_fold_object_superseded re-applies the same SET); (5) benign duplicate
+    journals — a replay re-emits the same event and the projection fold
+    converges. Hosted capture writes NO CommitRecord, so there is no
+    client_commit_id dedup between capture and commit (the commit-id key is
+    a commit-endpoint absorbent only); dedup between capture and re-capture
+    rides absorbents (1)-(5), never a commit-id key."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    sdk.create_entity("object", "successor-B", objectKind="core:strategy")
+    record = [{"superseded": "approach-A", "supersedes_by": "successor-B",
+               "evidence": "entity lifecycle supersedes"}]
+    warns: list[str] = []
+
+    applied = apply_supersessions(proj, sdk, record, session_id="sess_idem",
+                                  warn=warns.append)
+    assert applied == 1, "first application must fold"
+    assert warns == [], f"fold is clean — no warnings: {warns}"
+    state = _entity_fold_state(proj, "approach-A")
+    assert state == ("superseded", "successor-B"), state
+    assert _object_superseded_events(proj) == 1, "exactly one journal line"
+
+    # Re-apply the SAME record — same successor already folded → silent dedup
+    applied2 = apply_supersessions(proj, sdk, record, session_id="sess_idem",
+                                   warn=warns.append)
+    assert applied2 == 0, \
+        "same-successor re-apply must be a silent dedup no-op, not a re-fold"
+    assert warns == [], f"dedup must be silent — got a warning: {warns}"
+    assert _entity_fold_state(proj, "approach-A") == ("superseded",
+                                                       "successor-B")
+    assert _object_superseded_events(proj) == 1, \
+        "no second ObjectSuperseded journal for a re-applied record"
+
+
+def test_apply_supersessions_divergent_successor_keeps_first(sdk):
+    """#2164 (Task 7, helper-routed conflict): a supersession record whose
+    successor DIVERGES from an already-folded one (Object A already
+    superseded by B; a later out-of-band record claims A→C) is REJECTED
+    keep-first — A stays supersededBy='successor-B', the C claim is never
+    folded in (applied=0, no second journal, successor-C stays live), and
+    the rejection is a LOUD warning naming the ref, the kept successor, and
+    the rejected one. This pins the helper's deliberate divergence from
+    hosted §6b's blind clobber (the M5 PHASE-2 GAP: a §6b commit resolving
+    A→C after a capture A→B blind-overwrites supersededBy to C with NO
+    warning — DOCUMENTED and asserted in T9's parity harness, NOT fixed
+    in-PR). The helper-routed keep-first is the one consumer discipline
+    that never blind-overwrites; a capture can never trip it either (S3
+    excludes terminal Objects) — it guards out-of-band record delivery."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    sdk.create_entity("object", "successor-B", objectKind="core:strategy")
+    sdk.create_entity("object", "successor-C", objectKind="core:strategy")
+    first = [{"superseded": "approach-A", "supersedes_by": "successor-B",
+              "evidence": "lifecycle"}]
+    conflict = [{"superseded": "approach-A", "supersedes_by": "successor-C",
+                 "evidence": "lifecycle"}]
+    warns: list[str] = []
+
+    applied = apply_supersessions(proj, sdk, first, session_id="sess_keep1",
+                                  warn=warns.append)
+    assert applied == 1, "first fold must apply"
+    assert warns == [], f"first fold is clean: {warns}"
+
+    # Divergent successor → keep-first: A stays supersededBy B
+    applied2 = apply_supersessions(proj, sdk, conflict,
+                                   session_id="sess_keep2",
+                                   warn=warns.append)
+    assert applied2 == 0, \
+        "divergent successor must be rejected, never blind-folded"
+    state = _entity_fold_state(proj, "approach-A")
+    assert state == ("superseded", "successor-B"), \
+        f"keep-first violated — A's fold was overwritten: {state!r}"
+    # the warning names the conflict: the ref, the KEPT successor, the
+    # rejected one, and the keep-first rule (assert substrings, per the
+    # actual warn text in commit_ops.apply_supersessions)
+    joined = " | ".join(warns)
+    assert "approach-A" in joined, f"warning must name the ref: {joined}"
+    assert "successor-B" in joined, \
+        f"warning must name the kept successor: {joined}"
+    assert "successor-C" in joined, \
+        f"warning must name the rejected successor: {joined}"
+    assert "keep-first" in joined, f"warning must cite keep-first: {joined}"
+    # nothing folded for C: no second journal, successor-C stays live
+    assert _object_superseded_events(proj) == 1, \
+        "rejected conflict must not journal a second event"
+    c_state = _entity_fold_state(proj, "successor-C")
+    assert c_state is not None and (c_state[0] or "live") == "live", c_state
+    assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
+
+
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the
 #    method directly (no env var needed) ─────────────────────────────────
 
