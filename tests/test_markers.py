@@ -76,6 +76,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_invites_email_http.py": {"registry": "prod-coupled"},
     "test_invites_http.py": {"registry": "prod-coupled"},
     "test_mcp_http.py": {"registry": "prod-coupled"},
+    "test_mcp_server_auth_modes.py": {"registry": "prod-coupled"},   # C2 #2111 TestTenantModeDefault tk_ resolve mirrors test_mcp_http's registry pattern
     "test_metering.py": {"registry": "prod-coupled"},
     "test_namespace_uri_mode.py": {"registry": "assertion",
                                    "team-abc123": "assertion"},

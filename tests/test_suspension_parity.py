@@ -421,9 +421,11 @@ class TestHealthyTeamControl:
     """Control: the same seams must NOT block healthy teams (regression)."""
 
     def test_create_graph_still_works(self, sb_client, as_user):
-        """#1853: a healthy team can still create graphs (suspension is the
-        only blocker). C2: uses a PRO team — free 402s at the tier gate
-        before suspension is even consulted."""
+        """#1853: a healthy team can still create graphs. Suspension is
+        checked FIRST (before the tier gate — load-bearing: a suspended
+        FREE team must 403 SUSPENDED, not 402, per TestSuspendedTeamLockdown);
+        a healthy PRO team is used here so the free tier's 402 gate is not
+        in play and the success path is what's asserted."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False)
         fake.tables["teams"][0]["tier"] = "pro"

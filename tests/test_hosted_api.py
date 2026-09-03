@@ -3904,7 +3904,52 @@ class TestProvisioningService:
             r = tc.post("/v1/team/keys",
                         headers={"Authorization": f"Bearer {token}"})
             assert r.status_code == 403, r.text
-            assert "cannot mint" in r.json()["detail"], r.text
+            # The centralized deleg gate in get_current_team_session fires
+            # (KEY_NOT_USER_MINTED) — minted keys cannot manage the team.
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "KEY_NOT_USER_MINTED", \
+                    detail
+            else:
+                assert "minted" in detail.lower(), detail
+        finally:
+            gen.close()
+
+    def test_minted_key_dormant_on_data_plane(self, tmp_path):
+        """C2 #2111 (code-review security P1, #2b — posture pin): a MINTED
+        deleg=0 per-graph key is DORMANT until C5 #2114 routes resolved
+        graph scope into every request path. C1's fail-closed invariant (a
+        graph-bound key must never widen onto the default graph) is
+        unenforceable at the data plane before the spine — no endpoint
+        consumes graph_id/scopes yet — so deleg=0 keys authenticate to NO
+        capability surface: not management (KEY_NOT_USER_MINTED via
+        get_current_team_session), not raw data reads (GET /v1/points →
+        KEY_NOT_USER_MINTED via get_current_team_gated), not MCP (403 in
+        TeamResolutionMiddleware). They stay mintable / revocable /
+        listable — the provisioning lifecycle. C5 flips this off
+        deliberately with per-graph routing."""
+        import uuid
+        gen = TestProvisioningService()._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            from tortoise.auth import hash_api_key
+            token = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
+                "scopes:['graphs:read'], delegation_depth:0})",
+                params={"id": "minted-dormant", "tid": tid,
+                        "kh": hash_api_key(token), "kp": token[:10]},
+            )
+            # Raw data read (list points) — formerly the uncovered lane:
+            # deleg=0 must 403, never a team-wide read.
+            r = tc.get("/v1/points",
+                       headers={"Authorization": f"Bearer {token}"})
+            assert r.status_code == 403, r.text
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "KEY_NOT_USER_MINTED", \
+                    detail
         finally:
             gen.close()
 
@@ -4020,6 +4065,63 @@ class TestProvisioningService:
             r = tc.post(f"/v1/teams/{tid}/graphs", json={"name": "x"},
                         headers={"Authorization": f"Bearer {key['api_key']}"})
             assert r.status_code in (401, 403), r.text
+        finally:
+            gen.close()
+
+    def test_forced_graph_write_failure_rolls_back_no_orphan(self,
+                                                            tmp_path,
+                                                            monkeypatch):
+        """D11 drill (code-review P1): a mint failure AFTER the graph write
+        must roll back — 500, no graph node, and NO orphan key bound to the
+        graph id (the graph-scoped revoke catches keys whose mint raised
+        after the key write committed, where the returned dict never
+        materialized)."""
+        import tortoise.hosted_api as ha_mod
+        gen = self._setup(tmp_path, "pro", None)
+        sdk, tid, tc = next(gen)
+        try:
+            key = _mint_caller_key(sdk, tid, scopes=["graphs:create"])
+            # Force the KEY MINT to fail AFTER the graph write (the risky
+            # window: minted is None, so only graph-scoped revocation can
+            # clean up the half-landed key). Registry mode: make
+            # apikey_create raise after creating the node by breaking the
+            # BELONGS_TO edge query via a bad team lookup on the audit
+            # path is fragile — instead monkeypatch apikey_create to do the
+            # real write THEN raise.
+            orig = ha_mod.TortoiseSDK.apikey_create
+
+            def _failing_mint(self, team_id, created_by, **kw):
+                # Do the REAL mint (node + edge land), then raise —
+                # simulating an exception between the key write and the
+                # helper's return.
+                orig(self, team_id, created_by, **kw)  # real mint lands first
+                raise RuntimeError("simulated post-write mint failure")
+
+            monkeypatch.setattr(ha_mod.TortoiseSDK, "apikey_create",
+                                _failing_mint)
+            try:
+                r = tc.post(f"/v1/teams/{tid}/graphs",
+                            json={"name": "doomed"},
+                            headers={"Authorization":
+                                     f"Bearer {key['api_key']}"})
+                assert r.status_code == 500, r.text
+            finally:
+                monkeypatch.undo()
+            # Graph rolled back (no node named doomed)
+            graphs = sdk.graph_list(tid)
+            assert not any(g["name"] == "doomed" for g in graphs), \
+                "graph survived a failed mint — orphan!"
+            # No ACTIVE key minted by the caller survives: the failing
+            # apikey_create DID land a key (created_by_key_id = caller
+            # key id) before raising — graph-scoped revocation must have
+            # revoked it. Revoked keys stay listed (revoked_at set), so
+            # assert revocation, not absence.
+            caller_key_id = key["id"]
+            orphans = [k for k in sdk.apikey_list(tid)
+                       if k.get("created_by_key_id") == caller_key_id
+                       and k.get("revoked_at") is None]
+            assert not orphans, \
+                f"active orphan key(s) after failed mint: {orphans}"
         finally:
             gen.close()
 

@@ -397,7 +397,9 @@ def _count_resource(team_id: str, resource: str, sdk=None) -> int:
                 ).result_set
             else:  # graphs
                 rows = reg._get_registry().query(
-                    "MATCH (g:Graph {team_id: $tid}) RETURN count(g)",
+                    "MATCH (g:Graph {team_id: $tid}) "
+                    "WHERE g.status IS NULL OR g.status <> 'deleted' "
+                    "RETURN count(g)",
                     params={"tid": team_id},
                 ).result_set
             return int(rows[0][0])

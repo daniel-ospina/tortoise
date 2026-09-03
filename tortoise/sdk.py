@@ -12611,11 +12611,30 @@ class TortoiseSDK:
         NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
         the provisioning service mint tk_ per-graph keys (epic vocabulary);
         existing callers unchanged.
+
+        Registry-side invariant (code-review #2b, mirrors the Supabase DB
+        CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
+        = 0) can never hold escalation scopes (graphs:create/delete,
+        keys:manage, team:manage) — only owner-minted keys may. The app
+        mint (_mint_graph_key) already ∩ _MINTABLE_SCOPES, but apikey_create
+        is a public SDK method (graph-scripts, C3 drift surface): the check
+        here keeps selfhost parity with the hosted DB invariant once C5
+        flips deleg=0 dormancy off and starts honoring scopes.
         """
         import uuid  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
+
+        _ESCALATION_SCOPES = {"graphs:create", "graphs:delete",
+                              "keys:manage", "team:manage"}
+        if delegation_depth == 0 and scopes and any(
+                s in _ESCALATION_SCOPES for s in scopes):
+            raise ControlPlaneError(
+                "Minted keys (delegation_depth=0) cannot hold escalation "
+                "scopes: " + ",".join(sorted(
+                    _ESCALATION_SCOPES & set(scopes))) + ".",
+            )
 
         team = self.team_get(team_id)
         if team is None:
@@ -12710,11 +12729,15 @@ class TortoiseSDK:
         """Verify an API key against stored hashes.
 
         Returns {team_id, key_id} if valid, None if not found or revoked.
-        Uses salted-hash verification (per-key salt means exact-hash lookup
-        never matches — see #130, #139). #1709: expires_at filtering with
-        NULL-as-never-expires semantics (mirrors the REST path #742 + the
-        agent_signup mint, which now writes expires_at:null) — a legacy
-        selfhost key without the prop must keep authenticating.
+        C2 (#2111): also returns delegation_depth + scopes when present on
+        the node (MCP's TeamResolutionMiddleware rejects deleg=0 minted
+        keys — the REST surface is gated; MCP must not be the fail-open
+        lane for handed-out per-graph keys). Uses salted-hash verification
+        (per-key salt means exact-hash lookup never matches — see #130,
+        #139). #1709: expires_at filtering with NULL-as-never-expires
+        semantics (mirrors the REST path #742 + the agent_signup mint,
+        which now writes expires_at:null) — a legacy selfhost key without
+        the prop must keep authenticating.
         """
         from datetime import datetime, timezone as _tz  # noqa: I001
         now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
@@ -12724,7 +12747,10 @@ class TortoiseSDK:
             and (p.get("expires_at") is None or p.get("expires_at") > now_iso)
         ]
         if matches:
-            return {"team_id": matches[0]["team_id"], "key_id": matches[0]["id"]}
+            m = matches[0]
+            return {"team_id": m["team_id"], "key_id": m["id"],
+                    "delegation_depth": m.get("delegation_depth"),
+                    "scopes": m.get("scopes") or []}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────
