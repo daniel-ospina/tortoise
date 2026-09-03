@@ -23,7 +23,7 @@ name: e2e-live-reconcile
 
 on:
   schedule:
-    - cron: '0 3 * * 1'   # Mondays 03:00 UTC — weekly catches a recurrence at <= ~10 rows
+    - cron: '0 3 * * 1'   # Mondays 03:00 UTC — catches a recurrence within a week of onset (~1/10th the #2140 scale)
   workflow_dispatch:      # manual run (fault-injection / post-cleanup verification)
 
 concurrency:
@@ -75,7 +75,14 @@ jobs:
         # rc=1 only: counts exist, so the "N orphaned prod rows" title is
         # factual. rc=2 (could-not-determine) files a DISTINCT issue below —
         # no counts exist, and a fake "N rows" title would be noise.
-        if: ${{ steps.reconcile.outputs.rc == '1' }}
+        # GitHub Actions implicitly wraps bare `if:` expressions in
+        # success() — but this step only runs when the reconcile step
+        # FAILED (rc=1/rc=2), so success() is false and the auto-file would
+        # be skipped exactly when it must fire (#2189 review P0 — the
+        # #2140 deaf-monitor class recreated at the issue layer). always()
+        # overrides the implicit status check; the rc compare still gates.
+        # Same pattern as post-merge-validation.yml (#1438).
+        if: always() && steps.reconcile.outputs.rc == '1'
         run: |
           # #2140: --fail-with-body so a failed issue create (403/429/etc.)
           # fails the step loudly instead of silently skipping the file
@@ -140,7 +147,7 @@ jobs:
         # lesson was a monitor that failed for ~14 days with nobody hearing.
         # This is a distinct "check could not run" issue, NOT an "N orphaned
         # rows" one (no counts exist on exit 2).
-        if: ${{ steps.reconcile.outputs.rc == '2' }}
+        if: always() && steps.reconcile.outputs.rc == '2'
         run: |
           PAYLOAD="$(python3 - <<'PY'
           import json

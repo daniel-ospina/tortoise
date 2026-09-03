@@ -21,9 +21,13 @@ runbook's guards). FalkorDB graph reconciliation is deliberately out of scope
 
 Cadence: weekly (Mon 03:00 UTC) via .github/workflows/e2e-live-reconcile.yml
 (schedule + workflow_dispatch only — never a merge gate). A recurrence at the
-observed 1-2 rows/run is caught at <= ~10 rows, not ~200. On detection the
-workflow auto-files an issue with the counts (#2144's permissions/curl pattern);
-this script only computes them.
+monitor's ~16 rows/day rate (#2140's 222 in ~14 days) is caught within a week
+of onset at ~1/10th the #2140 scale (~100 rows) instead of weeks-unnoticed.
+On detection the workflow auto-files an issue with the counts (#2144's
+permissions/curl pattern); this script only computes them. Known behavior:
+rc=1/rc=2 auto-file a fresh issue per failing run with no dedup against open
+issues (matches the welcome-e2e-monitor precedent) — a stale-issue cleanup is
+out of scope for #2189.
 
 SAFETY MODEL — fail-closed; a dead check must never look green (#2140's
 "a deaf monitor is not a detection layer"):
@@ -298,4 +302,12 @@ if __name__ == "__main__":
         sys.exit(main())
     except ReconcileError as e:
         print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(2)
+    except Exception as e:  # #2189 review P1: any escape must be rc=2
+        # (could-not-determine), NEVER rc=1 (bleed semantics) — an uncaught
+        # parse/shape error (row missing a key, UNION kind renamed, etc.) is
+        # a detector failure, not evidence of orphans.
+        import traceback
+        traceback.print_exc(file=sys.stderr)
+        print(f"ERROR: reconcile crashed unexpectedly: {e!r}", file=sys.stderr)
         sys.exit(2)
