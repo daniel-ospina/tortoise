@@ -3246,6 +3246,422 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
     finally:
         ha._FALLBACK_KEEPALIVE.pop(ns, None)
 
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_make_sdk_concurrent_first_calls_single_anchor(monkeypatch):
+    """#2172: concurrent first _make_sdk calls for one namespace must create
+    exactly ONE keepalive anchor. The check-then-create race (two threads
+    both spawning on the same embedded db_path; the setdefault loser dropped
+    UNCLOSED → daemon socket unlinked mid-test → 503 / redis.socket
+    ConnectionError — the #2065/#2172 double-upload flake class) is closed
+    by _KEEPALIVE_LOCK. Regression: an __init__ construction probe scoped to
+    each round's db asserts post-fix counts (1 anchor + 2 fresh SDKs), no
+    ORPHAN construction (pre-fix: a 4th construction — the loser's anchor —
+    dropped unclosed), returned SDKs are distinct live clients attached to
+    the anchor's data-bearing server (sentinel round-trip), NOT the shared
+    anchor itself. The probe parks each counted construction ~300ms so the
+    pre-fix double-create is ~deterministic (the winner's construction is
+    held open while the loser reaches its own); under the lock only one
+    anchor construction can exist, so the park only costs time and can never
+    deadlock (join timeout is the net). Each round races a FRESH db file (no
+    daemon SAVE/socket teardown churn between rounds) and round 3 seeds a
+    STALE path-drifted anchor so the in-lock stale-evict + re-check branch is
+    exercised under contention too."""
+    import threading
+    import time
+    import uuid
+
+    import tortoise.hosted_api as ha
+
+    ns = f"anchor-race-{uuid.uuid4().hex}"
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for _round in range(4):
+                if _round == 3:
+                    # Seed an anchor bound to a DIFFERENT path so this round
+                    # races from a stored-but-stale keepalive entry. Seed
+                    # constructions target seed.db — the round counter (filters
+                    # on round-3.db) is not installed yet, so they aren't
+                    # counted; they also don't park (db mismatch).
+                    seed_db = os.path.join(td, "seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    seeded_fresh = ha._make_sdk(namespace=ns)
+                    seeded_fresh.close()
+                    stale = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+                    assert stale is not None, "seed anchor not stored"
+                    ha._FALLBACK_KEEPALIVE[ns] = stale  # pre-store: both threads see it
+                db = os.path.join(td, f"round-{_round}.db")
+                monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(_barrier=barrier, _results=results, _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(ha._make_sdk(namespace=ns))
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, daemon=True)
+                           for _ in range(2)]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=30)
+                        assert not t.is_alive(), (
+                            f"round {_round}: _make_sdk hung — a lock "
+                            f"regression would deadlock here")
+                    assert not errors, f"round {_round}: thread raised: {errors!r}"
+                    anchors = [v for k, v in ha._FALLBACK_KEEPALIVE.items()
+                               if k == ns]
+                    # Dict keys are unique, so this list has 0 or 1 entries —
+                    # a miss means the anchor was never stored (e.g. a fix
+                    # that builds but never inserts).
+                    assert anchors, (
+                        f"round {_round}: no anchor stored for {ns!r}")
+                    anchor = anchors[0]
+                    assert anchor._proj is not None, "anchor not connected"
+                    assert ha._anchor_usable(anchor, db) is True
+                    # Lower bound, not equality: a legitimate env-fault
+                    # recovery (the lock winner's eager connect fails, the
+                    # loser's in-lock re-check evicts it and recreates) adds
+                    # a second, CLOSED anchor construction on correct code.
+                    # The discriminator is the closed-aware orphan assert.
+                    assert len(constructed) >= 1 + len(results), (
+                        f"round {_round}: expected >= 1 anchor + 1 per "
+                        f"returned fresh SDK = {1 + len(results)} "
+                        f"constructions, got {len(constructed)} — an anchor "
+                        f"or fresh SDK was never built")
+                    # Fresh-per-request contract: returned SDKs are NOT the
+                    # shared anchor (a regression returning it would share
+                    # mutable session state across requests — the #493 class).
+                    assert all(s is not anchor for s in results), (
+                        f"round {_round}: a returned SDK IS the shared anchor")
+                    assert len({id(s) for s in results}) == 2, (
+                        f"round {_round}: returned SDKs are not distinct")
+                    returned = {id(s) for s in results}
+                    # Closed-aware orphan check: every construction must be
+                    # the stored anchor, a returned SDK, or a CLOSED evicted
+                    # candidate (the env-fault recovery path closes what it
+                    # evicts). Pre-fix the #2172 loser was dropped OPEN —
+                    # unclosed and unaccounted — which is exactly the leak.
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"round {_round}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2172 race) leaks here")
+                    # Data-plane probe: a node written through the anchor's
+                    # graph must be readable via every returned SDK — proves
+                    # they attach to the anchor's data-bearing daemon, not a
+                    # silently-empty or other-path server (#1607/#2065). Raw
+                    # graph query through _get_proj().g is the established
+                    # test idiom (test_index_surfacing.py).
+                    sentinel = f"race-{ns}-{_round}"
+                    anchor._get_proj().g.query(
+                        "CREATE (n:RaceSentinel {rk: $rk})", {"rk": sentinel})
+                    for sdk in results:
+                        seen = sdk._get_proj().g.query(
+                            "MATCH (n:RaceSentinel {rk: $rk}) RETURN count(n)",
+                            {"rk": sentinel}).result_set[0][0]
+                        assert seen == 1, (
+                            f"round {_round}: returned SDK missed the "
+                            f"anchor's write — decoupled server")
+                    if _round == 3:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2172 prevents")
+                        assert stale._proj is None
+                finally:
+                    # Deterministic round teardown (close-then-pop, #1950):
+                    # shut every daemon we started. Under FIXED code nothing
+                    # was dropped (the orphans assert proved it).
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            leftover = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_registry_anchor_reuses_healthy_anchor(monkeypatch):
+    """#2172: the registry anchor's healthy-hit fast path (lock-free return
+    of the stored anchor) must never replace or evict a healthy anchor.
+    _make_sdk's twin is pinned by test_make_sdk_reuses_healthy_anchor; the
+    registry path is request-hot in embedded selfhost mode (four per-request
+    helpers call _registry_anchor) and pre-fix used a replacement-prone
+    direct assignment, so pin it explicitly."""
+    import tortoise.hosted_api as ha
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            db = os.path.join(td, "registry.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db)
+            anchor1 = ha._registry_anchor()
+            assert ha._FALLBACK_KEEPALIVE.get("registry") is anchor1
+            assert ha._anchor_usable(anchor1, db) is True
+            # second call: same object — no eviction, no replacement
+            anchor2 = ha._registry_anchor()
+            assert anchor2 is anchor1, "healthy anchor replaced"
+            assert ha._FALLBACK_KEEPALIVE.get("registry") is anchor1
+            assert anchor1._proj is not None
+        finally:
+            leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_registry_anchor_concurrent_first_calls_single_anchor(monkeypatch):
+    """#2172: _registry_anchor() and _make_sdk(namespace="registry") share
+    the "registry" keepalive key through TWO separate check-then-set code
+    paths — the lock must serialize BOTH so a concurrent cold start yields
+    one anchored server. Mode 1 (registry ×2): concurrent _registry_anchor()
+    calls must return the SAME object — identity is the direct check, since
+    _registry_anchor returns the stored anchor itself; pre-fix the
+    direct-assignment loser leaked its own unclosed anchor and each thread
+    returned a different one. Mode 2 (make_sdk-vs-registry): the mixed
+    cold-start race (hosted_api.py:991 pattern) must produce exactly one
+    anchor plus one fresh SDK, distinct and attached to the same server.
+    Mode 3 (registry-stale-race): seeds a path-drifted "registry" anchor so
+    the concurrent stale-evict branch is exercised for this path too. The
+    same ~300ms construction park makes the pre-fix race ~deterministic."""
+    import threading
+    import time
+
+    import tortoise.hosted_api as ha
+
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    modes = (
+        ("registry-x2",
+         (ha._registry_anchor, ha._registry_anchor),
+         True, False),
+        ("make-sdk-vs-registry",
+         (lambda: ha._make_sdk(namespace="registry"), ha._registry_anchor),
+         False, False),
+        ("registry-stale-race",
+         (ha._registry_anchor, ha._registry_anchor),
+         True, True),
+    )
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for label, callers, expect_identity, seed_stale in modes:
+                if seed_stale:
+                    # Seed an anchor on a drifted path (see test 1 round 3).
+                    seed_db = os.path.join(td, f"{label}-seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    seeded_fresh = ha._make_sdk(namespace="registry")
+                    seeded_fresh.close()
+                    stale = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+                    assert stale is not None, "seed anchor not stored"
+                    ha._FALLBACK_KEEPALIVE["registry"] = stale
+                db = os.path.join(td, f"{label}.db")
+                monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(fn, _barrier=barrier, _results=results,
+                        _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(fn())
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, args=(fn,), daemon=True)
+                           for fn in callers]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=30)
+                        assert not t.is_alive(), (
+                            f"{label}: cold-start call hung — a lock "
+                            f"regression would deadlock here")
+                    assert not errors, f"{label}: thread raised: {errors!r}"
+                    anchor = ha._FALLBACK_KEEPALIVE.get("registry")
+                    assert anchor is not None, f"{label}: anchor not stored"
+                    assert anchor._proj is not None, f"{label}: not connected"
+                    assert ha._anchor_usable(anchor, db) is True
+                    fresh_count = sum(1 for s in results if s is not anchor)
+                    # Lower bound, not equality — a legit env-fault recovery
+                    # (winner's eager connect fails; loser's in-lock re-check
+                    # evicts + recreates) adds a second, CLOSED anchor
+                    # construction on correct code. The discriminator is the
+                    # closed-aware orphan assert below.
+                    assert len(constructed) >= 1 + fresh_count, (
+                        f"{label}: expected >= 1 anchor + 1 per returned "
+                        f"fresh SDK = {1 + fresh_count} constructions, got "
+                        f"{len(constructed)} — an anchor was never built")
+                    if expect_identity:
+                        if results[0] is results[1]:
+                            assert results[0] is anchor, f"{label}: wrong object"
+                        else:
+                            # Distinct results carry two signatures.
+                            # Regression: the pre-fix direct-assignment loser
+                            # was dropped OPEN — two open distinct anchors.
+                            # Env-fault recovery (CORRECT code): the winner's
+                            # eager connect failed and the loser's in-lock
+                            # re-check evicted + CLOSED it, then created the
+                            # stored anchor. _t_closed disambiguates, so the
+                            # test stays red on the bug and green on the
+                            # fault, with a self-diagnosing message.
+                            assert (
+                                getattr(results[0], "_t_closed", False)
+                                or getattr(results[1], "_t_closed", False)
+                            ), (
+                                f"{label}: two OPEN distinct anchors — the "
+                                f"#2172 double-create (the env-fault recovery "
+                                f"closes the evicted anchor; an open dropped "
+                                f"anchor is the regression signature)")
+                            assert anchor in results, (
+                                f"{label}: evicted anchor not replaced")
+                    else:
+                        if sum(1 for s in results if s is anchor) == 1:
+                            # Healthy shape: the _registry_anchor caller
+                            # returned the stored anchor; the _make_sdk
+                            # caller returned a distinct fresh SDK attached
+                            # to the same server (sentinel proves it).
+                            assert len({id(s) for s in results}) == 2, (
+                                f"{label}: results not distinct")
+                            fresh = next(s for s in results
+                                         if s is not anchor)
+                            sentinel = f"race-registry-{label}"
+                            anchor._get_proj().g.query(
+                                "CREATE (n:RaceSentinel {rk: $rk})",
+                                {"rk": sentinel})
+                            seen = fresh._get_proj().g.query(
+                                "MATCH (n:RaceSentinel {rk: $rk}) "
+                                "RETURN count(n)",
+                                {"rk": sentinel}).result_set[0][0]
+                            assert seen == 1, (
+                                f"{label}: fresh SDK missed the anchor's "
+                                f"write — decoupled server")
+                        else:
+                            # Env-fault recovery shape (mirror of the
+                            # identity branch): the lock winner's eager
+                            # connect failed, the loser's in-lock re-check
+                            # evicted + CLOSED the winner's anchor and built
+                            # the stored one — which NO caller returns
+                            # (_make_sdk never returns the anchor). Results
+                            # are exactly [closed evicted anchor, live fresh
+                            # SDK]; the data-plane check proves the live SDK
+                            # attaches to the STORED anchor's daemon.
+                            evicted = [s for s in results
+                                       if getattr(s, "_t_closed", False)]
+                            assert len(evicted) == 1, (
+                                f"{label}: stored anchor missing from "
+                                f"results with {len(evicted)} closed "
+                                f"result(s) — expected exactly the one "
+                                f"evicted anchor (two OPEN distinct results "
+                                f"would be the #2172 double-create)")
+                            live = next(s for s in results
+                                        if not getattr(s, "_t_closed", False))
+                            assert live is not anchor, (
+                                f"{label}: live result IS the stored anchor")
+                            assert anchor._proj is not None
+                            sentinel = f"race-registry-{label}-fault"
+                            anchor._get_proj().g.query(
+                                "CREATE (n:RaceSentinel {rk: $rk})",
+                                {"rk": sentinel})
+                            seen = live._get_proj().g.query(
+                                "MATCH (n:RaceSentinel {rk: $rk}) "
+                                "RETURN count(n)",
+                                {"rk": sentinel}).result_set[0][0]
+                            assert seen == 1, (
+                                f"{label}: surviving SDK missed the stored "
+                                f"anchor's write — decoupled server")
+                    returned = {id(s) for s in results}
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"{label}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2172 race) leaks here")
+                    if seed_stale:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2172 prevents")
+                        assert stale._proj is None
+                finally:
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            # Leave no anchored "registry" server bound to our tempdir for
+            # whichever test runs next (it cold-starts its own).
+            leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
 class TestRateLimitRealClientIP:
     """#1559: the per-IP rate-limit fallback must key on the REAL client IP
     (request.state.client_ip — the Fly-Client-IP when

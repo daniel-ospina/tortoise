@@ -100,6 +100,21 @@ _logger = logging.getLogger(__name__)
 # team count until a production FalkorDB replaces the embedded fallback.
 _FALLBACK_KEEPALIVE: dict[str, TortoiseSDK] = {}
 
+# #2172: concurrent first _make_sdk/_registry_anchor calls raced the keepalive
+# check-then-create — two threads could both see an empty/stale dict entry,
+# both open the same embedded db_path, and the setdefault loser was dropped
+# UNCLOSED (its redislite daemon could die mid-request → 503 / redis.socket
+# ConnectionError, or silent empty-graph reads — the #2065/#2172 flaky
+# double-upload class). _KEEPALIVE_LOCK serializes the miss/stale path
+# (re-check + evict + create + insert) so exactly ONE anchor per key is ever
+# created; a healthy-anchor hit stays lock-free (the designed steady state —
+# concurrent per-request fresh SDKs attach to the anchored daemon). No
+# re-entrancy/deadlock: the SDK/projection stack never imports hosted_api
+# (verified #2172), so nothing inside the critical section can call back into
+# _make_sdk/_registry_anchor; the lock is never held across a per-request
+# fresh-SDK construction.
+_KEEPALIVE_LOCK = threading.Lock()
+
 
 def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
     """True if the anchored SDK still holds the CURRENT embedded DB.
@@ -155,30 +170,46 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # fall back to a temp file so provisioning still works.
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
-    anchor = _FALLBACK_KEEPALIVE.get(namespace or "")
-    if anchor is not None and not _anchor_usable(anchor, db_path):
-        # #1502: the anchor is bound to a stale/dead embedded server — a
-        # previous test's tempdir (removed at fixture teardown, the CI
-        # failure class: redis.socket ConnectionError / 500 / stale rows)
-        # or a daemon that crashed. The old code only self-healed when
-        # `anchor._proj is None` — a stored-but-drifted projection was
-        # served forever. Evict + recreate below instead.
-        try:  # noqa: SIM105
-            anchor.close()
-        except Exception:
-            pass
-        _FALLBACK_KEEPALIVE.pop(namespace or "", None)
-        anchor = None
-    if anchor is None:
-        anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
-        try:  # noqa: SIM105
-            anchor._get_proj()  # eager: hold the connection so the server survives
-        except Exception:
-            # Keepalive is best-effort — a transient connect failure must not
-            # 500 this request; the request SDK connects lazily anyway and the
-            # anchor may connect on a later call.
-            pass
-        _FALLBACK_KEEPALIVE.setdefault(namespace or "", anchor)
+    key = namespace or ""
+    # Fast path (lock-free steady state): reuse a healthy anchor as-is — the
+    # per-request fresh SDK below attaches to its daemon (the #493/#1607
+    # designed shape). The probe runs outside the lock exactly as it always
+    # has on the serial path.
+    anchor = _FALLBACK_KEEPALIVE.get(key)
+    if anchor is not None and _anchor_usable(anchor, db_path):
+        pass
+    else:
+        # Miss or stale — serialize the evict+create+insert (#2172): two
+        # concurrent first calls must never both spawn on db_path. The
+        # in-lock re-check re-arbitrates against the anchor the winner
+        # stored (not this thread's pre-lock snapshot), so a waiter never
+        # evicts/duplicates the winner's fresh anchor.
+        with _KEEPALIVE_LOCK:
+            anchor = _FALLBACK_KEEPALIVE.get(key)
+            if anchor is not None and not _anchor_usable(anchor, db_path):
+                # #1502: the anchor is bound to a stale/dead embedded
+                # server — a previous test's tempdir (removed at fixture
+                # teardown, the CI failure class: redis.socket
+                # ConnectionError / 500 / stale rows) or a daemon that
+                # crashed. The old code only self-healed when
+                # `anchor._proj is None` — a stored-but-drifted projection
+                # was served forever. Evict + recreate below instead.
+                try:  # noqa: SIM105
+                    anchor.close()
+                except Exception:
+                    pass
+                _FALLBACK_KEEPALIVE.pop(key, None)
+                anchor = None
+            if anchor is None:
+                anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
+                try:  # noqa: SIM105
+                    anchor._get_proj()  # eager: hold the connection so the server survives
+                except Exception:
+                    # Keepalive is best-effort — a transient connect failure must not
+                    # 500 this request; the request SDK connects lazily anyway and the
+                    # anchor may connect on a later call.
+                    pass
+                _FALLBACK_KEEPALIVE.setdefault(key, anchor)
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
     return sdk
 
@@ -205,18 +236,24 @@ def _registry_anchor() -> TortoiseSDK:
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
     anchor = _FALLBACK_KEEPALIVE.get("registry")
     if anchor is None or not _anchor_usable(anchor, db_path):
-        if anchor is not None:
-            try:  # noqa: SIM105
-                anchor.close()
-            except Exception:
-                pass
-            _FALLBACK_KEEPALIVE.pop("registry", None)
-        anchor = TortoiseSDK(db_path=db_path, namespace="registry")
-        try:  # noqa: SIM105
-            anchor._get_proj()
-        except Exception:
-            pass
-        _FALLBACK_KEEPALIVE["registry"] = anchor
+        # Miss or stale — serialize the evict+create+insert (#2172, same
+        # shape as _make_sdk): the in-lock re-check re-arbitrates against
+        # the anchor the winner stored.
+        with _KEEPALIVE_LOCK:
+            anchor = _FALLBACK_KEEPALIVE.get("registry")
+            if anchor is None or not _anchor_usable(anchor, db_path):
+                if anchor is not None:
+                    try:  # noqa: SIM105
+                        anchor.close()
+                    except Exception:
+                        pass
+                    _FALLBACK_KEEPALIVE.pop("registry", None)
+                anchor = TortoiseSDK(db_path=db_path, namespace="registry")
+                try:  # noqa: SIM105
+                    anchor._get_proj()
+                except Exception:
+                    pass
+                _FALLBACK_KEEPALIVE["registry"] = anchor
     return anchor
 
 
