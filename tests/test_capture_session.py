@@ -12,6 +12,7 @@ import re
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import hosted_api as _ha
 from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
@@ -1710,34 +1711,12 @@ _CONSENT_TEAM = {
 }
 
 
-def _patch_sdk_to_temp(tmp_path):
-    """Force every TortoiseSDK construction to one temp embedded DB."""
-    orig_init = _ha.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kw):
-        orig_init(self, db_path=str(tmp_path / "c.db"), namespace=namespace)
-
-    _ha.TortoiseSDK.__init__ = _patched
-    return orig_init
-
-
-def _close_keepalive_anchors() -> None:
-    """#1950: close every _FALLBACK_KEEPALIVE anchor, then drop the dict.
-
-    Clearing the dict ALONE leaked the anchored SDKs — the redislite daemon
-    keeps running until its last connection is GC'd (nondeterministic), so a
-    later test whose tempdir reuses the same path hits EmbeddedStoreBusyError
-    and, worse, a mid-test anchor eviction can tear the daemon down between a
-    consent seed and the gate read. Closing here makes shutdown deterministic
-    (redislite SHUTDOWN SAVE) before the next test starts.
-    """
-    for ns in list(_ha._FALLBACK_KEEPALIVE):
-        anchor = _ha._FALLBACK_KEEPALIVE.pop(ns, None)
-        if anchor is not None:
-            try:  # noqa: SIM105
-                anchor.close()
-            except Exception:
-                pass
+def _provision_team(team_id: str) -> None:
+    """Create the registry Team node (onboarding state lives on it)."""
+    _ha._make_sdk(namespace="registry")._get_registry().query(
+        "CREATE (t:Team {id:$id, onboarding_state:$st})",
+        params={"id": team_id, "st": "{}"},
+    )
 
 
 @pytest.fixture()
@@ -1752,33 +1731,18 @@ def consent_client(tmp_path, monkeypatch):
     mirroring the production provision path.
     TORTOISE_SESSION_LLM_MOCK=1 satisfies the provider gate.
     """
-    orig_init = _patch_sdk_to_temp(tmp_path)
-    _ha._FALLBACK_KEEPALIVE.clear()
-    app.dependency_overrides[get_current_team] = lambda: dict(_CONSENT_TEAM)
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
-    # forces, so _make_sdk's keepalive anchor path matches and the anchor is
-    # REUSED instead of evicted + closed on every registry access (each
-    # eviction shut the redislite daemon down mid-test, losing the consent
-    # write between seed and gate read → intermittent 403).
-    monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "c.db"))
-    _provision_team(_CONSENT_TEAM["team_id"])
-    try:
+    # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+    # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+    # __init__ → deterministic anchor close → clear overrides at exit.
+    # Supersedes the local _patch_sdk_to_temp/_close_keepalive_anchors pair
+    # (this fixture was already #1950-canonical — pin + close present; the
+    # helper is the single source of truth now).
+    with patched_tortoise_sdk(str(tmp_path / "c.db")):
+        app.dependency_overrides[get_current_team] = lambda: dict(_CONSENT_TEAM)
+        _provision_team(_CONSENT_TEAM["team_id"])
         with TestClient(app) as tc:
             yield tc
-    finally:
-        app.dependency_overrides.clear()
-        _ha.TortoiseSDK.__init__ = orig_init
-        _close_keepalive_anchors()
-        _ha._FALLBACK_KEEPALIVE.clear()
-
-
-def _provision_team(team_id: str) -> None:
-    """Create the registry Team node (onboarding state lives on it)."""
-    _ha._make_sdk(namespace="registry")._get_registry().query(
-        "CREATE (t:Team {id:$id, onboarding_state:$st})",
-        params={"id": team_id, "st": "{}"},
-    )
 
 
 def _opt_in(team_id: str = _CONSENT_TEAM["team_id"], enabled: bool = True):
@@ -2213,23 +2177,26 @@ def _mcp_team_context(tmp_path, monkeypatch, *, team_id="team-1727-mcp",
     def _ctx():
         from tortoise.mcp_auth import _current_team_id, _current_team_limits, _transport_mode
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-        orig_init = _patch_sdk_to_temp(tmp_path)
-        _ha._FALLBACK_KEEPALIVE.clear()
-        _provision_team(team_id)
-        if seed_recording:
-            _ha._update_onboarding_state(team_id, session_recording=True)
-        tok_t = _current_team_id.set(team_id)
-        tok_l = _current_team_limits.set(
-            {"team_id": team_id, "tier": "free", "max_points": 100000})
-        tok_m = _transport_mode.set("http")
-        try:
-            yield team_id
-        finally:
-            _current_team_id.reset(tok_t)
-            _current_team_limits.reset(tok_l)
-            _transport_mode.reset(tok_m)
-            _ha.TortoiseSDK.__init__ = orig_init
-            _ha._FALLBACK_KEEPALIVE.clear()
+        # #2127 wave 2: shared helper — the old enter/exit plain-clear (no
+        # pin, no anchor close) is the #1950 clear-without-close gap this
+        # wave fixes; the helper adds the pin + close-then-clear at enter and
+        # the deterministic close at exit. The MCP ContextVar set/reset stays
+        # fixture-owned INSIDE the helper (they are per-call tokens, not SDK
+        # state).
+        with patched_tortoise_sdk(str(tmp_path / "mcp.db")):
+            _provision_team(team_id)
+            if seed_recording:
+                _ha._update_onboarding_state(team_id, session_recording=True)
+            tok_t = _current_team_id.set(team_id)
+            tok_l = _current_team_limits.set(
+                {"team_id": team_id, "tier": "free", "max_points": 100000})
+            tok_m = _transport_mode.set("http")
+            try:
+                yield team_id
+            finally:
+                _current_team_id.reset(tok_t)
+                _current_team_limits.reset(tok_l)
+                _transport_mode.reset(tok_m)
 
     return _ctx()
 
@@ -2274,21 +2241,22 @@ def test_session_capture_tool_off_switch_409(tmp_path, monkeypatch):
     from tortoise.mcp_auth import _current_team_id, _current_team_limits
     from tortoise.mcp_server import tortoise_session_capture
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-    orig_init = _patch_sdk_to_temp(tmp_path)
-    _ha._FALLBACK_KEEPALIVE.clear()
-    _provision_team("team-1727-mcp-opt")
-    _ha._update_onboarding_state("team-1727-mcp-opt", session_recording=False)
-    tok_t = _current_team_id.set("team-1727-mcp-opt")
-    tok_l = _current_team_limits.set(
-        {"team_id": "team-1727-mcp-opt", "tier": "free", "max_points": 100000})
-    try:
-        result = tortoise_session_capture(conversation=_CONV, harness="pi")
-        st = _ha._get_onboarding_state("team-1727-mcp-opt")
-    finally:
-        _current_team_id.reset(tok_t)
-        _current_team_limits.reset(tok_l)
-        _ha.TortoiseSDK.__init__ = orig_init
-        _ha._FALLBACK_KEEPALIVE.clear()
+    # #2127 wave 2: shared helper (same pin + deterministic-close upgrade
+    # as _mcp_team_context — the old inline restore was plain-clear).
+    with patched_tortoise_sdk(str(tmp_path / "mcp-opt.db")):
+        _provision_team("team-1727-mcp-opt")
+        _ha._update_onboarding_state("team-1727-mcp-opt",
+                                     session_recording=False)
+        tok_t = _current_team_id.set("team-1727-mcp-opt")
+        tok_l = _current_team_limits.set(
+            {"team_id": "team-1727-mcp-opt", "tier": "free",
+             "max_points": 100000})
+        try:
+            result = tortoise_session_capture(conversation=_CONV, harness="pi")
+            st = _ha._get_onboarding_state("team-1727-mcp-opt")
+        finally:
+            _current_team_id.reset(tok_t)
+            _current_team_limits.reset(tok_l)
     assert result.get("status") == 409, result
     assert "disabled" in result.get("error", ""), result
     assert st.get("session_capture_last_error_pi"), \
