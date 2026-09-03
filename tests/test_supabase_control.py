@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -36,8 +36,12 @@ from tortoise.supabase_control import (
     insert_api_key,
     insert_graph,
     invitation_accept,
+    invitation_expire,
     invitation_mint,
+    invitation_otp_mint,
+    invitation_otp_verify,
     invitation_rescind,
+    invitation_resend,
     is_anon_team,
     is_supabase_enabled,
     membership_count_since,
@@ -2492,3 +2496,274 @@ class TestC3KeyLifecycleSeam:
         set_api_key_scopes(fake, "k-c3-3", ["graphs:read"])
         row = api_key_by_id(fake, "k-c3-3")
         assert row["scopes"] == ["graphs:read"]
+
+# ── W7 #2003: invite fusion v2 — OTP proof-of-control + mismatch override ──
+
+class TestInviteFusionV2Seam:
+    """W7 (#2003) seam functions over the invitations table (hosted lane).
+
+    invitation_otp_mint / invitation_otp_verify / invitation_accept
+    mismatch_override / invitation_resend / invitation_expire. The registry
+    lane mirrors the same semantics on the Invitation graph node (tested in
+    tests/test_invite_fusion_http.py). The otp_* columns come from the
+    deploy-time migration 20260902000001; FakeControlPlane's generic row
+    store carries them without schema work.
+    """
+
+    def _owner(self, fake, team_id="team-1", user_id=_U3):
+        fake.seed("team_memberships", [{
+            "user_id": user_id, "team_id": team_id,
+            "role": "owner", "status": "active",
+        }])
+        if not any(t.get("id") == team_id for t in fake.tables.get("teams", [])):
+            fake.seed("teams", [{
+                "id": team_id, "name": "Invite Team", "tier": "team",
+                "max_users": 100, "graph_name": f"team_{team_id}",
+            }])
+
+    def _pending_invite(self, fake, *, email="bob@example.com",
+                        team_id="team-1") -> dict:
+        self._owner(fake, team_id=team_id)
+        inv = invitation_mint(fake, team_id, email, "member", "owner-1")
+        return inv
+
+    def _otp_for(self, fake, invitation_id: str, code: str) -> str:
+        """Mint + return the stored otp_hash (hash_api_key is salted — the
+        verify path uses verify_api_key, so the test stores what the seam
+        would)."""
+        from datetime import timedelta
+
+        from tortoise.auth import hash_api_key
+        exp = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+        ok = invitation_otp_mint(
+            fake, invitation_id, code_hash=hash_api_key(code),
+            expires_at=exp, sent_at=datetime.now(UTC).isoformat())
+        assert ok is True
+        return code
+
+    # ── OTP mint / verify ──────────────────────────────────────────────
+
+    def test_otp_mint_stores_hash_and_rotates(self, fake):
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        row = fake.tables["invitations"][0]
+        assert row["otp_hash"]  # hash-only, never the plaintext
+        assert row["otp_hash"] != "123456"
+        assert row["otp_attempts"] == 0
+        assert row["otp_expires_at"]
+        # a second mint rotates the code (single outstanding code)
+        self._otp_for(fake, inv["id"], "654321")
+        row = fake.tables["invitations"][0]
+        assert row["otp_attempts"] == 0
+
+    def test_otp_mint_on_consumed_invite_returns_false(self, fake):
+        inv = self._pending_invite(fake)
+        invitation_accept(fake, inv["token"], _U2, user_email="bob@example.com")
+        from datetime import timedelta
+        ok = invitation_otp_mint(
+            fake, inv["id"], code_hash="x",
+            expires_at=(datetime.now(UTC)
+                        + timedelta(minutes=10)).isoformat(),
+            sent_at=datetime.now(UTC).isoformat())
+        assert ok is False
+
+    def test_otp_verify_ok_non_consuming(self, fake):
+        """Verify is NON-consuming: ok leaves the code outstanding — it is
+        consumed exactly once, atomically at the ACCEPT COMMIT (a pre-commit
+        402 like the capacity gate never burns it)."""
+        inv = self._pending_invite(fake)
+        code = self._otp_for(fake, inv["id"], "123456")
+        now = datetime.now(UTC).isoformat()
+        assert invitation_otp_verify(fake, inv["id"], code=code,
+                                     now=now) == "ok"
+        row = fake.tables["invitations"][0]
+        assert row["otp_hash"] is not None      # still outstanding
+        assert row["otp_verified_at"] is None   # consumed only at commit
+
+    def test_otp_verify_wrong_code_budget(self, fake):
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        now = datetime.now(UTC).isoformat()
+        for _ in range(5):
+            assert invitation_otp_verify(fake, inv["id"], code="000000",
+                                         now=now) == "invalid"
+        row = fake.tables["invitations"][0]
+        assert row["otp_attempts"] == 0          # budget exhausted → reset
+        assert row["otp_hash"] is None           # code cleared
+        assert invitation_otp_verify(fake, inv["id"], code="000000",
+                                     now=now) == "no_otp"
+
+    def test_otp_verify_expired(self, fake):
+        inv = self._pending_invite(fake)
+        from tortoise.auth import hash_api_key
+        invitation_otp_mint(
+            fake, inv["id"], code_hash=hash_api_key("123456"),
+            expires_at=(datetime.now(UTC)
+                        - timedelta(minutes=1)).isoformat(),
+            sent_at=datetime.now(UTC).isoformat())
+        now = datetime.now(UTC).isoformat()
+        assert invitation_otp_verify(fake, inv["id"], code="123456",
+                                     now=now) == "expired"
+        assert fake.tables["invitations"][0]["otp_hash"] is None
+
+    # ── mismatch-override accept (both paths OTP-gated) ────────────────
+
+    def test_mismatch_override_without_code_blocked(self, fake):
+        """The seam verifies the code itself — a mismatch-override accept
+        without a code is a 403 (invite-hijack closed on BOTH paths)."""
+        inv = self._pending_invite(fake)
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse")
+        assert ei.value.status == 403
+        assert "Verification code required" in str(ei.value)
+
+    def test_wrong_code_blocked_at_accept(self, fake):
+        """A wrong code at the mismatch-override accept is a 403 — nothing
+        is accepted and no code is consumed."""
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse", otp_code="000000")
+        assert ei.value.status == 403
+        assert "Invalid or expired verification code" in str(ei.value)
+        assert fake.tables["invitations"][0].get("accepted_at") is None
+        assert fake.tables["invitations"][0]["otp_hash"] is not None
+
+    def test_legacy_mismatch_still_403(self, fake):
+        """No mismatch_override → the pre-W7 403 message (byte-unchanged)."""
+        inv = self._pending_invite(fake)
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com")
+        assert ei.value.status == 403
+        assert str(ei.value) == "Invite email does not match this account"
+
+    def test_invalid_override_path_422(self, fake):
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="hijack", otp_code="123456")
+        assert ei.value.status == 422
+
+    def test_fuse_override_accepts_under_current_account(self, fake):
+        """fuse + OTP → membership under the CURRENT account, the invitation
+        records accepted_via/accepted_mismatch/fused_from_email, and the code
+        is consumed atomically at the accept commit."""
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        res = invitation_accept(fake, inv["token"], _U2,
+                                user_email="alice@example.com",
+                                mismatch_override="fuse", otp_code="123456")
+        assert res["team_id"] == "team-1"
+        assert res["role"] == "member"
+        assert res["accepted_via"] == "fuse"
+        assert res["mismatch"] == {"invited_email": "bob@example.com",
+                                   "recorded": True}
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "accepted"
+        assert row["accepted_mismatch"] is True
+        assert row["fused_from_email"] == "bob@example.com"
+        # code consumed at commit (single-use) + proof recorded
+        assert row["otp_hash"] is None
+        assert row["otp_verified_at"] is not None
+        assert row["otp_verified_by"] == _U2
+        # membership row under the CURRENT user (not bob)
+        mem = [m for m in fake.tables["team_memberships"]
+               if m.get("user_id") == _U2 and m.get("team_id") == "team-1"]
+        assert len(mem) == 1 and mem[0]["role"] == "member"
+        # single-use token consumed
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse", otp_code="123456")
+        assert ei.value.status == 400
+
+    def test_accept_mismatch_override_path(self, fake):
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        res = invitation_accept(fake, inv["token"], _U2,
+                                user_email="alice@example.com",
+                                mismatch_override="accept-mismatch",
+                                otp_code="123456")
+        assert res["accepted_via"] == "accept-mismatch"
+        assert fake.tables["invitations"][0]["accepted_mismatch"] is True
+
+    def test_capacity_402_does_not_burn_code(self, fake):
+        """The quota/capacity 402s fire BEFORE the conditional commit — a
+        legit user who proved email control keeps their code (retryable with
+        the SAME code once a seat frees)."""
+        inv = self._pending_invite(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        for t in fake.tables["teams"]:          # cap at current members
+            if t.get("id") == "team-1":
+                t["max_users"] = 1
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="alice@example.com",
+                              mismatch_override="fuse", otp_code="123456")
+        assert ei.value.status == 402
+        row = fake.tables["invitations"][0]
+        assert row.get("accepted_at") is None  # invite NOT consumed
+        assert row["otp_hash"] is not None     # code NOT burned
+        # free the seat → the SAME code accepts
+        for t in fake.tables["teams"]:
+            if t.get("id") == "team-1":
+                t["max_users"] = 100
+        res = invitation_accept(fake, inv["token"], _U2,
+                                user_email="alice@example.com",
+                                mismatch_override="fuse", otp_code="123456")
+        assert res["team_id"] == "team-1"
+
+    # ── admin resend / expire ──────────────────────────────────────────
+
+    def test_resend_rotates_token_and_expiry(self, fake):
+        inv = self._pending_invite(fake)
+        old_hash = fake.tables["invitations"][0]["lookup_hash"]
+        res = invitation_resend(fake, inv["id"], "team-1",
+                                actor_user_id=_U3)
+        assert res["token"] and res["token"] != inv["token"]
+        assert res["email"] == "bob@example.com"
+        row = fake.tables["invitations"][0]
+        assert row["lookup_hash"] == lookup_hash(res["token"])
+        assert row["lookup_hash"] != old_hash
+        assert row["expires_at"] > inv["expires_at"]  # refreshed +7d
+        # a rotated-in OTP is cleared by the resend
+        self._otp_for(fake, inv["id"], "123456")
+        invitation_resend(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert fake.tables["invitations"][0]["otp_hash"] is None
+
+    def test_resend_accepted_409(self, fake):
+        inv = self._pending_invite(fake)
+        invitation_accept(fake, inv["token"], _U2, user_email="bob@example.com")
+        with pytest.raises(InvitationError) as ei:
+            invitation_resend(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert ei.value.status == 409
+
+    def test_expire_marks_pending_and_blocks_accept(self, fake):
+        inv = self._pending_invite(fake)
+        res = invitation_expire(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert res["expired"] is True
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "expired"
+        assert row["expires_at"]
+        # the expired invite cannot be accepted (token or by-id)
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U2,
+                              user_email="bob@example.com")
+        assert ei.value.status == 400
+        # expire is idempotent for already-expired
+        res2 = invitation_expire(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert res2.get("already") is True
+
+    def test_expire_accepted_409(self, fake):
+        inv = self._pending_invite(fake)
+        invitation_accept(fake, inv["token"], _U2, user_email="bob@example.com")
+        with pytest.raises(InvitationError) as ei:
+            invitation_expire(fake, inv["id"], "team-1", actor_user_id=_U3)
+        assert ei.value.status == 409

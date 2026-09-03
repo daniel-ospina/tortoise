@@ -9311,7 +9311,9 @@ async def invite_to_team(body: dict, user: dict = Depends(get_current_user)):  #
 
         dup = reg.query(
             "MATCH (i:Invitation {team_id:$tid, email:$email}) "
-            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status <> 'revoked') RETURN count(i)",
+            "WHERE i.accepted_at IS NULL AND "
+            "(i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+            "RETURN count(i)",
             params={"tid": team_id, "email": email},
         ).result_set[0][0]
         if dup:
@@ -9373,7 +9375,7 @@ async def invite_info(token: str):
         reg = sdk._get_registry()
         rows = reg.query(
             "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
-            "AND (i.status IS NULL OR i.status <> 'revoked') "
+            "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
             "RETURN i.id, i.team_id, i.role, i.inviter_email, i.expires_at, i.token_hash",
         ).result_set
         for iid, tid, role, ie, exp, th in rows:  # noqa: B007
@@ -9471,6 +9473,15 @@ async def accept_invite(body: dict, request: Request,
     # never consume budget (see _check_invite_accept_rate_limit docstring).
     await _check_invite_accept_rate_limit(request, token)
 
+    # #2003 (W7): v2 mismatch interception — the 3-path fusion choice. Only
+    # opted-in clients (Accept: ...onboarding+json;version=2) reach this
+    # branch; non-v2 requests fall through to the legacy lanes below with the
+    # hard-403 email mismatch BYTE-UNCHANGED (DE2E-7).
+    if _onboarding_v2(request):
+        _v2_invite = _resolve_v2_mismatch(token, user)
+        if _v2_invite is not None:
+            return await _accept_mismatch_v2(body, request, user, _v2_invite)
+
     # ── Supabase mode (plan Task 4): lookup_hash verify + role preserved ──
     from tortoise.supabase_control import (
         InvitationError,
@@ -9489,6 +9500,10 @@ async def accept_invite(body: dict, request: Request,
             async with _team_create_lock(user["user_id"]):
                 res = _sb_accept(get_control_plane(), token, user["user_id"],
                                  user_email=user.get("email"))
+            # #2003 (W7): arm the invitee's member slot (fail-soft; never
+            # masks the accept response).
+            _arm_invitee_member_progress(res.get("team_id") or "",
+                                          user["user_id"])
             _forget_invite_accept(request, token)
             return res
         except InvitationError as e:
@@ -9508,7 +9523,8 @@ async def accept_invite(body: dict, request: Request,
     reg = sdk._get_registry()
     rows = reg.query(
         "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
-        "AND (i.status IS NULL OR i.status <> 'revoked') RETURN i.id, i.team_id, i.email, i.role, i.token_hash, i.expires_at",
+        "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+        "RETURN i.id, i.team_id, i.email, i.role, i.token_hash, i.expires_at",
     ).result_set
     invite = None
     for iid, tid, email, role, th, exp in rows:
@@ -9605,8 +9621,43 @@ async def accept_invite(body: dict, request: Request,
             raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
     # #1880: drop the fake invite-{iid} membership row (ghost-members bug)
     _delete_fake_invite_membership(sdk, invite["team_id"], invite["id"])
+    # #2003 (W7): arm the invitee's member slot (fail-soft; never masks the
+    # accept response).
+    _arm_invitee_member_progress(invite["team_id"], user["user_id"])
     _forget_invite_accept(request, token)
     return {"team_id": invite["team_id"], "role": invite["role"]}
+
+
+def _resolve_v2_mismatch(token: str, user: dict) -> dict | None:
+    """#2003 (W7): resolve the invitation on the ACTIVE lane and report a v2
+    email mismatch (session email != invite email). None → no mismatch or
+    unresolvable invite → the legacy flow runs (and raises its own 400/403
+    untouched). Never consumes anything."""
+    user_email = (user.get("email") or "").lower().strip()
+    if not user_email:
+        return None
+    from tortoise.supabase_control import (
+        get_control_plane,
+        invitation_row_by_token,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        row = invitation_row_by_token(get_control_plane(), token)
+        if not row:
+            return None
+        if (row.get("email") or "").lower().strip() == user_email:
+            return None  # email match — the legacy one-click accept runs
+        return {"lane": "supabase", "id": row["id"], "team_id": row["team_id"],
+                "email": row.get("email") or "",
+                "role": row.get("role") or "member", "token": token}
+    sdk = _make_sdk(namespace="registry")
+    inv = _registry_pending_invite_by_token(sdk, token)
+    if not inv:
+        return None
+    if (inv["email"] or "").lower().strip() == user_email:
+        return None  # email match — the legacy one-click accept runs
+    return {"lane": "registry", "id": inv["id"], "team_id": inv["team_id"],
+            "email": inv["email"], "role": inv["role"], "token": token}
 
 
 def _forget_invite_accept(request: Request, token: str) -> None:
@@ -9632,6 +9683,633 @@ def _forget_invite_accept(request: Request, token: str) -> None:
         bucket = buckets.get(key)
         if bucket:
             bucket.pop()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W7 (#2003): invite-accept fusion v2 — 3-path choice + OTP proof-of-control
+# ─────────────────────────────────────────────────────────────────────────────
+# Additive contract on POST /v1/invites/accept (epic plan §6 I-6, DE2E-7): the
+# v2 Accept header (application/vnd.tortoise.onboarding+json;version=2) turns
+# the email-mismatch hard-403 into a 3-path fusion choice — fuse (default,
+# NEVER silent) | new account | accept-with-mismatch. BOTH mismatch-override
+# paths (fuse + accept-with-mismatch) require OTP proof-of-control of the
+# INVITEE email (privilege-accumulation / invite-hijack closed — epic risk
+# register High). Legacy callers (no header) are byte-unchanged (DE2E-7
+# asserts the 403 body verbatim).
+
+_V2_ACCEPT_MEDIA = "application/vnd.tortoise.onboarding+json"
+_V2_MISMATCH_PATHS = ("fuse", "accept-mismatch")
+
+# OTP lifecycle defaults (env-tunable at call time; RATE_LIMIT_DISABLED=1
+# opts out).
+_OTP_TTL_S = 600            # 10-minute proof window
+_OTP_MAX_ATTEMPTS = 5       # failed-verify budget per issued code
+_OTP_MAX_ATTEMPTS_WITHIN = 0  # (unused — per-code budget above)
+
+# OTP send caps (POST /v1/invites/otp): per-token / per-IP / global
+# sliding-window buckets — same shape as the invite-accept limiter (#1134).
+_INVITE_OTP_TOKEN_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_OTP_TOKEN_LOCK = asyncio.Lock()
+_INVITE_OTP_IP_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_OTP_IP_LOCK = asyncio.Lock()
+_INVITE_OTP_GLOBAL_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_OTP_GLOBAL_LOCK = asyncio.Lock()
+
+# Admin resend caps (POST /v1/invites/{id}/resend): per-invitation sliding
+# window (a resent link re-activates a mailbox that may be stale — an admin
+# spamming resend is an abuse signal).
+_INVITE_RESEND_BUCKETS: dict[tuple[str, str], list[float]] = defaultdict(list)
+_INVITE_RESEND_LOCK = asyncio.Lock()
+
+
+def _onboarding_v2(request: Request) -> bool:
+    """v2 Accept-header opt-in sniff (case-insensitive, param-tolerant)."""
+    accept = (request.headers.get("accept") or "").lower()
+    return _V2_ACCEPT_MEDIA in accept and "version=2" in accept
+
+
+def _mint_otp_code() -> str:
+    """Cryptographically random 6-digit code. NEVER returned by the API —
+    the invitee mailbox is the only channel (same posture as the invite
+    link itself)."""
+    import secrets
+    return f"{secrets.randbelow(1_000_000):06d}"
+
+
+async def _check_invite_otp_rate_limit(request: Request, token: str) -> None:
+    """Per-token / per-IP / global sliding-window caps on OTP sends.
+    RATE_LIMIT_DISABLED=1 opts out (test env). Raises 429 with error_code
+    over_invite_otp_rate_limit + Retry-After when exhausted."""
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    import hashlib as _hashlib
+    token_key = _hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    ip = _normalize_mapped_ipv6(ip)
+    detail = {
+        "error_code": "over_invite_otp_rate_limit",
+        "message": "Too many verification-code requests. Please try again later.",
+    }
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_OTP_TOKEN_BUCKETS, lock=_INVITE_OTP_TOKEN_LOCK,
+        limit=_int_env("TORTOISE_INVITE_OTP_TOKEN_LIMIT", 5),
+        window_s=_int_env("TORTOISE_INVITE_OTP_TOKEN_WINDOW_S", 15 * 60),
+        key=("invite-otp", "token", token_key),
+        detail=detail, retry_after_s=None)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_OTP_IP_BUCKETS, lock=_INVITE_OTP_IP_LOCK,
+        limit=_int_env("TORTOISE_INVITE_OTP_IP_LIMIT", 10),
+        window_s=_int_env("TORTOISE_INVITE_OTP_IP_WINDOW_S", 3600),
+        key=("invite-otp", "ip", ip),
+        detail=detail, retry_after_s=None)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_OTP_GLOBAL_BUCKETS, lock=_INVITE_OTP_GLOBAL_LOCK,
+        limit=_int_env("TORTOISE_INVITE_OTP_GLOBAL_LIMIT", 200),
+        window_s=_int_env("TORTOISE_INVITE_OTP_GLOBAL_WINDOW_S", 3600),
+        key=("invite-otp", "global"),
+        detail=detail, retry_after_s=None)
+
+
+async def _check_invite_resend_rate_limit(request: Request,
+                                          invitation_id: str) -> None:
+    """Per-invitation sliding-window cap on admin resends (default 5 / 24h)."""
+    if os.environ.get("RATE_LIMIT_DISABLED") == "1":
+        return
+    ip = (getattr(request.state, "client_ip", None)
+          or (request.client.host if request.client else None))
+    ip = _normalize_mapped_ipv6(ip)
+    await _check_ip_bucket_rate_limit(
+        request, buckets=_INVITE_RESEND_BUCKETS, lock=_INVITE_RESEND_LOCK,
+        limit=_int_env("TORTOISE_INVITE_RESEND_LIMIT", 5),
+        window_s=_int_env("TORTOISE_INVITE_RESEND_WINDOW_S", 24 * 3600),
+        key=("invite-resend", "invitation", invitation_id),
+        detail={"error_code": "over_invite_resend_rate_limit",
+                "message": "Too many resend requests for this invitation."},
+        retry_after_s=None)
+
+
+def _registry_pending_invite_by_token(sdk, token: str) -> dict | None:
+    """Resolve a PENDING + unexpired invitation by plaintext token (registry
+    lane). Mirrors the accept's token scan; None on unknown / consumed /
+    revoked / expired (the caller falls through to the legacy flow, which
+    raises the matching 400)."""
+    from tortoise.auth import verify_api_key as _verify2
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation) WHERE i.accepted_at IS NULL "
+        "AND (i.status IS NULL OR (i.status <> 'revoked' AND i.status <> 'expired')) "
+        "RETURN i.id, i.team_id, i.email, i.role, i.token_hash, i.expires_at",
+    ).result_set
+    now = datetime.now(UTC).isoformat()
+    for iid, tid, email, role, th, exp in rows:
+        if _verify2(token, th):
+            if exp and exp < now:
+                return None
+            return {"id": iid, "team_id": tid, "email": email or "",
+                    "role": role or "member", "expires_at": exp}
+    return None
+
+
+def _registry_otp_issue(sdk, invite_id: str, *, code_hash: str,
+                        expires_at: str, sent_at: str) -> bool:
+    """Record a fresh OTP (hash-only) on a pending registry invitation.
+    Returns False when the invitation is gone/consumed (concurrent accept
+    won) — the caller 4xxs."""
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation {id:$id}) "
+        "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+        "SET i.otp_hash = $hash, i.otp_expires_at = $exp, i.otp_attempts = 0, "
+        "i.otp_sent_at = $sent, i.otp_verified_at = null, i.otp_verified_by = null "
+        "RETURN count(i)",
+        params={"id": invite_id, "hash": code_hash, "exp": expires_at,
+                "sent": sent_at},
+    ).result_set
+    return bool(rows and rows[0][0])
+
+
+def _registry_otp_verify(sdk, invite_id: str, code: str, *,
+                         now: str) -> str:
+    """Registry-lane OTP verify (NON-consuming). Outcome strings match
+    supabase_control.invitation_otp_verify: ok | invalid | expired | no_otp.
+
+    The stored otp_hash is a salted PBKDF2 of the code — verification goes
+    through verify_api_key (deterministic), never a re-hash comparison. On
+    "ok" the code stays OUTSTANDING: it is consumed exactly once, atomically
+    with the accept commit (the executor's conditional single-use write), so
+    a non-consuming 402 (capacity/free-cap) never burns the code (P2-3).
+    """
+    from tortoise.auth import verify_api_key as _verify_otp
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation {id:$id}) "
+        "RETURN i.otp_hash, i.otp_expires_at, i.otp_attempts, i.otp_verified_at, "
+        "i.accepted_at, i.status",
+        params={"id": invite_id},
+    ).result_set
+    if not rows:
+        return "no_otp"
+    otp_hash, otp_expires_at, _otp_attempts, otp_verified_at, accepted_at, status = rows[0]
+    if accepted_at is not None or status == "revoked" or status == "expired":
+        return "no_otp"
+    if otp_verified_at is not None:
+        return "no_otp"  # already consumed at commit
+    if not otp_hash:
+        return "no_otp"
+    if otp_expires_at and otp_expires_at < now:
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, "
+            "i.otp_expires_at = null, i.otp_attempts = 0",
+            params={"id": invite_id},
+        )
+        return "expired"
+    if not _verify_otp(code, otp_hash):
+        # atomic-ish increment (single statement); >= budget clears the code.
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) "
+            "SET i.otp_attempts = COALESCE(i.otp_attempts, 0) + 1",
+            params={"id": invite_id},
+        )
+        recheck = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.otp_attempts",
+            params={"id": invite_id},
+        ).result_set
+        if recheck and int(recheck[0][0] or 0) >= _OTP_MAX_ATTEMPTS:
+            reg.query(
+                "MATCH (i:Invitation {id:$id}) SET i.otp_hash = null, "
+                "i.otp_expires_at = null, i.otp_attempts = 0",
+                params={"id": invite_id},
+            )
+        return "invalid"
+    # Match → reset the budget, keep the code outstanding (consume happens
+    # at the accept commit — never on a pre-commit 402).
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) SET i.otp_attempts = 0",
+        params={"id": invite_id},
+    )
+    return "ok"
+
+
+def _otp_verify_invite_http_error(outcome: str) -> HTTPException | None:
+    """Map a lane-neutral OTP verify outcome to the HTTP 403 shape (None for
+    ok). Wrong/expired codes are blocked with a distinguishable error_code —
+    the OTP is consumed only on success."""
+    if outcome == "ok":
+        return None
+    detail = {
+        "error_code": "invite_otp_invalid",
+        "message": "Invalid or expired verification code.",
+    }
+    if outcome == "no_otp":
+        detail = {
+            "error_code": "invite_otp_invalid",
+            "message": "No outstanding verification code — request a new one.",
+        }
+    return HTTPException(status_code=403, detail=detail)
+
+
+def _arm_invitee_member_progress(team_id: str, user_id: str) -> None:
+    """#2003 (W7): post-accept arming of the invitee's per-member slot in the
+    org's OnboardingState node — the inline-skippable affordance's mechanics.
+
+    - create-on-write seam: the node is ensured (never lazy-init'd into a
+      second node — W5's idempotent keyed MERGE).
+    - the member entry is user-scoped ({user_id: []}) — it NEVER advances an
+      org-level step (member_progress keys are user_ids, not steps) and NEVER
+      evaluates/fakes org completion (DE2E-8 And-clause). Skipping the inline
+      setup = no further write; org steps stay exactly as they were.
+    Fail-soft: an arming failure never masks the accept response (the accept
+    is the security boundary; the slot self-heals on the next checkpoint)."""
+    try:
+        proj = _team_proj(team_id)
+        # write_member_progress runs W5's create-on-write seam internally:
+        # an absent node is initialized with the byte-identical eager-init
+        # fragment every team-create lane applies (team-named auto-satisfied
+        # at init, exactly as register/org-create do) — the arming NEVER adds
+        # a member-scoped step or advances a member step to the org level.
+        _os.write_member_progress(proj, team_id, user_id, [])
+    except Exception:
+        _logger.warning(
+            "invite accept: member_progress arming failed for user %s on org %s",
+            user_id, team_id, exc_info=True)
+
+
+async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
+                                       path: str, code: str) -> dict:
+    """Registry-lane mismatch-override accept (W7 v2) — runs ONLY after the
+    OTP proof has been verified and consumed (single-use) by the caller. The
+    CURRENT account joins the invited team under the invited role; the invite
+    records accepted_via / accepted_mismatch / fused_from_email / OTP proof —
+    never silent. Mirrors the legacy token-accept check ordering (capacity /
+    free-cap / suspension pre-checks stay NON-consuming 402s)."""
+    reg = sdk._get_registry()
+    team_id = invite["team_id"]
+    # OTP gate INSIDE the executor (defense-in-depth, mirrors the supabase
+    # seam): a mismatch override only proceeds while a valid code is
+    # outstanding — verify is NON-consuming; the code is consumed at the
+    # conditional commit below (never on a pre-commit 402).
+    now = datetime.now(UTC).isoformat()
+    outcome = _registry_otp_verify(sdk, invite["id"], code, now=now)
+    err = _otp_verify_invite_http_error(outcome)
+    if err:
+        raise err
+    # Check not already a member
+    existing = reg.query(
+        "MATCH (m:Membership {team_id:$tid, user_id:$uid, status:'active'}) RETURN count(m)",
+        params={"tid": team_id, "uid": user["user_id"]},
+    ).result_set[0][0]
+    if existing:
+        raise HTTPException(status_code=409, detail="Already a member of this team")
+    _ensure_not_suspended(await _team_node(team_id))
+    async with _team_create_lock(user["user_id"]):
+        _team_row = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": team_id},
+        ).result_set
+        _team_tier = (_team_row[0][0].get("tier") if _team_row else None) or "free"
+        if _team_tier == "free" and await _count_active_free_memberships(user["user_id"]) >= 1:
+            raise HTTPException(
+                status_code=402,
+                detail="You already have a free team — this team requires a paid plan to join")
+    async with _invite_team_lock(team_id):
+        _cap_row = reg.query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": team_id},
+        ).result_set
+        _cap_max = (_cap_row[0][0].get("max_users") if _cap_row else None)
+        if _cap_max is not None:
+            _cap_active = reg.query(
+                "MATCH (m:Membership {team_id:$tid, status:'active'}) RETURN count(m)",
+                params={"tid": team_id},
+            ).result_set[0][0]
+            if _cap_active >= int(_cap_max):
+                raise HTTPException(
+                    status_code=402,
+                    detail="Team member limit reached — upgrade to invite more")
+        # Token single-use + OTP single-use: CONDITIONAL write (still-pending
+        # guard) + re-check — a concurrent accept (email-match Bob racing
+        # OTP-verified Alice on the same token) loses here and the loser
+        # bails with 409, never a second membership. The OTP is consumed in
+        # the SAME statement (single-use at commit — a 402 above never burns
+        # it). The accept also re-reads the recorded proof post-write so the
+        # committed row carries otp_verified_at/by.
+        reg.query(
+            "MATCH (i:Invitation {id:$id}) "
+            "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
+            "SET i.accepted_at = $now, i.accepted_by = $uid, i.accepted_via = $via, "
+            "i.accepted_mismatch = true, i.fused_from_email = $fused, "
+            "i.otp_hash = null, i.otp_expires_at = null, i.otp_attempts = 0, "
+            "i.otp_verified_at = $now, i.otp_verified_by = $uid",
+            params={"id": invite["id"], "now": now, "uid": user["user_id"],
+                    "via": path, "fused": invite["email"]},
+        )
+        consumed = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at",
+            params={"id": invite["id"]},
+        ).result_set
+        if not consumed or consumed[0][0] is None:
+            raise HTTPException(status_code=409,
+                                detail="Invitation has already been accepted")
+        try:
+            sdk.membership_create(team_id, user["user_id"], invite["role"])
+        except Exception as e:
+            _delete_fake_invite_membership(sdk, team_id, invite["id"])
+            raise HTTPException(status_code=402, detail=f"Could not join team: {e}")  # noqa: B904
+        _delete_fake_invite_membership(sdk, team_id, invite["id"])  # #1880
+    return {"team_id": team_id, "role": invite["role"]}
+
+
+async def _accept_mismatch_v2(body: dict, request: Request, user: dict,
+                              invite: dict) -> dict:
+    """W7 v2 mismatch-override accept — the 3-path fusion choice executor.
+
+    Contract (epic I-6 / DE2E-7):
+    1. no path        → 409 discovery shape (3-path choice, fuse default,
+                        otp_required) — never silent.
+    2. path + no OTP  → 403 blocked (BOTH override paths OTP-gated).
+    3. path + OTP     → verify (single-use) then execute the override.
+    """
+    user_email = (user.get("email") or "").lower().strip()
+    if not user_email:
+        raise HTTPException(status_code=422, detail="A verified email is required")
+    path = body.get("path")
+    if path is None:
+        raise HTTPException(status_code=409, detail={
+            "error_code": "invite_email_mismatch",
+            "message": ("This invitation was sent to a different email than "
+                        "your account's. Choose how you'd like to continue."),
+            "choice": {
+                "paths": list(_V2_MISMATCH_PATHS),
+                "default_path": "fuse",
+                "otp_required": True,
+                "invited_email": invite["email"],
+            },
+        })
+    if path not in _V2_MISMATCH_PATHS:
+        raise HTTPException(status_code=422,
+                            detail="path must be 'fuse' or 'accept-mismatch'")
+    otp_code = body.get("otp")
+    if not isinstance(otp_code, str) or not otp_code:
+        raise HTTPException(status_code=403, detail={
+            "error_code": "invite_mismatch_otp_required",
+            "message": ("A verification code is required to accept on a "
+                        "mismatched email."),
+            "invited_email": invite["email"],
+        })
+
+    token = invite["token"]
+    from tortoise.supabase_control import (
+        InvitationError as _InvErr,
+    )
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        invitation_accept as _sb_accept_v2,
+    )
+    if is_supabase_enabled():
+        # The seam verifies the outstanding code itself (non-consuming) and
+        # consumes it atomically at the conditional single-use commit — a
+        # code-less or wrong-code override is blocked before any write.
+        try:
+            res = _sb_accept_v2(get_control_plane(), token, user["user_id"],
+                                user_email=user_email, mismatch_override=path,
+                                otp_code=otp_code)
+        except _InvErr as e:
+            if e.status == 403 and "Verification code" in str(e):
+                raise HTTPException(status_code=403, detail={
+                    "error_code": "invite_otp_invalid",
+                    "message": str(e)}) from None
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        _arm_invitee_member_progress(res["team_id"], user["user_id"])
+        _forget_invite_accept(request, token)
+        return {**res, "mismatch": {"invited_email": invite["email"],
+                                     "recorded": True}}
+
+    # registry / selfhost lane — the executor verifies the outstanding code
+    # (non-consuming) and consumes it atomically at the accept commit.
+    sdk = _make_sdk(namespace="registry")
+    res = await _registry_mismatch_accept_v2(sdk, invite, user, path, otp_code)
+    _arm_invitee_member_progress(res["team_id"], user["user_id"])
+    _forget_invite_accept(request, token)
+    return {**res, "accepted_via": path,
+            "mismatch": {"invited_email": invite["email"], "recorded": True}}
+
+
+@app.post("/v1/invites/otp")
+async def invite_otp(body: dict, request: Request,
+                     user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2003 (W7): issue an OTP proof-of-control code to the INVITEE email.
+
+    Session-authed. The code is emailed best-effort to the invite address and
+    NEVER returned by the API. Used by the v2 mismatch-override accept paths
+    (fuse / accept-with-mismatch) — the invitee-email holder must prove
+    control either way (invite-hijack closed). Rate caps: per-token / per-IP
+    / global sliding windows (RATE_LIMIT_DISABLED=1 opts out).
+    """
+    token = (body or {}).get("token")
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=422, detail="token required")
+    await _check_invite_otp_rate_limit(request, token)
+
+    user_email = (user.get("email") or "").lower().strip()
+    if not user_email:
+        raise HTTPException(status_code=422,
+                            detail="A verified session email is required")
+
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        invitation_otp_mint as _sb_otp_mint,
+    )
+
+    def _do_send(invite: dict, team_name: str | None) -> dict:
+        code = _mint_otp_code()
+        from tortoise.email_notify import send_otp_email
+        now = datetime.now(UTC)
+        expires_at = (now + timedelta(seconds=_OTP_TTL_S)).isoformat()
+        if is_supabase_enabled():
+            ok = _sb_otp_mint(get_control_plane(), invite["id"],
+                              code_hash=hash_api_key(code),
+                              expires_at=expires_at, sent_at=now.isoformat())
+        else:
+            ok = _registry_otp_issue(_make_sdk(namespace="registry"),
+                                     invite["id"], code_hash=hash_api_key(code),
+                                     expires_at=expires_at,
+                                     sent_at=now.isoformat())
+        if not ok:
+            raise HTTPException(status_code=400,
+                                detail="Invite no longer pending — cannot send a code")
+        try:  # best-effort email — never blocks the response (#307 posture)
+            send_otp_email(team_name or "your team", invite["email"], code)
+        except Exception as _e:
+            _logger.warning("invite otp: email schedule failed for %s (%s)",
+                            invite["id"], _e)
+        return {"status": "otp_sent", "expires_in_s": _OTP_TTL_S}
+
+    try:
+        if is_supabase_enabled():
+            from tortoise.supabase_control import invitation_row_by_token
+            row = invitation_row_by_token(get_control_plane(), token)
+            if not row:
+                raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+            if (row.get("email") or "").lower() == user_email:
+                raise HTTPException(status_code=400, detail={
+                    "error_code": "otp_not_required",
+                    "message": "This invitation matches your email — accept directly."})
+            from tortoise.supabase_control import team_by_id as _team_by_id
+            team = _team_by_id(get_control_plane(), row["team_id"])
+            return _do_send({"id": row["id"], "email": row["email"],
+                             "team_id": row["team_id"]},
+                            (team or {}).get("name"))
+        invite = _registry_pending_invite_by_token(_make_sdk(namespace="registry"),
+                                                   token)
+        if not invite:
+            raise HTTPException(status_code=400, detail="Invalid or expired invite token")
+        if (invite["email"] or "").lower() == user_email:
+            raise HTTPException(status_code=400, detail={
+                "error_code": "otp_not_required",
+                "message": "This invitation matches your email — accept directly."})
+        sdk = _make_sdk(namespace="registry")
+        _team_row = sdk._get_registry().query(
+            "MATCH (t:Team {id:$id}) RETURN properties(t)",
+            params={"id": invite["team_id"]},
+        ).result_set
+        team_name = (_team_row[0][0].get("name") if _team_row else None)
+        return _do_send(invite, team_name)
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500,  # noqa: B904
+                            detail="Invites unavailable (control plane error)")
+
+
+@app.post("/v1/invites/{invitation_id}/resend")
+async def resend_invite(invitation_id: str, team_id: str, request: Request,
+                        user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2003 (W7): admin resend — rotate the invitation token (a fresh
+    plaintext is returned once, hash-only at rest) and re-send the email
+    (Slack-style). Owner/admin only (mirrors DELETE /v1/invites/{id} RBAC).
+    Rate-capped per invitation (default 5 / 24h)."""
+    from tortoise.supabase_control import (
+        InvitationError,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        invitation_resend as _sb_resend,
+    )
+    await _require_owner_admin(user["user_id"], team_id)
+    await _check_invite_resend_rate_limit(request, invitation_id)
+
+    if is_supabase_enabled():
+        try:
+            res = _sb_resend(get_control_plane(), invitation_id, team_id,
+                             actor_user_id=user["user_id"])
+        except InvitationError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        try:
+            from tortoise.email_notify import send_invite_email
+            send_invite_email(team_id, res["email"], res["role"],
+                              res["token"], invitation_id)
+        except Exception as _e:
+            _logger.warning("invite resend: email schedule failed (%s)", _e)
+        return {"invite_id": invitation_id, "status": "resent",
+                "token": res["token"], "expires_at": res["expires_at"],
+                "role": res["role"]}
+
+    # registry / selfhost lane
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation {id:$id}) RETURN i.team_id, i.email, i.role, "
+        "i.accepted_at, i.status, i.expires_at",
+        params={"id": invitation_id},
+    ).result_set
+    if not rows or rows[0][0] != team_id:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    _iid, _email, _role, _accepted_at, _status, _exp = invitation_id, *rows[0][1:]
+    if _accepted_at is not None or _status == "accepted":
+        raise HTTPException(status_code=409,
+                            detail="Invitation already accepted — cannot resend")
+    if _status == "revoked":
+        raise HTTPException(status_code=409,
+                            detail="Invitation has been revoked — cannot resend")
+    if _exp and _exp < datetime.now(UTC).isoformat():
+        raise HTTPException(status_code=400,
+                            detail="Invite token expired — create a new invite instead")
+    import uuid as _uuid_r
+    from datetime import timedelta as _td_r
+    token = str(_uuid_r.uuid4())
+    token_hash = hash_api_key(token)
+    new_exp = (datetime.now(UTC) + _td_r(days=7)).isoformat()
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) SET i.token_hash = $th, "
+        "i.expires_at = $exp, i.otp_hash = null, i.otp_expires_at = null, "
+        "i.otp_attempts = 0, i.otp_verified_at = null, i.otp_verified_by = null",
+        params={"id": invitation_id, "th": token_hash, "exp": new_exp},
+    )
+    _team_row = reg.query(
+        "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": team_id},
+    ).result_set
+    try:  # best-effort email
+        from tortoise.email_notify import send_invite_email
+        send_invite_email(_team_row[0][0].get("name") or team_id, _email,
+                          _role, token, invitation_id)
+    except Exception as _e:
+        _logger.warning("invite resend: email schedule failed (%s)", _e)
+    return {"invite_id": invitation_id, "status": "resent", "token": token,
+            "expires_at": new_exp, "role": _role}
+
+
+@app.post("/v1/invites/{invitation_id}/expire")
+async def expire_invite(invitation_id: str, team_id: str,
+                        user: dict = Depends(get_current_user)):  # noqa: B008
+    """#2003 (W7): admin expire-now — a PENDING invitation dies immediately
+    (link dead, leaves pending lists, Pro seat freed). Owner/admin only.
+    Consumed invitations are not expire-able (409)."""
+    from tortoise.supabase_control import (
+        InvitationError,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        invitation_expire as _sb_expire,
+    )
+    await _require_owner_admin(user["user_id"], team_id)
+    if is_supabase_enabled():
+        try:
+            return _sb_expire(get_control_plane(), invitation_id, team_id,
+                              actor_user_id=user["user_id"])
+        except InvitationError as e:
+            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+    sdk = _make_sdk(namespace="registry")
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (i:Invitation {id:$id}) RETURN i.team_id, i.status, i.accepted_at",
+        params={"id": invitation_id},
+    ).result_set
+    if not rows or rows[0][0] != team_id:
+        raise HTTPException(status_code=404, detail="Invitation not found")
+    _status, _accepted_at = rows[0][1], rows[0][2]
+    if _accepted_at is not None or _status == "accepted":
+        raise HTTPException(status_code=409,
+                            detail="Invitation already accepted — cannot expire")
+    if _status in ("revoked", "expired"):
+        return {"expired": True, "already": True, "invitation_id": invitation_id}
+    reg.query(
+        "MATCH (i:Invitation {id:$id}) "
+        "WHERE i.status IS NULL OR i.status = 'pending' "
+        "SET i.status = 'expired', i.expires_at = $now, i.expired_by = $by",
+        params={"id": invitation_id, "now": datetime.now(UTC).isoformat(),
+                "by": user["user_id"]},
+    )
+    _delete_fake_invite_membership(sdk, team_id, invitation_id)  # #1880
+    return {"expired": True, "invitation_id": invitation_id}
+
 
 
 @app.get("/v1/invites")
@@ -9815,13 +10493,20 @@ async def accept_invite_by_id(invitation_id: str,
             # #1954: the join-side free-cap + membership write are
             # read-then-write — serialize per user (see _team_create_lock).
             async with _team_create_lock(user["user_id"]):
-                return invitation_accept_by_id(
+                res = invitation_accept_by_id(
                     get_control_plane(), invitation_id, user["user_id"],
                     user.get("email"))
         except InvitationError as e:
             raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+        # #2003 (W7): arm the invitee's member slot (fail-soft).
+        _arm_invitee_member_progress(res.get("team_id") or "",
+                                      user["user_id"])
+        return res
     sdk = _make_sdk(namespace="registry")
-    return await _registry_accept_by_id(sdk, invitation_id, user)
+    res = await _registry_accept_by_id(sdk, invitation_id, user)
+    # #2003 (W7): arm the invitee's member slot (fail-soft).
+    _arm_invitee_member_progress(res.get("team_id") or "", user["user_id"])
+    return res
 
 
 @app.delete("/v1/invites/pending/{invitation_id}")

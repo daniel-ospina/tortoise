@@ -108,7 +108,8 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260826000001_revoke_signup_token.sql',
                '20260827000002_user_identity_profile.sql',
                '20260827000001_blog_cms.sql',
-               '20260901000001_graphs_and_key_scopes.sql'];  // C1 #2110 — appended last: timestamp sorts after the 2026 batch (fresh-DB safe)
+               '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110 — appended last: timestamp sorts after the 2026 batch (fresh-DB safe)
+               '20260902000001_invite_fusion_v2.sql'];  // #2003 (W7) — invite-fusion v2 OTP/mismatch columns; timestamp sorts after the C1 migration
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {
