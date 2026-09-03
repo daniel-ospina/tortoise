@@ -15,6 +15,7 @@
 | `PointPromoted` | 1 | `TortoiseSDK.promote_point` (#785) | `point` (full snapshot) | SDK |
 | `OperatorPromoted` | 1 | `TortoiseSDK.promote_point` R16 (#785) | `point` (full snapshot), `id` | SDK |
 | `OperatorAnnotated` | 1 | `TortoiseSDK.annotate_operator` | `id`, `bias`, `precision`, `consistency`, `directness` | SDK |
+| `ObjectSuperseded` | 1 | hosted commit §6b (`hosted_api._execute_commit_writes`) + capture (`sdk._extract_session_v2`) + eval (`tools/longmem_eval/ingest_v2`) — entity-level supersession records; capture/eval emit via the shared `commit_ops.apply_supersessions`, hosted §6b runs its own inline consumer (same record shape; phase-2 migration tracked) (#1350/#2164) | `id`, `name`, `supersedes_by`, `session_id`, `evidence` (capture/eval id-style — all fields ride the JSONL line via extra kwargs; hosted §6b journals id-only and omits `session_id`) | Hosted §6b / SDK capture / eval ingest |
 
 > ⛔ **`ClaimStateChanged` is NOT an event type** (plan-review P1). Every claim
 > transition maps to one of the five concrete types above; **challenged is a
