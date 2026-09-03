@@ -40,6 +40,36 @@ pytest warnings summary (the visible channel — CI output is buffered to
 /tmp/pytest.log). The allowlist is a config/ DATA file so allowlist
 changes select tier-2 ``full=false`` (config changes select the core
 surface), per the #2090 scoping doc's "Lint tripwire" section.
+
+Fail-loud semantics (code-review corrected): a RuntimeError at module
+import is a pytest COLLECTION error → pytest aborts the containing run
+by default (no --continue-on-collection-errors in CI; observed
+"Interrupted: 1 error during collection"). The error message enumerates
+EVERY violating module + its first patch-site line, so diagnosis is
+complete even though nothing else in that run executes.
+
+Known limitations (stated so the gate is not over-trusted):
+- Enforcement fires only when pytest collects this module (tier1 = the
+  base of every CI selection and of full local runs). Per-file dev runs
+  (``pytest tests/test_foo.py``) bypass it — the tripwire is a CI gate,
+  red in CI but possibly green locally until the full suite is collected.
+- The patch/pin forms recognized are enumerated (see the helpers): a
+  spelling outside the enumeration is invisible. Current coverage spans
+  the repo's actual idioms (object + string ``mock.patch``/``setattr``/
+  ``patch.object`` targets, bare assignments, ``os.environ[...]=`` /
+  ``setdefault`` / ``putenv`` / bare-``setenv`` / ``update`` /
+  ``mock.patch.dict`` / ``setitem`` pins). A class-LEVEL alias (``from
+  tortoise.sdk import TortoiseSDK as X`` then ``X.__init__ = …``) or a
+  helper variable (``INIT = "__init__"``) is NOT tracked.
+- The boundary is the ``TortoiseSDK.__init__`` patch — patching a method
+  that runs inside ``__init__`` (e.g. ``FalkorProjection.__init__``) or
+  a plain unpinned real ``TortoiseSDK()`` construction is out of scope
+  (test_sdk_props_coercion.py:337/:355 already patches
+  ``FalkorProjection.__init__`` legitimately).
+- Unparseable test modules are skipped (they red their own collection; a
+  new unlisted file reds the ci_selection --integrity drift gate).
+- Baselines warn only; nothing turns warnings into errors in CI
+  (no -W error / filterwarnings in pyproject or workflows).
 """
 from __future__ import annotations
 
@@ -96,7 +126,49 @@ def _is_pin_write(node: ast.AST) -> bool:
                 and isinstance(args[0], ast.Constant)
                 and args[0].value == _PIN_NAME):
             return True
+        # os.environ.update({"TORTOISE_DB_PATH": …}) — kwargs form too
+        # (os.environ.update(TORTOISE_DB_PATH=…)) and any receiver whose
+        # .update takes a dict carrying the literal key.
+        if (isinstance(fn, ast.Attribute) and fn.attr == "update"
+                and _call_dict_has_key(node)):
+            return True
+        # mock.patch.dict(os.environ, {"TORTOISE_DB_PATH": …}) / kwargs form
+        if (isinstance(fn, ast.Attribute) and fn.attr == "dict"
+                and _chain_contains(fn.value, "patch")
+                and _call_dict_has_key(node)):
+            return True
+        # monkeypatch.setitem(os.environ, "TORTOISE_DB_PATH", …)
+        if (isinstance(fn, ast.Attribute) and fn.attr == "setitem"
+                and len(args) >= 2 and isinstance(args[1], ast.Constant)
+                and args[1].value == _PIN_NAME):
+            return True
     return False
+
+
+def _call_dict_has_key(node: ast.Call) -> bool:
+    """True when any positional/keyword arg of the call is a dict literal
+    (or kwargs-call) whose keys include the TORTOISE_DB_PATH literal.
+
+    Covers os.environ.update({"TORTOISE_DB_PATH": …}), the kwargs form
+    os.environ.update(TORTOISE_DB_PATH=…), and
+    mock.patch.dict(os.environ, {"TORTOISE_DB_PATH": …}, …).
+    """
+    for arg in node.args:
+        if isinstance(arg, ast.Dict) and _dict_keys_contain(arg, _PIN_NAME):
+            return True
+    for kw in node.keywords:
+        if kw.arg == _PIN_NAME:  # os.environ.update(TORTOISE_DB_PATH=…)
+            return True
+        if (isinstance(kw.value, ast.Dict)
+                and _dict_keys_contain(kw.value, _PIN_NAME)):
+            return True
+    return False
+
+
+def _dict_keys_contain(node: ast.Dict, key: str) -> bool:
+    """True when the dict literal's keys include *key* (a string literal)."""
+    return any(isinstance(k, ast.Constant) and k.value == key
+               for k in node.keys)
 
 
 def _is_patch_site(node: ast.AST) -> int | None:
@@ -115,13 +187,29 @@ def _is_patch_site(node: ast.AST) -> int | None:
                 and _chain_contains(target.value, "TortoiseSDK")):
             return node.lineno
         return None
-    if isinstance(node, ast.Call) and len(node.args) >= 2:
-        a0, a1 = node.args[0], node.args[1]
-        if (isinstance(a1, ast.Constant) and a1.value == "__init__"
-                and _chain_contains(a0, "TortoiseSDK")):
-            return node.lineno
+    if isinstance(node, ast.Call) and len(node.args) >= 1:
+        a0 = node.args[0]
+        # String target containing the dotted method path is self-validating
+        # even with keyword-only extras: mock.patch("…TortoiseSDK.__init__",
+        # new=…/return_value=…) — the second positional is NOT required.
         if (isinstance(a0, ast.Constant) and isinstance(a0.value, str)
                 and "TortoiseSDK.__init__" in a0.value):
+            return node.lineno
+        # Split class-string target: setattr("…TortoiseSDK", "__init__", fn)
+        # / patch.object("…TortoiseSDK", "__init__", …) — the repo's
+        # dominant string-mocking idiom (test_enforcement.py etc.).
+        if (len(node.args) >= 2
+                and isinstance(a0, ast.Constant) and isinstance(a0.value, str)
+                and "TortoiseSDK" in a0.value
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "__init__"):
+            return node.lineno
+        # Object target: chain containing TortoiseSDK + a1 == "__init__"
+        # (setattr(ha_mod.TortoiseSDK, "__init__", fn) etc.).
+        if (len(node.args) >= 2
+                and isinstance(node.args[1], ast.Constant)
+                and node.args[1].value == "__init__"
+                and _chain_contains(a0, "TortoiseSDK")):
             return node.lineno
     return None
 
@@ -196,13 +284,24 @@ def _scan() -> dict:
     for path in sorted(_TESTS.rglob("*.py")):
         if "e2e" in path.parts:
             continue  # browser suite (separate jobs, excluded from python CI)
+        if path.name == "test_lint_tripwire.py":
+            # Self-skip: this module embeds the churn shapes as inert string
+            # DATA for its detector unit tests (ast.parse'd, never executed),
+            # so its own text legitimately contains "TortoiseSDK.__init__".
+            # It cannot be a churn violator by construction.
+            continue
         try:
             text = path.read_text()
         except OSError:
             continue
         rel = path.relative_to(_REPO).as_posix()
         scanned += 1
-        if "TortoiseSDK" not in text:
+        # Text prefilter: a module that never mentions TortoiseSDK cannot
+        # patch the method; a mention without the literal "__init__"
+        # cannot patch it either (every recognized form carries it) — so
+        # only files with BOTH pay an ast.parse+walk (54 of 452; a scan
+        # is ~0.3s, collected on every CI run incl. docs-only tier-1).
+        if "TortoiseSDK" not in text or "__init__" not in text:
             continue
         try:
             tree = ast.parse(text)
@@ -281,15 +380,120 @@ def _run_scan(*, warn: bool) -> dict:
 # ── Enforcement at collection ──────────────────────────────────────────────
 # Module-body call: pytest imports this module while collecting the suite
 # (it rides `tier1`, the base of every selection) → a NEW unpinned patch
-# module anywhere in tests/ fails THIS module's import → pytest reports a
-# collection ERROR and exits nonzero (fail-loud at collection; the rest of
-# the suite still collects, so unrelated errors stay visible).
+# module anywhere in tests/ fails THIS module's import → pytest treats the
+# import-time RuntimeError as a COLLECTION error and ABORTS the run
+# (default; no --continue-on-collection-errors in CI) — fail-loud with the
+# error message naming every violating module + line.
 _SCAN_REPORT = _run_scan(warn=True)
 
 
 def test_lint_tripwire_sweep_clean():
-    """The import-time sweep already enforced; this run-time re-check is
-    the backstop if the module-body call is ever removed — enforcement then
-    fails here instead of at collection (still loud, never silent)."""
-    report = _run_scan(warn=False)
-    assert not report["violations"], report["violations"]
+    """Sweep-clean backstop. The import-time scan already enforced; this
+    asserts the stored report is clean at run time. If a future edit removes
+    the module-body call, _SCAN_REPORT is undefined → NameError here (and
+    nothing warns) — still loud, never silent. (The runtime re-scan variant
+    was dropped in code review: it doubled the ~0.3s scan cost on every CI
+    run for no enforcement gain.)"""
+    if _SCAN_REPORT is None:  # pragma: no cover - defensive
+        raise AssertionError(
+            "test-lint tripwire (#2143): module-body _run_scan(warn=True) "
+            "call was removed — restore it so enforcement fires at collection.")
+    assert not _SCAN_REPORT["violations"], _SCAN_REPORT["violations"]
+
+
+def _src(py: str) -> tuple[list[int], bool]:
+    """classify one synthetic module source: (patch_lines, pinned)."""
+    return _module_matches(ast.parse(py))
+
+
+class TestPatchSiteDetection:
+    """Synthetic-source pins for the detector (green-tree unit tests — the
+    tree must be clean for this module to import at all)."""
+
+    def test_churn_assignment_form(self):
+        lines, pinned = _src(
+            'import os\n'
+            'def _orig(db): return None\n'
+            'ha_mod.TortoiseSDK.__init__ = _orig\n')
+        assert lines == [3] and not pinned
+
+    def test_pinned_env_write_is_not_a_violation_shape(self):
+        _, pinned = _src(
+            'import os\n'
+            'os.environ["TORTOISE_DB_PATH"] = db\n'
+            'ha_mod.TortoiseSDK.__init__ = _orig\n')
+        assert pinned
+
+    def test_setattr_object_target(self):
+        lines, pinned = _src(
+            'monkeypatch.setattr(ha_mod.TortoiseSDK, "__init__", _orig)\n')
+        assert lines == [1] and not pinned
+
+    def test_setattr_string_class_target(self):
+        lines, _ = _src(
+            'monkeypatch.setattr("tortoise.hosted_api.TortoiseSDK",'
+            ' "__init__", _orig)\n')
+        assert lines == [1]
+
+    def test_mock_patch_string_method_target_keyword_extras(self):
+        # P1 code-review regression: keyword-only extras must not hide the
+        # self-validating dotted string target.
+        lines, _ = _src(
+            'with mock.patch("tortoise.sdk.TortoiseSDK.__init__",'
+            ' return_value=None):\n    pass\n')
+        assert lines == [1]
+
+    def test_patch_object_object_target(self):
+        lines, _ = _src(
+            'mock.patch.object(sdk_mod.TortoiseSDK, "__init__",'
+            ' return_value=None)\n')
+        assert lines == [1]
+
+    def test_comments_and_docstrings_never_count(self):
+        lines, pinned = _src(
+            '"""docstring: TortoiseSDK.__init__ pinned via os.environ... """\n'
+            '# comment: monkeypatch.setattr(ha_mod.TortoiseSDK, "__init__"...)\n'
+            'x = 1\n')
+        assert not lines and not pinned
+
+    def test_unrelated_patch_is_ignored(self):
+        lines, _ = _src(
+            'monkeypatch.setattr(ha_mod.FalkorProjection, "__init__", _orig)\n')
+        assert not lines
+
+
+class TestPinDetection:
+    """Pin-form pins (code-review P2 regressions: update / patch.dict /
+    setitem / kwargs forms must count as pins)."""
+
+    def test_environ_update_dict(self):
+        _, pinned = _src(
+            'os.environ.update({"TORTOISE_DB_PATH": db_path})\n'
+            'ha_mod.TortoiseSDK.__init__ = _orig\n')
+        assert pinned
+
+    def test_environ_update_kwargs(self):
+        _, pinned = _src(
+            'os.environ.update(TORTOISE_DB_PATH=db_path)\n'
+            'ha_mod.TortoiseSDK.__init__ = _orig\n')
+        assert pinned
+
+    def test_patch_dict_env(self):
+        _, pinned = _src(
+            'with mock.patch.dict(os.environ, '
+            '{"TORTOISE_DB_PATH": db_path}):\n    pass\n'
+            'ha_mod.TortoiseSDK.__init__ = _orig\n')
+        assert pinned
+
+    def test_setitem_env(self):
+        _, pinned = _src(
+            'monkeypatch.setitem(os.environ, "TORTOISE_DB_PATH", db_path)\n'
+            'ha_mod.TortoiseSDK.__init__ = _orig\n')
+        assert pinned
+
+    def test_pop_restore_does_not_count_as_pin(self):
+        _, pinned = _src(
+            'os.environ.pop("TORTOISE_DB_PATH", None)\n'
+            'monkeypatch.delenv("TORTOISE_DB_PATH")\n'
+            'ha_mod.TortoiseSDK.__init__ = _orig\n')
+        assert not pinned
