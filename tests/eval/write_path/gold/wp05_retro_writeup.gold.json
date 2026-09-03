@@ -1,0 +1,293 @@
+{
+  "attribution_hazards": [
+    {
+      "id": "wp05_retro_writeup_h_01",
+      "planted_turn": 5,
+      "quote": "Aisha kept pushing us to check the config diff instead",
+      "source": "sam"
+    },
+    {
+      "id": "wp05_retro_writeup_h_02",
+      "planted_turn": 15,
+      "quote": "their account team accepted",
+      "source": "sam"
+    }
+  ],
+  "distractor_leakage_tolerance": 1,
+  "distractors": [
+    {
+      "anchor": "book the retro room for Friday morning",
+      "id": "wp05_retro_writeup_d_01",
+      "planted_turn": 17,
+      "statement": "Routine note about booking a retro room."
+    },
+    {
+      "anchor": "good Wi-Fi in the new meeting room",
+      "id": "wp05_retro_writeup_d_02",
+      "planted_turn": 15,
+      "statement": "Routine aside about the meeting room during the account call."
+    }
+  ],
+  "planted_units": [
+    {
+      "depth_bucket": "early",
+      "id": "wp05_retro_writeup_u_01",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 1,
+      "verbatim_anchor": "three hours and forty-one minutes of degraded search"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp05_retro_writeup_u_02",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 3,
+      "verbatim_anchor": "The first signal was the error budget burn alert at 9:15am"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp05_retro_writeup_u_03",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 3,
+      "verbatim_anchor": "the deploy went out at 9:12am"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp05_retro_writeup_u_04",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 5,
+      "verbatim_anchor": "The initial investigation blamed the search index"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp05_retro_writeup_u_05",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 7,
+      "verbatim_anchor": "The config partition was the root cause"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp05_retro_writeup_u_06",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 9,
+      "verbatim_anchor": "We rolled the config back to the previous partition at 12:40pm"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp05_retro_writeup_u_07",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "add a pre-deploy check that compares partition weights against the shard capacity model"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp05_retro_writeup_u_08",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "make the config diff visible in the deploy review"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp05_retro_writeup_u_09",
+      "kind": "idea",
+      "notability": "medium",
+      "planted_turn": 11,
+      "verbatim_anchor": "Nora suggested both"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp05_retro_writeup_u_10",
+      "kind": "entity",
+      "notability": "high",
+      "planted_turn": 13,
+      "verbatim_anchor": "Maya owns the pre-deploy check and it needs to land by November 2"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp05_retro_writeup_u_11",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 13,
+      "verbatim_anchor": "Diego owns the config diff surfacing, due November 9"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp05_retro_writeup_u_12",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 15,
+      "verbatim_anchor": "the search SLO is 99.9 percent"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp05_retro_writeup_u_13",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 17,
+      "verbatim_anchor": "Incident writeups are opt-out by default now"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp05_retro_writeup_u_14",
+      "kind": "vibe",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "the on-call stayed calm, honestly that matters more than any tooling"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp05_retro_writeup_u_15",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 21,
+      "verbatim_anchor": "Sam from customer engineering wrote the status updates"
+    }
+  ],
+  "salient_units": [
+    {
+      "id": "wp05_retro_writeup_u_01",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "three hours and forty-one minutes of degraded search"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_02",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "The first signal was the error budget burn alert at 9:15am"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_03",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the deploy went out at 9:12am"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_04",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "The initial investigation blamed the search index"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_05",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "The config partition was the root cause"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_06",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "We rolled the config back to the previous partition at 12:40pm"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_07",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "add a pre-deploy check that compares partition weights against the shard capacity model"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_08",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "make the config diff visible in the deploy review"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_09",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Nora suggested both"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_10",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Maya owns the pre-deploy check and it needs to land by November 2"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_11",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Diego owns the config diff surfacing, due November 9"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_12",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the search SLO is 99.9 percent"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_13",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Incident writeups are opt-out by default now"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_14",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the on-call stayed calm, honestly that matters more than any tooling"
+      }
+    },
+    {
+      "id": "wp05_retro_writeup_u_15",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Sam from customer engineering wrote the status updates"
+      }
+    }
+  ],
+  "scenario": "Sam drafts the Bluepeak incident retro with Aisha: timeline, root cause, follow-ups with owners and dates, published as an opt-out incident writeup.",
+  "schema_version": 1,
+  "session_id": "wp05_retro_writeup"
+}

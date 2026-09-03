@@ -1,0 +1,259 @@
+{
+  "attribution_hazards": [
+    {
+      "id": "wp02_lumen_refactor_h_01",
+      "planted_turn": 1,
+      "quote": "the team signed off last Friday",
+      "source": "jonah"
+    },
+    {
+      "id": "wp02_lumen_refactor_h_02",
+      "planted_turn": 11,
+      "quote": "their integration team is small and they were already asking for scoped credentials",
+      "source": "jonah"
+    }
+  ],
+  "distractor_leakage_tolerance": 1,
+  "distractors": [
+    {
+      "anchor": "managed to run outside both mornings",
+      "id": "wp02_lumen_refactor_d_01",
+      "planted_turn": 13,
+      "statement": "Routine note about the weather during the auth migration session."
+    },
+    {
+      "anchor": "the quarterly demo is next Tuesday",
+      "id": "wp02_lumen_refactor_d_02",
+      "planted_turn": 17,
+      "statement": "Routine calendar reminder mentioned mid-session."
+    }
+  ],
+  "planted_units": [
+    {
+      "depth_bucket": "early",
+      "id": "wp02_lumen_refactor_u_01",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 1,
+      "verbatim_anchor": "moving lumen auth to per-graph API keys"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp02_lumen_refactor_u_02",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 1,
+      "verbatim_anchor": "the team signed off last Friday"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp02_lumen_refactor_u_03",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 5,
+      "verbatim_anchor": "graph keys get the tt_ prefix"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp02_lumen_refactor_u_13",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 6,
+      "verbatim_anchor": "the leaked token stayed valid for weeks"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp02_lumen_refactor_u_04",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 7,
+      "verbatim_anchor": "token lifetime of twenty-four hours"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp02_lumen_refactor_u_05",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 9,
+      "verbatim_anchor": "Legacy keys remain valid until the rotation window closes"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp02_lumen_refactor_u_06",
+      "kind": "entity",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "Bluepeak Logistics is the pilot customer"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp02_lumen_refactor_u_07",
+      "kind": "entity",
+      "notability": "high",
+      "planted_turn": 13,
+      "verbatim_anchor": "Priya owns the registry service"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp02_lumen_refactor_u_08",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 15,
+      "verbatim_anchor": "Fail closed with a 401"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp02_lumen_refactor_u_09",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 17,
+      "verbatim_anchor": "Keep key usage events for ninety days"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp02_lumen_refactor_u_10",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "Two-phase deploy"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp02_lumen_refactor_u_11",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 19,
+      "verbatim_anchor": "the sandbox org runs on them for a week"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp02_lumen_refactor_u_12",
+      "kind": "vibe",
+      "notability": "high",
+      "planted_turn": 21,
+      "verbatim_anchor": "it is overdue, I have been meaning to clean that page up for months"
+    }
+  ],
+  "salient_units": [
+    {
+      "id": "wp02_lumen_refactor_u_01",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "moving lumen auth to per-graph API keys"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_02",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the team signed off last Friday"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_03",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "graph keys get the tt_ prefix"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_13",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the leaked token stayed valid for weeks"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_04",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "token lifetime of twenty-four hours"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_05",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Legacy keys remain valid until the rotation window closes"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_06",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Bluepeak Logistics is the pilot customer"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_07",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Priya owns the registry service"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_08",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Fail closed with a 401"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_09",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Keep key usage events for ninety days"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_10",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Two-phase deploy"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_11",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the sandbox org runs on them for a week"
+      }
+    },
+    {
+      "id": "wp02_lumen_refactor_u_12",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "it is overdue, I have been meaning to clean that page up for months"
+      }
+    }
+  ],
+  "scenario": "Jonah migrates lumen (internal dev portal) auth from shared team tokens to per-graph API keys; two-phase cutover with a pilot customer.",
+  "schema_version": 1,
+  "session_id": "wp02_lumen_refactor"
+}

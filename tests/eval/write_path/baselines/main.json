@@ -1,0 +1,18 @@
+{
+  "config": {
+    "harness": "all",
+    "lanes": [
+      "verbatim",
+      "facts",
+      "dream"
+    ],
+    "mode": "BPRE",
+    "seed": 42
+  },
+  "fixtures_hash": "sha256:52d4a742e7cea21ce9f1147cc3ec46a10436a6dd9e7fbc7ad22701d851d90dc8",
+  "history": [],
+  "judge_pin": null,
+  "justification": null,
+  "metrics": {},
+  "schema_version": 1
+}
