@@ -58,6 +58,7 @@ from tortoise.mcp_server import create_http_app
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
+    is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
 from tortoise.quota import (
     DEFAULT_MAX_SESSIONS,  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
@@ -9857,8 +9858,11 @@ def _drop_team_graph_strict(team_id: str, graph_name: str | None = None) -> None
     teams row and orphan the FalkorDB graph with no retry. Raising keeps
     the teams row as the retry anchor — the next sweep finds the team
     again and retries the drop. Since #2163 the drop runs on EVERY lane
-    (embedded + FalkorDB Cloud) — a raise here now means a real drop
-    failure, so the retry anchor fires when it should.
+    (embedded + FalkorDB Cloud) via select_graph(...).delete(); an
+    ABSENT-graph raise is treated as success inside the impl (the graph
+    being gone is the desired end state — the anchor must converge), so
+    a raise reaching the sweep means a real failure (auth/connection)
+    and the retry anchor fires when it should.
     """
     _drop_team_graph_impl(team_id, graph_name)
 
@@ -9876,7 +9880,19 @@ def _drop_team_graph_impl(team_id: str, graph_name: str | None = None) -> None:
     # graph orphaned with no retry (the #926 retry-anchor design broke).
     # select_graph(target).delete() issues GRAPH.DELETE on both clients —
     # the same call the mint-failure rollback paths use (hosted_api.py).
-    proj.db.select_graph(target).delete()
+    # #2163 re-review P0: GRAPH.DELETE on an ABSENT graph RAISES ("Invalid
+    # graph operation on empty key", v4.16.7) — treat that family as success
+    # so the #926 retry anchor converges (a graph dropped by an earlier
+    # sweep, never minted, or manually removed must not poison the team row
+    # forever); genuine failures (auth, dead connection) still propagate and
+    # keep the row for retry.
+    try:
+        proj.db.select_graph(target).delete()
+    except Exception as e:
+        if is_missing_graph_error(e):
+            _logger.debug("graph %s already absent — skipping", target)
+        else:
+            raise
 
 
 def _purge_registry_team(sdk, team_id: str, graph_name: str | None = None) -> None:
