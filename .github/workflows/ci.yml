@@ -9,6 +9,186 @@ on:
   pull_request:
 
 jobs:
+  # #2149 (ci-audit F3): path-gate the NON-required jobs. `changes` is a
+  # cheap changed-files selector (the python-ci.yml `changes` pattern) that
+  # emits per-surface booleans; each gated job below adds
+  # `needs: changes` + `if:` on its surface. The 5 branch-protection REQUIRED
+  # checks (pricing-artifact, docs, test-isolation, license-surface,
+  # legal-e2e) deliberately keep NO needs/if — a SKIPPED required job reports
+  # as Success and would silently pass the required check (the ai-review-gate
+  # trap, #2055). Fail-closed on detection: an empty/erroneous diff emits ALL
+  # surfaces true so every gated job runs — never a silent coverage loss.
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      migrations: ${{ steps.gate.outputs.migrations }}
+      dashboard: ${{ steps.gate.outputs.dashboard }}
+      uv_lock: ${{ steps.gate.outputs.uv_lock }}
+      entrypoints: ${{ steps.gate.outputs.entrypoints }}
+      client: ${{ steps.gate.outputs.client }}
+      packaging: ${{ steps.gate.outputs.packaging }}
+      website: ${{ steps.gate.outputs.website }}
+      hosted: ${{ steps.gate.outputs.hosted }}
+      flip: ${{ steps.gate.outputs.flip }}
+      python: ${{ steps.gate.outputs.python }}
+      drift: ${{ steps.gate.outputs.drift }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # PR base SHA must be present for the diff
+      - name: Compute per-surface path gates (#2149)
+        id: gate
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          [ -n "$BASE" ] || BASE="origin/main"
+          CHANGED=$(git diff --name-only "$BASE...HEAD" 2>/dev/null || true)
+          echo "changed files vs $BASE:"
+          echo "$CHANGED"
+          cat > /tmp/ci-gates.py <<'PY'
+          import sys
+
+          out = sys.argv[1]
+          files = [ln.strip() for ln in sys.stdin if ln.strip()]
+
+          def startswith(p):
+              return lambda f: f.startswith(p)
+
+          def isfile(*names):
+              return lambda f: f in names
+
+          def endswith(s):
+              return lambda f: f.endswith(s)
+
+          def any_file(*preds):
+              return any(any(p(f) for p in preds) for f in files)
+
+          # Surface -> predicates over changed paths. A key is true when ANY
+          # changed file can affect the job(s) it gates (issue #2149 / audit
+          # F3). Keep in sync with the per-job `if:`s below.
+          gates = {
+              # migration-unique-prefix / migration-append-only
+              "migrations": any_file(
+                  startswith("supabase/migrations/"),
+                  startswith(".github/scripts/check-migration-"),
+              ),
+              # dashboard-js-tests (agent-infra node-ci in website/apps/dashboard)
+              "dashboard": any_file(
+                  startswith("website/apps/dashboard/"),
+              ),
+              # uv-lock-check
+              "uv_lock": any_file(
+                  isfile("pyproject.toml", "uv.lock"),
+              ),
+              # entrypoint-guards (runs entrypoint.sh via .ci-checks script)
+              "entrypoints": any_file(
+                  isfile("entrypoint.sh", ".ci-checks/check-entrypoint-guards.sh"),
+              ),
+              # client-build (wheel staged from client/ + the 3 canonical
+              # shared modules build_client.sh copies into the wheel)
+              "client": any_file(
+                  startswith("client/"),
+                  isfile("tortoise/mcp_client.py", "tortoise/config.py",
+                         "tortoise/exceptions.py"),
+              ),
+              # packaging-smoke (wheel/sdist pack catalog + doc-consistency).
+              # Pack SOURCE is the root packs/ tree (pyproject maps
+              # tortoise.packs = packs); tortoise/packs/__init__.py is the
+              # discovery stub the sdist gate checks. #2160 review P2-1:
+              # was startswith("tortoise/packs/") only — a packs/** change
+              # silently skipped the wheel gate that guards it.
+              "packaging": any_file(
+                  isfile("pyproject.toml", "MANIFEST.in",
+                         "tortoise/pack_registry.py", "tortoise/pack_state.py",
+                         "tests/sample_transcript.txt",
+                         "docs/EXPANSION_PACKS.md",
+                         "docs/quickstart-selfhosted.md",
+                         "docs/quickstart-cloud.md"),
+                  startswith("tortoise/packs/"),
+                  startswith("packs/"),
+              ),
+              # welcome-e2e (wrangler preview of website/ + mocked playwright
+              # + the two edge-function node harnesses). Separate-app changes
+              # under website/apps/ do NOT trigger it — dashboard-js-tests
+              # covers dashboard; blog-admin has no gated suite. (#2160 P3-1:
+              # excluded website/apps/ wholesale, not dashboard only.)
+              "website": any_file(
+                  lambda f: f.startswith("website/")
+                  and not f.startswith("website/apps/"),
+                  isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
+                         "tests/test_waitlist_subscribe.mjs",
+                         "tests/test_tenant_provision_cors.mjs"),
+                  startswith("supabase/functions/waitlist-subscribe/"),
+                  startswith("supabase/functions/tenant-provision/"),
+                  startswith("supabase/functions/_shared/"),
+              ),
+              # hosted-e2e (boots uvicorn tortoise.hosted_api:app; engine
+              # surface = the python-ci 'api' source set it exercises PLUS
+              # hosted_api's module-load import graph — #2160 review P2-2:
+              # hosted_api imports abuse/analytics/audit_events/auth/
+              # hosted_backup/mcp_server/onboarding/projection/schemas/sdk/
+              # security at import time (+ pricing.tier_limits in body), so a
+              # change to any of those gets unit coverage but would never
+              # boot the artifact if gated on the old 4-module list. Keep the
+              # list in sync with hosted_api.py's imports; a miss only skips
+              # the boot suite (unit coverage still runs).
+              "hosted": any_file(
+                  startswith("tests/e2e/hosted/"),
+                  isfile("tortoise/hosted_api.py", "tortoise/session_auth.py",
+                         "tortoise/quota.py", "tortoise/metering.py",
+                         "tortoise/supabase_control.py", "tortoise/selfhost_api.py",
+                         "tortoise/selfhost.py", "tortoise/mcp_auth.py",
+                         "tortoise/transport.py",
+                         "tortoise/abuse.py", "tortoise/analytics.py",
+                         "tortoise/audit_events.py", "tortoise/auth.py",
+                         "tortoise/hosted_backup.py", "tortoise/security.py",
+                         "tortoise/pricing.py", "tortoise/billing.py",
+                         "tortoise/onboarding.py", "tortoise/mcp_server.py",
+                         "tortoise/projection.py", "tortoise/schemas.py",
+                         "tortoise/sdk.py", "tests/e2e/conftest.py"),
+              ),
+              # flip-gate (.github/scripts/verify-cutover* + supabase surface
+              # + the exact pytest legs the script runs)
+              "flip": any_file(
+                  startswith("supabase/"),
+                  startswith(".github/scripts/verify-cutover"),
+                  isfile("tests/test_writer_inventory.py", "tests/test_auth_flip.py",
+                         "tests/test_supabase_control.py",
+                         "tests/test_onboarding_health_flip.py",
+                         "tests/test_agent_signup.py", "tests/test_backup_sweep.py",
+                         "tests/test_backup_watcher.py", "tests/test_audit_events.py",
+                         "tests/test_provisioning_edge_function.py",
+                         "tests/test_flip_gate.py"),
+              ),
+              # agent-infra-ci (ruff check . + mypy tortoise/ — any .py
+              # change, lint/typecheck config, or workflow/skills surface)
+              "python": any_file(
+                  endswith(".py"),
+                  isfile("pyproject.toml"),
+                  startswith("skills/"),
+                  startswith(".github/workflows/"),
+              ),
+              # drift-check (agent-infra check --ci: version pin, workflow
+              # refs, symlinks, templates, AGENTS.md/.mcp.json/.husky)
+              "drift": any_file(
+                  isfile(".agent-infra-version", "AGENTS.md", ".mcp.json", "scripts"),
+                  startswith(".github/workflows/"),
+                  startswith(".husky/"),
+                  startswith("scripts/"),
+              ),
+          }
+
+          if not files:
+              # Undeterminable diff (git error / empty base) — fail-closed:
+              # run every gated job rather than silently dropping coverage.
+              print("changes: no diff computed — all gates true (run everything)")
+              gates = {k: True for k in gates}
+
+          with open(out, "a") as f:
+              for key, val in gates.items():
+                  print(f"  {key}={'true' if val else 'false'}")
+                  f.write(f"{key}={'true' if val else 'false'}\n")
+          PY
+          printf '%s\n' "$CHANGED" | python3 /tmp/ci-gates.py "$GITHUB_OUTPUT"
   # Migration invariants (#1095) — secret-free, fork-safe:
   #   migration-unique-prefix  — duplicate version prefixes / non-conforming
   #                              filenames (the 0012x2/0015x2 class that aborted
@@ -24,12 +204,16 @@ jobs:
   # tests exercise the shipped logic. fetch-depth: 0 is required for the base
   # SHA to be available to `git diff` (default checkout is depth 1).
   migration-unique-prefix:
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Check migration prefix invariants
         run: bash .github/scripts/check-migration-append-only prefix
   migration-append-only:
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -98,6 +282,8 @@ jobs:
           args: --no-progress ${{ steps.changed.outputs.files }}
 
   dashboard-js-tests:
+    needs: changes
+    if: needs.changes.outputs.dashboard == 'true'  # #2149: website/apps/dashboard/** only
     # #1894/#387: the dashboard's pure-derivation + CSS-rule test suite (node
     # --test, zero deps) now runs via the agent-infra reusable unit-test
     # capability (node-ci.yml@v0.1.1) — the migration target of #387.
@@ -115,6 +301,8 @@ jobs:
     secrets: inherit
 
   uv-lock-check:
+    needs: changes
+    if: needs.changes.outputs.uv_lock == 'true'  # #2149: pyproject.toml / uv.lock only
     # #493: the committed uv.lock is the dev-environment source of truth —
     # gate on lockfile/pyproject drift. The suite itself runs in the
     # dedicated python-ci.yml workflow (pip); this job enforces the uv lock
@@ -152,6 +340,8 @@ jobs:
         run: bash .ci-checks/check-test-isolation.sh
 
   entrypoint-guards:
+    needs: changes
+    if: needs.changes.outputs.entrypoints == 'true'  # #2149: entrypoint.sh / its .ci-checks script only
     # #1349 T11: the hosted entrypoint's guard contracts — env-reject of the
     # benchmark-only TORTOISE_EMBEDDER_OVERRIDE seam + missing-cache FATAL —
     # are shell-level and untestable from pytest. Matches the test-isolation
@@ -177,6 +367,8 @@ jobs:
           echo "service-first gate OK"
 
   client-build:
+    needs: changes
+    if: needs.changes.outputs.client == 'true'  # #2149: client/ + the 3 shared modules in the wheel
     # #526: the thin-client boundary must hold on EVERY PR — build the
     # tortoise-client wheel, run the acceptance gate in a clean venv (driver
     # imports, engine modules raise ImportError, no engine deps installed),
@@ -212,6 +404,8 @@ jobs:
         run: bash client/verify_client.sh
 
   packaging-smoke:
+    needs: changes
+    if: needs.changes.outputs.packaging == 'true'  # #2149: packaging / pack-catalog / pack-docs surfaces
     # #1929 (epic #1891 slice 1): per-PR G1 regression guard — the built
     # wheel must ship the pack catalog (surface 1) and a clean-venv install
     # must load the full starter set from the installed location. The
@@ -269,6 +463,8 @@ jobs:
           echo "doc-consistency OK"
 
   welcome-e2e:
+    needs: changes
+    if: needs.changes.outputs.website == 'true'  # #2149: website/ (minus dashboard app) + welcome/edge-fn tests
     runs-on: ubuntu-latest
     # Mocked welcome-page suite (#541) — secret-free per-PR coverage against
     # the LIVE page (Supabase calls mocked via Playwright routes). The #801
@@ -400,6 +596,8 @@ jobs:
           true
 
   hosted-e2e:
+    needs: changes
+    if: needs.changes.outputs.hosted == 'true'  # #2149: tests/e2e/hosted/ + the hosted api-surface modules
     # #303: the 12-case hosted-platform E2E suite (tests/e2e/hosted/). Boots
     # the REAL deployment artifact (uvicorn tortoise.hosted_api:app) on
     # embedded FalkorDBLite inside the test session — zero secrets, no
@@ -467,6 +665,8 @@ jobs:
           PYTHONUNBUFFERED: "1"
 
   flip-gate:
+    needs: changes
+    if: needs.changes.outputs.flip == 'true'  # #2149: supabase/ + verify-cutover* + its pytest legs
     # #669 pre-deploy cutover gate (plan Task 10.1, issue #771) — the gate
     # that MUST PASS before the single-deploy flip. Runs the local/CI
     # equivalence of the operator's live gate: FalkorDBLite + the seam fakes
@@ -495,6 +695,8 @@ jobs:
         run: bash .github/scripts/verify-cutover
 
   agent-infra-ci:
+    needs: changes
+    if: needs.changes.outputs.python == 'true'  # #2149: any .py / pyproject / skills / workflows
     # #303 — generic stack CI from agent-infra reusable workflows, pinned to a
     # semver tag (@v0.1.1). Bump = tag + manifest ci.ref edit; agent-infra
     # check blocks on a stale pin. GitHub Actions CANNOT parse symlinked
@@ -541,6 +743,8 @@ jobs:
     secrets: inherit
 
   drift-check:
+    needs: changes
+    if: needs.changes.outputs.drift == 'true'  # #2149: agent-infra pin surface (.agent-infra-version/workflows/symlinks)
     # #305/#387 — agent-infra drift gate: structural drift (version pin,
     # symlinks, missing templates, workflow refs vs manifest.check.ci.ref)
     # fails CI; content drift warns. Runs tiered via agent-infra check --ci.
