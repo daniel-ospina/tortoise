@@ -496,13 +496,18 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
     """
     issues: list[str] = []
     _require_mapping(gold, "gold", issues)
-    if not isinstance(fixture, dict) and fixture is not None:
-        issues.append(
-            "fixture: not an object (got "
-            f"{type(fixture).__name__}) — gold↔fixture cross-checks skipped"
-        )
-        fixture = None  # downgrade to gold-only validation (never crash)
     if not issues:
+        if not isinstance(fixture, dict) and fixture is not None:
+            # REVIEW-FIX (P2-1, re-review): the guard issue must NOT gate the
+            # gold-only content checks below — it only skips the gold↔fixture
+            # CROSS-checks (anchors/depth buckets/session_id). Record it and
+            # downgrade to gold-only validation; the content checks still run
+            # (a malformed fixture never masks a malformed gold).
+            issues.append(
+                "fixture: not an object (got "
+                f"{type(fixture).__name__}) — gold↔fixture cross-checks skipped"
+            )
+            fixture = None
         _reject_unknown_keys(
             gold,
             frozenset(
@@ -670,6 +675,19 @@ def validate_baseline(baseline: dict) -> list[str]:
             issues.append("baseline.metrics: expected an object")
         elif metrics:
             _validate_metric_values(metrics, "baseline.metrics", issues)
+            # REVIEW-FIX (P2-2, re-review): a published baseline must snapshot
+            # the FULL graded-metric vocabulary — a hand-edited/committed
+            # partial baseline would silently shrink the CI-gate compare set
+            # (compare_run gates only on committed keys). Mirrors the bless
+            # completeness rule so the validator gating committed files and
+            # the write path agree (plan R8: no gate degrades to rubber-stamp).
+            missing_metrics = sorted(METRIC_VALUES - set(metrics))
+            if missing_metrics:
+                issues.append(
+                    "baseline.metrics: published baseline is missing graded "
+                    f"dimensions {missing_metrics} — must snapshot the full "
+                    f"{len(METRIC_VALUES)}-metric vocabulary"
+                )
             if judge_pin is None:
                 issues.append(
                     "baseline.judge_pin: non-empty metrics require a pinned judge "

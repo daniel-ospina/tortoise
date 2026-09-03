@@ -883,3 +883,46 @@ def test_validate_gold_reports_non_object_fixture() -> None:
     # A non-dict fixture must not crash the depth-bucket / anchor cross-checks
     # (they route through _safe_turn/_conversation_len — hardened).
     assert isinstance(issues, list)
+
+
+def test_validate_gold_non_object_fixture_still_checks_gold() -> None:
+    """REVIEW-FIX (P2-1, re-review): a non-object fixture downgrades ONLY the
+    gold↔fixture CROSS-checks — the gold-only content checks (schema_version,
+    unknown keys, planted/salient units) still run. A malformed fixture must
+    never mask a malformed gold."""
+    from tests.eval.write_path import corpus as corpus_mod
+    import tests.eval.write_path.schema as schema_mod
+
+    gold = corpus_mod.load_gold(COMMITTED_SESSIONS[0])
+    gold["schema_version"] = 999  # gold is malformed regardless of fixture
+    issues = schema_mod.validate_gold(gold, fixture=["not", "a", "fixture"])
+    assert any("fixture" in i and "not an object" in i for i in issues), issues
+    assert any("schema_version" in i for i in issues), \
+        "gold-only checks must still run when the fixture is malformed (P2-1)"
+
+
+def test_validate_baseline_rejects_partial_metric_vocabulary() -> None:
+    """REVIEW-FIX (P2-2, re-review): validate_baseline — the validator that
+    gates committed baseline files — must reject a published baseline whose
+    metrics snapshot fewer than the full METRIC_VALUES vocabulary (a
+    hand-edited partial baseline would silently shrink the CI-gate compare
+    set). Mirrors the bless-path completeness rule."""
+    from tests.eval.write_path import corpus as corpus_mod
+    import tests.eval.write_path.schema as schema_mod
+
+    full = corpus_mod.load_baseline()
+    full["judge_pin"] = "judge-write-path-v1"
+    full["justification"] = "published"
+    full["metrics"] = {"salient_unit_survival_macro": 0.83}  # 5 of 6 missing
+    issues = schema_mod.validate_baseline(full)
+    assert any("missing graded dimensions" in i for i in issues), issues
+    # The full-vocabulary published baseline validates clean (control).
+    full["metrics"] = {
+        "salient_unit_survival_macro": 0.83,
+        "salient_unit_survival_strict": 0.78,
+        "distractor_leakage_per_run": 1,
+        "sessions_emitting": 1.0,
+        "quote_fidelity": 0.84,
+        "provenance_accuracy": 0.86,
+    }
+    assert schema_mod.validate_baseline(full) == []
