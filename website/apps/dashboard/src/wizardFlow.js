@@ -16,8 +16,9 @@
 // - org-create name REQUIRED with editable prefill (DE2E-3) — the client
 //   validation below mirrors POST /v1/onboarding/team (server regex).
 // - the fork card is once-per-org (set-once server-side); build branch
-//   renders the static placeholder catalog (W8 owns the real one) whose
-//   render marks the catalog-presented step edge (surface 4).
+//   renders the registry-backed capability catalog (W8 — the offline
+//   fallback lives in BUILD_CATALOG_PLACEHOLDER) whose render marks the
+//   catalog-presented step edge (surface 4).
 
 export const WIZARD_STEPS = Object.freeze([
   {
@@ -59,20 +60,43 @@ export const WIZARD_FORK_OPTIONS = Object.freeze([
   {
     id: 'build',
     label: 'Build an application on top',
-    description: 'You get the capability catalog — the indexers and extractors you can build with. (Preview shown here until the catalog ships.)',
+    description: 'You get the capability catalog — the indexers and extractors you can build with.',
   },
 ])
 
-// The static build-branch catalog PLACEHOLDER (W1-owned until W8): the real
-// catalog is a pullable registry endpoint (W8). The placeholder's RENDER
-// marks the catalog-presented step edge via POST /v1/onboarding/state/
-// checkpoint (surface 4 write contract — the launch-slice build-fork gate
-// is evaluable; W8 replaces the placeholder SOURCE, not the mechanism).
+// The static build-branch catalog list (#1997 W1): since #2004 (W8) the
+// SOURCE is the pullable registry endpoint (GET /v1/capabilities →
+// tortoise/tool_registry.py CAPABILITY_CATALOG); this list is the OFFLINE
+// FALLBACK the dashboard renders while the fetch is in flight or when the
+// endpoint is unreachable. The names/kinds/descriptions are kept
+// byte-identical to the registry's 3 launch rows (the JS unit tests pin
+// this shape; a registry rename must be mirrored here + in the Python
+// test_capability_catalog.py CANONICAL_NAMES). The fallback's render marks
+// the catalog-presented step edge via POST /v1/onboarding/state/checkpoint
+// (surface 4 write contract — unchanged by W8).
 export const BUILD_CATALOG_PLACEHOLDER = Object.freeze([
   { name: 'Session recorder', kind: 'indexer', description: 'Files agent conversations to the graph.' },
   { name: 'Session extractor', kind: 'extractor', description: 'Pulls decisions and findings out of recorded sessions.' },
   { name: 'Document indexer', kind: 'indexer', description: 'Indexes documents you point your agent at.' },
 ])
+
+// #2004 (W8): resolve the registry-backed catalog for the build-path card.
+// Returns the endpoint's module rows when the pull succeeds (non-empty
+// array of shape-complete rows — including the registry's future/planned
+// modules), else the static fallback above (identical names — honest
+// offline degrade, never a blank catalog). Pure helper (node --test
+// unit-tested).
+export function resolveBuildCatalog(modules, fallback = BUILD_CATALOG_PLACEHOLDER) {
+  if (!Array.isArray(modules) || modules.length === 0) return fallback
+  // shape validation: a row must be a name/kind/description object — a
+  // malformed payload renders the fallback instead of empty-name rows
+  // (first-party static registry today, but the helper degrades honestly)
+  const wellFormed = modules.every((row) => row && typeof row === 'object'
+    && typeof row.name === 'string' && row.name.length > 0
+    && typeof row.kind === 'string'
+    && typeof row.description === 'string' && row.description.length > 0)
+  return wellFormed ? modules : fallback
+}
 
 // Org-create name validation — mirrors the server (POST /v1/onboarding/team:
 // non-empty, ≤64 chars, /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/). REQUIRED with
