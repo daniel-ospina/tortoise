@@ -5352,6 +5352,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     )
 
     extracted = []
+    # #2002 (W6) delete-during-capture sweep state: track whether THIS
+    # capture minted the sessionCaptured Event (only a genuine capture does;
+    # a replay of an existing session_id skips the mint) so the dead-session
+    # sweep below never touches an unbound event_id on the replay path.
+    minted_event = False
+    event_id = None
 
     # NOTE: this per-turn loop (episodic turn Points) is duplicated from
     # tortoise/sdk.py capture_session — the shared primitives #1532 D1/D2
@@ -5497,7 +5503,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # create_event, so running it would mint a new node — violating the
     # "0 new nodes" idempotency contract).
     if not session_existed:
-        event_id = None
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
@@ -5509,6 +5514,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             )
             event_id = event.get("id") or event.get("eventId")
             if event_id:
+                minted_event = True
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
                     params={"ids": [p["id"] for p in extracted],
@@ -5617,17 +5623,170 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # mutation already landed; the missing marker is surfaced as an additive
     # warning (the dashboard honestly shows no receipt → install-pending),
     # and a retry with the same session_id converges (T1-P12).
-    try:
-        _update_onboarding_state(team["team_id"], **{
-            _capture_receipt_key(body.harness): now,
-        })
+    #
+    # #2002 (W6): DELETE-during-capture race — a Settings delete can land
+    # while this capture is in flight and remove the Session AFTER the MERGE
+    # above but BEFORE the receipt write. A receipt with no Session violates
+    # the T1-P12 receipt↔Session invariant (epic risk "capture delete orphans
+    # graph data" — DE2E-11 negative). Two guards close every interleaving:
+    #   (1) PRE-CHECK: skip the receipt entirely when the Session is already
+    #       gone (the delete won; a receipt would be an orphan).
+    #   (2) POST-COMPENSATION: the delete's graph removal + receipt recompute
+    #       can land between the pre-check and the receipt PATCH — re-verify
+    #       AFTER the write and clear the just-written receipt when the
+    #       Session vanished in that window.
+    # Normal replays (session present throughout) are unaffected: the receipt
+    # lands and stays (T1-P12 convergence preserved).
+    def _session_alive() -> bool:
+        try:
+            rows = proj.g.query(
+                "MATCH (s:Session {id:$sid}) RETURN count(s)",
+                params={"sid": session_id},
+            ).result_set
+            return bool(rows) and int(rows[0][0]) > 0
+        except Exception:
+            # graph read failed — do not skip/clear a receipt on a failed
+            # read (fail-open: the receipt follows the committed capture).
+            return True
+
+    def _sweep_orphaned_writes() -> None:
+        """Best-effort removal of the nodes THIS capture wrote after the
+        delete removed the Session mid-flight (the #2002 W6 residual of the
+        same race the receipt guards close): CONTAINS wiring MATCHes nothing
+        once the Session is gone, so turn/extracted Points written in that
+        window would otherwise orphan, as would a sessionCaptured Event /
+        agentSession Source minted post-delete. EXACT-IDS only — the turn ids
+        are this request's deterministic {{sid}}_t{{i}} set and the extracted
+        ids are the ULIDs this capture minted (never a prefix/label-wide
+        delete); the Event is this capture's own eventId when minted (a
+        replay never mints and never sweeps). All guarded: a sweep failure
+        never 500s the committed capture — the delete-side reconcile and a
+        same-session re-capture (MERGE re-absorbs turn ids) self-heal."""
+        point_ids: list[str] = []
+        if isinstance(windowed, list) and len(windowed) > 0:
+            point_ids = [f"{session_id}_t{i}" for i in range(len(windowed))]
+        if isinstance(extracted, list):
+            point_ids += [p.get("id") for p in extracted if p.get("id")]
+        point_ids = list(dict.fromkeys(point_ids))
+        if point_ids:
+            # Each destructive query carries the session-absence check INSIDE
+            # the same command (FalkorDB executes per-command) so the sweep is
+            # atomic against a same-session-id re-capture that MERGEd a fresh
+            # Session between the dead-branch check and this delete: a live
+            # Session (C's re-capture owns the shared {sid}_t{i} id-space) makes
+            # the query a no-op and the re-capture re-absorbs the turns; only a
+            # truly absent Session lets the orphans through.
+            with suppress(Exception):
+                proj.g.query(
+                    "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
+                    "WHERE s IS NULL "
+                    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p",
+                    params={"sid": session_id, "ids": point_ids},
+                )
+        if minted_event and event_id:
+            # no session guard needed — a minted eventId is a per-capture ULID
+            with suppress(Exception):
+                proj.g.query(
+                    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e",
+                    params={"eid": event_id},
+                )
+        with suppress(Exception):
+            proj.g.query(
+                "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
+                "WHERE s IS NULL "
+                "MATCH (src:Source {url:$url}) DETACH DELETE src",
+                params={"sid": session_id, "url": f"session:{session_id}"},
+            )
+
+    receipt_key = _capture_receipt_key(body.harness)
+    if _session_alive():
+        try:
+            _update_onboarding_state(team["team_id"], **{
+                receipt_key: now,
+            })
+            _record_capture_last_error(team["team_id"], body.harness, None)
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "session capture receipt write failed (non-fatal)")
+            extraction_warnings.append(
+                "session capture receipt write failed (non-fatal)")
+        else:
+            if not _session_alive():
+                # The delete won between the pre-check and the receipt PATCH
+                # — compensate (the response still 200s; the capture itself
+                # was valid). Bucket-aware like the delete-side recompute:
+                # clear ONLY when the WHOLE harness bucket is empty — a
+                # same-harness sibling Session (captured earlier, alive)
+                # keeps the receipt (T1-P12; delete-side semantics), even
+                # though THIS session's Session vanished. A failed count
+                # read leaves the receipt (fail-open; the next delete's
+                # reconcile self-heals).
+                try:
+                    bucket_empty = _session_count_by_harness(
+                        proj, body.harness) == 0
+                except Exception:
+                    bucket_empty = False
+                if bucket_empty:
+                    cleared = False
+                    with suppress(Exception):
+                        _update_onboarding_state(
+                            team["team_id"], **{receipt_key: None})
+                        cleared = True
+                    if cleared:
+                        extraction_warnings.append(
+                            "session deleted during capture — capture "
+                            "receipt cleared")
+                    else:
+                        extraction_warnings.append(
+                            "session deleted during capture — capture "
+                            "receipt clear failed (next delete reconciles)")
+                else:
+                    extraction_warnings.append(
+                        "session deleted during capture — capture receipt "
+                        "retained (sessions remain in this harness bucket)")
+                _sweep_orphaned_writes()
+    else:
+        # Session deleted mid-capture before the receipt write — never land
+        # an orphan receipt (the mutation was already removed). The capture
+        # still 200s (it was valid); the additive warning makes the removal
+        # visible. Sweep the writes THIS capture landed after the removal
+        # (exact-ids; best-effort).
+        extraction_warnings.append(
+            "session deleted during capture — capture receipt not recorded")
+        _sweep_orphaned_writes()
         _record_capture_last_error(team["team_id"], body.harness, None)
+
+    # #2002 (W6): FIRST-CAPTURE trigger (epic §2 WF-5, §4 DM-1, §8 timing pin)
+    # — at the user's FIRST capture the capture-disclosed NODE CHECKPOINT is
+    # written (idempotent keyed-MERGE step edge; FWW — a later capture is a
+    # 200 no-op) and the response marks first_capture=true so the calling
+    # in-conversation agent fires the ONE-line announcement whose COPY
+    # CONTRACT lives in tortoise/onboarding/SKILL.md §6 (W2 owns the copy;
+    # W6 owns the trigger — never duplicate the wording here). capture-
+    # disclosed is a NODE CHECKPOINT, never a card-counted step (state.py
+    # CARD_STEPS excludes it; the post-write gate eval is monotonic and only
+    # fires when the REAL fork gate was already satisfied). Hook-driven
+    # auto-capture has no in-conversation turn at capture time — the trigger
+    # still writes the checkpoint (the durable disclosure signal); the
+    # in-conversation line fires on agent-driven captures via first_capture.
+    # Non-fatal: a checkpoint hiccup never 500s a committed capture (mirrors
+    # the receipt block).
+    try:
+        legacy_mirror = bool(_get_onboarding_state(
+            team["team_id"]).get("onboarding_complete"))
+        _cd = _os.write_completed_step(
+            proj, team["team_id"], "capture-disclosed",
+            status_from_mirror=legacy_mirror)
+        first_capture = bool(_cd["created"])
+        _maybe_apply_completion(team["team_id"])
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
-            "session capture receipt write failed (non-fatal)")
+            "capture-disclosed checkpoint write failed (non-fatal)")
         extraction_warnings.append(
-            "session capture receipt write failed (non-fatal)")
+            "capture-disclosed checkpoint write failed (non-fatal)")
+        first_capture = False
 
     # P1 #1529 (D2): truthful extraction_mode on every response — "llm:<route>"
     # / "llm" on success, "empty" and "error" never claim success (the 422
@@ -5644,7 +5803,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "extraction_mode": effective_mode,
-            "errors": extraction_errors, "warnings": extraction_warnings}
+            "errors": extraction_errors, "warnings": extraction_warnings,
+            # #2002 (W6): first_capture=true exactly once per org — the
+            # trigger for the in-conversation announcement (SKILL.md §6 copy).
+            "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
     return resp
@@ -6428,12 +6590,22 @@ async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):
 
 
 @app.get("/v1/sessions/{session_id}")
-async def get_session_detail(session_id: str, team: dict = Depends(get_current_team_gated)):  # noqa: B008
+async def get_session_detail(session_id: str, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Get a single session with its conversation turns and extracted points (#714).
 
     Returns turns (episodic Point nodes with pointKind='event', ordered by
     turn index) and extracted decisions/claims (Point nodes linked via
     CONTAINS, filtered to pointKind IN ['decision', 'statement']).
+
+    #2002 (W6): dual-auth (session JWT OR tt_ key, #1828) — the Settings
+    Captured-sessions transcript View (DE2E-11) reads on the session JWT,
+    so it renders without a fresh bootstrap mint; agents keep passing their
+    tt_ key. This mirrors list_sessions, which #2111 (C2) deliberately left
+    on the session-ungated dependency for the same dashboard surface — the
+    ungated KEY branch still runs the C2 deleg=0 dormancy gate (minted
+    least-privilege keys cannot view transcripts any more than they can
+    capture). Team-member authz: session users are membership-validated in
+    _session_user_team (?team_id= → non-member 403); keys are team-scoped.
     """
     import re
     sdk = _make_sdk(namespace=team["team_id"])
@@ -6514,6 +6686,174 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
         "turn_points": turns,
         "extracted_points": extracted,
     }
+
+
+# #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
+# Captured-sessions view/delete home (DE2E-11). Removes the Session node +
+# its OWNED graph subgraph (CONTAINS turn/extracted Points, the
+# sessionCaptured provenance Event, the agentSession Source stub) and cleans
+# the capture receipts (jsonb) so nothing orphans (epic §2 WF-5, §4 DM-1, §6
+# I-5). Receipts carry no session id (per-harness timestamps, T1-P12) —
+# cleanup RECOMPUTES from the remaining graph: a receipt key is cleared iff
+# ZERO Sessions remain in its harness bucket (bare receipt ↔ harness-less
+# Sessions; per-harness receipt ↔ s.harness). Authz: team-member until W10
+# RBAC — dual-auth (session JWT OR tt_ key, #1828); session users are
+# membership-validated in _session_user_team (?team_id= → non-member 403),
+# key auth is team-scoped by resolution. Delete-during-capture safety: the
+# capture path re-verifies the Session before/after its receipt write and
+# skips/clears orphaned receipts; this recompute-after-removal is the
+# delete-side half of that invariant (idempotent: a re-delete 404s).
+
+
+def _session_count_by_harness(proj, harness: str | None) -> int:
+    """Remaining :Session count for a receipt bucket. None/absent harness =
+    the bare-receipt bucket (legacy no-harness hooks; a Session MERGE never
+    stores an empty harness — the property is absent, never '')."""
+    if harness:
+        rows = proj.g.query(
+            "MATCH (s:Session) WHERE s.harness = $h RETURN count(s)",
+            params={"h": harness},
+        ).result_set
+    else:
+        rows = proj.g.query(
+            "MATCH (s:Session) WHERE s.harness IS NULL RETURN count(s)",
+        ).result_set
+    return int(rows[0][0]) if rows else 0
+
+
+def _reconcile_capture_receipts(proj, team_id: str) -> list[str]:
+    """Receipt cleanup by recompute (the delete-side half of the T1-P12
+    receipt↔Session invariant): a receipt is an orphan iff zero Sessions
+    remain in its harness bucket. Only truthy receipts are touched (clear =
+    write None — the jsonb last-error-clear precedent); probes/last-errors
+    are install-health state and stay.
+
+    Best-effort guarded: a failure to recompute (transient graph/state
+    outage mid-delete) must never turn a clean deletion into a 500 that
+    re-poisons the state — the callers (success + 404 re-delete paths) run
+    it again on the next delete, so a skipped pass self-heals.
+    """
+    try:
+        state = _get_onboarding_state(team_id)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "capture-receipt reconcile: state read failed (skipped pass)")
+        return []
+    buckets = [(None, "session_capture_receipt")] + [
+        (h, f"session_capture_receipt_{h}") for h in sorted(_SESSION_HARNESS_VALUES)
+    ]
+    clear_fields: dict[str, None] = {}
+    cleaned: list[str] = []
+    for harness, key in buckets:
+        if not state.get(key):
+            continue
+        try:
+            empty_bucket = _session_count_by_harness(proj, harness) == 0
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture-receipt reconcile: count failed (skipped pass)")
+            continue
+        if empty_bucket:
+            clear_fields[key] = None
+            cleaned.append(key)
+    if clear_fields:
+        try:
+            _update_onboarding_state(team_id, **clear_fields)
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture-receipt reconcile: clear failed (skipped pass)")
+            return []
+    return cleaned
+
+
+@app.delete("/v1/sessions/{session_id}")
+async def delete_session(session_id: str, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Delete a captured session + its receipt (#2002 W6).
+
+    Team-member authz (until W10): dual-auth — a session JWT must be a
+    member of the team (?team_id= validated by _session_user_team); a tt_
+    key is team-scoped by key resolution. The session_id is resolved on the
+    team's own tenant graph, so cross-team deletion is impossible by
+    construction.
+
+    Response: 200 {deleted: true, cleaned_receipts: [...]} | 404. A 404
+    re-delete (session already gone — possibly a partial prior delete that
+    failed before its reconcile) still reconciles the receipts, so a
+    mid-delete outage self-heals on the retry.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    url = f"session:{session_id}"
+
+    # 1) existence (the Session node is the API-visible handle — GET detail's
+    #    404 contract: same detail string). A 404 STILL reconciles the
+    #    receipts — a re-delete after a partial prior delete must finish the
+    #    orphan cleanup the first attempt never reached.
+    sess_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.id, s.harness",
+        params={"sid": session_id},
+    ).result_set
+    if not sess_rows:
+        _reconcile_capture_receipts(proj, team["team_id"])
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 2) provenance event ids FIRST (before the Point delete below — the
+    #    sessionCaptured Event is stamped onto the extracted Points via
+    #    p.eventId, so the gather must run while the Points still exist;
+    #    the Source's own eventId is the fallback leg for the Source-absent
+    #    materialization path). A missing Event-write leaves no eventId —
+    #    nothing to match, no dangling.
+    ev_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
+        params={"sid": session_id},
+    ).result_set
+    src_rows = proj.g.query(
+        "MATCH (src:Source {url:$url}) RETURN src.eventId",
+        params={"url": url},
+    ).result_set
+    event_ids = [r[0] for r in ev_rows if r[0]]
+    if src_rows and src_rows[0][0]:
+        event_ids.append(src_rows[0][0])
+    event_ids = list(dict.fromkeys(event_ids))
+
+    # 3) turn + extracted Points wired via CONTAINS (owned by this Session;
+    #    DETACH DELETE also drops their aboutObject edges — the linked
+    #    WorkItem/Object entities themselves survive: deleting a transcript
+    #    never deletes the issue/entity it referenced).
+    proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
+        params={"sid": session_id},
+    )
+
+    # 4) the sessionCaptured provenance Event(s) by the collected ids.
+    if event_ids:
+        proj.g.query(
+            "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
+            params={"ids": event_ids},
+        )
+
+    # 5) the agentSession Source stub (url = session:{id}) + the Session.
+    proj.g.query(
+        "MATCH (src:Source {url:$url}) DETACH DELETE src",
+        params={"url": url},
+    )
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) DETACH DELETE s",
+        params={"sid": session_id},
+    )
+
+    # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
+    #    steps above are individually atomic but the SEQUENCE is not — a
+    #    failure between them leaves a partial deletion; the reconcile is
+    #    guarded (best-effort) so a mid-delete outage can never 500 AFTER
+    #    the Session is gone and strand an orphaned receipt, and the 404
+    #    re-delete path above finishes any skipped pass.
+    cleaned = _reconcile_capture_receipts(proj, team["team_id"])
+    return {"deleted": True, "cleaned_receipts": cleaned}
 
 
 # ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
