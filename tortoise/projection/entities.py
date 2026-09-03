@@ -654,14 +654,25 @@ class _EntityHandlers:
         # #1725: `github.issue.reopened` folds back to in_progress — a reopen
         # is a lifecycle Event whose ONLY projection is Object.status (the
         # indexer's decision table: lifecycle never mutates statement points).
+        # M3-P1 guard (#2164): the fold MATCHes only non-superseded Objects —
+        # a dual-tracked Object (connector work item conversationally
+        # superseded via the capture fold) must NOT be silently resurrected
+        # into recall_state's default view by a later connector lifecycle
+        # event. Aligns with the #1350 clobber doctrine (a re-mention cannot
+        # reset superseded→live). Live Objects (status IS NULL or <>'superseded')
+        # still fold normally.
         if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
                                  "github.issue.reopened"):
             self.g.query(
-                "MATCH (o:Object {name:$n}) SET o.status='in_progress'",
+                "MATCH (o:Object {name:$n}) "
+                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "SET o.status='in_progress'",
                 params={"n": _obj_name})
         elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
             self.g.query(
-                "MATCH (o:Object {name:$n}) SET o.status='completed'",
+                "MATCH (o:Object {name:$n}) "
+                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "SET o.status='completed'",
                 params={"n": _obj_name})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")

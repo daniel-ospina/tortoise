@@ -328,6 +328,66 @@ class TestWorkItemFold:
         finally:
             sdk.close()
 
+    def test_connector_fold_does_not_clobber_superseded(self):
+        """M3-P1 (#2164 Task 11): the connector work-item fold must NOT
+        reset a superseded Object back to in_progress/completed.
+
+        A dual-tracked Object (connector work item AND conversationally
+        superseded via the capture fold) must keep status='superseded' when
+        a LATER connector lifecycle event lands — recall_state's default view
+        excludes superseded/deprecated/archived/retracted, so an unguarded
+        SET would silently resurrect the Object into the default view.
+        BOTH families are driven here against the same superseded Object:
+        github.issue.closed (completed family) then
+        github.issue.reopened (in_progress family) — each would have
+        clobbered status='superseded' pre-fix.
+        """
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "TASK-9", objectKind="dev:issue")
+            # #2164 capture fold: supersede the work item (repo convention —
+            # the projection fold invoked by the commit path).
+            sdk._get_proj()._fold_object_superseded({
+                "name": "TASK-9", "supersedes_by": "TASK-9-v2"})
+            # completed family first — pre-fix this SET clobbers → completed.
+            sdk.create_event("closed", "github.issue.closed", object="TASK-9")
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status",
+                params={"n": "TASK-9"}).result_set
+            assert rows and rows[0][0] == "superseded", (
+                "github.issue.closed clobbered superseded status -> "
+                f"{rows[0][0] if rows else 'MISSING'}")
+            # in_progress family — pre-fix this SET clobbers → in_progress.
+            sdk.create_event("reopened", "github.issue.reopened",
+                             object="TASK-9")
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status",
+                params={"n": "TASK-9"}).result_set
+            assert rows and rows[0][0] == "superseded", (
+                "github.issue.reopened clobbered superseded status -> "
+                f"{rows[0][0] if rows else 'MISSING'}")
+        finally:
+            sdk.close()
+
+    def test_connector_fold_still_works_on_live_object(self):
+        """Regression for the M3-P1 guard: the WHERE (status IS NULL OR
+        status <> 'superseded') must only skip SUPERSEDED Objects — a live
+        Object's connector fold keeps working (#1725 reopen → in_progress
+        family, the one kind not explicitly covered by the pre-existing
+        live-Object tests above)."""
+        sdk = _fresh_sdk()
+        try:
+            sdk.create_entity("object", "the live bug", objectKind="dev:issue")
+            sdk.create_event("reopened", "github.issue.reopened",
+                             object="the live bug")
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status",
+                params={"n": "the live bug"}).result_set
+            assert rows and rows[0][0] == "in_progress", \
+                "live-Object reopen fold regressed under the guard"
+        finally:
+            sdk.close()
+
 
 # ── Read side (Steps 8-9) ────────────────────────────────────────────
 
