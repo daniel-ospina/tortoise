@@ -433,6 +433,7 @@ surfaces:
   - eval/retrieval/test_oracle.py
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
+  - eval/write_path/test_write_path_corpus.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
   - test_calibrate_thresholds.py
