@@ -1512,7 +1512,9 @@ def test_rogue_variance_coerces_and_projection_fail_open(w4_flag, monkeypatch):
             {"id": claim["id"], "ep": {"has_ep": True, "variance": None}}, block) is False
         # (2) projection fail-open: a projection error degrades the WHOLE batch
         # to the original items (byte-identical, no partial keys, no raise).
-        def _explode(item, block):  # noqa: ARG001
+        # ARG001 is not enabled in this repo's ruff config (#1503 baseline) —
+        # no noqa needed; the args are intentionally unused (unconditional raise).
+        def _explode(item, block):
             raise RuntimeError("projection exploded")
 
         monkeypatch.setattr(why_mod, "project_item", _explode)
