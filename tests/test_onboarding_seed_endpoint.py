@@ -99,7 +99,7 @@ class TestSeedEndpoint:
     def test_org_name_falls_back_to_teams_name(self):
         """Hosted anchor data: org display name ← teams.name (never
         invented); explicit person_name files the seed."""
-        tc, team_id, email = _registered()
+        tc, team_id, _email = _registered()
         try:
             org_name = f"w3org{uuid.uuid4().hex[:8]}"
             # rename the team so teams.name ≠ email slug? teams.name IS the
@@ -265,7 +265,7 @@ class TestSeedJourney:
     def test_self_fork_completes_only_with_decide(self):
         """Completion is fork-aware: two Subjects + connected WITHOUT decide
         → status active; decide-completed → complete."""
-        tc, team_id = self._self_fork_setup()
+        tc, _team_id = self._self_fork_setup()
         try:
             res = _seed(tc, org_name="Acme", person_name="Alex")
             assert res["onboarding"]["status"] == "active"
@@ -284,7 +284,7 @@ class TestSeedJourney:
         """LLM-503 → last_decide_attempt 'failed' recorded (retry
         reachable); a later success clears it; 'failed' never un-completes
         a completed decide; dismissal alone never completes."""
-        tc, team_id = self._self_fork_setup()
+        tc, _team_id = self._self_fork_setup()
         try:
             _seed(tc, org_name="Acme", person_name="Alex")
             # 503 attempt → failed recorded, still active
@@ -305,7 +305,7 @@ class TestSeedJourney:
             tc.__exit__(None, None, None)
 
     def test_dismissal_alone_never_completes(self):
-        tc, team_id = self._self_fork_setup()
+        tc, _team_id = self._self_fork_setup()
         try:
             _seed(tc, org_name="Acme", person_name="Alex")
             r = tc.post("/v1/onboarding/state/checkpoint",
@@ -319,7 +319,7 @@ class TestSeedJourney:
     def test_build_fork_defers_decide_to_catalog(self):
         """Build fork: two Subjects + connected are NOT complete; the
         catalog-presented checkpoint completes WITHOUT any decide."""
-        tc, team_id, _email = _registered()
+        tc, _team_id, _email = _registered()
         try:
             tc.post("/v1/onboarding/state/checkpoint", json={"fork": "build"})
             tc.post("/v1/onboarding/state/checkpoint",
