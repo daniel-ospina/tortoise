@@ -28,6 +28,7 @@ from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
+from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
@@ -12402,12 +12403,23 @@ class TortoiseSDK:
         graph_name = team.get("graph_name", f"team_{team.get('name', '')}")
         proj = self._get_proj()
         try:
-            if hasattr(proj.db, 'delete_graph'):
-                proj.db.delete_graph(graph_name)
+            # #2163: proj.db (falkordb.FalkorDB on every lane) has NO
+            # delete_graph attr on the pip client — the old hasattr probe
+            # skipped on FalkorDB Cloud and orphaned the graph after the
+            # registry rows were deleted. select_graph(...).delete() issues
+            # GRAPH.DELETE on embedded + server/cloud alike. An absent-graph
+            # raise (GRAPH.DELETE on a dropped/never-minted graph) is
+            # treated as success — the graph being gone is the desired end
+            # state; genuine failures still log and fall through to the
+            # best-effort swallow.
+            proj.db.select_graph(graph_name).delete()
+        except Exception as e:
+            if is_missing_graph_error(e):
+                _logger.debug("tenant graph %s already absent — skipping",
+                              graph_name)
             else:
-                _logger.debug("delete_graph not available (FalkorDBLite) — skipping")
-        except Exception:
-            _logger.debug("Failed to delete tenant graph %s — skipping", graph_name)
+                _logger.debug("Failed to delete tenant graph %s — skipping",
+                              graph_name)
 
         self._audit(team_id, None, "team_delete", resource_type="team",
                      resource_id=team_id)
