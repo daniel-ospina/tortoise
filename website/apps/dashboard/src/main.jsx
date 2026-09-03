@@ -5562,10 +5562,16 @@ function claimIntentInFlight() {
                     </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
-                    <td title={!k.revoked_at && isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) ? 'This key is in use by your current dashboard session — create a new key and switch to it rather than deleting this one.' : undefined}>
+                    <td>
                       {k.revoked_at ? <span className="revoked">revoked</span>
                         : k.enabled === false ? <span className="dim">disabled</span>
                         : <span className="live">active</span>}
+                      {/* #2166 (review P2): the held durable key's missing actions must be
+visible — visible text, not a hover-only title. Rotate = create a new key,
+then revoke this one (delete/toggle stay suppressed while in use). */}
+                      {!k.revoked_at && isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && (
+                        <div className="dim small">in use by this dashboard — to rotate, create a new key and revoke this one</div>
+                      )}
                     </td>
                     <td>{!k.revoked_at && !isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && isOwnerAdmin && (
                       <span className="key-actions">

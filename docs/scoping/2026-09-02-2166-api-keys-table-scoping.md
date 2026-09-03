@@ -19,6 +19,18 @@ created: 2026-09-02
 > `revoked_at`; copy carries no "temporary/permanent/session" vocabulary.
 > Server endpoint unchanged (still unfiltered for CLI/selfhost consumers).
 > See issue #2166 comment (issuecomment-5524398240).
+>
+> **SHIPPED-DESIGN SUPERSEDE (PR #2175, code-review P2):** the delivered
+> implementation is deliberately simpler than §2's `normalizeKeys` VM /
+> three-zone model: one pure `isManagedKey` predicate (durable-only) +
+> a managed-keys filter at render. The `normalizeKeys` VM, `keyZone`,
+> `managedStatus` (expired/in-use statuses), per-action `can*` helpers,
+> session/swept tbodies and §4 AC1/AC2's "separate section" wording are
+> **superseded by the amendment + this banner** — do not rebuild the VM.
+> The held-durable "in use" disclosure ships as a visible dim note under the
+> status cell (not a status token). Status vocabulary shipped: revoked /
+> disabled / active. The scope's S5/S6 mixed-fixture e2e + CI job (AC5) did
+> NOT ship in PR #2175 — tracked as follow-up issue #2178.
 
 
 > Consolidated scoping (double-diamond, verified). Companion research: `docs/research/2026-09-02-api-keys-table-session-credentials.md` (commit both as S0 first-chore). Issue: #2166. Complexity: standard. Team: epistemic-team. Worktree: `feat/2166-keys-table-durable-only`.

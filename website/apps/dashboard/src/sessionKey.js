@@ -20,7 +20,8 @@ export function isActiveKey(k, activeKey) {
 // Auto-minted session credentials (created_via 'bootstrap', or any row with an
 // expiry set) are the dashboard's own access keys — never presented as API
 // keys for using the product. Durable = user/agent-created keys the user can
-// name, toggle, revoke, and (later) scope or give a validity window.
+// name, toggle, revoke, and (later) scope or give a validity window. Disabled
+// (enabled:false) durable rows stay managed — the toggle needs them visible.
 export function isManagedKey(k) {
   if (!k) return false
   return !(k.created_via === 'bootstrap' || !!k.expires_at)

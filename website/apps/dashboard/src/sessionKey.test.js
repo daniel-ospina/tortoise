@@ -51,6 +51,10 @@ test('not managed: bootstrap session credential is never a table row', () => {
 test('not managed: any expiring row is an access credential, not a key', () => {
   assert.equal(isManagedKey({ created_via: 'provisioned', expires_at: '2026-08-02T00:00:00Z', revoked_at: null }), false)
 })
+test('managed: disabled durable key stays managed (toggle must stay reachable)', () => {
+  assert.equal(isManagedKey({ created_via: 'provisioned', enabled: false, expires_at: null }), true)
+  assert.equal(isManagedKey({ enabled: false, expires_at: null }), true)
+})
 test('managed: null row is never managed', () => {
   assert.equal(isManagedKey(null), false)
   assert.equal(isManagedKey(undefined), false)
