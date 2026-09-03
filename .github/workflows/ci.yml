@@ -23,6 +23,7 @@ jobs:
     outputs:
       migrations: ${{ steps.gate.outputs.migrations }}
       dashboard: ${{ steps.gate.outputs.dashboard }}
+      dashboard_e2e: ${{ steps.gate.outputs.dashboard_e2e }}
       uv_lock: ${{ steps.gate.outputs.uv_lock }}
       entrypoints: ${{ steps.gate.outputs.entrypoints }}
       client: ${{ steps.gate.outputs.client }}
@@ -174,6 +175,26 @@ jobs:
                   startswith(".github/workflows/"),
                   startswith(".husky/"),
                   startswith("scripts/"),
+              ),
+              # dashboard-e2e (#2166/#2178): the two-server keys-table suite
+              # (mixed fixture — durable-only render regression). Triggers on
+              # the suite + the harness module/fixtures it imports + the
+              # render-critical src (a render PR runs the suite against its
+              # committed dist — render changes ship the dist rebuild in the
+              # same PR per convention, #2175 precedent) + any committed-dist
+              # change + workflow edits (a job-definition change re-runs its
+              # own suite). Known blind spot (accepted): a src render change
+              # that forgets its dist rebuild runs against the previous
+              # bundle — detecting that would require an in-CI npm build,
+              # which the scope doc S6 explicitly excludes (committed-dist
+              # convention; deploy-pages rebuilds from src at deploy).
+              "dashboard_e2e": any_file(
+                  isfile("tests/e2e/test_keys_table_mixed.py"),
+                  isfile("tests/e2e/test_session_login_flow.py",
+                         "tests/e2e/conftest.py"),
+                  startswith("website/apps/dashboard/src/"),
+                  startswith("website/apps/dashboard/dist/"),
+                  isfile(".github/workflows/ci.yml"),
               ),
           }
 
@@ -592,6 +613,88 @@ jobs:
         run: |
           kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
           pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill workerd 2>/dev/null || true
+          true
+
+  dashboard-e2e:
+    needs: changes
+    if: needs.changes.outputs.dashboard_e2e == 'true'  # #2149: keys-table suite + harness + committed dist
+    runs-on: ubuntu-latest
+    # #2166/#2178: the mixed-fixture API Keys table suite — durable-only
+    # render regression (bootstrap/session rows never render; truthful
+    # revoked/disabled/active statuses; the held key's visible in-use note
+    # with toggle/trash suppressed). First dashboard suite in CI — the scope
+    # doc's S6 spec (no existing job boots the dashboard; the legal/welcome
+    # e2e jobs serve website/ on :8788 only).
+    #
+    # TWO wrangler boots (the #1511/#2166 harness): website/ on :8788 (the
+    # auth origin the gate redirects to) + the dashboard's COMMITTED dist on
+    # :8790. NO npm build inside CI (committed-dist convention): the mixed
+    # fixture asserts against the exact bundle PRs ship, so a stale/missing
+    # dist commit red-fails the job = tripwire.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: pip install -e '.[test]'
+      - run: python -m playwright install --with-deps chromium
+      - name: Start wrangler pages dev preview (website/ = auth origin, :8788)
+        run: |
+          cd website
+          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+            --compatibility-date=2024-09-23 \
+            > /tmp/wrangler-auth.log 2>&1 &
+          echo $! > /tmp/wrangler-auth.pid
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+              echo "wrangler (auth) ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::wrangler (auth) dev server failed to start"
+          tail -50 /tmp/wrangler-auth.log || true
+          exit 1
+      - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
+        run: |
+          cd website/apps/dashboard
+          npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
+            --compatibility-date=2024-09-23 \
+            > /tmp/wrangler-dash.log 2>&1 &
+          echo $! > /tmp/wrangler-dash.pid
+          for i in $(seq 1 120); do
+            if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
+              echo "wrangler (dashboard) ready after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::wrangler (dashboard) dev server failed to start"
+          tail -50 /tmp/wrangler-dash.log || true
+          exit 1
+      - name: Run keys-table mixed-fixture e2e (#2166/#2178)
+        run: >
+          RUN_DASHBOARD_E2E=1
+          python -m pytest tests/e2e/test_keys_table_mixed.py
+          -q -rs -p no:cacheprovider
+        env:
+          # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
+          # enforcement opt-in (this suite needs no FalkorDB server).
+          TORTOISE_TEST_CARVE_OUT: "1"
+      - name: Stop wrangler dev servers
+        if: always()
+        # kill npx + its wrangler/workerd children (each job gets its own
+        # runner VM, so pkill can't touch other jobs)
+        run: |
+          kill $(cat /tmp/wrangler-auth.pid) 2>/dev/null || true
+          kill $(cat /tmp/wrangler-dash.pid) 2>/dev/null || true
+          pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill -f 'wrangler.*8790' 2>/dev/null || true
           pkill workerd 2>/dev/null || true
           true
 
