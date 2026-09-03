@@ -435,7 +435,15 @@ class TestRegistryLegacyNode:
                     "kp": api_key[:10]},
         )
         out = sdk.apikey_verify(api_key)
-        assert out == {"team_id": team_id, "key_id": "legacy-k"}
+        # C2 (#2111): apikey_verify now returns delegation_depth + scopes
+        # (the MCP TeamResolutionMiddleware deleg gate reads them off the
+        # same dict) — additive to the pre-C2 {team_id, key_id} contract;
+        # a pre-#1709 legacy node resolves deleg NULL + scopes [] (the
+        # full-access legacy class).
+        assert out["team_id"] == team_id
+        assert out["key_id"] == "legacy-k"
+        assert out.get("delegation_depth") is None
+        assert out.get("scopes") == []
 
 
 class TestSupabaseLane:

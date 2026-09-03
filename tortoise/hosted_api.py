@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import json as _json
 import logging
 import math
@@ -1264,6 +1265,31 @@ async def health_security():
 SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe", "/v1/session/login"}
 
 
+async def _invoke_override(override, request: Request) -> dict:
+    """Invoke a dependency override the way FastAPI DI would. Overrides
+    declared with a ``request`` parameter (e.g. test_ask_api's
+    _suspended(request: Request)) get the Request injected; zero-arg
+    lambdas (the common auth-bypass override) are called bare. Mirrors
+    FastAPI's behavior so DIRECT calls from the C2 gated/session deps
+    behave identically to Depends()-resolved overrides."""
+    try:
+        sig = inspect.signature(override)
+        params = list(sig.parameters.values())
+        if params and params[0].kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD):
+            team = override(request)
+        else:
+            team = override()
+    except TypeError:
+        # Fallback: a callable whose signature inspect can't parse
+        # (builtins/C-extensions) — bare call is the historical behavior.
+        team = override()
+    if hasattr(team, "__await__"):
+        team = await team
+    return team
+
+
 async def _audit_auth_failure(request: Request, reason: str) -> None:
     """Fire-and-forget audit log for an auth failure (401).
 
@@ -1690,9 +1716,7 @@ async def get_current_team_gated(request: Request) -> dict:
     overrides = request.app.dependency_overrides
     override = overrides.get(get_current_team)
     if override is not None:
-        team = override()
-        if hasattr(team, "__await__"):
-            team = await team
+        team = await _invoke_override(override, request)
         return team
     return await get_current_team(request)
 
@@ -1736,9 +1760,7 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     overrides = request.app.dependency_overrides
     override = overrides.get(get_current_team)
     if override is not None:
-        team = override()
-        if hasattr(team, "__await__"):
-            team = await team
+        team = await _invoke_override(override, request)
         return team
     # Session JWT (eyJ...) — verify + resolve the user's team.
     user = await get_current_user(request)
