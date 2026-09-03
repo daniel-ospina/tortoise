@@ -4900,7 +4900,10 @@ class TestC3KeyLifecycle:
 
     def test_unknown_scope_422_and_unknown_graph_404(self, tmp_path):
         """422 on an off-allowlist scope; 404 on a graph-bound mint to an
-        unknown graph."""
+        unknown graph OR the literal "default" (the default graph is bound
+        by a team-wide key — graph_id absent — never a per-graph mint; the
+        supabase "default" id is a DERIVED row with no graphs-table row, so
+        an api_keys FK to it would 500)."""
         gen = self._setup(tmp_path)
         _sdk, tid, tc = next(gen)
         try:
@@ -4910,6 +4913,28 @@ class TestC3KeyLifecycle:
                 "graph_id": "g_no_such_graph", "scopes": ["graphs:read"],
             })
             assert r.status_code == 404, r.text
+            # Literal "default" is not key-bindable (custom-only).
+            r = self._session_mint(tc, tid, {
+                "graph_id": "default", "scopes": ["graphs:read"],
+            })
+            assert r.status_code == 404, r.text
+        finally:
+            gen.close()
+
+    def test_graph_bound_empty_scopes_422(self, tmp_path):
+        """SECOND-MODEL-GATE S2 pin: a graph-bound mint with an EXPLICIT
+        empty scopes array would mint a deleg-NULL scopes=[] key that
+        resolution derives legacy_full_access=True (FULL access) while the
+        response echoes scopes:[] — the F2 footgun on the mint path. 422."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            g = sdk._graph_create(tid, "acme", kind="custom")
+            r = self._session_mint(tc, tid, {
+                "graph_id": g["graph_id"], "scopes": [],
+            })
+            assert r.status_code == 422, r.text
+            assert "at least one scope" in r.text
         finally:
             gen.close()
 

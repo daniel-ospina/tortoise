@@ -4695,17 +4695,19 @@ def _mint_graph_key(team_id: str, graph_id: str,
 
 
 def _ensure_graph_exists(team_id: str, graph_id: str) -> None:
-    """C3 (#2112): a graph-bound mint references an existing graph.
-    "default" (or the registry default node's literal gid) always exists;
-    a custom graph must be a non-deleted row/node (404 otherwise). Mirrors
-    delete_graph's kind pre-lookup (mode-agnostic literal guard + kind
-    lookup)."""
+    """C3 (#2112): a graph-bound mint references an existing CUSTOM graph.
+
+    The default graph is bound via a team-wide key (graph_id ABSENT —
+    resolution maps it to the default namespace); there is no per-graph key
+    for the default graph. The literal "default" is the supabase seam's
+    DERIVED row id (no graphs row — teams.graph_name) and the registry
+    default node (kind='default', real gid g_<hex>) is not key-bindable, so
+    both 404 here (mirrors delete_graph's kind pre-lookup: a custom graph
+    must be a non-deleted row/node)."""
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
     )
-    if graph_id == "default":
-        return  # derived default — always present
     if is_supabase_enabled():
         rows = get_control_plane().query(
             "graphs", select=["kind", "status"],
@@ -4900,6 +4902,20 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
                 final_scopes = requested_scopes or ["graphs:read"]
                 prefix = "tk_"
             else:
+                # Owner-class (session/legacy-full) scoped mint. An EXPLICIT
+                # empty scopes array with a graph_id would mint a deleg-NULL
+                # scopes=[] graph-bound key — resolution derives
+                # legacy_full_access=(deleg NULL and scopes==[]) True = FULL
+                # access, while the response echoes scopes:[] (reads as least
+                # privilege). Same footgun the shrink branch 422s (F2) — 422
+                # here: per-graph keys require ≥1 explicit scope. (An empty
+                # array WITHOUT graph_id never reaches this branch — it
+                # collapses to the legacy {} owner mint.)
+                if graph_id is not None and not requested_scopes:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Per-graph keys require at least one scope.",
+                    )
                 delegation_depth = None
                 caller_key_id = None
                 final_scopes = requested_scopes
