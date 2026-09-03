@@ -10312,7 +10312,12 @@ async def resend_invite(invitation_id: str, team_id: str, request: Request,
     ).result_set
     if not rows or rows[0][0] != team_id:
         raise HTTPException(status_code=404, detail="Invitation not found")
-    _iid, _email, _role, _accepted_at, _status, _exp = invitation_id, *rows[0][1:]
+    _inv_row = rows[0]
+    _email = str(_inv_row[1] or "")
+    _role = str(_inv_row[2] or "member")
+    _accepted_at = _inv_row[3]
+    _status = _inv_row[4]
+    _exp = _inv_row[5]
     if _accepted_at is not None or _status == "accepted":
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot resend")
@@ -10375,7 +10380,8 @@ async def expire_invite(invitation_id: str, team_id: str,
     ).result_set
     if not rows or rows[0][0] != team_id:
         raise HTTPException(status_code=404, detail="Invitation not found")
-    _status, _accepted_at = rows[0][1], rows[0][2]
+    _exp_row = rows[0]
+    _status, _accepted_at = _exp_row[1], _exp_row[2]
     if _accepted_at is not None or _status == "accepted":
         raise HTTPException(status_code=409,
                             detail="Invitation already accepted — cannot expire")
