@@ -1275,9 +1275,18 @@ async def _invoke_override(override, request: Request) -> dict:
     try:
         sig = inspect.signature(override)
         params = list(sig.parameters.values())
-        if params and params[0].kind in (
+        first = params[0] if params else None
+        # Pass the Request ONLY when the first param is REQUIRED and
+        # position-callable (a real ``request: Request`` override like
+        # test_ask_api's _suspended). Optional-keyword lambdas
+        # (``lambda tid=tid: ...`` — the common auth-bypass override) must
+        # be called bare: binding the Request to their first optional
+        # param would silently corrupt the team dict (test_onboarding
+        # demo regressions).
+        if first is not None and first.kind in (
                 inspect.Parameter.POSITIONAL_ONLY,
-                inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                inspect.Parameter.POSITIONAL_OR_KEYWORD) \
+                and first.default is inspect.Parameter.empty:
             team = override(request)
         else:
             team = override()
