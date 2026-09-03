@@ -16,3 +16,12 @@ export function isSessionKey(k, activeKey) {
 export function isActiveKey(k, activeKey) {
   return !!activeKey && !k.revoked_at && (k.key_prefix === String(activeKey).slice(0, 10))
 }
+// #2166: durable product keys are the ONLY rows the API Keys page shows.
+// Auto-minted session credentials (created_via 'bootstrap', or any row with an
+// expiry set) are the dashboard's own access keys — never presented as API
+// keys for using the product. Durable = user/agent-created keys the user can
+// name, toggle, revoke, and (later) scope or give a validity window.
+export function isManagedKey(k) {
+  if (!k) return false
+  return !(k.created_via === 'bootstrap' || !!k.expires_at)
+}

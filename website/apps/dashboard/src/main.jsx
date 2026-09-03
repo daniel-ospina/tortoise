@@ -20,10 +20,10 @@ import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError } 
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
-// #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
-// unit-tested); imported under an alias to avoid an ESM redeclaration collision
-// with the local isSessionKey wrapper below.
-import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'
+// #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
+// unit-tested). #2166: isManagedKey selects the durable product keys the API
+// Keys page shows; isActiveKey protects the live data-plane key from revoke.
+import { isManagedKey, isActiveKey } from './sessionKey.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
 import {
@@ -4068,16 +4068,12 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1708 D8: API-first session-key classification (created_via === 'bootstrap'
-  // || expires_at) with the old active-key prefix guard retained ONLY as a
-  // fallback when the API fields are absent (stale cached responses / registry
-  // lane pre-#1709) so the live session key can never be revoked from the UI.
-  function isSessionKey(k) {
-    // #1708 fixer (P2): fall back to the apiKey state when this team has no
-    // cached key — the live session key must never be revocable even when
-    // teamKeysRef is empty (mirrors the `|| apiKey` pattern at mint/create).
-    return isSessionKeyPredicate(k, currentTeamId ? (teamKeysRef.current[currentTeamId] || apiKey) : apiKey)
-  }
+  // #2166: the API Keys page shows durable product keys only. Auto-minted
+  // session credentials (the dashboard's own access keys — created_via
+  // 'bootstrap' or any expiring row) are never rendered as rows; keys[] stays
+  // unfiltered in state so revoke/re-mint prefix matching (keyIdFromValue)
+  // keeps working for the live credential.
+  const managedKeys = (keys || []).filter(isManagedKey)
 
   function keyIdFromValue(value) {
     if (!value) return null
@@ -5528,8 +5524,8 @@ function claimIntentInFlight() {
             <table>
               <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {keys.length === 0 && <tr><td colSpan="5" className="dim">No keys yet.</td></tr>}
-                {keys.map((k) => (
+                {managedKeys.length === 0 && <tr><td colSpan="5" className="dim">No keys yet.</td></tr>}
+                {managedKeys.map((k) => (
                   <tr key={k.id}>
                     <td>
                       {editingKeyId === k.id ? (
@@ -5553,7 +5549,7 @@ function claimIntentInFlight() {
                       ) : (
                         <span className="key-name">
                           {k.name ? k.name : <span className="dim">—</span>}
-                          {!k.revoked_at && !isSessionKey(k) && isOwnerAdmin && (
+                          {!k.revoked_at && isOwnerAdmin && (
                             <button
                               className="ghost small key-rename"
                               onClick={() => { renameCancelRef.current = false; setEditingKeyId(k.id); setEditingKeyName(k.name || '') }}
@@ -5566,8 +5562,12 @@ function claimIntentInFlight() {
                     </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
-                    <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && !isSessionKey(k) && !isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && isOwnerAdmin && (
+                    <td title={!k.revoked_at && isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) ? 'This key is in use by your current dashboard session — create a new key and switch to it rather than deleting this one.' : undefined}>
+                      {k.revoked_at ? <span className="revoked">revoked</span>
+                        : k.enabled === false ? <span className="dim">disabled</span>
+                        : <span className="live">active</span>}
+                    </td>
+                    <td>{!k.revoked_at && !isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && isOwnerAdmin && (
                       <span className="key-actions">
                         {/* #1148-ux review: on/off toggle (new keys default on) */}
                         <button
