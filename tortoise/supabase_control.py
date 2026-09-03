@@ -1066,7 +1066,9 @@ def invitation_mint(cp, team_id: str, email: str, role: str,
 
 
 def invitation_accept(cp, token: str, user_id: str,
-                      user_email: str | None = None) -> dict:
+                      user_email: str | None = None,
+                      mismatch_override: str | None = None,
+                      otp_code: str | None = None) -> dict:
     """Accept a pending invitation by plaintext token (lookup_hash verify).
 
     Atomic single-use (E2E-3): the invitation is PATCHed to status='accepted'
@@ -1078,6 +1080,16 @@ def invitation_accept(cp, token: str, user_id: str,
     Rejects (InvitationError): unknown token (400), expired (400), used /
     already accepted (400), revoked (400), already an active member (409),
     JWT email vs invite email mismatch when the JWT carries an email (403).
+
+    W7 v2 (#2003, invite fusion): ``mismatch_override`` ∈ {'fuse',
+    'accept-mismatch'} turns the email-mismatch 403 into a mismatch-override
+    accept — ONLY after the OTP proof-of-control has been verified on the
+    invitation (``otp_verified_at`` set by ``invitation_otp_verify``; a
+    mismatch override without it is still a 403 — invite-hijack closed on
+    BOTH override paths). The accept then proceeds under the CURRENT account
+    and records the mismatch (accepted_via / accepted_mismatch /
+    fused_from_email / otp_verified_by) on the invitation. Legacy callers
+    (no override) keep the byte-unchanged 403.
 
     A previously removed/invited membership row for (user, team) is
     resurrected in place (registry MERGE semantics) rather than INSERTed —
@@ -1109,10 +1121,36 @@ def invitation_accept(cp, token: str, user_id: str,
     if exp is not None and exp <= now:
         raise InvitationError("Invite token expired")
 
-    if user_email and user_email.strip().lower() != (inv.get("email") or "").lower():
+    email_mismatch = bool(
+        user_email and (inv.get("email") or "").strip().lower()
+        != user_email.strip().lower())
+    if email_mismatch and mismatch_override is None:
         # Invitee must be the invitee's account (registry-path guard, #574).
         raise InvitationError("Invite email does not match this account",
                               status=403)
+    otp_verified_by = None
+    if email_mismatch and mismatch_override is not None:
+        # W7 v2: BOTH mismatch-override paths (fuse + accept-mismatch) are
+        # OTP-gated — the seam verifies the submitted code itself (defense
+        # in depth: a code-less or wrong-code mismatch-override can never
+        # reach the accept write). Verify is NON-consuming: the code is
+        # consumed at the conditional single-use PATCH below, so the quota /
+        # capacity 402s raised between here and the PATCH never burn it. The
+        # otp_* columns are touched ONLY on the v2 path — legacy accepts
+        # never read them (no schema coupling before the migration lands).
+        if mismatch_override not in ("fuse", "accept-mismatch"):
+            raise InvitationError(
+                "path must be 'fuse' or 'accept-mismatch'", status=422)
+        if not otp_code:
+            raise InvitationError(
+                "Verification code required to accept on a mismatched email",
+                status=403)
+        _otp_outcome = invitation_otp_verify(
+            cp, inv["id"], code=otp_code, now=now.isoformat())
+        if _otp_outcome != "ok":
+            raise InvitationError(
+                "Invalid or expired verification code", status=403)
+        otp_verified_by = user_id
 
     # Existing membership for (user, team) — any status.
     existing = cp.query(
@@ -1168,11 +1206,27 @@ def invitation_accept(cp, token: str, user_id: str,
                 "Team member limit reached", status=402)
 
     # Single-use: conditional PATCH (status='pending' filter) then verify.
+    accept_body: dict = {"status": "accepted", "accepted_at": now.isoformat()}
+    if email_mismatch and mismatch_override is not None:
+        # W7 v2 record: mismatch-override accepts are never silent — the
+        # invite carries the path, the original invited email (fused_from)
+        # and the OTP proof. The code is CONSUMED here (single-use at
+        # commit — same conditional PATCH as the token single-use).
+        accept_body.update({
+            "accepted_via": mismatch_override,
+            "accepted_mismatch": True,
+            "fused_from_email": inv.get("email"),
+            "otp_hash": None,
+            "otp_expires_at": None,
+            "otp_attempts": 0,
+            "otp_verified_at": now.isoformat(),
+            "otp_verified_by": otp_verified_by,
+        })
     cp.query(
         "invitations",
         method="PATCH",
         filters=[("id", "eq", inv["id"]), ("status", "eq", "pending")],
-        json_body={"status": "accepted", "accepted_at": now.isoformat()},
+        json_body=accept_body,
     )
     check = cp.query(
         "invitations", select=["status"], filters=[("id", "eq", inv["id"])],
@@ -1228,7 +1282,12 @@ def invitation_accept(cp, token: str, user_id: str,
         except Exception:
             pass
         raise
-    return {"team_id": inv["team_id"], "role": inv["role"]}
+    res = {"team_id": inv["team_id"], "role": inv["role"]}
+    if email_mismatch and mismatch_override is not None:
+        res["accepted_via"] = mismatch_override
+        res["mismatch"] = {"invited_email": inv.get("email"),
+                            "recorded": True}
+    return res
 
 
 def invitation_info_by_token(cp, token: str) -> dict | None:
@@ -1260,6 +1319,32 @@ def invitation_info_by_token(cp, token: str) -> dict | None:
         "inviter_email": row.get("inviter_email"),
         "expires_at": row.get("expires_at"),
     }
+
+
+def invitation_row_by_token(cp, token: str) -> dict | None:
+    """Resolve a PENDING + unexpired invitation ROW by plaintext token
+    (#2003 W7 v2 pre-resolution — the mismatch branch + OTP endpoint need the
+    invite email/id BEFORE any accept write). Returns None on unknown /
+    consumed / revoked / expired (the caller falls through to the legacy
+    flow, which raises the matching 400)."""
+    from tortoise.auth import lookup_hash as _lookup_hash
+
+    rows = cp.query(
+        "invitations",
+        select=["id", "team_id", "email", "role", "status",
+                "accepted_at", "expires_at"],
+        filters=[("lookup_hash", "eq", _lookup_hash(token))],
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    if row.get("accepted_at") is not None or (
+            row.get("status") or "pending") != "pending":
+        return None
+    exp = _parse_ts(row.get("expires_at"))
+    if exp is not None and exp <= datetime.now(UTC):
+        return None
+    return row
 
 
 def invitation_rescind(cp, invitation_id: str, team_id: str,
@@ -2842,3 +2927,207 @@ def decline_invitation_by_email(cp, invitation_id: str, email: str) -> dict:
         json_body={"status": "revoked"},
     )
     return {"revoked": True, "invitation_id": invitation_id}
+
+
+# ── W7 (#2003): invite fusion v2 — OTP proof-of-control + admin resend/expire
+# ─────────────────────────────────────────────────────────────────────────────
+# The mismatch-override accept paths (fuse / accept-mismatch) are gated on
+# proof-of-control of the INVITEE email: a 6-digit code emailed to the invite
+# address (never returned by the API) is verified once (single-use). State is
+# recorded on the invitations row via the deploy-time migration
+# 20260902000001 (otp_hash / otp_expires_at / otp_attempts / otp_sent_at /
+# otp_verified_at / otp_verified_by / accepted_via / accepted_mismatch /
+# fused_from_email). FakeControlPlane's generic row store carries the columns
+# without schema work, so these functions are unit-tested verbatim in CI; the
+# registry (selfhost) lane mirrors the same fields on the Invitation graph
+# node in hosted_api.py.
+
+
+def invitation_otp_mint(cp, invitation_id: str, *, code_hash: str,
+                        expires_at: str, sent_at: str) -> bool:
+    """Record a fresh OTP (hash-only at rest — the code is never stored
+    plaintext) on a PENDING invitation. Rotates any prior code (single
+    outstanding code per invitation; a re-issue invalidates the old one).
+
+    Returns False when the invitation is gone or no longer pending (a
+    concurrent accept won) — the caller 4xxs instead of minting onto a
+    consumed invite."""
+    updated = cp.query(
+        "invitations",
+        method="PATCH",
+        select=["id"],
+        filters=[("id", "eq", invitation_id), ("status", "eq", "pending")],
+        json_body={
+            "otp_hash": code_hash,
+            "otp_expires_at": expires_at,
+            "otp_attempts": 0,
+            "otp_sent_at": sent_at,
+            "otp_verified_at": None,
+            "otp_verified_by": None,
+        },
+    )
+    return bool(updated)
+
+
+def invitation_otp_verify(cp, invitation_id: str, *, code: str,
+                          now: str) -> str:
+    """Verify a submitted code against the invitation's recorded OTP.
+
+    NON-consuming: "ok" leaves the code OUTSTANDING — it is consumed exactly
+    once, atomically with the accept commit (invitation_accept's conditional
+    single-use PATCH clears otp_hash and records otp_verified_at/by). A
+    non-consuming 402 (capacity/free-cap) therefore never burns the code.
+
+    Outcome strings (the HTTP layer maps them to error shapes):
+      "ok"       — code matches (PBKDF2 verify via verify_api_key) + unexpired.
+      "invalid"  — mismatch → otp_attempts += 1; at 5 attempts the code
+                   is cleared (exhausted — a fresh send is required).
+      "expired"  — past otp_expires_at (the code is cleared).
+      "no_otp"   — no outstanding code (never sent / already consumed at a
+                   prior accept / attempts exhausted).
+    """
+    from tortoise.auth import verify_api_key as _verify_otp
+
+    rows = cp.query(
+        "invitations",
+        select=["otp_hash", "otp_expires_at", "otp_attempts",
+                "otp_verified_at", "status"],
+        filters=[("id", "eq", invitation_id)],
+    )
+    if not rows or rows[0].get("status") != "pending":
+        return "no_otp"
+    row = rows[0]
+    if row.get("otp_verified_at") is not None:
+        return "no_otp"  # already consumed at the accept commit
+    otp_hash = row.get("otp_hash")
+    if not otp_hash:
+        return "no_otp"
+    exp = _parse_ts(row.get("otp_expires_at"))
+    if exp is not None and exp <= _parse_ts(now):
+        # Expired code — clear so a re-send starts clean.
+        cp.query(
+            "invitations",
+            method="PATCH",
+            filters=[("id", "eq", invitation_id)],
+            json_body={"otp_hash": None, "otp_expires_at": None,
+                       "otp_attempts": 0},
+        )
+        return "expired"
+    if not _verify_otp(code, otp_hash):
+        attempts = int(row.get("otp_attempts") or 0) + 1
+        body: dict = {"otp_attempts": attempts}
+        if attempts >= 5:
+            # Brute-force budget exhausted — clear the code entirely (a
+            # fresh send mints a new one).
+            body.update({"otp_hash": None, "otp_expires_at": None,
+                         "otp_attempts": 0})
+        cp.query(
+            "invitations",
+            method="PATCH",
+            filters=[("id", "eq", invitation_id)],
+            json_body=body,
+        )
+        return "invalid"
+    # Match → reset the budget; the code stays outstanding until the accept
+    # commit consumes it.
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("id", "eq", invitation_id)],
+        json_body={"otp_attempts": 0},
+    )
+    return "ok"
+
+
+def invitation_resend(cp, invitation_id: str, team_id: str,
+                      *, actor_user_id: str) -> dict:
+    """Owner/admin resend (Slack-style, #2003): rotate the invitation token
+    (a fresh plaintext is returned ONCE, hash-only at rest — same posture as
+    invitation_mint) and refresh the expiry to +7 days. The invitee-side
+    email send stays best-effort in the caller.
+
+    Raises InvitationError: 404 unknown/mismatched team, 409 consumed
+    (accepted) or revoked, 400 expired-pending (an expired pending invite
+    must be re-minted, not resurrected by resend — seats and links stay
+    honest)."""
+    import uuid
+    from datetime import timedelta
+
+    from tortoise.auth import lookup_hash as _lookup_hash
+
+    rows = cp.query(
+        "invitations",
+        select=["id", "team_id", "email", "role", "status",
+                "accepted_at", "expires_at"],
+        filters=[("id", "eq", invitation_id)],
+    )
+    if not rows:
+        raise InvitationError("Invitation not found", status=404)
+    inv = rows[0]
+    if inv.get("team_id") != team_id:
+        raise InvitationError("Invitation not found", status=404)
+    if inv.get("accepted_at") is not None or inv.get("status") == "accepted":
+        raise InvitationError(
+            "Invitation already accepted — cannot resend", status=409)
+    if inv.get("status") == "revoked":
+        raise InvitationError(
+            "Invitation has been revoked — cannot resend", status=409)
+    exp = _parse_ts(inv.get("expires_at"))
+    if exp is not None and exp <= datetime.now(UTC):
+        raise InvitationError(
+            "Invite token expired — create a new invite instead", status=400)
+    token = str(uuid.uuid4())
+    new_expires = (datetime.now(UTC) + timedelta(days=7)).isoformat()
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("id", "eq", invitation_id), ("status", "eq", "pending")],
+        json_body={
+            "lookup_hash": _lookup_hash(token),
+            "expires_at": new_expires,
+            "invited_by": actor_user_id,
+            # A resend invalidates any outstanding OTP — the proof must be
+            # re-issued against the fresh link.
+            "otp_hash": None,
+            "otp_expires_at": None,
+            "otp_attempts": 0,
+            "otp_verified_at": None,
+            "otp_verified_by": None,
+        },
+    )
+    return {"token": token, "email": inv.get("email"),
+            "role": inv.get("role"), "expires_at": new_expires}
+
+
+def invitation_expire(cp, invitation_id: str, team_id: str,
+                      *, actor_user_id: str) -> dict:
+    """Owner/admin expire-now (Slack-style, #2003): a PENDING invitation is
+    marked status='expired' with expires_at=now — the link dies, the invite
+    leaves every actionable/pending list, and the Pro seat it held is freed.
+    Consumed (accepted) invitations are not expire-able (409)."""
+    now = datetime.now(UTC).isoformat()
+    rows = cp.query(
+        "invitations",
+        select=["id", "team_id", "status", "accepted_at"],
+        filters=[("id", "eq", invitation_id)],
+    )
+    if not rows:
+        raise InvitationError("Invitation not found", status=404)
+    inv = rows[0]
+    if inv.get("team_id") != team_id:
+        raise InvitationError("Invitation not found", status=404)
+    if inv.get("accepted_at") is not None or inv.get("status") == "accepted":
+        raise InvitationError(
+            "Invitation already accepted — cannot expire", status=409)
+    if inv.get("status") == "revoked":
+        return {"expired": True, "already": True, "invitation_id": invitation_id}
+    if inv.get("status") == "expired":
+        return {"expired": True, "already": True, "invitation_id": invitation_id}
+    cp.query(
+        "invitations",
+        method="PATCH",
+        filters=[("id", "eq", invitation_id), ("status", "eq", "pending")],
+        json_body={"status": "expired", "expires_at": now,
+                   "expired_by": actor_user_id},
+    )
+    return {"expired": True, "invitation_id": invitation_id}
