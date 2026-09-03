@@ -5263,8 +5263,11 @@ class TestC3ReviewGatePins:
 
     def test_shrink_422_is_noop_for_enabled_and_name(self, tmp_path):
         """P2 partial-application pin: a PATCH body with a superset scopes
-        array + enabled:false must 422 WITHOUT persisting enabled=false
-        (validation runs before any mutation)."""
+        array + enabled:false + name must 422 WITHOUT persisting ANY of them
+        (validation runs before any mutation). Registry lane: enabled is a
+        no-op echo (no column) so the discriminating mutation is the name
+        write — pre-fix code persisted k.name before the scopes 422; the
+        post-fix code validates scopes first."""
         gen = TestC3KeyLifecycle()._setup(tmp_path)
         sdk, tid, tc = next(gen)
         try:
@@ -5284,15 +5287,18 @@ class TestC3ReviewGatePins:
             )
             r = tc.patch(f"/v1/team/keys/{scoped['id']}", json={
                 "enabled": False,
+                "name": "scratch",
                 "scopes": ["graphs:read", "graphs:write"],  # superset → 422
             })
             assert r.status_code == 422, r.text
-            # Nothing persisted: scopes unchanged, no partial state.
+            # Nothing persisted: scopes AND name unchanged (pre-fix registry
+            # code wrote k.name before the 422 — this assert catches it).
             rows = sdk._get_registry().query(
-                "MATCH (k:APIKey {id:$id}) RETURN k.scopes",
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes, k.name",
                 params={"id": scoped["id"]},
             ).result_set
             assert rows[0][0] == ["graphs:read"]
+            assert rows[0][1] != "scratch"
         finally:
             gen.close()
 
