@@ -1,11 +1,11 @@
 {
   "receipt_version": 1,
-  "run_id": "w2b-a6a3a5cbca1c",
-  "date": "2026-09-03T12:45:44Z",
+  "run_id": "w2b-f3e4905bfbff",
+  "date": "2026-09-03T21:48:18Z",
   "run_status": "completed",
-  "verdict": "inconclusive",
-  "failure_origin": null,
-  "commit": "795a0209",
+  "verdict": "regression",
+  "failure_origin": "gate_regression",
+  "commit": "20d3c4ba",
   "corpus_hash": "sha256:52d4a742e7cea21ce9f1147cc3ec46a10436a6dd9e7fbc7ad22701d851d90dc8",
   "judge_pin": "w2-write-path-mechanical-v1",
   "resolved_config": {
@@ -16,11 +16,12 @@
     ],
     "mode": "BPRE",
     "harness": "all",
-    "seed": 42
+    "seed": 42,
+    "extractor_posture": "llm"
   },
   "cost_usd": 0.0,
   "metrics": {
-    "salient_unit_survival_macro": 0.3055555555555556,
+    "salient_unit_survival_macro": 0.25,
     "salient_unit_survival_strict": 0.0,
     "distractor_leakage_per_run": 0,
     "sessions_emitting": 1.0,
@@ -33,7 +34,7 @@
       "session_id": "wp01_quarry_debug",
       "emitted": true,
       "macro": {
-        "survived": 3,
+        "survived": 1,
         "total": 16
       },
       "strict": {
@@ -46,10 +47,10 @@
         "total": 0
       },
       "provenance": {
-        "provenanced": 16,
-        "total": 16
+        "provenanced": 13,
+        "total": 13
       },
-      "memory_points": 16,
+      "memory_points": 13,
       "operator_counts": {},
       "failed_units": [
         {
@@ -98,11 +99,11 @@
         },
         {
           "id": "wp01_quarry_debug_u_12",
-          "failure": "ep_update_missing"
+          "failure": "content_missing"
         },
         {
           "id": "wp01_quarry_debug_u_13",
-          "failure": "ep_update_missing"
+          "failure": "content_missing"
         },
         {
           "id": "wp01_quarry_debug_u_14",
@@ -135,10 +136,10 @@
         "total": 0
       },
       "provenance": {
-        "provenanced": 13,
-        "total": 13
+        "provenanced": 12,
+        "total": 12
       },
-      "memory_points": 13,
+      "memory_points": 12,
       "operator_counts": {},
       "failed_units": [
         {
@@ -212,10 +213,10 @@
         "total": 0
       },
       "provenance": {
-        "provenanced": 26,
-        "total": 26
+        "provenanced": 20,
+        "total": 20
       },
-      "memory_points": 26,
+      "memory_points": 20,
       "operator_counts": {},
       "failed_units": [
         {
@@ -224,7 +225,7 @@
         },
         {
           "id": "wp03_ember_design_u_10",
-          "failure": "ep_update_missing"
+          "failure": "content_missing"
         },
         {
           "id": "wp03_ember_design_u_02",
@@ -272,7 +273,7 @@
         },
         {
           "id": "wp03_ember_design_u_14",
-          "failure": "content_missing"
+          "failure": "ep_update_missing"
         },
         {
           "id": "wp03_ember_design_u_15",
@@ -284,7 +285,7 @@
       "session_id": "wp04_aurora_perf",
       "emitted": true,
       "macro": {
-        "survived": 5,
+        "survived": 1,
         "total": 13
       },
       "strict": {
@@ -297,10 +298,10 @@
         "total": 0
       },
       "provenance": {
-        "provenanced": 15,
-        "total": 15
+        "provenanced": 12,
+        "total": 12
       },
-      "memory_points": 15,
+      "memory_points": 12,
       "operator_counts": {},
       "failed_units": [
         {
@@ -313,11 +314,11 @@
         },
         {
           "id": "wp04_aurora_perf_u_03",
-          "failure": "ep_update_missing"
+          "failure": "content_missing"
         },
         {
           "id": "wp04_aurora_perf_u_04",
-          "failure": "ep_update_missing"
+          "failure": "content_missing"
         },
         {
           "id": "wp04_aurora_perf_u_05",
@@ -341,7 +342,7 @@
         },
         {
           "id": "wp04_aurora_perf_u_10",
-          "failure": "ep_update_missing"
+          "failure": "content_missing"
         },
         {
           "id": "wp04_aurora_perf_u_11",
@@ -349,7 +350,7 @@
         },
         {
           "id": "wp04_aurora_perf_u_12",
-          "failure": "ep_update_missing"
+          "failure": "content_missing"
         },
         {
           "id": "wp04_aurora_perf_u_13",
@@ -361,7 +362,7 @@
       "session_id": "wp05_retro_writeup",
       "emitted": true,
       "macro": {
-        "survived": 4,
+        "survived": 6,
         "total": 15
       },
       "strict": {
@@ -374,15 +375,15 @@
         "total": 0
       },
       "provenance": {
-        "provenanced": 16,
-        "total": 16
+        "provenanced": 20,
+        "total": 20
       },
-      "memory_points": 16,
+      "memory_points": 20,
       "operator_counts": {},
       "failed_units": [
         {
           "id": "wp05_retro_writeup_u_01",
-          "failure": "content_missing"
+          "failure": "ep_update_missing"
         },
         {
           "id": "wp05_retro_writeup_u_02",
@@ -438,18 +439,20 @@
         },
         {
           "id": "wp05_retro_writeup_u_15",
-          "failure": "content_missing"
+          "failure": "ep_update_missing"
         }
       ]
     }
   ],
   "notes": [
-    "wp01_quarry_debug: capture ok=True extraction_mode=llm:deepseek-direct extracted=16",
-    "wp02_lumen_refactor: capture ok=True extraction_mode=llm:deepseek-direct extracted=13",
-    "wp03_ember_design: capture ok=True extraction_mode=llm:deepseek-direct extracted=26",
-    "wp04_aurora_perf: capture ok=True extraction_mode=llm:deepseek-direct extracted=15",
-    "wp05_retro_writeup: capture ok=True extraction_mode=llm:deepseek-direct extracted=16",
-    "dream EP pass: total_affected=0 coverage=0.0 converged_all=True"
+    "wp01_quarry_debug: capture ok=True extraction_mode=llm:deepseek-direct extracted=13",
+    "wp02_lumen_refactor: capture ok=True extraction_mode=llm:deepseek-direct extracted=12",
+    "wp03_ember_design: capture ok=True extraction_mode=llm:deepseek-direct extracted=20",
+    "wp04_aurora_perf: capture ok=True extraction_mode=llm:deepseek-direct extracted=12",
+    "wp05_retro_writeup: capture ok=True extraction_mode=llm:deepseek-direct extracted=20",
+    "dream EP pass: total_affected=0 coverage=0.0 converged_all=True",
+    "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no double-quoted spans (quote_spans_total=0) \u2014 this number is a floor, not a fidelity bar; it will not hold under a future corpus that quotes",
+    "cost not tracked: the extractor seam reported no llm_cost_usd (mock/unknown adapter) \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
   ],
   "log": [
     "parser round-trip ok (codex, 26 turns)",
@@ -457,6 +460,6 @@
     "parser round-trip ok (pi, 24 turns)",
     "parser round-trip ok (pi, 20 turns)",
     "parser round-trip ok (claude-desktop, 23 turns)",
-    "metrics: {\"salient_unit_survival_macro\": 0.3056, \"salient_unit_survival_strict\": 0.0, \"distractor_leakage_per_run\": 0, \"sessions_emitting\": 1.0, \"quote_fidelity\": 1.0, \"provenance_accuracy\": 1.0}"
+    "metrics: {\"salient_unit_survival_macro\": 0.25, \"salient_unit_survival_strict\": 0.0, \"distractor_leakage_per_run\": 0, \"sessions_emitting\": 1.0, \"quote_fidelity\": 1.0, \"provenance_accuracy\": 1.0}"
   ]
 }
