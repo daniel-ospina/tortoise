@@ -3507,9 +3507,10 @@ function claimIntentInFlight() {
       } else if (e?.status === 403) {
         // #1148: on dashboard_key_login=false (Protect) teams, KEY-authed
         // management mints 403 — the human session could pass but mintKey's
-        // key header shadows the JWT (api() merge). The paste escape below is
-        // the path: create/regenerate in the API Keys tab, paste here.
-        setWizardDurableError('This Organization restricts key management — create or regenerate a durable key in the API Keys tab, then paste it below.')
+        // key header shadows the JWT (api() merge). The tab's create/regenerate
+        // hits the same key-auth 403, so the escape is pasting an existing
+        // durable key (from an agent config / another device) below.
+        setWizardDurableError('This Organization restricts key management from this session — paste an existing durable key below (or re-authenticate in the API Keys tab to create one).')
       } else {
         setWizardDurableError(e?.message || 'Could not create a durable setup key — try again.')
       }
@@ -4927,7 +4928,7 @@ function claimIntentInFlight() {
                                 // the server; shown once, cleared on use.
                                 const check = durableConnectKey('', pasted, keys)
                                 if (check.source === 'bootstrap' || check.source === 'revoked' || check.source === 'disabled') {
-                                  setWizardDurableError('That key is not usable (expired, revoked, or disabled). Regenerate one in the API Keys tab and paste the new key.')
+                                  setWizardDurableError('That key is not durable (session keys expire within 24 hours; revoked and disabled keys never authenticate). Regenerate a durable one in the API Keys tab and paste the new key.')
                                   return
                                 }
                                 if (!/^tt_/.test(pasted)) {
@@ -4936,6 +4937,13 @@ function claimIntentInFlight() {
                                 }
                                 setWizardDurableKey(pasted)
                                 setWizardDurablePaste('')
+                                // NOTE: paste is intentionally NOT installed to
+                                // apiKey/localStorage (unlike the mint path) —
+                                // the user brought this key from elsewhere and
+                                // manages it there; making it the team's active
+                                // data-plane key would be a silent rotation.
+                                // Re-entry re-gates (paste again) — acceptable
+                                // friction, no leak.
                               }}>Use this key</button>
                           </div>
                         </>
