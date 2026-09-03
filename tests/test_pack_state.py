@@ -410,32 +410,6 @@ class TestPackInstallLockSerialization:
 # ── Provisioning hooks ─────────────────────────────────────────────────────
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Force every hosted_api TortoiseSDK construction onto one embedded DB.
-
-    #2127 wave 2: kept ONLY for the two in-body backfill-script tests below
-    (they DELENV TORTOISE_DB_URI so the script's bare tortoise.sdk
-    constructions resolve via the TORTOISE_DB_PATH env pin — the shared
-    tests._http_fixtures.patched_tortoise_sdk helper would not delete the
-    URI and its force-drop would not reach the script's bare SDKs). The
-    registry_client / supabase_client fixtures migrated onto the shared
-    helper (which adds the #1950 pin + deterministic anchor close the
-    restore-only shape here lacked).
-    """
-    import tortoise.hosted_api as ha_mod
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
 @pytest.fixture
 def registry_client(monkeypatch):
     """TestClient in REGISTRY control-plane mode (selfhost) with a temp
@@ -730,13 +704,13 @@ class TestBackfillScript:
         Runs the script IN-PROCESS (embedded FalkorDBLite is single-writer —
         a subprocess would hit EmbeddedStoreBusyError on the same DB).
         """
-        import tortoise.hosted_api as ha_mod  # noqa: I001
-        from fastapi.testclient import TestClient
-        from tortoise.hosted_api import app
-
         # Import the script from its path (graph-scripts is not a package).
         import importlib.machinery
         import importlib.util
+
+        from fastapi.testclient import TestClient
+
+        from tortoise.hosted_api import app
         _script = os.path.join(REPO_ROOT, "graph-scripts",
                                "backfill_pack_installs.py")
         _loader = importlib.machinery.SourceFileLoader(
@@ -755,20 +729,21 @@ class TestBackfillScript:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "bf.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-            _orig = _patch_tortoise_sdk_init(db_path)
-            try:
-                with TestClient(app) as tc:
-                    # seed a team via the registry provision path (eager
-                    # activation writes the starter set)
-                    r = tc.post("/internal/provision",
-                                headers=_INTERNAL_HEADERS, json={
-                                    "team_id": "t-bf-1", "team_name": "BF",
-                                    "api_key_hash": "abc",
-                                    "created_by": "user-1"})
-                    assert r.status_code == 200, r.text
-            finally:
-                ha_mod.TortoiseSDK.__init__ = _orig
-                app.dependency_overrides.clear()
+            # #2127 wave 2: shared helper (see registry_client fixture).
+            # Scoped to the provision TestClient ONLY: the dry-run's bare
+            # tortoise.sdk constructions run AFTER init restore and resolve
+            # via the monkeypatch-set TORTOISE_DB_PATH pin — the helper's
+            # exit snapshot-RESTORES the pin (to the monkeypatch value, still
+            # db_path), so it stays set for bf.main() and the post-run reads.
+            with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+                # seed a team via the registry provision path (eager
+                # activation writes the starter set)
+                r = tc.post("/internal/provision",
+                            headers=_INTERNAL_HEADERS, json={
+                                "team_id": "t-bf-1", "team_name": "BF",
+                                "api_key_hash": "abc",
+                                "created_by": "user-1"})
+                assert r.status_code == 200, r.text
 
             # dry-run: exit 0, prints per-team plans, writes nothing
             monkeypatch.setattr(sys, "argv", ["backfill_pack_installs.py",
