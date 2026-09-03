@@ -1129,6 +1129,184 @@ def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
         (f"fold must never fire for a dangling successor: {rows!r}")
 
 
+# ── #2164 Task 4: pt_ capture routing + terminal guard + unresolved-ref
+#    meta warnings (indicators 3 + 4) — end-to-end through
+#    _extract_session_v2 (each test fails if the helper's pt_ branch were
+#    removed; the records would never reach supersede()/CORRECTS) ────────
+
+def _capture_pt_id(content: str) -> str:
+    """Content-addressed capture point id (extractor_v2._content_id parity:
+    pt_<sha256[:62]> — E5 #1537 emits supersession refs in this format)."""
+    from tortoise.ids import content_hash
+    return f"pt_{content_hash(content)[:62]}"
+
+
+def test_extract_session_v2_routes_pt_supersession_to_supersede(sdk, monkeypatch):
+    """#2164 (Task 4): a pt_ supersession record on the capture payload
+    routes to the shared helper's CORRECTS branch — (new)-[:CORRECTS]->(old)
+    with the old point terminal (status='superseded' + outdated=True), meta
+    mode 'v2', no errors. The successor point rides payload.points (written
+    by the points loop) exactly as extractor_v2 emits it (E5 #1537); the
+    OLD point is a prior session's live statement point."""
+    import tortoise.extractor_v2 as ev2
+
+    old = _capture_pt_id("the gym moved from 6pm to 5pm")
+    new = _capture_pt_id("the gym session is now at 5pm")
+    sdk.create_point("statement", "the gym moved from 6pm to 5pm",
+                     id=old, status="live")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [{"id": new, "content": "the gym session is now at 5pm",
+                            "pointKind": "statement"}],
+               "supersessions": [{"superseded": old, "supersedes_by": new,
+                                   "evidence": "fact-value contradiction"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$new})-[:CORRECTS]->(o:Point {id:$old}) "
+        "RETURN o.status, o.outdated",
+        params={"new": new, "old": old}).result_set
+    assert rows, "CORRECTS edge missing — pt_ record never reached supersede()"
+    status, outdated = rows[0]
+    assert status == "superseded", rows
+    assert outdated is True, rows
+    assert meta["mode"] == "v2"
+    assert meta["errors"] == [], meta
+
+
+def test_extract_session_v2_terminal_old_is_silent_noop(sdk, monkeypatch):
+    """#2164 (Task 4): re-ingesting a pt_ supersession record whose OLD
+    point is ALREADY terminal is an idempotent silent no-op — no raise, no
+    NEW meta warning naming the ref (the helper's terminal probe pre-empts
+    supersede_point's raise — sdk.supersede_point rejects terminal olds),
+    and no duplicate CORRECTS edge."""
+    import tortoise.extractor_v2 as ev2
+
+    old = _capture_pt_id("the gym moved from 6pm to 5pm")
+    new = _capture_pt_id("the gym session is now at 5pm")
+    sdk.create_point("statement", "the gym moved from 6pm to 5pm",
+                     id=old, status="live")
+    sdk.create_point("statement", "the gym session is now at 5pm",
+                     id=new, status="draft")
+    sdk.supersede(old, new)  # first application — old now terminal
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [],
+               "supersessions": [{"superseded": old, "supersedes_by": new,
+                                   "evidence": "fact-value contradiction"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    assert meta["errors"] == [], meta
+    assert not any(old in w for w in meta["warnings"]), meta["warnings"]
+    n = sdk._get_proj().g.query(
+        "MATCH (n:Point)-[:CORRECTS]->(o:Point {id:$old}) RETURN count(n)",
+        params={"old": old}).result_set[0][0]
+    assert n == 1, f"re-ingest must be idempotent: {n} CORRECTS edges"
+
+
+def test_extract_session_v2_draft_old_point_supersedeable(sdk, monkeypatch):
+    """#2164 (Task 4): a capture-DRAFT old point (the points loop writes
+    status='draft') CAN be superseded by a later session's E5 record — the
+    supersede guard rejects only retracted/superseded/archived, so draft is
+    not terminal. Pins that a session-N draft is correctable by session-N+1."""
+    import tortoise.extractor_v2 as ev2
+
+    old = _capture_pt_id("deploy target is serve --http")
+    new = _capture_pt_id("deploy target is serve --https")
+    sdk.create_point("statement", "deploy target is serve --http",
+                     id=old, status="draft")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [{"id": new, "content": "deploy target is serve --https",
+                            "pointKind": "statement"}],
+               "supersessions": [{"superseded": old, "supersedes_by": new,
+                                   "evidence": "fact-value contradiction"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$new})-[:CORRECTS]->(o:Point {id:$old}) "
+        "RETURN o.status",
+        params={"new": new, "old": old}).result_set
+    assert rows, ("draft old point must be supersedeable — CORRECTS edge "
+                  "missing")
+    assert rows[0][0] == "superseded", rows
+    assert meta["errors"] == [], meta
+
+
+def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
+    """#2164 (Task 4, indicator 4): the pt_ branch's fail-open skips surface
+    as meta WARNINGS with the specific cause — never an error, never a
+    silent drop. (a) unresolved pt_ ref (old point absent → 'not found');
+    (b) dangling successor (new point absent → supersede()'s No point guard
+    is caught + warned, and the old point is NOT terminalized — a CORRECTS
+    edge to a nonexistent point would be dangling)."""
+    import tortoise.extractor_v2 as ev2
+
+    # (a) unresolved OLD ref — the successor IS written by the points loop
+    ghost_old = _capture_pt_id("ghost old point never captured")
+    new = _capture_pt_id("the successor that does exist")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [{"id": new, "content": "the successor that does exist",
+                            "pointKind": "statement"}],
+               "supersessions": [{"superseded": ghost_old,
+                                   "supersedes_by": new,
+                                   "evidence": "lifecycle"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    assert meta["errors"] == [], \
+        "unresolved pt_ ref is a warning, never an error"
+    assert any(ghost_old in w and "not found" in w
+               for w in meta["warnings"]), meta["warnings"]
+    n = sdk._get_proj().g.query(
+        "MATCH (:Point)-[:CORRECTS]->() RETURN count(*)").result_set[0][0]
+    assert n == 0, f"no CORRECTS may fire for an unresolved ref: {n}"
+
+    # (b) dangling successor — the OLD point exists + is live, the new does
+    #     not. The helper probes both endpoints but supersede()'s own
+    #     missing-new guard raises BEFORE any mutation — the raise is caught
+    #     and warned; the old point must stay live (never terminalized onto
+    #     a phantom).
+    old = _capture_pt_id("the point that gets corrected")
+    ghost_new = _capture_pt_id("ghost successor never written")
+    sdk.create_point("statement", "the point that gets corrected",
+                     id=old, status="live")
+    payload2 = {"session_id": "sess_p2", "story_arc": "",
+                "entities": [], "events": [], "operators": [],
+                "points": [],
+                "supersessions": [{"superseded": old,
+                                    "supersedes_by": ghost_new,
+                                    "evidence": "lifecycle"}],
+                "client_commit_id": "ccid2"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload2))
+    _extracted, meta2 = sdk._extract_session_v2(
+        CONV, "sess_p2", "2026-08-20T00:00:00+00:00")
+    assert meta2["errors"] == [], \
+        "dangling pt_ successor is a warning, never an error"
+    assert any(ghost_new in w and "failed" in w
+               for w in meta2["warnings"]), meta2["warnings"]
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$old}) RETURN o.status",
+        params={"old": old}).result_set
+    assert rows and rows[0][0] == "live", \
+        ("old point must stay live — a CORRECTS edge to a nonexistent "
+         f"successor would be dangling: {rows!r}")
+
+
 def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
     """#2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
     WITHOUT the canonical obj-<sha26(name)> id — every supported write path
