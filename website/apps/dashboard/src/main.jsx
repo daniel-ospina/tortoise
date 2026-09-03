@@ -23,7 +23,7 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
 // unit-tested). #2166: isManagedKey selects the durable product keys the API
 // Keys page shows; isActiveKey protects the live data-plane key from revoke.
-import { isManagedKey, isActiveKey } from './sessionKey.js'
+import { isManagedKey, isActiveKey, durableConnectKey } from './sessionKey.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
 import {
@@ -1641,6 +1641,18 @@ function claimIntentInFlight() {
   // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
   const [wizardConnectError, setWizardConnectError] = React.useState('')
+  // #1998 fold-in (durable connect key, PR #2161 finding): the connect step's
+  // universal command must embed a DURABLE key. When the live session key is
+  // a 24h bootstrap credential (returning user), the wizard mints a durable
+  // provisioned key on demand (POST /v1/team/keys) — held here, shown once in
+  // the command snippet; cap error routes to the API Keys tab (regenerate).
+  const [wizardDurableKey, setWizardDurableKey] = React.useState('')
+  const [wizardDurableBusy, setWizardDurableBusy] = React.useState(false)
+  const [wizardDurableError, setWizardDurableError] = React.useState('')
+  // #1998 fold-in: optional paste-your-own-durable-key fallback (closes the
+  // 402-cap loop — a user at max_api_keys regenerates in the API Keys tab and
+  // pastes the shown-once replacement here instead of dead-ending).
+  const [wizardDurablePaste, setWizardDurablePaste] = React.useState('')
   // #1997 (W1): catalog-presented is marked when the build catalog
   // RENDERS (not just on pick) — re-entry with fork=build already set must
   // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
@@ -3422,6 +3434,66 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1998 fold-in (PR #2161 finding): the connect step must source a DURABLE
+  // key, not the 24h bootstrap session credential. Mints via POST /v1/team/keys
+  // (the same endpoint the API Keys tab's create uses — created_via
+  // 'provisioned', durable, counts vs max_api_keys). Session-authed
+  // (useSession: true) so it works even when the current apiKey is a bootstrap
+  // key. The plaintext is shown ONCE — the connect command embeds it (the
+  // reveal); afterwards the key is managed/regenerable from the API Keys tab.
+  async function wizardMintDurableKey() {
+    if (wizardDurableBusy) return
+    setWizardDurableBusy(true)
+    setWizardDurableError('')
+    try {
+      // Round-15 (P2) team pin (createKey pattern): resolve the ACTIVE team's
+      // key explicitly so the mint lands on the onboarding org — a session
+      // JWT alone resolves the first membership, wrong team for multi-team
+      // users. api() useSession:true still sends the session JWT when the key
+      // is absent (recoverable-mint-failure case, #1830); with a bootstrap
+      // apiKey the key auth resolves the team (createKey precedent — the API
+      // Keys tab mints with the live key today).
+      const _teamAtCall = currentTeamId
+      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
+      const keyVal = await mintKey(activeKey, 'Setup command')
+      // Identity guard BEFORE any UI write: a team switch during the POST must
+      // not render this team's plaintext key under the new team's header.
+      if (teamIdRef.current !== _teamAtCall) return
+      setWizardDurableKey(keyVal)
+      // Install the durable key as the team's active data-plane key (the
+      // regenerateKey pattern) so a reload reuses it instead of re-minting —
+      // each mint counts vs max_api_keys (free tier = 2) and an orphaned
+      // durable per wizard visit would burn the cap. The 24h bootstrap key
+      // expires harmlessly (reconcile sweep revokes expired bootstraps).
+      // setApiKey keeps state + localStorage in sync (regenerateKey's guard at
+      // ~4065 depends on the invariant localStorage === apiKey state); without
+      // it a same-session regenerate of this key would skip the storage update
+      // and reload could boot a revoked key.
+      try { localStorage.setItem(KEY_STORAGE, keyVal) } catch { /* best-effort */ }
+      if (_teamAtCall) teamKeysRef.current[_teamAtCall] = keyVal
+      apiKeyRef.current = keyVal
+      setApiKey(keyVal)
+      // Refresh the team keys/sessions lists (createKey precedent) so the new
+      // durable row lands in keys[] — the API Keys tab shows it and future
+      // durableConnectKey lookups match it (the gate stays closed on reload).
+      await loadAll(keyVal).catch(() => {})
+    } catch (e) {
+      // #1147: a tier-cap 402 is a LIMIT, not an error — surface the upgrade /
+      // regenerate path (the API Keys tab's regenerateKey does not grow the
+      // key count). Free tier max_api_keys = 2. NOTE: regenerating in the tab
+      // does NOT update the apiKey state here, so returning to this step would
+      // re-gate — the paste field below is the forward path (regenerate in the
+      // tab shows the new key once → paste it here).
+      if (e?.status === 402) {
+        setWizardDurableError('You\'ve reached your plan\'s limit of API keys — regenerate one in the API Keys tab (shown once there), then paste it below.')
+      } else {
+        setWizardDurableError(e?.message || 'Could not create a durable setup key — try again.')
+      }
+    } finally {
+      setWizardDurableBusy(false)
+    }
+  }
+
   async function switchTeam(teamId) {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
@@ -4528,7 +4600,15 @@ function claimIntentInFlight() {
   // recoverable mint failure (#1830) BOTH welcomeKey and apiKey can be empty
   // — never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
-  const harnessKey = welcomeKey || apiKey || ''
+  // #1998 fold-in (PR #2161 finding): the embedded key must be DURABLE. The
+  // 24h bootstrap session key minted at login (created_via 'bootstrap',
+  // expires_at = now+24h) would kill any agent configured with it within a
+  // day — so a bootstrap/unknown apiKey is NOT embedded; the connect step
+  // shows the durable-key gate (mint via POST /v1/team/keys or route to the
+  // API Keys tab) instead. wizardDurableKey = a durable key minted at the
+  // connect step this session.
+  const durableConnect = durableConnectKey(welcomeKey, apiKey, keys)
+  const harnessKey = wizardDurableKey || durableConnect.key || ''
 
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
@@ -4753,11 +4833,59 @@ function claimIntentInFlight() {
                         ))}
                       </div>
                       {!harnessKey ? (
-                        <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                          The setup command embeds your API key — create one
-                          first on the API Keys tab, then come back here to
-                          finish setup.
-                        </p>
+                        // #1998 fold-in (PR #2161 finding): the connect step
+                        // must embed a DURABLE key — the session bootstrap key
+                        // expires in 24h and would kill an agent configured
+                        // with it. Offer to mint a durable provisioned key via
+                        // POST /v1/team/keys (shown once in the command), or
+                        // route to the API Keys tab to create/regenerate one.
+                        // Copy branches on WHY no durable key is embeddable
+                        // (review): 'bootstrap' = the live session key expires;
+                        // 'none'/'unknown' = no key or unverifiable rows — the
+                        // "expires" phrasing would be false there.
+                        <>
+                          <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                            {durableConnect.source === 'bootstrap'
+                              ? 'The setup command embeds a durable API key — the key in this session expires within 24 hours, which would cut off your agent. Create a durable one now (shown once), or create/regenerate one in the API Keys tab.'
+                              : 'The setup command embeds a durable API key — session keys expire within 24 hours, so your agent needs a durable one (created once, never shown again). Create one now, or create/regenerate one in the API Keys tab.'}
+                          </p>
+                          {wizardDurableError && (
+                            <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
+                          )}
+                          <div className="wizard-nav" style={{ marginTop: '1rem' }}>
+                            <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+                                {wizardDurableBusy ? 'Creating…' : 'Create a durable setup key'}
+                              </button>
+                              <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
+                            </div>
+                          </div>
+                          {/* #1998 fold-in: paste-your-own escape — a user at
+                              the max_api_keys cap regenerates a durable key in
+                              the API Keys tab (shown once there) and pastes it
+                              here instead of dead-ending on 402. */}
+                          <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                            <input
+                              type="password"
+                              aria-label="Paste a durable API key"
+                              placeholder="…or paste a durable key (tt_…)"
+                              value={wizardDurablePaste}
+                              onChange={(e) => { setWizardDurablePaste(e.target.value); setWizardDurableError('') }}
+                              style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }}
+                            />
+                            <button
+                              type="button"
+                              className="ghost"
+                              disabled={!wizardDurablePaste.trim()}
+                              onClick={() => {
+                                const pasted = wizardDurablePaste.trim()
+                                if (!pasted) return
+                                setWizardDurableKey(pasted)
+                                setWizardDurablePaste('')
+                              }}>Use this key</button>
+                          </div>
+                        </>
                       ) : (
                         <>
                           {HARNESS_INTRO[wizardHarness] && (
