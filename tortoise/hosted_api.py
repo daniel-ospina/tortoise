@@ -1719,6 +1719,23 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     return team
 
 
+def _require_keys_manage(team: dict, surface: str) -> None:
+    """C3 (#2112) code-review P1: a deleg-NULL SCOPED key (deleg NULL but
+    scopes non-empty → NOT legacy_full_access) is a least-privilege
+    credential — the mint gate (D13 row 4) requires keys:manage, and so
+    must the other key-management surfaces (revoke, list). Legacy
+    full-access keys (deleg NULL, scopes=[]) are the owner class and pass;
+    deleg=0 keys never reach here (the DI dormancy gate 403s them first);
+    session faces pass (no key_id)."""
+    if team.get("key_id") is not None \
+            and not team.get("legacy_full_access") \
+            and "keys:manage" not in (team.get("scopes") or []):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing keys:manage scope to {surface}",
+        )
+
+
 def _reject_minted_delegated_key(team: dict, surface: str) -> None:
     """C2 (#2111) one-level-deep guard (code-review security P1): a MINTED
     (deleg=0) per-graph key must NEVER reach account-management or
@@ -2115,18 +2132,6 @@ class CheckoutResponse(BaseModel):
 
 class PortalResponse(BaseModel):
     portal_url: str
-
-
-class CreateKeyResponse(BaseModel):
-    id: str
-    key: str  # plaintext — shown once
-    key_prefix: str
-    created_at: str
-    name: str | None = None  # optional user-facing label (20260825000001)
-    # C3 (#2112) scoped-mint fields (additive — absent on legacy {} mints):
-    graph_id: str | None = None
-    scopes: list[str] | None = None
-    delegation_depth: int | None = None
 
 
 class KeyListResponse(BaseModel):
@@ -4813,6 +4818,15 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     # body is NOT an owner-class mint (it can only mint a deleg=0 child) —
     # cap class 409, not the legacy 402.
     scoped_request = bool(requested_scopes) or bool(graph_id)
+    # NOTE (code-review): bool() collapses an explicit `"scopes": []` onto
+    # the absent case — a session/legacy-full owner face POSTing
+    # {"scopes": []} mints the legacy owner-class full-access tt_ key,
+    # exactly like {} (empty allowlist dropped). Owner-class faces may
+    # already mint full-access via {}, so this is not an escalation; the
+    # response omits the C3 fields (no signal the empty array was dropped),
+    # mirroring the shrink branch's treatment of scopes=[] + deleg NULL as
+    # legacy_full_access. Deleg-NULL scoped keys can never reach this branch
+    # with [] (their {} mint is the deleg=0 child path below).
     child_mint = is_key_caller and not caller_legacy_full
     try:
         if not scoped_request:
@@ -4852,8 +4866,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
             unknown = [s for s in requested_scopes
                        if not isinstance(s, str) or s not in _OWNER_SCOPE_ALLOWLIST]
             if unknown:
+                # code-review: key=str keeps a non-str member (e.g. int in a
+                # crafted body) from raising TypeError in sorted() → the 422
+                # must never degrade to a 500.
                 raise HTTPException(status_code=422,
-                                    detail=f"Unknown scope(s): {sorted(unknown)}")
+                                    detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
             # Key caller WITHOUT the mint capability (D13): a scoped deleg-NULL
             # key that lacks keys:manage may not mint. Legacy full-access keys
             # (scopes=[]) are the owner class and pass (C1 legacy_full_access).
@@ -4997,6 +5014,12 @@ async def list_api_keys(graph_id: str | None = None,
     #1828 review P1: ungated — a key-driven agent keeps listing keys on a
     flag-off team (the #1148 gate stays scoped to the management set).
 
+    C3 (#2112) code-review P2: a deleg-NULL SCOPED key (not owner class)
+    must not enumerate the team's key inventory (ids/prefixes/graph
+    bindings/lineage) — keys:manage required for scoped key faces (same
+    caller-class rule as mint/revoke). Legacy full-access keys, session
+    faces, and deleg=0 (already 403 at the DI dormancy gate) unaffected.
+
     #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
     with their revoked_at; registry parity). Registry path stays for
@@ -5005,7 +5028,9 @@ async def list_api_keys(graph_id: str | None = None,
     write them at mint time; the registry list stays None-tolerant for
     LEGACY nodes minted before those fixes). C3 (#2112): optional
     ?graph_id= filter (per-graph key panel — surface 12) + the C1 tenancy
-    columns ride the rows (scopes/delegation_depth/graph_id/created_by_key_id)."""
+    columns ride the rows (scopes/delegation_depth/graph_id/created_by_key_id).
+    """
+    _require_keys_manage(team, "list API keys")
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -5115,6 +5140,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     from tortoise.supabase_control import (
         revoke_api_key as _sb_revoke,
     )
+    # C3 (#2112) code-review P1: a deleg-NULL SCOPED key (e.g. graphs:read-
+    # only, minted for least privilege) must not destroy every team key —
+    # same caller-class rule as the mint gate (D13 row 4). deleg=0 keys
+    # 403 at the DI gate before this; legacy full-access keys and session
+    # faces pass.
+    _require_keys_manage(team, "revoke API keys")
     if is_supabase_enabled():
         try:
             row = api_key_by_id(get_control_plane(), key_id)
@@ -5270,31 +5301,23 @@ async def toggle_api_key_enabled(
             # owner is using.
             raise HTTPException(status_code=409, detail="Cannot modify a session key")
         result = {"key_id": key_id}
-        # Explicit null for enabled is treated as absent (leave untouched) —
-        # `None is not False` would silently RE-ENABLE a disabled key.
-        if "enabled" in body.model_fields_set and body.enabled is not None:
-            _sb_set_enabled(cp, key_id, body.enabled)
-            result["enabled"] = body.enabled
-        # model_fields_set distinguishes explicit null (clear label) from
-        # field-absent (don't touch) — JSON null must clear, not skip.
-        if "name" in body.model_fields_set:
-            cleaned = _clean_key_label(body.name)
-            _sb_set_name(cp, key_id, cleaned)
-            result["name"] = cleaned
         # C3 (#2112) shrink branch: {scopes} replaces the current scopes
         # with a STRICT SUBSET (expand = revoke+recreate, §5.4 — 422). The
         # key must not be a revoked/session key (guards above); shrinking a
         # disabled key is allowed (disabled ≠ revoked). Emptying a deleg-NULL
         # scoped key is ALSO 422: scopes=[] + deleg NULL reclassifies it as
         # legacy_full_access (full access) — a capability EXPANSION through
-        # the shrink endpoint (VGATE F2). Revoke+recreate to decommission.
+        # the shrink endpoint (code-review F2). ALL scopes validation runs
+        # BEFORE the enabled/name writes so a 422 is a no-op (code-review:
+        # partial-application fix — a superset body must not persist
+        # enabled=false then error).
         if "scopes" in body.model_fields_set:
             current = row.get("scopes") or []
             requested = body.scopes or []
             unknown = [s for s in requested if s not in _OWNER_SCOPE_ALLOWLIST]
             if unknown:
                 raise HTTPException(status_code=422,
-                                    detail=f"Unknown scope(s): {sorted(unknown)}")
+                                    detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
             if not set(requested) <= set(current):
                 raise HTTPException(
                     status_code=422,
@@ -5309,8 +5332,20 @@ async def toggle_api_key_enabled(
                            "reclassifies it legacy full-access) — revoke and "
                            "recreate instead.",
                 )
-            _sb_set_scopes(cp, key_id, requested)
-            result["scopes"] = requested
+        # Explicit null for enabled is treated as absent (leave untouched) —
+        # `None is not False` would silently RE-ENABLE a disabled key.
+        if "enabled" in body.model_fields_set and body.enabled is not None:
+            _sb_set_enabled(cp, key_id, body.enabled)
+            result["enabled"] = body.enabled
+        # model_fields_set distinguishes explicit null (clear label) from
+        # field-absent (don't touch) — JSON null must clear, not skip.
+        if "name" in body.model_fields_set:
+            cleaned = _clean_key_label(body.name)
+            _sb_set_name(cp, key_id, cleaned)
+            result["name"] = cleaned
+        if "scopes" in body.model_fields_set:
+            _sb_set_scopes(cp, key_id, body.scopes or [])
+            result["scopes"] = body.scopes or []
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
     # (registry keys are always active, preserving the #1148 no-op echo
@@ -5334,23 +5369,17 @@ async def toggle_api_key_enabled(
     if created_via == "bootstrap":
         raise HTTPException(status_code=409, detail="Cannot modify a session key")
     result = {"key_id": key_id, "enabled": True}
-    if "name" in body.model_fields_set:
-        cleaned = _clean_key_label(body.name)
-        sdk._get_registry().query(
-            "MATCH (k:APIKey {id: $id}) SET k.name = $name",
-            params={"id": key_id, "name": cleaned},
-        )
-        result["name"] = cleaned
     # C3 (#2112) shrink branch — registry parity with the supabase lane:
     # strict-subset scopes replace (expansion 422), never on revoked keys.
     # Emptying a deleg-NULL scoped key is ALSO 422 (reclassifies it legacy
-    # full-access — capability expansion; VGATE F2).
+    # full-access — capability expansion). ALL scopes validation runs before
+    # the name write so a 422 is a no-op (partial-application fix).
     if "scopes" in body.model_fields_set:
         requested = body.scopes or []
         unknown = [s for s in requested if s not in _OWNER_SCOPE_ALLOWLIST]
         if unknown:
             raise HTTPException(status_code=422,
-                                detail=f"Unknown scope(s): {sorted(unknown)}")
+                                detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
         current = list(current_scopes or [])
         if not set(requested) <= set(current):
             raise HTTPException(
@@ -5365,11 +5394,19 @@ async def toggle_api_key_enabled(
                        "reclassifies it legacy full-access) — revoke and "
                        "recreate instead.",
             )
+    if "name" in body.model_fields_set:
+        cleaned = _clean_key_label(body.name)
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {id: $id}) SET k.name = $name",
+            params={"id": key_id, "name": cleaned},
+        )
+        result["name"] = cleaned
+    if "scopes" in body.model_fields_set:
         sdk._get_registry().query(
             "MATCH (k:APIKey {id: $id}) SET k.scopes = $sc",
-            params={"id": key_id, "sc": list(requested)},
+            params={"id": key_id, "sc": list(body.scopes or [])},
         )
-        result["scopes"] = requested
+        result["scopes"] = body.scopes or []
     return result
 
 
