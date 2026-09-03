@@ -308,6 +308,7 @@ if __name__ == "__main__":
         # parse/shape error (row missing a key, UNION kind renamed, etc.) is
         # a detector failure, not evidence of orphans.
         import traceback
+
         traceback.print_exc(file=sys.stderr)
         print(f"ERROR: reconcile crashed unexpectedly: {e!r}", file=sys.stderr)
         sys.exit(2)
