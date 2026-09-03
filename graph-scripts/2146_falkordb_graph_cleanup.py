@@ -10,9 +10,10 @@ the manifest.
 
 It resolves FALKORDB_CLOUD_URI → TORTOISE_DB_URI exactly like entrypoint.sh
 lines 89-93, and drops graphs with `select_graph(name).delete()` — the same
-call the in-repo rollback paths use (tortoise/hosted_api.py:3691/9641).
-(NOTE: the production purge helper `_drop_team_graph_impl` at
-hosted_api.py:9036 branches on `hasattr(proj.db, "delete_graph")`; the pip
+call the in-repo rollback paths use (tortoise/hosted_api.py — the
+mint-failure compensation calls).
+(NOTE: the production purge helper `_drop_team_graph_impl` in
+hosted_api.py branches on `hasattr(proj.db, "delete_graph")`; the pip
 falkordb cloud client exposes NO delete_graph attribute, so that branch
 log-and-skips on FalkorDB Cloud — tracked separately as daniel-ospina/
 tortoise#2163. THIS script's GRAPH.DELETE works regardless.)

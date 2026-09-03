@@ -55,7 +55,7 @@ endpoint in-repo).
 | `public.invitations` | 0 | 0 |
 | `public.abuse_events` (`key_create`, orphan teams) | 154 | 222 |
 | `public.audit_events` / metering / oauth (FK-cascade or trail) | 0 | 0 |
-| `public.analytics_events` (no FK — deleted explicitly) | 0 | 0 |
+| `public.analytics_events` (no FK + immutable trigger — check-only) | 0 | 0 |
 | FalkorDB graphs `team_*` | **not enumerable from this env** (see §5) | same |
 
 Window = `created_at >= 2026-08-19T22:20:00Z AND < 2026-09-03T00:00:00Z`
@@ -117,7 +117,9 @@ ORDER BY u.created_at;
 **Q3 — children per orphan team** (replace `<ids>` with the Q1 id list):
 expect `api_keys` 154, `team_memberships` 2, `invitations` 0, `abuse_events`
 154, `analytics_events` (rows minted by real-app-root loads; counted 0 in the
-2026-09-02 inventory but re-check here), `audit_events` 0.
+2026-09-02 inventory but re-check here — check-only: the table is append-only
+via migration 0004's immutability trigger, so the script counts but never
+deletes), `audit_events` 0.
 ```sql
 SELECT 'api_keys' AS kind, count(*) FROM public.api_keys
   WHERE team_id IN (<ids>)
@@ -166,29 +168,32 @@ Live FK catalog (`pg_constraint`, 2026-09-02):
 | `invitations` FK | `team_id → teams(id) ON DELETE CASCADE` | same |
 | `abuse_events_team_id_fkey` | `team_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
 | `team_memberships.team_id` | **no FK** | memberships are NOT removed by a teams-row delete — delete explicitly |
-| `analytics_events` (0004) | **no FK, no immutability trigger** | rows survive team deletion — deleted explicitly by the cleanup script |
+| `analytics_events` (0004) | **no FK + `analytics_events_immutable` trigger** | append-only (BEFORE UPDATE OR DELETE, statement-level, not role-gated) — survives by design; check-only in the script (a bare DELETE would fire the trigger and strand the purge). Operator decision required if rows are ever deleted |
 | `audit_events` | **no FK + immutable trigger** | the append-only trail — survives by design; never deleted |
-| `metering_records` (0014) / `oauth` (0016) / `agent_signup_tokens` (20260814000001) | `team_id → teams(id) ON DELETE CASCADE` | die with the teams row — no explicit delete needed |
+| `metering_records` (0014) / `oauth` (0016) / `agent_signup_tokens` (20260814000001) / `graphs` (20260901000001) | `team_id → teams(id) ON DELETE CASCADE` | die with the teams row — no explicit delete needed |
 
 There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
-/v1/teams/{team_id}` (hosted_api.py:8908) is JWT-owner-gated (soft delete →
-24 h grace → purge) and the orphan users are gone — an operator cannot act as
-an owner. The sanctioned **purge machinery** is
-`purge_team_control_plane` (supabase_control.py:1555 — deletes
+/v1/teams/{team_id}` (`hosted_api.py` — the delete route) is JWT-owner-gated
+(soft delete → 24 h grace → purge) and the orphan users are gone — an
+operator cannot act as an owner. The sanctioned **purge machinery** is
+`purge_team_control_plane` (`supabase_control.py` — deletes
 api_keys → team_memberships → invitations, teams row **last** as retry anchor)
-+ the in-repo rollback graph calls (`select_graph(name).delete()`,
-hosted_api.py:3691/9641), used by the hourly deleted-team sweep. The cleanup
++ the in-repo mint-failure compensation graph calls
+(`select_graph(name).delete()`, `hosted_api.py` — register compensation and
+agent-signup compensation). The cleanup
 scripts below mirror that ordering with direct SQL (api_keys →
-team_memberships → invitations → abuse_events → analytics_events →
+team_memberships → invitations → abuse_events →
 audit_events INSERT → teams LAST), plus an append-only `audit_events` row per
 purged team (`operation='e2e_live_orphan_purged'`, per-run uuid in the id so
 re-runs after a partial failure never collide) written **before** the
 teams-row delete.
 
-NOTE on the sweep's graph drop: `_drop_team_graph_impl` (hosted_api.py:9036)
+NOTE on the sweep's graph drop: `_drop_team_graph_impl` (`hosted_api.py`)
 branches on `hasattr(proj.db, 'delete_graph')` — the pip falkordb cloud client
 has NO `delete_graph` (only `select_graph`), so that sweep path log-and-skips
-on FalkorDB Cloud (tracked as daniel-ospina/tortoise#2163). THIS cleanup's
+on FalkorDB Cloud (tracked as daniel-ospina/tortoise#2163; the sweep helper
+`_drop_team_graph` / `_drop_team_graph_strict` is the #2163-broken path).
+THIS cleanup's
 graph drop uses `select_graph(...).delete()` (GRAPH.DELETE) which works on
 both clients.
 

@@ -49,23 +49,22 @@ DELETE-ORDER RATIONALE (mirrors tortoise purge semantics; live FK catalog):
   4. invitations WHERE team_id IN (...) — FK CASCADE, explicit anyway.
   5. abuse_events WHERE team_id IN (...) — FK CASCADE (0015 key_create rows
      minted by provision_team), explicit anyway.
-  6. analytics_events WHERE team_id IN (...) — NO FK (migration 0004) and no
-     immutability trigger: rows would otherwise survive the purge as
-     permanent orphans. Red-window runs loaded the real app root, which fires
-     signup_completed/key_provisioned/onboarding_* events.
-  7. audit_events INSERT per team (operation=e2e_live_orphan_purged). Each run
+  6. audit_events INSERT per team (operation=e2e_live_orphan_purged). Each run
      carries a fresh uuid in the audit id so a partial failure (INSERT ok,
      teams DELETE failed) is re-runnable without PK collision (audit_events is
      append-only — immutable trigger, migration 0002).
-  8. teams WHERE id IN (...) LAST — children gone; row = retry anchor.
+  7. teams WHERE id IN (...) LAST — children gone; row = retry anchor.
   FalkorDB graphs: companion script, run against the same manifest (may run
   before or after; a graph left behind is a benign orphan with no DB row).
 
-Note on FK survival: metering_records/oauth/agent_signup_tokens all have
-REFERENCES teams(id) ON DELETE CASCADE (migrations 0014/0016/20260814000001)
-so they die with the team row; only audit_events (immutable append-only) and
-analytics_events (no FK) need explicit handling — audit rows are the intended
-trail, analytics rows are deleted at step 6.
+Note on FK survival: metering_records/oauth/agent_signup_tokens/graphs all
+have REFERENCES teams(id) ON DELETE CASCADE (migrations 0014/0016/
+20260814000001/20260901000001) so they die with the team row; audit_events
+(immutable append-only) and analytics_events (no FK + its own immutability
+trigger, migration 0004) survive by design and are NOT script-deleted — audit
+rows are the intended trail; analytics rows are counted (CHILDREN_SQL/Q3)
+but a bare DELETE would fire analytics_events_immutable and strand the purge
+(#2162 re-review ISSUE A).
 
 REQUIRED ACCESS (operator)
   * SQL:  SUPABASE_ACCESS_TOKEN (Management API) OR supabase CLI linked to the
@@ -264,6 +263,13 @@ def _gotrue_delete_user(base_url: str, service_key: str, user_id: str) -> None:
         with urllib.request.urlopen(req, timeout=30):
             return
     except urllib.error.HTTPError as e:
+        if e.code == 404:
+            # #2162 re-review ISSUE B: a partial mid-list failure followed by a
+            # re-run hits already-deleted users -> 404. Treat 404 as
+            # already-deleted so the loop continues (the runbook's idempotency
+            # guarantee: re-running any phase is a no-op).
+            print(f"[users] {user_id} already gone (404) — continuing")
+            return
         raise OpError(
             f"GoTrue delete user {user_id} failed: HTTP {e.code} {e.reason}") from None
 
@@ -355,11 +361,14 @@ def phase_db(args: argparse.Namespace, manifest: dict, runner) -> None:
         ("team_memberships", f"DELETE FROM public.team_memberships WHERE team_id IN ({ids});"),
         ("invitations", f"DELETE FROM public.invitations WHERE team_id IN ({ids});"),
         ("abuse_events", f"DELETE FROM public.abuse_events WHERE team_id IN ({ids});"),
-        # #2146 review P2-2: analytics_events (migration 0004) has team_id with
-        # NO FK and no immutability trigger — rows would survive the purge as
-        # permanent orphans unless deleted here (red-window runs loaded the real
-        # app root, which fires signup_completed/key_provisioned/etc.).
-        ("analytics_events", f"DELETE FROM public.analytics_events WHERE team_id IN ({ids});"),
+        # #2162 re-review ISSUE A: analytics_events is NOT deletable — migration
+        # 0004 creates an analytics_events_immutable BEFORE UPDATE OR DELETE
+        # FOR EACH STATEMENT trigger (not role-gated: fires on ANY delete
+        # statement, even 0 rows), so a bare DELETE would abort phase_db after
+        # steps 1-4 and strand the purge. It stays in CHILDREN_SQL as a
+        # check-only child (the 09-02 inventory counted 0; the runbook Q3 sees
+        # it). Rows, if any ever exist, need an explicit operator decision
+        # (DISABLE TRIGGER around the delete), NOT script deletion.
     ]
     # #2146 review P1-1: the audit id carries a per-RUN uuid so a partial
     # failure (audit INSERT ok, teams DELETE failed) can be re-run safely — a
