@@ -367,7 +367,7 @@ class _EntityHandlers:
             ev, self._OBJECT_HANDLED,
         )
 
-    def _fold_object_superseded(self, ev: dict) -> None:
+    def _fold_object_superseded(self, ev: dict) -> int:
         """#1350: fold an ObjectSuperseded event into Object.status.
 
         Projection-owned cache of the event stream (§11 'derived values may
@@ -375,25 +375,35 @@ class _EntityHandlers:
         the successor name + timestamp. Idempotent (a replayed/duplicate
         event re-applies the same SET); a chain A→B→C leaves A superseded by
         B and B superseded by C (each event folds its own target).
+
+        #2164 (Task 2): returns the MATCHED-ROW count (additive fold-miss
+        signal) — 1 = the target Object was found and folded, 0 = no Object
+        matched (missing Object / stale id) or no id+name was supplied. The
+        SET…RETURN form yields a row only when the MATCH bound a node, so
+        the return value makes a fold-miss distinguishable from a successful
+        fold without a separate existence pre-query.
         """
         oid = ev.get("id")
         name = ev.get("name")
         if not oid and not name:
-            return
+            return 0
         supersedes_by = str(ev.get("supersedes_by") or "")[:200]
         now = _now_iso()
         if oid:
-            self.g.query(
+            result = self.g.query(
                 "MATCH (o:Object {id:$id}) "
                 "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$now",
+                "    o.supersededAt=$now "
+                "RETURN o.id LIMIT 1",
                 params={"id": oid, "sb": supersedes_by, "now": now})
         else:
-            self.g.query(
+            result = self.g.query(
                 "MATCH (o:Object {name:$name}) "
                 "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$now",
+                "    o.supersededAt=$now "
+                "RETURN o.id LIMIT 1",
                 params={"name": name, "sb": supersedes_by, "now": now})
+        return len(result.result_set)
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE Document node."""

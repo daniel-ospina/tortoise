@@ -249,6 +249,51 @@ class TestProjectionFold:
         finally:
             sdk.close()
 
+    def test_fold_returns_match_count(self):
+        """#2164 Task 2: _fold_object_superseded returns the MATCHED-ROW count
+        (additive fold-miss signal).
+
+        Pre-change the fold returned None and its Cypher was a bare MATCH…SET
+        with no RETURN — a fold that matched 0 rows (missing Object, stale id)
+        was indistinguishable from a successful fold. Now: 0 = no Object
+        matched (the fold missed), 1 = the Object was folded.
+        """
+        sdk = _fresh_sdk()
+        try:
+            fold = sdk._get_proj()._fold_object_superseded
+            # (1) fold on a MISSING Object id → 0 (fold-miss signal)
+            assert fold({"id": "no-such-object", "name": "",
+                          "supersedes_by": "strategy-B"}) == 0
+            # (1b) empty id AND empty name → 0 (early return, never None)
+            assert fold({"id": "", "name": "",
+                          "supersedes_by": "strategy-B"}) == 0
+            # (2) fold on an EXISTING Object (create + resolve canonical id)
+            sdk.create_entity("object", "strategy-A",
+                              objectKind="core:strategy")
+            oid = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.id",
+                params={"n": "strategy-A"}).result_set[0][0]
+            assert fold({"id": oid, "name": "strategy-A",
+                          "supersedes_by": "strategy-B"}) == 1
+            # (3) re-fold (already superseded, same successor) → 1 and the
+            #     stored values are unchanged (idempotency preserved)
+            assert fold({"id": oid, "name": "strategy-A",
+                          "supersedes_by": "strategy-B"}) == 1
+            # (3b) name-branch also returns the match count (legacy no-id
+            #     shape — regression guard for the name-branch RETURN)
+            assert fold({"id": "", "name": "strategy-A",
+                          "supersedes_by": "strategy-B"}) == 1
+            assert fold({"id": "", "name": "no-such-object",
+                          "supersedes_by": "strategy-B"}) == 0
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {id:$id}) RETURN o.status, o.supersededBy",
+                params={"id": oid}).result_set
+            assert rows and rows[0][0] == "superseded"
+            assert rows[0][1] == "strategy-B", \
+                "re-fold must not clobber the successor"
+        finally:
+            sdk.close()
+
 
 # ── Work-item fold (Step 7) ──────────────────────────────────────────
 
