@@ -6,9 +6,7 @@ on:
     branches: [main]
     paths:
       - 'website/**'
-      - 'tortoise/onboarding/AGENT_ONBOARDING.md'
-      - 'tortoise/onboarding/variants/**'
-      - 'tortoise/onboarding/stage_variants.py'
+      - 'tortoise/onboarding/**'
       # #1118: workflow changes must self-deploy — the #1113 merge (which
       # added the dashboard job) did NOT trigger this workflow because the
       # workflow file wasn't in its own paths filter; it required manual
@@ -30,23 +28,25 @@ jobs:
           node-version: '22'
           cache: npm
           cache-dependency-path: website/apps/blog-admin/package-lock.json
-      - name: Stage onboarding prompt + harness variants (single source of truth → deployed copies)
-        # tortoise/onboarding/AGENT_ONBOARDING.md is canonical (issues #496/#540).
-        # The welcome page fetches https://premiselabs.co/onboarding-prompt.md
-        # (canonical) and /onboarding/<harness>.md (epic #529 variants) at runtime;
-        # stage_variants.py is the single concat point — headers wrap the canonical
-        # body, never fork it, so the copies can't drift.
+      - name: Onboarding skill is staged for the dashboard deploy
+        # #1998 (W2, M8): the OLD prompt-staging pipeline (the
+        # archived prompt + harness variants -> deployed .md copies via the
+        # retired staging script) is ARCHIVED — never two live onboarding
+        # scripts. The ONE live script is the tortoise-onboarding
+        # SKILL.md, mirrored byte-identically into
+        # website/apps/dashboard/public/skills/tortoise-onboarding/ (parity
+        # test) and served at app.premiselabs.co/skills/tortoise-onboarding/
+        # by the deploy-dashboard job below (dist build copies public/).
         run: |
-          python3 tortoise/onboarding/stage_variants.py --out website
-          test -s website/onboarding-prompt.md
-          for h in claude-code codex cursor pi; do
-            test -s "website/onboarding/$h.md"
-          done
+          test -s tortoise/onboarding/SKILL.md
+          cmp tortoise/onboarding/SKILL.md \
+            website/apps/dashboard/public/skills/tortoise-onboarding/SKILL.md
+          test -f website/apps/dashboard/public/install-tortoise-skills.sh
       - name: Sync DNS — tortoise.premiselabs.co → premise-labs Pages project (best-effort)
         # The subdomain previously CNAME'd to the legacy tortoise-landing-v2
-        # Pages project (stale content: welcome v1, no onboarding-prompt.md),
-        # which is why the premise-labs custom-domain attach stayed "pending"
-        # and the old PROMPT_URL fetch returned HTML (#540).
+        # Pages project (stale content: welcome v1, no retired onboarding
+        # prompt page), which is why the premise-labs custom-domain attach
+        # stayed "pending" and the old PROMPT_URL fetch returned HTML (#540).
         # Best-effort: the deploy token may lack Zone:DNS edit scope (auth error
         # is tolerated — the welcome page now uses premiselabs.co which is
         # already active). Once the token gains DNS scope this repairs the

@@ -36,7 +36,7 @@ def test_docs_only_runs_tier1():
 
 
 def test_onboarding_change_selects_onboarding():
-    r = _sel(["tortoise/onboarding/AGENT_ONBOARDING.md"])
+    r = _sel(["tortoise/onboarding/SKILL.md"])
     assert r["full"] is False
     assert "onboarding" in r["surfaces"]
     assert set(r["test_files"]) == ((_tier1() | set(load_manifest()["surfaces"]["onboarding"]))
@@ -81,7 +81,7 @@ def test_test_file_change_selects_owning_surface():
 
 
 def test_two_surfaces_union():
-    r = _sel(["tortoise/decide.py", "tortoise/onboarding/AGENT_ONBOARDING.md"])
+    r = _sel(["tortoise/decide.py", "tortoise/onboarding/SKILL.md"])
     assert r["full"] is False
     assert set(r["surfaces"]) == {"ep", "onboarding"}
 

@@ -87,6 +87,19 @@ export function orgNameError(name) {
   return null
 }
 
+// #1998 (W2): fork-card display-mode semantics (surface 4 — W1 renders the
+// shell, W2 owns semantics). Pure helper so the fork-card behavior is
+// unit-testable without React:
+//   'ask'  — fork never chosen (first org, or a legacy org pre-opt-in): the
+//            fork card ASKS (once per org; set-once server-side).
+//   'set'  — fork already persisted (chosen earlier, or INHERITED by org B at
+//            creation — compact orgs never re-ask): the card renders a
+//            read-only summary + Continue, options disabled.
+// fork values are 'self' | 'build' (state.py FORK_VALUES).
+export function forkStepState(fork) {
+  return (fork === 'self' || fork === 'build') ? 'set' : 'ask'
+}
+
 // The LEGACY #1643 wizard's step labels — ARCHIVED-not-deleted (A0 rollback
 // path, epic §8). The archived render lives in main.jsx under the
 // ⛔ ARCHIVED header; wizardArchived.test.js asserts these labels still exist

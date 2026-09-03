@@ -53,8 +53,8 @@ export const onRequest: PagesFunction = async (context) => {
   // legal E2E suite can run against a dev server and previews stay
   // navigable (neither is indexed; no SEO impact). Auth flows already
   // target the tortoise host (welcome_url, invite emails, OAuth redirectTo)
-  // and are unaffected. Runtime fetches (onboarding-prompt.md) are not in
-  // the set.
+  // and are unaffected. Runtime fetches (the tortoise-onboarding skill at
+  // app.premiselabs.co/skills/...) are not in the set.
   const TORTOISE_ONLY = new Set([
     "/docs", "/docs.html",
     "/security", "/security.html",

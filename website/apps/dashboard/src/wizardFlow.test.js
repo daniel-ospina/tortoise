@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER,
-  orgNameError, LEGACY_LABELS,
+  orgNameError, LEGACY_LABELS, forkStepState,
 } from './wizardFlow.js'
 
 test('EXACTLY 5 human steps in the plan order (orientation → org-create → fork → connect → done)', () => {
@@ -62,4 +62,18 @@ test('LEGACY_LABELS archived-not-deleted (A0 rollback path, DE2E-1)', () => {
     "Connect your tool", "Memory sources", "Your agent's toolkit",
     "Seed your graph", "You're set",
   ])
+})
+
+test('#1998 forkStepState: fork card ASKS when unset, renders SET summary when persisted (once per org)', () => {
+  assert.equal(forkStepState(null), 'ask')
+  assert.equal(forkStepState(undefined), 'ask')
+  assert.equal(forkStepState(''), 'ask')
+  assert.equal(forkStepState('self'), 'set')
+  assert.equal(forkStepState('build'), 'set')
+})
+
+test('#1998 DE2E-12: an INHERITED fork (org B) is a SET summary — never re-asks', () => {
+  // org B's node carries the inherited fork at creation (server-side
+  // resolve_init_fork_compact); the client renders a read-only summary.
+  assert.equal(forkStepState('build'), 'set')
 })
