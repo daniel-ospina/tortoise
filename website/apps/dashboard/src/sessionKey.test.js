@@ -1,5 +1,8 @@
 // sessionKey.test.js — run with node --test (Node 20+, zero deps: the
 // predicate is pure, no jsdom/React needed) (#1708 D8).
+// NOTE (#2166): isSessionKey tests remain valid pure-function tests; the export
+// is retained for #2167/registry-lane and is not on the current UI path (the
+// API Keys page uses isManagedKey + isActiveKey).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { isSessionKey, isActiveKey, isManagedKey } from './sessionKey.js'

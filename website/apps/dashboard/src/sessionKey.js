@@ -1,6 +1,10 @@
 // #1708 D8: session-key classification from server-provided API data,
 // extracted pure so it's unit-testable with node --test (no harness).
 // (k: key row, activeKey: the current session's plaintext key, or null)
+// NOTE (#2166): isSessionKey is NOT imported by main.jsx anymore — the API
+// Keys page renders durable keys only (isManagedKey below). Retained for the
+// #2167 browser-auth workstream + registry-lane stale-cache handling — not on
+// the current UI path. isActiveKey is the live protection in main.jsx.
 export function isSessionKey(k, activeKey) {
   if (!k || k.revoked_at) return false
   if (k.created_via === 'bootstrap' || !!k.expires_at) return true
