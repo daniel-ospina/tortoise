@@ -4,7 +4,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER,
-  orgNameError, LEGACY_LABELS, forkStepState,
+  resolveBuildCatalog, orgNameError, LEGACY_LABELS, forkStepState,
 } from './wizardFlow.js'
 
 test('EXACTLY 5 human steps in the plan order (orientation → org-create → fork → connect → done)', () => {
@@ -37,13 +37,33 @@ test('fork options are exactly self + build with Organization-aware copy', () =>
   assert.ok(!/\bteam\b/i.test(copy))
 })
 
-test('build catalog placeholder has the 3 launch-slice modules (W8 replaces source later)', () => {
+test('offline fallback mirrors the 3 canonical catalog module names (W8 #2004 endpoint contract)', () => {
   assert.deepEqual(BUILD_CATALOG_PLACEHOLDER.map((m) => m.name), [
     'Session recorder', 'Session extractor', 'Document indexer',
   ])
   for (const m of BUILD_CATALOG_PLACEHOLDER) {
     assert.ok(m.kind === 'indexer' || m.kind === 'extractor', `${m.name} kind`)
     assert.ok(m.description && m.description.length > 0, `${m.name} description`)
+  }
+})
+
+test('resolveBuildCatalog prefers the registry payload and falls back offline (W8 #2004)', () => {
+  const endpoint = [
+    { name: 'Session recorder', kind: 'indexer', description: 'd' },
+    { name: 'Document extractor', kind: 'extractor', description: 'planned', available: false },
+  ]
+  // endpoint rows win (incl. future/planned modules — presentation is
+  // copy-driven, never a billing gate)
+  assert.equal(resolveBuildCatalog(endpoint), endpoint)
+  assert.equal(resolveBuildCatalog(endpoint).length, 2)
+  // empty / null / malformed → the offline fallback (never a blank catalog)
+  for (const bad of [null, undefined, [], {}, { modules: [] }]) {
+    assert.equal(resolveBuildCatalog(bad), BUILD_CATALOG_PLACEHOLDER, `fallback for ${JSON.stringify(bad)}`)
+  }
+  // malformed ROWS (shape-incomplete array) also fall back — never renders
+  // empty-name items or (undefined) kinds
+  for (const bad of [[{}], [{ name: null, kind: 'indexer', description: 'd' }], [{ name: 'x' }]]) {
+    assert.equal(resolveBuildCatalog(bad), BUILD_CATALOG_PLACEHOLDER, `fallback for rows ${JSON.stringify(bad)}`)
   }
 })
 

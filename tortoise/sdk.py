@@ -2,6 +2,12 @@
 
 Wraps FalkorProjection (Docker/server FalkorDB by default, embedded via path argument).
 Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result sets.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session recorder' (``TortoiseSDK.capture_session`` is the SDK recorder
+facade) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
+an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 

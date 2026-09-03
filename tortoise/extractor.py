@@ -5,6 +5,11 @@ key: one utterance-level point each (Option A), plus asserted-only {NAND, IMPL}
 operators inferred from discourse connectives. The real LLM extractor (M2) will
 implement the same `Extractor` interface — segment in, events out — so nothing
 downstream changes when it's swapped in.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session extractor' — tortoise/tool_registry.py CAPABILITY_CATALOG. If you
+add or rename an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations
 

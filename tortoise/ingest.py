@@ -13,6 +13,12 @@ ollama tags). Providers:
     mock:NAME       → offline MockModel                 (for testing the wiring)
 
 Idempotent: re-running the same file at the same extractor version is a no-op.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Document indexer' (corpus ingestion) — tortoise/tool_registry.py
+CAPABILITY_CATALOG. If you add or rename an extractor/indexer, update the
+catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 

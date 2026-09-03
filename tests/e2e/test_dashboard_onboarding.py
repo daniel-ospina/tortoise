@@ -192,11 +192,12 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     page.get_by_role("button", name="Create Organization").click()
-    # fork card — pick BUILD (the build branch renders the placeholder catalog)
+    # fork card — pick BUILD (the build branch renders the catalog)
     expect(page.locator("body")).to_contain_text("Build an application on top", timeout=10_000)
     page.get_by_role("button", name="Build an application on top").click()
-    # the placeholder catalog renders on step 2 (build stays; the user
-    # reviews what they can build on, then continues)
+    # the capability catalog renders on step 2 (build stays; the user
+    # reviews what they can build on, then continues) — W8 (#2004): the
+    # registry endpoint backs it; these text pins match the canonical names.
     expect(page.locator("body")).to_contain_text("Build catalog", timeout=10_000)
     expect(page.locator("body")).to_contain_text("Session recorder", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()

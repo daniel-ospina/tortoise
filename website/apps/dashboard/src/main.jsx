@@ -16,7 +16,7 @@ import { setupGuide } from './setupGuide.js'
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER, orgNameError } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
@@ -1510,7 +1510,7 @@ function claimIntentInFlight() {
   // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
   const [wizardConnectError, setWizardConnectError] = React.useState('')
-  // #1997 (W1): catalog-presented is marked when the build placeholder
+  // #1997 (W1): catalog-presented is marked when the build catalog
   // RENDERS (not just on pick) — re-entry with fork=build already set must
   // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
   // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
@@ -1529,6 +1529,27 @@ function claimIntentInFlight() {
         body: JSON.stringify({ step: 'catalog-presented' }),
       }).catch(() => {})
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
+
+  // #2004 (W8): the registry-backed builder catalog — fetched ONCE per
+  // session from GET /v1/capabilities (tortoise/tool_registry.py
+  // CAPABILITY_CATALOG) when the build branch renders on step 2. The static
+  // placeholder in wizardFlow.js renders until the fetch resolves and stays
+  // as the OFFLINE fallback (same names — never a blank catalog; the
+  // registry-presented mark above is untouched: this swap is SOURCE-only,
+  // the once-per-org catalog-presented step edge still fires on first
+  // build-fork render and is a keyed-MERGE no-op on replay).
+  const [wizardCatalog, setWizardCatalog] = React.useState(null)
+  const catalogFetchedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (wizardStep !== 2) return
+    const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
+    if (!buildFork || catalogFetchedRef.current) return
+    catalogFetchedRef.current = true
+    api('/v1/capabilities', { useSession: true })
+      .then((res) => { if (res && Array.isArray(res.modules) && res.modules.length > 0) setWizardCatalog(res.modules) })
+      .catch(() => { catalogFetchedRef.current = false })  // transient failure → retry on next effect run; meanwhile the offline fallback renders (honest degrade)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
 
@@ -3184,10 +3205,11 @@ function claimIntentInFlight() {
   }
 
   // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
-  // branch: the placeholder catalog render marks catalog-presented via W5's
-  // checkpoint (surface 4 write contract — the launch-slice build-fork gate
-  // is evaluable; W8 later replaces the placeholder SOURCE, not the
-  // mechanism). Fork SEMANTICS are W2-owned — W1 renders the shell only.
+  // branch: the catalog render marks catalog-presented via W5's checkpoint
+  // (surface 4 write contract — the build-fork gate is evaluable; W8 #2004
+  // replaced the placeholder SOURCE with the registry endpoint, the
+  // mark/mechanism is unchanged). Fork SEMANTICS are W2-owned — W1 renders
+  // the shell only.
   async function handleWizardFork(forkId) {
     setWizardForkBusy(true)
     setWizardForkError('')
@@ -3203,9 +3225,9 @@ function claimIntentInFlight() {
       // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
       // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
       // persisted build fork (onboarding.fork === 'build').
-      // A build pick also STAYS on step 2 so the placeholder catalog renders
-      // (the user sees what they can build on before continuing) — the
-      // Continue button appears once a fork is chosen; self picks advance.
+      // A build pick also STAYS on step 2 so the catalog renders (the user
+      // sees what they can build on before continuing) — the Continue button
+      // appears once a fork is chosen; self picks advance.
       if (forkId === 'build') {
         const teamKey = teamIdRef.current || 'default'
         if (!catalogMarkedRef.current[teamKey]) {
@@ -4521,8 +4543,8 @@ function claimIntentInFlight() {
                       </div>
                       {(wizardForkChosen === 'build' || (onboarding && onboarding.fork === 'build')) && (
                         <div className="catalog-placeholder" style={{ marginBottom: '1rem', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8 }}>
-                          <p className="dim small" style={{ margin: '0 0 0.5rem' }}><strong>Build catalog</strong> — what you can build on (preview until the full catalog ships):</p>
-                          {BUILD_CATALOG_PLACEHOLDER.map((mod) => (
+                          <p className="dim small" style={{ margin: '0 0 0.5rem' }}><strong>Build catalog</strong> — the indexers and extractors you can build with:</p>
+                          {resolveBuildCatalog(wizardCatalog).map((mod) => (
                             <div key={mod.name} style={{ marginBottom: '0.35rem' }}>
                               <strong className="small">{mod.name}</strong>{' '}
                               <span className="dim small">({mod.kind}) — {mod.description}</span>

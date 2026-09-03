@@ -5,6 +5,12 @@ tenant-provision Edge Function, and will be extended with the full
 multi-tenant REST API (issue #7717).
 
 See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5, §6.1
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session recorder' (the hosted POST /v1/sessions capture_session path) —
+tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename an
+extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations
 
@@ -12333,6 +12339,27 @@ _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
     "capture_disclosed", "team_named",
 }
+
+
+@app.get("/v1/capabilities", response_model=dict)
+async def get_capabilities(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Return the pullable builder capability catalog (#2004 W8, epic I-7).
+
+    The indexers+extractors registry rows from tool_registry.py
+    ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
+    registry endpoint AND the dashboard's build-path catalog read (W8
+    replaced W1's static placeholder source with this endpoint; the
+    dashboard's first build-fork render marks the catalog-presented
+    checkpoint via the existing W1/W5 mechanism — presentation only, never
+    a billing gate). Org-independent static registry data (no graph
+    touch — never 'unavailable'); dual-auth like the onboarding state reads.
+
+    Contract: ``200 {modules: [{name, kind: indexer|extractor, description,
+    available}]}`` — names/descriptions are the presented copy; every named
+    module file carries the catalog-reference note (W8b sweep)."""
+    from tortoise.tool_registry import capability_catalog
+    del team  # auth-context presence only — the catalog is org-independent
+    return {"modules": capability_catalog()}
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)

@@ -1246,3 +1246,105 @@ def tool_groups() -> dict[str, list[str]]:
     for t in TOOL_REGISTRY:
         out.setdefault(t.group, []).append(t.name)
     return out
+
+
+# ── Builder capability catalog (#2004 W8 — epic #1976 WF-6/DM-5/I-7) ──────
+# The pullable indexers+extractors catalog a BUILD-fork org sees once on the
+# build path. R2-9: lives HERE (no new infra). Registry rows are the canonical
+# builder-facing module names (the presented copy — the dashboard fallback
+# mirrors them byte-for-byte); each row names the REAL code module(s) that
+# implement the capability, and every named module carries the catalog note
+# in its module docstring (W8b sweep — tests/test_capability_catalog.py
+# TestModuleNoteInventory reds on any missed note).
+#
+# Mapping evidence (2026-09-02, repo-wide class search): session recording =
+# TortoiseSDK.capture_session + the hosted POST /v1/sessions capture; session
+# extraction = extractor.py (Extractor/LLMExtractor) + extractor_v2.py (5-stage
+# pipeline) + session_indexer.py (session-file metadata); document indexing =
+# ingest.py (corpus) + file_indexer.py (file identity) + session_indexer.py
+# (session .md files).
+#
+# Deliberately OUTSIDE this sweep (legacy/internal seams, not builder-facing
+# capabilities — no note added, keep the list honest if they resurface):
+# mining.py (internal batch conversation-mining pipeline over recorded
+# sessions), value_extractor.py (extractor-v1 production seam behind
+# TORTOISE_EXTRACTOR=v1 in sdk.py), session_import/parsers.py (recorder-side
+# importers feeding POST /v1/sessions). A future "extractor" catalog row must
+# add each implementing module to its modules tuple + the note to its file.
+#
+# DELIBERATELY EXCLUDED: the GitHub source indexers (tortoise/indexer/
+# github_indexer.py + github_docs.py). They are the SELF-use Settings
+# memory-source surface (github_* toggles, epic #1976 scope boundary: webhook
+# GitHub ingestion is out of epic scope) — build-fork orgs see THIS catalog,
+# not GitHub toggles. If GitHub ingestion becomes a buildable module, add a
+# row here + the note to those files.
+
+CATALOG_NOTE = (
+    "This module is referenced in the builder capability catalog (onboarding) — "
+    "tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename an "
+    "extractor/indexer, update the catalog reference."
+)
+
+
+@dataclass(frozen=True)
+class CatalogModule:
+    """One builder-facing data-input module in the capability catalog.
+
+    ``modules`` lists the real code module(s) implementing the capability —
+    each file's module docstring carries :data:`CATALOG_NOTE` (W8b sweep;
+    inventory test iterates this tuple). ``available=False`` marks a planned
+    module (the registry's honest future entry).
+    """
+    name: str                       # canonical builder-facing name
+    kind: str                       # "indexer" | "extractor"
+    description: str                # builder-facing one-liner (presented copy)
+    modules: tuple[str, ...]        # real module paths (W8b note homes)
+    available: bool = True          # False = planned/future
+
+
+CAPABILITY_CATALOG: tuple[CatalogModule, ...] = (
+    CatalogModule(
+        name="Session recorder",
+        kind="indexer",
+        description="Files agent conversations to the graph.",
+        modules=("tortoise/sdk.py", "tortoise/hosted_api.py"),
+    ),
+    CatalogModule(
+        name="Session extractor",
+        kind="extractor",
+        description=("Pulls decisions and findings out of recorded "
+                     "sessions."),
+        modules=("tortoise/extractor.py", "tortoise/extractor_v2.py",
+                 "tortoise/session_indexer.py"),
+    ),
+    CatalogModule(
+        name="Document indexer",
+        kind="indexer",
+        description="Indexes documents you point your agent at.",
+        modules=("tortoise/ingest.py", "tortoise/file_indexer.py",
+                 "tortoise/session_indexer.py"),
+    ),
+    CatalogModule(
+        name="Document extractor",
+        kind="extractor",
+        description=("Extracts claims and decisions from indexed documents "
+                     "(planned)."),
+        modules=(),
+        available=False,
+    ),
+)
+
+
+def capability_catalog() -> list[dict]:
+    """Pullable catalog rows — the GET /v1/capabilities payload (#2004 W8).
+
+    Returns the canonical module list (presented once on the build path):
+    ``[{name, kind, description, available}, ...]``. Names/kinds/descriptions
+    are the source of truth the dashboard fallback mirrors — rename here AND
+    in the module docstrings (W8b), never one without the other.
+    """
+    return [
+        {"name": m.name, "kind": m.kind, "description": m.description,
+         "available": m.available}
+        for m in CAPABILITY_CATALOG
+    ]

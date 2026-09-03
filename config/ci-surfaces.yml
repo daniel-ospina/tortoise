@@ -366,6 +366,8 @@ surfaces:
   - test_invites_email_http.py
   - test_invites_http.py
   - test_onboard_prompt_ref.py
+  - test_capabilities_endpoint.py  # #2004 (W8): docker-lane catalog endpoint + build-fork gate tests
+  - test_capability_catalog.py     # #2004 (W8): lane-agnostic catalog registry + W8b note inventory
   - test_onboarding_analytics_patch.py
   - test_onboarding_endpoints.py
   - test_onboarding_health_flip.py
