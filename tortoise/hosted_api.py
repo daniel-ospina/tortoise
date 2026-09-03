@@ -9856,8 +9856,9 @@ def _drop_team_graph_strict(team_id: str, graph_name: str | None = None) -> None
     silently swallows drop errors, which would let the sweep delete the
     teams row and orphan the FalkorDB graph with no retry. Raising keeps
     the teams row as the retry anchor — the next sweep finds the team
-    again and retries the drop. FalkorDBLite (no ``delete_graph``) is
-    not an error — it is skipped exactly like the best-effort variant.
+    again and retries the drop. Since #2163 the drop runs on EVERY lane
+    (embedded + FalkorDB Cloud) — a raise here now means a real drop
+    failure, so the retry anchor fires when it should.
     """
     _drop_team_graph_impl(team_id, graph_name)
 
@@ -9866,10 +9867,16 @@ def _drop_team_graph_impl(team_id: str, graph_name: str | None = None) -> None:
     target = graph_name or f"team_{team_id}"
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
-    if hasattr(proj.db, "delete_graph"):
-        proj.db.delete_graph(target)
-    else:
-        _logger.debug("delete_graph not available (FalkorDBLite) — skipped")
+    # #2163: proj.db is falkordb.FalkorDB on BOTH lanes (embedded redislite
+    # + server/docker/cloud — the projection builds self.g via
+    # db.select_graph on both). The pip client has NO ``delete_graph``
+    # attribute (only select_graph/list_graphs/udf_*), so the old
+    # hasattr(delete_graph) probe was false on FalkorDB Cloud and the purge
+    # sweep silently skipped every drop — the teams row was deleted and the
+    # graph orphaned with no retry (the #926 retry-anchor design broke).
+    # select_graph(target).delete() issues GRAPH.DELETE on both clients —
+    # the same call the mint-failure rollback paths use (hosted_api.py).
+    proj.db.select_graph(target).delete()
 
 
 def _purge_registry_team(sdk, team_id: str, graph_name: str | None = None) -> None:

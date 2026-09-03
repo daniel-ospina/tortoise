@@ -995,6 +995,63 @@ class TestPurge:
         assert ops.count("team_delete_purged") == 2
 
 
+class TestDropTeamGraphImplCloudShape:
+    """#2163 regression: _drop_team_graph_impl must issue GRAPH.DELETE on a
+    cloud-shaped client (falkordb.FalkorDB — has select_graph, NO
+    delete_graph attr). The old hasattr(delete_graph) probe was false on
+    FalkorDB Cloud, so the purge sweep silently skipped every drop and
+    orphaned the graph after the teams row was deleted (no retry — the
+    #926 retry-anchor design broke)."""
+
+    def test_impl_drops_via_select_graph_when_delete_graph_absent(self, monkeypatch):
+        dropped = []
+
+        class FakeGraph:
+            def __init__(self, name):
+                self._name = name
+
+            def delete(self):
+                dropped.append(self._name)  # GRAPH.DELETE fires
+
+        class FakeDB:
+            """Cloud-shaped: select_graph present, delete_graph ABSENT."""
+
+            def select_graph(self, name):
+                return FakeGraph(name)
+
+        db = FakeDB()
+        proj = type("FakeProj", (), {"db": db})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        # graph_name wins; the default team_{team_id} fallback also drops
+        ha_mod._drop_team_graph_impl("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_team_graph_impl("team-xyz")
+
+        # the pre-#2163 code called NOTHING on this client (hasattr probe
+        # false) — the regression pin is that both drops actually fired
+        assert not hasattr(db, "delete_graph"), \
+            "fixture must mirror the pip falkordb client (no delete_graph)"
+        assert dropped == [
+            "team_abc000000000000000000000", "team_team-xyz"]
+
+    def test_strict_drop_raises_when_graph_delete_fails(self, monkeypatch):
+        """#926 retry-anchor contract: _drop_team_graph_strict propagates a
+        GRAPH.DELETE failure so the purge sweep keeps the teams row."""
+        class BoomDB:
+            def select_graph(self, name):
+                raise RuntimeError("GRAPH.DELETE failed (connection)")
+
+        proj = type("FakeProj", (), {"db": BoomDB()})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
+            ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
+        # best-effort variant swallows the same failure
+        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Sensitive-op rate limits
 # ═══════════════════════════════════════════════════════════════════════════

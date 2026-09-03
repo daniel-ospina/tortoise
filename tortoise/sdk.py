@@ -12402,10 +12402,12 @@ class TortoiseSDK:
         graph_name = team.get("graph_name", f"team_{team.get('name', '')}")
         proj = self._get_proj()
         try:
-            if hasattr(proj.db, 'delete_graph'):
-                proj.db.delete_graph(graph_name)
-            else:
-                _logger.debug("delete_graph not available (FalkorDBLite) — skipping")
+            # #2163: proj.db (falkordb.FalkorDB on every lane) has NO
+            # delete_graph attr on the pip client — the old hasattr probe
+            # skipped on FalkorDB Cloud and orphaned the graph after the
+            # registry rows were deleted. select_graph(...).delete() issues
+            # GRAPH.DELETE on embedded + server/cloud alike.
+            proj.db.select_graph(graph_name).delete()
         except Exception:
             _logger.debug("Failed to delete tenant graph %s — skipping", graph_name)
 
