@@ -2061,6 +2061,16 @@ class TortoiseSDK:
         edge). The deterministic regex loop is removed as a product
         path — LLM extraction is the default and no-key fails closed.
 
+        Supersession records are REAL-BACKEND-ONLY, by construction: the v2
+        extractor forms conversation-driven supersessions only when its S3
+        search resolves against the real graph — extractor_v2 skips the search
+        entirely when the active backend is not "real" (the ``mode != "real"``
+        degraded branch: embedded/FalkorDBLite — the real graph, FalkorDB via
+        docker/redis URI or hosted API, is required), so capture over
+        embedded/FalkorDBLite produces ZERO supersession records (structurally
+        — the supersedes refs never resolve). Not a bug; do not debug it as
+        one.
+
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
         "extraction_mode", "extraction_provider", "ok", "errors",
@@ -2425,6 +2435,15 @@ class TortoiseSDK:
         graph — entities via create_entity, points via create_point with the
         content-addressed ids, events via create_event, IMPL/NAND via
         create_operator — then wires session CONTAINS + aboutObject edges.
+        Supersessions ride the payload's ``supersessions`` channel (#2164):
+        ``commit_ops.apply_supersessions`` applies each record AFTER the
+        entities/points it references exist (ordering contract) — ``pt_`` refs
+        → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
+        entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
+        full provenance) + the ``_fold_object_superseded`` status fold. Every
+        fold miss/skip/failure is surfaced through the shared meta
+        ``warnings`` channel — supersession application is best-effort and
+        never a silent drop (and never fails capture).
 
         Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
         consumes it): ``extracted`` is the same [{id, kind, text}] contract

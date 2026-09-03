@@ -2911,12 +2911,29 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "note": "no match — created"})
         lifecycle = str(e.get("lifecycle", "") or "").strip()
         supersedes_ref = str(e.get("supersedes") or "").strip()
-        if lifecycle in ("changed", "superseded"):
-            warnings.append(f"entity '{name[:60]}' lifecycle={lifecycle} is not "
-                            "expressible in the Layer-1 payload — the server "
-                            "merges entities by (name, kind); the state change "
-                            "must ride on points/events instead")
-        if supersedes_ref and supersedes_ref not in ("null", "None", ""):
+        supersedes_collected = bool(supersedes_ref and supersedes_ref
+                                    not in ("null", "None", ""))
+        # #2164: the warning must not lie — a 'superseded' lifecycle WITH a
+        # supersedes ref IS expressible: the ref is collected below and rides
+        # payload["supersessions"] canonically (the deterministic fold
+        # channel). Only two shapes are genuinely inexpressible in the Layer-1
+        # payload (entities merge by (name, kind) — there is no Object
+        # lifecycle state to write):
+        if lifecycle == "changed":
+            # changed-ness is attribute/value state — it belongs on points
+            # (and events), not on an Object transition.
+            warnings.append(f"entity '{name[:60]}' lifecycle='changed' is not "
+                            "expressible in the Layer-1 payload — changed-ness "
+                            "is attribute/value state and must ride on "
+                            "points/events, not on an Object transition")
+        elif lifecycle == "superseded" and not supersedes_collected:
+            # superseded with NO supersedes ref has nothing to express — the
+            # ref is the expressible channel (→ payload["supersessions"]).
+            warnings.append(f"entity '{name[:60]}' lifecycle=superseded with no "
+                            "supersedes ref is not expressible in the Layer-1 "
+                            "payload — set supersedes=<existing id/name> for "
+                            "the supersession to ride payload['supersessions']")
+        if supersedes_collected:
             entity_supersede_refs.append({"name": name, "kind": kind,
                                           "supersedes": supersedes_ref})
         payload_entities.append({
