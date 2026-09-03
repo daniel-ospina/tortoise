@@ -102,6 +102,12 @@ surfaces:
   - test_suspension_parity.py
   - test_telegram_push.py
   - test_turnstile_signup.py
+  # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
+  # boundary PR (hosted capture code changes) must run the real-pipeline
+  # replay gate against the write-path corpus. First-match ownership (api
+  # before eval) is fine: the tier-2 union includes it whenever api OR eval
+  # matches.
+  - eval/write_path/test_write_path_benchmark.py
   battery:
   - test_battery_arms.py
   - test_battery_judge.py
@@ -319,8 +325,14 @@ surfaces:
   - test_wiring_phase01.py
   - test_write_consolidation.py
   - test_writer_inventory.py
+  # W2-b (#2098): BPRE write-path gate — core fallback catches engine
+  # code with no surface mapping (tortoise/session_import/ parsers etc.).
+  - eval/write_path/test_write_path_benchmark.py
   ep:
   - test_a9_direct_edge_traversal.py
+  # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes (the
+  # strict-survival dimension) must run the replay gate.
+  - eval/write_path/test_write_path_benchmark.py
   - test_calibration.py
   - test_calibration_tools.py
   - test_decide.py
@@ -434,6 +446,9 @@ surfaces:
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
   - eval/write_path/test_write_path_corpus.py
+  - eval/write_path/test_write_path_grading.py
+  - eval/write_path/test_write_path_runner.py
+  - eval/write_path/test_write_path_benchmark.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
   - test_calibrate_thresholds.py

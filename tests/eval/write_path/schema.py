@@ -569,11 +569,13 @@ def _validate_metric_values(metrics: dict, where: str, issues: list[str]) -> Non
         if key == "distractor_leakage_per_run":
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 issues.append(f"{where}.{key}: expected a non-negative int, got {value!r}")
-            elif value > DISTRACTOR_LEAKAGE_TOLERANCE:
-                issues.append(
-                    f"{where}.{key}: {value} exceeds the gold-locked tolerance "
-                    f"{DISTRACTOR_LEAKAGE_TOLERANCE} (research-recommended ≤1/run)"
-                )
+            # NOTE (W2-b #2098, F5 resolution): an OVER-tolerance measurement
+            # is RECORDABLE — the fix-wave protocol requires the honest first
+            # (possibly bad) number to be publishable so a write-path defect
+            # can be named and fixed. The tolerance is enforced as the STANDING
+            # quality bar in compare_run (leakage > tolerance ⇒ regression on
+            # every subsequent run — never blessed away), not as a
+            # record-time hard cap that deadlocks the first publish.
         elif isinstance(value, bool) or not isinstance(value, (int, float)):
             issues.append(f"{where}.{key}: expected a number, got {value!r}")
         elif not (0.0 <= float(value) <= 1.0):
@@ -757,6 +759,14 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run
             worse = run_value < committed_value
         if worse:
             return VERDICT_REGRESSION
+    # Standing quality bar (W2-b #2098, F5 resolution): distractor leakage
+    # above the gold-locked tolerance is a REGRESSION on every run — even
+    # when the committed baseline was itself over-tolerance (a bad first
+    # number records per the fix-wave protocol but never legitimizes a
+    # future run at the same level; the tolerance is the convergence target
+    # and can never be blessed away by re-pinning the committed value).
+    if run_metrics.get("distractor_leakage_per_run", 0) > DISTRACTOR_LEAKAGE_TOLERANCE:
+        return VERDICT_REGRESSION
     return VERDICT_PASS
 
 
