@@ -107,21 +107,23 @@ def _run_all(sdk_factory, root=corpus.WRITE_PATH_DIR) -> dict:
 def test_bpre_lane_full_corpus_replay_emits_and_grades(sdk_factory):
     """S1 + grading-surface smoke over the REAL pipeline: every planted
     session emits through the real capture path and the mechanical graders
-    read the real written graph."""
+    read the real written graph.
+
+    REVIEW-FIX (PR #2183 findings 1+4): the smoke runs the deterministic
+    M2 echo lane and compares against the lane's OWN committed m2.json
+    baseline (posture-matched) — verdict PASS on a clean replay (the echo
+    lane is byte-reproducible, so a healthy write path reproduces its
+    committed numbers exactly). A write-path regression (provenance strip,
+    parser silent-skip) moves the metrics ⇒ REGRESSION ⇒ the can-fail CI
+    gate. The M2 lane is NEVER compared against the LLM-lane main.json
+    (cross-posture compare is a config mismatch ⇒ inconclusive — the
+    posture guard)."""
     report = _run_all(sdk_factory)
     assert report["run_status"] == "completed", report.get("log")
-    # vs the committed baseline (published by W2-b's first run): the verdict
-    # is a REAL compare — regression when the honest re-run underperforms the
-    # blessed number (LLM extraction is nondeterministic between runs), never
-    # inconclusive against a pending baseline. The gate contract (compare
-    # vocabulary + failure_origin wiring) is what this asserts.
-    assert report["verdict"] in (schema.VERDICT_PASS, schema.VERDICT_REGRESSION)
-    # failure_origin names the gate failure when the compare regressed (the
-    # CI-fail signal); None only on pass.
-    if report["verdict"] == schema.VERDICT_REGRESSION:
-        assert report["failure_origin"] == "gate_regression"
-    else:
-        assert report["failure_origin"] is None
+    assert (report.get("resolved_config") or {}).get("extractor_posture") == "m2"
+    # The deterministic lane reproduces its committed m2.json numbers ⇒ PASS.
+    assert report["verdict"] == schema.VERDICT_PASS, report.get("log")
+    assert report["failure_origin"] is None
     assert set(report["metrics"]) == schema.METRIC_VALUES
     # 100% sessions-emitting invariant (S1: no session silently produces no
     # memory points through the real pipeline).
@@ -179,13 +181,18 @@ def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_
     # A committed baseline the echo lane cannot meet (leakage 0 < observed;
     # macro/strict 1.0 > observed) → the run REGRESSES against it.
     root = _tmp_corpus(tmp_path)
-    pending = corpus.load_baseline(root)
+    pending = corpus.load_baseline(root, posture="m2")
     assert pending["fixtures_hash"] == report1["corpus_hash"]
+    # REVIEW-FIX (posture): the synthetic gate baseline belongs to the m2
+    # lane (the run under test is the deterministic echo lane) — written to
+    # the m2 posture file with posture-m2 config.
+    fixture_config = dict(corpus.BASELINE_CONFIG)
+    fixture_config["extractor_posture"] = "m2"
     fixture_baseline = {
         "schema_version": 1,
         "fixtures_hash": report1["corpus_hash"],
         "judge_pin": JUDGE_PIN_MECHANICAL,
-        "config": dict(corpus.BASELINE_CONFIG),
+        "config": fixture_config,
         "justification": "synthetic fixture baseline (integration test)",
         "metrics": {"salient_unit_survival_macro": 1.0,
                     "salient_unit_survival_strict": 1.0,
@@ -196,7 +203,7 @@ def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_
         "history": [],
     }
     assert schema.validate_baseline(fixture_baseline) == []
-    (root / "baselines" / "main.json").write_text(json.dumps(fixture_baseline, indent=2))
+    (root / "baselines" / "m2.json").write_text(json.dumps(fixture_baseline, indent=2))
 
     report3 = _run_all(sdk_factory, root=root)
     assert report3["run_status"] == "completed"

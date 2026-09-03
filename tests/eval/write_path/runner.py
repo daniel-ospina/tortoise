@@ -16,9 +16,11 @@ Blindness / grading discipline:
   hierarchy).  BPRE (the default mode) runs the mechanical arm only and
   records ``JUDGE_PIN_MECHANICAL`` — numbers are publishable against a
   pinned judge (the schema requires non-null judge_pin on publish).
-  ``--judge salience`` (full mode, cost-tracked) adds the pinned blind
-  salience judge (judge.py) whose output is reported SEPARATELY and never
-  overwrites a mechanical verdict.
+  NOTE (PR #2183 review): the full ``--judge salience`` mode is NOT yet
+  wired — the CLI exposes ``run`` / ``bless`` / ``validate-receipt`` only;
+  the blind SalienceJudge in judge.py is implemented + unit-tested but not
+  yet invoked by the runner (deferred to a later wave; the docstring claim
+  was removed when the option failed to exist).
 * **Verbatim control lane**: every session's gold is ALSO graded against a
   control memory (the conversation written back verbatim).  Control macro
   survival is 1.0 by construction; anything less is a CORPUS/GRADER bug
@@ -35,8 +37,12 @@ Blindness / grading discipline:
   ``TORTOISE_SESSION_EXTRACTOR=m2`` seam (content-preserving echo, no
   network — the CI lane); the real v2 extractor (provider key) is the
   product-parity lane used for first-baseline publishes.  The extractor
-  posture is an ENV property of the run (recorded in the report's notes),
-  never part of the corpus config snapshot.
+  posture (``llm`` | ``m2``) is part of the resolved-config comparability
+  surface (REVIEW-FIX, PR #2183 findings 1+4): a run on one lane never
+  compares against a baseline on the other (config mismatch ⇒
+  inconclusive); the m2 lane blesses its own committed m2.json baseline
+  (determinism gate) while the llm lane owns main.json + the standing
+  leakage quality bar.
 
 Receipts follow the epic §6.6 contract (run_status / verdict /
 failure_origin / commit / corpus_hash / judge_pin / resolved_config /
@@ -96,15 +102,25 @@ class RunError(Exception):
 # ── Pre-flight (S4: manifest/hash/baseline/config) ──────────────────────────
 
 
-def preflight(root: Path = corpus.WRITE_PATH_DIR) -> dict:
+def _env_posture() -> str:
+    """Extractor posture for the current run (REVIEW-FIX, PR #2183 findings
+    1+4): ``TORTOISE_SESSION_EXTRACTOR=m2`` selects the deterministic echo
+    lane; anything else (incl. absent) is the product ``llm`` lane.
+    """
+    if os.environ.get("TORTOISE_SESSION_EXTRACTOR", "").strip() == "m2":
+        return "m2"
+    return "llm"
+
+
+def preflight(root: Path = corpus.WRITE_PATH_DIR, *, posture: str = "llm") -> dict:
     """Pre-flight gate: manifest coverage, corpus validity, baseline validity.
 
     Returns ``{"ok": bool, "issues": [...], "fixtures_hash": str,
     "baseline": dict}``.  Every committed fixture + gold validates against
     its schema (cross-checked pair-wise), the manifest covers the on-disk
-    corpus byte-for-byte, the committed baseline validates (first-run-pending
-    or published), and every gold carries ≥1 graded salient unit (a vacuum
-    1.0 denominator would rubber-stamp).
+    corpus byte-for-byte, the committed baseline for the run's ``posture``
+    validates (first-run-pending or published), and every gold carries ≥1
+    graded salient unit (a vacuum 1.0 denominator would rubber-stamp).
     """
     issues: list[str] = []
     verify = corpus.verify_manifest(root)
@@ -118,9 +134,9 @@ def preflight(root: Path = corpus.WRITE_PATH_DIR) -> dict:
         manifest = corpus.load_manifest(root)
         m_issues = schema.validate_manifest(manifest)
         issues.extend(f"manifest: {i}" for i in m_issues)
-    baseline = corpus.load_baseline(root)
+    baseline = corpus.load_baseline(root, posture=posture)
     b_issues = schema.validate_baseline(baseline)
-    issues.extend(f"baseline: {i}" for i in b_issues)
+    issues.extend(f"baseline ({posture}): {i}" for i in b_issues)
     for session_id in corpus.session_ids(root):
         fixture = corpus.load_fixture(session_id, root)
         issues.extend(f"fixture {session_id}: {i}" for i in schema.validate_fixture(fixture))
@@ -412,14 +428,28 @@ def run_benchmark(
     resolved_config = dict(corpus.BASELINE_CONFIG)
     if config is not None:
         resolved_config.update(config)
+    posture = resolved_config.setdefault("extractor_posture", _env_posture())
+    # REVIEW-FIX (findings 1+4): the m2 echo lane ALWAYS runs the m2 posture
+    # (its env is the lane selector), and an llm run never inherits m2's env
+    # by accident.
+    if _env_posture() == "m2":
+        resolved_config["extractor_posture"] = "m2"
+        posture = "m2"
     date = _now_iso()
     commit = _git_head_short()
 
-    pf = preflight(root)
+    pf = preflight(root, posture=posture)
     if not pf["ok"]:
+        # REVIEW-FIX (PR #2183 review finding 6): corpus-hash/manifest drift
+        # is the audit-grade ``hash_mismatch`` origin (E2E-2 — a gold-only
+        # edit must surface as the hash failure it is), not a generic
+        # runner_error. Everything else stays runner_error.
+        drift_issues = [i for i in pf["issues"]
+                        if "hash" in i or "drift" in i or "manifest" in i]
+        origin = "hash_mismatch" if drift_issues else "runner_error"
         return _failed_report(
             run_id, date, commit, pf["fixtures_hash"], resolved_config,
-            origin="runner_error",
+            origin=origin,
             detail="; ".join(pf["issues"][:8]), log=log,
         )
     baseline = pf["baseline"]
@@ -439,11 +469,16 @@ def run_benchmark(
         sdk = _open_hermetic_sdk(run_id)
     session_results: list[dict] = []
     runner_errors: list[str] = []
+    total_cost: float = 0.0
+    cost_tracked: bool = True  # flipped False if any capture lacks a cost figure
+    quote_spans_total: int = 0
     try:
         workdir = workdir or Path(tempfile.mkdtemp(prefix=f"w2b_{run_id}_"))
         for session_id in selected:
             fixture = corpus.load_fixture(session_id, root)
             gold = corpus.load_gold(session_id, root)
+            conversation = None  # REVIEW-FIX (F5): never leak a prior
+            # iteration's parsed conversation into a failed capture's grading.
             try:
                 conversation = parse_roundtrip(
                     session_id, fixture["conversation"], fixture["harness"],
@@ -462,12 +497,25 @@ def run_benchmark(
                         f"{session_id}: capture ok=False "
                         f"(errors={capture.get('errors')})"
                     )
+                # REVIEW-FIX (cost honesty): accumulate the extractor's
+                # reported cost when the capture telemetry carries it; a
+                # None/missing figure (mock seam, unknown adapter) flips
+                # cost_tracked False so the receipt records an explicit
+                # note rather than a silently-fake 0.0.
+                telemetry = capture.get("telemetry") or {}
+                session_cost = telemetry.get("llm_cost_usd")
+                if session_cost is None:
+                    cost_tracked = False
+                else:
+                    total_cost += float(session_cost)
             except Exception as exc:  # noqa: BLE001 — the run report carries it
                 runner_errors.append(f"{session_id}: capture raised {type(exc).__name__}: {exc}")
                 capture = {}
             snapshot = snapshot_session(sdk, session_id)
+            grade_conv = conversation if conversation is not None \
+                else fixture["conversation"]
             result = grade_session(
-                session_id, gold, conversation if "conversation" in locals() else fixture["conversation"],
+                session_id, gold, grade_conv,
                 snapshot["points"], snapshot["rephrase_edges"],
             )
             result["operator_counts"] = snapshot["operator_counts"]
@@ -540,6 +588,18 @@ def run_benchmark(
         return report
 
     metrics = grading.aggregate_metrics(session_results)
+    # REVIEW-FIX (F3): surface quote vacuity — a gold corpus that never
+    # quotes yields a vacuous quote_fidelity 1.0 (floor, not bar). The
+    # graded snapshot stays canonical-6; the REPORT carries the raw span
+    # count + a note so the committed 1.0 is never misread.
+    quote_spans_total = sum(r["quotes"]["total"] for r in session_results)
+    if quote_spans_total == 0:
+        notes.append(
+            "quote_fidelity 1.0 is VACUOUS: the corpus gold contains no "
+            "double-quoted spans (quote_spans_total=0) — this number is a "
+            "floor, not a fidelity bar; it will not hold under a future "
+            "corpus that quotes"
+        )
     log.append(f"metrics: {json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in metrics.items()})}")
     verdict = schema.compare_run(
         metrics, baseline,
@@ -557,6 +617,12 @@ def run_benchmark(
             failure_origin = "config_mismatch"
         elif not (baseline.get("metrics") or {}):
             failure_origin = None  # first-run-pending — nothing to compare yet
+    if not cost_tracked and total_cost == 0.0:
+        notes.append(
+            "cost not tracked: the extractor seam reported no llm_cost_usd "
+            "(mock/unknown adapter) — receipt cost_usd is 0.0 with this note, "
+            "never a silently-fake measured figure"
+        )
     return {
         "run_id": run_id,
         "date": date,
@@ -567,8 +633,9 @@ def run_benchmark(
         "corpus_hash": fixtures_hash,
         "judge_pin": judge_pin,
         "resolved_config": resolved_config,
-        "cost_usd": 0.0,
+        "cost_usd": round(total_cost, 6) if cost_tracked else 0.0,
         "metrics": metrics,
+        "quote_spans_total": quote_spans_total,
         "session_results": session_results,
         "notes": notes,
         "log": log,
@@ -806,6 +873,10 @@ def _main(argv: list[str] | None = None) -> int:
     p_bless = sub.add_parser("bless", help="bless a baseline from a run receipt")
     p_bless.add_argument("--receipt", type=Path, required=True)
     p_bless.add_argument("--justification", required=True)
+    p_bless.add_argument("--corpus-bless", action="store_true",
+                         help="accept an INTENTIONAL corpus regeneration "
+                              "(fixtures_hash change) — the justification "
+                              "must name the corpus change; records it in history")
     p_bless.add_argument("--write", action="store_true",
                          help="write the blessed baseline to baselines/main.json")
     p_bless.add_argument("--root", type=Path, default=corpus.WRITE_PATH_DIR)
@@ -855,22 +926,38 @@ def _main(argv: list[str] | None = None) -> int:
         if receipt["run_status"] != "completed":
             print(f"cannot bless a {receipt['run_status']!r} run", file=sys.stderr)
             return EXIT_RUNNER_ERROR
-        previous = corpus.load_baseline(args.root)
+        # REVIEW-FIX (findings 1+4): bless targets the posture's baseline
+        # file (llm → baselines/main.json, m2 → baselines/m2.json) — the
+        # receipt's resolved_config names the lane, and cross-posture bless
+        # is a config mismatch caught below by bless_baseline.
+        bless_posture = (receipt.get("resolved_config") or {}).get(
+            "extractor_posture", "llm")
+        previous = corpus.load_baseline(args.root, posture=bless_posture)
         previous_metrics = previous.get("metrics") or {}
+        corpus_bless = args.corpus_bless
+        hash_changed = bool(previous.get("fixtures_hash")) and \
+            receipt["corpus_hash"] != previous.get("fixtures_hash")
         if receipt["verdict"] == schema.VERDICT_INCONCLUSIVE:
             # Inconclusive is blessable ONLY as the first publish against the
             # pending baseline (no committed targets yet — benchmark-first)
-            # and only when the run is on the same frozen corpus + resolved
-            # config (a drifted run must not silently re-pin the baseline).
-            if previous_metrics:
-                print("cannot bless an inconclusive run against committed targets",
+            # or as a --corpus-bless of an intentional regeneration (new
+            # corpus ⇒ no comparability ⇒ re-pin, recorded in history).
+            if previous_metrics and not corpus_bless:
+                print("cannot bless an inconclusive run against committed targets "
+                      "(use --corpus-bless for an intentional corpus regeneration)",
                       file=sys.stderr)
                 return EXIT_RUNNER_ERROR
-            if receipt["corpus_hash"] != previous.get("fixtures_hash"):
-                print("cannot bless first publish: corpus hash mismatch", file=sys.stderr)
-                return EXIT_RUNNER_ERROR
-            if receipt["resolved_config"] != previous.get("config"):
-                print("cannot bless first publish: resolved-config mismatch", file=sys.stderr)
+            if not corpus_bless:
+                if receipt["corpus_hash"] != previous.get("fixtures_hash"):
+                    print("cannot bless first publish: corpus hash mismatch", file=sys.stderr)
+                    return EXIT_RUNNER_ERROR
+                if receipt["resolved_config"] != previous.get("config"):
+                    print("cannot bless first publish: resolved-config mismatch", file=sys.stderr)
+                    return EXIT_RUNNER_ERROR
+            elif not hash_changed:
+                print("cannot bless: --corpus-bless given but the run is on the "
+                      "SAME corpus (no fixtures_hash change) — use the ordinary bless",
+                      file=sys.stderr)
                 return EXIT_RUNNER_ERROR
         run = {
             "date": receipt["date"],
@@ -885,7 +972,10 @@ def _main(argv: list[str] | None = None) -> int:
             ],
         }
         try:
-            blessed = schema.bless_baseline(previous, run, justification=args.justification)
+            blessed = schema.bless_baseline(
+                previous, run, justification=args.justification,
+                corpus_bless=corpus_bless,
+            )
         except ValueError as exc:
             print(f"cannot bless: {exc}", file=sys.stderr)
             return EXIT_RUNNER_ERROR
@@ -896,7 +986,7 @@ def _main(argv: list[str] | None = None) -> int:
         print("blessed baseline:")
         print(json.dumps(blessed, indent=2))
         if args.write:
-            target = args.root / "baselines" / "main.json"
+            target = corpus.baseline_path(args.root, posture=bless_posture)
             target.write_text(json.dumps(blessed, indent=2) + "\n", encoding="utf-8")
             print(f"written: {target}")
         return EXIT_OK

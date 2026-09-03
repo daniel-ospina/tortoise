@@ -104,9 +104,12 @@ surfaces:
   - test_turnstile_signup.py
   # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
   # boundary PR (hosted capture code changes) must run the real-pipeline
-  # replay gate against the write-path corpus. First-match ownership (api
-  # before eval) is fine: the tier-2 union includes it whenever api OR eval
-  # matches.
+  # replay gate against the write-path corpus. The deterministic M2 echo
+  # lane replays and compares vs its OWN committed baselines/m2.json
+  # (posture-matched; PR #2183): verdict PASS on a clean replay, REGRESSION
+  # when a write-path regression moves the metrics — the can-fail CI gate.
+  # First-match ownership (api before eval) is fine: the tier-2 union
+  # includes it whenever api OR eval matches.
   - eval/write_path/test_write_path_benchmark.py
   battery:
   - test_battery_arms.py

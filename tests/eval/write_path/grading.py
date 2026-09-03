@@ -367,6 +367,14 @@ def aggregate_metrics(session_results: list[dict]) -> dict:
         ),
         "distractor_leakage_per_run": len(leaked),
         "sessions_emitting": n_emitted / n_sessions if n_sessions else 0.0,
+        # REVIEW-FIX (F3, PR #2183 code-review): quote_fidelity is NOT a
+        # measure of memory when the gold never quotes — `1.0` on zero quote
+        # spans is a vacuous floor, not a hit bar. The snapshot stays the
+        # canonical 6-metric vocabulary (the bless gate validates against
+        # METRIC_VALUES); vacuity is surfaced as a separate REPORT-level
+        # ``quote_spans_total`` field + runner note so the committed 1.0 is
+        # never read as a real fidelity bar (see runner: quote note + receipt
+        # carry ``quote_vacuous``).
         "quote_fidelity": (grounded / quote_total if quote_total else 1.0),
         "provenance_accuracy": (prov_present / prov_total if prov_total else 0.0),
     }

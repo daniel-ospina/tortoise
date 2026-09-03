@@ -3,14 +3,14 @@
 Hermetic, deterministic, idempotent fixture generator for the write-path
 planted-gold corpus (plan DM-3/4/5, §4.3.1-4.3.3).  The corpus is a FIXTURE
 generator, NOT a test suite: it produces the committed fixtures + sealed gold
-+ ``_manifest.json`` + first-run-pending ``baselines/main.json`` that the W2-b
++ ``_manifest.json`` + first-run-pending ``baselines/{main,m2}.json`` (one per
 benchmark runner (#2098) consumes.
 
 Authoring discipline (why the answer key is safe here):
 * The transcript + answer-key authoring lives in THIS module (source code) —
   the only committed DATA artifacts are ``fixtures/`` (adapter-visible fields
   only: ``{session_id, harness, conversation}``), the sealed ``gold/`` dir
-  (the ENTIRE answer key), ``_manifest.json`` and ``baselines/main.json``.
+  extractor posture) that the W2-b first run publishes over.
 * A ``gold`` key inside a committed fixture is a validation error; the corpus
   never carries the answer key outside ``gold/`` (sealed-key discipline).
 * Every ``verbatim_anchor`` / distractor ``anchor`` / hazard ``quote`` is
@@ -570,9 +570,15 @@ def render_corpus() -> dict[str, bytes]:
     }
     outputs["_manifest.json"] = _dump_json_bytes(manifest)
 
-    baseline = corpus.first_run_pending_baseline()
-    baseline["fixtures_hash"] = fixtures_hash  # computed over the SAME digests
-    outputs["baselines/main.json"] = _dump_json_bytes(baseline)
+    # First-run-pending baselines for BOTH extractor postures (REVIEW-FIX,
+    # PR #2183 findings 1+4): main.json = product (llm) lane, m2.json =
+    # deterministic echo (m2) CI lane. Each config snapshot pins its posture
+    # so a run on the other lane is a config mismatch ⇒ inconclusive.
+    for posture in ("llm", "m2"):
+        baseline = corpus.first_run_pending_baseline(posture=posture)
+        baseline["fixtures_hash"] = fixtures_hash  # computed over the SAME digests
+        rel = "baselines/main.json" if posture == "llm" else "baselines/m2.json"
+        outputs[rel] = _dump_json_bytes(baseline)
     return outputs
 
 
@@ -586,18 +592,19 @@ def write_corpus(outputs: dict[str, bytes] | None = None, root: Path | None = No
     temp root to exercise the hash-mismatch gates without touching committed
     bytes.
 
-    ``baselines/main.json`` is NOT part of the frozen-corpus drift scope (it
-    changes legitimately when W2-b blesses a published run): the pending
-    baseline is written only when the file is missing or still first-run-
-    pending (empty metrics) — a PUBLISHED baseline (non-empty metrics, e.g.
-    the W2-b fix-wave trail) is never clobbered by a generator re-run.
+    ``baselines/main.json`` + ``baselines/m2.json`` are NOT part of the
+    frozen-corpus drift scope (they change legitimately when W2-b blesses a
+    published run): each pending baseline is written only when the file is
+    missing or still first-run-pending (empty metrics) — a PUBLISHED baseline
+    (non-empty metrics, e.g. the W2-b fix-wave trail) is never clobbered by a
+    generator re-run.
     """
     root = root or corpus.WRITE_PATH_DIR
     outputs = outputs or render_corpus()
     written: list[str] = []
     for rel, data in outputs.items():
         path = root / rel
-        if rel == "baselines/main.json" and path.exists():
+        if rel.startswith("baselines/") and path.exists():
             existing = schema.read_json(path)
             if existing.get("metrics") or existing.get("history"):
                 continue  # published/blessed baseline — never clobber
@@ -619,7 +626,7 @@ def check_drift(root: Path | None = None) -> list[str]:
     fresh = render_corpus()
     drifted = []
     for rel, data in fresh.items():
-        if rel == "baselines/main.json":
+        if rel.startswith("baselines/"):
             continue  # outside the frozen-corpus drift scope (see _iter_committed)
         if rel not in committed:
             drifted.append(f"{rel} (missing on disk)")
@@ -635,10 +642,11 @@ def _iter_committed(root: Path):
     """Yield the frozen-corpus JSON files under ``root``.
 
     Scope = fixtures + gold + ``_manifest.json`` — deliberately EXCLUDING
-    ``baselines/main.json``: the baseline changes legitimately when W2-b
-    blesses a published run, so it is not part of the byte-idempotency
-    guarantee (its integrity is enforced separately by ``validate_baseline``
-    and the fixtures_hash cross-check in ``validate_committed``).
+    ``baselines/`` (main.json + m2.json): baselines change legitimately when
+    W2-b blesses a published run, so they are not part of the byte-
+    idempotency guarantee (their integrity is enforced separately by
+    ``validate_baseline`` and the fixtures_hash cross-check in
+    ``validate_committed``).
     """
     for path in sorted(root.rglob("*")):
         if path.is_file() and path.suffix == ".json":
@@ -688,13 +696,25 @@ def validate_committed(root: Path | None = None) -> list[str]:
                 f"{gold_path.name}: embedded session_id {gold.get('session_id')!r} "
                 f"!= filename stem {gold_stem!r}"
             )
-    baseline = schema.read_json(root / "baselines" / "main.json")
-    issues += [f"baselines/main.json: {issue}" for issue in schema.validate_baseline(baseline)]
-    if baseline.get("fixtures_hash") != corpus.compute_fixtures_hash(root):
-        issues.append(
-            "baselines/main.json fixtures_hash does not match the committed "
-            "fixture + gold files (a gold-only edit invalidates baselines)"
-        )
+    # Both posture baselines validate + their fixtures_hash must match the
+    # committed fixture + gold files (REVIEW-FIX: a gold-only edit
+    # invalidates BOTH lanes' baselines; the m2 CI lane is not exempt).
+    committed_hash = corpus.compute_fixtures_hash(root)
+    for posture in ("llm", "m2"):
+        rel = "baselines/main.json" if posture == "llm" else "baselines/m2.json"
+        baseline = schema.read_json(root / rel)
+        issues += [f"{rel}: {issue}" for issue in schema.validate_baseline(baseline)]
+        if baseline.get("fixtures_hash") != committed_hash:
+            issues.append(
+                f"{rel} fixtures_hash does not match the committed "
+                "fixture + gold files (a gold-only edit invalidates baselines)"
+            )
+        cfg_posture = (baseline.get("config") or {}).get("extractor_posture")
+        if cfg_posture != posture:
+            issues.append(
+                f"{rel}: config.extractor_posture {cfg_posture!r} != file posture "
+                f"{posture!r} (posture-keyed baseline file)"
+            )
     manifest = corpus.load_manifest(root)
     issues += [f"_manifest.json: {issue}" for issue in schema.validate_manifest(manifest)]
     verification = corpus.verify_manifest(root)

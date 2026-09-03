@@ -125,7 +125,10 @@ def test_run_fails_clean_on_preflight_break(tmp_path):
     fixture_path.write_text(json.dumps(fixture))
     report = runner.run_benchmark(root=root, session_ids=["wp01_quarry_debug"])
     assert report["run_status"] == "failed"
-    assert report["failure_origin"] == "runner_error"
+    # REVIEW-FIX (finding 6): gold-key-in-fixture breaks the manifest/hash
+    # pre-flight → classified hash_mismatch (the audit-grade origin), not
+    # a generic runner_error.
+    assert report["failure_origin"] == "hash_mismatch"
     assert report["verdict"] == schema.VERDICT_INCONCLUSIVE
     assert report["metrics"] == {}
 
@@ -350,3 +353,66 @@ def test_runner_error_when_session_unknown(tmp_path):
     assert report["run_status"] == "failed"
     assert report["failure_origin"] == "runner_error"
     assert "unknown sessions" in report["log"][-1]
+
+
+def test_cli_corpus_bless_refreshes_published_baseline(tmp_path, capsys):
+    """REVIEW-FIX (PR #2183 finding 2): --corpus-bless accepts an INTENTIONAL
+    corpus regeneration against a PUBLISHED baseline — re-pins the new hash,
+    records corpus_change in history, no compare. The ordinary bless path
+    still rejects a drifted run."""
+    root = _tmp_corpus(tmp_path)
+    # Publish a baseline first (pending → published on this tmp corpus).
+    baseline = corpus.load_baseline(root)
+    run = {
+        "date": "2026-09-01T00:00:00Z",
+        "fixtures_hash": baseline["fixtures_hash"],
+        "config": dict(corpus.BASELINE_CONFIG),
+        "metrics": {
+            "salient_unit_survival_macro": 0.55,
+            "salient_unit_survival_strict": 0.31,
+            "distractor_leakage_per_run": 0,
+            "sessions_emitting": 1.0,
+            "quote_fidelity": 1.0,
+            "provenance_accuracy": 1.0,
+        },
+        "judge_pin": JUDGE_PIN_MECHANICAL,
+        "failure_classes": [],
+    }
+    schema.bless_baseline(baseline, run, justification="first baseline")
+    # A drifted (post-regeneration) run receipt on the PUBLISHED baseline.
+    receipt_path = tmp_path / "drifted-receipt.json"
+    receipt_path.write_text(json.dumps({
+        "run_id": "w2b-after-regen", "date": "2026-09-20T00:00:00Z",
+        "run_status": "completed", "verdict": schema.VERDICT_INCONCLUSIVE,
+        "failure_origin": "hash_mismatch", "commit": "abc123",
+        "corpus_hash": "sha256:regenerated-corpus", "judge_pin": JUDGE_PIN_MECHANICAL,
+        "resolved_config": dict(corpus.BASELINE_CONFIG),
+        "cost_usd": 0.0,
+        "metrics": {
+            "salient_unit_survival_macro": 0.7,
+            "salient_unit_survival_strict": 0.6,
+            "distractor_leakage_per_run": 1,
+            "sessions_emitting": 1.0,
+            "quote_fidelity": 1.0,
+            "provenance_accuracy": 1.0,
+        },
+        "session_results": [], "notes": [], "log": [],
+    }))
+    # Ordinary bless rejects the drifted hash.
+    exit_code = runner._main([
+        "bless", "--receipt", str(receipt_path),
+        "--justification", "drifted — should fail without corpus-bless",
+        "--root", str(root),
+    ])
+    assert exit_code == runner.EXIT_RUNNER_ERROR
+    # --corpus-bless accepts it and re-pins.
+    exit_code = runner._main([
+        "bless", "--receipt", str(receipt_path), "--corpus-bless",
+        "--justification", "intentional corpus regeneration (fixture fix)",
+        "--write", "--root", str(root),
+    ])
+    assert exit_code == runner.EXIT_OK
+    committed = corpus.load_baseline(root)
+    assert committed["fixtures_hash"] == "sha256:regenerated-corpus"
+    assert committed["history"][-1].get("corpus_change") is True
+    assert schema.validate_baseline(committed) == []

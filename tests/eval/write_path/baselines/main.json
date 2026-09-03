@@ -10,7 +10,8 @@
     ],
     "mode": "BPRE",
     "harness": "all",
-    "seed": 42
+    "seed": 42,
+    "extractor_posture": "llm"
   },
   "justification": "first published baseline (bad number, per fix-wave protocol) \u2014 macro 30.6% / strict 0.0% / leakage 0; failure classes: strict survival 0 driven by dream EP pass coverage 0.0 (0 points affected); extraction nondeterminism observed (leakage 2\u21920 across runs, llm:deepseek-direct)",
   "metrics": {

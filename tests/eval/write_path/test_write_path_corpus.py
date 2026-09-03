@@ -818,7 +818,7 @@ def test_bless_refuses_inconclusive_compare() -> None:
         "metrics": {"salient_unit_survival_macro": 0.9},
         "failure_classes": [],
     }
-    with pytest.raises(ValueError, match="inconclusive"):
+    with pytest.raises(ValueError, match="corpus drift|fixtures_hash differs"):
         schema.bless_baseline(previous, run, justification="cannot bless a mismatched corpus")
 
 
@@ -991,3 +991,138 @@ def test_validate_baseline_rejects_partial_metric_vocabulary() -> None:
         "provenance_accuracy": 0.86,
     }
     assert schema_mod.validate_baseline(full) == []
+
+
+def test_corpus_bless_refreshes_on_intentional_fixture_change() -> None:
+    """REVIEW-FIX (PR #2183 review finding 2): an INTENTIONAL corpus
+    regeneration (fixtures_hash change) is blessable via corpus_bless=True
+    with a justification — the ordinary path stays fail-closed on drift, but
+    a deliberate fixture/gold edit (recorded in history as corpus_change)
+    must not deadlock every subsequent bless (plan §8.2 R8 mitigation)."""
+    previous = _sample_published_baseline()
+    run = {
+        "fixtures_hash": "sha256:new-corpus-after-regeneration",
+        "judge_pin": "judge-write-path-v1",
+        "config": previous["config"],
+        "date": "2026-09-20",
+        "metrics": {
+            "salient_unit_survival_macro": 0.7,
+            "salient_unit_survival_strict": 0.6,
+            "distractor_leakage_per_run": 1,
+            "sessions_emitting": 1.0,
+            "quote_fidelity": 1.0,
+            "provenance_accuracy": 1.0,
+        },
+        "failure_classes": [],
+    }
+    # Without corpus_bless: drift is rejected (fail-closed).
+    with pytest.raises(ValueError, match="corpus_bless"):
+        schema.bless_baseline(
+            previous, dict(run), justification="drift must be rejected without corpus_bless")
+    # With corpus_bless: the new hash re-pins; no compare (different corpus);
+    # history records the corpus change.
+    blessed = schema.bless_baseline(
+        previous, dict(run), justification="deliberate corpus regeneration (fixture fix)",
+        corpus_bless=True)
+    assert blessed["fixtures_hash"] == "sha256:new-corpus-after-regeneration"
+    assert blessed["metrics"]["salient_unit_survival_macro"] == 0.7
+    assert schema.validate_baseline(blessed) == []
+    assert blessed["history"][-1].get("corpus_change") is True
+    assert "verdict" not in blessed["history"][-1], \
+        "a corpus-bless re-pins without a compare (different corpus content)"
+
+
+def test_bless_rejects_judge_pin_change_without_corpus_bless() -> None:
+    """REVIEW-FIX (PR #2183 review finding 3): a run whose judge_pin differs
+    from the committed baseline's pin is a PROTOCOL CHANGE — never silently
+    compared/regressed against a different grading protocol."""
+    previous = _sample_published_baseline()  # judge-write-path-v1
+    run = {
+        "fixtures_hash": previous["fixtures_hash"],
+        "judge_pin": "judge-write-path-v2",  # protocol bump
+        "config": previous["config"],
+        "date": "2026-09-20",
+        "metrics": dict(previous["metrics"]),
+        "failure_classes": [],
+    }
+    with pytest.raises(ValueError, match="judge_pin differs"):
+        schema.bless_baseline(previous, run, justification="bumped the judge protocol")
+
+
+def test_cross_posture_compare_is_inconclusive() -> None:
+    """REVIEW-FIX (PR #2183 findings 1+4): a run on one extractor posture is
+    NEVER compared against a baseline on the other — the posture rides inside
+    resolved_config, so the config-equality guard returns inconclusive (never
+    a silent cross-posture regression/pass)."""
+    published = _sample_published_baseline()  # llm posture (main.json)
+    assert (published["config"] or {}).get("extractor_posture") == "llm"
+    m2_config = dict(corpus.BASELINE_CONFIG)
+    m2_config["extractor_posture"] = "m2"
+    verdict = schema.compare_run(
+        published["metrics"], published,
+        resolved_config=m2_config,          # m2 run vs llm baseline
+        run_fixtures_hash=published["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_INCONCLUSIVE
+
+
+def test_m2_lane_standing_leakage_bar_does_not_fire() -> None:
+    """REVIEW-FIX (finding 1): the standing leakage bar (leakage > tolerance
+    => regression on every run) is a PRODUCT-lane (llm) bar. The deterministic
+    M2 echo lane STRUCTURALLY copies every distractor (leakage ~11 > 1) - a
+    bar on it would make the CI lane permanently un-passable (rubber). Its
+    gate is determinism/reproduction vs its own committed m2.json."""
+    baseline = _sample_published_baseline()
+    m2_config = dict(baseline["config"])
+    m2_config["extractor_posture"] = "m2"
+    m2_metrics = dict(baseline["metrics"])
+    # The m2 lane's own committed baseline records the echo's structural
+    # leakage (over product tolerance - honest artifact of the echo seam).
+    m2_metrics["distractor_leakage_per_run"] = 11
+    m2_baseline = dict(baseline)
+    m2_baseline["config"] = m2_config
+    m2_baseline["metrics"] = m2_metrics
+    # A deterministic replay AT the committed level (leakage 11) is PASS on
+    # the m2 lane: the standing product bar does not fire for m2.
+    replay = dict(m2_metrics)
+    verdict = schema.compare_run(
+        replay, m2_baseline,
+        resolved_config=m2_config,
+        run_fixtures_hash=m2_baseline["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_PASS
+    # The m2 lane still catches a leak INCREASE directionally (12 > committed
+    # 11 => regression) - determinism/reproduction is its gate.
+    verdict = schema.compare_run(
+        dict(replay, distractor_leakage_per_run=12), m2_baseline,
+        resolved_config=m2_config,
+        run_fixtures_hash=m2_baseline["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_REGRESSION
+    # The SAME replay (leakage 12) against an LLM baseline is also a
+    # regression - the product lane keeps its standing bar.
+    verdict = schema.compare_run(
+        dict(replay, distractor_leakage_per_run=12), baseline,
+        resolved_config=baseline["config"],
+        run_fixtures_hash=baseline["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_REGRESSION
+
+
+def test_validate_baseline_rejects_wrong_posture_file() -> None:
+    """REVIEW-FIX: validate_baseline rejects a baseline whose config posture
+    is not in the vocabulary; generate_corpus additionally enforces the file
+    ↔ posture keying (main.json ⇒ llm, m2.json ⇒ m2)."""
+    published = _sample_published_baseline()
+    bad = dict(published)
+    bad_config = dict(published["config"])
+    bad_config["extractor_posture"] = "m2"
+    bad["config"] = bad_config
+    issues = schema.validate_baseline(bad)
+    assert issues == []  # schema-level: posture enum is valid; file keying is
+    # generate_corpus's job (m2 config in main.json is caught there)
+    # The committed main.json must be llm-keyed, m2.json m2-keyed.
+    main_b = schema.read_json(corpus.WRITE_PATH_DIR / "baselines" / "main.json")
+    m2_b = schema.read_json(corpus.WRITE_PATH_DIR / "baselines" / "m2.json")
+    assert main_b["config"]["extractor_posture"] == "llm"
+    assert m2_b["config"]["extractor_posture"] == "m2"
