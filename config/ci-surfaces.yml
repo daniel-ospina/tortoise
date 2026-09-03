@@ -227,6 +227,7 @@ surfaces:
   - test_judge_harness.py
   - test_linear_connector.py
   - test_lint_config.py
+  - test_lint_tripwire.py
   - test_list_contexts.py
   - test_lme_m6_evidence.py
   - test_longmem_errors.py
@@ -456,6 +457,7 @@ tier1:
 - test_ids.py
 - test_init_apikey_validation.py
 - test_log.py
+- test_lint_tripwire.py
 - test_mcp_server.py
 - test_mcp_server_auth_modes.py
 - test_onboard_prompt_ref.py
