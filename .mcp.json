@@ -8,7 +8,12 @@
       ],
       "env": {
         "EXA_API_KEY": "${EXA_API_KEY}"
-      }
+      },
+      "lazy": true,
+      "idleTimeoutMs": 900000,
+      "purpose": "Semantic search (Exa) — scholarly/semantic/entity discovery",
+      "whenToLoad": "on demand — semantic/scholarly/prospect discovery only (agent-infra #419)",
+      "cost": "one light process; Perplexity is the primary source"
     },
     "brave-search": {
       "command": "npx",
