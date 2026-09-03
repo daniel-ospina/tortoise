@@ -1052,6 +1052,205 @@ def test_extract_session_v2_counts_point_write_skips(sdk, monkeypatch):
     assert meta["mode"] == "error", "a failed point write is a capture failure"
 
 
+# ── #2164 Task 3: capture applies payload supersessions (shared
+#    apply_supersessions helper — entity-level records fold Object.status
+#    via ObjectSuperseded + the projection fold; pt_ records CORRECTS) ────
+
+def test_extract_session_v2_folds_entity_supersession(sdk, monkeypatch):
+    """#2164 (Task 3): a payload supersession record (entity ref) is APPLIED
+    by capture — the superseded Object's status flips to 'superseded' with
+    supersededBy set, via the ObjectSuperseded event + projection fold.
+    Pre-fix capture IGNORED payload supersessions (Object A stayed 'live')."""
+    import tortoise.extractor_v2 as ev2
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [{"name": "approach-B", "kind": "core:strategy"}],
+               "points": [], "operators": [], "events": [],
+               "supersessions": [{"superseded": "approach-A",
+                                   "supersedes_by": "approach-B",
+                                   "evidence": "entity lifecycle supersedes"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+        params={"n": "approach-A"}).result_set
+    assert rows and rows[0][0] == "superseded", rows
+    assert rows[0][1] == "approach-B", rows
+    assert meta["mode"] == "v2"
+    assert meta["errors"] == [], meta
+
+
+def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
+    """#2164 (Task 3): supersession records that cannot apply are additive
+    meta WARNINGS — never errors and never a capture failure. An unresolved
+    entity ref (no Object matches) and a dangling successor (supersedes_by
+    absent from the payload entities and the graph) both surface by ref."""
+    import tortoise.extractor_v2 as ev2
+
+    # (a) unresolved superseded ref — no Object matches "ghost-A"
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [{"name": "approach-B", "kind": "core:strategy"}],
+               "points": [], "operators": [], "events": [],
+               "supersessions": [{"superseded": "ghost-A",
+                                   "supersedes_by": "approach-B",
+                                   "evidence": "lifecycle"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    assert meta["errors"] == [], "unresolved ref is a warning, never an error"
+    assert any("ghost-A" in w for w in meta["warnings"]), meta["warnings"]
+
+    # (b) dangling successor — "ghost-B" is in neither the payload entities
+    #     nor the graph. approach-A RESOLVES, but folding it would reference
+    #     an invisible successor (recall_state excludes superseded Objects),
+    #     so the record is skipped and the Object stays live.
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    payload2 = {"session_id": "sess_p2", "story_arc": "",
+                "entities": [], "points": [], "operators": [], "events": [],
+                "supersessions": [{"superseded": "approach-A",
+                                    "supersedes_by": "ghost-B",
+                                    "evidence": "lifecycle"}],
+                "client_commit_id": "ccid2"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload2))
+    _extracted, meta2 = sdk._extract_session_v2(
+        CONV, "sess_p2", "2026-08-20T00:00:00+00:00")
+    assert meta2["errors"] == [], "dangling successor is a warning, never an error"
+    assert any("ghost-B" in w for w in meta2["warnings"]), meta2["warnings"]
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status",
+        params={"n": "approach-A"}).result_set
+    assert rows and rows[0][0] == "live", \
+        (f"fold must never fire for a dangling successor: {rows!r}")
+
+
+def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
+    """#2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
+    WITHOUT the canonical obj-<sha26(name)> id — every supported write path
+    mints it, raw writes can skip it) superseded by a payload record must
+    (a) flip status to 'superseded' AND (b) journal the ObjectSuperseded
+    event carrying the SYNTHESIZED canonical id + name + supersedes_by.
+
+    Pre-fix the probe row had o.id=None → _emit_event received id=None →
+    the JSONL branch early-returned and the GraphEvent payload became {}
+    — the event journaled NOWHERE (silent drop, the M2 provenance gap)
+    and the live status never flipped."""
+    from tortoise.commit_ops import apply_supersessions
+    from tortoise.sdk import _entity_name_id
+
+    proj = sdk._get_proj()
+    # successor must be visible (the payload-entities equivalent)
+    sdk.create_entity("object", "successor-B", objectKind="core:strategy")
+    # raw legacy Object — NO id property at all
+    proj.g.query("CREATE (o:Object {name:'legacy-X', status:'live'})")
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "legacy-X", "supersedes_by": "successor-B",
+          "evidence": "legacy lifecycle"}],
+        session_id="sess_legacy")
+    assert applied == 1, "legacy no-id supersession must apply"
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+        params={"n": "legacy-X"}).result_set
+    assert rows and rows[0][0] == "superseded", \
+        f"status never flipped: {rows!r}"
+    assert rows[0][1] == "successor-B", rows
+    # journaled with the synthesized canonical id (create_entity parity)
+    events = proj.g.query(
+        "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) "
+        "RETURN e.payload ORDER BY e.seq",
+    ).result_set
+    assert events, "ObjectSuperseded must reach the :GraphEvent store"
+    payload = json.loads(events[-1][0])
+    assert payload["id"] == _entity_name_id("Object", "legacy-X"), payload
+    assert payload["name"] == "legacy-X", payload
+    assert payload["supersedes_by"] == "successor-B", payload
+    assert payload["session_id"] == "sess_legacy", payload
+
+
+def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
+    """#2164 review (P2-1, JSONL half): the synthesized-id emission must reach
+    the JSONL rebuild log (#548) — the store the reviewer's M2 provenance gap
+    is about. Pre-fix the emit passed id=None → the JSONL branch of
+    sdk._emit_event early-returned (``if point is None and id is None``) and
+    the legacy Object's supersession left NO journal line — a wipe+rebuild
+    could never restore (or even show) the fold."""
+    from tortoise.commit_ops import apply_supersessions
+    from tortoise.sdk import _entity_name_id
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "tlegacy.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        sdk.create_entity("object", "successor-C", objectKind="core:strategy")
+        # raw legacy Object — NO id property at all
+        proj.g.query("CREATE (o:Object {name:'legacy-Y', status:'live'})")
+        applied = apply_supersessions(
+            proj, sdk,
+            [{"superseded": "legacy-Y", "supersedes_by": "successor-C",
+              "evidence": "legacy lifecycle"}],
+            session_id="sess_legacy2")
+        assert applied == 1
+        log = (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        superseded_lines = [ln for ln in log
+                            if '"type": "ObjectSuperseded"' in ln]
+        assert superseded_lines, ("ObjectSuperseded must be journaled to the "
+                                  "JSONL log for a legacy no-id Object")
+        ev = json.loads(superseded_lines[-1])
+        assert ev["id"] == _entity_name_id("Object", "legacy-Y"), ev
+        assert ev["name"] == "legacy-Y", ev
+        assert ev["supersedes_by"] == "successor-C", ev
+    finally:
+        sdk.close()
+
+
+def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
+    """#2164 review (P2-2): when a supersession ref matches an Object BY ID
+    and ALSO a DIFFERENT Object BY NAME (a legacy no-id Object whose name
+    happens to equal another Object's id), the selection must deterministi-
+    cally prefer the id-match row. Pre-fix rows[0] was backend-order-depen-
+    dent — the OR probe returned both rows and FalkorDB's unordered result
+    picked either, so the fold target (and the status flip) was a coin flip."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "successor-Z", objectKind="core:strategy")
+    # canonical Object B — its id is the ref
+    sdk.create_entity("object", "approach-B", objectKind="core:strategy")
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "approach-B"}).result_set
+    oid = rows[0][0]
+    # legacy no-id Object whose NAME equals B's id → both probe clauses hit
+    proj.g.query(
+        "CREATE (o:Object {name:$n, status:'live'})", params={"n": oid})
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": oid, "supersedes_by": "successor-Z",
+          "evidence": "id-vs-name ambiguity"}],
+        session_id="sess_p22")
+    assert applied == 1, "the id-match row must win deterministically"
+    # B (matched by id) is the fold target — superseded
+    b = proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status, o.supersededBy",
+        params={"id": oid}).result_set
+    assert b and b[0][0] == "superseded", f"id-match Object not folded: {b!r}"
+    assert b[0][1] == "successor-Z", b
+    # the same-string NAME match must NOT be the one folded
+    n = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status",
+        params={"n": oid}).result_set
+    assert n and n[0][0] == "live", \
+        f"name-match Object wrongly folded instead of the id match: {n!r}"
+
+
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the
 #    method directly (no env var needed) ─────────────────────────────────
 

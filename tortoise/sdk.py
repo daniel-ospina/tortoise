@@ -2493,16 +2493,29 @@ class TortoiseSDK:
         proj = self._get_proj()
 
         # ── entities ──
+        entity_failures: list[str] = []
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            try:  # noqa: SIM105
+            try:
                 self.create_entity("object", name,
                                    objectKind=str(e.get("kind", "core:other")),
                                    is_episodic=False)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+            except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
+                # old `except: pass` was indicator-4 hygiene — a swallowed
+                # create_entity failure silently stranding an Object a
+                # supersession record then references. Mirror the point-write
+                # failure pattern (:2538-2546): surface per-item + a count
+                # line as additive warnings (never a silent drop; entity
+                # writes stay warning-grade — recall-by-name remains intact
+                # for pre-existing Objects, unlike lost point content).
+                entity_failures.append(
+                    f"{type(exc).__name__}: entity write failed for {name}: {exc}")
+        if entity_failures:
+            warnings.extend(entity_failures)
+            warnings.append(
+                f"{len(entity_failures)} extracted entit(y/ies) failed to write")
 
         # ── points + aboutObject edges + session CONTAINS ──
         extracted: list[dict] = []
@@ -2575,6 +2588,17 @@ class TortoiseSDK:
                 proj, self, ops,
                 point_content_by_id=lambda pid: _payload_point_content_by_id(
                     payload, pid))
+        # #2164: supersessions — client-derived records (the deterministic
+        # channel for the Object status fold; §6b parity). pt_ → supersede()
+        # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
+        # entities exist (ordering contract). Warnings ride meta — never a
+        # silent drop. Best-effort — never fail capture (hosted §6b rule).
+        try:
+            from tortoise.commit_ops import apply_supersessions
+            apply_supersessions(proj, self, payload.get("supersessions") or [],
+                                session_id=session_id, warn=warnings.append)
+        except Exception as exc:  # pragma: no cover - defensive outer bound
+            _logger.warning("supersession apply failed: %s", exc, exc_info=True)
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.

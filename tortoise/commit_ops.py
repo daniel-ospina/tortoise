@@ -28,6 +28,15 @@ def _op_attr(op, name, default=None):
     return getattr(op, name, default)
 
 
+def _sr_attr(record, name, default=None):
+    """Field access for raw supersession dicts OR commit_schema
+    SupersessionRecord models (``.superseded`` / ``.supersedes_by`` /
+    ``.evidence``) — same normalization as ``_op_attr``."""
+    if isinstance(record, dict):
+        return record.get(name, default)
+    return getattr(record, name, default)
+
+
 def _target_attr(target, name, default=None):
     """Field access for an OperatorTarget model OR a raw target dict."""
     if isinstance(target, dict):
@@ -110,3 +119,173 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             reason = f"[MITIGATION] {src}"
         sdk.mitigate_operator(op_id, reason=reason,
                               strength=_op_attr(op, "strength") or 0.5)
+
+
+# ── Supersession application (#2164 Task 3) ────────────────────────────
+# Canonical supersession records flow from extractor_v2._supersession_records
+# (``{"superseded", "supersedes_by", "evidence"}`` — refs are an entity id
+# OR name; pt_<sha> refs are point content-addressed ids, dispatched by
+# prefix) OR commit_schema.SupersessionRecord models (the commit reconcile
+# records). Extracted here so capture (_extract_session_v2), eval ingest_v2,
+# and (phase-2) hosted §6b share ONE consumer-side discipline.
+
+
+def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
+    """Apply canonical supersession records — the ONE consumer-side
+    discipline (producer side: extractor_v2._supersession_records).
+    pt_ records → supersede() CORRECTS (terminal-probed, idempotent);
+    entity records → ObjectSuperseded event (id-style, journaled with
+    full provenance) + _fold_object_superseded (count-verified).
+    #2164: shared by capture (_extract_session_v2), eval ingest_v2,
+    and (phase-2) hosted §6b. warn() receives every skip/failure —
+    never a silent drop. Returns the number of records applied.
+    """
+    if warn is None:
+        warn = _logger.warning
+    applied = 0
+    for record in records or []:
+        ref = str(_sr_attr(record, "superseded") or "").strip()
+        supersedes_by = str(_sr_attr(record, "supersedes_by") or "").strip()
+        evidence = str(_sr_attr(record, "evidence") or "")
+        if not ref or not supersedes_by:
+            warn(f"supersession record skipped (missing superseded or "
+                 f"supersedes_by): {record!r}")
+            continue
+        if ref.startswith("pt_"):
+            # Point-level → the canonical supersede() CORRECTS (outdated +
+            # edge transfer). Terminal-probed first: supersede_point RAISES
+            # on a terminal old point (sdk.py supersede_point guard), so a
+            # re-ingested/overlapping terminal record is an idempotent
+            # silent skip, never a warning and never a raised error.
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                params={"ids": [ref, supersedes_by]},
+            ).result_set
+            status_by_id = {r[0]: r[1] for r in rows}
+            if ref not in status_by_id:
+                warn(f"point supersession ref {ref!r} not found — "
+                     f"skipped (fail-open)")
+                continue
+            if (status_by_id[ref] or "") in ("superseded", "retracted",
+                                              "archived"):
+                # already terminal — idempotent re-ingest no-op
+                continue
+            try:
+                sdk.supersede(ref, supersedes_by)
+                applied += 1
+            except Exception as exc:
+                warn(f"point supersede {ref!r} → {supersedes_by!r} failed: {exc}")
+            continue
+        # Entity-level — successor FIRST: supersedes_by must be visible
+        # (payload entities were already written when capture calls this;
+        # eval/hosted write entities before supersessions too). A dangling
+        # successor would be INVISIBLE — recall_state excludes superseded
+        # Objects — so it is warned + skipped before any fold.
+        sb_rows = proj.g.query(
+            "MATCH (o:Object {name:$sb}) RETURN o.id LIMIT 1",
+            params={"sb": supersedes_by},
+        ).result_set
+        if not sb_rows:
+            warn(f"entity supersession {ref!r} skipped — successor "
+                 f"{supersedes_by!r} is not an Object in the payload "
+                 f"entities or the graph (dangling successor)")
+            continue
+        rows = proj.g.query(
+            "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
+            "RETURN o.id, o.name, o.status, o.supersededBy",
+            params={"ids": [ref], "names": [ref]},
+        ).result_set
+        if not rows:
+            warn(f"supersession ref {ref!r} not found in the graph — "
+                 f"skipped (fail-open)")
+            continue
+        # #2164 review (P2-2): rows[0] was backend-order-dependent — the OR
+        # probe can return BOTH an id-match row (ref == an Object's id) AND a
+        # DIFFERENT Object's name-match row for one ref (e.g. a legacy no-id
+        # Object whose name happens to equal another Object's id). Deterministic
+        # preference: when ref equals an Object's id, that row wins — an id
+        # match is unambiguous, a same-string name match is the ambiguous side.
+        # The >1-name-match never-guess below stays for name refs, where the
+        # graph offers no tiebreak.
+        by_id = [r for r in rows if r[0] == ref]
+        if len(by_id) > 1:
+            # two nodes claim the same id — raw-corruption artifact.
+            warn(f"supersession ref {ref!r} matches {len(by_id)} Objects "
+                 f"by id — skipped (never-guess)")
+            continue
+        if by_id:
+            obj_id, obj_name, o_status, o_sb = by_id[0]
+        else:
+            by_name = [r for r in rows if r[1] == ref]
+            if len(by_name) > 1:
+                # never-guess — deliberate divergence from hosted §6b's blind
+                # LIMIT 1: two Objects claim the same name, do not pick one.
+                warn(f"supersession ref {ref!r} matches {len(by_name)} Objects "
+                     f"by name — skipped (never-guess)")
+                continue
+            if not by_name:  # pragma: no cover - probe WHERE clause guarantees
+                warn(f"supersession ref {ref!r} matched a row via neither id "
+                     f"nor name — skipped (never-guess)")
+                continue
+            obj_id, obj_name, o_status, o_sb = by_name[0]
+        legacy_no_id = False
+        if not obj_id:
+            # #2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
+            # BEFORE canonical obj-<sha26(name)> minting — every supported write
+            # path assigns the canonical id) probes back with o.id = None.
+            # Emitting id=None was a SILENT DROP: the JSONL branch of
+            # sdk._emit_event early-returns when id is None and the GraphEvent
+            # payload became {} — the ObjectSuperseded journaled NOWHERE (the
+            # M2 provenance gap). Never guess an id when the name is also gone.
+            if not obj_name:
+                warn(f"supersession ref {ref!r} resolved to an Object with "
+                     f"neither id nor name — skipped (never-guess)")
+                continue
+            # Synthesize the canonical deterministic id (sdk._entity_name_id —
+            # the exact id create_entity would have minted) so the journal
+            # carries a real, auditable id.
+            from tortoise.sdk import _entity_name_id
+            legacy_no_id = True
+            obj_id = _entity_name_id("Object", obj_name)
+        if (o_status or "") == "superseded":
+            if (o_sb or "") == supersedes_by:
+                # same successor already folded — idempotent dedup no-op
+                continue
+            warn(f"supersession ref {ref!r} already superseded by "
+                 f"{o_sb!r} — conflict with {supersedes_by!r} skipped "
+                 f"(keep-first, the fold never blind-overwrites)")
+            continue
+        try:
+            # id-style emission: id + ALL extra kwargs ride the JSONL line
+            # (event.update(extra), sdk._emit_event #548) AND ObjectSuperseded
+            # ∈ _GRAPH_EVENT_TYPES (#432) synthesizes the GraphEvent payload
+            # from the same kwargs — provenance reaches BOTH stores. The
+            # emitted id is the synthesized canonical id for legacy nodes.
+            sdk._emit_event(
+                "ObjectSuperseded",
+                id=obj_id, name=obj_name, supersedes_by=supersedes_by,
+                session_id=session_id, evidence=evidence,
+            )
+            # _fold_object_superseded is ID-BRANCH-ONLY when id is truthy
+            # (entities.py: MATCH (o:Object {id:$id}); the name branch runs
+            # only when NO id is supplied) — a legacy node carries no id
+            # property, so folding on the synthesized id would MISS and the
+            # status would never flip. Fold by NAME — the only key the legacy
+            # node actually has. The journaled event still carries the
+            # synthesized id for audit + replay (a node canonicalized by a
+            # later create_entity gains the id and replay folds by it).
+            fold_ev = {"name": obj_name, "supersedes_by": supersedes_by}
+            if not legacy_no_id:
+                fold_ev["id"] = obj_id
+            matched = proj._fold_object_superseded(fold_ev)
+            if matched == 0:
+                # fold-miss: event stays journaled (rebuild retains the
+                # truth), but the live status flip failed — make it visible.
+                warn(f"ObjectSuperseded emitted for {obj_name!r} but the "
+                     f"fold matched no Object — event stays journaled "
+                     f"(rebuild retains the truth)")
+            else:
+                applied += 1
+        except Exception as exc:
+            warn(f"ObjectSuperseded emit/fold failed for {obj_name!r}: {exc}")
+    return applied
