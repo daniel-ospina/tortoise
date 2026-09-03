@@ -37,6 +37,7 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 # the limit (the R-13 bucket tests below exercise the middleware directly).
 os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.commit_schema import (
     compute_client_commit_id,
     point_content_id,
@@ -65,33 +66,6 @@ TEST_TEAM = {
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make TortoiseSDK use a temp db_path when constructed without one."""
-    import tortoise.hosted_api as ha_mod
-
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
-    # is module-level and survives test files, so an anchored SDK bound to a
-    # PREVIOUS test's temp DB leaks state into this test (the anchor's socket
-    # dies when that tempdir is removed → redis.socket ConnectionError, or the
-    # previous graph's rows appear in the "fresh" temp DB). Clear it so
-    # _make_sdk re-binds to THIS test's temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig_init
-
-
-def _restore_tortoise_sdk_init(original_init):
-    """Restore original TortoiseSDK.__init__."""
-    import tortoise.hosted_api as ha_mod
-
-    ha_mod.TortoiseSDK.__init__ = original_init
-
-
 @pytest.fixture
 def client():
     """TestClient with auth override and a temp FalkorDBLite DB.
@@ -102,13 +76,13 @@ def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch/_restore_tortoise_sdk_init copies).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc
 
 
 @pytest.fixture
@@ -116,13 +90,8 @@ def client_no_auth():
     """TestClient WITHOUT auth override — exercises the real 401 path."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc
 
 
 @pytest.fixture
@@ -134,13 +103,8 @@ def client_quota40():
         team40 = dict(TEST_TEAM)
         team40["max_sessions"] = 40
         app.dependency_overrides[get_current_team] = lambda: dict(team40)
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc
 
 
 def _team_sdk() -> TortoiseSDK:

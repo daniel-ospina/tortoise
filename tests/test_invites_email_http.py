@@ -14,6 +14,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import email_notify
 from tortoise.hosted_api import app, get_current_user
 
@@ -21,28 +22,6 @@ from tortoise.hosted_api import app, get_current_user
 # subjects are UUIDs; non-UUID user_id literals are prod-impossible.
 _U1 = "9f2c1a40-0000-4a00-8000-000000000001"
 _U2 = "9f2c1a40-0000-4a00-8000-000000000002"
-
-
-def _patch_tortoise_sdk_init(db_path: str):
-    import tortoise.hosted_api as ha_mod
-
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig_init
-
-
-def _restore_tortoise_sdk_init(original_init):
-    import tortoise.hosted_api as ha_mod
-
-    ha_mod.TortoiseSDK.__init__ = original_init
 
 
 @pytest.fixture
@@ -53,17 +32,22 @@ def client():
             "user_id": _U1,
             "email": "owner@example.com",
         }
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            while _REG_SDKS:
-                try:  # noqa: SIM105
-                    _REG_SDKS.pop().close()
-                except Exception:
-                    pass
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch/_restore_tortoise_sdk_init copies). The _REG_SDKS hold +
+        # close stay here (direct SDK constructions, not keepalive anchors).
+        with patched_tortoise_sdk(db_path):
+            try:
+                with TestClient(app) as tc:
+                    yield tc
+            finally:
+                while _REG_SDKS:
+                    try:  # noqa: SIM105
+                        _REG_SDKS.pop().close()
+                    except Exception:
+                        pass
 
 
 # #1556: hold registry SDKs alive — _get_registry() drops the SDK ref;

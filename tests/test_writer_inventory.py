@@ -34,6 +34,7 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.hosted_api import app, get_current_team, get_current_user
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row  # noqa: F401
 
@@ -112,34 +113,18 @@ def supabase_env(monkeypatch, fake) -> FakeControlPlane:
     return fake
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    import tortoise.hosted_api as ha_mod
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
 @pytest.fixture
 def client(monkeypatch, supabase_env, spy):
     """TestClient in Supabase mode with a temp embedded DB + registry spy."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "inv.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, supabase_env, spy
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces this file's local
+        # _patch_tortoise_sdk_init — the #1497 original).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, supabase_env, spy
 
 
 @pytest.fixture

@@ -14,6 +14,8 @@ import tempfile
 
 import pytest
 
+from tests._http_fixtures import patched_tortoise_sdk
+
 
 def _provider_available():
     from tortoise import hosted_api
@@ -157,34 +159,6 @@ def test_analyze_keys_subset_of_session_keys():
 # ── capture_session honors the fail-closed / LLM-default contract ──────────
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make TortoiseSDK use a temp db_path when constructed without one.
-
-    Same pattern as tests/test_hosted_api.py — the full 200 path needs a real
-    (embedded) DB for quota checks and graph writes.
-    """
-    import tortoise.hosted_api as ha_mod
-
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig_init
-
-
-def _restore_tortoise_sdk_init(original_init):
-    """Restore original TortoiseSDK.__init__."""
-    import tortoise.hosted_api as ha_mod
-
-    ha_mod.TortoiseSDK.__init__ = original_init
-
-
 @pytest.fixture()
 def client(monkeypatch):
     """TestClient with auth override + temp FalkorDBLite DB.
@@ -206,23 +180,25 @@ def client(monkeypatch):
         app.dependency_overrides[get_current_team] = lambda: {
             "team_id": "test-team-722", "key_id": "test-key-722", "tier": "free",
         }
-        _orig_init = _patch_tortoise_sdk_init(db_path)
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
-        # #1927: session_recording defaults ON (no consent gate) — the
-        # explicit opt-in below keeps the gate-order tests (503/422/200)
-        # deterministic regardless of default drift. Provision the Team node
-        # first (the state writer is MATCH...SET).
-        ha_mod._make_sdk(namespace="registry")._get_registry().query(
-            "CREATE (t:Team {id:$id, onboarding_state:$st})",
-            params={"id": "test-team-722", "st": "{}"},
-        )
-        ha_mod._update_onboarding_state("test-team-722", session_recording=True)
-        try:
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch/_restore_tortoise_sdk_init copies).
+        with patched_tortoise_sdk(db_path):
+            # #1927: session_recording defaults ON (no consent gate) — the
+            # explicit opt-in below keeps the gate-order tests (503/422/200)
+            # deterministic regardless of default drift. Provision the Team
+            # node first (the state writer is MATCH...SET).
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "CREATE (t:Team {id:$id, onboarding_state:$st})",
+                params={"id": "test-team-722", "st": "{}"},
+            )
+            ha_mod._update_onboarding_state(
+                "test-team-722", session_recording=True)
             with TestClient(app) as tc:
                 yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
 
 
 def test_no_provider_503(monkeypatch, client):
