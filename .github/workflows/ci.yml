@@ -90,7 +90,12 @@ jobs:
                   isfile("tortoise/mcp_client.py", "tortoise/config.py",
                          "tortoise/exceptions.py"),
               ),
-              # packaging-smoke (wheel/sdist pack catalog + doc-consistency)
+              # packaging-smoke (wheel/sdist pack catalog + doc-consistency).
+              # Pack SOURCE is the root packs/ tree (pyproject maps
+              # tortoise.packs = packs); tortoise/packs/__init__.py is the
+              # discovery stub the sdist gate checks. #2160 review P2-1:
+              # was startswith("tortoise/packs/") only — a packs/** change
+              # silently skipped the wheel gate that guards it.
               "packaging": any_file(
                   isfile("pyproject.toml", "MANIFEST.in",
                          "tortoise/pack_registry.py", "tortoise/pack_state.py",
@@ -99,13 +104,16 @@ jobs:
                          "docs/quickstart-selfhosted.md",
                          "docs/quickstart-cloud.md"),
                   startswith("tortoise/packs/"),
+                  startswith("packs/"),
               ),
               # welcome-e2e (wrangler preview of website/ + mocked playwright
-              # + the two edge-function node harnesses). Dashboard-app changes
-              # do NOT trigger it (dashboard-js-tests covers those).
+              # + the two edge-function node harnesses). Separate-app changes
+              # under website/apps/ do NOT trigger it — dashboard-js-tests
+              # covers dashboard; blog-admin has no gated suite. (#2160 P3-1:
+              # excluded website/apps/ wholesale, not dashboard only.)
               "website": any_file(
                   lambda f: f.startswith("website/")
-                  and not f.startswith("website/apps/dashboard/"),
+                  and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
                          "tests/test_tenant_provision_cors.mjs"),
@@ -114,14 +122,29 @@ jobs:
                   startswith("supabase/functions/_shared/"),
               ),
               # hosted-e2e (boots uvicorn tortoise.hosted_api:app; engine
-              # surface = the python-ci 'api' source set it exercises)
+              # surface = the python-ci 'api' source set it exercises PLUS
+              # hosted_api's module-load import graph — #2160 review P2-2:
+              # hosted_api imports abuse/analytics/audit_events/auth/
+              # hosted_backup/mcp_server/onboarding/projection/schemas/sdk/
+              # security at import time (+ pricing.tier_limits in body), so a
+              # change to any of those gets unit coverage but would never
+              # boot the artifact if gated on the old 4-module list. Keep the
+              # list in sync with hosted_api.py's imports; a miss only skips
+              # the boot suite (unit coverage still runs).
               "hosted": any_file(
                   startswith("tests/e2e/hosted/"),
                   isfile("tortoise/hosted_api.py", "tortoise/session_auth.py",
                          "tortoise/quota.py", "tortoise/metering.py",
                          "tortoise/supabase_control.py", "tortoise/selfhost_api.py",
                          "tortoise/selfhost.py", "tortoise/mcp_auth.py",
-                         "tortoise/transport.py"),
+                         "tortoise/transport.py",
+                         "tortoise/abuse.py", "tortoise/analytics.py",
+                         "tortoise/audit_events.py", "tortoise/auth.py",
+                         "tortoise/hosted_backup.py", "tortoise/security.py",
+                         "tortoise/pricing.py", "tortoise/billing.py",
+                         "tortoise/onboarding.py", "tortoise/mcp_server.py",
+                         "tortoise/projection.py", "tortoise/schemas.py",
+                         "tortoise/sdk.py", "tests/e2e/conftest.py"),
               ),
               # flip-gate (.github/scripts/verify-cutover* + supabase surface
               # + the exact pytest legs the script runs)
