@@ -8,9 +8,14 @@ tenant-provision/index.ts). The Supabase side is cleaned by
 2146_e2e_live_orphan_cleanup.py; THIS script drops the graphs for the teams in
 the manifest.
 
-It uses the same access path as the production purge (`_drop_team_graph_impl`,
-tortoise/hosted_api.py: select_graph(name).delete()) by resolving
-FALKORDB_CLOUD_URI → TORTOISE_DB_URI exactly like entrypoint.sh lines 89-93.
+It resolves FALKORDB_CLOUD_URI → TORTOISE_DB_URI exactly like entrypoint.sh
+lines 89-93, and drops graphs with `select_graph(name).delete()` — the same
+call the in-repo rollback paths use (tortoise/hosted_api.py:3691/9641).
+(NOTE: the production purge helper `_drop_team_graph_impl` at
+hosted_api.py:9036 branches on `hasattr(proj.db, "delete_graph")`; the pip
+falkordb cloud client exposes NO delete_graph attribute, so that branch
+log-and-skips on FalkorDB Cloud — tracked separately as daniel-ospina/
+tortoise#2163. THIS script's GRAPH.DELETE works regardless.)
 
 DRY-RUN by default. GRAPH.DELETE only runs with --execute.
 Deletes are strictly limited to graph names present in the manifest's
@@ -55,7 +60,7 @@ def _get_db():
     os.environ["TORTOISE_DB_URI"] = uri
     try:
         from tortoise.sdk import TortoiseSDK
-    except ImportError as e:
+    except ImportError:
         raise OpError(
             "tortoise SDK not importable — run via `uv run python3 ...` in the "
             "repo (falkordb client is a dependency)") from None

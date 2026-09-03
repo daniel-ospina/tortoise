@@ -49,10 +49,23 @@ DELETE-ORDER RATIONALE (mirrors tortoise purge semantics; live FK catalog):
   4. invitations WHERE team_id IN (...) — FK CASCADE, explicit anyway.
   5. abuse_events WHERE team_id IN (...) — FK CASCADE (0015 key_create rows
      minted by provision_team), explicit anyway.
-  6. audit_events INSERT per team (operation=e2e_live_orphan_purged).
-  7. teams WHERE id IN (...) LAST — children gone; row = retry anchor.
+  6. analytics_events WHERE team_id IN (...) — NO FK (migration 0004) and no
+     immutability trigger: rows would otherwise survive the purge as
+     permanent orphans. Red-window runs loaded the real app root, which fires
+     signup_completed/key_provisioned/onboarding_* events.
+  7. audit_events INSERT per team (operation=e2e_live_orphan_purged). Each run
+     carries a fresh uuid in the audit id so a partial failure (INSERT ok,
+     teams DELETE failed) is re-runnable without PK collision (audit_events is
+     append-only — immutable trigger, migration 0002).
+  8. teams WHERE id IN (...) LAST — children gone; row = retry anchor.
   FalkorDB graphs: companion script, run against the same manifest (may run
   before or after; a graph left behind is a benign orphan with no DB row).
+
+Note on FK survival: metering_records/oauth/agent_signup_tokens all have
+REFERENCES teams(id) ON DELETE CASCADE (migrations 0014/0016/20260814000001)
+so they die with the team row; only audit_events (immutable append-only) and
+analytics_events (no FK) need explicit handling — audit rows are the intended
+trail, analytics rows are deleted at step 6.
 
 REQUIRED ACCESS (operator)
   * SQL:  SUPABASE_ACCESS_TOKEN (Management API) OR supabase CLI linked to the
@@ -90,7 +103,8 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+import uuid
+from datetime import UTC, datetime
 
 # ── Guard constants (verified against live prod, 2026-09-02) ────────────────
 EMAIL_RE = re.compile(r"^e2e-live-[0-9a-f]{8}@premise-labs\.dev$")
@@ -135,6 +149,9 @@ CHILDREN_SQL = """
     SELECT 'abuse_events', count(*) FROM public.abuse_events
       WHERE team_id IN ({ids})
     UNION ALL
+    SELECT 'analytics_events', count(*) FROM public.analytics_events
+      WHERE team_id IN ({ids})
+    UNION ALL
     SELECT 'audit_events', count(*) FROM public.audit_events
       WHERE team_id IN ({ids});
 """
@@ -145,7 +162,7 @@ class OpError(Exception):
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 # ── SQL drivers ──────────────────────────────────────────────────────────────
@@ -188,7 +205,7 @@ def _cli_sql(query: str) -> list[dict]:
         raise OpError(f"supabase db query failed: {proc.stderr[-600:]}")
     try:
         data = json.loads(proc.stdout)
-    except json.JSONDecodeError as e:
+    except json.JSONDecodeError:
         raise OpError(f"supabase db query returned non-JSON: {proc.stdout[:300]}") from None
     if isinstance(data, dict) and isinstance(data.get("rows"), list):
         return data["rows"]
@@ -338,10 +355,21 @@ def phase_db(args: argparse.Namespace, manifest: dict, runner) -> None:
         ("team_memberships", f"DELETE FROM public.team_memberships WHERE team_id IN ({ids});"),
         ("invitations", f"DELETE FROM public.invitations WHERE team_id IN ({ids});"),
         ("abuse_events", f"DELETE FROM public.abuse_events WHERE team_id IN ({ids});"),
+        # #2146 review P2-2: analytics_events (migration 0004) has team_id with
+        # NO FK and no immutability trigger — rows would survive the purge as
+        # permanent orphans unless deleted here (red-window runs loaded the real
+        # app root, which fires signup_completed/key_provisioned/etc.).
+        ("analytics_events", f"DELETE FROM public.analytics_events WHERE team_id IN ({ids});"),
     ]
+    # #2146 review P1-1: the audit id carries a per-RUN uuid so a partial
+    # failure (audit INSERT ok, teams DELETE failed) can be re-run safely — a
+    # deterministic id would collide on the append-only audit_events PK
+    # (immutable trigger, migration 0002) and strand the cleanup permanently.
+    run_id = uuid.uuid4().hex[:8]
     audit_values = ", ".join(
-        "('2146-purge-%s-%d', '%s', '%s', '%s', 'team', '%s', '%s')" % (
-            t["id"][:16], i, t["id"], AUDIT_ACTOR, AUDIT_OP, t["id"], _now_iso())
+        "('2146-purge-{rid}-{tid}-{i}', '{tid2}', '{actor}', '{op}', 'team', '{tid3}', '{ts}')".format(
+            rid=run_id, tid=t["id"][:16], i=i, tid2=t["id"],
+            actor=AUDIT_ACTOR, op=AUDIT_OP, tid3=t["id"], ts=_now_iso())
         for i, t in enumerate(teams))
     steps.append((
         "audit_events (append trail)",
@@ -357,7 +385,7 @@ def phase_db(args: argparse.Namespace, manifest: dict, runner) -> None:
         print(f"[db] {'DRY-RUN ' if not args.execute else ''}{label}")
         if args.execute:
             _run_sql(runner, sql, f"db phase: {label}")
-            print(f"      ok")
+            print("      ok")
         elif args.verbose:
             print(f"      {sql[:300]}")
 
@@ -388,6 +416,24 @@ def main() -> int:
 
     if args.phase in ("enumerate", "all"):
         manifest = phase_enumerate(args, runner)
+        # #2146 review P2-1: refuse to clobber a non-empty manifest with an
+        # empty re-enumeration. A post-success re-run enumerates 0 teams; if it
+        # overwrote the manifest in place, the FalkorDB companion would read an
+        # empty list and silently skip all ~154 graphs with no row-level record
+        # of what to drop. Delete the manifest manually to force a fresh empty
+        # enumeration.
+        if os.path.exists(args.manifest):
+            try:
+                with open(args.manifest) as fh:
+                    prior = json.load(fh)
+                prior_n = len(prior.get("teams") or [])
+            except (OSError, json.JSONDecodeError):
+                prior_n = 0
+            if prior_n > 0 and len(manifest.get("teams") or []) == 0:
+                print(f"[enumerate] REFUSING to overwrite {args.manifest}: it holds "
+                      f"{prior_n} teams but the new enumeration found 0 (post-success "
+                      f"re-run?). Remove the file to force a fresh empty enumeration.")
+                return 2
         with open(args.manifest, "w") as fh:
             json.dump(manifest, fh, indent=2, default=str)
         print(f"[enumerate] wrote {args.manifest}")
@@ -395,6 +441,7 @@ def main() -> int:
         print(f"[enumerate] teams={c.get('teams', 0)} users={c.get('users', 0)} "
               f"api_keys={c.get('api_keys', 0)} memberships={c.get('team_memberships', 0)} "
               f"invitations={c.get('invitations', 0)} abuse_events={c.get('abuse_events', 0)} "
+              f"analytics_events={c.get('analytics_events', 0)} "
               f"audit_events={c.get('audit_events', 0)}")
         print(f"[enumerate] graph names to drop (FalkorDB): {len(manifest['teams'])}")
         if args.dump_csv:

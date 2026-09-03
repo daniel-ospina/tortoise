@@ -54,7 +54,8 @@ endpoint in-repo).
 | `public.team_memberships` (orphan teams) | 2 | 2 |
 | `public.invitations` | 0 | 0 |
 | `public.abuse_events` (`key_create`, orphan teams) | 154 | 222 |
-| `public.audit_events` / metering / analytics / oauth | 0 | 0 |
+| `public.audit_events` / metering / oauth (FK-cascade or trail) | 0 | 0 |
+| `public.analytics_events` (no FK — deleted explicitly) | 0 | 0 |
 | FalkorDB graphs `team_*` | **not enumerable from this env** (see §5) | same |
 
 Window = `created_at >= 2026-08-19T22:20:00Z AND < 2026-09-03T00:00:00Z`
@@ -115,7 +116,8 @@ ORDER BY u.created_at;
 
 **Q3 — children per orphan team** (replace `<ids>` with the Q1 id list):
 expect `api_keys` 154, `team_memberships` 2, `invitations` 0, `abuse_events`
-154, `audit_events` 0.
+154, `analytics_events` (rows minted by real-app-root loads; counted 0 in the
+2026-09-02 inventory but re-check here), `audit_events` 0.
 ```sql
 SELECT 'api_keys' AS kind, count(*) FROM public.api_keys
   WHERE team_id IN (<ids>)
@@ -124,6 +126,8 @@ UNION ALL SELECT 'team_memberships', count(*) FROM public.team_memberships
 UNION ALL SELECT 'invitations', count(*) FROM public.invitations
   WHERE team_id IN (<ids>)
 UNION ALL SELECT 'abuse_events', count(*) FROM public.abuse_events
+  WHERE team_id IN (<ids>)
+UNION ALL SELECT 'analytics_events', count(*) FROM public.analytics_events
   WHERE team_id IN (<ids>)
 UNION ALL SELECT 'audit_events', count(*) FROM public.audit_events
   WHERE team_id IN (<ids>);
@@ -162,7 +166,9 @@ Live FK catalog (`pg_constraint`, 2026-09-02):
 | `invitations` FK | `team_id → teams(id) ON DELETE CASCADE` | same |
 | `abuse_events_team_id_fkey` | `team_id → teams(id) ON DELETE CASCADE` | same (the 0015 `key_create` rows minted per provisioned key) |
 | `team_memberships.team_id` | **no FK** | memberships are NOT removed by a teams-row delete — delete explicitly |
-| `audit_events` / metering / analytics | **no FK** | survive team deletion by design (immutable audit trail) |
+| `analytics_events` (0004) | **no FK, no immutability trigger** | rows survive team deletion — deleted explicitly by the cleanup script |
+| `audit_events` | **no FK + immutable trigger** | the append-only trail — survives by design; never deleted |
+| `metering_records` (0014) / `oauth` (0016) / `agent_signup_tokens` (20260814000001) | `team_id → teams(id) ON DELETE CASCADE` | die with the teams row — no explicit delete needed |
 
 There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
 /v1/teams/{team_id}` (hosted_api.py:8908) is JWT-owner-gated (soft delete →
@@ -170,15 +176,25 @@ There is **no in-repo hosted-api delete-team path usable for orphans**: `DELETE
 an owner. The sanctioned **purge machinery** is
 `purge_team_control_plane` (supabase_control.py:1555 — deletes
 api_keys → team_memberships → invitations, teams row **last** as retry anchor)
-+ `_drop_team_graph_impl` (hosted_api.py:9036 — `select_graph(name).delete()`),
-used by the hourly deleted-team sweep. The cleanup scripts below mirror that
-exact ordering with direct SQL, plus an append-only `audit_events` row per
-purged team (`operation='e2e_live_orphan_purged'`) written **before** the
++ the in-repo rollback graph calls (`select_graph(name).delete()`,
+hosted_api.py:3691/9641), used by the hourly deleted-team sweep. The cleanup
+scripts below mirror that ordering with direct SQL (api_keys →
+team_memberships → invitations → abuse_events → analytics_events →
+audit_events INSERT → teams LAST), plus an append-only `audit_events` row per
+purged team (`operation='e2e_live_orphan_purged'`, per-run uuid in the id so
+re-runs after a partial failure never collide) written **before** the
 teams-row delete.
 
+NOTE on the sweep's graph drop: `_drop_team_graph_impl` (hosted_api.py:9036)
+branches on `hasattr(proj.db, 'delete_graph')` — the pip falkordb cloud client
+has NO `delete_graph` (only `select_graph`), so that sweep path log-and-skips
+on FalkorDB Cloud (tracked as daniel-ospina/tortoise#2163). THIS cleanup's
+graph drop uses `select_graph(...).delete()` (GRAPH.DELETE) which works on
+both clients.
+
 FalkorDB graphs: no DB-side cascade exists (separate store). Dropped with
-`GRAPH.DELETE team_<id>` via the same SDK call the prod purge uses.
-`tenant-provision` never wrote control-plane **registry** nodes (E2E-1, and
+`GRAPH.DELETE team_<id>` via the manifest. `tenant-provision` never wrote
+control-plane **registry** nodes (E2E-1, and
 the registry is deleted post-#669 flip), so no registry cleanup is needed for
 these teams — only the per-team `team_<id>` knowledge graphs.
 
@@ -258,7 +274,10 @@ runs without `--execute`.
 `backup_enabled=false` (no R2 backups). Mitigations: (a) keep the manifest
 JSON (full rows); (b) optional `--dump-csv` for a CSV snapshot before any
 delete; (c) the audit_events append-only rows survive the team deletion as the
-purge trail; (d) re-running any phase is a no-op (idempotent). If an operator
+purge trail; (d) re-running any phase is a no-op (idempotent) — with one
+exception: the manifest refuses to be overwritten with an EMPTY team list
+(post-success re-enumeration) so the FalkorDB phase always has its target
+list; remove the manifest file to force a fresh empty enumeration. If an operator
 wants DB-level insurance, `pg_dump` the four tables scoped to the orphan ids
 first.
 
