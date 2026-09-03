@@ -2159,6 +2159,14 @@ function claimIntentInFlight() {
 
   async function wizardComplete() {
     setWizardDone(true)
+    // #2195 (durable connect key): the done step ends the connect flow — the
+    // minted/pasted durable plaintext was shown once in the command; drop it
+    // so a later re-entry re-gates (a revoked/regenerated key never re-embeds
+    // stale). The durable key itself persists as the active apiKey (localStorage
+    // + teamKeysRef) — this only clears the wizard's shown-once state.
+    setWizardDurableKey('')
+    setWizardDurablePaste('')
+    setWizardDurableError('')
     // #1997 (W1): the legacy jsonb completion write is REMOVED — the done
     // step hands off to the graph (accept-and-drop makes a client PATCH
     // inert on node-present orgs; the node's fork-aware gate owns
@@ -3130,6 +3138,11 @@ function claimIntentInFlight() {
     clearSessionDetail()
     setSessionDeletingId(null)
     setSessionsActionError(null)
+    // #2195 (durable connect key): drop the wizard's minted/pasted durable key
+    // on logout — plaintext key state must never survive to the next session.
+    setWizardDurableKey('')
+    setWizardDurablePaste('')
+    setWizardDurableError('')
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
@@ -3437,10 +3450,15 @@ function claimIntentInFlight() {
   // #1998 fold-in (PR #2161 finding): the connect step must source a DURABLE
   // key, not the 24h bootstrap session credential. Mints via POST /v1/team/keys
   // (the same endpoint the API Keys tab's create uses — created_via
-  // 'provisioned', durable, counts vs max_api_keys). Session-authed
-  // (useSession: true) so it works even when the current apiKey is a bootstrap
-  // key. The plaintext is shown ONCE — the connect command embeds it (the
-  // reveal); afterwards the key is managed/regenerable from the API Keys tab.
+  // 'provisioned', durable, counts vs max_api_keys). Auth NOTE: mintKey passes
+  // Authorization: Bearer <activeKey> which api() merges AFTER the session JWT
+  // (opts.headers win, main.jsx api()) — so the mint authenticates as the team
+  // key (team pinning, the createKey precedent), falling back to the session
+  // JWT only when no key exists (#1830 recoverable-mint case). A bootstrap
+  // session key CAN mint (server deleg gate only rejects delegation_depth=0
+  // minted keys). The plaintext is shown ONCE — the connect command embeds it
+  // (the reveal); afterwards the key is managed/regenerable from the API Keys
+  // tab.
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
@@ -3486,6 +3504,12 @@ function claimIntentInFlight() {
       // tab shows the new key once → paste it here).
       if (e?.status === 402) {
         setWizardDurableError('You\'ve reached your plan\'s limit of API keys — regenerate one in the API Keys tab (shown once there), then paste it below.')
+      } else if (e?.status === 403) {
+        // #1148: on dashboard_key_login=false (Protect) teams, KEY-authed
+        // management mints 403 — the human session could pass but mintKey's
+        // key header shadows the JWT (api() merge). The paste escape below is
+        // the path: create/regenerate in the API Keys tab, paste here.
+        setWizardDurableError('This Organization restricts key management — create or regenerate a durable key in the API Keys tab, then paste it below.')
       } else {
         setWizardDurableError(e?.message || 'Could not create a durable setup key — try again.')
       }
@@ -3523,6 +3547,14 @@ function claimIntentInFlight() {
     setNewKeyName('')      // key-label: a typed label must not leak onto another team's mint
     setEditingKeyId(null)  // key-label: close any in-flight inline rename across teams
     renameCancelRef.current = true // key-label: the unmount-blur must not fire a rename for the old team
+    // #2195 (durable connect key): the wizard's minted/pasted durable key is
+    // TEAM-scoped plaintext (minted under the old team's key). A switch must
+    // drop it — otherwise the next empty org's connect step would embed the
+    // previous org's durable key in its setup command (silent wrong-org
+    // embed). Mirrors the setNewKey(null) plaintext-card convention above.
+    setWizardDurableKey('')
+    setWizardDurablePaste('')
+    setWizardDurableError('')
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -4628,7 +4660,7 @@ function claimIntentInFlight() {
           <button
             className="ghost small"
             disabled={welcomeProvisioning || welcomeProvisionError}
-            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); finishWelcomeLoads() }}
+            onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
           </button>
@@ -4845,9 +4877,11 @@ function claimIntentInFlight() {
                         // "expires" phrasing would be false there.
                         <>
                           <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                            {durableConnect.source === 'bootstrap'
-                              ? 'The setup command embeds a durable API key — the key in this session expires within 24 hours, which would cut off your agent. Create a durable one now (shown once), or create/regenerate one in the API Keys tab.'
-                              : 'The setup command embeds a durable API key — session keys expire within 24 hours, so your agent needs a durable one (created once, never shown again). Create one now, or create/regenerate one in the API Keys tab.'}
+                            {durableConnect.source === 'bootstrap' && 'The setup command embeds a durable API key — the key in this session expires within 24 hours, which would cut off your agent. Create a durable one now (shown once), or create/regenerate one in the API Keys tab.'}
+                            {durableConnect.source === 'none' && 'The setup command embeds a durable API key — session keys expire within 24 hours, so your agent needs a durable one (created once, never shown again). Create one now, or create/regenerate one in the API Keys tab.'}
+                            {durableConnect.source === 'revoked' && 'Your current key was revoked — the setup command needs an active durable API key. Create a new one now (shown once), or create/regenerate one in the API Keys tab.'}
+                            {durableConnect.source === 'disabled' && 'Your current key is disabled — the setup command needs an enabled durable API key. Create a new one now (shown once), or re-enable / regenerate one in the API Keys tab.'}
+                            {durableConnect.source === 'unknown' && 'We couldn\'t confirm a durable API key for this session — the setup command needs one (session keys expire within 24 hours). Create a durable one now (shown once), or create/regenerate one in the API Keys tab.'}
                           </p>
                           {wizardDurableError && (
                             <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
@@ -4881,6 +4915,25 @@ function claimIntentInFlight() {
                               onClick={() => {
                                 const pasted = wizardDurablePaste.trim()
                                 if (!pasted) return
+                                // #2195 (review): validate the pasted value
+                                // through the same durable classifier — the
+                                // whole point is to never embed a bootstrap /
+                                // revoked / disabled key. A pasted value that
+                                // matches a KNOWN non-durable row is rejected;
+                                // an unknown row (freshly minted elsewhere,
+                                // keys[] not yet refreshed) is trusted only on
+                                // the tt_ prefix (self-paste trust model — the
+                                // user pastes their own key). Never sent to
+                                // the server; shown once, cleared on use.
+                                const check = durableConnectKey('', pasted, keys)
+                                if (check.source === 'bootstrap' || check.source === 'revoked' || check.source === 'disabled') {
+                                  setWizardDurableError('That key is not usable (expired, revoked, or disabled). Regenerate one in the API Keys tab and paste the new key.')
+                                  return
+                                }
+                                if (!/^tt_/.test(pasted)) {
+                                  setWizardDurableError('That does not look like a Tortoise API key (tt_…). Paste the full key from the API Keys tab.')
+                                  return
+                                }
                                 setWizardDurableKey(pasted)
                                 setWizardDurablePaste('')
                               }}>Use this key</button>
