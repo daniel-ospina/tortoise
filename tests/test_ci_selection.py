@@ -924,6 +924,42 @@ def test_diff_gated_jobs_consume_changes_outputs():
             "test-slow leg rows must stay the committed literal lists (#1471)"
 
 
+def test_slow_selected_echo_transform_roundtrips_into_legs():
+    """#2159 review P2-1: the changes job's slow_selected echo strips the
+    .py suffix and space-joins BARE names; test-slow's tier-2 shape then
+    case-matches them against the committed leg rows (matrix.files). This
+    pin reproduces the echo transform for every selection shape and asserts
+    the round-trip holds — a strip/join format drift (suffix leak, JSON,
+    newline) would silently empty BOTH legs to a green gate, and this
+    tier-2 partial shape never runs in CI outside a real tier-2 PR."""
+    m = load_manifest()
+    wf = _load_python_ci()
+    legs = set()
+    for i in wf["jobs"]["test-slow"]["strategy"]["matrix"]["include"]:
+        legs.update(i["files"].split())
+    shapes = [
+        ([], "push"),
+        ([], "schedule"),
+        (["docs/README.md"], "pull_request"),
+        (["tortoise/sdk.py"], "pull_request"),
+        (["tortoise/ep.py"], "pull_request"),
+        (["tests/test_w4_why_enrichment.py"], "pull_request"),
+        (["mystery-dir/x.py"], "pull_request"),
+        (["tools/ci_selection.py"], "pull_request"),  # #2159 P2-3: full
+    ]
+    for changed, event in shapes:
+        r = select(changed, event, m)
+        # the echo transform, verbatim from python-ci.yml
+        transformed = [
+            x[:-3] if x.endswith(".py") else x for x in r["slow_selected"]]
+        assert all(".py" not in x for x in transformed), \
+            f"suffix leak in echo output ({changed}/{event}): {transformed}"
+        assert set(transformed) <= legs, \
+            f"slow_selected escapes the committed slow legs ({changed}/{event})"
+        assert bool(r["slow_run"]) == bool(transformed), \
+            f"slow_run must imply a non-empty leg intersection ({changed}/{event})"
+
+
 def test_canary_streak_job_consumes_half_b_artifacts_only():
     """Task 9 Step 6 (cycle-5 P1-7/cycle-6 P1-7): the canary-streak job is
     post-merge only (push/schedule), needs [test] (matrix fan-in), consumes

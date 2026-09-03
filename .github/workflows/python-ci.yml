@@ -102,8 +102,10 @@ on:
 # (#801 live-signup monitor) lives in its own scheduled workflow.
 # #2147/#2148 (2026-09-02-ci-audit F1/F2): the formerly-unconditional
 # test-slow + test-carve-out legs are diff-gated on the selector's
-# slow_run / carve_out_run / slow_selected outputs — docs/website/config-
-# only PRs skip both; tier-2 PRs run only their surface's slow files;
+# slow_run / carve_out_run / slow_selected outputs — docs/website-only
+# PRs skip both; tier-2 PRs run only their surface's slow files. NOTE:
+# config/* falls through to the core surface, so config-only PRs (the
+# manifest edits) run both legs — conservative and correct.
 # trunk (push) + nightly (schedule) + unknown/shared-module PRs keep the
 # full runs (the coverage backstop is never weakened).
 
@@ -204,6 +206,27 @@ jobs:
           echo "slow_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["slow_run"]).lower())')" >> "$GITHUB_OUTPUT"
           echo "carve_out_run=$(echo "$SEL" | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["carve_out_run"]).lower())')" >> "$GITHUB_OUTPUT"
           echo "slow_selected=$(echo "$SEL" | python3 -c 'import json,sys; print(" ".join(x[:-3] if x.endswith(".py") else x for x in json.load(sys.stdin)["slow_selected"]))')" >> "$GITHUB_OUTPUT"
+          # #2159 review P2-1: the tier-2 slow legs case-match slow_selected's
+          # BARE names against the committed leg rows (matrix.files format),
+          # and this tier-2 partial shape had never run in CI when #2148
+          # landed — a strip/join format drift (suffix leak, JSON array,
+          # newline) would silently empty BOTH legs to a green gate. Fail the
+          # changes job (red, not silent-green) if slow_run=true with an
+          # empty or non-leg slow_selected.
+          python3 - "$SEL" <<'EOF'
+          import json, sys, yaml
+          sel = json.loads(sys.argv[1])
+          if sel["slow_run"]:
+              wf = yaml.safe_load(open('.github/workflows/python-ci.yml'))
+              legs = set()
+              for i in wf['jobs']['test-slow']['strategy']['matrix']['include']:
+                  legs.update(i['files'].split())
+              entries = {f[:-3] if f.endswith(".py") else f for f in sel["slow_selected"]}
+              bad = sorted(entries - legs)
+              if bad or not entries:
+                  print(f"::error::slow_selected format drift: slow_run=true entries={entries!r} not-in-legs={bad}")
+                  sys.exit(1)
+          EOF
       - name: Emit push matrix (#1472)
         # #1472: the push halves are DERIVED from config/ci-surfaces.yml by the
         # selector — registration in the manifest is sufficient, no manual

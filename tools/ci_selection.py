@@ -13,9 +13,12 @@ every return path: slow_run (test-slow runs), slow_selected (the slow files
 test-slow should run — surface-matched on tier-2 PRs, the whole committed
 leg set = slow_files - carve_out on full selections), carve_out_run (the
 carve-out job runs — full selections or a matched surface owns carve-out
-files). The workflow's changes job echoes these; docs/website/config-only
-PRs (surfaces == []) skip both legs, trunk (push) + nightly (schedule) +
-unknown/shared-module PRs keep full coverage.
+files). The workflow's changes job echoes these; docs/website-only PRs
+(surfaces == []) skip both legs, trunk (push) + nightly (schedule) +
+unknown/shared-module PRs keep full coverage. NOTE: config/* is NOT a
+docs-only path — it falls through to the core surface, so config-only PRs
+run both legs (conservative: manifest edits are exactly when the slow split
+should be exercised; the workflow header comment says the same).
 
 Selection rules (fail-closed, conservative):
 - push to main / schedule  -> full (tier 3 — the trunk backstop)
@@ -148,6 +151,13 @@ TOOL_CARVEOUTS = (
     "tools/ask_spotcheck.py",
     "tools/ask_spotcheck_consistency.py",
     "tools/ask_spotcheck_probe.py",
+    # #2159 review P2-3: the diff-gate selector itself must never classify
+    # as docs-only (the two gated legs would skip AND the wiring pins in
+    # tests/test_ci_selection.py would never run on the PR that owns them).
+    # No source pattern matches tools/ci_selection.py, so a selector-only PR
+    # lands in the unknown-path fail-closed branch -> FULL matrix + both
+    # legs — the heaviest but safest gate for the file that owns gating.
+    "tools/ci_selection.py",
 )
 
 
@@ -183,7 +193,16 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     The 6 slow carve-out files (test_reaper et al.) run in the dedicated
     URI-unset carve-out job (epic #1647 E2E-4), never the docker slow legs
     — the test-slow committed leg set is exactly slow_files - carve_out
-    (pinned by the workflow's drift-guard step, #1471)."""
+    (pinned by the workflow's drift-guard step, #1471).
+
+    First-match semantics (#2159 review P2-2): classify_test_file returns
+    the FIRST surface whose patterns match (dict order api, battery, core,
+    ep, onboarding, sdk, classify, eval). A slow/carve file registered
+    under two surfaces therefore owns to the first — a tier-2 PR touching
+    ONLY the second surface will not run it (full runs stay the backstop).
+    test_diff_gate_keys_emitted_on_every_return_path pins every
+    slow_selected subset to slow_files - carve_out; the tier-2 intersection
+    tests pin the per-surface splits."""
     slow = set(manifest.get("slow_files", []))
     carve = set(manifest.get("carve_out", []))
     by_surface: dict[str, set[str]] = {}
