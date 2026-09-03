@@ -187,9 +187,12 @@ jobs:
       - name: Install ruff (CI-pinned ==0.16.4)
         run: pip install ruff==0.16.4
       - name: Ruff check . (repo config — E/F/B/UP/I/SIM/RUF, #1503 baseline)
+        id: ruff
         run: ruff check .
       - name: Comment on the merged PR (best-effort attribution)
-        if: failure()
+        # Only on an actual ruff finding — an earlier infra flake (checkout /
+        # pip network) would leave this step skipped, not commented.
+        if: steps.ruff.outcome == 'failure'
         env:
           PR_NUMBER: ${{ needs.dedup-check.outputs.pr_number }}
         uses: actions/github-script@v7
