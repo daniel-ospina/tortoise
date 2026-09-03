@@ -53,6 +53,12 @@ const INVITE_TOKEN_STORAGE = 'tortoise.inviteToken'
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 
 
+// #2002 (W6): pure captured-sessions view/delete derivations (node --test —
+// capturedSessions.test.js) for the Settings Captured-sessions home.
+import {
+  removeSession, sessionRowMeta, transcriptModel,
+  turnRoleClass, kindBadgeClass, DELETE_CONFIRM,
+} from './capturedSessions.js'
 // #2001 (W5): the Setup-guide card mirror — ONE shared derivation
 // (setupGuide.js, node --test) of the graph-held FLOW state. Renders the
 // counted checklist (fork-aware), collapses when complete (status-driven,
@@ -252,6 +258,11 @@ function SettingsTab(props) {
     github, githubConnected, reposCount, onConnectGithub, githubError,
     sessions, sessionsOn, sessionsLoading,
     memorySourcesProps,
+    // #2002 (W6): captured-sessions view/delete consumer props (the W4 seam:
+    // W4 built the home + named the seam; W6 consumes it).
+    selectedSessionId, onViewSession, onClearSessionDetail,
+    sessionDetail, detailLoading, sessionDetailError,
+    onDeleteSession, deletingSessionId, sessionsActionError,
   } = props
   const reposNote = githubConnected
     ? (github.repos != null ? `${github.repos} repos available`
@@ -259,6 +270,10 @@ function SettingsTab(props) {
         : 'repos available'))
     : null
   const fmt = (iso) => { if (!iso) return '—'; try { return new Date(iso).toLocaleString() } catch { return iso } }
+  // #2002 (W6): one captured session is expanded at a time — the open row
+  // mirrors the App-level sessionDetail/selectedSessionId (kept in the App
+  // so team switches + logouts clear it in one place).
+  const openSessionId = selectedSessionId ? String(selectedSessionId) : null
   return (
     <section className="settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -339,18 +354,128 @@ function SettingsTab(props) {
         ) : sessions.length === 0 ? (
           <p className="dim">No captured sessions yet — recordings appear here after your agent's first session.</p>
         ) : (
-          <ul className="captured-sessions" style={{ listStyle: 'none', margin: '0.4rem 0 0', padding: 0 }}>
-            {sessions.map((s) => (
-              <li key={s.id} className="captured-session" style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline', padding: '0.35rem 0', borderBottom: '1px solid var(--border,#1e293b)' }}>
-                <span className="small">{fmt(s.created_at)}</span>
-                <span className="dim small">{(s.turns ?? 0)} turns · {(s.extracted ?? 0)} extracted</span>
-                <code className="dim small" style={{ marginLeft: 'auto' }}>{String(s.id).slice(0, 12)}…</code>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="captured-sessions" style={{ listStyle: 'none', margin: '0.4rem 0 0', padding: 0 }}>
+              {sessions.map((s) => {
+                const meta = sessionRowMeta(s)
+                const sid = String(s.id)
+                const open = openSessionId === sid
+                const deleting = deletingSessionId === sid
+                return (
+                  <li key={sid} className="captured-session" style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline', padding: '0.35rem 0', borderBottom: '1px solid var(--border,#1e293b)' }}>
+                    <span className="small">{fmt(s.created_at)}</span>
+                    <span className="dim small">{meta.turns} turns · {meta.extracted} extracted</span>
+                    <code className="dim small" style={{ marginLeft: 'auto' }}>{sid.slice(0, 12)}…</code>
+                    {/* #2002 (W6): per-row View (expands the transcript
+                        panel below) + Delete (confirm → DELETE
+                        /v1/sessions/{id} + receipt cleanup). */}
+                    <span style={{ display: 'flex', gap: '0.4rem' }}>
+                      <button type="button" className="ghost small"
+                        aria-expanded={open}
+                        onClick={() => (open ? onClearSessionDetail() : onViewSession(s.id))}
+                        disabled={!!deletingSessionId}>
+                        {open ? 'Close' : 'View'}
+                      </button>
+                      <button type="button" className="ghost small"
+                        style={{ color: 'var(--red,#f87171)' }}
+                        disabled={!!deletingSessionId}
+                        onClick={() => {
+                          if (!window.confirm(DELETE_CONFIRM)) return
+                          onDeleteSession(s.id)
+                        }}>
+                        {deleting ? 'Deleting…' : 'Delete'}
+                      </button>
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+            {/* #2002 (W6): delete action error surfaces under the list (row-
+                level, never a fabricated success) + the transcript panel for
+                the open session (loading / honest error / transcript body). */}
+            {sessionsActionError && (
+              <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{sessionsActionError}</p>
+            )}
+            {openSessionId && (
+              <SessionTranscriptPanel
+                sessionId={openSessionId}
+                detail={sessionDetail && String(sessionDetail.id) === openSessionId ? sessionDetail : null}
+                loading={detailLoading}
+                error={sessionDetailError}
+                onRetry={onViewSession ? () => onViewSession(openSessionId) : null}
+                onClose={onClearSessionDetail}
+              />
+            )}
+          </>
         )}
       </section>
     </section>
+  )
+}
+
+// #2002 (W6): the transcript panel for one captured session — fed by
+// GET /v1/sessions/{id} (turn_points + extracted_points) and rendered with
+// the #714 session-detail CSS vocabulary (.turn-* / .kind-* — shipped with
+// the original session detail view). Honest states: loading, error (with
+// retry), or the transcript body (turns + extracted memory). Never
+// fabricates an empty transcript from a failed fetch.
+function SessionTranscriptPanel({ sessionId, detail, loading, error, onRetry, onClose }) {
+  if (loading && !detail) {
+    return (
+      <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
+        <p className="dim">Loading transcript…</p>
+      </div>
+    )
+  }
+  if (error && !detail) {
+    return (
+      <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
+        <p className="error" role="alert">{error}</p>
+        <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem' }}>
+          {onRetry && <button type="button" className="ghost small" onClick={onRetry}>Retry</button>}
+          <button type="button" className="ghost small" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    )
+  }
+  if (!detail) return null
+  const tm = transcriptModel(detail)
+  return (
+    <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
+      <div className="dim small" style={{ margin: '0.5rem 0 0.25rem' }}>
+        Transcript — {tm.counts.turns} turns · {tm.counts.extracted} extracted memory
+      </div>
+      {tm.turns.length === 0 ? (
+        <p className="dim small">No conversation turns stored for this session.</p>
+      ) : (
+        <div className="turn-list" style={{ marginTop: '0.5rem' }}>
+          {tm.turns.map((t, i) => (
+            <div key={t.id || `t${i}`} className={`turn-item ${turnRoleClass(t.role)}`}>
+              <div className="turn-header">
+                <span className="turn-role">{t.role || 'unknown'}</span>
+                {t.id && <span className="turn-index">{t.id}</span>}
+              </div>
+              <div className="turn-content">{t.content}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {tm.extracted.length > 0 && (
+        <div className="session-section">
+          <h3>Extracted memory</h3>
+          <div className="extracted-list">
+            {tm.extracted.map((p) => (
+              <div key={p.id || p.content} className="extracted-item">
+                <div className="extracted-header">
+                  <span className={`kind-badge ${kindBadgeClass(p.kind)}`}>{p.kind || 'statement'}</span>
+                </div>
+                <div className="turn-content">{p.content}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -994,6 +1119,12 @@ function claimIntentInFlight() {
   const [selectedSessionId, setSelectedSessionId] = React.useState(null)
   const [sessionDetail, setSessionDetail] = React.useState(null)
   const [detailLoading, setDetailLoading] = React.useState(false)
+  // #2002 (W6): Settings Captured-sessions view/delete state — the
+  // transcript panel's fetch error (inline, per-panel) and the single-flight
+  // delete (one session deleting at a time; row-level action error).
+  const [sessionDetailError, setSessionDetailError] = React.useState(null)
+  const [sessionDeletingId, setSessionDeletingId] = React.useState(null)
+  const [sessionsActionError, setSessionsActionError] = React.useState(null)
 
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
@@ -2983,6 +3114,10 @@ function claimIntentInFlight() {
     setClaimError('')
     try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
     clearClaimPendingMarker()
+    // #2002 (W6): no cross-user transcript/delete-state bleed on logout
+    clearSessionDetail()
+    setSessionDeletingId(null)
+    setSessionsActionError(null)
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
@@ -3307,6 +3442,9 @@ function claimIntentInFlight() {
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
     setSessions([])
+    clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
+    setSessionDeletingId(null)
+    setSessionsActionError(null)
     setBackupInfo(null)
     setBackupsStatus('loading') // #1923: mirror the backupInfo reset
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
@@ -4089,15 +4227,57 @@ function claimIntentInFlight() {
   // #714 (main): session detail view
   async function fetchSessionDetail(sessionId) {
     setDetailLoading(true)
-    setError('')
+    setSessionDetailError(null)
     try {
-      const detail = await api(`/v1/sessions/${sessionId}`)
+      // #2002 (W6): the Settings transcript View (DE2E-11) reads on the
+      // session JWT + the selected team (multi-membership parity with
+      // list_sessions' ?team_id= pin — a stale team's detail must never
+      // land under the current team's Settings home).
+      const detail = await api(`/v1/sessions/${encodeURIComponent(sessionId)}${onboardingTeamQ()}`, { useSession: true })
+      if (detail && detail.session === null) {
+        // #1591 graph fail-soft: the server could not read the graph —
+        // honest inline error, never a fabricated empty transcript.
+        setSessionDetail(null)
+        setSessionDetailError('Could not load this session right now — try again in a moment.')
+        return null
+      }
       setSessionDetail(detail)
+      setSelectedSessionId(sessionId)
+      return detail
     } catch (e) {
-      setError(e.message)
       setSessionDetail(null)
+      setSessionDetailError((e && e.message) || 'Could not load this session.')
+      return null
     } finally {
       setDetailLoading(false)
+    }
+  }
+
+  function clearSessionDetail() {
+    setSelectedSessionId(null)
+    setSessionDetail(null)
+    setSessionDetailError(null)
+  }
+
+  // #2002 (W6): delete a captured session (Settings Captured-sessions home,
+  // DE2E-11). DELETE /v1/sessions/{id} removes the transcript + extracted
+  // memory nodes AND the capture receipt when it was the bucket's last
+  // session (server recompute). The list mutates locally via the pure
+  // removeSession filter (no refetch race), then onboarding refreshes so the
+  // Memory-sources capture-status rows reflect the server's receipt cleanup.
+  async function deleteCapturedSession(sessionId) {
+    if (sessionDeletingId) return // single-flight: one delete at a time
+    setSessionDeletingId(sessionId)
+    setSessionsActionError(null)
+    try {
+      await api(`/v1/sessions/${encodeURIComponent(sessionId)}${onboardingTeamQ()}`, { method: 'DELETE', useSession: true })
+      setSessions((prev) => removeSession(prev, sessionId))
+      if (selectedSessionId === sessionId) clearSessionDetail()
+      await refreshOnboarding()
+    } catch (e) {
+      setSessionsActionError((e && e.message) || 'Could not delete this session — try again.')
+    } finally {
+      setSessionDeletingId(null)
     }
   }
 
@@ -5385,6 +5565,15 @@ function claimIntentInFlight() {
             sessions={sessions}
             sessionsOn={!!(onboarding && onboarding.session_recording)}
             sessionsLoading={onboardingLoading}
+            selectedSessionId={selectedSessionId}
+            onViewSession={fetchSessionDetail}
+            onClearSessionDetail={clearSessionDetail}
+            sessionDetail={sessionDetail}
+            detailLoading={detailLoading}
+            sessionDetailError={sessionDetailError}
+            onDeleteSession={deleteCapturedSession}
+            deletingSessionId={sessionDeletingId}
+            sessionsActionError={sessionsActionError}
             memorySourcesProps={{
               state: onboarding,
               loading: onboardingLoading,
