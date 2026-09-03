@@ -15,8 +15,10 @@ contract semantics the W2-b benchmark runner (#2098) grades against:
   POINT level (the research-brief/plan write-path unit assumption — NOT
   eval-spec §5's loopy-NAND "A1" adversarial test); the REPHRASE-link
   concept is borrowed from ``docs/epistemic-layer-eval-spec.md`` §P5
-  (dedup-without-deletion), and the numeric/date ``accepts_rephrase_linked
-  = false`` carve-out is THIS corpus's claim-preservation rule.
+  (dedup-without-deletion), and the ``accepts_rephrase_linked = false``
+  carve-out is THIS corpus's claim-preservation rule (any anchor whose
+  paraphrase would not preserve the claim — commonly date/numeric-critical,
+  also named-entity ownership, decisions, and root-cause facts).
 * **Baseline** (DM-5) — committed ``baselines/main.json`` that the
   ``--compare`` gate can fail against.  Blessing (any committed-target
   refresh, incl. a regression) requires a ``justification`` string; a
@@ -61,8 +63,8 @@ KIND_VALUES = frozenset({"fact", "idea", "decision", "vibe", "entity"})
 NOTABILITY_VALUES = frozenset({"high", "medium", "low"})
 # Research-grounded Cat-35 enumeration (research-brief W2 row + raw-notes
 # 10:10Z gold line-ref): the third of the session the unit was planted in.
-# ``planted_turn`` carries the exact position; the plan §4.3.2 "explicit"
-# example value is illustrative, not an enum member.
+# ``planted_turn`` carries the exact position; the plan §4.3.2 note explains the
+# earlier-draft "explicit" value was illustrative, not an enum member.
 DEPTH_BUCKET_VALUES = frozenset({"early", "middle", "late"})
 
 # Comparison lanes + mode snapshot for the committed baseline config (the
@@ -124,7 +126,8 @@ def sha256_file(path: Path) -> str:
 
 def _require_mapping(doc: object, where: str, issues: list[str]) -> None:
     if not isinstance(doc, dict):
-        issues.append(f"{where}: expected a JSON object, got {type(doc).__name__}")
+        issues.append(
+            f"{where}: not an object (expected a JSON object), got {type(doc).__name__}")
 
 
 def _reject_unknown_keys(doc: dict, allowed: frozenset[str], where: str, issues: list[str]) -> None:
@@ -206,12 +209,54 @@ def validate_fixture(fixture: dict) -> list[str]:
 # ── Gold (DM-4 — sealed answer key) ─────────────────────────────────────────
 
 
+def _safe_turn(fixture: dict | None, planted_turn: int, where: str, issues: list[str]) -> dict | None:
+    """1-based fixture turn access that NEVER raises on malformed fixtures.
+
+    Emits issues and returns None when the fixture is absent, its conversation
+    is malformed (not a non-empty list), the turn index is out of range, or the
+    turn is not an object — so the shared validators honor their
+    ``list[str] of issues`` contract on garbage input (a separate
+    ``validate_fixture`` call reports the underlying fixture problems).
+    """
+    if fixture is None:
+        return None
+    conversation = fixture.get("conversation")
+    if not isinstance(conversation, list) or not conversation:
+        issues.append(
+            f"{where}: fixture conversation is malformed (not a non-empty list) — "
+            f"gold↔fixture cross-checks skipped"
+        )
+        return None
+    if not (1 <= planted_turn <= len(conversation)):
+        issues.append(
+            f"{where}.planted_turn: {planted_turn} is out of range for "
+            f"{len(conversation)} conversation turns"
+        )
+        return None
+    turn = conversation[planted_turn - 1]
+    if not isinstance(turn, dict):
+        issues.append(
+            f"{where}: fixture turn {planted_turn - 1} is not an object — "
+            f"gold↔fixture cross-checks skipped"
+        )
+        return None
+    return turn
+
+
+def _conversation_len(fixture: dict | None) -> int | None:
+    """Session length when the fixture's conversation is a list (else None)."""
+    if fixture is None:
+        return None
+    conversation = fixture.get("conversation")
+    return len(conversation) if isinstance(conversation, list) else None
+
+
 def _validate_planted_units(gold: dict, fixture: dict | None, issues: list[str]) -> None:
     units = gold.get("planted_units")
     if not isinstance(units, list) or not units:
         issues.append("gold.planted_units: expected a non-empty list")
         return
-    n_turns = len(fixture["conversation"]) if fixture else None
+    n_turns = _conversation_len(fixture)
     seen_ids: set[str] = set()
     for i, unit in enumerate(units):
         where = f"gold.planted_units[{i}]"
@@ -234,13 +279,11 @@ def _validate_planted_units(gold: dict, fixture: dict | None, issues: list[str])
         _expect_enum(unit, "depth_bucket", DEPTH_BUCKET_VALUES, where, issues)
         anchor = _expect_str(unit, "verbatim_anchor", where, issues)
         planted_turn = _expect_int(unit, "planted_turn", where, issues, minimum=1)
-        if fixture is not None and planted_turn is not None and n_turns is not None:
-            if planted_turn > n_turns:
-                issues.append(
-                    f"{where}.planted_turn: {planted_turn} > {n_turns} conversation turns"
-                )
+        if fixture is not None and planted_turn is not None:
+            turn = _safe_turn(fixture, planted_turn, where, issues)
+            if turn is None:
                 continue
-            content = fixture["conversation"][planted_turn - 1].get("content")
+            content = turn.get("content")
             # Defensive: the shared validator must never crash on a malformed
             # fixture turn (non-string content) — report it and move on.
             if not isinstance(content, str):
@@ -285,7 +328,6 @@ def _validate_distractors(gold: dict, fixture: dict | None, issues: list[str]) -
     if not isinstance(distractors, list) or not distractors:
         issues.append("gold.distractors: expected a non-empty list (true-but-routine leakage probes)")
         return
-    n_turns = len(fixture["conversation"]) if fixture else None
     seen_ids: set[str] = set()
     for i, distractor in enumerate(distractors):
         where = f"gold.distractors[{i}]"
@@ -303,13 +345,11 @@ def _validate_distractors(gold: dict, fixture: dict | None, issues: list[str]) -
         _expect_str(distractor, "statement", where, issues)
         anchor = _expect_str(distractor, "anchor", where, issues)
         planted_turn = _expect_int(distractor, "planted_turn", where, issues, minimum=1)
-        if fixture is not None and planted_turn is not None and n_turns is not None:
-            if planted_turn > n_turns:
-                issues.append(
-                    f"{where}.planted_turn: {planted_turn} > {n_turns} conversation turns"
-                )
+        if fixture is not None and planted_turn is not None:
+            turn = _safe_turn(fixture, planted_turn, where, issues)
+            if turn is None:
                 continue
-            content = fixture["conversation"][planted_turn - 1].get("content")
+            content = turn.get("content")
             if not isinstance(content, str):
                 issues.append(
                     f"{where}.anchor: fixture turn {planted_turn - 1} content is not a "
@@ -328,7 +368,6 @@ def _validate_hazards(gold: dict, fixture: dict | None, issues: list[str]) -> No
     if not isinstance(hazards, list) or not hazards:
         issues.append("gold.attribution_hazards: expected a non-empty list")
         return
-    n_turns = len(fixture["conversation"]) if fixture else None
     seen_ids: set[str] = set()
     for i, hazard in enumerate(hazards):
         where = f"gold.attribution_hazards[{i}]"
@@ -346,13 +385,11 @@ def _validate_hazards(gold: dict, fixture: dict | None, issues: list[str]) -> No
         quote = _expect_str(hazard, "quote", where, issues)
         _expect_str(hazard, "source", where, issues)
         planted_turn = _expect_int(hazard, "planted_turn", where, issues, minimum=1)
-        if fixture is not None and planted_turn is not None and n_turns is not None:
-            if planted_turn > n_turns:
-                issues.append(
-                    f"{where}.planted_turn: {planted_turn} > {n_turns} conversation turns"
-                )
+        if fixture is not None and planted_turn is not None:
+            turn = _safe_turn(fixture, planted_turn, where, issues)
+            if turn is None:
                 continue
-            content = fixture["conversation"][planted_turn - 1].get("content")
+            content = turn.get("content")
             if not isinstance(content, str):
                 issues.append(
                     f"{where}.quote: fixture turn {planted_turn - 1} content is not a "
@@ -369,7 +406,7 @@ def _validate_hazards(gold: dict, fixture: dict | None, issues: list[str]) -> No
             # Attribution hazards quote content spoken by the named human
             # operator (user role) — an assistant-spoken line must not carry a
             # human ``source`` (the trap is misattributing WHO said it).
-            if fixture["conversation"][planted_turn - 1].get("role") != "user":
+            if turn.get("role") != "user":
                 issues.append(
                     f"{where}.source: quoted turn {planted_turn - 1} is an assistant "
                     f"turn — hazard sources must be user-spoken lines of the named "
@@ -383,7 +420,7 @@ def _validate_salient_units(gold: dict, issues: list[str]) -> None:
     if not isinstance(salient, list) or not salient:
         issues.append("gold.salient_units: expected a non-empty list (the graded set)")
         return
-    planted_ids = {u.get("id") for u in units} if isinstance(units, list) else set()
+    planted_ids = {u.get("id") for u in units if isinstance(u, dict)} if isinstance(units, list) else set()
     planted_anchor_by_id = {
         u.get("id"): u.get("verbatim_anchor")
         for u in units
@@ -724,6 +761,13 @@ def bless_baseline(previous: dict, run: dict, *, justification: str) -> dict:
         raise ValueError(
             "publishing a baseline requires a non-null judge_pin "
             "(the pinned judge prompt version)"
+        )
+    run_metric_issues: list[str] = []
+    _validate_metric_values(run["metrics"], "run.metrics", run_metric_issues)
+    if run_metric_issues:
+        raise ValueError(
+            "cannot bless: run metrics are not valid published values — "
+            + "; ".join(run_metric_issues)
         )
     previous_metrics = previous.get("metrics") or {}
     first_publish = not previous_metrics

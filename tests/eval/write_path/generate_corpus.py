@@ -79,10 +79,12 @@ def _unit(unit_id: str, kind: str, anchor: str, *, turn: int, notability: str = 
 
     ``anchor`` MUST be a verbatim fragment of ``turns[turn - 1].content``
     (case-insensitive, whitespace-normalized) — the generator verifies it.
-    ``accepts_rephrase_linked=False`` marks date/numeric-critical anchors that
-    must survive as the anchor-bearing point itself (a paraphrase would not
-    preserve the claim).  This is THIS corpus's claim-preservation carve-out on
-    the REPHRASE-link concept (borrowed from docs/epistemic-layer-eval-spec.md
+    ``accepts_rephrase_linked=False`` marks claim-critical anchors whose
+    paraphrase would not preserve the claim — commonly date/numeric-critical,
+    but also named-entity ownership, decisions, and root-cause statements
+    (see the sealed gold's false-flag mix).  This is THIS corpus's
+    claim-preservation carve-out on the
+    REPHRASE-link concept (borrowed from docs/epistemic-layer-eval-spec.md
     §P5 dedup-without-deletion); survival is graded at the POINT level (the
     research-brief/plan write-path unit assumption).
     """

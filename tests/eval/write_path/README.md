@@ -43,8 +43,8 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   verbatim_anchor, notability (high|medium|low), depth_bucket, planted_turn}`.
   `kind`/`notability` follow the Cat-35 vocabulary; `depth_bucket` is the
   third of the session the unit was planted in — **early|middle|late**
-  (research-grounded Cat-35 enumeration; the plan §4.3.2 "explicit" example
-  value is illustrative). The bucket is DERIVED from `planted_turn` vs
+  (research-grounded Cat-35 enumeration; the plan §4.3.2 note explains the
+  earlier-draft "explicit" value was illustrative, not an enum member). The bucket is DERIVED from `planted_turn` vs
   session length and coherence-checked by the validator.
 * `distractors` — true-but-routine content present in the session that must
   NOT surface as salient (leakage probes), each with a grounded `anchor` +
@@ -61,9 +61,10 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
   loopy-NAND "A1" adversarial test, and NOT page-level): `via_anchor` (the
   survival predicate = verbatim-anchor substring present in a surviving
   point), `accepts_rephrase_linked` (a REPHRASE-linked point counts as
-  survival; false for date/numeric-critical anchors whose paraphrase would
-  not preserve the claim — this corpus's claim-preservation carve-out on the
-  REPHRASE-link concept borrowed from `docs/epistemic-layer-eval-spec.md`
+  survival; false for any anchor whose paraphrase would not preserve the
+  claim — commonly date/numeric-critical, also named-entity ownership,
+  decisions, root-cause facts; this corpus's claim-preservation carve-out on
+  the REPHRASE-link concept borrowed from `docs/epistemic-layer-eval-spec.md`
   §P5 dedup-without-deletion), `provenance_required`, `ep_update_required`.
 * `distractor_leakage_tolerance: 1` — research-recommended ≤1/run (gbrain
   measured 1/86); supersedes the epic's literal "zero" wording.

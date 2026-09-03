@@ -603,12 +603,60 @@ def test_hazard_role_enforced_by_shared_validator() -> None:
 
 def test_validator_survives_malformed_fixture_turn_content() -> None:
     """The shared validator must report (never crash on) a malformed fixture
-    turn — e.g. non-string content or a non-dict turn."""
+    turn — non-string content, a non-dict turn, or a non-list conversation."""
     fixture = copy.deepcopy(corpus.load_fixture(COMMITTED_SESSIONS[0]))
     gold = copy.deepcopy(corpus.load_gold(COMMITTED_SESSIONS[0]))
-    fixture["conversation"][0]["content"] = 12345  # corrupted
+    fixture["conversation"][0]["content"] = 12345  # corrupted content
     issues = schema.validate_gold(gold, fixture=fixture)
     assert any("not a string" in issue for issue in issues), issues
+    # Non-dict turn (crashes a naive .get() cross-check) — corrupt a turn the
+    # gold actually references (turn 9: u_05/u_06 + h_01).
+    fixture = copy.deepcopy(corpus.load_fixture(COMMITTED_SESSIONS[0]))
+    fixture["conversation"][8] = "not-a-dict-turn"
+    issues = schema.validate_gold(gold, fixture=fixture)
+    assert any("not an object" in issue for issue in issues), issues
+    # Non-list conversation.
+    fixture = copy.deepcopy(corpus.load_fixture(COMMITTED_SESSIONS[0]))
+    fixture["conversation"] = "not-a-list"
+    issues = schema.validate_gold(gold, fixture=fixture)
+    assert any("not a non-empty list" in issue for issue in issues), issues
+    # Non-dict planted_units entry (crashes a naive id-set comprehension).
+    fixture = copy.deepcopy(corpus.load_fixture(COMMITTED_SESSIONS[0]))
+    bad_gold = copy.deepcopy(gold)
+    bad_gold["planted_units"][0] = "not-an-object"
+    issues = schema.validate_gold(bad_gold, fixture=fixture)
+    assert any("not an object" in issue for issue in issues), issues
+
+
+def test_bless_rejects_invalid_run_metrics() -> None:
+    """Run metrics entering the bless boundary are typed/ranged like committed
+    metrics — a non-numeric or out-of-range value cannot be blessed (it would
+    crash compare_run or bless an impossible target)."""
+    previous = _sample_published_baseline()
+
+    def _run_with(metrics) -> dict:
+        return {
+            "fixtures_hash": previous["fixtures_hash"],
+            "judge_pin": "judge-write-path-v1",
+            "config": previous["config"],
+            "date": "2026-09-12",
+            "metrics": metrics,
+            "failure_classes": [],
+        }
+
+    string_metric = _run_with({"salient_unit_survival_macro": "0.9"})
+    with pytest.raises(ValueError, match="run metrics are not valid"):
+        schema.bless_baseline(previous, string_metric, justification="string metric")
+    out_of_range = _run_with({"salient_unit_survival_macro": 1.7})
+    with pytest.raises(ValueError, match="run metrics are not valid"):
+        schema.bless_baseline(previous, out_of_range, justification="impossible target")
+    # First-publish path validates too.
+    pending = corpus.load_baseline()
+    leaky = _run_with({"distractor_leakage_per_run": 9})
+    leaky["fixtures_hash"] = pending["fixtures_hash"]
+    leaky["config"] = pending["config"]
+    with pytest.raises(ValueError, match="run metrics are not valid"):
+        schema.bless_baseline(pending, leaky, justification="over-tolerance leakage")
 
 
 def test_generator_rejects_out_of_range_planted_turns() -> None:

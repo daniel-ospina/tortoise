@@ -103,11 +103,13 @@ def verify_manifest(root: Path = WRITE_PATH_DIR) -> dict:
     """Verify a corpus ``_manifest.json`` against the on-disk files.
 
     Returns ``{"ok": bool, "missing": [...], "extra": [...], "mismatched": [...],
-    "fixtures_hash": str}``.  ``ok`` is True only when the manifest's per-file
-    sha256 entries cover exactly the fixture + gold files and every digest
-    matches.  A gold-only edit surfaces here as ``mismatched``/``extra`` —
-    the W2 pre-flight + E2E-2 negative gate (gold-only edit ⇒ mismatch ⇒
-    inconclusive, never a rubber-stamp).
+    "malformed": str | None, "fixtures_hash": str}``.  ``ok`` is True only
+    when the manifest's per-file sha256 entries cover exactly the fixture + gold
+    files and every digest matches.  A gold-only edit surfaces here as
+    ``mismatched``/``extra`` — the W2 pre-flight + E2E-2 negative gate
+    (gold-only edit ⇒ mismatch ⇒ inconclusive, never a rubber-stamp).
+    ``malformed`` is set (str) when the manifest document itself is not a
+    dict-shaped digest map — the gate reports it, never raises.
     """
     manifest = load_manifest(root)
     manifest_files = manifest.get("files")
