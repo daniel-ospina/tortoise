@@ -491,7 +491,13 @@ def test_bless_regression_requires_justification() -> None:
         "judge_pin": "judge-write-path-v1",
         "config": previous["config"],
         "date": "2026-09-12",
-        "metrics": {"salient_unit_survival_macro": 0.5},  # regression vs 0.83
+        "metrics": {
+            **previous["metrics"],
+            # Full vocabulary with macro REGRESSED (0.5 < 0.83 committed) —
+            # a partial-metrics bless is now its own error (missing graded
+            # dimensions can never be blessed away, review F3).
+            "salient_unit_survival_macro": 0.5,
+        },
         "failure_classes": ["triage misses on buried-signal transcripts"],
     }
     with pytest.raises(ValueError, match="requires a non-empty justification"):
@@ -634,6 +640,9 @@ def test_bless_rejects_invalid_run_metrics() -> None:
     crash compare_run or bless an impossible target)."""
     previous = _sample_published_baseline()
 
+    def _full() -> dict:
+        return dict(previous["metrics"])
+
     def _run_with(metrics) -> dict:
         return {
             "fixtures_hash": previous["fixtures_hash"],
@@ -644,19 +653,46 @@ def test_bless_rejects_invalid_run_metrics() -> None:
             "failure_classes": [],
         }
 
-    string_metric = _run_with({"salient_unit_survival_macro": "0.9"})
+    bad_string = _full(); bad_string["salient_unit_survival_macro"] = "0.9"
     with pytest.raises(ValueError, match="run metrics are not valid"):
-        schema.bless_baseline(previous, string_metric, justification="string metric")
-    out_of_range = _run_with({"salient_unit_survival_macro": 1.7})
+        schema.bless_baseline(previous, _run_with(bad_string), justification="string metric")
+    out_of_range = _full(); out_of_range["salient_unit_survival_macro"] = 1.7
     with pytest.raises(ValueError, match="run metrics are not valid"):
-        schema.bless_baseline(previous, out_of_range, justification="impossible target")
+        schema.bless_baseline(previous, _run_with(out_of_range), justification="impossible target")
     # First-publish path validates too.
     pending = corpus.load_baseline()
-    leaky = _run_with({"distractor_leakage_per_run": 9})
-    leaky["fixtures_hash"] = pending["fixtures_hash"]
-    leaky["config"] = pending["config"]
+    leaky = _full(); leaky["distractor_leakage_per_run"] = 9
     with pytest.raises(ValueError, match="run metrics are not valid"):
-        schema.bless_baseline(pending, leaky, justification="over-tolerance leakage")
+        schema.bless_baseline(pending, _run_with(leaky), justification="over-tolerance leakage")
+
+
+def test_bless_rejects_partial_metric_vocabulary() -> None:
+    """REVIEW-FIX (F3, code-review gate): a published baseline must snapshot
+    the FULL graded-metric vocabulary — a partial bless (a lane that failed
+    to produce metrics) would permanently drop that lane from the CI-gate
+    compare set, silently shrinking the graded surface over time (plan R8:
+    no gate degrades to rubber-stamp)."""
+    previous = _sample_published_baseline()
+    partial = {
+        "fixtures_hash": previous["fixtures_hash"],
+        "judge_pin": "judge-write-path-v1",
+        "config": previous["config"],
+        "date": "2026-09-12",
+        "metrics": {"salient_unit_survival_macro": 0.5},
+        "failure_classes": [],
+    }
+    with pytest.raises(ValueError, match="missing graded dimensions"):
+        schema.bless_baseline(
+            previous, partial, justification="partial lane bless"
+        )
+    # First-publish path also rejects partial snapshots.
+    pending = corpus.load_baseline()
+    partial["fixtures_hash"] = pending["fixtures_hash"]
+    partial["config"] = pending["config"]
+    with pytest.raises(ValueError, match="missing graded dimensions"):
+        schema.bless_baseline(
+            pending, partial, justification="partial first publish"
+        )
 
 
 def test_generator_rejects_out_of_range_planted_turns() -> None:
@@ -755,8 +791,11 @@ def test_generator_is_byte_idempotent() -> None:
     for rel, path in generate_corpus._iter_committed(COMMITTED):
         assert path.read_bytes() == fresh[rel], f"{rel} drifted from a fresh render"
     # While the committed baseline is still first-run-pending it must equal the
-    # deterministic render (post-publication it is legitimately blessed).
-    assert corpus.BASELINE_PATH.read_bytes() == fresh["baselines/main.json"]
+    # deterministic render (post-publication it is legitimately blessed by W2-b
+    # #2098 and no longer equals the fresh render — conditionalize, REVIEW-FIX
+    # F4, so this hermetic test survives the first real baseline publish).
+    if not (corpus.load_baseline().get("metrics") or {}):
+        assert corpus.BASELINE_PATH.read_bytes() == fresh["baselines/main.json"]
 
 
 def test_corpus_floors_hold() -> None:
@@ -812,3 +851,35 @@ def test_fixture_vs_gold_content_never_contains_answer_key_headers(tmp_path) -> 
         text = fixture.read_text()
         for key in anchor_vocab:
             assert f'"{key}"' not in text, f"{fixture.name} leaks answer-key vocabulary {key}"
+
+
+def test_verify_manifest_reports_non_object_document(tmp_path) -> None:
+    """REVIEW-FIX (F1, code-review gate): a corrupted ``_manifest.json`` that
+    parses to a NON-dict (e.g. ``[]`` from a botched merge) is REPORTED as
+    malformed — never a crash. ``verify_manifest``'s docstring promises the
+    gate reports, never raises."""
+    from tests.eval.write_path import corpus as corpus_mod
+
+    manifest_path = tmp_path / "_manifest.json"
+    manifest_path.write_text("[]\n")
+    verification = corpus_mod.verify_manifest(tmp_path)
+    assert not verification["ok"]
+    assert verification["malformed"], \
+        "non-object manifest document must set the malformed field"
+    assert "not an object" in verification["malformed"]
+
+
+def test_validate_gold_reports_non_object_fixture() -> None:
+    """REVIEW-FIX (F2, code-review gate): a gold↔fixture cross-check against a
+    fixture that parses to a NON-dict (corrupted fixture file) reports issues
+    — never crashes. The validators' list[str]-of-issues contract holds on
+    garbage documents, not just garbage fields inside dicts."""
+    from tests.eval.write_path import corpus as corpus_mod
+    import tests.eval.write_path.schema as schema_mod
+
+    gold = corpus_mod.load_gold(COMMITTED_SESSIONS[0])
+    issues = schema_mod.validate_gold(gold, fixture=["not", "a", "fixture"])
+    assert any("fixture" in i and "not an object" in i for i in issues), issues
+    # A non-dict fixture must not crash the depth-bucket / anchor cross-checks
+    # (they route through _safe_turn/_conversation_len — hardened).
+    assert isinstance(issues, list)

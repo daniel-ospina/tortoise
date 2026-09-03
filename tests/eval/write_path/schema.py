@@ -220,6 +220,12 @@ def _safe_turn(fixture: dict | None, planted_turn: int, where: str, issues: list
     """
     if fixture is None:
         return None
+    if not isinstance(fixture, dict):
+        issues.append(
+            f"{where}: fixture is not an object (got {type(fixture).__name__}) — "
+            "gold↔fixture cross-checks skipped"
+        )
+        return None
     conversation = fixture.get("conversation")
     if not isinstance(conversation, list) or not conversation:
         issues.append(
@@ -245,7 +251,7 @@ def _safe_turn(fixture: dict | None, planted_turn: int, where: str, issues: list
 
 def _conversation_len(fixture: dict | None) -> int | None:
     """Session length when the fixture's conversation is a list (else None)."""
-    if fixture is None:
+    if not isinstance(fixture, dict):
         return None
     conversation = fixture.get("conversation")
     return len(conversation) if isinstance(conversation, list) else None
@@ -490,6 +496,12 @@ def validate_gold(gold: dict, fixture: dict | None = None) -> list[str]:
     """
     issues: list[str] = []
     _require_mapping(gold, "gold", issues)
+    if not isinstance(fixture, dict) and fixture is not None:
+        issues.append(
+            "fixture: not an object (got "
+            f"{type(fixture).__name__}) — gold↔fixture cross-checks skipped"
+        )
+        fixture = None  # downgrade to gold-only validation (never crash)
     if not issues:
         _reject_unknown_keys(
             gold,
@@ -802,6 +814,23 @@ def bless_baseline(previous: dict, run: dict, *, justification: str) -> dict:
                 f"(config or fixtures_hash mismatch) — re-run on the frozen corpus "
                 f"with the resolved config before blessing"
             )
+    # REVIEW-FIX (F3, code-review gate): a published baseline must carry the
+    # FULL graded-metric vocabulary — a partial bless (a lane that failed to
+    # produce metrics) would permanently drop that lane from the CI-gate
+    # compare set (compare_run gates only on committed keys), silently
+    # shrinking the graded surface over time (plan R8: no gate degrades to
+    # rubber-stamp). A run that under-reports a seam must be fixed, not
+    # blessed away with a justification string. Checked AFTER the drift/
+    # inconclusive guards (a mismatched-corpus run is rejected on that ground
+    # first, regardless of metric completeness).
+    missing_metrics = sorted(METRIC_VALUES - set(run["metrics"]))
+    if missing_metrics:
+        raise ValueError(
+            "cannot bless: run metrics are missing graded dimensions "
+            f"{missing_metrics} — a published baseline must snapshot the full "
+            f"{len(METRIC_VALUES)}-metric vocabulary (partial bless would "
+            "silently drop the lane from the CI regression gate)"
+        )
     history_entry = {
         "date": run["date"],
         "values": run["metrics"],

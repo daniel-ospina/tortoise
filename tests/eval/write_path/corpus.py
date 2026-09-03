@@ -112,6 +112,17 @@ def verify_manifest(root: Path = WRITE_PATH_DIR) -> dict:
     dict-shaped digest map — the gate reports it, never raises.
     """
     manifest = load_manifest(root)
+    if not isinstance(manifest, dict):
+        return {
+            "ok": False,
+            "missing": [],
+            "extra": [],
+            "mismatched": [],
+            "malformed": (
+                "manifest document is not an object "
+                f"(got {type(manifest).__name__}) — gate reports, never raises"),
+            "fixtures_hash": compute_fixtures_hash(root),
+        }
     manifest_files = manifest.get("files")
     if not isinstance(manifest_files, dict):
         return {
