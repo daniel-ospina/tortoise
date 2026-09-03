@@ -643,19 +643,33 @@ jobs:
           node-version: '22'
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
+      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
+      # clock starts — a fresh runner's npx fetch was eating most of the 120s
+      # boot budget (first CI run died here with an empty log). --version is
+      # fast; the readiness loops below now retry twice at 240s each.
+      - name: Pre-warm wrangler toolchain
+        run: |
+          npx --yes wrangler@4 --version
+          npx --yes wrangler@4 pages dev --help >/dev/null
       - name: Start wrangler pages dev preview (website/ = auth origin, :8788)
         run: |
           cd website
-          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
-            --compatibility-date=2024-09-23 \
-            > /tmp/wrangler-auth.log 2>&1 &
-          echo $! > /tmp/wrangler-auth.pid
-          for i in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-              echo "wrangler (auth) ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
+          for attempt in 1 2; do
+            npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 \
+              > /tmp/wrangler-auth.log 2>&1 &
+            echo $! > /tmp/wrangler-auth.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+                echo "wrangler (auth) ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler-auth.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8788' 2>/dev/null || true
+            sleep 3
           done
           echo "::error::wrangler (auth) dev server failed to start"
           tail -50 /tmp/wrangler-auth.log || true
@@ -663,16 +677,22 @@ jobs:
       - name: Start wrangler pages dev preview (dashboard dist = app origin, :8790)
         run: |
           cd website/apps/dashboard
-          npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
-            --compatibility-date=2024-09-23 \
-            > /tmp/wrangler-dash.log 2>&1 &
-          echo $! > /tmp/wrangler-dash.pid
-          for i in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
-              echo "wrangler (dashboard) ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
+          for attempt in 1 2; do
+            npx --yes wrangler@4 pages dev dist --port 8790 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 \
+              > /tmp/wrangler-dash.log 2>&1 &
+            echo $! > /tmp/wrangler-dash.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8790/ >/dev/null 2>&1; then
+                echo "wrangler (dashboard) ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler-dash.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8790' 2>/dev/null || true
+            sleep 3
           done
           echo "::error::wrangler (dashboard) dev server failed to start"
           tail -50 /tmp/wrangler-dash.log || true
