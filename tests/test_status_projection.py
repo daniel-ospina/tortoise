@@ -142,6 +142,98 @@ class TestProjectionFold:
         finally:
             sdk.close()
 
+    def test_rebuild_all_restores_object_superseded_fold(self, tmp_path):
+        """#2164 pass-1b rebuild parity: a journaled ObjectSuperseded (C2
+        kwargs shape — id + name + supersedes_by riding the JSONL envelope) is
+        REPLAYED by rebuild_all, not just folded live by apply().
+
+        Pre-fix the rebuild pass-1b elif chain (projection/__init__.py ~:1351)
+        dispatched ObjectSuperseded in apply() but had NO rebuild branch — the
+        journaled event silently fell through and the Object reverted to
+        status='live' on JSONL wipe+rebuild. (The older
+        test_rebuild_replays_object_superseded is MISLABELED: it calls
+        proj.apply() directly and never exercises rebuild_all — this test
+        journals real events and replays them.)
+
+        Rebuild-only shape note (M1): the fold target must EXIST at replay, so
+        ObjectRegistered is journaled FIRST. That is an EventAPI-style
+        journaled producer (ObjectRegistered IS journaled there). SDK
+        capture-created Objects are NOT journaled as ObjectRegistered
+        (pre-existing — sdk.py _create_entity journals EventRecorded for
+        Events only) — capture folds stay live-graph-only until the separate
+        OD2 journaling issue lands; this test journals ObjectRegistered
+        directly to make the replay coherent.
+        """
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t2164a.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            sdk.create_entity("object", "strategy-A",
+                              objectKind="core:strategy")
+            # hosted_api §6b resolves the canonical id from the graph before
+            # emitting — mirror that here.
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.id",
+                params={"n": "strategy-A"}).result_set
+            oid = rows[0][0]
+            # Journal the fold-target registration FIRST — rebuild replays in
+            # journal order, so the Object must exist when ObjectSuperseded
+            # folds (a MATCH with no rows is a silent no-op).
+            sdk._emit_event("ObjectRegistered", id=oid, name="strategy-A",
+                            objectKind="core:strategy")
+            # C2 kwargs shape: extra kwargs ride the JSONL envelope
+            # (event.update(extra)) so supersededBy survives the replay.
+            sdk._emit_event("ObjectSuperseded", id=oid, name="strategy-A",
+                            supersedes_by="strategy-B")
+            sdk._get_proj().rebuild_all(str(events))
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                params={"n": "strategy-A"}).result_set
+            assert rows, "journaled ObjectRegistered must recreate the target"
+            assert rows[0][0] == "superseded", "status reverted to live on replay"
+            assert rows[0][1] == "strategy-B", "supersededBy lost on replay"
+        finally:
+            sdk.close()
+
+    def test_rebuild_all_legacy_6b_id_only_shape_supersedes(self, tmp_path):
+        """#2164 legacy §6b id-only shape: hosted_api §6b currently passes the
+        payload dict POSITIONALLY to _emit_event (GraphEvent-store only) with
+        just id= as the JSONL kwarg — name/supersedes_by never reach the
+        journal, so a rebuild replay folds with supersededBy='' (the
+        documented interim until producers move to the C2 kwargs shape). The
+        status flip must still survive rebuild_all."""
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t2164b.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            sdk.create_entity("object", "strategy-C",
+                              objectKind="core:strategy")
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.id",
+                params={"n": "strategy-C"}).result_set
+            oid = rows[0][0]
+            sdk._emit_event("ObjectRegistered", id=oid, name="strategy-C",
+                            objectKind="core:strategy")
+            # Verbatim §6b emission shape: positional payload (GraphEvent
+            # store) + id kwarg (JSONL). The JSONL line carries type+id only.
+            sdk._emit_event(
+                "ObjectSuperseded",
+                {"id": oid, "name": "strategy-C",
+                 "supersedes_by": "strategy-D", "evidence": ""},
+                id=oid,
+            )
+            sdk._get_proj().rebuild_all(str(events))
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                params={"n": "strategy-C"}).result_set
+            assert rows and rows[0][0] == "superseded", \
+                "id-only ObjectSuperseded must still flip status on replay"
+            assert rows[0][1] == "", "legacy shape must fold supersededBy=''"
+        finally:
+            sdk.close()
+
     def test_clobber_guard_second_mention_keeps_superseded(self):
         sdk = _fresh_sdk()
         try:

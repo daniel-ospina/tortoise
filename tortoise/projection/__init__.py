@@ -1350,6 +1350,14 @@ class FalkorProjection(
                 self._upsert_subject(ev)
             elif t == "ObjectRegistered":
                 self._upsert_object(ev)
+            elif t == "ObjectSuperseded":
+                # #2164 pass-1b rebuild parity: apply() folds ObjectSuperseded
+                # into Object.status, but the rebuild chain had no branch — a
+                # journaled ObjectSuperseded silently fell through and the
+                # Object reverted to status='live' on JSONL wipe+rebuild.
+                # Mirror the apply() dispatch (replay is the fold's source of
+                # truth: a replayed event re-applies the same idempotent SET).
+                self._fold_object_superseded(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
             elif t == "SourceCreated":
