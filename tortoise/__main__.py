@@ -523,6 +523,20 @@ def _cmd_init(args):
             _proj = FalkorProjection(db_path)
             _proj.g.query("RETURN 1")
             print(f"  ✅ Embedded mode initialized at {db_path} (single-writer, eval only — docker compose for durable multi-writer)")
+            # #2200: a URI-less run that lands on the canonical embedded
+            # default is a SILENT fallback onto the eval-only engine — gate
+            # it loudly (stderr, EMBEDDED_EVAL_BANNER precedent #942) instead
+            # of proceeding as if a durable system came up. Explicit embedded
+            # choices (--path / TORTOISE_DB_PATH) keep the eval-only label on
+            # the success line but are not this fallback.
+            if (_is_embedded_default_fallback(db_path, getattr(args, "path", None))
+                    and getattr(args, "from_onboard", False) is not True):
+                # #2200: the standalone gate is suppressed when _cmd_onboard
+                # runs init in-process (from_onboard=True) — the wizard's
+                # completion gate prints the notice once, next to
+                # "Onboarding complete."
+                from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
+                print(EMBEDDED_FALLBACK_NOTICE, file=sys.stderr)
             graph_ready = True
         except ImportError:
             # Reachable when falkordblite is actually missing: tortoise/__init__
@@ -2707,6 +2721,44 @@ def _projection_for(target: str):
     return FalkorProjection(path=target)
 
 
+def _is_embedded_default_fallback(target: str,
+                                  explicit_path: str | None,
+                                  db_path_env_set: bool | None = None) -> bool:
+    """True when a resolved target is the UNCHOSEN canonical embedded default.
+
+    #2200: the silent-default case — TORTOISE_DB_URI unset and no explicit
+    --path / TORTOISE_DB_PATH, so init/onboard land on embedded FalkorDBLite
+    (single-writer, eval only) without the user picking it. Explicit embedded
+    choices (--path, TORTOISE_DB_PATH, or a set TORTOISE_DB_URI — including
+    the legacy file-path form resolve_db_path treats as embedded) are labeled
+    eval-only by init's success line but are NOT this fallback — the user
+    chose them (quickstart Option C).
+
+    db_path_env_set: pass a SNAPSHOT taken before init ran. init's embedded
+    branch records the resolved path with os.environ.setdefault(...) (#715
+    conf 60), so an onboard completion gate reading the LIVE env after init
+    would see the var as set and misjudge a default fallback as an explicit
+    choice (the completion gate would never fire on a real run). None = read
+    the live env — the _cmd_init call site, where the gate runs BEFORE that
+    setdefault. Do not drift.
+    """
+    import os  # noqa: I001
+    from tortoise.config import is_db_uri
+
+    if is_db_uri(target):
+        return False
+    if explicit_path:
+        return False
+    # A SET TORTOISE_DB_URI is an explicit choice even when it carries no
+    # supported scheme (resolve_db_path treats an absolute file path there as
+    # embedded, backward compat) — "TORTOISE_DB_URI is unset" would be a lie.
+    if (os.environ.get("TORTOISE_DB_URI") or "").strip():
+        return False
+    if db_path_env_set is None:
+        db_path_env_set = bool((os.environ.get("TORTOISE_DB_PATH") or "").strip())
+    return not db_path_env_set
+
+
 def _cmd_onboard(args) -> int:
     """Guided onboarding: init → index → demo → doctor.
 
@@ -2714,6 +2766,7 @@ def _cmd_onboard(args) -> int:
     Non-interactive — skips prompts, just runs.
     Idempotent — re-running skips already-done steps.
     """
+    import os as _os
     import subprocess as _sp
     import sys as _sys
     from pathlib import Path
@@ -2741,9 +2794,19 @@ def _cmd_onboard(args) -> int:
     # #715 P2 conf 70: no_index=True disables init's own background
     # auto-index — onboard indexes ONCE, inline in step 3 below. Without it
     # a git repo gets indexed twice (init spawn + inline run).
+    # #2200: snapshot whether TORTOISE_DB_PATH was set BEFORE init runs —
+    # init's embedded branch records the resolved path via
+    # os.environ.setdefault(TORTOISE_DB_PATH), which would make the live env
+    # look user-chosen by the time the completion gate below reads it. The
+    # completion gate must distinguish a genuine default fallback (URI
+    # unset, nothing chosen) from an explicit embedded choice (Option C;
+    # --path is handled by the helper's explicit_path argument).
+    embedded_db_path_env_set = bool(
+        (_os.environ.get("TORTOISE_DB_PATH") or "").strip())
     banner("Initialize graph")
     rc = _cmd_init(argparse.Namespace(
-        path=getattr(args, 'path', None), yes=True, no_index=True))
+        path=getattr(args, 'path', None), yes=True, no_index=True,
+        from_onboard=True))
     if rc != 0:
         print("  ❌ Init failed")
         return rc
@@ -2819,6 +2882,17 @@ def _cmd_onboard(args) -> int:
 
     print(f"\n{'='*50}")
     print("Onboarding complete.")
+    # #2200: a no-Docker wizard run that defaulted onto the canonical
+    # embedded path must never read as a durable setup — gate the completion
+    # the same way init gates the fallback (the eval-only engine is a
+    # clearly-labeled fallback, never the silent default). Explicit embedded
+    # choices keep init's eval-only success label; no extra gate here.
+    if _is_embedded_default_fallback(
+            db_target, getattr(args, "path", None),
+            db_path_env_set=embedded_db_path_env_set):
+        from tortoise._embedded import EMBEDDED_FALLBACK_NOTICE
+        print()
+        print(EMBEDDED_FALLBACK_NOTICE)
     print()
     print("Tortoise is ready. Agents can now:")
     print("  • Query the graph via tortoise_suggest_entry_points()")

@@ -214,6 +214,182 @@ class TestCliOnboardDbTarget:
         assert "Embedded mode initialized" in out
         assert "single-writer, eval only" in out
 
+    def test_init_embedded_default_prints_fallback_notice(self, monkeypatch, capsys, tmp_path):
+        """#2200: with TORTOISE_DB_URI unset and no explicit --path /
+        TORTOISE_DB_PATH, `tortoise init` lands on the canonical embedded
+        default — it must print the embedded-fallback notice (eval-only
+        fallback; supported path = docker compose up -d, quickstart Option A)
+        instead of silently defaulting onto the eval-only engine."""
+        # Point the canonical default at tmp so the run never touches a real
+        # ~/.tortoise DB (DEFAULT_DB_PATH is resolved at call time).
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Embedded mode initialized" in out
+        # The #2200 fallback gate — wording pinned by the shared constant.
+        assert "Embedded engine active" in out
+        assert "eval-only fallback" in out
+        assert "docker compose up -d" in out
+        assert "quickstart-selfhosted Option A" in out
+        # The init gate is stderr-only (stdout carries the machine-readable
+        # init report; #942 EMBEDDED_EVAL_BANNER precedent).
+        assert "Embedded engine active" in captured.err
+        assert "Embedded engine active" not in captured.out
+
+    def test_init_embedded_no_fallback_notice_when_uri_set_as_path(self, monkeypatch, capsys, tmp_path):
+        """#2200 negative: a SET TORTOISE_DB_URI is an explicit choice even
+        when it carries no supported scheme — resolve_db_path treats an
+        absolute file path there as the embedded DB (backward compat), so the
+        run honors a user-configured target: no 'TORTOISE_DB_URI is unset'
+        fallback notice (that sentence would be a lie on this path)."""
+        chosen = str(tmp_path / "via-uri.db")
+        monkeypatch.setenv("TORTOISE_DB_URI", chosen)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Embedded mode initialized" in out
+        assert "Embedded engine active" not in out  # explicit choice — no gate
+
+    def test_init_explicit_embedded_path_no_fallback_notice(self, monkeypatch, capsys, tmp_path):
+        """#2200 negative: an EXPLICIT embedded choice (TORTOISE_DB_PATH)
+        keeps init's eval-only success label but does not fire the fallback
+        gate — the user chose the embedded engine (quickstart Option C)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "init.db"))
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Embedded mode initialized" in out
+        assert "Embedded engine active" not in out  # no fallback gate — explicit choice
+
+    def test_onboard_completion_gates_embedded_default(self, tmp_path, monkeypatch, capsys):
+        """#2200: the `tortoise onboard` wizard completion must gate the
+        canonical embedded default too — a no-Docker run never reaches
+        'Onboarding complete.' reading as a durable setup. (index finds no
+        git repo / no markdown in tmp_path, so only init+doctor run.)
+
+        The init stub mirrors production's side effect: init's embedded
+        branch RECORDS the resolved path via os.environ.setdefault
+        (TORTOISE_DB_PATH) after gating (#715 conf 60) — the completion gate
+        must still fire (it snapshots the user's explicit choice before
+        init runs), or a real no-Docker onboard would never carry the gate.
+        """
+        import os as _os
+
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        def fake_init(args):
+            # Production _cmd_init embedded side effect: record the resolved
+            # path in the env AFTER its own gate (setdefault is a no-op if
+            # the user already chose a TORTOISE_DB_PATH).
+            _os.environ.setdefault("TORTOISE_DB_PATH", default_db)
+            seen["init_ns"] = args
+            return 0
+
+        seen: dict = {}
+        with mock.patch.object(m, "_cmd_init", side_effect=fake_init), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 1  # not a git repo
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Onboarding complete." in out
+        # init was invoked with the wizard's in-process marker so its own gate
+        # stays silent (the completion gate below is the ONE loud gate).
+        assert getattr(seen["init_ns"], "from_onboard", False) is True
+        # Wizard completion carries the fallback gate (never a silent durable
+        # claim on the eval-only engine) even after init recorded the path.
+        assert "Embedded engine active" in out
+        assert "eval-only fallback" in out
+        assert "docker compose up -d" in out
+        assert "quickstart-selfhosted Option A" in out
+
+    def test_onboard_real_init_prints_fallback_notice_once(self, tmp_path, monkeypatch, capsys):
+        """#2200: a REAL no-Docker onboard run (production path — init is NOT
+        stubbed) prints the fallback notice exactly ONCE. init's in-process
+        gate is suppressed (from_onboard=True), so the wizard's completion
+        gate next to 'Onboarding complete.' is the single loud gate — never a
+        duplicated wall of text mid-flow (review F2)."""
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        with mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 1  # not a git repo
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        captured = capsys.readouterr()
+        out = captured.out + captured.err
+        assert rc == 0
+        assert "Onboarding complete." in out
+        assert out.count("Embedded engine active") == 1
+        assert "Embedded engine active" in captured.out  # completion gate
+        assert "Embedded engine active" not in captured.err  # init gate suppressed
+
+    def test_onboard_completion_skips_gate_when_db_path_user_set(self, tmp_path, monkeypatch, capsys):
+        """#2200 negative: a user who EXPLICITLY set TORTOISE_DB_PATH before
+        onboard (quickstart Option C embedded) keeps init's eval-only success
+        label but never sees the completion fallback gate — they chose the
+        embedded engine. Covers the env-snapshot branch of the gate."""
+        import tortoise.config as cfg
+        default_db = str(tmp_path / "default.db")
+        monkeypatch.setattr(cfg, "DEFAULT_DB_PATH", default_db)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "chosen.db"))
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 1  # not a git repo
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Onboarding complete." in out
+        assert "Embedded engine active" not in out  # explicit choice — no gate
+
     def test_falkordb_env_honored_as_docker_uri(self, monkeypatch, capsys):
         """#715 P2 conf 55: legacy FALKORDB_* trio (still in .env.example,
         still probed by doctor) set without TORTOISE_DB_URI must be HONORED
