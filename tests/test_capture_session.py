@@ -3014,7 +3014,9 @@ def test_session_capture_tool_registered_and_invokeable(tmp_path, monkeypatch):
             conversation=_CONV, harness="claude", session_id="s-mcp-1727")
         st = _ha._get_onboarding_state("team-1727-mcp")
     assert result.get("session_id") == "s-mcp-1727", result
-    assert "error" not in result, result
+    # W5 (#2104): the memory_write_v1 envelope ALWAYS carries an error key
+    # (None on success) — assert the null value, not key absence.
+    assert not result.get("error"), result
     assert result.get("turns") == len(_CONV)
     assert st.get("session_capture_receipt_claude"), \
         "MCP capture must set the per-harness receipt"
@@ -3031,7 +3033,9 @@ def test_session_capture_tool_fresh_team_captures(tmp_path, monkeypatch):
         st = _ha._get_onboarding_state("team-1727-mcp")
     assert st.get("session_recording") is True, "read-time default must be ON"
     assert result.get("session_id") == "s-mcp-1927-default", result
-    assert "error" not in result, result
+    # W5 (#2104): memory_write_v1 envelope always carries error (None on
+    # success) — assert the null value, not key absence.
+    assert not result.get("error"), result
     assert result.get("turns") == len(_CONV)
     assert st.get("session_capture_receipt_claude"), \
         "MCP capture must set the per-harness receipt"
