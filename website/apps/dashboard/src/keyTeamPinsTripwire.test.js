@@ -30,22 +30,26 @@ function writeFnBody(name) {
   return mainJsx.slice(start, end)
 }
 
-test('#2230: whole-file sentinel — NO session-mode key write URL anywhere may drop the pin', () => {
-  // Second layer over the per-site checks below: a FUTURE fourth key-write
-  // function (revoke/rename/toggle were added after #2167's pins without
-  // pins — exactly how #2230 regressed) with an unpinned URL must fail
-  // loudly here and force a deliberate WRITE_FNS extension, not pass
-  // silently. Covers both shapes: id-scoped writes `/v1/team/keys/${id}${q}`
-  // and the two create mints `/v1/team/keys${q}` (mintKey + wizardMint-
-  // DurableKey — no other tripwire guards their ${q}; mintTripwire only
-  // pins mintSessionKey removal). No bare `/v1/team/keys` list-literal
-  // exists to collide with the count.
-  const unpinned = mainJsx.match(/\/v1\/team\/keys\/\$\{[^}]+\}(?!\$\{q\})/g) || []
-  assert.deepEqual(unpinned, [],
-    `every key-management write URL must append the ?team_id= pin (\${q}): ${unpinned}`)
-  const createPins = mainJsx.match(/\/v1\/team\/keys\$\{q\}/g) || []
-  assert.equal(createPins.length, 2,
-    `both create-mint URLs must keep the \${q} pin (mintKey + wizardMintDurableKey), got ${createPins.length}`)
+test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps its ?team_id= pin', () => {
+  // Second layer over the per-site checks below: a FUTURE key-management
+  // write (revoke/rename/toggle were added after #2167's pins without pins —
+  // exactly how #2230 regressed) or a new mint/list path with an unpinned
+  // URL must fail loudly here and force a deliberate WRITE_FNS extension,
+  // not pass silently. Rule: every backtick template-literal URL that
+  // references /v1/team/keys must END in `${q}` — either the bare form
+  // `/v1/team/keys${q}` (mintKey's POST create at L937 + loadAll's GET list
+  // at L3213; wizardMintDurableKey delegates to mintKey, so it is covered
+  // transitively) or the id-scoped `/v1/team/keys/${id}${q}` (the three
+  // writes). Comments mentioning the endpoint (no backtick) are exempt.
+  const keyUrls = [...mainJsx.matchAll(/`(\/v1\/team\/keys[^`]*)`/g)]
+    .map((m) => m[1])
+    .filter((u) => u.startsWith('/v1/team/keys'))
+  assert.ok(keyUrls.length >= 5,
+    `expected the 5 known key URLs (2 mint/list + 3 writes), got ${keyUrls.length}: ${keyUrls}`)
+  for (const u of keyUrls) {
+    assert.match(u, /^\/v1\/team\/keys(?:\/\$\{[^}]+\})?\$\{q\}$/,
+      `unpinned key-management URL (missing the \${q} pin): ${u}`)
+  }
 })
 
 test('#2230: each key-management write (revoke/rename/toggle) pins ?team_id= on its URL', () => {
