@@ -831,6 +831,80 @@ def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> 
     expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Healthy Co", timeout=10_000)
 
 
+def test_stored_durable_on_suspended_team_lands_healthy_alternate(page: Page) -> None:
+    """#2167 rule 5d (PR #2232 reviewer P2): a stored DURABLE whose own team
+    is SUSPENDED probes 403-dict, but a multi-membership user with a HEALTHY
+    alternate team must land on the healthy team — never the blocking
+    suspension card (the pre-change probe failure fell through to a mint for
+    the first selectable team). The suspended team's recoverable durable is
+    KEPT in the slot."""
+    import time as _time
+    import urllib.parse as _up
+    user_id = "u-5d-alt"
+    held_key = "tt_susal_abcdef0123456789"
+    mint_calls: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "susalt@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{held_key}');")
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if path.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([
+                                  {"team_id": "team_sus", "name": "Suspended Co",
+                                   "suspended_at": "2026-09-01T00:00:00Z"},
+                                  {"team_id": "team_ok", "name": "Healthy Co", "tier": "free"},
+                              ]))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                auth = (route.request.headers.get("authorization") or "")
+                if auth.startswith("Bearer tt_"):
+                    # the stored durable's own team is suspended → 403 dict
+                    route.fulfill(status=403, content_type="application/json",
+                                  body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                                "message": "Suspended for review",
+                                                                "appeal_url": "https://premise-labs.dev/appeal"}}))
+                    return
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"team_id": "team_ok", "team_name": "Healthy Co",
+                                               "tier": "free", "anon": False, "graph_ready": True,
+                                               "point_count": 1}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    # the HEALTHY alternate renders — chrome up, no suspension card
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    expect(page.locator("body")).not_to_contain_text("Suspended for review")
+    expect(page.locator("body")).not_to_contain_text("Appeal the suspension")
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Healthy Co", timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    # 5d: the suspended team's recoverable durable is KEPT in the slot
+    slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
+    assert slot == held_key, f"5d must retain the suspended team's durable, got {slot!r}"
+
+
 def test_logout_redirects_to_auth(page: Page) -> None:
     """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
     /auth — the key-only card is gone, so sign-out must land on the login

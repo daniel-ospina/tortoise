@@ -2664,14 +2664,29 @@ function claimIntentInFlight() {
           } else if (decision.action === 'keep-suspended') {
             // 5d: the KEY lane returns 403 {detail:{code:'SUSPENDED',…}} on
             // a suspended team (hosted_api.py L1620-1623) — the stored
-            // durable is recoverable, so it is KEPT (slot untouched); render
-            // the suspension path (blocking error card + appeal CTA,
-            // pre-change parity with the mint-403 leg).
-            setSuspended(decision.detail)
-            setMountError((decision.detail && (decision.detail.message || 'Organization suspended')) || 'Organization suspended')
-            setAuthed(false)  // #1567 P0: the error card renders in !authed
-            setChecking(false)
-            return
+            // durable is recoverable, so it is KEPT (slot untouched). The
+            // blocking error card + appeal CTA renders ONLY when every
+            // membership is suspended AND the selection did not move
+            // mid-probe (the F8 probe case — pre-change parity: the old
+            // mint-403 leg blocked the same way). A healthy alternate
+            // membership (or a mid-probe switch) falls through to the
+            // session-only tail — the #1912 pin below lands the first
+            // HEALTHY team and completeLogin renders it, so a stored
+            // durable on a suspended team never traps a multi-membership
+            // user with a healthy team (the pre-change probe failure fell
+            // through to a mint for the first selectable team — reviewer
+            // P2, PR #2232). The suspension then surfaces via the session
+            // reads when that team is selected.
+            const allSuspended = !teamsList.some((t) => !t.suspended_at)
+            if (allSuspended && teamIdRef.current === teamAtProbe) {
+              setSuspended(decision.detail)
+              setMountError((decision.detail && (decision.detail.message || 'Organization suspended')) || 'Organization suspended')
+              setAuthed(false)  // #1567 P0: the error card renders in !authed
+              setChecking(false)
+              return
+            }
+            // fall through — session-only (key null); slot retained for the
+            // next mount, exactly like the 5e/5f keep legs
           }
           // 5e (network/5xx/429/408/425 transient) + 5f (200 but the key's
           // team is no longer a membership): keep-session-only — slot
@@ -3488,7 +3503,6 @@ function claimIntentInFlight() {
     // requested team as current for staleness guards.
     setCapNotice('') // #1147: a cap banner from the previous team must not stick
     const prevTeamId = currentTeamId
-    const prevKey = apiKey
     const tok = sessionTokenRef.current
     if (!tok) return // Round-3: guard BEFORE wiping state — logout→apikey
                      // login must not blank the dashboard on a stale pick
@@ -3599,14 +3613,18 @@ function claimIntentInFlight() {
       if (teamIdRef.current === teamId) {
         // #2167 (revert re-frame): a failed switch never mints and never
         // blocks. Re-attach the PREVIOUS team's durable when one is really
-        // held — teamKeysRef is durable-only by construction (the cache can
-        // never hold a bootstrap); the prevKey fallback covers the brief
-        // 5b-adopt provisional window (adopted, not yet promoted by the
-        // first keys landing). Otherwise revert session-only. The slot is
+        // held — teamKeysRef is durable-only by construction (the 5b-adopt is
+        // provisional and the loadAll classification promotes durable rows
+        // only), so the cache is the ONLY re-attach source. The pre-switch
+        // apiKey (prevKey) is deliberately NOT a fallback: it cannot be
+        // row-truth-verified here (the previous team's rows were cleared at
+        // the switch top), and re-attaching an unverifiable key would reopen
+        // the rule-3/revert bootstrap class this change removes. The slot is
         // never rewritten by a switch, so the revert leaves it untouched — a
         // falsy value must never land in localStorage over a valid stored
-        // key.
-        const restoreKey = (prevTeamId && teamKeysRef.current[prevTeamId]) || prevKey
+        // key. A failed switch in the brief adopt-before-promotion window
+        // reverts session-only; the next reload re-probes the slot.
+        const restoreKey = (prevTeamId && teamKeysRef.current[prevTeamId]) || ''
         setApiKey(restoreKey || '')
         apiKeyRef.current = restoreKey || ''
         if (prevTeamId) {

@@ -703,6 +703,13 @@ def test_session_only_team_selection_does_not_survive_reload(page: Page) -> None
     assert "team_b" in team_reads, f"post-switch reads must pin team_b: {team_reads}"
     # reload: the session-only selection is NOT persisted — the mount lands
     # the first selectable membership (Alpha)
-    page.reload(wait_until="domcontentloaded", timeout=30_000)
+    reads_before_reload = len(team_reads)
+    with page.expect_response(lambda r: "/v1/team" in r.url and "team_id=team_a" in r.url,
+                              timeout=20000):
+        page.reload(wait_until="domcontentloaded", timeout=30_000)
     expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Alpha", timeout=20_000)
-    assert "team_a" in team_reads, f"reload reads must pin the first selectable team: {team_reads}"
+    # the reload added a NEW post-reload read pinned to team_a (a plain
+    # membership check on the pre-reload reads — which already contain team_a
+    # from the mount — could false-pass)
+    new_reads = team_reads[reads_before_reload:]
+    assert "team_a" in new_reads, f"reload must re-read the first selectable team: {team_reads}"
