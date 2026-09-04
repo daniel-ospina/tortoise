@@ -41,9 +41,10 @@ _SUPPORTED_URI_SCHEMES = {"docker", "redis", "rediss"}
 
 # The exact command allowlist — never widen without re-verifying key specs
 # (GRAPH.LIST registers firstkey=0 → key-pattern ACL never applies, #2652).
+# Denial is the -@all base the full-reset SETUSER composes (redis 8 adds
+# -@all when commands are granted with no category); never add an explicit
+# "deny" list here — a +prefixed entry would GRANT.
 _GRAPH_COMMANDS = ("+GRAPH.QUERY", "+GRAPH.RO_QUERY", "+PING")
-_GRAPH_DENY = ("+GRAPH.LIST", "+GRAPH.CONFIG", "+GRAPH.DEBUG", "+GRAPH.UDF",
-               "+KEYS", "+SCAN", "+@all", "+AUTH")
 
 
 class AclLayerError(RuntimeError):
