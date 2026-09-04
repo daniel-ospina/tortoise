@@ -233,6 +233,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check migration prefix invariants
         run: bash .github/scripts/check-migration-append-only prefix
+  # C8 #2117: the migration ROLLBACK DRILL — applies every migration on
+  # PGlite, runs the assertion suites, then proves the R18 reversibility
+  # round trip (apply → rollback → re-apply) for the multi-graph migration:
+  # drop graphs + the api_keys graph columns restores the pre-C1 shape, and
+  # re-applying migration 20260901000001 restores the invariants (verified
+  # by re-running its assertion suite). Runs whenever a migration changes.
+  schema-drill:
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: PGlite schema tests + rollback drill
+        run: |
+          cd supabase/tests/pglite
+          npm ci --no-audit --no-fund
+          npm run validate
   migration-append-only:
     needs: changes
     if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only

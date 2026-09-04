@@ -5,6 +5,7 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 ## Entity Types
 
 ### Team
+
 ```
 (:Team {
   id: string,              // ULID
@@ -29,6 +30,7 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 ```
 
 ### WebhookEvent (idempotency markers — #310)
+
 ```
 (:WebhookEvent {
   event_id: string,      // Stripe event.id — unique dedup key (SET-then-marker)
@@ -39,6 +41,7 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 ```
 
 ### Membership
+
 ```
 (:Membership {
   id: string,       // ULID
@@ -49,21 +52,77 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 })
 ```
 
+### Graph (epic #2083, C1/C2 — multi-graph tenancy)
+
+```
+(:Graph {
+  id: string,        // ULID (g_<hex>); the DEFAULT graph's id = the team's
+                     // derived default (registry: kind='default' node;
+                     // supabase: the literal 'default' — no graphs row,
+                     // derived from teams.graph_name)
+  team_id: string,   // references Team.id
+  name: string,      // display name (default graph: "default")
+  kind: string,      // "default" | "custom"
+  namespace: string, // FalkorDB tenant namespace (team_<name> for the
+                     // default; team_<name>_g<hex> for customs — the graph
+                     // SWITCHER/contexts ride this)
+  status: string,    // "active" | "deleted" (tombstone; list filters)
+  recording: boolean?,  // C6 #2115 session_recording override — true/false
+                     // = per-graph override; NULL = inherit the team default
+  created_at: datetime
+})
+```
+
+Default-graph semantics (the no-migration contract):
+
+- The default graph is **graph 0** — the team's pre-epic namespace. It is
+  DERIVED, never materialized into a tenant data store: supabase mode reads
+  `teams.graph_name`; registry mode has a `kind='default'` Graph node whose
+  namespace IS the team namespace. **No backfill, no data move.**
+- Existing (pre-epic) API keys have `graph_id` NULL and resolve to the
+  default graph — legacy keys keep working untouched (E2E-5 zero-action).
+- The default graph occupies quota slot 1 (`max_graphs_per_team`) and is
+  NOT deletable (delete_graph 403s; the UI locks the row).
+- Tenant namespaces carry their own `:Point`/graph data; only the registry
+  namespace holds `:Graph` control-plane rows.
+
 ### APIKey
+
 ```
 (:APIKey {
-  id: string,         // ULID
-  team_id: string,    // references Team.id
-  key_hash: string,   // SHA-256(pepper + key) — never plaintext
-  key_prefix: string, // first 8 chars for display
-  created_by: uuid,   // Supabase user who created it
+  id: string,              // ULID
+  team_id: string,         // references Team.id
+  graph_id: string?,       // C1: NULL = team-wide key → default graph;
+                           // set = bound to ONE custom graph (no per-graph
+                           // key exists for the default graph — graph-bound
+                           // mints 404 on kind='default' nodes)
+  scopes: string[],        // C1: FLAT allowlist ["graphs:read",
+                           // "graphs:write", "team:manage"]; [] = legacy
+                           // full-access class (see auth-architecture.md §6)
+  delegation_depth: integer?, // 0 = minted (deleg=0, cannot mint);
+                           // NULL = owner-minted
+  created_by_key_id: string?, // mint lineage (which key minted this one)
+  key_hash: string,        // SHA-256(pepper + key) — never plaintext
+  key_prefix: string,      // first 8 chars for display
+  created_by: uuid,        // Supabase user who created it
   created_at: datetime,
   last_used_at: datetime?,
   revoked_at: datetime?
 })
 ```
 
+Key-class derivation (resolution, D2 — all three lanes agree):
+
+- `legacy_full_access` ⇔ `delegation_depth IS NULL AND scopes = []` — the
+  pre-epic owner class (full team access, tt_ prefix).
+- `delegation_depth = 0` (minted child) can NEVER hold escalation scopes
+  (`graphs:create/delete`, `keys:manage`, `team:manage`) — DB CHECK
+  `chk_minted_key_no_escalation` + resolution both enforce (D1/D13).
+- A scoped deleg-NULL key with an EMPTY array is the same footgun the
+  shrink branch 422s: per-graph keys require ≥1 explicit scope.
+
 ### Invitation
+
 ```
 (:Invitation {
   id: string,        // ULID
@@ -79,16 +138,28 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 ```
 
 ## Relationships
+
 ```
 (:Membership) -[:BELONGS_TO]-> (:Team)
 (:APIKey) -[:BELONGS_TO]-> (:Team)
+(:APIKey) -[:SCOPED_TO]-> (:Graph)     // graph-bound keys (C1); team-wide keys
+                                       // (graph_id NULL) resolve to the default graph
 (:Invitation) -[:FOR_TEAM]-> (:Team)
+(:Graph) -[:BELONGS_TO]-> (:Team)      // every graph (default + custom)
 ```
+
+## Quota definition (epic #2083)
+
+`max_graphs_per_team` (Team.max_graphs) counts graph rows: the DEFAULT graph
+occupies slot 1; customs occupy the rest. Tier caps (product/pricing.json):
+free=1, solo=2, pro/team NULL (∞ — owner decision, Gate #2 2026-09-01). The
+create flow gates: 402 when the tier is in the blocked set (free/anon),
+409 when at cap (both modes; per-team lock serializes count-then-insert).
 
 ## Authorization Matrix
 
 | Operation | Free Owner | Pro Owner | Pro Admin |
-|-----------|-----------|-----------|-----------|
+| ----------- | ----------- | ----------- | ----------- |
 | Create/query Points | ✅ | ✅ | ✅ |
 | Create graphs | ❌ (max 1) | ✅ | ✅ |
 | Invite members | ❌ (max 1) | ✅ (max 2) | ❌ |

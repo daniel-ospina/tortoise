@@ -227,3 +227,61 @@ bounce helpers — loop-safety by construction across all three pages:
   clear → `/auth`, no welcome↔/auth loop), `test_cross_subdomain_cookie_sync.py`
   (helper presence + byte parity), `test_writer_inventory.py` /
   `TestCreateApiKeySessionAttribution` (created_by = session UUID).
+
+## 6. The machine-credential model: unified scoped keys (epic #2083)
+
+Epic #2083 (multi-graph tenancy, shipped 2026-09-04) replaced the implicit
+"one key = full team access" model with **one unified key table carrying a
+graph scope + a flat scope allowlist** — no new credential type, no key
+rotation, no forced migration (E2E-5).
+
+### 6.1 What an API key now IS
+
+| Column | Meaning |
+|---|---|
+| `graph_id` | NULL = **team-wide key** → resolves to the team's DEFAULT graph (the pre-epic behavior — legacy keys untouched); set = bound to ONE custom graph |
+| `scopes` | FLAT allowlist array from `{graphs:read, graphs:write, team:manage}` (plus the escalation set `graphs:create/delete`, `keys:manage` for owner mints) |
+| `delegation_depth` | NULL = owner-minted; 0 = minted by another key (can never hold escalation scopes — DB CHECK + resolution) |
+| `created_by_key_id` | mint lineage (a delegated key cannot mint) |
+
+**The owner/legacy class (D2):** `delegation_depth IS NULL AND scopes = []`
+⇒ `legacy_full_access = True` — a tt_ key minted before/in the legacy shape
+keeps byte-identical full-team behavior (all three resolution lanes — REST,
+MCP, apikey_verify — derive the same class). The C3-era scoped mint of a
+deleg-NULL key with scopes `[]` + a graph is the documented footgun: it
+would read as full access while echoing `scopes:[]` — the shrink branch 422s
+it (`Per-graph keys require at least one scope.`).
+
+### 6.2 Enforcement surfaces
+
+- **`_require_scope(scope)`** (REST) / the MCP equivalent: reads require
+  `graphs:read`, writes require `graphs:write`; `legacy_full_access` (and
+  key-less session faces) are exempt. Graph-bound keys can only touch their
+  own graph; team-level write surfaces (index/seed/pack/restore/backup)
+  reject graph-bound keys (`_reject_graph_bound_*`) because they act on the
+  DEFAULT graph.
+- **Delegation is one level:** a `deleg=0` child key is minted with
+  `graphs:read` by default and `keys:manage` children cannot mint further
+  keys — the DB CHECK `chk_minted_key_no_escalation` is the invariant.
+- **C5/C6 data-plane gates:** per-graph context/sessions/capture ride the
+  key's graph context (fail-closed 403 `GRAPH_NOT_FOUND` on vanished
+  graph-bound keys); the session_recording per-graph override (`PATCH
+  /v1/graphs/{id} {recording}`) never re-enables a team-opted-out recording.
+
+### 6.3 The #2082 boundary (deliberate)
+
+Key scopes are **capability gates in the control plane**: they decide which
+graph + which data-plane verbs a credential may use. They are NOT an agent
+policy system — what an agent does with its granted access (prompts,
+tool-selection policy, safety rails) lives in the agent layer, outside the
+key model. The epic kept that line: scope allowlisting stays flat and
+machine-readable; per-graph ACL *users* (C4) are defense-in-depth for graph
+mints, not a policy engine.
+
+### 6.4 Supabase storage parity
+
+The supabase `api_keys` table mirrors the registry shape exactly
+(`graph_id`, `scopes` jsonb FLAT, `delegation_depth`, `created_by_key_id`,
++ the `chk_minted_key_no_escalation` CHECK + `idx_api_keys_graph_id`).
+The C1 migration is pure-additive and drops cleanly (rollback drill in the
+C8 runbook — apply → rollback → re-apply passes in CI).
