@@ -102,13 +102,28 @@ shape); graph-bound keys carry scopes+legacy so `_require_scope` and
 `_data_sdk` behave identically to REST. The recording gate (D-C6-3) then reads
 the key's graph override on MCP too.
 
-### D-C6-5 — install probe + team toggle unchanged
+### D-C6-5 — install probe + team toggle unchanged (round-1 decisions)
 `session_install_probe` stays team-level (probe reports provider/hook state —
 recording-independent by design, #1927 comment). `set_session_recording`
 (REST) + `tortoise_onboarding_session_recording` (MCP toggle) continue to
 write the TEAM default in onboarding state. PATCH default-graph recording is
 the graph-0 override — distinct from the team toggle; NULL removes the
 override and the team default (ON unless toggled) governs again.
+
+Round-1 review decisions:
+(a) team:manage is a TEAM-WIDE management scope — graph-agnostic by design;
+an owner-minted graph-bound key carrying it may manage ANY graph in the team
+(per-graph keys never carry team:manage — child policy ∩ _MINTABLE_SCOPES;
+deleg=0 rejected at the dependency). Pinned in the endpoint docstring.
+(b) the recording gate lives in `_capture_session_impl` ONLY —
+`commit_session` stays recording-INDEPENDENT (pre-existing #1910/#1927
+design: "the off-switch lives in _capture_session_impl only"); the per-graph
+override inherits the team-level asymmetry deliberately (auto-capture gated,
+explicit commits not) — do not re-flag in future reviews.
+(c) the supabase kind='default' upsert carries the TEAM graph name as its
+namespace (graphs.namespace is NOT NULL — 20260901000001; a null would 500
+the PostgREST INSERT) and converges on a concurrent duplicate POST (re-read
++ PATCH the winner — no duplicate-key 500).
 
 ## Tasks
 

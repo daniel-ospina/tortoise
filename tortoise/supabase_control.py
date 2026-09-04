@@ -2385,18 +2385,44 @@ def set_graph_recording(cp, team_id: str, graph_id: str,
             json_body={"recording": value},
         )
         return True
+    # Review P1: graphs.namespace is text NOT NULL (20260901000001) — the
+    # default row's namespace is the TEAM graph name (what graph_metadata
+    # derives the default from: teams.graph_name). PostgREST would reject a
+    # null-namespace INSERT (500); populate it from the team row.
     import uuid as _uuid
     gid = f"g_{_uuid.uuid4().hex[:16]}"
-    from datetime import datetime
-    cp.query(
-        "graphs", method="POST",
-        json_body={
-            "id": gid, "team_id": team_id, "name": "default",
-            "kind": "default", "namespace": None, "status": "active",
-            "recording": value,
-            "created_at": datetime.now(UTC).isoformat(),
-        },
-    )
+    from datetime import UTC, datetime
+    tro = cp.query(
+        "teams", select=["graph_name"], filters=[("id", "eq", team_id)])
+    team_graph_name = tro[0].get("graph_name") if tro else None
+    try:
+        cp.query(
+            "graphs", method="POST",
+            json_body={
+                "id": gid, "team_id": team_id, "name": "default",
+                "kind": "default", "namespace": team_graph_name,
+                "status": "active", "recording": value,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    except Exception:
+        # Review P2 (convergent upsert): a concurrent PATCH observed no row
+        # and POSTed first — re-read + PATCH the winner instead of surfacing
+        # a duplicate-key 500 (idempotent convergence).
+        rows = cp.query(
+            "graphs", select=["id"],
+            filters=[("team_id", "eq", team_id),
+                     ("kind", "eq", "default")],
+        )
+        if rows:
+            cp.query(
+                "graphs", method="PATCH",
+                filters=[("id", "eq", rows[0]["id"]),
+                         ("team_id", "eq", team_id)],
+                json_body={"recording": value},
+            )
+            return True
+        raise
     return True
 
 

@@ -456,6 +456,14 @@ def test_supabase_set_graph_recording_custom_and_default():
     meta = graph_metadata(cp, "t1")
     default = next(m for m in meta if m["kind"] == "default")
     assert default["recording"] is False
+    # Review P1: the upserted row carries the TEAM graph name as namespace
+    # (graphs.namespace is NOT NULL in 20260901000001 — a null namespace
+    # would 500 the real PostgREST INSERT; the fake doesn't enforce NOT
+    # NULL so assert the payload explicitly).
+    drow = cp.query("graphs", select=["namespace"],
+                    filters=[("team_id", "eq", "t1"),
+                             ("kind", "eq", "default")])
+    assert drow and drow[0]["namespace"] == "team_t1", drow
     # Clearing restores inherit (None)
     assert set_graph_recording(cp, "t1", "default", None) is True
     meta = graph_metadata(cp, "t1")

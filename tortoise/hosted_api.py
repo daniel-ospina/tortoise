@@ -8520,6 +8520,9 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
     class — deleg NULL + scopes []), or an owner/admin session user (the
     dual-auth dependency resolves BOTH faces like delete_graph). A MINTED
     deleg=0 key never carries team:manage (C2/C3 child policy) → 403.
+    team:manage is a TEAM-WIDE management scope — a graph-bound key that
+    carries it (owner-minted) manages ANY graph in the team, mirroring the
+    session owner; per-graph keys never carry team:manage.
 
     Body: ``{recording: true|false|null}`` — null removes the override
     (inherit team default). The DEFAULT graph is settable too (recording is
@@ -8532,8 +8535,16 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
+    # #1853: suspended teams locked down (parity with delete_graph's inline
+    # check — the dual-auth dependency also 403s, defense-in-depth).
+    _ensure_not_suspended(team)
     # Auth: key with team:manage (or legacy full access) — else the caller
     # is a session user whose membership role must be owner/admin.
+    # team:manage is a TEAM-WIDE management scope (graph-agnostic by design,
+    # review P2): an owner-minted key carrying it may manage ANY graph in
+    # the team (incl. graph 0); graph-bound keys never carry it (child
+    # policy ∩ _MINTABLE_SCOPES) and deleg=0 keys are rejected at the
+    # dependency.
     if key_ctx.get("key_id"):
         scopes = key_ctx.get("scopes") or []
         if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
