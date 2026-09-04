@@ -1,0 +1,18 @@
+{
+  "config": {
+    "extractor_posture": "llm",
+    "holdout_excluded": false,
+    "mode": "full",
+    "reflex": "graded",
+    "seed": 42,
+    "suites": [
+      "why_suite"
+    ]
+  },
+  "fixtures_hash": "sha256:8e192799cfc27c9da9cb80c70dfbe40bc0914b8df7a6b7489c27556c633aff3e",
+  "history": [],
+  "judge_pin": null,
+  "justification": null,
+  "metrics": {},
+  "schema_version": 1
+}
