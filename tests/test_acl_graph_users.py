@@ -274,3 +274,88 @@ def test_default_user_secured():
     client = acl._admin_client()
     assert client is not None
     acl._ensure_default_user_secured(client)  # no raise = secured
+
+
+# ── Code-review round-1 pins ──────────────────────────────────────────────
+
+def test_store_miss_rotate_invalidates_old_secret(acl_env, monkeypatch):
+    """Code-review: when the user EXISTS but the stored password is MISSING
+    (crash between SETUSER and registry store), the next create generates a
+    fresh secret AND resetpasses — the orphaned prior secret dies (a bare
+    ``>pw`` would APPEND a second live credential)."""
+    from tortoise.acl_graph_users import _user_exists_on
+    tid, gid = acl_env["tid"], acl_env["gid"]
+    cred1 = acl.create_acl_user(gid, tid)
+    # Simulate the store-miss window: wipe the node's stored password.
+    sdk = acl_env["sdk"]
+    sdk._get_registry().query(
+        "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.acl_pass = null",
+        params={"gid": gid, "tid": tid},
+    )
+    client = acl._admin_client()
+    assert _user_exists_on(client, f"tenant_{gid}")
+    # Next create: fresh password + resetpass (old one invalidated).
+    cred2 = acl.create_acl_user(gid, tid)
+    assert cred2["password"] != cred1["password"]
+    # Old password no longer authenticates.
+    from urllib.parse import urlparse as _up
+
+    import redis as redis_py
+    uri = _up(os.environ["TORTOISE_DB_URI"])
+    with pytest.raises((redis_py.AuthenticationError, redis_py.ResponseError)):
+        redis_py.Redis(host=uri.hostname, port=uri.port or 16379,
+                       username=f"tenant_{gid}", password=cred1["password"],
+                       decode_responses=True, socket_timeout=5,
+                       ).execute_command("PING")
+    # New password authenticates.
+    redis_py.Redis(host=uri.hostname, port=uri.port or 16379,
+                   username=f"tenant_{gid}", password=cred2["password"],
+                   decode_responses=True,
+                   ).execute_command("PING")
+
+
+def test_unsafe_id_rejected_fail_closed(acl_env):
+    """Code-review hardening: ids carrying rule-injection chars (spaces /
+    quotes / globs) are refused — SETUSER rule args are space-split
+    server-side."""
+    from tortoise.acl_graph_users import AclLayerError
+    with pytest.raises(AclLayerError, match="unsafe graph id"):
+        acl.create_acl_user("g_bad id~*", acl_env["tid"])
+    with pytest.raises(AclLayerError, match="unsafe team id"):
+        acl._graph_namespace('tid" +@all', acl_env["gid"])
+    with pytest.raises(AclLayerError, match="unsafe graph id"):
+        acl.drop_acl_user('g_bad"\n~* +@all')
+
+
+def test_open_default_strict_provision_503(acl_env, monkeypatch):
+    """Code-review: an open-default (nopass) server makes the STRICT
+    provisioning mint surface an actionable 503 (not an opaque 500) and
+    roll back the graph — no orphan, clear remedy."""
+    from tortoise.acl_graph_users import AclLayerError
+    ha, tid = acl_env["ha"], acl_env["tid"]
+
+    # Force the layer to think the default user is open.
+    def _secured(client):
+        raise AclLayerError(
+            "default ACL user is open (nopass) — per-graph ACL users are "
+            "theater without a secured default. Set a password/requirepass "
+            "first.")
+
+    monkeypatch.setattr(acl, "_ensure_default_user_secured", _secured)
+    team = {"id": tid, "tier": "pro", "max_graphs": 100, "max_api_keys": 20}
+    try:
+        ha._provision_graph(team, f"n-{uuid.uuid4().hex[:6]}", None, None)
+        raise AssertionError("provision unexpectedly succeeded")
+    except Exception as e:
+        from fastapi import HTTPException
+        assert isinstance(e, HTTPException)
+        assert e.status_code == 503, e.status_code
+        assert "secured default" in str(e.detail) or "password" in str(e.detail), e.detail
+    # Rolled back: only the FIXTURE graph remains (the provisioned one is
+    # gone — its name never landed).
+    sdk = ha._make_sdk(namespace="registry")
+    rows = sdk._get_registry().query(
+        "MATCH (g:Graph {team_id:$tid}) RETURN count(g)",
+        params={"tid": tid},
+    ).result_set
+    assert rows[0][0] == 1  # fixture graph only — provisioned graph rolled back

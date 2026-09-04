@@ -7886,6 +7886,25 @@ def _provision_graph(team: dict, name: str,
     except HTTPException:
         raise
     except Exception as e:
+        # C4 (#2113) code-review: an AclLayerError (server reachable, real
+        # ACL failure — e.g. the default user is OPEN/nopass so the layer
+        # refuses to create theater users) must roll back cleanly and surface
+        # an ACTIONABLE 503, not an opaque 500 (selfhosts without requirepass
+        # would otherwise see "Graph provisioning failed" with the remedy
+        # buried in a log).
+        from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
+            AclLayerError,
+        )
+        if isinstance(e, AclLayerError):
+            _rollback_graph(team["id"], graph)
+            raise HTTPException(
+                status_code=503,
+                detail=("Per-graph ACL provisioning failed — the FalkorDB "
+                        "ACL layer rejected the graph user: "
+                        f"{e}. Set a password/requirepass on the FalkorDB "
+                        "default user (per-graph ACL users are theater "
+                        "without a secured default), then retry."),
+            ) from e
         # Cross-worker dup-name race (Supabase lane): the partial unique
         # index uq_graphs_team_name_active catches the interleaved INSERT
         # the per-process lock cannot see (registry selfhost has no unique

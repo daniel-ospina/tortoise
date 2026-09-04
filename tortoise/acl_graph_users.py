@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from urllib.parse import urlparse
 
 logger = logging.getLogger("tortoise.acl")
@@ -52,7 +53,15 @@ class AclLayerError(RuntimeError):
 
 def _username_for(graph_id: str) -> str:
     """tenant_<gid> — gid is unique per graph (uuid/sha-derived), so the
-    username is unique server-wide and derivable (drop needs no storage)."""
+    username is unique server-wide and derivable (drop needs no storage).
+    Fail-closed charset guard: SETUSER/DELUSER rule args are space-split
+    server-side, so a caller-supplied id carrying spaces/quotes/globs would
+    be a rule-injection primitive — reject anything outside the safe id
+    charset ([0-9A-Za-z_-]; ids in this codebase are hex or dash-ids)."""
+    if not re.fullmatch(r"[0-9A-Za-z_-]+", graph_id):
+        raise AclLayerError(
+            f"refusing to build an ACL username from unsafe graph id "
+            f"{graph_id!r} — ids must be [0-9A-Za-z_-].")
     return f"tenant_{graph_id}"
 
 
@@ -60,13 +69,19 @@ def _graph_namespace(team_id: str, graph_id: str) -> str:
     """The FalkorDB graph name the ACL pattern must match — the exact
     namespace both control-plane modes derive (registry _graph_create +
     supabase _provision_graph): team_{team_id}_{graph_id}."""
+    if not re.fullmatch(r"[0-9A-Za-z_-]+", team_id):
+        raise AclLayerError(
+            f"refusing to build an ACL pattern from unsafe team id "
+            f"{team_id!r} — ids must be [0-9A-Za-z_-].")
     return f"team_{team_id}_{graph_id}"
 
 
 def _admin_client():
     """redis-py client to the FalkorDB server the app uses (TORTOISE_DB_URI
     admin creds). None when: no URI (embedded redislite), a hostless URI, or
-    an unsupported scheme — every ACL fn then no-ops (fail-soft)."""
+    an unsupported scheme — every ACL fn then no-ops (fail-soft). Port-less
+    URIs default to 16379 (the repo-wide convention — projection/session
+    parsers; docker-compose maps 6379 for containers WITH the port)."""
     uri = os.environ.get("TORTOISE_DB_URI")
     if not uri:
         return None
@@ -79,7 +94,7 @@ def _admin_client():
     import redis
     return redis.Redis(
         host=parsed.hostname,
-        port=parsed.port or 6379,
+        port=parsed.port or 16379,
         username=parsed.username or None,
         password=parsed.password or None,
         ssl=(parsed.scheme == "rediss"),
@@ -243,6 +258,15 @@ def _stored_acl_password(team_id: str, graph_id: str) -> str | None:
         return None
 
 
+def _user_exists_on(client, username: str) -> bool:
+    """True when the tenant user is already configured on the server."""
+    try:
+        raw = client.execute_command("ACL", "GETUSER", username)
+        return bool(raw)
+    except Exception:
+        return False
+
+
 def create_acl_user(graph_id: str, team_id: str) -> dict | None:
     """Create/upsert the per-graph ACL user (hardened recipe, D1).
 
@@ -250,8 +274,16 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
     is absent (no server URI / bare redis / down) — fail-soft, never a SPOF.
     Raises AclLayerError when the server is REACHABLE but the SETUSER fails
     (a real recipe/permission problem) — the strict provisioning caller
-    rolls back (no graph without its ACL user). Idempotent: SETUSER on an
-    existing user updates; a stored password is reused when present.
+    rolls back (no graph without its ACL user).
+
+    ONE live secret per graph (code-review): registry mode reuses the
+    stored password when present (idempotent re-runs don't churn); when a
+    NEW password is needed for an EXISTING user (store-miss window — the
+    user exists but no stored credential), SETUSER runs ``resetpass`` first
+    so the orphaned prior secret dies (``>pw`` alone APPENDS — old secrets
+    stay valid). Supabase/hosted mode is create-once: further mints no-op
+    when the user exists (the hosted credential story is C5's; per-mint
+    throwaway secrets would accumulate live, never-revoked credentials).
     """
     client = _admin_client()
     if client is None:
@@ -261,19 +293,51 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
     _ensure_default_user_secured(client)
     username = _username_for(graph_id)
     graph_name = _graph_namespace(team_id, graph_id)
-    password = _stored_acl_password(team_id, graph_id) \
-        or os.urandom(24).hex()
-    try:
-        client.execute_command(
-            "ACL", "SETUSER", username, "on", f">{password}",
-            f"~{graph_name}", *_GRAPH_COMMANDS)
-    except Exception as e:
-        raise AclLayerError(
-            f"ACL SETUSER failed for graph {graph_id} (graph={graph_name}, "
-            f"user={username}): {e}") from e
+    from tortoise.supabase_control import is_supabase_enabled
+    if is_supabase_enabled():
+        if _user_exists_on(client, username):
+            # create-once: no per-mint password churn (hosted defers the
+            # credential story to C5 — the platform manages DB users).
+            return {"username": username, "password": None,
+                    "graph": graph_name}
+        password = os.urandom(24).hex()
+        _setuser(client, username, graph_name, password, reset=False)
+        _acl_save(client)
+        return {"username": username, "password": password,
+                "graph": graph_name}
+    # Registry (selfhost) mode: reuse the stored password when present.
+    stored = _stored_acl_password(team_id, graph_id)
+    exists = _user_exists_on(client, username)
+    if stored is not None:
+        password = stored
+        reset = False  # re-assert the SAME secret — no churn
+    else:
+        password = os.urandom(24).hex()
+        # A fresh secret on an EXISTING user must resetpass first (the old
+        # secret is gone from storage — a crash/store-miss orphan).
+        reset = exists
+    _setuser(client, username, graph_name, password, reset=reset)
     _registry_store_credential(team_id, graph_id, username, password)
     _acl_save(client)
     return {"username": username, "password": password, "graph": graph_name}
+
+
+def _setuser(client, username: str, graph_name: str, password: str,
+             *, reset: bool) -> None:
+    """Issue ACL SETUSER with the hardened recipe. reset=True prepends
+    resetpass so only the NEW password stays valid (no ``>``-append of a
+    second live secret). Raises AclLayerError on a server-reachable
+    failure."""
+    cmd = ["ACL", "SETUSER", username, "on"]
+    if reset:
+        cmd.append("resetpass")
+    cmd += [f">{password}", f"~{graph_name}", *_GRAPH_COMMANDS]
+    try:
+        client.execute_command(*cmd)
+    except Exception as e:
+        raise AclLayerError(
+            f"ACL SETUSER failed for graph {graph_name} (user={username}): "
+            f"{e}") from e
 
 
 def drop_acl_user(graph_id: str) -> None:
