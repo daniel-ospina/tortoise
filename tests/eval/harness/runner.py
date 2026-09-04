@@ -726,12 +726,29 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
     # (drift / config-mismatch / inconclusive raise; a regression re-publish
     # records its verdict in history per the fix-wave protocol).  A re-bless
     # MUST carry a justification naming the correction.
-    report = run_benchmark(root=root, run_id=run_id, notes=notes,
-                           progress=sys.stderr)
+    report = None
+    last_log: list[str] = []
+    for attempt in range(1, 4):
+        report = run_benchmark(root=root, run_id=run_id, notes=notes,
+                               progress=sys.stderr)
+        last_log = report.get("log", [])
+        if report["run_status"] == "completed":
+            break
+        flake = any(
+            "no JSON block" in line or "S2 failed" in line or "capture ok=False" in line
+            for line in last_log
+        )
+        if not flake:
+            break  # deterministic failure — retrying won't help
+        print(
+            f"run attempt {attempt} hit a capture flake (LLM extraction); "
+            "retrying the whole hermetic run (attempt {attempt + 1}/3)",
+            file=sys.stderr,
+        )
     if report["run_status"] != "completed":
         print(
             f"run failed ({report['failure_origin']}): "
-            + "; ".join(report["log"][-3:])
+            + "; ".join(last_log[-4:])
         )
         return 2
     try:
