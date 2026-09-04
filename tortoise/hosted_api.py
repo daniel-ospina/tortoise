@@ -7177,7 +7177,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # record fail-open (warn-only — never fails the commit). Same-commit
     # supersession chains must be emitted in fold order ([A→B, B→C]) — the
     # visible-successor gate skips a fold whose successor this payload has
-    # already terminalized (order-sensitivity pinned in #2246). The step-6
+    # already terminalized (order-sensitivity pinned in #2249). The step-6
     # entity writes above have landed the payload's net-new successors.
     # ──
     from tortoise.commit_ops import apply_supersessions
