@@ -474,7 +474,7 @@ sdk.taxonomy()  # or tortoise_status() — returns point counts, pointKinds, gra
 
 Or via MCP:
 ```
-tortoise_summarize_structure  # returns {gateN_*, total}; zero total on an empty/wrong graph
+tortoise_summarize_structure  # returns {total, operators, gateN_*, gate_total}; zero total on an empty/wrong graph
 ```
 
 ## Common Failure Mode

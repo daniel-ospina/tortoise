@@ -841,8 +841,11 @@ def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
 
 
 def tortoise_summarize_structure() -> dict:
-    """Count points per Gate (by pointKind). Returns {gateN_*, total}.
-    Alias → overview(section='structure') (epic #888 W3)."""
+    """Structure summary — points on the graph across ALL point kinds (#2205).
+    Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}.
+    total counts every non-operator kind (statements, observations, decisions,
+    ...), not just the product-strategy gates; operators is reported
+    separately. Alias → overview(section='structure') (epic #888 W3)."""
     return _safe(_get_team_sdk().summarize_structure)
 
 
