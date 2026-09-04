@@ -7162,60 +7162,29 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
-    # for the Object status fold, #1350). Point-level records (E5 #1537 —
-    # ``pt_<sha>`` refs, dispatched by prefix) materialize the EXISTING
-    # canonical ``sdk.supersede()``: CORRECTS + outdated + edge transfer.
-    # Entity-level records keep the ObjectSuperseded fold unchanged. Resolve
-    # each superseded ref by id (fallback name) and emit an ObjectSuperseded
-    # event for the projection to fold into Object.status. Unresolved refs
-    # warn and are skipped (fail-open — mirrors the extractor's never-guess
-    # discipline); a supersession write must never fail the commit. ──
-    for sr in payload.supersessions:
-        ref = (sr.superseded or "").strip()
-        if ref.startswith("pt_"):   # point-level supersession → CORRECTS via supersede()
-            rows = proj.g.query(
-                "MATCH (p:Point) WHERE p.id = $ref RETURN p.id, p.status LIMIT 1",
-                params={"ref": ref}).result_set
-            if not rows:
-                _logger.warning("point supersession ref %r not found — "
-                                "skipped (fail-open)", ref)
-                continue
-            if (rows[0][1] or "") in ("superseded", "retracted", "archived"):
-                # already terminal — idempotent no-op (supersede_point would
-                # raise ValueError; a re-commit/overlap must not fail)
-                continue
-            try:
-                sdk.supersede(ref, sr.supersedes_by)   # EXISTING canonical unified tool
-            except Exception as e:
-                _logger.warning("point supersede %r → %r failed: %s",
-                                ref, sr.supersedes_by, e)
-            continue
-        rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.id = $ref OR o.name = $ref "
-            "RETURN o.id, o.name LIMIT 1",
-            params={"ref": sr.superseded}).result_set
-        if not rows:
-            _logger.warning("supersession ref %r not found in the graph — "
-                            "skipped (fail-open)", sr.superseded)
-            continue
-        obj_id, obj_name = rows[0]
-        try:
-            sdk._emit_event(
-                "ObjectSuperseded",
-                {"id": obj_id, "name": obj_name,
-                 "supersedes_by": sr.supersedes_by,
-                 "evidence": sr.evidence or ""},
-                id=obj_id,
-            )
-            # #1350: apply the fold at live-write time (the event is the
-            # journal for rebuild replay; the projection-owned fold is what
-            # flips the status now — mirrors supersede_point's pattern).
-            sdk._get_proj()._fold_object_superseded({
-                "id": obj_id, "name": obj_name,
-                "supersedes_by": sr.supersedes_by})
-        except Exception as e:
-            _logger.warning("ObjectSuperseded emit failed for %r: %s",
-                            obj_name, e)
+    # for the Object status fold, #1350), applied via the SHARED
+    # apply_supersessions helper (#2164/#2193): pt_<sha> refs → the canonical
+    # supersede() CORRECTS (terminal-probed, idempotent); entity records →
+    # id-style ObjectSuperseded journal (full provenance incl. session_id) +
+    # count-verified fold. ONE consumer-side discipline with capture
+    # (_extract_session_v2) and eval ingest_v2 — §6b's inline consumer was the
+    # last divergent copy. Guards inherited: terminal keep-first (the fold
+    # never blind-overwrites), self-supersession skip, >1-name never-guess,
+    # visible-successor gate, legacy id-less canonical-id synthesis. Every skip
+    # surfaces via _logger.warning (hosted attribution) — never a silent drop;
+    # per-record fail-open (warn-only — never fails the commit). The step-6
+    # entity writes above have landed the payload's net-new successors.
+    # ──
+    from tortoise.commit_ops import apply_supersessions
+    applied = apply_supersessions(
+        proj, sdk, payload.supersessions,
+        session_id=session_id, warn=_logger.warning,
+    )
+    if payload.supersessions:
+        log = (_logger.warning if applied < len(payload.supersessions)
+               else _logger.info)
+        log("supersessions applied=%d total=%d (session=%s)",
+            applied, len(payload.supersessions), session_id)
 
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
