@@ -124,15 +124,19 @@ commit / corpus hash / judge pin / cost_usd. Sealed answer keys:
 answer_session_ids}` + aggregate digest — a gold-only edit changes the
 digest).
 
-| Receipt field | Value |
+| Receipt field | Value (PENDING — no run executed; filled at execution) |
 |---|---|
-| run_status | REPLACE |
-| verdict | REPLACE |
-| failure_origin | REPLACE |
-| commit | REPLACE_HEAD |
-| corpus_hash | sha256:d6f21ea9…3a442 |
+| run_status | PENDING |
+| verdict | PENDING |
+| failure_origin | PENDING |
+| commit | PENDING |
+| corpus_hash | sha256:d6f21ea9…3a442 (seal verified, gates 1-4) |
 | judge_pin | `longmemeval-official-anscheck-gpt4o-2024-08-06-v1` |
-| cost_usd | REPLACE_COST |
+| cost_usd | PENDING |
+
+`w7a-500q.receipt.json` / `w7a-500q.report.json` / `w7a-500q.seal.json`
+are NOT committed in this machinery PR — they land WITH the executed run
+(annotated update, never a silent in-place edit).
 
 ## 6. Cost discipline (R13)
 
@@ -155,8 +159,12 @@ digest).
   record — verified directly (report.py publication gate, E2E-3 Precondition
   2); this report's methodology carries the audit record with verdict
   `trusted-as-documented-variant`.
-- Integrity block of the committed report: REPLACE (valid /
-  n_attempted / n_invalid / invalid_rate / hard-invalid count).
+- Protocol gates 1-4 evidence (corpus seal digest, answer-key manifest
+  coverage, dataset_audit divergence record, judge-pin record): committed
+  alongside this report in `gate-evidence.json` (a J7 auditor can verify
+  without the uncommitted `.longmemeval_cache/`).
+- Integrity block of the executed run's report: PENDING (filled at
+  execution with the committed `w7a-500q.report.json` integrity block).
 
 ## 8. Runner fix carried by this issue
 
@@ -171,11 +179,22 @@ deterministic full run is unexecutable — evidence: 3 aborted 10-Q runs
 (workers 3/4/8), all healthy on fts/vector, structural-empty on every
 outcome.
 
-## 9. Handoff to W7-b (#2106)
+## 9. Errata / annotations log
+
+Every post-commit change to THIS report is an annotated entry here —
+never a silent in-place edit (publication discipline, #2106 §7):
+
+| Date | Entry |
+|---|---|
+| (machinery commit) | Report committed in PENDING state: protocol gates 1-4 passed (evidence below); steps 5+ (full 500-Q execution) not run. |
+
+## 10. Handoff to W7-b (#2106)
 
 The comparison-table rows for this run are drafted in
 `docs/benchmarks/w7a-comparison-rows-for-2106.md` (mechanism-named,
 receipt-cited, §6.7 row contract) — the #2106 agent merges them into
 `docs/benchmarks/comparison-systems.md` when publishing. The epic's
 publication sequencing (W7-b capstone) is respected: this commit lands the
-run report + receipt; the comparison doc fill is W7-b's atomic event.
+run report + the MACHINERY that builds/validates the receipt (no receipt
+is claimed — the run has not executed); the comparison doc fill is W7-b's
+atomic event after execution.
