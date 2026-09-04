@@ -41,6 +41,11 @@ test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps i
   // at L3213; wizardMintDurableKey delegates to mintKey, so it is covered
   // transitively) or the id-scoped `/v1/team/keys/${id}${q}` (the three
   // writes). Comments mentioning the endpoint (no backtick) are exempt.
+  // Boundary (accepted limitation): only template-literal URLs are scanned —
+  // a hypothetical string-concatenated (`'/v1/team/keys' + q`), absolute
+  // (`${API_BASE}/v1/team/keys…`), or variable-built URL would evade this
+  // regex, but the file uniformly constructs key URLs as backtick literals
+  // and the per-site tests share the same shape.
   const keyUrls = [...mainJsx.matchAll(/`(\/v1\/team\/keys[^`]*)`/g)]
     .map((m) => m[1])
     .filter((u) => u.startsWith('/v1/team/keys'))
