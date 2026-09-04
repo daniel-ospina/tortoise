@@ -30,6 +30,7 @@ from tortoise.schemas import (  # one vocabulary, no duplicated boundary literal
 )
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
+                               _current_scopes, _current_legacy_full_access,
                                _transport_mode, _tool_group, _get_team_sdk,
                                HTTP_ALLOWED, ERR_UNAUTHORIZED, ERR_EXCLUDED,
                                SELFHOST_TEAM_ID)
@@ -219,6 +220,37 @@ async def _flush_mcp_telemetry() -> None:
 _original_call_tool = mcp.call_tool
 
 
+def _enforce_mcp_tool_scope(name: str) -> None:
+    """C5 #2114 (D-C5-3, MCP half): pre-filter scope gate at the tool-call
+    boundary — the single dispatch point every tenant tool call crosses.
+
+    - legacy full-access keys (scopes None OR legacy_full_access) and OAuth/
+      session resolutions (scopes None) pass — existing flows unchanged.
+    - a SCOPED key is enforced: tools in WRITE_TOOL_NAMES need
+      graphs:write; everything else (read tools) needs graphs:read (write
+      implies read — graphs:write satisfies reads).
+    - deleg=0 children without a data scope never reach here (the
+      middleware rejects them at resolution); deleg=0 children WITH a data
+      scope are routed to their own graph by _get_team_sdk and enforced
+      here like any scoped key.
+
+    Raises AuthorizationError (mapped to an authz error result + classified
+    auth_error by _classify_mcp_call_error) — same failure family as the
+    middleware's KEY_NOT_USER_MINTED / SUSPENDED signals."""
+
+    scopes = _current_scopes.get()
+    if scopes is None or _current_legacy_full_access.get():
+        return
+    have = set(scopes)
+    if name in WRITE_TOOL_NAMES:
+        if "graphs:write" not in have:
+            raise AuthorizationError(
+                f"Key lacks graphs:write scope for tool {name}.")
+    elif "graphs:read" not in have and "graphs:write" not in have:
+        raise AuthorizationError(
+            f"Key lacks a graph data scope (graphs:read) for tool {name}.")
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -234,6 +266,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     team_id = _current_team_id.get() or ""
+    _enforce_mcp_tool_scope(name)
     maybe_record_mcp_read(name, team_id, _current_team_limits.get())
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
