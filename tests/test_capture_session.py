@@ -1570,6 +1570,68 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
 
 
+def test_apply_supersessions_self_supersession_skipped(sdk):
+    """#2164 review (P1 — ISSUE A): a SELF-supersession record —
+    superseded == supersedes_by (the same ref string) — must be SKIPPED
+    with a warning (applied=0) and leave the Object untouched. Pre-fix the
+    entity lane applied it with applied=1: the LIVE Object folded to
+    status='superseded', supersededBy=<itself> — permanently removing it
+    from recall_state's default view — and a durable self-referential
+    ObjectSuperseded was journaled. Every sibling path guards this (the
+    replaced eval inline loop's old_id == new_id → continue;
+    supersede_point raises on old==new; the producer-side id-match
+    short-circuits before its kind filter) — this consumer-side guard is
+    the defense-in-depth sink, placed before the pt_/entity dispatch so it
+    guards BOTH lanes (the pt_ self-ref previously tripped supersede()'s
+    raise into a spurious "failed" warning)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "plan-X", "supersedes_by": "plan-X",
+          "evidence": "self lifecycle"}],
+        session_id="sess_self", warn=warns.append)
+    assert applied == 0, "self-supersession must never apply"
+    assert any("self-supersession" in w for w in warns), warns
+    state = _entity_fold_state(proj, "plan-X")
+    assert state == ("live", None), \
+        f"self-supersession folded plan-X onto itself: {state!r}"
+    assert _object_superseded_events(proj) == 0, \
+        "no ObjectSuperseded may be journaled for a self-supersession"
+
+
+def test_apply_supersessions_pt_self_supersession_skipped(sdk):
+    """#2164 review (P1 — ISSUE A, pt_ lane): the same self-supersession
+    guard fires for point records — a pt_ ref superseding ITSELF is a
+    meaningless record, skipped with the same warning (pre-fix it fell
+    through to sdk.supersede() whose old==new guard raised, surfacing as a
+    spurious "point supersede ... failed" warning with no better signal)."""
+    from tortoise.commit_ops import apply_supersessions
+    from tortoise.commit_schema import point_content_id
+
+    proj = sdk._get_proj()
+    pid = point_content_id("self-supersession pt content")
+    sdk.create_point("statement", "self-supersession pt content", id=pid,
+                     status="live")
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": pid, "supersedes_by": pid, "evidence": "pt"}],
+        session_id="sess_self_pt", warn=warns.append)
+    assert applied == 0
+    assert any("self-supersession" in w for w in warns), warns
+    assert not any("failed" in w for w in warns), \
+        f"pt_ self-ref must not surface as a supersede() failure: {warns}"
+    rows = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.status",
+        params={"id": pid}).result_set
+    assert rows and rows[0][0] == "live", \
+        "the self-referencing point must stay live"
+
+
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the
 #    method directly (no env var needed) ─────────────────────────────────
 

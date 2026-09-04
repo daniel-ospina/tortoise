@@ -382,6 +382,13 @@ class _EntityHandlers:
         SET…RETURN form yields a row only when the MATCH bound a node, so
         the return value makes a fold-miss distinguishable from a successful
         fold without a separate existence pre-query.
+
+        #2164 review (ISSUE B): when the event carries a truthy id whose
+        id-branch MATCH misses (the node carries no such id — e.g. a legacy
+        id-less Object folded by name at live-write time but journaled with a
+        synthesized canonical id), the fold FALLS BACK to the name branch
+        below (only when a name is present — never for id-only/legacy §6b
+        shapes, which still no-op on an id miss).
         """
         oid = ev.get("id")
         name = ev.get("name")
@@ -401,6 +408,28 @@ class _EntityHandlers:
                 "    o.supersededAt=$sa "
                 "RETURN o.id LIMIT 1",
                 params={"id": oid, "sb": supersedes_by, "sa": superseded_at})
+            if not result.result_set and name:
+                # #2164 review (P2, ISSUE B): the id branch matched NOTHING
+                # — the event's id is not the key the node carries. For a
+                # legacy id-less Object (raw-created before canonical
+                # obj-<sha26(name)> minting; its journal registration
+                # predates canonical ids) apply_supersessions emits the
+                # SYNTHESIZED canonical id (sdk._entity_name_id) while the
+                # node itself has NO id property (or a pre-canonical
+                # registration id) — a JSONL wipe+rebuild replay selected
+                # the id branch (oid truthy) and silently no-op'd (0 rows),
+                # reverting the Object to status='live'. Fall back to the
+                # name branch — the same name-keyed fold the live path uses
+                # (fold_ev with no id). A name uniquely identifies one
+                # Object (MERGE-by-name), so a same-name fold after an
+                # id-miss is unambiguous; an absent name still no-ops.
+                result = self.g.query(
+                    "MATCH (o:Object {name:$name}) "
+                    "SET o.status='superseded', o.supersededBy=$sb, "
+                    "    o.supersededAt=$sa "
+                    "RETURN o.id LIMIT 1",
+                    params={"name": name, "sb": supersedes_by,
+                            "sa": superseded_at})
         else:
             result = self.g.query(
                 "MATCH (o:Object {name:$name}) "

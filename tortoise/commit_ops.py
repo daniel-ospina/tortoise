@@ -158,6 +158,17 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             warn(f"supersession record skipped (missing superseded or "
                  f"supersedes_by): {record!r}")
             continue
+        if ref == supersedes_by:
+            # self-supersession — meaningless, would fold an Object to
+            # supersede itself (entity lane) or trip supersede_point's
+            # old==new raise (pt_ lane). Every sibling path guards this
+            # (the replaced eval inline loop's old_id == new_id → continue;
+            # supersede_point raises on old==new; the producer-side
+            # id-match short-circuits before its kind filter) — this
+            # consumer-side guard is the defense-in-depth sink, placed
+            # BEFORE the pt_/entity dispatch so it guards both lanes.
+            warn(f"supersession record skipped (self-supersession): {record!r}")
+            continue
         if ref.startswith("pt_"):
             # Point-level → the canonical supersede() CORRECTS (outdated +
             # edge transfer). Terminal-probed first: supersede_point RAISES
@@ -197,6 +208,16 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                  f"{supersedes_by!r} is not an Object in the payload "
                  f"entities or the graph (dangling successor)")
             continue
+        # #2164 review (P2): the fold stores supersededBy truncated to 200
+        # chars (_fold_object_superseded: str(...)[:200]) — truncate ONCE
+        # here, AFTER the successor-visibility probe above (which must see
+        # the FULL successor name), so the keep-first probe, the journaled
+        # event, and the stored fold value all agree. Pre-fix the conflict
+        # probe compared the incoming UNtruncated value against the
+        # fold-stored truncated one — long successor names produced spurious
+        # "conflict … keep-first" warnings and same-successor dedup never
+        # fired for the same successor.
+        supersedes_by = supersedes_by[:200]
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
             "RETURN o.id, o.name, o.status, o.supersededBy",
@@ -273,14 +294,18 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                 id=obj_id, name=obj_name, supersedes_by=supersedes_by,
                 session_id=session_id, evidence=evidence,
             )
-            # _fold_object_superseded is ID-BRANCH-ONLY when id is truthy
-            # (entities.py: MATCH (o:Object {id:$id}); the name branch runs
-            # only when NO id is supplied) — a legacy node carries no id
-            # property, so folding on the synthesized id would MISS and the
-            # status would never flip. Fold by NAME — the only key the legacy
-            # node actually has. The journaled event still carries the
-            # synthesized id for audit + replay (a node canonicalized by a
-            # later create_entity gains the id and replay folds by it).
+            # _fold_object_superseded prefers the id branch when id is
+            # truthy (entities.py: MATCH (o:Object {id:$id})) but FALLS BACK
+            # to the name branch when the id branch matches nothing and a
+            # name is present (#2164 ISSUE B) — a legacy node carries no id
+            # property (or a pre-canonical one), so folding on the
+            # synthesized id alone would MISS on replay. Fold by NAME — the
+            # only key the legacy node actually has; the fold id branch is
+            # kept (real id present) so canonical nodes fold by id. The
+            # journaled event still carries the synthesized id for audit +
+            # replay (a node canonicalized by a later create_entity gains
+            # the id and replay folds by it; an id-less one is recovered by
+            # the replay name fallback).
             fold_ev = {"name": obj_name, "supersedes_by": supersedes_by}
             if not legacy_no_id:
                 fold_ev["id"] = obj_id

@@ -245,6 +245,116 @@ class TestProjectionFold:
         finally:
             sdk.close()
 
+    def test_rebuild_all_legacy_idless_object_fold_survives(self, tmp_path):
+        """#2164 review (P2 — ISSUE B): a legacy id-less Object (raw-created
+        WITHOUT the canonical obj-<sha26(name)> id) superseded by the shared
+        apply_supersessions helper folds live BY NAME but is journaled with a
+        SYNTHESIZED canonical id (sdk._entity_name_id). A JSONL wipe+rebuild
+        replays that journaled ObjectSuperseded into _fold_object_superseded,
+        which selected the id branch whenever the event id was truthy →
+        MATCH (o:Object {id:$synth}) missed the node (its registration
+        predates canonical id minting — here a pre-canonical github-style
+        registration id, the same class of miss as a node with NO id
+        property) → 0 rows silent no-op → the Object reverted to
+        status='live'. The fold now falls back to the name branch (the same
+        name-keyed fold the live path uses) when the id branch matches
+        nothing and the event carries a name.
+
+        RED-capability: pre-fix this test fails at the final status assert
+        (post-rebuild status is 'live', the fold replay no-op'd)."""
+        from tortoise.commit_ops import apply_supersessions
+        from tortoise.sdk import _entity_name_id
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "tlegacy-rebuild.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            name = "legacy-R"
+            successor = "successor-S"
+            # successor must be visible (payload-entities equivalent)
+            sdk.create_entity("object", successor, objectKind="core:strategy")
+            # the legacy registration line — journaled in the pre-canonical
+            # era's id shape (github-style, NOT _entity_name_id), so the
+            # replayed node exists but carries no canonical id. The node
+            # must exist at replay for the fold to have a target.
+            legacy_reg_id = f"github-issue-{name}-7"
+            sdk._emit_event("ObjectRegistered", id=legacy_reg_id, name=name,
+                            objectKind="core:strategy")
+            # raw legacy Object — NO id property at all
+            proj.g.query("CREATE (o:Object {name:$n, status:'live'})",
+                         params={"n": name})
+            warns: list[str] = []
+            applied = apply_supersessions(
+                proj, sdk,
+                [{"superseded": name, "supersedes_by": successor,
+                  "evidence": "legacy lifecycle"}],
+                session_id="sess_legacy_r", warn=warns.append)
+            assert applied == 1, f"legacy no-id supersession must apply: {warns}"
+            # crux: the journaled ObjectSuperseded carries the SYNTHESIZED
+            # canonical id — NOT the node's registration id
+            from tortoise.log import EventLog
+            journaled = [ev for ev in
+                         EventLog(str(events / "events.jsonl")).read_all()
+                         if ev.get("type") == "ObjectSuperseded"]
+            assert journaled, "ObjectSuperseded must reach the JSONL log"
+            ev = journaled[-1]
+            assert ev["id"] == _entity_name_id("Object", name), ev
+            assert ev["name"] == name, ev
+            assert ev["supersedes_by"] == successor, ev
+            assert ev["id"] != legacy_reg_id, \
+                "the synthesized id must differ from the legacy registration id"
+            sdk._get_proj().rebuild_all(str(events))
+            rows = proj.g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                params={"n": name}).result_set
+            assert rows, "the replayed registration must recreate the Object"
+            assert rows[0][0] == "superseded", \
+                ("legacy id-less Object reverted to live on rebuild — the "
+                 f"id-branch replay missed and no name fallback fired: {rows!r}")
+            assert rows[0][1] == successor, \
+                f"supersededBy lost on replay: {rows!r}"
+        finally:
+            sdk.close()
+
+    def test_fold_id_miss_falls_back_to_name(self):
+        """#2164 review (P2 — ISSUE B, fold-side unit pin): calling
+        _fold_object_superseded with a truthy id that matches NO Object (the
+        SYNTHESIZED canonical id for a legacy id-less node — a node that
+        carries no id property) plus a name must FALL BACK to the name
+        branch and fold. Pre-fix the id branch's 0-row miss was a silent
+        no-op returning 0 — the live fold in apply_supersessions sidesteps
+        it by omitting the id, but the rebuild replay of the journaled event
+        (id + name) cannot."""
+        from tortoise.sdk import _entity_name_id
+
+        sdk = _fresh_sdk()
+        try:
+            proj = sdk._get_proj()
+            name = "legacy-F"
+            # raw legacy Object — NO id property at all
+            proj.g.query("CREATE (o:Object {name:$n, status:'live'})",
+                         params={"n": name})
+            fold = proj._fold_object_superseded
+            # id branch misses (no node carries the synthesized id) — the
+            # name fallback must fold and report the matched row
+            matched = fold({"id": _entity_name_id("Object", name),
+                            "name": name,
+                            "supersedes_by": "successor-F"})
+            assert matched == 1, \
+                "id-miss + name-present fold must fall back to the name branch"
+            rows = proj.g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                params={"n": name}).result_set
+            assert rows and rows[0][0] == "superseded", rows
+            assert rows[0][1] == "successor-F", rows
+            # id-miss + NO name stays a 0 no-op (id-only/§6b legacy shapes)
+            assert fold({"id": "no-such-id", "name": "",
+                         "supersedes_by": "x"}) == 0
+        finally:
+            sdk.close()
+
     def test_clobber_guard_second_mention_keeps_superseded(self):
         sdk = _fresh_sdk()
         try:

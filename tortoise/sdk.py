@@ -2524,11 +2524,15 @@ class TortoiseSDK:
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
-                # supersession record then references. Mirror the point-write
-                # failure pattern (:2538-2546): surface per-item + a count
-                # line as additive warnings (never a silent drop; entity
-                # writes stay warning-grade — recall-by-name remains intact
-                # for pre-existing Objects, unlike lost point content).
+                # supersession record then references. Per-item failures are
+                # surfaced as additive WARNINGS + a count line (never a
+                # silent drop) — warning-grade BY DESIGN, a DELIBERATE
+                # channel divergence from the points loop (:2581-2587),
+                # where a per-point write failure is an ERROR appended to
+                # meta errors (mode flips to 'error' and capture FAILS):
+                # lost point content is unrecoverable, while an entity
+                # write failure leaves recall-by-name intact for
+                # pre-existing Objects.
                 entity_failures.append(
                     f"{type(exc).__name__}: entity write failed for {name}: {exc}")
         if entity_failures:
