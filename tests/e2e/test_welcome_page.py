@@ -8,13 +8,16 @@ tortoise host; both hosts share the premise-labs Pages project).
 Two test groups:
 1. Static/live tests — no Supabase session needed:
    - page loads, shows loading state then the no-session error
-   - the canonical prompt URL serves markdown (PROMPT_URL contract)
+   - the live tortoise-onboarding skill mirror serves markdown
+     (ONBOARDING_SKILL_URL contract — #1998 superseded the retired
+     onboarding-prompt.md URL; see the module constant comment)
 2. Mocked-session tests — drive the success state (harness tabs, copy
    buttons, MCP config JSON) by intercepting Supabase REST calls. These
    verify the welcome page v2 UI without needing real credentials.
 
 Run:  python -m pytest tests/e2e/ -q
 Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co/welcome)
+       ONBOARDING_SKILL_URL overrides the onboarding-skill target
        SUPABASE_URL/SUPABASE_SERVICE_KEY enable the live no-429 signup smoke
        (skipped by default — no creds in CI; see #801).
 
@@ -38,7 +41,20 @@ from playwright.sync_api import Page, expect
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
-PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-prompt.md")
+# The canonical onboarding artifact is the tortoise-onboarding skill mirror
+# (app.premiselabs.co/skills/tortoise-onboarding/SKILL.md) — W2 #1998 archived
+# the AGENT_ONBOARDING.md prompt pipeline (stage_variants.py -> website/
+# onboarding-prompt.md) under tortoise/onboarding/archive/ (M8: one live
+# onboarding script; deployed mirror byte-identical by test). The old
+# premiselabs.co/onboarding-prompt.md URL is retired: no deployment has staged
+# it since #2161 (2026-09-03) and requests fall through to the Pages HTML
+# fallback — the live-signup monitor failures #2171/#2187/#2190/#2191 were this
+# static assertion against the retired URL, masked intermittently by a stale
+# CDN cache entry (this module's e2e was the consumer the M8 sweep missed).
+ONBOARDING_SKILL_URL = os.environ.get(
+    "ONBOARDING_SKILL_URL",
+    "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md",
+)
 
 
 
@@ -53,15 +69,19 @@ def test_welcome_page_no_session_redirects_to_auth(page: Page) -> None:
     expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=25_000)
 
 
-def test_onboarding_prompt_serves_markdown(page: Page) -> None:
-    """The canonical onboarding prompt (#540) must be fetchable as markdown —
-    this is the onboarding-prompt URL."""
-    resp = page.request.get(PROMPT_URL, timeout=15_000)
-    assert resp.ok, f"prompt URL returned {resp.status}"
+def test_onboarding_skill_serves_markdown(page: Page) -> None:
+    """The live tortoise-onboarding skill (#1998) must be fetchable as
+    markdown from the deployed dashboard mirror — the onboarding artifact URL
+    the CLI prints after `tortoise onboard` (#544, repointed by #1998)."""
+    resp = page.request.get(ONBOARDING_SKILL_URL, timeout=15_000)
+    assert resp.ok, f"skill URL returned {resp.status}"
     assert "text/markdown" in (resp.headers.get("content-type") or "")
     body = resp.text()
-    assert body.startswith("# Tortoise Onboarding"), "unexpected prompt body"
-    assert "Q1" in body and "Q6" in body, "prompt missing question set"
+    assert body.startswith("---"), "unexpected skill body (frontmatter missing)"
+    assert "name: tortoise-onboarding" in body, "unexpected skill body (frontmatter name)"
+    assert "tortoise_health" in body and "harness-connected" in body, (
+        "skill missing canonical content markers"
+    )
 
 
 def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
