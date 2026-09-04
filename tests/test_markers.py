@@ -70,6 +70,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
     "test_hosted_auth.py": {"registry": "prod-coupled"},   # C2 #2111 TestTkPrefixAuth mirrors test_hosted_api's registry-resolve pattern
     "test_hosted_api.py": {"registry": "prod-coupled",
                            "team-002": "team-identity"},
+    "test_acl_graph_users.py": {"registry": "prod-coupled"},   # C4 #2113 — team seeding via _make_sdk(namespace="registry")
     "test_import_endpoint.py": {"registry": "import-ledger"},
     "test_index_mcp.py": {"registry": "prod-coupled",
                            "e2e-900": "redirect-derived per-path"},

@@ -4,6 +4,7 @@ surfaces:
   - test_1162_add_operator_local_svbp.py
   - test_abuse.py
   - test_abuse_integration.py
+  - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
   - test_api.py
