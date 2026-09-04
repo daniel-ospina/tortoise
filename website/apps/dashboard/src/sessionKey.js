@@ -30,3 +30,31 @@ export function isManagedKey(k) {
   if (!k) return false
   return !(k.created_via === 'bootstrap' || !!k.expires_at)
 }
+
+// #1998 fold-in (durable connect key): the wizard connect step's universal
+// command embeds an API key the user's agent will authenticate with. It must
+// be a DURABLE key — the 24h bootstrap session credential minted at login
+// (created_via 'bootstrap', expires_at = now+24h) stops authenticating within
+// a day, killing any agent configured with it. This classifies the key the
+// connect step should embed from server key rows (GET /v1/team/keys — which
+// lists ALL rows incl. bootstrap, kept unfiltered in state so prefix matching
+// works, #2166). Returns { key, durable, source }:
+//   - welcomeKey present → durable (first-time A13 provisioned key)
+//   - apiKey matches a durable row (created_via != bootstrap, no expires_at,
+//     not revoked, not disabled)
+//   - apiKey bootstrap/expiring/revoked/disabled/absent/UNKNOWN (no row — keys
+//     not loaded yet or stale) → { key: '', durable: false } so the caller
+//     shows the durable gate instead of embedding a possibly-24h or dead key.
+//     Never embed on unknown.
+export function durableConnectKey(welcomeKey, apiKey, keyRows) {
+  if (welcomeKey) return { key: welcomeKey, durable: true, source: 'welcome' }
+  if (!apiKey) return { key: '', durable: false, source: 'none' }
+  const row = (keyRows || []).find((k) => k && k.key_prefix === String(apiKey).slice(0, 10))
+  if (!row) return { key: '', durable: false, source: 'unknown' }
+  if (row.revoked_at) return { key: '', durable: false, source: 'revoked' }
+  if (row.enabled === false) return { key: '', durable: false, source: 'disabled' }
+  if (row.created_via === 'bootstrap' || !!row.expires_at) {
+    return { key: '', durable: false, source: 'bootstrap' }
+  }
+  return { key: apiKey, durable: true, source: 'durable' }
+}
