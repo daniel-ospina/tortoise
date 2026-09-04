@@ -64,6 +64,10 @@ class TestConflictRelevance:
         assert _query_touches_conflict(
             "zebra migration data", ["social behavior shows otherwise"]
         ) is False
+        # Exactly ONE overlapping token is still below the >= 2 gate.
+        assert _query_touches_conflict(
+            "zebra migration data", ["data shows the opposite"]
+        ) is False
         # Stopword-only overlap never counts.
         assert _query_touches_conflict("the and or", ["the or and"]) is False
         assert _query_touches_conflict("zebra finch", []) is False
@@ -100,7 +104,12 @@ class _FakeProjection:
             self.nand_query_count += 1
             if self.nand_rows is not None:
                 return self._Rows(self.nand_rows)
-            return self._Rows(self.counter_claims)
+            # (pid, claim_id, content, alpha, beta) — mirror the resolver's
+            # RETURN; neutral (1.0, 1.0) alpha/beta => medium severity.
+            return self._Rows([
+                (pid, f"{pid}-c{i}", content, 1.0, 1.0)
+                for i, (pid, content) in enumerate(self.counter_claims)
+            ])
         self.signal_query_count += 1
         return self._Rows(self.point_rows)
 
@@ -264,6 +273,37 @@ class TestGraphRankerBoost:
         by_id = {r["id"]: r["graph_ranking"] for r in ranked}
         assert "w4_contested_boost" not in by_id["twin_hot"]
         assert by_id["twin_hot"]["final_score"] == by_id["twin_calm"]["final_score"]
+
+    def test_severity_selection_mirrors_why_budget(self, monkeypatch):
+        """P2-2 (round-3): the budgeted subset mirrors why.py's severity-
+        then-id selection.  A HIGH-severity NANDer (persisted EP mean >=
+        0.6) is always chosen before MEDIUM ones — Cypher row order never
+        decides which counter-claims are tested for relevance."""
+        class _SevFake(_FakeProjection):
+            pass
+
+        # twin_hot has 3 NANDers: high-severity irrelevant (id "zz"),
+        # medium irrelevant ("aa"), medium RELEVANT ("bb").  Severity-first
+        # selection picks [zz(high), aa] — the relevant bb at position 3 is
+        # outside the W4_MAX_CONFLICTS budget, exactly as why.py would
+        # surface it.  Without severity-first ordering, [aa, bb] would fire.
+        fake = _SevFake(
+            point_rows=[
+                _point_row("twin_calm", 10.0, 10.0),
+                _point_row("twin_hot", 2.0, 2.0),
+            ],
+            nand_rows=[
+                ("twin_hot", "zz-high", "unrelated weather front claim", 3.0, 1.0),
+                ("twin_hot", "aa-med", "another irrelevant thesis", 1.0, 1.0),
+                ("twin_hot", "bb-med", "flocking zebra finch behavior is social", 1.0, 1.0),
+            ],
+        )
+        ranker = GraphRanker(projection=fake)
+        monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+        ranked = ranker.rerank(_twin_results(), query="zebra finch social behavior")
+        by_id = {r["id"]: r["graph_ranking"] for r in ranked}
+        assert "w4_contested_boost" not in by_id["twin_hot"]
+        assert fake.nand_query_count == 1
 
     def test_graph_boost_cap_keeps_invariant_at_max(self, monkeypatch):
         """The [0, 1] graph_boost invariant: a contested point near the
@@ -515,7 +555,9 @@ def test_integration_w4_enrich_false_suppresses_boost_with_flag_on(ranked_sdk, m
         "zebra finch migration", limit=10, order_by="graph", w4_enrich=False)
     assert [r["id"] for r in off] == [r["id"] for r in on_optout]
     for r_off, r_opt in zip(off, on_optout):  # noqa: B905
-        assert r_off["graph_ranking"] == r_opt["graph_ranking"]
+        # Full-row equality: no why-layer keys AND no boost in the opt-out
+        # run — order and keys both match the flag-off baseline exactly.
+        assert r_off == r_opt
     by_opt = {r["id"]: r["graph_ranking"] for r in on_optout}
     assert "w4_contested_boost" not in by_opt[hot]
 

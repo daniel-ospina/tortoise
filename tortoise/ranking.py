@@ -107,19 +107,22 @@ def resolve_contested_relevance(
 ) -> dict[str, float]:
     """ONE batch read (S8 N+1 guard): contested id → whether the query is
     conflict-relevant.  Returns {pid: W4_CONTESTED_BOOST} for contested
-    points whose NAND-side counter-claim shares a significant token with the
-    query.  Never per-result queries; never raises (defensive).
+    points whose NAND-side counter-claim shares >= 2 significant tokens
+    with the query.  Never per-result queries; never raises (defensive).
 
-    The counter-claim resolution mirrors why.py's canonical conflict shape:
-    a NANDer ``c`` NANDs INTO the point — either a direct operator-less
-    statement or a NAND operator whose counterargument is its INPUT source
-    at idx 0 (the NAND edge into the target sits at idx > 0).  Mirroring
-    why.py also means: terminal-status counter-claims are excluded
-    (``_exclude_status_clause('c')``), each contested point's claims are
-    budget-capped at why.py's W4_MAX_CONFLICTS (a boost never fires on a
-    conflict the canonical why-layer wouldn't surface), and the whole read
-    + row-processing is fail-open — ranking must never break from
-    enrichment (non-str raw-graph content is coerced, never raised)."""
+    The counter-claim resolution mirrors why.py's canonical conflict
+    shape: a NANDer ``c`` NANDs INTO the point — either a direct
+    operator-less statement or a NAND operator whose counterargument is its
+    INPUT source at idx 0 (the NAND edge into the target sits at idx > 0).
+    Mirroring why.py also means: terminal-status counter-claims are
+    excluded (``_exclude_status_clause('c')``), each contested point's
+    claims are severity-ranked (high-severity first — a NANDer whose
+    persisted EP mean >= 0.6 is a strong dispute) then id-ordered, and
+    budget-capped at why.py's W4_MAX_CONFLICTS — the SAME subset the
+    canonical why-layer would surface (a boost never fires on a conflict
+    the why-layer wouldn't show, and never misses one it would).  The
+    whole read + row-processing is fail-open — ranking must never break
+    from enrichment (non-str raw-graph content is coerced, never raised)."""
     if not contested_ids or not query:
         return {}
     try:
@@ -137,15 +140,35 @@ def resolve_contested_relevance(
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
             "  (c.is_operator = false OR c.is_operator IS NULL)) "
             "AND " + _exclude_status_clause("c") + " "
-            "RETURN n.id, coalesce(src.content, c.label, c.content, '')",
+            "RETURN n.id, coalesce(src.id, c.id), "
+            "  coalesce(src.content, c.label, c.content, ''), "
+            "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
+            "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)",
             params={"ids": contested_ids},
         ).result_set
-        by_id: dict[str, list[str]] = {}
-        for pid, content in rows:
-            by_id.setdefault(pid, []).append(str(content or ""))
+        # Severity-then-id selection mirrors why.py's _assemble_conflicts:
+        # a NANDer with persisted EP mean >= 0.6 is a high-severity dispute
+        # and ranks above medium ones; ids break the tie deterministically
+        # (Cypher row order never decides the budgeted subset).
+        pending: dict[str, dict[str, dict]] = {}
+        for pid, claim_id, content, a, b in rows:
+            if not pid or not claim_id:
+                continue
+            a_f, b_f = float(a), float(b)
+            s = a_f + b_f
+            mean = (a_f / s) if s > 0 else 0.5
+            pending.setdefault(pid, {})[claim_id] = {
+                "content": str(content or ""),
+                "mean": mean,
+                "claim_id": claim_id,
+            }
         boosts: dict[str, float] = {}
-        for pid, claims in by_id.items():
-            if _query_touches_conflict(query, claims[:_claim_budget]):
+        for pid, claims in pending.items():
+            chosen = sorted(
+                claims.values(),
+                key=lambda c: (0 if c["mean"] >= 0.6 else 1, c["claim_id"]))
+            texts = [c["content"] for c in chosen[:_claim_budget]]
+            if _query_touches_conflict(query, texts):
                 boosts[pid] = W4_CONTESTED_BOOST
         return boosts
     except Exception as e:  # pragma: no cover — defensive
