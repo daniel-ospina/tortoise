@@ -4254,9 +4254,11 @@ function claimIntentInFlight() {
     // the split-second before the redirect lands (the shell).
     const claimIntent = claimIntentInFlight()
     if (!claimIntent) {
-      // #1559: a mount failure (mint 429/5xx, auth lib blocked) renders a
-      // REAL error card with a retry — never the silent "Redirecting…"
-      // shell (which only ever accompanied an ACTUAL navigation).
+      // #1559: a mount failure (429/5xx on session resolution or team
+      // load, auth lib blocked — #2246: no session-key mint runs in the
+      // !authed mount window) renders a REAL error card with a retry —
+      // never the silent "Redirecting…" shell (which only ever
+      // accompanied an ACTUAL navigation).
       if (authUnavailable || mountError) {
         return (
           <div className="auth-wrap">
