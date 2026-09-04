@@ -242,6 +242,116 @@ class TestAuthPreLeak:
             assert r.status_code == 401
 
 
+# ── #2202: tortoise_health truth on the hosted surface ────────────────
+
+class TestTortoiseHealthTruth:
+    """#2202 — the hosted MCP tool tortoise_health must report the same truth
+    as the server /health: ok when the served graph is healthy, degraded only
+    on a real probe failure. Pre-#2202 the tool probed monitoring's
+    module-global SDK handle, which the HTTP hosted surface never registers —
+    every onboarding call reported degraded / no_sdk_registered while /health
+    (fresh SDK probe of the same DB) said ok. The tool must instead probe the
+    request-scoped TEAM SDK (the graph it actually serves) like every other
+    tool."""
+
+    @staticmethod
+    def _tool_result(body):
+        """Dict-shaped tool results come back inline or as content[].text JSON
+        depending on the FastMCP call path — handle both."""
+        result = body.get("result", {}) if body else {}
+        if isinstance(result, dict) and "content" in result:
+            text = "".join(c.get("text", "") for c in result["content"]
+                           if isinstance(c, dict))
+            if text:
+                import json
+                try:
+                    return json.loads(text)
+                except ValueError:
+                    return {"text": text}
+        return result
+
+    def test_tortoise_health_ok_over_tenant_http(self, tmp_path, monkeypatch):
+        """A healthy team's tortoise_health reads ok — never the onboarding
+        no_sdk_registered lie. Pins its own embedded store (the shared default
+        ~/.tortoise store is a cross-suite singleton; per-test isolation keeps
+        this green on both lanes)."""
+        from tortoise.mcp_server import create_http_app
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "health.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.team_create("health-truth-team")
+        key = reg.apikey_create(team["id"], "h")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_health",
+                                                "arguments": {}}})
+            assert r.status_code == 200, r.text
+            result = self._tool_result(body)
+            assert result.get("status") == "ok", body
+            assert result.get("db", {}).get("ok") is True
+            assert result.get("falkordb") == "connected"
+            assert "no_sdk_registered" not in str(result)
+            assert isinstance(result.get("graph_size"), int)
+
+    def test_tortoise_health_probes_team_graph_not_registry(self, tmp_path,
+                                                             monkeypatch):
+        """The tool's db/graph_size come from the SERVED team graph — probing
+        the registry namespace would auto-create/report a different graph
+        (#669 discipline: health probes never open the registry namespace).
+        Seed one point as the team, then assert graph_size reflects it."""
+        from tortoise.mcp_server import create_http_app
+
+        # Deterministic embedded env (mirrors the quota fixtures): the team
+        # graph lives on this DB, so graph_size is asserted against the same
+        # store the request-scoped SDK serves.
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        db = str(tmp_path / "health.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", db)
+        reg = TortoiseSDK(db_path=db, namespace="registry")
+        team = reg.team_create("health-truth-team")
+        reg.team_update(team["id"], max_points=1000)
+        key = reg.apikey_create(team["id"], "h")["api_key"]
+
+        app = create_http_app(allowed_origins=["https://app.premiselabs.co"],
+                              _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        tc.headers.update({
+            "Authorization": f"Bearer {key}",
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+        })
+        with tc:
+            # Seed through the served surface (create_point resolves the same
+            # team SDK the health probe uses).
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 1,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_create_point",
+                                                "arguments": {"kind": "statement",
+                                                              "content": "health-truth seed"}}})
+            assert r.status_code == 200, r.text
+            assert "error" not in str(body), body
+            r, body = _mcp_post(tc, {"jsonrpc": "2.0", "id": 2,
+                                     "method": "tools/call",
+                                     "params": {"name": "tortoise_health",
+                                                "arguments": {}}})
+            assert r.status_code == 200, r.text
+            result = self._tool_result(body)
+            assert result.get("status") == "ok", body
+            assert result.get("graph_size") >= 1, body
+
+
 # ── GET /mcp metadata ───────────────────────────────────────────────────────
 
 class TestGetMetadata:

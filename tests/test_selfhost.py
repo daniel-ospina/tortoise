@@ -182,6 +182,175 @@ class TestToolsList:
             assert "result" in r.text or "tools" in r.text
 
 
+def _parse_sse_json(r):
+    """Parse an MCP response body that may be SSE-framed."""
+    text = r.text
+    if text.startswith("event:") or "\ndata: " in text:
+        for line in text.splitlines():
+            if line.startswith("data: "):
+                import json
+                return json.loads(line[len("data: "):])
+        return None
+    return r.json()
+
+
+def _tool_result(body):
+    """Extract a tool-call result dict from a JSON-RPC body — FastMCP returns
+    dict-shaped results inline OR wrapped in content[].text JSON depending on
+    the call path; both are handled here."""
+    result = body.get("result", {}) if body else {}
+    if isinstance(result, dict) and "content" in result:
+        text = "".join(c.get("text", "") for c in result["content"]
+                       if isinstance(c, dict))
+        if text:
+            import json
+            try:
+                return json.loads(text)
+            except ValueError:
+                return {"text": text}
+    return result
+
+
+def _mcp_post(tc, payload):
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json"}
+    r = tc.post("/mcp", json=payload, headers=headers)
+    return r, _parse_sse_json(r)
+
+
+def _mcp_post_auth(tc, key, payload):
+    """_mcp_post with a static-mode Bearer key (auth_mode="static")."""
+    headers = {"Accept": "application/json, text/event-stream",
+               "Content-Type": "application/json",
+               "Authorization": f"Bearer {key}"}
+    r = tc.post("/mcp", json=payload, headers=headers)
+    return r, _parse_sse_json(r)
+
+
+class TestHealthTruthMCP:
+    """#2202 — tortoise_health reports the same truth as the daemon's /health.
+
+    The onboarding lie: the MCP tool used to probe monitoring's module-global
+    SDK handle, which the HTTP daemon never registers (only the stdio
+    entrypoint does) — so tortoise_health reported degraded /
+    no_sdk_registered / graph_size 0 while GET /health (fresh SDK probe of the
+    SAME graph) returned ok. These tests run the REAL selfhost daemon surface
+    (auth_mode=static): /health and the MCP tortoise_health tool must agree,
+    and mere tool listing must not drag hosted machinery in.
+    """
+
+    def test_tortoise_health_ok_matches_http_health(self, monkeypatch, tmp_path):
+        """Healthy daemon: tools/call tortoise_health == ok, exactly like
+        GET /health — no no_sdk_registered, graph probed."""
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        with tc:
+            health = tc.get("/health")
+            assert health.status_code == 200
+            assert health.json()["status"] == "ok"
+
+            r, body = _mcp_post_auth(tc, "k", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "tortoise_health", "arguments": {}},
+            })
+            assert r.status_code == 200, r.text
+            result = _tool_result(body)
+            assert result.get("status") == "ok", body
+            assert result.get("db", {}).get("ok") is True
+            assert result.get("falkordb") == "connected"
+            assert "no_sdk_registered" not in str(result)
+            assert isinstance(result.get("graph_size"), int)
+
+    def test_tortoise_health_degraded_matches_http_health(self, monkeypatch,
+                                                          tmp_path):
+        """#2202 pin: degraded is reserved for a REAL probe failure — a dead
+        DB flips BOTH /health and the MCP tool to degraded together (same
+        probe)."""
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        import tortoise.monitoring as mon
+
+        def _boom_probe(sdk):
+            # probe_db's contract is never-raise: a dead DB is a FAILED probe
+            # result, not an exception. Return the degraded shape both /health
+            # and metrics() turn into status="degraded".
+            return {"ok": False, "latency_ms": 0.0, "error": "NXDOMAIN"}
+
+        # probe_db is imported lazily from tortoise.monitoring inside both
+        # /health (selfhost.py) and metrics() (the MCP tool) — patch it there.
+        monkeypatch.setattr(mon, "probe_db", _boom_probe)
+        with tc:
+            r = tc.get("/health")
+            assert r.status_code == 200
+            assert r.json()["status"] == "degraded"
+
+            r, body = _mcp_post_auth(tc, "k", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "tortoise_health", "arguments": {}},
+            })
+            assert r.status_code == 200, r.text
+            result = _tool_result(body)
+            assert result.get("status") == "degraded", body
+            assert result.get("db", {}).get("ok") is False
+
+    def test_tools_list_creates_no_stray_tmp_db(self, monkeypatch, tmp_path):
+        """#2202 indicator 2: tools/list on the daemon must not open a stray
+        embedded DB in $TMPDIR (the 21KB tortoise.db side effect observed
+        during mere tool listing). The daemon's own graph lives at
+        TORTOISE_DB_PATH (tmp_path here) — nothing may mint a second store in
+        the system tempdir. (The hosted_api no-import guarantee is pinned
+        unit-level in test_onboarding_gate_short_circuits_on_selfhost — a
+        sys.modules diff here would be vacuous once an earlier file in the
+        same pytest process imported hosted_api.)"""
+        import tempfile
+
+        tmp = tempfile.gettempdir()
+        stray_before = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
+
+        tc = _client_for_env(monkeypatch, tmp_path, TORTOISE_API_KEY="k")
+        with tc:
+            r, body = _mcp_post_auth(tc, "k", {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/list",
+                "params": {},
+            })
+            assert r.status_code == 200, r.text
+            names = [t["name"] for t in body["result"]["tools"]]
+            assert "tortoise_health" in names
+
+        stray_after = {f for f in os.listdir(tmp) if f.startswith("tortoise.db")}
+        assert stray_after == stray_before, (
+            f"tools/list opened a stray embedded DB in $TMPDIR: "
+            f"{stray_after - stray_before}")
+
+    def test_onboarding_gate_short_circuits_on_selfhost_before_hosted_api(
+            self, monkeypatch):
+        """#2202 indicator 2: the tools/list onboarding-completion gate
+        (_team_onboarding_complete) must short-circuit on the SELFHOST team
+        id BEFORE importing tortoise.hosted_api — the control-plane read that
+        dragged hosted machinery / an embedded registry DB into a mere tool
+        listing. Pin the guard ORDER: hosted_api imports are BLOCKED here, and
+        the gate still returns False (fail-open: onboarding tools stay
+        listed)."""
+        import builtins
+
+        from tortoise import mcp_server as _ms
+        from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id
+
+        real_import = builtins.__import__
+
+        def _blocked_import(name, *args, **kwargs):
+            if name == "tortoise.hosted_api":
+                raise AssertionError(
+                    "tools/list gate must not import hosted_api on the "
+                    "selfhost daemon")
+            return real_import(name, *args, **kwargs)
+
+        monkeypatch.setattr(builtins, "__import__", _blocked_import)
+        token = _current_team_id.set(SELFHOST_TEAM_ID)
+        try:
+            assert _ms._team_onboarding_complete() is False
+        finally:
+            _current_team_id.reset(token)
+
+
 class TestOriginProtection:
     def test_origin_bearing_request_ok_for_allowed_origin(self, monkeypatch, tmp_path):
         """allowed_origins pin: Origin http://localhost:8000 passes (T1.2)."""

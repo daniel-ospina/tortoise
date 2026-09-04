@@ -4,7 +4,7 @@ from __future__ import annotations
 import json  # noqa: F401
 from unittest.mock import MagicMock
 
-import pytest  # noqa: F401
+import pytest
 
 from tortoise import monitoring
 
@@ -35,6 +35,17 @@ def _counter_value(counter, labels=None):
                     continue
                 return s.value
     return 0
+
+
+@pytest.fixture(autouse=True)
+def _restore_sdk_global():
+    """Save/restore monitoring._sdk around every test — the metrics tests set
+    it directly, and residue would leak a FakeSDK (or None) into any later
+    no-arg metrics()/serve_health test in the same pytest process (#2202
+    review fix)."""
+    previous = monitoring._sdk
+    yield
+    monitoring._sdk = previous
 
 
 class TestProbeDb:
@@ -134,16 +145,24 @@ class TestProbeDb:
 class TestMetricsFunction:
     """metrics() function tests."""
 
-    def test_no_sdk_returns_degraded(self):
+    def test_no_sdk_returns_honest_unknown_never_degraded(self):
+        """#2202: NO probe target (no sdk= arg, nothing registered) is an
+        unverified handle, NOT an observed component failure — the report must
+        be an accurate intermediate state (unknown, db.ok=None), never
+        'degraded'. Reporting degraded here is the onboarding lie: the HTTP
+        daemon/hosted surfaces never register the module-global, so the old
+        code claimed the served system was broken while /health said ok."""
         monitoring._sdk = None
         result = monitoring.metrics()
-        assert result["status"] == "degraded"
+        assert result["status"] == "unknown"
         assert result["falkordb"] == "no_sdk_registered"
-        assert result["db"] == {"ok": False, "latency_ms": 0.0,
+        assert result["db"] == {"ok": None, "latency_ms": 0.0,
                                 "error": "no_sdk_registered"}
         assert result["graph_size"] == 0
 
-    def test_connected_sdk_returns_ok(self):
+    def test_registered_sdk_returns_ok(self):
+        """The module-global handle (stdio path: main() registers it) still
+        works when no explicit sdk= is passed."""
         monitoring._sdk = FakeSDK(db_ok=True, graph_size=7)
         result = monitoring.metrics()
         assert result["status"] == "ok"
@@ -153,6 +172,8 @@ class TestMetricsFunction:
         assert result["graph_size"] == 7
 
     def test_broken_db_returns_degraded(self):
+        """#2202 pin: degraded is reserved for an observed probe FAILURE — a
+        real component failing — never for a missing registration."""
         monitoring._sdk = FakeSDK(db_ok=False)
         result = monitoring.metrics()
         assert result["status"] == "degraded"
@@ -164,6 +185,66 @@ class TestMetricsFunction:
         monitoring._sdk = FakeSDK()
         result = monitoring.metrics()
         assert result["uptime"] >= 0
+
+
+class TestMetricsExplicitSdkArg:
+    """metrics(sdk=...) — #2202: serving surfaces pass the SDK whose graph
+    they actually serve so the report reflects the real graph even when the
+    module-global handle is unregistered (HTTP daemon/hosted paths)."""
+
+    def test_explicit_healthy_sdk_returns_ok_when_nothing_registered(self):
+        """The #2202 regression: daemon-served (unregistered module-global)
+        but healthy → ok, exactly as /health reports."""
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=True, graph_size=42))
+        assert result["status"] == "ok"
+        assert result["falkordb"] == "connected"
+        assert result["db"]["ok"] is True
+        assert result["graph_size"] == 42
+        assert "no_sdk_registered" not in str(result)
+
+    def test_explicit_broken_sdk_returns_degraded(self):
+        """degraded still fires when the SERVED graph's probe actually fails
+        — the fix narrows degraded to real component failures only."""
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+        assert result["db"]["ok"] is False
+        assert "connection refused" in result["db"]["error"]
+
+    def test_explicit_sdk_overrides_registered_global(self):
+        """sdk= is authoritative when passed — an explicit target never falls
+        through to (or masks itself as) the module-global handle."""
+        monitoring._sdk = FakeSDK(db_ok=False)
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=True, graph_size=3))
+        assert result["status"] == "ok"
+        assert result["graph_size"] == 3
+        # And the reverse: a healthy registered handle must not mask a broken
+        # explicitly-passed serving SDK.
+        monitoring._sdk = FakeSDK(db_ok=True)
+        result = monitoring.metrics(sdk=FakeSDK(db_ok=False))
+        assert result["status"] == "degraded"
+
+    def test_no_taxonomy_roundtrip_when_probe_failed(self):
+        """#2202 (review fix): a FAILED probe must not drag an extra taxonomy
+        graph round-trip onto the degraded health call (a dead DB degrades
+        fast, bounded by the RETURN-1 probe only) — and the skipped count
+        never inflates the ``errors`` field this same response reports."""
+        calls = {"taxonomy": 0}
+
+        class BrokenSDK(FakeSDK):
+            def __init__(self):
+                super().__init__(db_ok=False)
+
+            def taxonomy(self):
+                calls["taxonomy"] += 1
+                return {"Point": 5}
+
+        monitoring._sdk = None
+        result = monitoring.metrics(sdk=BrokenSDK())
+        assert result["status"] == "degraded"
+        assert calls["taxonomy"] == 0
+        assert result["graph_size"] == 0
 
 
 class TestRecordFunctions:
