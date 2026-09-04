@@ -155,9 +155,20 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     skipped SILENTLY regardless of the claimed successor (no
     divergence probe — supersede_point would raise on a terminal old);
     terminal ENTITY olds warn keep-first when the claimed successor
-    diverges from the stored one. Real capture cannot reach either
-    branch (S3 terminal exclusion) — the out-of-band path is
-    defense-in-depth. Returns the number of records applied.
+    diverges from the stored one. The entity terminal branch is
+    REACHABLE, not out-of-band-only: the extractor's S3 search_graph
+    calls tortoise_fts_query(entity_type='object') directly, and that
+    surface does NOT exclude terminal Objects (the terminal-status
+    clause in search_engine applies to label == 'Point' only; recall's
+    #1350 object filter runs after retrieval inside recall_state
+    alone) — so overlapping capture (session 2 re-derives a
+    supersession whose target session 1 already folded) routes a real
+    entity record against a terminal target, and this branch is the
+    idempotency mechanism (dedup same-successor / keep-first
+    divergence). pt_ terminal olds remain unreachable via capture
+    (S3 point exclusion + supersede_point's own guard); their silent
+    idempotent skip guards out-of-band delivery. Returns the number of
+    records applied.
     """
     if warn is None:
         warn = _logger.warning
@@ -274,6 +285,16 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                      f"nor name — skipped (never-guess)")
                 continue
             obj_id, obj_name, o_status, o_sb = by_name[0]
+        # REAL id captured BEFORE the legacy synthesis below: for a legacy
+        # id-less target this stays None (the canonical id is synthesized
+        # next for the journal — the graph node itself carries no id, and an
+        # id-branch fold on a synthesized id would MISS on replay without
+        # the name fallback). The alias + visible-successor scans need the
+        # REAL id: a synthesized id could equal a canonical successor's id
+        # only if a canonical Object with the same name coexists — impossible
+        # (the ref probe's >1-name never-guess would have skipped it
+        # earlier).
+        real_obj_id = obj_id
         legacy_no_id = False
         if not obj_id:
             # #2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
@@ -317,15 +338,6 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # scan: legacy refs resolve by name (obj_name == ref), so a
         # self-alias there requires supersedes_by == ref — already absorbed
         # by the string-equality guard above.
-        # real id BEFORE legacy synthesis: for a legacy id-less target this
-        # stays None (the canonical id is synthesized below for the journal —
-        # the graph node itself carries no id, and an id-branch fold on a
-        # synthesized id would MISS on replay without the name fallback). The
-        # alias scan below needs the REAL id: a synthesized id could equal a
-        # canonical successor's id only if a canonical Object with the same
-        # name coexists — impossible (the ref probe's >1-name never-guess
-        # would have skipped it earlier).
-        real_obj_id = obj_id
         # Self-alias ⇔ EVERY successor candidate is the target itself — i.e.
         # no DISTINCT successor exists under that name (a pure self-fold with
         # nothing left visible as the successor). Legacy id-less rows can
@@ -379,9 +391,11 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # round-4 review: the fold-through decision (target is LIVE) needs a
         # successor VISIBLE to recall_state's default Object view. That view
         # (sdk.py recall_state, #1350 filter) requires BOTH:
-        #   (a) an id — retrieval keys on o.id; an id-less Object never
-        #       surfaces in ANY object read (name query, kind scan,
-        #       recall_state), regardless of status; and
+        #   (a) an id — SDK object reads (recall_state, fts_query, kind
+        #       scan, get_entity) key retrieval on o.id and drop id-less
+        #       rows before presenting results; a raw graph name probe
+        #       returns an id-less node only as an id=None row (which the
+        #       gate filters), never as a usable successor; and
         #   (b) status not in recall's object exclusion tuple
         #       {"superseded", "deprecated", "archived", "retracted"}
         #       (verified live: a deprecated Object enters the FTS pool but

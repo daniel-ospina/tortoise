@@ -1524,8 +1524,13 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     A→C after a capture A→B blind-overwrites supersededBy to C with NO
     warning — DOCUMENTED and asserted in T9's parity harness, NOT fixed
     in-PR). The helper-routed keep-first is the one consumer discipline
-    that never blind-overwrites; a capture can never trip it either (S3
-    excludes terminal Objects) — it guards out-of-band record delivery."""
+    that never blind-overwrites; a capture CAN trip it — the extractor's
+    S3 search_graph calls tortoise_fts_query(entity_type='object'),
+    which does NOT exclude terminal Objects (the terminal clause is
+    point-label-only; recall's #1350 object filter runs inside
+    recall_state alone), so overlapping capture re-derives a
+    supersession against a target session 1 already folded — this
+    keep-first branch is the idempotency mechanism for that path."""
     from tortoise.commit_ops import apply_supersessions
 
     proj = sdk._get_proj()
