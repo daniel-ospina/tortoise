@@ -83,6 +83,7 @@ ROUTED_NAMESPACES: dict[str, dict[str, str]] = {
                                    "team-abc123": "assertion"},
     "test_onboarding_endpoints.py": {"registry": "prod-coupled"},
     "test_onboarding_integration.py": {"registry": "prod-coupled"},
+    "test_onboarding_seed_endpoint.py": {"registry": "prod-coupled"},  # #1999 (W3): seed/decide endpoint tests
     "test_onboarding_state_split.py": {"registry": "prod-coupled"},
     "test_onboarding_state.py": {"registry": "unit-only"},
     "test_pack_state.py": {

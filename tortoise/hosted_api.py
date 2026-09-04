@@ -13495,6 +13495,237 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
     }
 
 
+# ── #1999 (W3): interactive ontology-precise seed ─────────────────────
+# POST /v1/onboarding/seed — files exactly two Subjects (Organization/
+# organization + User/naturalPerson linked memberOf, DM-3) from auth-
+# context anchor data (teams.name + team email + session user), with
+# collision detection (never silent merge of distinct identities),
+# person→naturalPerson normalization, never-invented identity (email-
+# derived person name is a PROPOSAL requiring confirmation), and the
+# fork-aware completion gate (WF-2). The seed core lives in
+# tortoise/onboarding/seed.py (graph-agnostic — W12's self-hosted path
+# reuses it); this module owns the hosted anchor-data resolution.
+
+
+def _team_name(team_id: str) -> str | None:
+    """Org display name from the control plane (teams.name / Team node)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        team_name as _sb_team_name,
+    )
+    if is_supabase_enabled():
+        return _sb_team_name(get_control_plane(), team_id)
+    sdk = _make_sdk(namespace="registry")
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) RETURN t.name",
+            params={"id": team_id}).result_set
+        return rows[0][0] if rows else None
+    finally:
+        sdk.close()
+
+
+class _TeamSeedSurface:
+    """Duck-typed seed surface over the team-scoped SDK: find_subject_by_name
+    needs raw Cypher (projection), entity writes need the SDK (SubjectAdded
+    events + journal + embedding + #452 name-MERGE)."""
+
+    def __init__(self, sdk):
+        self._sdk = sdk
+
+    def query(self, cypher, **params):
+        return self._sdk._get_proj().query(cypher, **params)
+
+    def create_subject(self, name, subjectKind="other", **props):
+        return self._sdk.create_subject(name, subjectKind=subjectKind, **props)
+
+    def create_edge(self, relation, from_id, to_id):
+        return self._sdk.create_edge(relation, from_id, to_id)
+
+
+def _next_onboarding_step(team_id: str, proj) -> str | None:
+    """First incomplete fork-aware step after the seed (the decide nudge
+    target): self fork → decide; build → catalog-presented; compact →
+    harness-connected. 'done' when the gate already satisfied the status."""
+    node = _os.read_onboarding_node(proj, team_id)
+    if node is None or node.get("status") == _os.STATUS_COMPLETE:
+        return "done"
+    steps = set(_os.completed_steps(proj, team_id))
+    if bool(node.get("compact")):
+        order = ("harness-connected",)
+    elif node.get("fork") == _os.FORK_BUILD:
+        order = ("harness-connected", "catalog-presented")
+    else:
+        order = ("harness-connected", "decide-completed")
+    for step in order:
+        if step not in steps:
+            return step
+    return "done"
+
+
+def _run_onboarding_seed(team_id: str, *, org_name: str | None = None,
+                         person_name: str | None = None,
+                         person_user_id: str | None = None,
+                         person_email: str | None = None) -> dict:
+    """The W3 interactive seed runner (shared by the REST endpoint + the
+    MCP tool). Hosted anchor data: org display name ← explicit org_name or
+    teams.name; person ← explicit person_name (user-confirmed) or
+    email-prefix derivation (PROPOSAL — never silently filed); user_id /
+    email are the stable identity refs (DM-3).
+
+    Contract (WF-2 / DM-3): gaps/collisions → NO graph writes
+    (all-or-nothing — a disambiguation round never leaves a half-seed);
+    seeded → two Subjects (compact: org-anchor seed-lite only) + memberOf
+    + onboards edge/org_subject_id + first-points-filed step edge
+    (created-signal) + fork-aware gate eval. Graph-down → 503 fail-loud
+    (FLOW-bearing write, retry-safe)."""
+    from tortoise.onboarding import seed as _seed
+    if not _graph_available(team_id):
+        raise HTTPException(status_code=503,
+                            detail="Onboarding graph unavailable — retry later")
+    proj = _team_proj(team_id)
+    node = _os.read_onboarding_node(proj, team_id)
+    compact = bool((node or {}).get("compact")) if node is not None else False
+
+    org_display = (org_name or "").strip()
+    org_source = "provided" if org_display else "teams.name"
+    if not org_display:
+        org_display = _team_name(team_id) or ""
+    include_person = not compact
+    person_provided = (person_name or "").strip()
+    person_source = "provided" if person_provided else None
+
+    # never-invented-identity gate: gaps → ask (zero writes)
+    gaps: list[dict] = []
+    if not org_display:
+        gaps.append({"field": "org_name", "source": "ask",
+                      "reason": "no org display name on the control plane"})
+    if include_person and not person_provided:
+        derived = (_seed.derive_display_name_from_email(person_email)
+                   if person_email else None)
+        if derived:
+            person_source = "email-derived"
+            gaps.append({
+                "field": "person_name", "source": "email-derived",
+                "derived": derived,
+                "reason": ("display_name is not exposed — confirm the "
+                            "email-prefix name before filing"),
+            })
+        else:
+            gaps.append({"field": "person_name", "source": "ask",
+                          "reason": "no email-prefix name derivable"})
+    if gaps:
+        return {"status": "needs_confirmation", "gaps": gaps,
+                "org_name": org_display or None,
+                "org_name_source": org_source if org_display else None,
+                "person_name_source": person_source}
+
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        surface = _TeamSeedSurface(sdk)
+        try:
+            report = _seed.seed_onboarding_anchors(
+                surface, org_name=org_display, org_id=team_id,
+                person_name=person_provided or None,
+                user_id=person_user_id, person_email=person_email,
+                include_person=include_person)
+        except _seed.SubjectCollision as exc:
+            return {
+                "status": "collision",
+                "collisions": [{
+                    "kind": exc.kind, "name": exc.name,
+                    "existing_id": exc.existing_id, "reason": exc.reason,
+                    "existing_refs": exc.refs,
+                }],
+                "org_name": org_display,
+                "org_name_source": org_source,
+                "person_name_source": person_source,
+                "question": (f"A Subject named {exc.name!r} already exists "
+                              "and is not this org/user. Provide a "
+                              "disambiguated name (suffix/canonical key) — "
+                              "distinct identities are never merged."),
+            }
+        # node ↔ anchor link (DM-1) + first-points-filed step edge + gate
+        legacy_mirror = bool(_get_onboarding_state(team_id).get(
+            "onboarding_complete"))
+        org_subject = report["org_subject"]
+        onboards = _os.write_onboards_edge(proj, team_id, org_subject["id"])
+        step = _os.write_completed_step(
+            proj, team_id, "first-points-filed",
+            status_from_mirror=legacy_mirror)
+        _maybe_apply_completion(team_id)
+    finally:
+        sdk.close()
+    return {
+        "status": "seeded",
+        "org_name": org_display,
+        "org_name_source": org_source,
+        "person_name_source": person_source,
+        "org_subject": report["org_subject"],
+        "user_subject": report["user_subject"],
+        "org_created": report["org_created"],
+        "person_created": report["person_created"],
+        "org_kind_normalized": report["org_kind_normalized"],
+        "person_kind_normalized": report["person_kind_normalized"],
+        "member_of": report["member_of"],
+        "onboards": onboards,
+        "steps": {"first-points-filed": step},
+        "next": _next_onboarding_step(team_id, _team_proj(team_id)),
+        "onboarding": _get_onboarding_projection(team_id),
+    }
+
+
+class OnboardingSeedRequest(BaseModel):
+    """Interactive seed — explicit (user-confirmed) names override anchor
+    data. ``extra="forbid"``: unknown fields are a 422, never a silent
+    ignore."""
+    org_name: str | None = Field(default=None, max_length=200)
+    person_name: str | None = Field(default=None, max_length=200)
+    model_config = {"extra": "forbid"}
+
+
+@app.post("/v1/onboarding/seed", response_model=dict)
+async def onboarding_seed(body: OnboardingSeedRequest,
+                          team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """File the two onboarding anchor Subjects (Organization/organization +
+    User/naturalPerson linked memberOf) from auth-context anchor data.
+
+    Interactive (WF-2): call without names to discover gaps (email-derived
+    person name → needs_confirmation) or collisions (same-name Subject that
+    is not this org/user → disambiguation); call with explicit
+    user-confirmed names to file. Gaps/collisions write NOTHING — never
+    invented identity, never silent merge. Seeded → two Subjects + memberOf
+    + onboards edge + first-points-filed step edge + fork-aware gate eval.
+
+    Dual-auth (session JWT OR tt_ key) like the checkpoint; the team always
+    comes from the auth context. """
+    team_id = team["team_id"]
+    # identity refs from the auth context (never client-supplied):
+    # session_user_id is the JWT user UUID; created_by is a user UUID on
+    # session-minted keys but the EMAIL on register-lane keys (legacy) — an
+    # email must never ride the user_id ref (it would tag the person anchor
+    # with a bogus identity and break the collision predicate).
+    person_user_id = team.get("session_user_id") or team.get("created_by")
+    if person_user_id in (None, "api") or "@" in str(person_user_id):
+        person_user_id = None
+    try:
+        return _run_onboarding_seed(
+            team_id, org_name=body.org_name, person_name=body.person_name,
+            person_user_id=person_user_id,
+            person_email=team.get("email"))
+    except HTTPException:
+        raise
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "onboarding seed failed (team=%s)", team_id)
+        raise HTTPException(status_code=500,
+                            detail="Onboarding seed failed — retry-safe") from None
+
+
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)
 async def set_session_recording(body: dict, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Toggle automatic session recording (Q3 / Memory-sources sessions toggle).
