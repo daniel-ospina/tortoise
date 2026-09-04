@@ -50,6 +50,17 @@ if _OriginalFalkorDB is not None:
         paths create per-CWD servers, the Category-3 leak). Absolute paths and
         no-arg construction pass through to the original.
 
+        Issue #2204 (first-run): redislite writes its redis-server config with
+        ``dir <db-path-parent>`` and the embedded daemon FATALs at config load
+        when that directory does not exist (fresh machine — no ~/.tortoise
+        yet). The data dir is created HERE, at the single embedded choke-point,
+        BEFORE the server config is read — so `tortoise init` / `doctor` /
+        any first embedded open on a clean machine works instead of printing a
+        raw "FATAL CONFIG FILE ERROR". Idempotent (exist_ok). No-op for
+        :memory:. Fails clean (OSError propagates as-is) only when the dir
+        cannot be created at all (e.g. unwritable parent) — never a redislite
+        subprocess FATAL.
+
         Issue #1005 (lifecycle): context-manager support + idempotent close +
         atexit registration so normal process exit never orphans the server.
         NOTE: no GC-time weakref.finalize here — the object IS the redislite
@@ -67,8 +78,16 @@ if _OriginalFalkorDB is not None:
                     # (mirrors config.py; #1005 lifecycle applies to
                     # file-backed servers only)
                     pass
-                elif not os.path.isabs(path) and not path.startswith("~"):
-                    raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
+                else:
+                    if not os.path.isabs(path) and not path.startswith("~"):
+                        raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
+                    # #2204: create the data dir BEFORE redislite reads its
+                    # config (see class docstring). os.path.expanduser first so
+                    # a tilde path resolves before dirname. Never fails on an
+                    # existing dir; bare filenames (impossible after the
+                    # absolute reject above) would no-op via dirname "" → ".".
+                    data_dir = os.path.dirname(os.path.expanduser(path))
+                    os.makedirs(data_dir or ".", exist_ok=True)
             super().__init__(*args, **kwargs)
             import atexit as _atexit
             self._t_closed = False

@@ -295,15 +295,26 @@ class TestDoctorPath:
 
 
 class TestDoctorDefaultResolution:
-    def test_no_flags_defaults_to_embedded(self, clear_db_env, capsys):
+    def test_no_flags_defaults_to_embedded(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """No flags, no env → shared default resolution (canonical embedded
         path), like init/index — NOT a local docker://localhost default
         (#720 conf 70). Graph health must report the embedded graph, never
-        a docker connection failure."""
+        a docker connection failure. Hermetic (#2204): the canonical default
+        (~/.tortoise/tortoise.db) is redirected to a seeded tmp DB — the
+        test must never depend on the runner's real ~/.tortoise existing."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+        # Seed an initialized embedded DB at the canonical default (fix A
+        # creates the data dir on open; the write forces the projection up).
+        sdk = TortoiseSDK(db_path=canonical)
+        sdk.create_point(kind="observation", content="doctor no-flags seed")
+        sdk.close()
+
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
-        assert rc in (0, 1)  # docker probe may fail without a live FalkorDB
+        assert rc in (0, 1)  # docker section may warn without a live FalkorDB
         line = _health_line(out)
         assert "Points" in line
         assert "❌" not in line  # embedded resolution must not fail
@@ -339,6 +350,59 @@ class TestDoctorDefaultResolution:
         assert rc in (0, 1)
         line = _health_line(out)
         assert "0 Points" in line
+
+
+class TestDoctorPreInit:
+    """#2204: doctor on an UNINITIALIZED environment (no data dir — a fresh
+    machine that never ran `tortoise init`) must print a clean, readable
+    first-run status instead of starting the embedded redis server, which
+    would emit a raw "*** FATAL CONFIG FILE ERROR" (redislite writes
+    `dir <missing-dir>` into its config) plus a redis-server subprocess
+    traceback. The probe is SKIPPED — doctor never creates state on a
+    machine the user has not set up — and the run PASSES (rc 0, ⚠️ only).
+    """
+
+    def test_embedded_path_missing_dir_reports_not_set_up(self, clear_db_env, tmp_path, capsys):
+        """--path into a NONEXISTENT directory tree → readable 'not set up
+        yet' line + rc 0, no FATAL CONFIG noise, no traceback, and NO
+        directory created (probe skipped — doctor has no side effects)."""
+        db_path = os.path.join(str(tmp_path), "no-such-dir", "graph", "tortoise.db")
+
+        rc = _run_doctor(["--path", db_path])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "FATAL CONFIG" not in out
+        assert "Traceback" not in out
+        assert "redis-server" not in out
+        line = _health_line(out)
+        assert "⚠️" in line
+        assert "not set up yet" in line
+        assert "tortoise init" in line
+        assert "❌" not in line
+        # probe skipped → the missing dir tree was NOT created
+        assert not os.path.exists(os.path.dirname(db_path))
+
+    def test_no_flags_fresh_machine_reports_not_set_up(self, monkeypatch, clear_db_env, tmp_path, capsys):
+        """The canonical first-run scenario: no flags, no env, no ~/.tortoise
+        → doctor reports 'not set up yet — run tortoise init' (rc 0) instead
+        of the raw embedded-redis FATAL CONFIG error."""
+        from tortoise import config as _config
+        canonical = os.path.join(str(tmp_path), ".tortoise", "tortoise.db")
+        monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
+
+        rc = _run_doctor([])
+        out = capsys.readouterr().out
+
+        assert rc == 0
+        assert "FATAL CONFIG" not in out
+        assert "Traceback" not in out
+        line = _health_line(out)
+        assert "⚠️" in line
+        assert "not set up yet" in line
+        assert canonical in line  # names the missing default so the hint is actionable
+        assert "❌" not in line
+        assert not (tmp_path / ".tortoise").exists()  # no dir created by the probe
 
 
 class TestDoctorSessionExtraction:

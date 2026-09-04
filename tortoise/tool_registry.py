@@ -1058,6 +1058,26 @@ class FastMCPAdapter:
             handler = handlers.get(entry.name)
             if handler is None:
                 continue
+            # #2204: skip names already registered on the mcp instance (stale
+            # @mcp.tool() decorators / other registration paths). fastmcp's
+            # default on_duplicate="warn" logs "Component already exists" and
+            # REPLACES — double registration at import is pure noise, and
+            # replacing a live tool is never intended when the first
+            # registration came from an identical decorator. Sync existence
+            # check via the local provider's component store (get_tool is
+            # async; _components is keyed "tool:<name>@..." — scanning by
+            # component name avoids the key format). getattr-guarded so an
+            # upstream layout change degrades to a duplicate warning, never
+            # a crash.
+            _provider = getattr(self._mcp, "_local_provider", None)
+            _components = getattr(_provider, "_components", None)
+            if _components is not None:
+                _dup = any(
+                    getattr(c, "name", None) == entry.name
+                    for c in _components.values()
+                )
+                if _dup:
+                    continue
             tool = FunctionTool.from_function(
                 handler,
                 name=entry.name,
