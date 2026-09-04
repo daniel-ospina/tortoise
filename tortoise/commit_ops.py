@@ -139,7 +139,8 @@ def apply_payload_operators(proj, sdk, operators: list, *,
 # OR name; pt_<sha> refs are point content-addressed ids, dispatched by
 # prefix) OR commit_schema.SupersessionRecord models (the commit reconcile
 # records). Extracted here so capture (_extract_session_v2), eval ingest_v2,
-# and (phase-2) hosted §6b share ONE consumer-side discipline.
+# and the hosted commit endpoint (_execute_commit_writes §6b, migrated in
+# #2193) share ONE consumer-side discipline.
 
 
 def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
@@ -148,8 +149,9 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     pt_ records → supersede() CORRECTS (terminal-probed, idempotent);
     entity records → ObjectSuperseded event (id-style, journaled with
     full provenance) + _fold_object_superseded (count-verified).
-    #2164: shared by capture (_extract_session_v2), eval ingest_v2,
-    and (phase-2) hosted §6b. warn() receives every skip/failure —
+    #2164/#2193: shared by capture (_extract_session_v2), eval ingest_v2,
+    and the hosted commit endpoint (_execute_commit_writes §6b). warn()
+    receives every skip/failure —
     never a silent drop — with ONE explicit asymmetry (final-review
     P3): terminal pt_ olds are treated as idempotent re-ingests and
     skipped SILENTLY regardless of the claimed successor (no
@@ -275,8 +277,8 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         else:
             by_name = [r for r in rows if r[1] == ref]
             if len(by_name) > 1:
-                # never-guess — deliberate divergence from hosted §6b's blind
-                # LIMIT 1: two Objects claim the same name, do not pick one.
+                # never-guess: two Objects claim the same name, do not pick
+                # one (a blind LIMIT 1 would fold an arbitrary carrier).
                 warn(f"supersession ref {ref!r} matches {len(by_name)} Objects "
                      f"by name — skipped (never-guess)")
                 continue
