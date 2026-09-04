@@ -59,9 +59,16 @@ EXTRACTOR_MOCK = {"TORTOISE_SESSION_LLM_MOCK": "1", "TORTOISE_SESSION_EXTRACTOR"
 def sdk_factory():
     """Yields a factory that mints ONE fresh hermetic graph per call (docker
     lane: a unique server graph via the redirect seam; embedded lane: a
-    transient file).  Every minted SDK is wiped + closed at teardown."""
+    transient file).  Every minted SDK is wiped + closed at teardown.  The
+    m2 mock posture env is set for the test and RESTORED at teardown
+    (review round-1 P2: process-global env mutation must not leak into
+    sibling test modules in the same worker)."""
     from tortoise.sdk import TortoiseSDK
 
+    saved_env = {
+        key: os.environ.get(key) for key in
+        ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_SESSION_LLM_MOCK")
+    }
     os.environ.update(EXTRACTOR_MOCK)
     created: list[tuple] = []
 
@@ -83,6 +90,12 @@ def sdk_factory():
     for _sdk, _dir in created:
         with contextlib.suppress(Exception):
             shutil.rmtree(_dir, ignore_errors=True)
+    # Restore the ambient env (the mock posture was test-scoped).
+    for key, value in saved_env.items():
+        if value is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = value
 
 
 def _tmp_corpus(tmp_path: Path) -> Path:
@@ -211,19 +224,26 @@ def test_full_mode_includes_pinned_holdout(sdk_factory):
 def test_isolation_gate_catches_misrouted_teams(sdk_factory):
     """E2E-4 negative: force both teams into ONE cell (a misrouted rig) and
     the isolation grader DETECTS the cross-team leak ⇒ REGRESSION.  The
-    clean replay is violations=0; routing is the graded seam."""
+    clean replay is violations=0; routing is the graded seam.
+
+    Review round-1 P1 upgrade: the misroute is PARTIAL and CROSS-SUITE —
+    only team B's WRITE_BACK session (iso_wb_b_atlas, the Atlas note) lands
+    in team A's cell.  The per-gold teams map (Mercury anchors only) would
+    miss this leak; the UNION other-team anchor vocabulary (Atlas content
+    included) is what catches it."""
     from eval.harness import runner as runner_module
 
     real_cell_key = runner_module._cell_key
 
-    def _misroute(session_id, fixture, gold):
-        return "team_team_a" if fixture.get("team") else real_cell_key(
-            session_id, fixture, gold)
+    def _misroute_wb_b(session_id, fixture, gold):
+        if fixture.get("suite") == "write_back" and fixture.get("team") == "team_b":
+            return "team_team_a"  # only the Atlas write-back leaks across
+        return real_cell_key(session_id, fixture, gold)
 
     report_clean = _run_all(sdk_factory)
     assert report_clean["metrics"]["source_isolation_violations"] == 0
 
-    runner_module._cell_key = _misroute
+    runner_module._cell_key = _misroute_wb_b
     try:
         report = runner_module.run_benchmark()
     finally:
@@ -232,3 +252,21 @@ def test_isolation_gate_catches_misrouted_teams(sdk_factory):
     assert report["metrics"]["source_isolation_violations"] > 0
     assert report["verdict"] == schema.VERDICT_REGRESSION
     assert report["failure_origin"] == "gate_regression"
+
+
+def test_run_dropping_a_suite_fails_loud(sdk_factory):
+    """Review round-1 P1/C: a run whose session set drops gate-corpus
+    suites reads those metrics at their vacuous FLOOR — which is now WORST
+    (minimize rates collapse to 1.0), so the run REGRESSES vs the committed
+    baseline instead of passing.  The session_ids dodge cannot turn a
+    dropped suite into a green."""
+    wb_only = [s for s in corpus.session_ids()
+               if corpus.load_fixture(s).get("suite") == "write_back"]
+    report = runner.run_benchmark(session_ids=wb_only)
+    assert report["run_status"] == "completed"
+    # Dropped kta/false-fire/push/continuity suites sit at worst ⇒ the run
+    # cannot pass the committed baseline (kta 1.0 == committed, ff 1.0 >
+    # committed 0.0 ⇒ REGRESSION).
+    assert report["metrics"]["know_to_ask_failure_rate"] == 1.0
+    assert report["metrics"]["false_fire_rate"] == 1.0
+    assert report["verdict"] == schema.VERDICT_REGRESSION

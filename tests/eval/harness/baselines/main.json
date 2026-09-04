@@ -16,6 +16,7 @@
   "fixtures_hash": "sha256:ded9706426ba6b9ae541c8753ca5c6fbc22ed0555b559af2cd153fcf25ddff21",
   "history": [
     {
+      "correction": "2026-09-04 prose correction: the original blessing justification quoted the FIRST completed llm run's numbers (continuity_recall 0.667 / 4-of-6 \u2014 itself unreachable on the 3-reader BPRE corpus); the blessed snapshot is THIS run's 0.3333 (1/3). Values unchanged; prose aligned to the committed snapshot.",
       "date": "2026-09-04T07:17:50Z",
       "failure_classes": [
         "blessed via CLI",
@@ -23,7 +24,7 @@
         "cw01_writer_ingest: cell=pair_cw01_writer_ingest suite=continuity",
         "iso_a_mercury: cell=team_team_a suite=isolation"
       ],
-      "justification": "llm product-lane BPRE replay at clean head e50ae316 (15-session gate corpus, real deepseek/openrouter extraction): first product-lane number per the fix-wave protocol. write_back_fidelity 0.25 \u2014 REAL finding: the LLM extractor paraphrases/mints few literal anchors (echo-lane 1.0 was the deterministic artifact; the product bar is this number). continuity_recall 0.667 (4/6 readers surfaced the planted decision through real recall). source_isolation 0 (E2E-4 gate green). kta failure 1.0 / push 0.0 = honest NULL-reflex numbers (graded seam lands with W4 #2102; reflex bars activate on the graded re-bless).",
+      "justification": "llm product-lane BPRE replay at clean head e50ae316 (15-session gate corpus, real deepseek/openrouter extraction): first product-lane number per the fix-wave protocol. write_back_fidelity 0.25 \u2014 REAL finding: the LLM extractor paraphrases/mints few literal anchors (echo-lane 1.0 was the deterministic artifact; the product bar is this number). continuity_recall 0.3333 (1 of 3 BPRE readers surfaced the planted decision through real recall; LLM jitter disclosed \u2014 a prior completed run measured 0.667). source_isolation 0 (E2E-4 gate green). kta failure 1.0 / push 0.0 = honest NULL-reflex numbers (graded seam lands with W4 #2102; reflex bars activate on the graded re-bless).",
       "values": {
         "continuity_recall": 0.3333333333333333,
         "false_fire_rate": 0.0,
@@ -36,7 +37,7 @@
     }
   ],
   "judge_pin": "w3-volunteering-memory-mechanical-v1",
-  "justification": "llm product-lane BPRE replay at clean head e50ae316 (15-session gate corpus, real deepseek/openrouter extraction): first product-lane number per the fix-wave protocol. write_back_fidelity 0.25 \u2014 REAL finding: the LLM extractor paraphrases/mints few literal anchors (echo-lane 1.0 was the deterministic artifact; the product bar is this number). continuity_recall 0.667 (4/6 readers surfaced the planted decision through real recall). source_isolation 0 (E2E-4 gate green). kta failure 1.0 / push 0.0 = honest NULL-reflex numbers (graded seam lands with W4 #2102; reflex bars activate on the graded re-bless).",
+  "justification": "llm product-lane BPRE replay at clean head e50ae316 (15-session gate corpus, real deepseek/openrouter extraction): first product-lane number per the fix-wave protocol. write_back_fidelity 0.25 \u2014 REAL finding: the LLM extractor paraphrases/mints few literal anchors (echo-lane 1.0 was the deterministic artifact; the product bar is this number). continuity_recall 0.3333 (1 of 3 BPRE readers surfaced the planted decision through real recall; LLM jitter disclosed \u2014 a prior completed run measured 0.667). source_isolation 0 (E2E-4 gate green). kta failure 1.0 / push 0.0 = honest NULL-reflex numbers (graded seam lands with W4 #2102; reflex bars activate on the graded re-bless).",
   "metrics": {
     "continuity_recall": 0.3333333333333333,
     "false_fire_rate": 0.0,

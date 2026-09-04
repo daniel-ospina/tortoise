@@ -56,7 +56,8 @@ def _gold(**over) -> dict:
 
 
 def _baseline(metrics: dict | None = None, *, config=None, reflex: str = "null",
-              judge_pin: str = "w3-volunteering-memory-mechanical-v1") -> dict:
+              judge_pin: str = "w3-volunteering-memory-mechanical-v1",
+              justification: str = "first publish") -> dict:
     cfg = dict(config or BASE_CONFIG)
     cfg["reflex"] = reflex
     return {
@@ -64,7 +65,7 @@ def _baseline(metrics: dict | None = None, *, config=None, reflex: str = "null",
         "fixtures_hash": HASH_A,
         "judge_pin": judge_pin,
         "config": cfg,
-        "justification": "first publish",
+        "justification": justification,
         "metrics": metrics or {},
         "history": [],
     }
@@ -184,8 +185,13 @@ class TestAggregation:
         assert metrics["source_isolation_violations"] == 1
 
     def test_empty_denominator_collapses_to_worst(self):
+        """An empty denominator collapses to the metric's WORST value — a
+        suite with no graded demand must never read as a clean pass
+        (review round-1 P1/C fix: minimize rates collapse to 1.0, maximize
+        to 0.0)."""
         metrics = schema.aggregate_metrics([])
-        assert metrics["know_to_ask_failure_rate"] == 0.0
+        assert metrics["know_to_ask_failure_rate"] == 1.0
+        assert metrics["false_fire_rate"] == 1.0
         assert metrics["push_precision"] == 0.0
         assert metrics["source_isolation_violations"] == 0
 
@@ -239,6 +245,33 @@ class TestGraders:
         assert result["write_back"]["survived"] == 1
         assert result["write_back"]["total"] == 2
         assert result["write_back"]["missing"] == ["beta decision"]
+
+    def test_write_back_unprovenanced_match_does_not_survive(self):
+        """Review round-1 P1: with provenance_required, a content match whose
+        provenance was stripped is NOT a fidelity survival — a provenance-
+        stripping write path must not pass fidelity 1.0."""
+        gold = {"suite": "write_back", "write_back": {
+            "planted_points": ["alpha decision"],
+            "provenance_required": True,
+        }}
+        stripped = [{"content": "the alpha decision stands",
+                     "provenance_present": False}]
+        result = grading.grade_write_back("s", gold, stripped)
+        assert result["write_back"]["survived"] == 0
+        assert result["write_back"]["unprovenanced"] == 1
+        assert result["write_back"]["missing"] == []
+
+    def test_push_courtesy_fire_is_a_false_fire(self):
+        """Review round-1 P2: an injection at a should_retrieve:false push
+        turn is a false fire (the push seam's anti-gaming surface)."""
+        gold = {"suite": "push", "per_turn": [
+            {"turn": 1, "should_retrieve": True, "pointers": ["a"]},
+            {"turn": 2, "should_retrieve": False},
+        ]}
+        result = grading.grade_push("s", gold, injected={1: ["a"], 2: ["a"]})
+        assert result["push"]["prec_num"] == 1
+        assert result["push"]["prec_den"] == 1  # only retrieve-turn injections scored
+        assert result["false_fire"] == {"fires": 1, "silent_required": 1}
 
     def test_continuity_surfaces_planted_anchors(self):
         gold = {"suite": "continuity", "continuity": {
@@ -438,7 +471,21 @@ class TestBless:
 
 class TestValidateBaseline:
     def test_pending_baseline_valid(self):
-        assert schema.validate_baseline(_baseline(metrics={})) == []
+        # Pending: empty metrics ⇒ null judge_pin AND null justification.
+        pending = _baseline(metrics={}, judge_pin=None, justification=None)
+        assert schema.validate_baseline(pending) == []
+
+    def test_published_requires_pin_and_justification(self):
+        full = schema.aggregate_metrics([])
+        no_pin = _baseline(metrics=full, judge_pin=None)
+        no_just = _baseline(metrics=full, justification=None)
+        assert any("requires a pinned judge" in i
+                   for i in schema.validate_baseline(no_pin))
+        assert any("requires the blessing justification" in i
+                   for i in schema.validate_baseline(no_just))
+        # And a pending baseline must not carry a pin/justification.
+        stamped = _baseline(metrics={})
+        assert any("pending baseline" in i for i in schema.validate_baseline(stamped))
 
     def test_published_baseline_must_have_full_metric_vocabulary(self):
         partial = _baseline(metrics={"write_back_fidelity": 1.0})

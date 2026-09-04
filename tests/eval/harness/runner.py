@@ -97,7 +97,10 @@ def _session_graph(cells: dict[str, object], key: str, run_id: str) -> object:
     Cell isolation is the E2E-4 rig property: each cell (team / pair /
     session) gets its OWN graph — server-namespace under TORTOISE_DB_URI,
     transient embedded file otherwise (mirrors write_path's hermetic SDK
-    open, with the cell folded into the namespace)."""
+    open, with the cell folded into the namespace).  A stale graph left by a
+    CRASHED prior run with the same fixed run_id would contaminate grading
+    (double sessionCaptured events), so server-lane graphs are wiped
+    on-open (review round-1 P2)."""
     from tortoise.sdk import TortoiseSDK
 
     sdk = cells.get(key)
@@ -107,6 +110,12 @@ def _session_graph(cells: dict[str, object], key: str, run_id: str) -> object:
         namespace = f"w3h_{run_id}_{ns_slug}"
         if uri and os.environ.get("TORTOISE_TEST_MODE") != "1":
             sdk = TortoiseSDK(namespace=namespace)
+            # Wipe-on-open: a fresh run must never replay over a dead run's
+            # graph (best-effort — a wipe failure surfaces at capture).
+            import contextlib
+
+            with contextlib.suppress(Exception):
+                sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
         else:
             tmp = Path(tempfile.mkdtemp(prefix="w3h_graph_")) / f"{key}.db"
             sdk = TortoiseSDK(db_path=str(tmp), namespace=namespace)
@@ -123,6 +132,36 @@ def _teardown_cells(cells: dict[str, object]) -> None:
         with contextlib.suppress(Exception):
             sdk.close()
     cells.clear()
+
+
+def _team_anchor_map(root: Path = HARNESS_DIR) -> dict[str, list[str]]:
+    """Team → anchors authored under that team, across ALL corpus suites
+    (isolation-gold team maps, write_back planted points, continuity
+    reader_planted anchors).  The E2E-4 isolation gate probes a team's cell
+    with the OTHER team's full authored set — Mercury, Atlas AND Orion
+    (review round-1 P1 fix)."""
+    per_team: dict[str, set[str]] = {}
+    for sid in corpus.session_ids(root):
+        fixture = corpus.load_fixture(sid, root)
+        team = fixture.get("team")
+        if not team:
+            continue
+        gold = corpus.load_gold(sid, root)
+        suite = gold.get("suite")
+        if suite == "isolation":
+            for other, spec in (gold.get("teams") or {}).items():
+                per_team.setdefault(other, set()).update(
+                    (spec or {}).get("anchors", [])
+                )
+        elif suite == "write_back":
+            per_team.setdefault(team, set()).update(
+                (gold.get("write_back") or {}).get("planted_points", [])
+            )
+        elif suite == "continuity":
+            per_team.setdefault(team, set()).update(
+                (gold.get("continuity") or {}).get("reader_planted", [])
+            )
+    return {team: sorted(anchors) for team, anchors in per_team.items()}
 
 
 # ── Pre-flight (mirrors write_path; harness corpus surface) ────────────────
@@ -169,8 +208,61 @@ def preflight(root: Path = HARNESS_DIR, *, posture: str = "llm") -> dict:
     n_holdout = len(corpus.holdout_ids(root))
     if n and (n_holdout / n) < 0.05:
         issues.append(f"holdout set too small: {n_holdout}/{n} < 5%")
+    # Both teams' isolation fixtures must be present in the gate corpus — a
+    # missing iso_a leaves the team_b→team_a leak direction ungraded
+    # (review round-1 P1: the E2E-4 gate must fail LOUD, not silently lose a
+    # direction).
+    teams = {fixture.get("team") for sid in corpus.session_ids(root)
+             for fixture in [corpus.load_fixture(sid, root)]
+             if fixture.get("team") and fixture.get("suite") == "isolation"}
+    if len(teams) < 2:
+        issues.append(
+            f"isolation suite needs ≥ 2 teams in the gate corpus (found {sorted(teams)})"
+        )
+    # Suite-denominator floor (review round-1 P1/C): every suite present in
+    # the corpus must grade a NON-EMPTY denominator on the gate corpus — a
+    # suite with no demands trivially scores its floor (a 0-denominator
+    # minimize rate collapses to WORST, but the corpus must still exercise
+    # each suite so no suite is silently absent from the gate).
+    suite_denominators: dict[str, bool] = {}
+    for sid in corpus.session_ids(root):
+        if sid in corpus.holdout_ids(root):
+            continue
+        fixture = corpus.load_fixture(sid, root)
+        suite = fixture.get("suite")
+        suite_denominators.setdefault(suite, False)
+        if suite in ("know_to_ask", "push"):
+            suite_denominators[suite] = suite_denominators[suite] or any(
+                e.get("should_retrieve") for e in
+                (corpus.load_gold(sid, root).get("per_turn") or [])
+            )
+        elif suite == "write_back":
+            suite_denominators[suite] = suite_denominators[suite] or bool(
+                (corpus.load_gold(sid, root).get("write_back") or {})
+                .get("planted_points")
+            )
+        elif suite == "continuity":
+            suite_denominators[suite] = suite_denominators[suite] or bool(
+                (corpus.load_gold(sid, root).get("continuity") or {})
+                .get("reader_planted")
+            )
+    for suite, exercised in suite_denominators.items():
+        if suite == "isolation":
+            # Isolation's graded demand is the cross-team probe surface —
+            # exercised whenever ≥ 2 teams are in the gate corpus (checked
+            # above); its metric is a raw violation count.
+            exercised = exercised or len(teams) >= 2
+        if not exercised:
+            issues.append(
+                f"gate corpus suite {suite!r} has no graded demand "
+                "(0-denominator — the metric is vacuous; author the suite "
+                "so it exercises the graded surface)"
+            )
     fixtures_hash = corpus.compute_fixtures_hash(root)
     baseline = corpus.load_baseline(root, posture=posture)
+    baseline_issues = schema.validate_baseline(baseline)
+    if baseline_issues:
+        issues.extend(f"baseline ({posture}): {i}" for i in baseline_issues)
     if baseline.get("fixtures_hash") != fixtures_hash:
         issues.append(
             "baseline.fixtures_hash != on-disk corpus hash "
@@ -431,6 +523,12 @@ def run_benchmark(
         )
     else:
         selected = corpus.session_ids(root)
+    # holdout_excluded rides WITH the mode (review round-1 P2): a full-mode
+    # run includes the holdout, so its config snapshot must not claim
+    # exclusion — the audit record never lies about which fixtures produced
+    # the numbers.
+    if session_ids is None:
+        resolved_config["holdout_excluded"] = (run_mode == "BPRE")
     missing = [s for s in selected if s not in corpus.session_ids(root)]
     if missing:
         return _failed_report(
@@ -491,7 +589,12 @@ def run_benchmark(
             else:
                 total_cost += float(session_cost)
         # Isolation post-pass: grade each TEAM cell once against the WHOLE
-        # cell graph (see cell_points) — the E2E-4 surface.
+        # cell graph (see cell_points) — the E2E-4 surface.  The violation
+        # vocabulary is the UNION of the other team's anchors across ALL
+        # corpus suites (Mercury + Atlas + Orion — review round-1 P1: a
+        # per-gold teams map samples only one anchor and misses cross-suite
+        # leaks).
+        team_anchors = _team_anchor_map(root)
         for key in sorted(cells):
             if not key.startswith("team_"):
                 continue
@@ -504,25 +607,36 @@ def run_benchmark(
             if not iso_sids:
                 continue
             sid = iso_sids[0]
-            gold = corpus.load_gold(sid, root)
             try:
                 points = cell_points(cells[key])
-                result = grading.grade_isolation(
-                    sid, gold, points, own_team=team
+                other_anchors = sorted(set(
+                    anchor for other_team, anchors in team_anchors.items()
+                    if other_team != team for anchor in anchors
+                ))
+                result = grading.grade_isolation_vs(
+                    sid, points, own_team=team,
+                    own_anchors=sorted(team_anchors.get(team, [])),
+                    other_anchors=other_anchors,
                 )
                 result["cell"] = key
                 result["capture_ok"] = True
                 result["memory_point_count"] = len(points)
-                # Drop the session-loop's ungraded placeholder for this sid
-                # (grade once per cell, not per session).
+                # Replace the graded sid's ungraded placeholder (grade once
+                # per cell); the cell's OTHER isolation sessions keep their
+                # rows but are marked covered-by so the receipt never shows a
+                # silently-ungraded isolation session.
                 session_results = [
                     r for r in session_results if r["session_id"] != sid
                 ]
                 session_results.append(result)
+                for r in session_results:
+                    if r.get("suite") == "isolation" and r.get("isolation") is None:
+                        r["isolation"] = {"covered_by_cell": key}
                 notes.append(
                     f"isolation {key}: own {result['isolation']['own_anchors_present']}/"
                     f"{result['isolation']['own_anchors_total']} present, "
-                    f"violations={result['isolation']['violations']}"
+                    f"{result['isolation']['other_anchors_probed']} other-team "
+                    f"anchors probed, violations={result['isolation']['violations']}"
                 )
             except Exception as exc:
                 runner_errors.append(
@@ -530,6 +644,24 @@ def run_benchmark(
                 )
     finally:
         _teardown_cells(cells)
+
+    # Run-level suite coverage (review round-1 P1/C): the gate corpus's
+    # suites must ALL be graded by this run — a session-set that drops a
+    # suite (session_ids dodge, empty selection) would read the dropped
+    # suite's metrics at their vacuous floor.  Fail loud, never pass.
+    if not ordered:
+        runner_errors.append("no sessions selected for the run")
+    graded_suites = {r.get("suite") for r in session_results if r.get("suite")}
+    corpus_suites = {
+        corpus.load_fixture(s, root).get("suite") for s in ordered
+    }
+    missing_suites = sorted(corpus_suites - graded_suites)
+    if missing_suites:
+        runner_errors.append(
+            f"run did not grade corpus suites {missing_suites} "
+            "(a dropped suite reads its metric at the vacuous floor — the "
+            "run must cover every gate-corpus suite)"
+        )
 
     if runner_errors:
         report = _failed_report(
@@ -817,13 +949,21 @@ def _main(argv: list[str] | None = None) -> int:
         )
         if report["run_status"] != "completed":
             print("log: " + "; ".join(report["log"][-5:]))
-            return 2 if report["failure_origin"] else 0
+            # Exit-code contract (aligned with W2-b; review round-1 P2):
+            # 1 = gate failure / runner error (CI must fail), 2 =
+            # inconclusive (not a pass, but nothing regressed — pending
+            # first-run or cross-config compare).  Never 0 for either.
+            return 1
         receipt = build_receipt(report)
         issues = validate_receipt(receipt)
         if issues:
             print("RECEIPT ISSUES: " + "; ".join(issues))
-            return 2
-        return 0 if report["verdict"] == schema.VERDICT_PASS else 2
+            return 1
+        if report["verdict"] == schema.VERDICT_PASS:
+            return 0
+        if report["verdict"] == schema.VERDICT_REGRESSION:
+            return 1  # gate regression — CI fails
+        return 2  # inconclusive (pending / config / hash / pin mismatch)
     if "--bless" in args or "--bless-corpus" in args or "--bless-protocol" in args:
         posture = "m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2" else "llm"
         justification = _arg_value(args, "--justification")

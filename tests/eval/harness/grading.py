@@ -95,12 +95,19 @@ def grade_push(session_id: str, gold: dict, injected: dict[int, list[str]],
     precision = gold-acceptable injected / total injected (per turn, capped
     at ``budget``); recall = gold-acceptable injected / gold-required
     pointers.  Pooled across turns by the caller (schema.aggregate_metrics).
+    Injections at ``should_retrieve: false`` turns (courtesy / re-mention)
+    are FALSE FIRES — the push suite's anti-gaming surface is measured too
+    (review round-1 P2: a courtesy fire on the push seam must not vanish
+    from false_fire_rate).
     """
     gold_required: dict[int, list[str]] = {}
+    silent_turns: list[int] = []
     for entry in gold.get("per_turn", []):
         turn = entry["turn"]
         if entry.get("should_retrieve") and entry.get("pointers"):
             gold_required[turn] = entry["pointers"]
+        elif entry.get("should_retrieve") is False:
+            silent_turns.append(turn)
     prec_num = prec_den = rec_num = rec_den = 0
     for turn, required in gold_required.items():
         injected_turn = (injected.get(turn) or [])[:budget]
@@ -108,6 +115,7 @@ def grade_push(session_id: str, gold: dict, injected: dict[int, list[str]],
         rec_num += sum(1 for pid in injected_turn if pid in required)
         prec_den += len(injected_turn)
         prec_num += sum(1 for pid in injected_turn if pid in required)
+    fires = sum(1 for turn in silent_turns if injected.get(turn))
     return {
         "session_id": session_id,
         "suite": "push",
@@ -115,6 +123,7 @@ def grade_push(session_id: str, gold: dict, injected: dict[int, list[str]],
             "prec_num": prec_num, "prec_den": prec_den,
             "recall_num": rec_num, "recall_den": rec_den,
         },
+        "false_fire": {"fires": fires, "silent_required": len(silent_turns)},
         "emitted": True,
     }
 
@@ -122,10 +131,10 @@ def grade_push(session_id: str, gold: dict, injected: dict[int, list[str]],
 # ── write_back (graded today — graph snapshot) ─────────────────────────────
 
 def grade_write_back(session_id: str, gold: dict, points: list[dict]) -> dict:
-    """Fidelity = planted anchors found in the session's graph snapshot with
-    provenance intact (point has event/extractedFrom provenance).  Anchors
-    whose match lacks provenance count as SURVIVED-but-unprovenanced — the
-    provenance dimension is reported per session for the receipt notes."""
+    """Fidelity = planted anchors that survived with their PROVENANCE intact
+    when the gold requires it (review round-1 P1 fix: a provenance-stripping
+    write path must not pass fidelity 1.0 on content-only matches).
+    ``unprovenanced`` stays diagnostic detail."""
     planted = (gold.get("write_back") or {}).get("planted_points", [])
     provenance_required = bool((gold.get("write_back") or {}).get(
         "provenance_required", True))
@@ -137,15 +146,17 @@ def grade_write_back(session_id: str, gold: dict, points: list[dict]) -> dict:
         if point is None:
             missing.append(anchor)
             continue
-        survived += 1
         if provenance_required and not point.get("provenance_present"):
             unprovenanced += 1
+            continue  # not a fidelity survival — provenance is part of the bar
+        survived += 1
     return {
         "session_id": session_id,
         "suite": "write_back",
         "write_back": {
             "survived": survived, "total": len(planted),
             "unprovenanced": unprovenanced, "missing": missing,
+            "provenance_required": provenance_required,
         },
         "emitted": True,
     }
@@ -175,21 +186,35 @@ def grade_continuity(session_id: str, gold: dict,
 
 def grade_isolation(session_id: str, gold: dict, points: list[dict],
                     *, own_team: str) -> dict:
-    """Violations = other-team anchored content present in this team's graph
-    snapshot (gold.teams maps team → its anchors).  This team's OWN anchors
-    present is expected (fidelity), not a violation; the OTHER teams' anchors
-    present is the E2E-4 leak."""
+    """Per-gold isolation grade (unit-tested surface): other-team anchors
+    listed in THIS gold's ``teams`` map present in the cell graph are
+    violations; own-team anchors present are expected (fidelity)."""
     teams = (gold.get("teams") or {})
     own_anchors = (teams.get(own_team) or {}).get("anchors", [])
+    other_anchors = []
+    for other_team, spec in teams.items():
+        if other_team != own_team:
+            other_anchors.extend((spec or {}).get("anchors", []))
+    return grade_isolation_vs(
+        session_id, points, own_team=own_team,
+        own_anchors=own_anchors, other_anchors=other_anchors,
+    )
+
+
+def grade_isolation_vs(session_id: str, points: list[dict], *, own_team: str,
+                       own_anchors: list[str], other_anchors: list[str]) -> dict:
+    """Union isolation grade (the E2E-4 gate surface — review round 1,
+    P1 finding): ``other_anchors`` is the UNION of the other team's anchors
+    across ALL corpus suites (write_back planted anchors, continuity
+    reader_planted anchors, isolation-gold team anchors) — a leak of ANY
+    other-team content (Mercury, Atlas, OR Orion) into this team's cell is
+    a violation, not just the single-anchor sample a per-gold map lists."""
     violations = 0
     violation_anchors: list[str] = []
-    for other_team, spec in teams.items():
-        if other_team == own_team:
-            continue
-        for anchor in (spec or {}).get("anchors", []):
-            if find_point_for_anchor(anchor, points) is not None:
-                violations += 1
-                violation_anchors.append(f"{other_team}::{anchor}")
+    for anchor in other_anchors:
+        if find_point_for_anchor(anchor, points) is not None:
+            violations += 1
+            violation_anchors.append(anchor)
     own_present = sum(1 for a in own_anchors
                       if find_point_for_anchor(a, points) is not None)
     return {
@@ -200,6 +225,7 @@ def grade_isolation(session_id: str, gold: dict, points: list[dict],
             "violation_anchors": violation_anchors,
             "own_anchors_present": own_present,
             "own_anchors_total": len(own_anchors),
+            "other_anchors_probed": len(other_anchors),
         },
         "emitted": True,
     }

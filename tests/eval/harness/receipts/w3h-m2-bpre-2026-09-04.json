@@ -56,7 +56,8 @@
     "isolation team_team_a: own 3/3 present, violations=0",
     "isolation team_team_b: own 3/3 present, violations=0",
     "no-reflex: know_to_ask/push graded on the NULL reflex (nothing injected) \u2014 the kta failure / push precision numbers are the honest pre-W4 baseline; the standing kta/false-fire/push bars activate when a baseline is published with config.reflex=graded",
-    "cost not tracked: the capture seam reported no llm_cost_usd \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
+    "cost not tracked: the capture seam reported no llm_cost_usd \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure",
+    "reproduction run: this receipt was captured from a SECOND deterministic-lane run ~40s after the blessed run (byte-identical metrics \u2014 the echo lane is reproducible); the blessed history entry carries no run_id, so the receipt pins the commit + hash + metrics the baseline records."
   ],
   "receipt_version": 1,
   "resolved_config": {

@@ -361,13 +361,15 @@ def aggregate_metrics(session_results: list[dict]) -> dict:
          "write_back": {...}, "continuity": {...},
          "isolation": {"violations": int}, "emitted": bool}
 
-    Aggregation is POOLED.  ``know_to_ask_failure_rate`` = missed / should
-    (0.0 when nothing should retrieve — a corpus with no retrieval demands
-    trivially scores 0.0, which the corpus floor guards against).  False-fire
-    rate = fires / turns that required silence.  Push precision/recall are
-    pooled ratios.  ``source_isolation_violations`` is a raw count (the 0
-    gate).  Missing values for a suite the corpus includes collapse the
-    metric to its worst value (a skipped suite never counts as pass).
+    Aggregation is POOLED.  ``know_to_ask_failure_rate`` = missed / should;
+    ``false_fire_rate`` = fires / turns that required silence; push
+    precision/recall pooled; ``source_isolation_violations`` is a raw count
+    (the 0 gate).  An empty denominator collapses the metric to its WORST
+    value (minimize rates → 1.0, maximize rates → 0.0): a suite with no
+    graded demand must never read as a clean pass (review round-1 P1/C —
+    the preflight suite-denominator floor + the runner's suite-coverage
+    check make a 0-denominator suite on a real run a runner error; this
+    collapse keeps an empty/partial aggregate honest too).
     """
     kta_missed = sum((r.get("kta") or {}).get("missed", 0) for r in session_results)
     kta_should = sum((r.get("kta") or {}).get("should", 0) for r in session_results)
@@ -389,8 +391,10 @@ def aggregate_metrics(session_results: list[dict]) -> dict:
     iso_violations = sum((r.get("isolation") or {}).get("violations", 0)
                          for r in session_results)
     return {
-        "know_to_ask_failure_rate": (kta_missed / kta_should if kta_should else 0.0),
-        "false_fire_rate": (ff_fires / ff_silent if ff_silent else 0.0),
+        # Empty denominator ⇒ WORST: minimize rates collapse to 1.0 (a
+        # suite with no graded demand must not read as a clean pass).
+        "know_to_ask_failure_rate": (kta_missed / kta_should if kta_should else 1.0),
+        "false_fire_rate": (ff_fires / ff_silent if ff_silent else 1.0),
         "push_precision": (push_prec_num / push_prec_den if push_prec_den else 0.0),
         "push_recall": (push_rec_num / push_rec_den if push_rec_den else 0.0),
         "write_back_fidelity": (wb_survived / wb_total if wb_total else 0.0),
@@ -622,9 +626,12 @@ def _validate_history_entry(entry: dict, index: int, issues: list[str]) -> None:
         entry,
         frozenset({"date", "values", "failure_classes", "justification",
                    "verdict", "corpus_change", "protocol_change",
-                   "reflex_graded"}),
+                   "reflex_graded", "correction"}),
         where, issues,
     )
+    correction = entry.get("correction")
+    if correction is not None and (not isinstance(correction, str) or not correction.strip()):
+        issues.append(f"{where}.correction: expected null or a non-empty string")
     date = entry.get("date")
     if not isinstance(date, str) or not date.strip():
         issues.append(f"{where}.date: expected a non-empty string (ISO date)")
@@ -708,6 +715,35 @@ def validate_baseline(baseline: dict) -> list[str]:
                     "baseline.metrics: published baseline is missing graded "
                     f"dimensions {missing_metrics} — must snapshot the full "
                     f"{len(METRIC_VALUES)}-metric vocabulary"
+                )
+        # Cross-invariants (review round-1 P2, parity with W2-b): a PUBLISHED
+        # baseline (non-empty metrics) must carry a judge_pin AND a
+        # justification; a first-run PENDING baseline (empty metrics) must
+        # carry neither — a published snapshot without its pin would make
+        # compare_run's pin guard inert (numbers blessed under one protocol
+        # compared against a pin-less target).
+        published = bool(metrics)
+        if published:
+            if judge_pin is None:
+                issues.append(
+                    "baseline.judge_pin: published baseline (non-empty metrics) "
+                    "requires a pinned judge"
+                )
+            if justification is None:
+                issues.append(
+                    "baseline.justification: published baseline (non-empty "
+                    "metrics) requires the blessing justification"
+                )
+        else:
+            if judge_pin is not None:
+                issues.append(
+                    "baseline.judge_pin: pending baseline (empty metrics) must "
+                    "have a null judge_pin"
+                )
+            if justification is not None:
+                issues.append(
+                    "baseline.justification: pending baseline (empty metrics) "
+                    "must have a null justification"
                 )
         history = baseline.get("history", [])
         if not isinstance(history, list):
