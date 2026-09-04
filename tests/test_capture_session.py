@@ -1749,6 +1749,105 @@ def test_apply_supersessions_dead_dup_candidate_skipped(sdk):
     assert by_id["obj-planx-dead"] == "superseded", by_id
 
 
+def test_apply_supersessions_deprecated_carrier_skipped(sdk):
+    """#2164 round-4 review (P1-1): the visible-successor gate must use
+    recall_state's OBJECT exclusion set — a DEPRECATED successor is recall-
+    INVISIBLE (enters the FTS pool but never the state view) even though
+    'deprecated' is not in the point-terminal vocabulary set. A (live,
+    named plan-X) superseded by "plan-X" where the only other carrier (B)
+    is deprecated → no visible successor → warn + skip (applied=0)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'deprecated'})",
+        params={"id": "obj-planx-dep", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the deprecated duplicate"}],
+        session_id="sess_dep", warn=warns.append)
+    assert applied == 0, "deprecated carrier is recall-invisible — no fold"
+    assert any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "live", \
+        f"A must stay live — its only other carrier is deprecated: {by_id}"
+
+
+def test_apply_supersessions_idless_live_carrier_skipped(sdk):
+    """#2164 round-4 review (P1-2): an id-less Object is recall-INVISIBLE
+    regardless of status (retrieval keys on o.id — name query, kind scan,
+    and recall_state all exclude id-less rows). A (canonical, live, named
+    plan-X) superseded by "plan-X" where the only other carrier is a raw
+    id-less LIVE Object → no VISIBLE successor → warn + skip (applied=0),
+    not a fold onto an unseen carrier."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    # raw legacy id-less carrier — no id property, status live
+    proj.g.query(
+        "CREATE (o:Object {name:$n, kind:$k, status:'live'})",
+        params={"n": "plan-X", "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the id-less duplicate"}],
+        session_id="sess_idless", warn=warns.append)
+    assert applied == 0, "id-less carrier is recall-invisible — no fold"
+    assert any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "live", \
+        f"A must stay live — its only other carrier is id-less: {by_id}"
+
+
+def test_apply_supersessions_outdated_carrier_folds(sdk):
+    """#2164 round-4 review (P2-1, inverse): 'outdated' IS visible in
+    recall_state's default OBJECT view (it is in the point-terminal
+    vocabulary, NOT the object exclusion tuple). A (live, named plan-X)
+    superseded by "plan-X" where the only other carrier is outdated → a
+    VISIBLE successor exists → fold proceeds (applied=1)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'outdated'})",
+        params={"id": "obj-planx-old", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the outdated duplicate"}],
+        session_id="sess_old", warn=warns.append)
+    assert applied == 1, "outdated carrier IS visible — fold applies"
+    assert not any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "superseded", by_id
+    assert by_id["obj-planx-old"] == "outdated", \
+        "the outdated carrier must be untouched"
+
+
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the
 #    method directly (no env var needed) ─────────────────────────────────
 

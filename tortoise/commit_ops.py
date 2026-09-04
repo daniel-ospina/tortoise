@@ -20,6 +20,18 @@ import logging
 
 _logger = logging.getLogger(__name__)
 
+# Statuses excluded from recall_state's default OBJECT view (the #1350 fold
+# consumer). Mirrors the literal exclusion tuple in TortoiseSDK.recall_state
+# (sdk.py — "(o.get('status') or '') not in (superseded, deprecated,
+# archived, retracted)"). NOTE: this is NOT TortoiseSDK.STATE_EXCLUDED_STATUS
+# (a class attr missing 'archived' and used for the POINT pool) and NOT
+# search_engine.TERMINAL_EXCLUDED_STATUSES (adds 'outdated', which recall's
+# object view DOES surface). Keep in sync with the recall_state filter — a
+# supersession fold is only valid when a successor VISIBLE to that view
+# remains.
+_RECALL_OBJECT_EXCLUDED_STATUS = frozenset(
+    {"superseded", "deprecated", "archived", "retracted"})
+
 
 def _op_attr(op, name, default=None):
     """Field access for raw payload dicts OR commit_schema Operator models."""
@@ -332,7 +344,14 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                  f"{obj_name!r} (id {real_obj_id!r}) — no distinct "
                  f"successor exists under that name")
             continue
-        if (o_status or "") == "superseded":
+        # round-4 review (P2-2): any target already in a recall-excluded
+        # status (superseded/deprecated/archived/retracted — the #1350
+        # object exclusion tuple, not just 'superseded') is terminal: a
+        # re-record must dedup on same-successor or keep-first on divergence
+        # — never re-fold. Pre-fix an archived/retracted/deprecated target
+        # fell through to the fold, clobbering e.g. archived→superseded
+        # (and for retracted, reversing the #689 leak-guard direction).
+        if (o_status or "") in _RECALL_OBJECT_EXCLUDED_STATUS:
             # stored supersededBy is truncated to 200 by the fold — compare
             # against the truncated form (round-2 ISSUE C): a long
             # same-successor re-ingest dedups instead of spurious conflict.
@@ -352,35 +371,43 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                          f"identity beyond the name cap is not verified")
                 # same successor already folded — idempotent dedup no-op
                 continue
-            warn(f"supersession ref {ref!r} already superseded by "
-                 f"{o_sb!r} — conflict with {supersedes_by!r} skipped "
+            warn(f"supersession ref {ref!r} already terminal "
+                 f"(status={o_status!r}, supersededBy={o_sb!r}) — "
+                 f"conflict with {supersedes_by!r} skipped "
                  f"(keep-first, the fold never blind-overwrites)")
             continue
-        # round-3 review: the fold-through decision (target is LIVE) needs a
-        # LIVE distinct successor. A duplicate-named candidate that is itself
-        # terminal (status in STALE_TERMINAL_STATUSES) is INVISIBLE to
-        # recall_state's default view — folding the live target onto its
-        # display name would leave NO visible carrier of that name (target
-        # now dead, candidate already dead) = the exact dangling-successor
-        # harm this lane exists to prevent ("a dangling successor would be
-        # INVISIBLE … warned + skipped"). Only a live (or draft) distinct
-        # candidate authorizes the fold; when every distinct candidate is
-        # terminal, the record's successor is effectively dangling → warn +
-        # skip. (Runs AFTER the terminal check above — an idempotent
-        # re-ingest of an already-folded target dedups silently even if its
-        # successor has since gone terminal: the fold already happened, no
-        # new fold is being made.)
-        from tortoise.sdk import STALE_TERMINAL_STATUSES
-        has_live_distinct = any(
-            (sid is None or sid != real_obj_id)
-            and (sst or "") not in STALE_TERMINAL_STATUSES
+        # round-4 review: the fold-through decision (target is LIVE) needs a
+        # successor VISIBLE to recall_state's default Object view. That view
+        # (sdk.py recall_state, #1350 filter) requires BOTH:
+        #   (a) an id — retrieval keys on o.id; an id-less Object never
+        #       surfaces in ANY object read (name query, kind scan,
+        #       recall_state), regardless of status; and
+        #   (b) status not in recall's object exclusion tuple
+        #       {"superseded", "deprecated", "archived", "retracted"}
+        #       (verified live: a deprecated Object enters the FTS pool but
+        #       never the recall state view; "outdated" IS visible — it is
+        #       not in the object exclusion, only in the POINT-terminal
+        #       vocabulary set).
+        # Folding a live target onto a display name whose remaining carriers
+        # are all id-less or recall-excluded leaves NO visible successor =
+        # the exact dangling-successor harm this lane exists to prevent.
+        # Only a visible distinct candidate authorizes the fold; otherwise
+        # the record's successor is effectively dangling → warn + skip.
+        # (Runs AFTER the terminal check above — an idempotent re-ingest of
+        # an already-folded target dedups silently even if its successor has
+        # since gone terminal: the fold already happened, no new fold is
+        # being made. Also: id-less legacy targets fold by name via the
+        # journaled synthesized id + name fallback — their SUCCESSORS
+        # carrying canonical ids are unaffected by the id-present rule.)
+        has_visible_distinct = any(
+            sid is not None and sid != real_obj_id
+            and (sst or "") not in _RECALL_OBJECT_EXCLUDED_STATUS
             for sid, _sname, sst in sb_rows)
-        if not has_live_distinct:
+        if not has_visible_distinct:
             warn(f"entity supersession {ref!r} skipped — successor "
-                 f"{supersedes_by!r} resolves only to terminal or "
-                 f"target-identical Objects (no visible successor "
-                 f"under that name — recall_state excludes terminal "
-                 f"Objects)")
+                 f"{supersedes_by!r} resolves only to id-less, "
+                 f"target-identical, or recall-excluded Objects (no "
+                 f"visible successor under that name)")
             continue
         try:
             # id-style emission: id + ALL extra kwargs ride the JSONL line
