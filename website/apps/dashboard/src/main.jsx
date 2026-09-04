@@ -5419,7 +5419,7 @@ function claimIntentInFlight() {
         <nav>
           <button className={tab === 'overview' ? 'active' : ''} onClick={() => { setTab('overview'); setSelectedSessionId(null); setSessionDetail(null); }}>Overview</button>
           <button className={tab === 'keys' ? 'active' : ''} data-tab="keys" onClick={() => { setTab('keys'); setSelectedSessionId(null); setSessionDetail(null); }}>API Keys</button>
-          <button className={tab === 'graphs' ? 'active' : ''} onClick={() => setTab('graphs')}>Graphs</button>
+          <button className={tab === 'graphs' ? 'active' : ''} data-tab="graphs" onClick={() => setTab('graphs')}>Graphs</button>
           <button className={tab === 'members' ? 'active' : ''} onClick={() => setTab('members')}>Members</button>
           {/* #1623: Billing — plan, usage, upgrade/portal. Session-gated like
               the rest of the dashboard (anon teams get the Protect screen). */}
