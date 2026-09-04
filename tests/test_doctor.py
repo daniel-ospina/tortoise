@@ -454,6 +454,8 @@ class TestDoctorImportHygiene:
         *_DB_ENV_VARS,
         "TORTOISE_SECRET_PEPPER", "TORTOISE_API_KEY", "OPENROUTER_API_KEY",
         "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+        "TORTOISE_TEST_MODE", "TORTOISE_FAST_ATEXIT", "RATE_LIMIT_DISABLED",
+        "TORTOISE_TEST_SESSION", "TORTOISE_SESSION_LLM_MOCK",
     )
 
     def _run_py(self, code: str) -> subprocess.CompletedProcess:
