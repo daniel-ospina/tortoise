@@ -301,6 +301,14 @@ your active packs.
 
 ## 5. Connect your agent (MCP)
 
+One transport per setup (mirrors README §2): hosted + the Docker path talk
+to the **daemon over HTTP** (`http://localhost:8000/mcp`); the no-Docker
+single-agent eval path talks **stdio** (a local `python3 -m
+tortoise.mcp_server`) — the eval path connects over stdio by default and
+never needs a daemon (running the embedded daemon yourself via `selfhost` /
+`serve --http` is optional and still eval-only; see below). Never the
+other way around — the Docker path has no stdio config.
+
 ### Docker path (recommended) — connect to the daemon
 
 The compose daemon serves MCP at `http://localhost:8000/mcp`:
