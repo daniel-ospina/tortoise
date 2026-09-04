@@ -535,6 +535,10 @@ jobs:
             kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
             pkill -f 'wrangler.*8788' 2>/dev/null || true
             pkill workerd 2>/dev/null || true
+            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
+            # with > anyway, and deleting after the LAST attempt would remove
+            # the only evidence before the final cat (review P1 — a double
+            # failure must still surface wrangler's own diagnostics).
             sleep 3
           done
           # Final cleanup: flush the log + free :8788 before surfacing it
@@ -628,6 +632,10 @@ jobs:
             kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
             pkill -f 'wrangler.*8788' 2>/dev/null || true
             pkill workerd 2>/dev/null || true
+            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
+            # with > anyway, and deleting after the LAST attempt would remove
+            # the only evidence before the final cat (review P1 — a double
+            # failure must still surface wrangler's own diagnostics).
             sleep 3
           done
           # Final cleanup: flush the log + free :8788 before surfacing it
