@@ -178,7 +178,10 @@ def client(monkeypatch):
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "test-team-722", "key_id": "test-key-722", "tier": "free",
+            # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403
+            # the data-plane gates otherwise (mirrors #2241 migration).
+            "team_id": "test-team-722", "key_id": "test-key-722",
+            "legacy_full_access": True, "tier": "free",
         }
         monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
