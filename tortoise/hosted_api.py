@@ -4565,7 +4565,8 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
               session_user_id: str | None = None,
               prefix: str | None = None,
               created_via: str = "provisioned",
-              name: str | None = None) -> dict:
+              name: str | None = None,
+              acl_strict: bool = False) -> dict:
     """C3 (#2112) — the ONE low-level key write (registry + Supabase).
     Generalized from C2's _mint_graph_key (D14 — never re-implemented):
     graph_id is OPTIONAL (None = team-wide key → default graph), scopes
@@ -4597,6 +4598,15 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
         count = _count_resource(team_id, "api_keys")
         if count >= int(max_keys):
             raise _KeyCapExceeded()
+
+    # C4 (#2113) ACL seam — fires for graph-bound mints BEFORE the key write
+    # (a strict failure raises with nothing committed → the provisioning
+    # caller's rollback deletes the graph cleanly; no key to orphan). Soft
+    # (standalone mint to an EXISTING graph — its ACL user was created at
+    # graph-mint) failures are logged, never block the mint: the app-layer
+    # scope check is authoritative and the ACL is defense-in-depth.
+    if graph_id:
+        _acl_user_create_hook(graph_id, team_id, strict=acl_strict)
 
     # D15: scoped (or graph-bound) keys are the epic's single tk_ type;
     # a legacy-shape mint (no scopes, no graph) keeps tt_ so existing
@@ -4652,11 +4662,6 @@ def _mint_key(team_id: str, *, graph_id: str | None = None,
         api_key = created["api_key"]
         key_prefix = created["key_prefix"]
 
-    # C4 (#2113) seam: ACL user created at mint (defense-in-depth). Fail-soft
-    # no-op when C4 is absent — surface-6 assertions run at capstone (#2118).
-    if graph_id:
-        _acl_user_create_hook(graph_id, team_id)
-
     return {
         "id": kid,
         "key_plaintext": api_key,
@@ -4691,6 +4696,9 @@ def _mint_graph_key(team_id: str, graph_id: str,
         team_id, graph_id=graph_id, scopes=scopes,
         delegation_depth=0, caller_key_id=caller_key_id,
         session_user_id=session_user_id, prefix="tk_",
+        # C4 (#2113): provisioning graph mint is STRICT — no graph without
+        # its ACL user (E2E indicator 5; failure → rollback in the caller).
+        acl_strict=True,
     )
 
 
@@ -4728,17 +4736,29 @@ def _ensure_graph_exists(team_id: str, graph_id: str) -> None:
         raise HTTPException(status_code=404, detail="Unknown graph")
 
 
-def _acl_user_create_hook(graph_id: str, team_id: str) -> None:
-    """C4 seam — create the per-graph ACL user (defense-in-depth). No-op
-    until C4 ships; failures are logged, never block the mint (the app-layer
-    scope check is authoritative)."""
+def _acl_user_create_hook(graph_id: str, team_id: str, *,
+                          strict: bool = False) -> None:
+    """C4 seam — create the per-graph ACL user (defense-in-depth).
+
+    Soft (default): failures are logged, never block the mint (the app-layer
+    scope check is authoritative — ACL is defense-in-depth, not a SPOF).
+    Strict (provisioning graph mint): a server-reachable AclLayerError
+    re-raises so the mint rolls back (no graph without its ACL user — E2E
+    indicator 5). Layer-down/absent stays fail-soft in both modes."""
     try:
-        from tortoise.acl_graph_users import (
-            create_acl_user,  # type: ignore[import-not-found]
+        from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
+            AclLayerError,
+            create_acl_user,
         )
         create_acl_user(graph_id, team_id)
     except ImportError:
         pass  # C4 not shipped — seam dormant
+    except AclLayerError as e:
+        if strict:
+            raise  # provisioning rollback (no graph without its ACL user)
+        _logger.warning(
+            "ACL user create failed for graph %s (defense-in-depth, "
+            "non-blocking): %s", graph_id, e)
     except Exception as e:
         _logger.warning("ACL user create failed for graph %s (defense-in-depth, non-blocking): %s",
                         graph_id, e)
@@ -7923,6 +7943,9 @@ def _rollback_graph(team_id: str, graph: dict | None) -> None:
                 "MATCH (g:Graph {id:$gid, team_id:$tid}) DETACH DELETE g",
                 params={"gid": graph["id"], "tid": team_id},
             )
+        # C4 (#2113): a strict ACL create may have landed before the rollback
+        # trigger — drop the tenant user too (idempotent no-op when absent).
+        _acl_user_drop_hook(graph["id"])
     except Exception as e:
         _logger.error("graph rollback failed for %s (leak risk): %s",
                       graph.get("id"), e)
