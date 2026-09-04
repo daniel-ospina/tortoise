@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client'
 import './index.css'
 // #1623: plan display data (build-time import of product/pricing.json).
 import { planOptions, STATUS_LABELS, TIER_LABELS } from './pricing.js'
-import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS } from './harnesses.js'
+import { HARNESS_CAPTURE_INSTALL, HARNESS_CAPTURE_REASON, HARNESS_CAPTURE_STATUS_LABEL, HARNESS_CAPTURE_SUPPORT, HARNESS_CONTINUE_LABEL, HARNESS_COPY_LABEL, HARNESS_INSTALL, HARNESS_INTRO, HARNESS_NAMES, HARNESS_ORDER, HARNESS_PERSIST, HARNESS_SKILLS, HARNESS_SKILLLESS, HARNESS_SKILLS_IN_PROMPT, HARNESS_SKILLS_IN_STEPS, HARNESS_STEPS, UNIVERSAL_COMMAND } from './harnesses.js'
 // #1728 Slice 3 (Tasks 16-17): the SHARED 4-state capture-status derivation
 // (off → install-pending → waiting → active, probe-driven) — pure, node --test
 // unit-tested (captureStatus.test.js). #1927: the re-ask gate predicate was
@@ -16,14 +16,14 @@ import { setupGuide } from './setupGuide.js'
 import { overviewConnection, overviewDigest, overviewNextAction } from './overview.js'
 // #1997 (W1): the 5 human onboarding steps — pure structure + copy + fork
 // options + org-name validation, node --test unit-tested (wizardFlow.test.js).
-import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, BUILD_CATALOG_PLACEHOLDER, orgNameError } from './wizardFlow.js'
+import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError } from './wizardFlow.js'
 // #1894: indexed-state + job-progress derivations — pure, node --test
 // unit-tested (memorySourcesStatus.test.js).
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
-// #1708 D8: pure session-key predicate extracted to sessionKey.js (node --test
-// unit-tested); imported under an alias to avoid an ESM redeclaration collision
-// with the local isSessionKey wrapper below.
-import { isSessionKey as isSessionKeyPredicate, isActiveKey } from './sessionKey.js'
+// #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
+// unit-tested). #2166: isManagedKey selects the durable product keys the API
+// Keys page shows; isActiveKey protects the live data-plane key from revoke.
+import { isManagedKey, isActiveKey } from './sessionKey.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
 import {
@@ -53,6 +53,12 @@ const INVITE_TOKEN_STORAGE = 'tortoise.inviteToken'
 const CLAIM_PENDING_COOKIE = 'tt_claim_pending'
 
 
+// #2002 (W6): pure captured-sessions view/delete derivations (node --test —
+// capturedSessions.test.js) for the Settings Captured-sessions home.
+import {
+  removeSession, sessionRowMeta, transcriptModel,
+  turnRoleClass, kindBadgeClass, DELETE_CONFIRM,
+} from './capturedSessions.js'
 // #2001 (W5): the Setup-guide card mirror — ONE shared derivation
 // (setupGuide.js, node --test) of the graph-held FLOW state. Renders the
 // counted checklist (fork-aware), collapses when complete (status-driven,
@@ -252,6 +258,11 @@ function SettingsTab(props) {
     github, githubConnected, reposCount, onConnectGithub, githubError,
     sessions, sessionsOn, sessionsLoading,
     memorySourcesProps,
+    // #2002 (W6): captured-sessions view/delete consumer props (the W4 seam:
+    // W4 built the home + named the seam; W6 consumes it).
+    selectedSessionId, onViewSession, onClearSessionDetail,
+    sessionDetail, detailLoading, sessionDetailError,
+    onDeleteSession, deletingSessionId, sessionsActionError,
   } = props
   const reposNote = githubConnected
     ? (github.repos != null ? `${github.repos} repos available`
@@ -259,6 +270,10 @@ function SettingsTab(props) {
         : 'repos available'))
     : null
   const fmt = (iso) => { if (!iso) return '—'; try { return new Date(iso).toLocaleString() } catch { return iso } }
+  // #2002 (W6): one captured session is expanded at a time — the open row
+  // mirrors the App-level sessionDetail/selectedSessionId (kept in the App
+  // so team switches + logouts clear it in one place).
+  const openSessionId = selectedSessionId ? String(selectedSessionId) : null
   return (
     <section className="settings" aria-label="Settings">
       <h2>Settings</h2>
@@ -339,18 +354,128 @@ function SettingsTab(props) {
         ) : sessions.length === 0 ? (
           <p className="dim">No captured sessions yet — recordings appear here after your agent's first session.</p>
         ) : (
-          <ul className="captured-sessions" style={{ listStyle: 'none', margin: '0.4rem 0 0', padding: 0 }}>
-            {sessions.map((s) => (
-              <li key={s.id} className="captured-session" style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline', padding: '0.35rem 0', borderBottom: '1px solid var(--border,#1e293b)' }}>
-                <span className="small">{fmt(s.created_at)}</span>
-                <span className="dim small">{(s.turns ?? 0)} turns · {(s.extracted ?? 0)} extracted</span>
-                <code className="dim small" style={{ marginLeft: 'auto' }}>{String(s.id).slice(0, 12)}…</code>
-              </li>
-            ))}
-          </ul>
+          <>
+            <ul className="captured-sessions" style={{ listStyle: 'none', margin: '0.4rem 0 0', padding: 0 }}>
+              {sessions.map((s) => {
+                const meta = sessionRowMeta(s)
+                const sid = String(s.id)
+                const open = openSessionId === sid
+                const deleting = deletingSessionId === sid
+                return (
+                  <li key={sid} className="captured-session" style={{ display: 'flex', gap: '0.75rem', alignItems: 'baseline', padding: '0.35rem 0', borderBottom: '1px solid var(--border,#1e293b)' }}>
+                    <span className="small">{fmt(s.created_at)}</span>
+                    <span className="dim small">{meta.turns} turns · {meta.extracted} extracted</span>
+                    <code className="dim small" style={{ marginLeft: 'auto' }}>{sid.slice(0, 12)}…</code>
+                    {/* #2002 (W6): per-row View (expands the transcript
+                        panel below) + Delete (confirm → DELETE
+                        /v1/sessions/{id} + receipt cleanup). */}
+                    <span style={{ display: 'flex', gap: '0.4rem' }}>
+                      <button type="button" className="ghost small"
+                        aria-expanded={open}
+                        onClick={() => (open ? onClearSessionDetail() : onViewSession(s.id))}
+                        disabled={!!deletingSessionId}>
+                        {open ? 'Close' : 'View'}
+                      </button>
+                      <button type="button" className="ghost small"
+                        style={{ color: 'var(--red,#f87171)' }}
+                        disabled={!!deletingSessionId}
+                        onClick={() => {
+                          if (!window.confirm(DELETE_CONFIRM)) return
+                          onDeleteSession(s.id)
+                        }}>
+                        {deleting ? 'Deleting…' : 'Delete'}
+                      </button>
+                    </span>
+                  </li>
+                )
+              })}
+            </ul>
+            {/* #2002 (W6): delete action error surfaces under the list (row-
+                level, never a fabricated success) + the transcript panel for
+                the open session (loading / honest error / transcript body). */}
+            {sessionsActionError && (
+              <p className="error" role="alert" style={{ marginTop: '0.5rem' }}>{sessionsActionError}</p>
+            )}
+            {openSessionId && (
+              <SessionTranscriptPanel
+                sessionId={openSessionId}
+                detail={sessionDetail && String(sessionDetail.id) === openSessionId ? sessionDetail : null}
+                loading={detailLoading}
+                error={sessionDetailError}
+                onRetry={onViewSession ? () => onViewSession(openSessionId) : null}
+                onClose={onClearSessionDetail}
+              />
+            )}
+          </>
         )}
       </section>
     </section>
+  )
+}
+
+// #2002 (W6): the transcript panel for one captured session — fed by
+// GET /v1/sessions/{id} (turn_points + extracted_points) and rendered with
+// the #714 session-detail CSS vocabulary (.turn-* / .kind-* — shipped with
+// the original session detail view). Honest states: loading, error (with
+// retry), or the transcript body (turns + extracted memory). Never
+// fabricates an empty transcript from a failed fetch.
+function SessionTranscriptPanel({ sessionId, detail, loading, error, onRetry, onClose }) {
+  if (loading && !detail) {
+    return (
+      <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
+        <p className="dim">Loading transcript…</p>
+      </div>
+    )
+  }
+  if (error && !detail) {
+    return (
+      <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
+        <p className="error" role="alert">{error}</p>
+        <div style={{ marginTop: '0.5rem', display: 'flex', gap: '0.5rem' }}>
+          {onRetry && <button type="button" className="ghost small" onClick={onRetry}>Retry</button>}
+          <button type="button" className="ghost small" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    )
+  }
+  if (!detail) return null
+  const tm = transcriptModel(detail)
+  return (
+    <div className="session-detail" aria-label={`Session ${sessionId} transcript`}>
+      <div className="dim small" style={{ margin: '0.5rem 0 0.25rem' }}>
+        Transcript — {tm.counts.turns} turns · {tm.counts.extracted} extracted memory
+      </div>
+      {tm.turns.length === 0 ? (
+        <p className="dim small">No conversation turns stored for this session.</p>
+      ) : (
+        <div className="turn-list" style={{ marginTop: '0.5rem' }}>
+          {tm.turns.map((t, i) => (
+            <div key={t.id || `t${i}`} className={`turn-item ${turnRoleClass(t.role)}`}>
+              <div className="turn-header">
+                <span className="turn-role">{t.role || 'unknown'}</span>
+                {t.id && <span className="turn-index">{t.id}</span>}
+              </div>
+              <div className="turn-content">{t.content}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {tm.extracted.length > 0 && (
+        <div className="session-section">
+          <h3>Extracted memory</h3>
+          <div className="extracted-list">
+            {tm.extracted.map((p) => (
+              <div key={p.id || p.content} className="extracted-item">
+                <div className="extracted-header">
+                  <span className={`kind-badge ${kindBadgeClass(p.kind)}`}>{p.kind || 'statement'}</span>
+                </div>
+                <div className="turn-content">{p.content}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -994,6 +1119,12 @@ function claimIntentInFlight() {
   const [selectedSessionId, setSelectedSessionId] = React.useState(null)
   const [sessionDetail, setSessionDetail] = React.useState(null)
   const [detailLoading, setDetailLoading] = React.useState(false)
+  // #2002 (W6): Settings Captured-sessions view/delete state — the
+  // transcript panel's fetch error (inline, per-panel) and the single-flight
+  // delete (one session deleting at a time; row-level action error).
+  const [sessionDetailError, setSessionDetailError] = React.useState(null)
+  const [sessionDeletingId, setSessionDeletingId] = React.useState(null)
+  const [sessionsActionError, setSessionsActionError] = React.useState(null)
 
   const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
@@ -1506,7 +1637,11 @@ function claimIntentInFlight() {
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
   const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' (set once per org)
-  // #1997 (W1): catalog-presented is marked when the build placeholder
+  // #1998 (W2): connect-consent state — the harness-connected checkpoint
+  // write on "I've set it up — Continue" (busy + error mirror handleWizardFork).
+  const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
+  const [wizardConnectError, setWizardConnectError] = React.useState('')
+  // #1997 (W1): catalog-presented is marked when the build catalog
   // RENDERS (not just on pick) — re-entry with fork=build already set must
   // still mark it (launch-slice build-fork gate evaluable). Ref-guarded:
   // the checkpoint is keyed-MERGE (replay no-op), but a per-ORG guard keeps
@@ -1525,6 +1660,27 @@ function claimIntentInFlight() {
         body: JSON.stringify({ step: 'catalog-presented' }),
       }).catch(() => {})
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
+
+  // #2004 (W8): the registry-backed builder catalog — fetched ONCE per
+  // session from GET /v1/capabilities (tortoise/tool_registry.py
+  // CAPABILITY_CATALOG) when the build branch renders on step 2. The static
+  // placeholder in wizardFlow.js renders until the fetch resolves and stays
+  // as the OFFLINE fallback (same names — never a blank catalog; the
+  // registry-presented mark above is untouched: this swap is SOURCE-only,
+  // the once-per-org catalog-presented step edge still fires on first
+  // build-fork render and is a keyed-MERGE no-op on replay).
+  const [wizardCatalog, setWizardCatalog] = React.useState(null)
+  const catalogFetchedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (wizardStep !== 2) return
+    const buildFork = (onboarding && onboarding.fork === 'build') || wizardForkChosen === 'build'
+    if (!buildFork || catalogFetchedRef.current) return
+    catalogFetchedRef.current = true
+    api('/v1/capabilities', { useSession: true })
+      .then((res) => { if (res && Array.isArray(res.modules) && res.modules.length > 0) setWizardCatalog(res.modules) })
+      .catch(() => { catalogFetchedRef.current = false })  // transient failure → retry on next effect run; meanwhile the offline fallback renders (honest degrade)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wizardStep, wizardForkChosen, onboarding && onboarding.fork])
 
@@ -2958,6 +3114,10 @@ function claimIntentInFlight() {
     setClaimError('')
     try { sessionStorage.removeItem(CLAIM_KEY_STORAGE) } catch { /* best-effort */ }
     clearClaimPendingMarker()
+    // #2002 (W6): no cross-user transcript/delete-state bleed on logout
+    clearSessionDetail()
+    setSessionDeletingId(null)
+    setSessionsActionError(null)
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
@@ -3180,10 +3340,11 @@ function claimIntentInFlight() {
   }
 
   // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
-  // branch: the placeholder catalog render marks catalog-presented via W5's
-  // checkpoint (surface 4 write contract — the launch-slice build-fork gate
-  // is evaluable; W8 later replaces the placeholder SOURCE, not the
-  // mechanism). Fork SEMANTICS are W2-owned — W1 renders the shell only.
+  // branch: the catalog render marks catalog-presented via W5's checkpoint
+  // (surface 4 write contract — the build-fork gate is evaluable; W8 #2004
+  // replaced the placeholder SOURCE with the registry endpoint, the
+  // mark/mechanism is unchanged). Fork SEMANTICS are W2-owned — W1 renders
+  // the shell only.
   async function handleWizardFork(forkId) {
     setWizardForkBusy(true)
     setWizardForkError('')
@@ -3199,9 +3360,9 @@ function claimIntentInFlight() {
       // never observes the fresh build pick. Fire-and-forget; keyed-MERGE
       // (replay no-op). The step-2 effect above still covers RE-ENTRY with a
       // persisted build fork (onboarding.fork === 'build').
-      // A build pick also STAYS on step 2 so the placeholder catalog renders
-      // (the user sees what they can build on before continuing) — the
-      // Continue button appears once a fork is chosen; self picks advance.
+      // A build pick also STAYS on step 2 so the catalog renders (the user
+      // sees what they can build on before continuing) — the Continue button
+      // appears once a fork is chosen; self picks advance.
       if (forkId === 'build') {
         const teamKey = teamIdRef.current || 'default'
         if (!catalogMarkedRef.current[teamKey]) {
@@ -3231,6 +3392,36 @@ function claimIntentInFlight() {
     }
   }
 
+  // #1998 (W2): connect-consent Continue — the harness-connected checkpoint
+  // (surface 5/6 contract; W1's plan table left it "W2 owns"). The agent-side
+  // tortoise-onboarding skill writes it after tortoise_health passes (CLI
+  // harnesses via REST); Claude Desktop/Web have NO REST/curl surface, so the
+  // human's Continue writes it (session dual-auth — the checkpoint endpoint
+  // accepts session OR tt_ key). FWW keyed-MERGE → replay is a 200 no-op, so
+  // the agent write + this write (and repeat clicks) can all fire safely.
+  // Mirror handleWizardFork's failure handling: busy/disable, stay on step on
+  // 503/error (a fire-and-forget would strand Desktop/Web's gate with no
+  // retry affordance), advance on 2xx only.
+  async function wizardHarnessContinue() {
+    setWizardConnectBusy(true)
+    setWizardConnectError('')
+    try {
+      await api(`/v1/onboarding/state/checkpoint${onboardingTeamQ()}`, {
+        method: 'POST', useSession: true,
+        body: JSON.stringify({ step: 'harness-connected' }),
+      })
+      setWizardStep(4)
+    } catch (e) {
+      if (e?.status === 503) {
+        setWizardConnectError('The graph is temporarily unavailable — try again in a moment.')
+      } else {
+        setWizardConnectError(e?.message || 'Could not save your progress — try again.')
+      }
+    } finally {
+      setWizardConnectBusy(false)
+    }
+  }
+
   async function switchTeam(teamId) {
     // P3 (code-review): reset stale team-scoped state at the top so a rapid
     // switch never flashes the previous team's members/graphs, and record the
@@ -3251,6 +3442,9 @@ function claimIntentInFlight() {
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
     setKeys([])
     setSessions([])
+    clearSessionDetail()          // #2002 (W6): a switch must never show the previous team's transcript
+    setSessionDeletingId(null)
+    setSessionsActionError(null)
     setBackupInfo(null)
     setBackupsStatus('loading') // #1923: mirror the backupInfo reset
     setNewKey(null)        // Round-16: the plaintext key card was shown once on the old team
@@ -4012,16 +4206,12 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1708 D8: API-first session-key classification (created_via === 'bootstrap'
-  // || expires_at) with the old active-key prefix guard retained ONLY as a
-  // fallback when the API fields are absent (stale cached responses / registry
-  // lane pre-#1709) so the live session key can never be revoked from the UI.
-  function isSessionKey(k) {
-    // #1708 fixer (P2): fall back to the apiKey state when this team has no
-    // cached key — the live session key must never be revocable even when
-    // teamKeysRef is empty (mirrors the `|| apiKey` pattern at mint/create).
-    return isSessionKeyPredicate(k, currentTeamId ? (teamKeysRef.current[currentTeamId] || apiKey) : apiKey)
-  }
+  // #2166: the API Keys page shows durable product keys only. Auto-minted
+  // session credentials (the dashboard's own access keys — created_via
+  // 'bootstrap' or any expiring row) are never rendered as rows; keys[] stays
+  // unfiltered in state so revoke/re-mint prefix matching (keyIdFromValue)
+  // keeps working for the live credential.
+  const managedKeys = (keys || []).filter(isManagedKey)
 
   function keyIdFromValue(value) {
     if (!value) return null
@@ -4037,15 +4227,57 @@ function claimIntentInFlight() {
   // #714 (main): session detail view
   async function fetchSessionDetail(sessionId) {
     setDetailLoading(true)
-    setError('')
+    setSessionDetailError(null)
     try {
-      const detail = await api(`/v1/sessions/${sessionId}`)
+      // #2002 (W6): the Settings transcript View (DE2E-11) reads on the
+      // session JWT + the selected team (multi-membership parity with
+      // list_sessions' ?team_id= pin — a stale team's detail must never
+      // land under the current team's Settings home).
+      const detail = await api(`/v1/sessions/${encodeURIComponent(sessionId)}${onboardingTeamQ()}`, { useSession: true })
+      if (detail && detail.session === null) {
+        // #1591 graph fail-soft: the server could not read the graph —
+        // honest inline error, never a fabricated empty transcript.
+        setSessionDetail(null)
+        setSessionDetailError('Could not load this session right now — try again in a moment.')
+        return null
+      }
       setSessionDetail(detail)
+      setSelectedSessionId(sessionId)
+      return detail
     } catch (e) {
-      setError(e.message)
       setSessionDetail(null)
+      setSessionDetailError((e && e.message) || 'Could not load this session.')
+      return null
     } finally {
       setDetailLoading(false)
+    }
+  }
+
+  function clearSessionDetail() {
+    setSelectedSessionId(null)
+    setSessionDetail(null)
+    setSessionDetailError(null)
+  }
+
+  // #2002 (W6): delete a captured session (Settings Captured-sessions home,
+  // DE2E-11). DELETE /v1/sessions/{id} removes the transcript + extracted
+  // memory nodes AND the capture receipt when it was the bucket's last
+  // session (server recompute). The list mutates locally via the pure
+  // removeSession filter (no refetch race), then onboarding refreshes so the
+  // Memory-sources capture-status rows reflect the server's receipt cleanup.
+  async function deleteCapturedSession(sessionId) {
+    if (sessionDeletingId) return // single-flight: one delete at a time
+    setSessionDeletingId(sessionId)
+    setSessionsActionError(null)
+    try {
+      await api(`/v1/sessions/${encodeURIComponent(sessionId)}${onboardingTeamQ()}`, { method: 'DELETE', useSession: true })
+      setSessions((prev) => removeSession(prev, sessionId))
+      if (selectedSessionId === sessionId) clearSessionDetail()
+      await refreshOnboarding()
+    } catch (e) {
+      setSessionsActionError((e && e.message) || 'Could not delete this session — try again.')
+    } finally {
+      setSessionDeletingId(null)
     }
   }
 
@@ -4487,8 +4719,8 @@ function claimIntentInFlight() {
                       </div>
                       {(wizardForkChosen === 'build' || (onboarding && onboarding.fork === 'build')) && (
                         <div className="catalog-placeholder" style={{ marginBottom: '1rem', padding: '0.7rem 0.9rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8 }}>
-                          <p className="dim small" style={{ margin: '0 0 0.5rem' }}><strong>Build catalog</strong> — what you can build on (preview until the full catalog ships):</p>
-                          {BUILD_CATALOG_PLACEHOLDER.map((mod) => (
+                          <p className="dim small" style={{ margin: '0 0 0.5rem' }}><strong>Build catalog</strong> — the indexers and extractors you can build with:</p>
+                          {resolveBuildCatalog(wizardCatalog).map((mod) => (
                             <div key={mod.name} style={{ marginBottom: '0.35rem' }}>
                               <strong className="small">{mod.name}</strong>{' '}
                               <span className="dim small">({mod.kind}) — {mod.description}</span>
@@ -4534,19 +4766,34 @@ function claimIntentInFlight() {
                             </p>
                           )}
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
-                            {HARNESS_INSTALL[wizardHarness](harnessKey)}
-                            {HARNESS_SKILLS(wizardHarness)}
-                            {welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''}
+                            {UNIVERSAL_COMMAND[wizardHarness](harnessKey)}
                           </pre>
+                          {/* #1998 (W2): the universal command covers all 6
+                              harnesses — 4 self-install (Claude Code, Cursor,
+                              Codex, Pi), 2 teach-human (Claude Desktop, Claude
+                              Web). The agent self-adjudicates its harness from
+                              the tortoise-onboarding skill's table; the skill
+                              install line above fetches it. */}
+                          <p className="dim small" style={{ margin: '0.75rem 0 0', lineHeight: 1.6 }}>
+                            One universal command, all 6 harnesses — your agent
+                            self-adjudicates which it is and verifies the
+                            connection with <code>tortoise_health</code> before
+                            you continue.
+                          </p>
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                             <div className="wizard-nav-actions">
+                              {wizardConnectError && (
+                                <p className="error" role="alert" style={{ margin: '0 0.5rem 0 0', fontSize: 13 }}>{wizardConnectError}</p>
+                              )}
                               <button type="button" className={wizardCopied === 'harness' ? 'ghost' : 'btn-primary'}
-                                onClick={() => wizardCopy(HARNESS_INSTALL[wizardHarness](harnessKey) + HARNESS_SKILLS(wizardHarness) + (welcomeKey && !HARNESS_SKILLLESS.includes(wizardHarness) && !HARNESS_SKILLS_IN_PROMPT.includes(wizardHarness) && !HARNESS_SKILLS_IN_STEPS.includes(wizardHarness) ? ('\n\n' + HARNESS_PERSIST(harnessKey)) : ''), 'harness')}>
+                                onClick={() => wizardCopy(UNIVERSAL_COMMAND[wizardHarness](harnessKey), 'harness')}>
                                 {wizardCopied === 'harness' ? 'Copied ✓' : (HARNESS_COPY_LABEL[wizardHarness] || 'Copy setup')}
                               </button>
                               {wizardCopied === 'harness' && (
-                                <button type="button" className="btn-primary" onClick={() => setWizardStep(4)}>{HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →"}</button>
+                                <button type="button" className="btn-primary" onClick={wizardHarnessContinue} disabled={wizardConnectBusy}>
+                                  {wizardConnectBusy ? 'Saving…' : (HARNESS_CONTINUE_LABEL[wizardHarness] || "I've set it up — Continue →")}
+                                </button>
                               )}
                               <button type="button" className="ghost" onClick={() => setWizardStep(4)}>Skip for now</button>
                             </div>
@@ -5318,6 +5565,15 @@ function claimIntentInFlight() {
             sessions={sessions}
             sessionsOn={!!(onboarding && onboarding.session_recording)}
             sessionsLoading={onboardingLoading}
+            selectedSessionId={selectedSessionId}
+            onViewSession={fetchSessionDetail}
+            onClearSessionDetail={clearSessionDetail}
+            sessionDetail={sessionDetail}
+            detailLoading={detailLoading}
+            sessionDetailError={sessionDetailError}
+            onDeleteSession={deleteCapturedSession}
+            deletingSessionId={sessionDeletingId}
+            sessionsActionError={sessionsActionError}
             memorySourcesProps={{
               state: onboarding,
               loading: onboardingLoading,
@@ -5457,8 +5713,8 @@ function claimIntentInFlight() {
             <table>
               <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr></thead>
               <tbody>
-                {keys.length === 0 && <tr><td colSpan="5" className="dim">No keys yet.</td></tr>}
-                {keys.map((k) => (
+                {managedKeys.length === 0 && <tr><td colSpan="5" className="dim">No keys yet.</td></tr>}
+                {managedKeys.map((k) => (
                   <tr key={k.id}>
                     <td>
                       {editingKeyId === k.id ? (
@@ -5482,7 +5738,7 @@ function claimIntentInFlight() {
                       ) : (
                         <span className="key-name">
                           {k.name ? k.name : <span className="dim">—</span>}
-                          {!k.revoked_at && !isSessionKey(k) && isOwnerAdmin && (
+                          {!k.revoked_at && isOwnerAdmin && (
                             <button
                               className="ghost small key-rename"
                               onClick={() => { renameCancelRef.current = false; setEditingKeyId(k.id); setEditingKeyName(k.name || '') }}
@@ -5495,8 +5751,18 @@ function claimIntentInFlight() {
                     </td>
                     <td><code>{k.key_prefix || k.id?.slice(0, 12)}</code></td>
                     <td>{fmtTime(k.created_at || k.createdAt)}</td>
-                    <td>{k.revoked_at ? <span className="revoked">revoked</span> : isSessionKey(k) ? <span className="live">ephemeral · session</span> : <span className="live">active</span>}</td>
-                    <td>{!k.revoked_at && !isSessionKey(k) && !isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && isOwnerAdmin && (
+                    <td>
+                      {k.revoked_at ? <span className="revoked">revoked</span>
+                        : k.enabled === false ? <span className="dim">disabled</span>
+                        : <span className="live">active</span>}
+                      {/* #2166 (review P2): the held durable key's missing actions must be
+visible — visible text, not a hover-only title. Rotate = create a new key,
+then revoke this one (delete/toggle stay suppressed while in use). */}
+                      {!k.revoked_at && isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && (
+                        <div className="dim small">in use by this dashboard — to rotate, create a new key and revoke this one</div>
+                      )}
+                    </td>
+                    <td>{!k.revoked_at && !isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && isOwnerAdmin && (
                       <span className="key-actions">
                         {/* #1148-ux review: on/off toggle (new keys default on) */}
                         <button

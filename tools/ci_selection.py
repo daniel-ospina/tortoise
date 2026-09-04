@@ -82,7 +82,7 @@ SHARED_MODULES = (
 SOURCE_PATTERNS = {
     "battery": ("battery/",),
     "onboarding": ("tortoise/onboarding/", "website/welcome.html",
-                   "website/onboarding-prompt.md", "website/self-hosted.html"),
+                   "website/self-hosted.html"),
     "ep": ("tortoise/decide.py", "tortoise/dream.py", "tortoise/analyze.py",
            "tortoise/ranking.py"),
     "sdk": ("tortoise/ids.py", "tortoise/models.py", "tortoise/crypto.py",

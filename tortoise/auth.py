@@ -70,6 +70,12 @@ def is_dev_mode() -> bool:
     return not bool(os.environ.get("TORTOISE_API_KEY", ""))
 
 
+# C2 (#2111): accepted API-key prefixes. ``tt_`` = legacy/current mints;
+# ``tk_`` = C2/C3 per-graph scoped keys (epic #2083 — minted by the
+# provisioning service). A tuple so callers use ``token.startswith(PREFIXES)``.
+API_KEY_PREFIXES = ("tt_", "tk_")
+
+
 def hash_api_key(key: str) -> str:
     """PBKDF2-HMAC-SHA256 hash an API key for at-rest storage. Not reversible.
 

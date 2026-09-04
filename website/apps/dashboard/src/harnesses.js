@@ -219,3 +219,43 @@ export const HARNESS_PERSIST = (key) =>
   `# Persist the key for future sessions — add this line to your shell profile (~/.zshrc, ~/.bashrc, or equivalent):\nexport TORTOISE_API_KEY=${key}`
 
 export const HARNESS_ORDER = ['claude', 'claude-desktop', 'claude-web', 'codex', 'cursor', 'pi']
+
+// ── #1998 (W2): universal setup command (epic #1976 I-3, surface 5) ────────
+// The connect step's ONE command per harness — all 6 covered, 4 self-install
+// (config-write) + 2 teach-human. HARNESS_NAMES/HARNESS_ORDER stay the single
+// 6-harness vocabulary; the harness table in the tortoise-onboarding SKILL.md
+// is the agent-side self-adjudication source (the chooser's successor).
+//
+// Contract (DE2E-5): every harness reaches a connected state verifiable via
+// tortoise_health; the tortoise-onboarding skill takes over from the command
+// (verify → harness-connected checkpoint). The command NEVER embeds the API
+// key in a project-scoped/committable config (env-var indirection); CLI
+// one-liners carry the key in the shell call only. These exports are
+// ADDITIVE — the legacy HARNESS_* exports stay (the ARCHIVED #1643 wizard
+// render + Memory-sources capture rows depend on them; A0 rollback path).
+export const HARNESS_SELF_INSTALL = ['claude', 'codex', 'cursor', 'pi']
+
+export const HARNESS_TEACH_HUMAN = ['claude-desktop', 'claude-web']
+
+// The skill installer line every config-writing harness command appends
+// (v2 SKILLS includes tortoise-onboarding + the 3 core skills).
+const SKILL_INSTALL = (harness) =>
+  `# Install the Tortoise skills (how-to-use-tortoise, tortoise-decide, tortoise-file-finding, tortoise-onboarding):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness ${harness}`
+
+// One copyable block per harness. The wizard renders + copies exactly this.
+export const UNIVERSAL_COMMAND = {
+  claude: (key) =>
+    `# Tortoise — universal setup command (Claude Code)\n# The same command covers all 6 harnesses — your agent self-adjudicates which\n# it is from the tortoise-onboarding skill's harness table.\nexport TORTOISE_API_KEY=${key}\nclaude mcp add --transport http tortoise ${MCP_URL} --header "Authorization: Bearer ${'${TORTOISE_API_KEY}'}"\n\n${SKILL_INSTALL('claude')}\n\n# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health\n# and reports the harness-connected checkpoint.`,
+  codex: (key) =>
+    `# Tortoise — universal setup command (Codex)\nexport TORTOISE_API_KEY=${key}\ncodex mcp add tortoise --url ${MCP_URL} --bearer-token-env-var TORTOISE_API_KEY\n\n${SKILL_INSTALL('codex')}\n\n# Then tell your agent: "Set up Tortoise" — it verifies with tortoise_health\n# and reports the harness-connected checkpoint.`,
+  cursor: () =>
+    `# Tortoise — universal setup command (Cursor)\n# 1. Export the key — add this line to your shell profile so it persists:\nexport TORTOISE_API_KEY=<your-tortoise-api-key>\n# 2. Create .cursor/mcp.json in this project with:\n${JSON.stringify(CURSOR_MCP_CONFIG_ENV, null, 2)}\n# 3. Install the Tortoise skills (run in a terminal):\ncurl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness cursor\n# 4. Restart Cursor, then tell your agent: "Set up Tortoise" — it verifies\n#    with tortoise_health and reports the harness-connected checkpoint.\n#    (The config references the env var, never the key.)`,
+  pi: (key) =>
+    `Set up Tortoise for this project (universal setup command — Pi):\n1. Add TORTOISE_API_KEY=${key} to my shell profile (~/.zshrc or ~/.bashrc).\n2. Create or merge .mcp.json in this project with (the file references the\n   env var, never the key):\n${JSON.stringify(PI_MCP_CONFIG_ENV, null, 2)}\n3. Run: curl -fsSL ${SKILLS_INSTALL_URL} | bash -s -- --harness pi\n4. Verify the Tortoise MCP server is configured, then call tortoise_health —\n   when it passes, tell me "Tortoise is connected" and checkpoint\n   harness-connected (I've set it up — Continue on the dashboard covers it).`,
+  'claude-desktop': (key) =>
+    `# Tortoise — universal setup command (Claude Desktop — teach-human)\n# Claude Desktop has no local shell, so YOU complete the manual steps and the\n# agent verifies after:\n# 1. Open ~/Library/Application Support/Claude/claude_desktop_config.json\n#    (macOS) — or Claude > Settings > Developer in the app.\n# 2. MERGE the mcpServers block below into the existing config (never replace\n#    the whole file; the key stays literal here — keep the file private):\n${JSON.stringify({ mcpServers: { tortoise: { url: MCP_URL, headers: { Authorization: `Bearer ${key}` } } } }, null, 2)}\n# 3. Restart Claude Desktop, then say "Set up Tortoise" in a chat — the agent\n#    verifies with tortoise_health. Click "I've set it up — Continue" in the\n#    dashboard connect step when it passes (that writes the checkpoint).`,
+  'claude-web': (key) =>
+    `Tortoise — universal setup command (Claude Web — teach-human)\nClaude Web runs in Anthropic's cloud — no local files. Complete the connector\nsteps, then the agent (with the connector's tortoise_* tools) verifies:\n1. Go to claude.ai > Settings > Connectors > Add custom connector, name it "Tortoise".\n2. Server URL: ${MCP_URL}\n3. Request headers (advanced): Authorization: Bearer ${key}  (stored by Anthropic)\n4. In a Claude Web chat, say "Set up Tortoise" — the agent calls tortoise_health\n   to verify, then click "I've pasted it — Continue" in the dashboard connect\n   step (that writes the harness-connected checkpoint).`,
+}
+
+export const UNIVERSAL_COMMAND_HARNESSES = HARNESS_ORDER

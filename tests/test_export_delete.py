@@ -709,9 +709,8 @@ class TestDashboardCreatedTeamRoundTrip:
     def test_dashboard_created_team_delete_drops_team_id_graph(self, sb_client, as_user, monkeypatch, capture_audit):
         """#1903 Indicator 3: delete of a dashboard-created team targets the
         team_{team_id} graph (the old team_{name} stored name orphaned it).
-        The _drop_team_graph_strict spy is the mechanism proof — embedded
-        FalkorDBLite has no delete_graph, so the assertion is on the CORRECT
-        TARGET passed to the drop."""
+        The _drop_team_graph_strict spy is the mechanism proof — the
+        assertion is on the CORRECT TARGET passed to the drop."""
         tc, fake, _ = sb_client
         as_user()
         # env must be 0 BEFORE delete — soft_delete stamps the STORED
@@ -993,6 +992,90 @@ class TestPurge:
         assert all(r["id"] != TEAM_ID for r in fake.tables["teams"])
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 2
+
+
+class TestDropTeamGraphImplCloudShape:
+    """#2163 regression: _drop_team_graph_impl must issue GRAPH.DELETE on a
+    cloud-shaped client (falkordb.FalkorDB — has select_graph, NO
+    delete_graph attr). The old hasattr(delete_graph) probe was false on
+    FalkorDB Cloud, so the purge sweep silently skipped every drop and
+    orphaned the graph after the teams row was deleted (no retry — the
+    #926 retry-anchor design broke)."""
+
+    def test_impl_drops_via_select_graph_when_delete_graph_absent(self, monkeypatch):
+        dropped = []
+
+        class FakeGraph:
+            def __init__(self, name):
+                self._name = name
+
+            def delete(self):
+                dropped.append(self._name)  # GRAPH.DELETE fires
+
+        class FakeDB:
+            """Cloud-shaped: select_graph present, delete_graph ABSENT."""
+
+            def select_graph(self, name):
+                return FakeGraph(name)
+
+        db = FakeDB()
+        proj = type("FakeProj", (), {"db": db})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        # graph_name wins; the default team_{team_id} fallback also drops
+        ha_mod._drop_team_graph_impl("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_team_graph_impl("team-xyz")
+
+        # the pre-#2163 code called NOTHING on this client (hasattr probe
+        # false) — the regression pin is that both drops actually fired
+        assert not hasattr(db, "delete_graph"), \
+            "fixture must mirror the pip falkordb client (no delete_graph)"
+        assert dropped == [
+            "team_abc000000000000000000000", "team_team-xyz"]
+
+    def test_strict_drop_raises_when_graph_delete_fails(self, monkeypatch):
+        """#926 retry-anchor contract: _drop_team_graph_strict propagates a
+        GENUINE GRAPH.DELETE failure (auth/connection) so the purge sweep
+        keeps the teams row — but treats an absent-graph raise as success
+        (#2163 re-review P0) so the anchor converges."""
+        class BoomDB:
+            def select_graph(self, name):
+                raise RuntimeError("GRAPH.DELETE failed (connection)")
+
+        proj = type("FakeProj", (), {"db": BoomDB()})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
+            ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
+        # best-effort variant swallows the same failure
+        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
+
+    def test_strict_drop_converges_on_absent_graph(self, monkeypatch):
+        """#2163 re-review P0: GRAPH.DELETE on an already-dropped graph
+        raises 'Invalid graph operation on empty key' (v4.16.7) — the strict
+        drop must treat that as SUCCESS so the sweep's retry anchor does not
+        keep a team row poisoned forever after the graph is already gone."""
+        from redis.exceptions import ResponseError
+
+        class AbsentDB:
+            def select_graph(self, name):
+                g = type("G", (), {})()
+
+                def _delete():
+                    raise ResponseError("Invalid graph operation on empty key")
+
+                g.delete = _delete
+                return g
+
+        proj = type("FakeProj", (), {"db": AbsentDB()})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        # strict drop must NOT raise on the absent-graph family
+        ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

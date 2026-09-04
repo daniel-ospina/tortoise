@@ -26,11 +26,15 @@ from tortoise.supabase_control import (
     active_api_keys,
     api_key_by_id,
     claim_membership,
+    count_graph_keys,
+    delete_graph_row,
     expired_bootstrap_keys,
     get_control_plane,
     github_credentials,
+    graph_key_ids,
     graph_metadata,
     insert_api_key,
+    insert_graph,
     invitation_accept,
     invitation_mint,
     invitation_rescind,
@@ -44,6 +48,7 @@ from tortoise.supabase_control import (
     resolve_api_key,
     revoke_api_key,
     set_membership,
+    soft_delete_graph,
     store_github_credentials,
     team_by_email,
     team_by_id,
@@ -2320,3 +2325,170 @@ class TestIdentitySeam:
         assert owner_user_id(fake, "t-own") == "u-owner"
         assert owner_user_id(fake, "t-anon") is None  # anon owner → None
         assert owner_user_id(fake, "t-none") is None  # zero-owner → None
+
+
+# ── C2 (#2111): graph write + lifecycle seams ────────────────────────────────
+
+class TestGraphLifecycleSeam:
+    """Supabase-mode seams for the provisioning service: insert/delete/
+    soft-delete graph rows + graph-key counting + delete cascade source."""
+
+    def _seed_team(self, fake):
+        fake.seed("teams", [{
+            "id": "team-c2-001", "name": "C2 Team", "tier": "solo",
+            "max_graphs": 2, "graph_name": "team_team-c2-001",
+        }])
+
+    def test_insert_graph_writes_row(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000001", "team_id": "team-c2-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000001",
+            "status": "active", "recording": None,
+        })
+        rows = fake.query("graphs", select=["id", "name", "status"],
+                          filters=[("team_id", "eq", "team-c2-001")])
+        assert rows == [{"id": "g_c2test00000001", "name": "prod",
+                         "status": "active"}]
+
+    def test_soft_delete_tombstones_non_default(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000002", "team_id": "team-c2-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000002",
+            "status": "active", "recording": None,
+        })
+        assert soft_delete_graph(fake, "team-c2-001",
+                                 "g_c2test00000002") is True
+        rows = fake.query("graphs", select=["status"],
+                          filters=[("id", "eq", "g_c2test00000002")])
+        assert rows[0]["status"] == "deleted"
+
+    def test_soft_delete_unknown_returns_false(self, fake):
+        self._seed_team(fake)
+        assert soft_delete_graph(fake, "team-c2-001", "g_ghost00000000") is False
+
+    def test_delete_graph_row_rollback(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000003", "team_id": "team-c2-001",
+            "name": "rb", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000003",
+            "status": "active", "recording": None,
+        })
+        delete_graph_row(fake, "team-c2-001", "g_c2test00000003")
+        assert fake.query("graphs", select=["id"],
+                          filters=[("team_id", "eq", "team-c2-001")]) == []
+
+    def test_count_graph_keys_active_only(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000004", "team_id": "team-c2-001",
+            "name": "keys", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000004",
+            "status": "active", "recording": None,
+        })
+        fake.seed("api_keys", [
+            {"id": "k1", "team_id": "team-c2-001", "lookup_hash": "h1",
+             "graph_id": "g_c2test00000004", "revoked_at": None},
+            {"id": "k2", "team_id": "team-c2-001", "lookup_hash": "h2",
+             "graph_id": "g_c2test00000004",
+             "revoked_at": "2026-09-01T00:00:00Z"},
+            {"id": "k3", "team_id": "team-c2-001", "lookup_hash": "h3",
+             "graph_id": None, "revoked_at": None},
+        ])
+        assert count_graph_keys(fake, "team-c2-001",
+                                "g_c2test00000004") == 1  # k1 only
+        assert graph_key_ids(fake, "team-c2-001",
+                             "g_c2test00000004") == ["k1", "k2"]  # cascade all
+
+
+# ── C3 (#2112): key lifecycle seams ─────────────────────────────────────────
+
+class TestC3KeyLifecycleSeam:
+    """Supabase-mode seams for the C3 key lifecycle: scoped-row writes
+    (mint with C1 columns), list graph_id filter + tenancy columns, shrink
+    (set_api_key_scopes) reflected in api_key_by_id, and the api_keys cap
+    count."""
+
+    def _seed_team(self, fake):
+        fake.seed("teams", [{
+            "id": "team-c3-001", "name": "C3 Team", "tier": "pro",
+            "max_api_keys": 5, "graph_name": "team_team-c3-001",
+        }])
+
+    def _seed_graph(self, fake, gid="g_c3test00000001"):
+        fake.seed("graphs", [{
+            "id": gid, "team_id": "team-c3-001", "name": "acme",
+            "kind": "custom", "namespace": f"team_team-c3-001_g_{gid}",
+            "status": "active", "recording": None,
+        }])
+
+    def test_insert_scoped_key_row_round_trips(self, fake):
+        """Mint row carries the C1 columns (scopes/delegation/graph_id/
+        created_by_key_id) and api_key_by_id returns them."""
+        from tortoise.auth import lookup_hash
+        self._seed_team(fake)
+        self._seed_graph(fake)
+        token = "tk_c3test000000000000000001"
+        insert_api_key(fake, {
+            "id": "k-c3-1", "team_id": "team-c3-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": "user-1",
+            "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "name": "ci",
+            "graph_id": "g_c3test00000001",
+            "scopes": ["graphs:read", "graphs:write"],
+            "created_by_key_id": "parent-key", "delegation_depth": 0,
+        })
+        row = api_key_by_id(fake, "k-c3-1")
+        assert row["graph_id"] == "g_c3test00000001"
+        assert row["scopes"] == ["graphs:read", "graphs:write"]
+        assert row["delegation_depth"] == 0
+        assert row["created_by_key_id"] == "parent-key"
+        # list with the graph_id filter narrows.
+        rows = team_api_keys(fake, "team-c3-001", graph_id="g_c3test00000001")
+        assert [r["id"] for r in rows] == ["k-c3-1"]
+        rows_all = team_api_keys(fake, "team-c3-001")
+        assert len(rows_all) == 1
+
+    def test_team_api_keys_graph_filter_omits_unbound(self, fake):
+        """A team-wide key (graph_id null) is invisible under a graph filter."""
+        from tortoise.auth import lookup_hash
+        self._seed_team(fake)
+        token = "tt_c3test000000000000000002"
+        insert_api_key(fake, {
+            "id": "k-c3-2", "team_id": "team-c3-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": "user-1",
+            "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "name": None,
+            "graph_id": None, "scopes": [], "delegation_depth": None,
+            "created_by_key_id": None,
+        })
+        rows = team_api_keys(fake, "team-c3-001", graph_id="g_other000000")
+        assert rows == []
+        rows_all = team_api_keys(fake, "team-c3-001")
+        assert [r["id"] for r in rows_all] == ["k-c3-2"]
+
+    def test_set_api_key_scopes_shrinks_row(self, fake):
+        """set_api_key_scopes replaces the row's scopes (subset validated at
+        the endpoint) — api_key_by_id reflects the shrunken set."""
+        from tortoise.auth import lookup_hash
+        from tortoise.supabase_control import set_api_key_scopes
+        self._seed_team(fake)
+        token = "tk_c3test000000000000000003"
+        insert_api_key(fake, {
+            "id": "k-c3-3", "team_id": "team-c3-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": "user-1",
+            "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "name": None,
+            "graph_id": None, "scopes": ["graphs:read", "graphs:write"],
+            "delegation_depth": None, "created_by_key_id": None,
+        })
+        set_api_key_scopes(fake, "k-c3-3", ["graphs:read"])
+        row = api_key_by_id(fake, "k-c3-3")
+        assert row["scopes"] == ["graphs:read"]

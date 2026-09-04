@@ -2,6 +2,12 @@
 
 Wraps FalkorProjection (Docker/server FalkorDB by default, embedded via path argument).
 Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result sets.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session recorder' (``TortoiseSDK.capture_session`` is the SDK recorder
+facade) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
+an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -22,6 +28,7 @@ from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
+from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
@@ -12236,10 +12243,10 @@ class TortoiseSDK:
         teams.graph_name) + count(custom active). Deleted rows excluded
         (delete frees the slot; v1 has no archive). Registry mode: the
         existing MATCH (team_create :12055 creates the kind='default' node,
-        so the registry count already includes the default). NOTE for C3:
-        registry graph_count has no status filter — correct while no delete
-        exists, but C3's soft-delete must filter status <> 'deleted' to
-        avoid registry↔Supabase overcount drift.
+        so the registry count already includes the default). C2 (#2111):
+        registry branch now filters status <> 'deleted' (soft-delete must
+        free the slot — E2E-8; pre-C1 nodes without the prop count as
+        active) — parity with the Supabase branch (plan-review P1 #3).
         """
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, is_supabase_enabled,
@@ -12262,9 +12269,58 @@ class TortoiseSDK:
             return 1 + len(rows)
         reg = self._get_registry()
         return reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN count(g)",
+            "MATCH (g:Graph {team_id:$tid}) "
+            "WHERE g.status IS NULL OR g.status <> 'deleted' "
+            "RETURN count(g)",
             params={"tid": team_id},
         ).result_set[0][0]
+
+    def graph_delete(self, team_id: str, graph_id: str) -> bool:
+        """Soft-delete a Graph node (status='deleted' tombstone — the v1
+        lifecycle, C2 #2111). Returns True when a non-default node was
+        tombstoned; False when unknown OR the default (callers map to
+        404/403). Pre-C1 nodes without status gain it on delete."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        if not rows:
+            return False
+        if rows[0][0] == "default":
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "SET g.status = 'deleted'",
+            params={"gid": graph_id, "tid": team_id},
+        )
+        return True
+
+    def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
+        """APIKey node ids bound to a graph — the delete-cascade source
+        (every key dies with the graph, E2E-8). Revoked or not — the
+        cascade must revoke rows that are somehow still active AND clean
+        up revoked ones (idempotent)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) RETURN k.id",
+            params={"tid": team_id, "gid": graph_id},
+        ).result_set
+        return [r[0] for r in rows]
+
+    def graph_active_key_count(self, team_id: str, graph_id: str) -> int:
+        """ACTIVE (non-revoked) APIKey nodes bound to a graph — the
+        key_count source for GET /v1/graphs (parity with the Supabase
+        count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
+        and must NOT be reused for the meter — after C3's standalone
+        revoke, counting all keys would overcount vs Supabase)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) "
+            "WHERE k.revoked_at IS NULL RETURN count(k)",
+            params={"tid": team_id, "gid": graph_id},
+        ).result_set
+        return int(rows[0][0]) if rows else 0
 
     def team_get(self, team_id: str) -> dict | None:
         """Get a team by ID. Returns None if not found."""
@@ -12347,12 +12403,23 @@ class TortoiseSDK:
         graph_name = team.get("graph_name", f"team_{team.get('name', '')}")
         proj = self._get_proj()
         try:
-            if hasattr(proj.db, 'delete_graph'):
-                proj.db.delete_graph(graph_name)
+            # #2163: proj.db (falkordb.FalkorDB on every lane) has NO
+            # delete_graph attr on the pip client — the old hasattr probe
+            # skipped on FalkorDB Cloud and orphaned the graph after the
+            # registry rows were deleted. select_graph(...).delete() issues
+            # GRAPH.DELETE on embedded + server/cloud alike. An absent-graph
+            # raise (GRAPH.DELETE on a dropped/never-minted graph) is
+            # treated as success — the graph being gone is the desired end
+            # state; genuine failures still log and fall through to the
+            # best-effort swallow.
+            proj.db.select_graph(graph_name).delete()
+        except Exception as e:
+            if is_missing_graph_error(e):
+                _logger.debug("tenant graph %s already absent — skipping",
+                              graph_name)
             else:
-                _logger.debug("delete_graph not available (FalkorDBLite) — skipping")
-        except Exception:
-            _logger.debug("Failed to delete tenant graph %s — skipping", graph_name)
+                _logger.debug("Failed to delete tenant graph %s — skipping",
+                              graph_name)
 
         self._audit(team_id, None, "team_delete", resource_type="team",
                      resource_id=team_id)
@@ -12516,11 +12583,11 @@ class TortoiseSDK:
         Falls back to full scan for legacy provision_tenant keys whose
         key_prefix was set to team_id[:8] (which won't match token[:10]).
         """
-        from tortoise.auth import verify_api_key
+        from tortoise.auth import API_KEY_PREFIXES, verify_api_key
         reg = self._get_registry()
 
         # #687: indexed key_prefix lookup avoids O(keys) PBKDF2 scan
-        if label == "APIKey" and plaintext.startswith("tt_"):
+        if label == "APIKey" and plaintext.startswith(API_KEY_PREFIXES):
             prefix = plaintext[:10]
             rows = reg.query(
                 f"MATCH (n:{label}) WHERE n.key_prefix = $prefix "
@@ -12549,7 +12616,10 @@ class TortoiseSDK:
                       *, graph_id: str | None = None,
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
-                      delegation_depth: int | None = None) -> dict:
+                      delegation_depth: int | None = None,
+                      prefix: str = "tt_",
+                      name: str | None = None,
+                      created_via: str | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
@@ -12558,18 +12628,43 @@ class TortoiseSDK:
         back-compat for existing callers): graph_id (NULL = team-wide key
         → default graph), scopes (FLAT allowlist, default []), mint lineage
         (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
-        NULL = owner-minted).
+        NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
+        the provisioning service mint tk_ per-graph keys (epic vocabulary);
+        existing callers unchanged. C3 (#2112): ``name`` (user-facing label,
+        20260825000001 parity — the hosted create_api_key lane passes it)
+        and ``created_via`` (mint-source classification — "provisioned" /
+        "agent_signup" etc.) ride the node as optional props; absent =
+        legacy nodes without them.
+
+        Registry-side invariant (code-review #2b, mirrors the Supabase DB
+        CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
+        = 0) can never hold escalation scopes (graphs:create/delete,
+        keys:manage, team:manage) — only owner-minted keys may. The app
+        mint (_mint_graph_key) already ∩ _MINTABLE_SCOPES, but apikey_create
+        is a public SDK method (graph-scripts, C3 drift surface): the check
+        here keeps selfhost parity with the hosted DB invariant once C5
+        flips deleg=0 dormancy off and starts honoring scopes.
         """
         import uuid  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
 
+        _ESCALATION_SCOPES = {"graphs:create", "graphs:delete",
+                              "keys:manage", "team:manage"}
+        if delegation_depth == 0 and scopes and any(
+                s in _ESCALATION_SCOPES for s in scopes):
+            raise ControlPlaneError(
+                "Minted keys (delegation_depth=0) cannot hold escalation "
+                "scopes: " + ",".join(sorted(
+                    _ESCALATION_SCOPES & set(scopes))) + ".",
+            )
+
         team = self.team_get(team_id)
         if team is None:
             raise ControlPlaneError(f"Team {team_id!r} not found")
 
-        api_key = f"tt_{uuid.uuid4().hex}"
+        api_key = f"{prefix}{uuid.uuid4().hex}"
         key_hash = hash_api_key(api_key)
         key_prefix = api_key[:10]
         kid = ulid()
@@ -12578,7 +12673,8 @@ class TortoiseSDK:
         reg = self._get_registry()
         # C1 (#2110): include non-None tenancy props in the CREATE (absent =
         # old callers unchanged; old registry nodes without the props resolve
-        # with safe defaults).
+        # with safe defaults). C3 (#2112): name/created_via ride the same
+        # optional-props pattern.
         extra = ""
         params = {"id": kid, "tid": team_id, "kh": key_hash,
                   "kp": key_prefix, "cb": created_by, "now": now}
@@ -12590,6 +12686,10 @@ class TortoiseSDK:
             extra += ", created_by_key_id:$cbk"; params["cbk"] = created_by_key_id  # noqa: E702 (baseline #1503)
         if delegation_depth is not None:
             extra += ", delegation_depth:$dd"; params["dd"] = delegation_depth  # noqa: E702 (baseline #1503)
+        if name is not None:
+            extra += ", name:$nm"; params["nm"] = name  # noqa: E702 (baseline #1503)
+        if created_via is not None:
+            extra += ", created_via:$cv"; params["cv"] = created_via  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
@@ -12658,11 +12758,15 @@ class TortoiseSDK:
         """Verify an API key against stored hashes.
 
         Returns {team_id, key_id} if valid, None if not found or revoked.
-        Uses salted-hash verification (per-key salt means exact-hash lookup
-        never matches — see #130, #139). #1709: expires_at filtering with
-        NULL-as-never-expires semantics (mirrors the REST path #742 + the
-        agent_signup mint, which now writes expires_at:null) — a legacy
-        selfhost key without the prop must keep authenticating.
+        C2 (#2111): also returns delegation_depth + scopes when present on
+        the node (MCP's TeamResolutionMiddleware rejects deleg=0 minted
+        keys — the REST surface is gated; MCP must not be the fail-open
+        lane for handed-out per-graph keys). Uses salted-hash verification
+        (per-key salt means exact-hash lookup never matches — see #130,
+        #139). #1709: expires_at filtering with NULL-as-never-expires
+        semantics (mirrors the REST path #742 + the agent_signup mint,
+        which now writes expires_at:null) — a legacy selfhost key without
+        the prop must keep authenticating.
         """
         from datetime import datetime, timezone as _tz  # noqa: I001
         now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
@@ -12672,7 +12776,10 @@ class TortoiseSDK:
             and (p.get("expires_at") is None or p.get("expires_at") > now_iso)
         ]
         if matches:
-            return {"team_id": matches[0]["team_id"], "key_id": matches[0]["id"]}
+            m = matches[0]
+            return {"team_id": m["team_id"], "key_id": m["id"],
+                    "delegation_depth": m.get("delegation_depth"),
+                    "scopes": m.get("scopes") or []}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────

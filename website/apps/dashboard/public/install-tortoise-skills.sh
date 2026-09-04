@@ -17,9 +17,12 @@
 # Idempotent: re-running updates the skills in place. Prints the verify step.
 set -euo pipefail
 
-SKILLS_VERSION="v1"   # bump when the skill set changes
+SKILLS_VERSION="v2"   # bump when the skill set changes
 SKILLS_BASE="https://app.premiselabs.co/skills"
-SKILLS=(how-to-use-tortoise tortoise-decide tortoise-file-finding)
+# v2 (#1998 W2): +tortoise-onboarding — the ONE live onboarding script
+# (successor to AGENT_ONBOARDING.md, archived M8). The installer is the
+# distribution path the dashboard's universal command relies on.
+SKILLS=(how-to-use-tortoise tortoise-decide tortoise-file-finding tortoise-onboarding)
 
 usage() {
   cat <<'HELP'

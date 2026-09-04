@@ -134,9 +134,12 @@ Next: connect your agent (step 4)
   </div>
 
   <div class="note">
-    <strong>Onboarding prompt:</strong> after setup, paste the canonical prompt into your agent — it drives the same 5 yes/no questions (connect sources, record sessions, demo graph, ingest docs, verify) against your local MCP server. Fetch it at
-    <code><a href="https://premiselabs.co/onboarding-prompt.md" target="_blank" rel="noopener">premiselabs.co/onboarding-prompt.md</a></code>
-    or run <code class="cmd">tortoise onboard</code> and copy the URL it prints.
+    <strong>Onboarding skill:</strong> after setup, install the tortoise-onboarding skill for your
+    agent — it self-adjudicates your harness, connects the MCP server, verifies with
+    <code>tortoise_health</code>, and reports the harness-connected checkpoint. Fetch it at
+    <code><a href="https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md" target="_blank" rel="noopener">app.premiselabs.co/skills/tortoise-onboarding/SKILL.md</a></code>
+    (the archived onboarding prompt was superseded by this skill, M8) or run
+    <code class="cmd">tortoise onboard</code> and copy the URL it prints.
   </div>
 
   <a href="/auth" class="cta">Hosted (zero-ops) →</a>

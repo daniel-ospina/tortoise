@@ -5,11 +5,18 @@ tenant-provision Edge Function, and will be extended with the full
 multi-tenant REST API (issue #7717).
 
 See: docs/epics/2026-08-03-tortoise-hosted-platform/04-plan.md §5, §6.1
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session recorder' (the hosted POST /v1/sessions capture_session path) —
+tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename an
+extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations
 
 import asyncio
 import hmac
+import inspect
 import json as _json
 import logging
 import math
@@ -35,7 +42,7 @@ from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op with
     tenant_provisioned,
 )  # E1–E8 session endpoints (D1)
 from tortoise.audit_events import AuditLogger
-from tortoise.auth import hash_api_key
+from tortoise.auth import API_KEY_PREFIXES, hash_api_key
 from tortoise.hosted_backup import (
     MemoryStorage,
     R2Storage,
@@ -51,6 +58,7 @@ from tortoise.mcp_server import create_http_app
 from tortoise.onboarding import state as _os  # #2001 (W5) canonical FLOW-state module
 from tortoise.projection import (
     _journal_append_product,  # #1686: team_* mint journaling (session sweep drops them)
+    is_missing_graph_error,  # #2163: absent-graph GRAPH.DELETE family == success
 )
 from tortoise.quota import (
     DEFAULT_MAX_SESSIONS,  # used by get_current_team (#754 P0: missing import → 500 on every agent_signup auth)
@@ -91,6 +99,21 @@ _logger = logging.getLogger(__name__)
 # TODO(#176): one anchor per namespace, never evicted — bounded by provisioned
 # team count until a production FalkorDB replaces the embedded fallback.
 _FALLBACK_KEEPALIVE: dict[str, TortoiseSDK] = {}
+
+# #2172: concurrent first _make_sdk/_registry_anchor calls raced the keepalive
+# check-then-create — two threads could both see an empty/stale dict entry,
+# both open the same embedded db_path, and the setdefault loser was dropped
+# UNCLOSED (its redislite daemon could die mid-request → 503 / redis.socket
+# ConnectionError, or silent empty-graph reads — the #2065/#2172 flaky
+# double-upload class). _KEEPALIVE_LOCK serializes the miss/stale path
+# (re-check + evict + create + insert) so exactly ONE anchor per key is ever
+# created; a healthy-anchor hit stays lock-free (the designed steady state —
+# concurrent per-request fresh SDKs attach to the anchored daemon). No
+# re-entrancy/deadlock: the SDK/projection stack never imports hosted_api
+# (verified #2172), so nothing inside the critical section can call back into
+# _make_sdk/_registry_anchor; the lock is never held across a per-request
+# fresh-SDK construction.
+_KEEPALIVE_LOCK = threading.Lock()
 
 
 def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
@@ -147,30 +170,46 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # fall back to a temp file so provisioning still works.
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
-    anchor = _FALLBACK_KEEPALIVE.get(namespace or "")
-    if anchor is not None and not _anchor_usable(anchor, db_path):
-        # #1502: the anchor is bound to a stale/dead embedded server — a
-        # previous test's tempdir (removed at fixture teardown, the CI
-        # failure class: redis.socket ConnectionError / 500 / stale rows)
-        # or a daemon that crashed. The old code only self-healed when
-        # `anchor._proj is None` — a stored-but-drifted projection was
-        # served forever. Evict + recreate below instead.
-        try:  # noqa: SIM105
-            anchor.close()
-        except Exception:
-            pass
-        _FALLBACK_KEEPALIVE.pop(namespace or "", None)
-        anchor = None
-    if anchor is None:
-        anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
-        try:  # noqa: SIM105
-            anchor._get_proj()  # eager: hold the connection so the server survives
-        except Exception:
-            # Keepalive is best-effort — a transient connect failure must not
-            # 500 this request; the request SDK connects lazily anyway and the
-            # anchor may connect on a later call.
-            pass
-        _FALLBACK_KEEPALIVE.setdefault(namespace or "", anchor)
+    key = namespace or ""
+    # Fast path (lock-free steady state): reuse a healthy anchor as-is — the
+    # per-request fresh SDK below attaches to its daemon (the #493/#1607
+    # designed shape). The probe runs outside the lock exactly as it always
+    # has on the serial path.
+    anchor = _FALLBACK_KEEPALIVE.get(key)
+    if anchor is not None and _anchor_usable(anchor, db_path):
+        pass
+    else:
+        # Miss or stale — serialize the evict+create+insert (#2172): two
+        # concurrent first calls must never both spawn on db_path. The
+        # in-lock re-check re-arbitrates against the anchor the winner
+        # stored (not this thread's pre-lock snapshot), so a waiter never
+        # evicts/duplicates the winner's fresh anchor.
+        with _KEEPALIVE_LOCK:
+            anchor = _FALLBACK_KEEPALIVE.get(key)
+            if anchor is not None and not _anchor_usable(anchor, db_path):
+                # #1502: the anchor is bound to a stale/dead embedded
+                # server — a previous test's tempdir (removed at fixture
+                # teardown, the CI failure class: redis.socket
+                # ConnectionError / 500 / stale rows) or a daemon that
+                # crashed. The old code only self-healed when
+                # `anchor._proj is None` — a stored-but-drifted projection
+                # was served forever. Evict + recreate below instead.
+                try:  # noqa: SIM105
+                    anchor.close()
+                except Exception:
+                    pass
+                _FALLBACK_KEEPALIVE.pop(key, None)
+                anchor = None
+            if anchor is None:
+                anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
+                try:  # noqa: SIM105
+                    anchor._get_proj()  # eager: hold the connection so the server survives
+                except Exception:
+                    # Keepalive is best-effort — a transient connect failure must not
+                    # 500 this request; the request SDK connects lazily anyway and the
+                    # anchor may connect on a later call.
+                    pass
+                _FALLBACK_KEEPALIVE.setdefault(key, anchor)
     sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
     return sdk
 
@@ -197,18 +236,24 @@ def _registry_anchor() -> TortoiseSDK:
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
     anchor = _FALLBACK_KEEPALIVE.get("registry")
     if anchor is None or not _anchor_usable(anchor, db_path):
-        if anchor is not None:
-            try:  # noqa: SIM105
-                anchor.close()
-            except Exception:
-                pass
-            _FALLBACK_KEEPALIVE.pop("registry", None)
-        anchor = TortoiseSDK(db_path=db_path, namespace="registry")
-        try:  # noqa: SIM105
-            anchor._get_proj()
-        except Exception:
-            pass
-        _FALLBACK_KEEPALIVE["registry"] = anchor
+        # Miss or stale — serialize the evict+create+insert (#2172, same
+        # shape as _make_sdk): the in-lock re-check re-arbitrates against
+        # the anchor the winner stored.
+        with _KEEPALIVE_LOCK:
+            anchor = _FALLBACK_KEEPALIVE.get("registry")
+            if anchor is None or not _anchor_usable(anchor, db_path):
+                if anchor is not None:
+                    try:  # noqa: SIM105
+                        anchor.close()
+                    except Exception:
+                        pass
+                    _FALLBACK_KEEPALIVE.pop("registry", None)
+                anchor = TortoiseSDK(db_path=db_path, namespace="registry")
+                try:  # noqa: SIM105
+                    anchor._get_proj()
+                except Exception:
+                    pass
+                _FALLBACK_KEEPALIVE["registry"] = anchor
     return anchor
 
 
@@ -683,7 +728,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         gets a DEDICATED per-key bucket (``<key>@<path>``) so it is exempt
         from the general 100/min key budget (R-13). Invalid/missing keys
         fall to a per-IP bucket; no client host → no bucket (blocked)."""
-        if auth.startswith("Bearer ") and auth[7:].startswith("tt_"):
+        if auth.startswith("Bearer ") and auth[7:].startswith(API_KEY_PREFIXES):
             key = auth[7:]
             if path in self.path_limits:
                 return f"{key}@{path}"
@@ -1264,6 +1309,40 @@ async def health_security():
 SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe", "/v1/session/login"}
 
 
+async def _invoke_override(override, request: Request) -> dict:
+    """Invoke a dependency override the way FastAPI DI would. Overrides
+    declared with a ``request`` parameter (e.g. test_ask_api's
+    _suspended(request: Request)) get the Request injected; zero-arg
+    lambdas (the common auth-bypass override) are called bare. Mirrors
+    FastAPI's behavior so DIRECT calls from the C2 gated/session deps
+    behave identically to Depends()-resolved overrides."""
+    try:
+        sig = inspect.signature(override)
+        params = list(sig.parameters.values())
+        first = params[0] if params else None
+        # Pass the Request ONLY when the first param is REQUIRED and
+        # position-callable (a real ``request: Request`` override like
+        # test_ask_api's _suspended). Optional-keyword lambdas
+        # (``lambda tid=tid: ...`` — the common auth-bypass override) must
+        # be called bare: binding the Request to their first optional
+        # param would silently corrupt the team dict (test_onboarding
+        # demo regressions).
+        if first is not None and first.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD) \
+                and first.default is inspect.Parameter.empty:
+            team = override(request)
+        else:
+            team = override()
+    except TypeError:
+        # Fallback: a callable whose signature inspect can't parse
+        # (builtins/C-extensions) — bare call is the historical behavior.
+        team = override()
+    if hasattr(team, "__await__"):
+        team = await team
+    return team
+
+
 async def _audit_auth_failure(request: Request, reason: str) -> None:
     """Fire-and-forget audit log for an auth failure (401).
 
@@ -1296,7 +1375,7 @@ async def get_current_team(request: Request) -> dict:
         await _audit_auth_failure(request, "bad_scheme")
         raise HTTPException(status_code=401, detail="Authorization header must use Bearer scheme")
     token = auth[7:]
-    if not token.startswith("tt_"):
+    if not token.startswith(API_KEY_PREFIXES):
         await _audit_auth_failure(request, "invalid_format")
         raise HTTPException(status_code=401, detail="Invalid API key format")
     # #767 (plan Task 3): hosted auth resolves from Supabase (lookup_hash)
@@ -1640,6 +1719,78 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     return team
 
 
+def _require_keys_manage(team: dict, surface: str) -> None:
+    """C3 (#2112) code-review P1: a deleg-NULL SCOPED key (deleg NULL but
+    scopes non-empty → NOT legacy_full_access) is a least-privilege
+    credential — the mint gate (D13 row 4) requires keys:manage, and so
+    must the other key-management surfaces (revoke, list). Legacy
+    full-access keys (deleg NULL, scopes=[]) are the owner class and pass;
+    deleg=0 keys never reach here (the DI dormancy gate 403s them first);
+    session faces pass (no key_id)."""
+    if team.get("key_id") is not None \
+            and not team.get("legacy_full_access") \
+            and "keys:manage" not in (team.get("scopes") or []):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing keys:manage scope to {surface}",
+        )
+
+
+def _reject_minted_delegated_key(team: dict, surface: str) -> None:
+    """C2 (#2111) one-level-deep guard (code-review security P1): a MINTED
+    (deleg=0) per-graph key must NEVER reach account-management or
+    data-plane surfaces in C2. C1's fail-closed invariant — a graph-bound
+    key must never widen onto the default graph — is UNENFORCEABLE at the
+    data plane until C5 #2114 routes resolved graph scope into every
+    request path (no endpoint consumes graph_id/scopes yet). Until then the
+    only safe posture is dormancy: deleg=0 keys are mintable / revocable /
+    listable (the provisioning lifecycle) but authenticate to NO capability
+    surface. The #1148 flag cannot cover this (it only rejects tt_; tk_ is
+    the new class) and the DB CHECK constrains deleg=0 scopes, not
+    capability surfaces. The REST data endpoints take this gate through
+    get_current_team_gated / get_current_team_session; MCP mirrors it in
+    TeamResolutionMiddleware; raw get_current_team resolution stays OPEN so
+    C5's spine can route graph-bound keys once it ships (#2114 consumes the
+    resolved dict). C5 flips this gate off deliberately.
+    """
+    if team.get("key_id") is not None \
+            and team.get("delegation_depth") == 0:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "KEY_NOT_USER_MINTED",
+                    "message": f"Minted keys cannot access {surface}."},
+        )
+
+
+async def get_current_team_gated(request: Request) -> dict:
+    """C2 (#2111): data-plane dependency for deleg=0 dormancy. Resolves the
+    key exactly like get_current_team (kept as the pure resolution seam —
+    C1's tenancy-field contract + C5's spine read graph_id/scopes off it),
+    then rejects minted (deleg=0) keys. Every raw-get_current_team data
+    endpoint (points/search/packs/sessions/context/demo/backups) must use
+    this so a handed-out least-privilege key cannot read or write team data
+    team-wide before per-graph isolation ships (C5 #2114).
+
+    Override semantics mirror get_current_team_session: FastAPI overrides
+    apply at DI time, so a DIRECT call to get_current_team would bypass the
+    test suite's auth bypass override — honor the override explicitly for
+    the non-key path. The deleg gate only fires for real API-key auth
+    (deleg=0 is a property of minted keys, never sessions/overrides).
+    """
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer ") and not auth[7:].startswith("eyJ"):
+        team = await get_current_team(request)
+        _reject_minted_delegated_key(team, "team data until per-graph "
+                                           "isolation ships (C5)")
+        return team
+    overrides = request.app.dependency_overrides
+    override = overrides.get(get_current_team)
+    if override is not None:
+        team = await _invoke_override(override, request)
+        return team
+    return await get_current_team(request)
+
+
 async def get_current_team_session(request: Request, gate_key_login: bool = True) -> dict:
     """Management-endpoint dependency: accept a session JWT (verified
     identity) OR an API key. Key-auth goes through get_current_team + the
@@ -1659,6 +1810,16 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
         # caller opts out: overview reads stay reachable for key-driven
         # agents on flag-off teams).
         team = await get_current_team(request)
+        # C2 (#2111) deleg gate — the gated dependency IS the management
+        # set (mint/revoke/restore/billing/onboarding/delete-graph): minted
+        # keys are data-plane credentials held dormant until C5 binds them
+        # per-graph; they must never reach account management. (create_api_key's
+        # endpoint gate is redundant-but-harmless defense-in-depth behind this
+        # DI gate. The _session_login_exchange gate is NOT redundant —
+        # /v1/session/login is in SKIP_AUTH and resolves the body token itself,
+        # so this dependency never runs on that path; removing the exchange's
+        # inline gate would reopen P1-2.)
+        _reject_minted_delegated_key(team, "team management")
         if gate_key_login:
             _check_dashboard_key_login(team, request)
         return team
@@ -1669,9 +1830,7 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
     overrides = request.app.dependency_overrides
     override = overrides.get(get_current_team)
     if override is not None:
-        team = override()
-        if hasattr(team, "__await__"):
-            team = await team
+        team = await _invoke_override(override, request)
         return team
     # Session JWT (eyJ...) — verify + resolve the user's team.
     user = await get_current_user(request)
@@ -1973,14 +2132,6 @@ class CheckoutResponse(BaseModel):
 
 class PortalResponse(BaseModel):
     portal_url: str
-
-
-class CreateKeyResponse(BaseModel):
-    id: str
-    key: str  # plaintext — shown once
-    key_prefix: str
-    created_at: str
-    name: str | None = None  # optional user-facing label (20260825000001)
 
 
 class KeyListResponse(BaseModel):
@@ -2728,7 +2879,7 @@ async def events_poll(
     after: str | None = None,
     types: str | None = None,
     limit: int = Query(100, ge=1, le=1000),
-    team: dict = Depends(get_current_team),  # noqa: B008
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
 ):
     """Poll graph/claim events after an opaque cursor (at-least-once contract).
 
@@ -2759,7 +2910,7 @@ async def list_points(
     kind: str | None = None,
     tag: str | None = None,
     limit: int = Query(50, ge=1, le=1000),
-    team: dict = Depends(get_current_team),  # noqa: B008
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
 ):
     """Query Points in the team's graph. Optional kind and tag filters."""
     if kind:
@@ -2803,7 +2954,7 @@ async def list_points(
 
 
 @app.get("/v1/points/{point_id}")
-async def get_point(point_id: str, team: dict = Depends(get_current_team)):  # noqa: B008
+async def get_point(point_id: str, team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Get a single Point by ID."""
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
@@ -2826,7 +2977,7 @@ async def dream(
     full: bool = False,
     mode: str | None = None,
     budget: int | None = None,
-    team: dict = Depends(get_current_team),  # noqa: B008
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
 ):
     """Trigger EP stabilization (dreaming, #85) for the team's graph.
 
@@ -2896,7 +3047,7 @@ async def dream(
 
 @app.get("/v1/dream/health")
 async def dream_health(
-    team: dict = Depends(get_current_team),  # noqa: B008
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
 ):
     """Dream observability (epic 903-C7, #1245): the I5 field set — last-pass
     ts, coverage %, failure rate, operator counts, per-mode counts, stale
@@ -2910,7 +3061,7 @@ async def dream_health(
 
 
 @app.get("/v1/search")
-async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team)):  # noqa: B008
+async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Hybrid search across Points (FTS + vector + structural, RRF-fused).
 
     Uses the SDK's tortoise_fts_query (search_engine) instead of raw
@@ -2973,7 +3124,7 @@ def _register_ask_route() -> None:
 
 
 async def ask_question(body: AskRequest,
-                       team: dict = Depends(get_current_team)):  # noqa: B008
+                       team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Team-scoped answer surface (#1987 Task 7): one bounded RAG pass over
     the team's memory — retrieval → annotation → dedup → context assembly →
     ONE LLM reader call (the two-phase commit/abstain discipline) → metered
@@ -3075,7 +3226,7 @@ async def topic_summary(
     max_seeds: int = Query(50, ge=1, le=200),
     max_hops: int = Query(1, ge=0, le=3),
     include_relationships: bool = Query(True),
-    team: dict = Depends(get_current_team),  # noqa: B008
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
 ):
     """Epistemic topic summarization — settled vs contested structure (#592).
 
@@ -3285,7 +3436,7 @@ async def _session_login_exchange(
         membership_for_user_team,
         mint_target_user_for_key,
     )
-    if not token.startswith("tt_"):
+    if not token.startswith(API_KEY_PREFIXES):
         await _audit_auth_failure(request, "invalid_key")
         raise HTTPException(status_code=401, detail="Invalid API key")
 
@@ -3315,6 +3466,23 @@ async def _session_login_exchange(
 
     team_id = team["team_id"]
     created_by = team.get("created_by")
+
+    # C2 (#2111) child-policy guard: a MINTED (deleg=0) key — per-graph or
+    # team-wide — NEVER carries login identity. The /v1/session/login
+    # exchange was designed when the only keys were owner-minted
+    # (holder == creator — exchanging was a no-op privilege); C2's minted
+    # keys exist to be handed to THIRD PARTIES (contractor/agent/customer)
+    # whose access is strictly less than the creator's — allowing the
+    # exchange would let any holder of a dashboard-minted per-graph key
+    # sign in as the OWNER (delete graphs, mint keys, read other graphs,
+    # manage billing). Reject deleg=0 here (KEY_NOT_USER_MINTED class) —
+    # consistent with the create_team_graph deleg=0 → 403 gate.
+    if team.get("delegation_depth") == 0:
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "KEY_NOT_USER_MINTED",
+                    "message": "Minted keys cannot be used to sign in."},
+        )
 
     # created_by decision tree: UUID → mint the CREATOR's session; anon/
     # identity (owner-less team) → claim funnel; "api"/NULL/unknown →
@@ -3420,7 +3588,7 @@ async def _session_login_exchange(
 
 
 @app.get("/v1/packs")
-async def list_packs(team: dict = Depends(get_current_team)):  # noqa: B008
+async def list_packs(team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """#318: read-only pack introspection — the tenant's ACTIVE packs.
 
     Shared pack catalog + per-tenant ``PackInstall`` activation records
@@ -3469,7 +3637,7 @@ async def list_packs(team: dict = Depends(get_current_team)):  # noqa: B008
 @app.post("/v1/packs/manifests", status_code=201)
 async def upload_pack_manifest(
     request: Request,
-    team: dict = Depends(get_current_team),  # noqa: B008
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
 ):
     """#1935 (epic #1891 slice 4): per-tenant custom pack upload.
 
@@ -4345,9 +4513,261 @@ async def create_demo_graph(request: Request):
 
     return _seed_demo_graph(team_id)
 
-@app.post("/v1/team/keys", response_model=CreateKeyResponse)
+
+# ── C2 (#2111): the ONE shared per-graph key mint ────────────────────────────
+# C3 (#2112) standalone key-lifecycle endpoints CONSUME this helper (D0 —
+# one implementation, never re-implemented). It stamps delegation_depth=0,
+# gates max_api_keys, filters scopes through the child policy, and reveals
+# the plaintext exactly once (hash-only stored).
+
+# Child policy (fixed, W1): a minted key can NEVER inherit escalation
+# scopes — only graph-data scopes pass the ∩ filter. The DB CHECK
+# (chk_minted_key_no_escalation) is the backstop.
+_MINTABLE_SCOPES = ("graphs:read", "graphs:write")
+
+# C3 (#2112): the FULL allowlist an OWNER-class mint may request (§5.4 —
+# scopes, all-off default). Write-implies-read is a resolve-time
+# classification (C5 enforces it per-surface); the allowlist here is the
+# mint-time vocabulary. Escalation = the difference from _MINTABLE_SCOPES
+# (graphs:create/delete/keys:manage/team:manage — never inherited by
+# key-minted children; DB CHECK chk_minted_key_no_escalation backstops).
+_OWNER_SCOPE_ALLOWLIST = (
+    "graphs:read", "graphs:write", "graphs:create",
+    "graphs:delete", "team:manage", "keys:manage",
+)
+
+
+class _KeyCapExceeded(Exception):
+    """max_api_keys reached — caller maps to 409 + graph rollback (D4)."""
+
+
+def _team_node_sync_limits(team_id: str) -> dict:
+    """Sync twin of _team_node + _team_limits_from_node for the sync mint
+    path (C2 #2111). Returns {} when the team is unknown (the mint then
+    skips the key-cap gate — the caller's team check already ran)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        team_by_id,
+    )
+    if is_supabase_enabled():
+        row = team_by_id(get_control_plane(), team_id)
+        return _team_limits_from_node(row) if row else {}
+    sdk = _make_sdk(namespace="registry")
+    node = sdk.team_get(team_id)
+    return _team_limits_from_node(node) if node else {}
+
+
+def _mint_key(team_id: str, *, graph_id: str | None = None,
+              scopes: list | None = None,
+              delegation_depth: int | None = None,
+              caller_key_id: str | None = None,
+              session_user_id: str | None = None,
+              prefix: str | None = None,
+              created_via: str = "provisioned",
+              name: str | None = None) -> dict:
+    """C3 (#2112) — the ONE low-level key write (registry + Supabase).
+    Generalized from C2's _mint_graph_key (D14 — never re-implemented):
+    graph_id is OPTIONAL (None = team-wide key → default graph), scopes
+    arrive ALREADY validated/filtered by the caller class (owner mint may
+    carry escalation; key mint ∩ child policy), delegation_depth is 0 for
+    key-minted children or None for owner-minted keys.
+
+    Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
+    graph_id, created_by_key_id, created_at}. key_plaintext appears ONLY
+    in this return (reveal-once: the caller puts it in the 201 envelope /
+    mint response and nowhere else; hash-only stored). Raises
+    _KeyCapExceeded when the team is at max_api_keys (caller maps 409).
+    C4 (#2113) ACL seam fires for graph-bound mints (fail-soft no-op).
+    """
+    import uuid
+
+    from tortoise.auth import lookup_hash
+
+    # Key-cap gate (pre-check; the caller rolls back on _KeyCapExceeded —
+    # the provisioning caller rolls back the graph, no graph-without-key).
+    from tortoise.quota import _count_resource
+    from tortoise.supabase_control import (
+        get_control_plane,
+        insert_api_key,
+        is_supabase_enabled,
+    )
+    max_keys = _team_node_sync_limits(team_id).get("max_api_keys")
+    if max_keys is not None:
+        count = _count_resource(team_id, "api_keys")
+        if count >= int(max_keys):
+            raise _KeyCapExceeded()
+
+    # D15: scoped (or graph-bound) keys are the epic's single tk_ type;
+    # a legacy-shape mint (no scopes, no graph) keeps tt_ so existing
+    # dashboard/CLI {} bodies are byte-identical.
+    final_scopes = list(scopes or [])
+    if prefix is None:
+        prefix = "tk_" if (final_scopes or graph_id) else "tt_"
+
+    api_key = f"{prefix}{uuid.uuid4().hex}"
+    key_prefix = api_key[:10]
+    kid = _short_id()
+    now = datetime.now(UTC).isoformat()
+
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        # created_by attribution (established convention, P2 review fix):
+        # user UUID (session alias — #1511) or "api" — NEVER a key id.
+        # Key-driven mints can't resolve the caller's user at mint time and
+        # lineage already rides created_by_key_id; consumers treat
+        # created_by as user-UUID-or-"api" (first_api_call distinct_id,
+        # the session-login exchange tree).
+        created_by = session_user_id or "api"
+        insert_api_key(cp, {
+            "id": kid,
+            "team_id": team_id,
+            "lookup_hash": lookup_hash(api_key),
+            "key_prefix": key_prefix,
+            "created_via": created_via,
+            "created_by": created_by,
+            "created_at": now,
+            "revoked_at": None,
+            "expires_at": None,
+            "name": name,
+            # C1 columns: graph scope + allowlist + mint lineage
+            "graph_id": graph_id,
+            "scopes": final_scopes,
+            "created_by_key_id": caller_key_id,
+            "delegation_depth": delegation_depth,
+        })
+    else:
+        sdk = _make_sdk(namespace="registry")
+        # apikey_create generates its OWN id (ulid) AND plaintext for the
+        # node — capture BOTH so the envelope's key.id and key_plaintext
+        # match the registry node (revoke/shrink in C3 must hit the real
+        # id; a revealed plaintext must verify against the stored hash).
+        created = sdk.apikey_create(
+            team_id, session_user_id or "api",
+            graph_id=graph_id, scopes=final_scopes or None,
+            created_by_key_id=caller_key_id, delegation_depth=delegation_depth,
+            prefix=prefix, name=name, created_via=created_via,
+        )
+        kid = created["id"]
+        api_key = created["api_key"]
+        key_prefix = created["key_prefix"]
+
+    # C4 (#2113) seam: ACL user created at mint (defense-in-depth). Fail-soft
+    # no-op when C4 is absent — surface-6 assertions run at capstone (#2118).
+    if graph_id:
+        _acl_user_create_hook(graph_id, team_id)
+
+    return {
+        "id": kid,
+        "key_plaintext": api_key,
+        "key_prefix": key_prefix,
+        "scopes": final_scopes,
+        "delegation_depth": delegation_depth,
+        "graph_id": graph_id,
+        "created_by_key_id": caller_key_id,
+        "created_at": now,
+    }
+
+
+def _mint_graph_key(team_id: str, graph_id: str,
+                    requested_scopes: list | None,
+                    caller_key_id: str | None,
+                    session_user_id: str | None = None) -> dict:
+    """C2 (#2111) provisioning wrapper over the ONE low-level mint (D14).
+    Graph-bound (graph_id required), deleg=0 child (never inherits
+    escalation — child policy ∩ _MINTABLE_SCOPES), tk_ prefix. C3's
+    standalone endpoints call _mint_key directly with the caller-class
+    matrix (D13); this wrapper keeps C2's provisioning callers unchanged.
+
+    Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
+    graph_id, created_by_key_id, created_at}. Raises _KeyCapExceeded when
+    the team is at max_api_keys (caller maps 409 + graph rollback).
+    """
+    # Child policy: requested ∩ mintable (escalation scopes never inherited;
+    # empty result → the safe default read-only).
+    scopes = [s for s in (requested_scopes or [])
+              if s in _MINTABLE_SCOPES] or ["graphs:read"]
+    return _mint_key(
+        team_id, graph_id=graph_id, scopes=scopes,
+        delegation_depth=0, caller_key_id=caller_key_id,
+        session_user_id=session_user_id, prefix="tk_",
+    )
+
+
+def _ensure_graph_exists(team_id: str, graph_id: str) -> None:
+    """C3 (#2112): a graph-bound mint references an existing CUSTOM graph.
+
+    The default graph is bound via a team-wide key (graph_id ABSENT —
+    resolution maps it to the default namespace); there is no per-graph key
+    for the default graph. The literal "default" is the supabase seam's
+    DERIVED row id (no graphs row — teams.graph_name) and the registry
+    default node (kind='default', real gid g_<hex>) is not key-bindable, so
+    both 404 here (mirrors delete_graph's kind pre-lookup: a custom graph
+    must be a non-deleted row/node)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "graphs", select=["kind", "status"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+        row = rows[0] if rows else None
+        ok = row is not None and row.get("status") != "deleted" \
+            and row.get("kind") != "default"
+    else:
+        sdk = _make_sdk(namespace="registry")
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "RETURN g.kind, g.status",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        ok = bool(rows) and rows[0][1] != "deleted" and rows[0][0] != "default"
+    if not ok:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+
+
+def _acl_user_create_hook(graph_id: str, team_id: str) -> None:
+    """C4 seam — create the per-graph ACL user (defense-in-depth). No-op
+    until C4 ships; failures are logged, never block the mint (the app-layer
+    scope check is authoritative)."""
+    try:
+        from tortoise.acl_graph_users import (
+            create_acl_user,  # type: ignore[import-not-found]
+        )
+        create_acl_user(graph_id, team_id)
+    except ImportError:
+        pass  # C4 not shipped — seam dormant
+    except Exception as e:
+        _logger.warning("ACL user create failed for graph %s (defense-in-depth, non-blocking): %s",
+                        graph_id, e)
+
+
+def _acl_user_drop_hook(graph_id: str) -> None:
+    """C4 seam — drop the per-graph ACL user on delete. Same fail-soft
+    contract as the create hook."""
+    try:
+        from tortoise.acl_graph_users import (
+            drop_acl_user,  # type: ignore[import-not-found]
+        )
+        drop_acl_user(graph_id)
+    except ImportError:
+        pass  # C4 not shipped — seam dormant
+    except Exception as e:
+        _logger.warning("ACL user drop failed for graph %s (non-blocking): %s", graph_id, e)
+
+
+@app.post("/v1/team/keys")
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Generate a new API key for the team.
+
+    C3 (#2112): the body may carry {graph_id?, scopes?, name?} — a scoped
+    mint routes the D13 delegation matrix (session/legacy-owner → deleg
+    NULL owner key with the full allowlist; scoped keys:manage key →
+    deleg=0 child ∩ child policy, escalation request 403; deleg=0 caller
+    → 403). Bodies default to {} (legacy clients) → the byte-identical
+    pre-C3 owner mint (tt_, deleg NULL, no scopes).
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
     row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
@@ -4356,54 +4776,178 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     which stays for selfhost. The registry path is the #767 review note
     (PR #851 P1) surface this migration closes: no production window exists
     because #765 lands before the single-deploy flip (#771).
-
-    The body is optional and currently carries one field: `name` — an
-    optional user-facing label (migration 20260825000001) so dashboards/CLI
-    can remember which key is which. Bodies default to {} (legacy clients)."""
-    _check_team_limit(team, "api_keys")
-    # Key label (optional): read the body defensively — mint bodies are
-    # usually `{}` (dashboard/CLI), so a name is best-effort, never a
-    # failure mode for a mint.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    # C2 (#2111) one-level-deep guard: a MINTED (deleg=0) caller key can
+    # NEVER mint another key — the child policy (deleg=0 keys cannot
+    # escalate) covers this capability surface, not just scope columns
+    # (the DB CHECK constrains the scopes of deleg=0 rows; it cannot see
+    # POST /v1/team/keys). Mirrors the create_team_graph deleg=0 → 403
+    # gate (E2E-4). Session callers (key_id None) always pass.
+    if team.get("key_id") is not None and team.get("delegation_depth") == 0:
+        raise HTTPException(status_code=403,
+                            detail="Minted keys cannot mint new keys")
+    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
+    # Read the body defensively — mint bodies are usually `{}` (dashboard/
+    # CLI), so parse failures degrade to the legacy owner mint, never a
+    # failure mode.
     name = None
+    graph_id = None
+    requested_scopes = None
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         payload = _json.loads(raw)
-        name = _clean_key_label(payload.get("name")) if isinstance(payload, dict) else None
+        if isinstance(payload, dict):
+            name = _clean_key_label(payload.get("name"))
+            graph_id = payload.get("graph_id")
+            requested_scopes = payload.get("scopes")
     except HTTPException:
         raise
     except Exception:
         name = None
-    import uuid
 
-    from tortoise.auth import lookup_hash
-    from tortoise.supabase_control import (
-        get_control_plane,
-        insert_api_key,
-        is_supabase_enabled,
-    )
-    api_key = f"tt_{uuid.uuid4().hex}"
-    key_hash = hash_api_key(api_key)
-    key_prefix = api_key[:10]
-    kid = _short_id()
-    now = datetime.now(UTC).isoformat()
+    is_key_caller = team.get("key_id") is not None
+    caller_scopes = team.get("scopes") or []
+    caller_legacy_full = bool(team.get("legacy_full_access"))
+
+    # D13 caller-class matrix. The DEFAULT (no scopes + no graph_id in the
+    # body) is the legacy owner-class mint — byte-identical response, tt_,
+    # 402 key-cap (D3 asymmetry preserved). A SCOPED mint (scopes and/or
+    # graph_id) routes the D13 rules. A scoped deleg-NULL key with a {}
+    # body is NOT an owner-class mint (it can only mint a deleg=0 child) —
+    # cap class 409, not the legacy 402.
+    scoped_request = bool(requested_scopes) or bool(graph_id)
+    # NOTE (code-review): bool() collapses an explicit `"scopes": []` onto
+    # the absent case — a session/legacy-full owner face POSTing
+    # {"scopes": []} mints the legacy owner-class full-access tt_ key,
+    # exactly like {} (empty allowlist dropped). Owner-class faces may
+    # already mint full-access via {}, so this is not an escalation; the
+    # response omits the C3 fields (no signal the empty array was dropped),
+    # mirroring the shrink branch's treatment of scopes=[] + deleg NULL as
+    # legacy_full_access. Deleg-NULL scoped keys can never reach this branch
+    # with [] (their {} mint is the deleg=0 child path below).
+    child_mint = is_key_caller and not caller_legacy_full
+    try:
+        if not scoped_request:
+            # Legacy {} mint — D13 caller-class gate: SESSION faces and
+            # legacy full-access (deleg-NULL, scopes=[]) OWNER-class keys
+            # mint the byte-identical pre-C3 tt_ key (402 key-cap, D3). A
+            # scoped deleg-NULL key (even WITH keys:manage) may NOT mint a
+            # full-access owner key — its {} mint routes the row-3/row-4
+            # semantics: 403 without keys:manage (no mint capability); a
+            # deleg=0 child with lineage (created_by_key_id + deleg=0) when
+            # it has keys:manage — never an escalation to the owner class.
+            # deleg=0 callers never reach here (central gate).
+            if is_key_caller and not caller_legacy_full:
+                if "keys:manage" not in caller_scopes:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Missing keys:manage scope to mint keys",
+                    )
+                # keys:manage scoped key + {} body → deleg=0 child with the
+                # child-policy default scope (C2 parity), tk_ prefix.
+                minted = _mint_key(
+                    team["team_id"], scopes=["graphs:read"],
+                    delegation_depth=0, caller_key_id=team["key_id"],
+                    session_user_id=team.get("session_user_id"),
+                    prefix="tk_", name=name,
+                )
+            else:
+                _check_team_limit(team, "api_keys")
+                minted = _mint_key(
+                    team["team_id"], name=name,
+                    session_user_id=team.get("session_user_id"),
+                )
+        else:
+            if not isinstance(requested_scopes, list):
+                raise HTTPException(status_code=422,
+                                    detail="scopes must be an array of allowlisted scope strings")
+            unknown = [s for s in requested_scopes
+                       if not isinstance(s, str) or s not in _OWNER_SCOPE_ALLOWLIST]
+            if unknown:
+                # code-review: key=str keeps a non-str member (e.g. int in a
+                # crafted body) from raising TypeError in sorted() → the 422
+                # must never degrade to a 500.
+                raise HTTPException(status_code=422,
+                                    detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
+            # Key caller WITHOUT the mint capability (D13): a scoped deleg-NULL
+            # key that lacks keys:manage may not mint. Legacy full-access keys
+            # (scopes=[]) are the owner class and pass (C1 legacy_full_access).
+            if is_key_caller and not caller_legacy_full \
+                    and "keys:manage" not in caller_scopes:
+                raise HTTPException(status_code=403,
+                                    detail="Missing keys:manage scope to mint keys")
+            # Key caller WITH mint capability → deleg=0 child (one-level-deep):
+            # scopes ∩ child policy; an escalation-scope REQUEST from a key is a
+            # 403 (§6.3 — never silently stripped). SESSION faces and legacy
+            # full-access (owner-class) callers fail the `not caller_legacy_full`
+            # term and fall through to the else → owner-class deleg-NULL mint
+            # with the full allowlist (D13 rows 1-2).
+            if is_key_caller and not caller_legacy_full:
+                requested = set(requested_scopes)
+                escalation = requested - set(_MINTABLE_SCOPES)
+                if escalation:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Minted keys cannot hold escalation scopes: "
+                               + ",".join(sorted(escalation)),
+                    )
+                delegation_depth = 0
+                caller_key_id = team["key_id"]
+                # Child keys default to graphs:read when no data scope requested
+                # (C2 parity).
+                final_scopes = requested_scopes or ["graphs:read"]
+                prefix = "tk_"
+            else:
+                # Owner-class (session/legacy-full) scoped mint. An EXPLICIT
+                # empty scopes array with a graph_id would mint a deleg-NULL
+                # scopes=[] graph-bound key — resolution derives
+                # legacy_full_access=(deleg NULL and scopes==[]) True = FULL
+                # access, while the response echoes scopes:[] (reads as least
+                # privilege). Same footgun the shrink branch 422s (F2) — 422
+                # here: per-graph keys require ≥1 explicit scope. (An empty
+                # array WITHOUT graph_id never reaches this branch — it
+                # collapses to the legacy {} owner mint.)
+                if graph_id is not None and not requested_scopes:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Per-graph keys require at least one scope.",
+                    )
+                delegation_depth = None
+                caller_key_id = None
+                final_scopes = requested_scopes
+                prefix = None  # auto: tk_ when scopes/graph, else tt_
+            # Graph-bound mint → the graph must exist (404).
+            if graph_id is not None:
+                _ensure_graph_exists(team["team_id"], graph_id)
+            minted = _mint_key(
+                team["team_id"], graph_id=graph_id, scopes=final_scopes,
+                delegation_depth=delegation_depth, caller_key_id=caller_key_id,
+                session_user_id=team.get("session_user_id"),
+                prefix=prefix, name=name,
+            )
+    except _KeyCapExceeded:
+        # D3 asymmetry (pinned): the LEGACY owner mint keeps the historical
+        # 402 (its pre-check _check_team_limit fires first; this is the race
+        # backstop); the SCOPED mint + deleg=0 child mints surface the C2
+        # _KeyCapExceeded 409 semantic. Never a 500.
+        is_owner_class_mint = not scoped_request and not child_mint
+        raise HTTPException(
+            status_code=402 if is_owner_class_mint else 409,
+            detail=("API key limit reached." if not is_owner_class_mint
+                    else "API key limit reached (legacy mint — upgrade or revoke)"),
+        ) from None
+
+    kid = minted["id"]
+    api_key = minted["key_plaintext"]
+    key_prefix = minted["key_prefix"]
+    now = minted["created_at"]
+
     if is_supabase_enabled():
         cp = get_control_plane()
-        insert_api_key(cp, {
-            "id": kid,
-            "team_id": team["team_id"],
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": key_prefix,
-            "created_via": "provisioned",  # NOT NULL in 0007; counts vs the
-            # recovery-mint cap like the registry's NULL created_via rows
-            "created_by": team.get("session_user_id") or "api",  # #1511: the
-            # session user UUID when the mint was session-authed (so
-            # dashboard-minted keys can drive the /v1/session/login exchange);
-            # key-auth/override mints keep "api" (registry parity).
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": None,
-            "name": name,  # 20260825000001: optional user-facing label
-        })
         # #528 analytics — actor id from the team's active memberships when
         # resolvable (one seam query), else a team_id-prefixed id (request.
         # state only carries team_id here). Registry path below reads the
@@ -4427,15 +4971,6 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         )
     else:
         sdk = _make_sdk(namespace="registry")
-        # #1753: created_via/expires_at prop parity with agent_signup + the
-        # Supabase lane (like the #1709 mint at ~7365) — without them the
-        # selfhost dashboard lists durable keys as "ephemeral · session"
-        # and hides rename. expires_at:null = never (durable key).
-        sdk._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
-            "created_by:$cb, created_via:'provisioned', created_at:$now, expires_at:null, name:$name})",
-            params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now, "name": name},
-        )
         # #528 analytics — actor user id from the team's Membership graph when
         # resolvable (key creation is rare; one extra registry lookup), else a
         # team_id-prefixed id (request.state only carries team_id here).
@@ -4464,17 +4999,28 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
-    return {
+    resp = {
         "id": kid,
         "key": api_key,
         "key_prefix": key_prefix,
         "created_at": now,
         "name": name,
     }
+    if scoped_request or child_mint:
+        # C3 (#2112) scoped/delegated-mint fields — ABSENT on the legacy {}
+        # owner-class path so pre-C3 clients see the byte-identical shape
+        # (exact-equality pin in test_writer_inventory pins
+        # {id,key,key_prefix,created_at,name}); a keys:manage {} child mint
+        # DOES carry deleg=0 + scopes (not owner class).
+        resp["graph_id"] = minted.get("graph_id")
+        resp["scopes"] = minted.get("scopes")
+        resp["delegation_depth"] = minted.get("delegation_depth")
+    return resp
 
 
 @app.get("/v1/team/keys")
-async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+async def list_api_keys(graph_id: str | None = None,
+                        team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """List API keys for the team (hashes only — no plaintext).
 
     #1828: dual-auth (session JWT OR tt_ key) — the dashboard's overview API
@@ -4484,13 +5030,23 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
     #1828 review P1: ungated — a key-driven agent keeps listing keys on a
     flag-off team (the #1148 gate stays scoped to the management set).
 
+    C3 (#2112) code-review P2: a deleg-NULL SCOPED key (not owner class)
+    must not enumerate the team's key inventory (ids/prefixes/graph
+    bindings/lineage) — keys:manage required for scoped key faces (same
+    caller-class rule as mint/revoke). Legacy full-access keys, session
+    faces, and deleg=0 (already 403 at the DI dormancy gate) unaffected.
+
     #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
     with their revoked_at; registry parity). Registry path stays for
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
     (agent_signup #1709, create_api_key #1753 and session_key mints all
     write them at mint time; the registry list stays None-tolerant for
-    LEGACY nodes minted before those fixes)."""
+    LEGACY nodes minted before those fixes). C3 (#2112): optional
+    ?graph_id= filter (per-graph key panel — surface 12) + the C1 tenancy
+    columns ride the rows (scopes/delegation_depth/graph_id/created_by_key_id).
+    """
+    _require_keys_manage(team, "list API keys")
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -4498,7 +5054,8 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
     )
     if is_supabase_enabled():
         try:
-            keys = team_api_keys(get_control_plane(), team["team_id"])
+            keys = team_api_keys(get_control_plane(), team["team_id"],
+                                 graph_id=graph_id)
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -4518,19 +5075,36 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
                     # #1708 D7: session-key metadata (additive, non-breaking)
                     "created_via": row.get("created_via"),
                     "expires_at": row.get("expires_at"),
+                    # C3 (#2112) C1 tenancy columns (additive — absent on
+                    # pre-C1 rows → JSON null is additive-safe).
+                    "graph_id": row.get("graph_id"),
+                    "scopes": row.get("scopes") or [],
+                    "delegation_depth": row.get("delegation_depth"),
+                    "created_by_key_id": row.get("created_by_key_id"),
                 }
                 for row in keys
             ]
         }
     sdk = _make_sdk(namespace="registry")
     try:
-        keys = sdk._get_registry().query(
-            "MATCH (k:APIKey {team_id: $tid}) "
-            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
-            "k.name, k.created_via, k.expires_at "
-            "ORDER BY k.created_at DESC",
-            params={"tid": team["team_id"]},
-        )
+        if graph_id is not None:
+            keys = sdk._get_registry().query(
+                "MATCH (k:APIKey {team_id: $tid, graph_id: $gid}) "
+                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
+                "k.revoked_at, k.name, k.created_via, k.expires_at, "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "ORDER BY k.created_at DESC",
+                params={"tid": team["team_id"], "gid": graph_id},
+            )
+        else:
+            keys = sdk._get_registry().query(
+                "MATCH (k:APIKey {team_id: $tid}) "
+                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
+                "k.name, k.created_via, k.expires_at, "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "ORDER BY k.created_at DESC",
+                params={"tid": team["team_id"]},
+            )
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -4551,6 +5125,12 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
                 # additive-safe.
                 "created_via": row[6],
                 "expires_at": row[7],
+                # C3 (#2112): C1 tenancy props (None-tolerant for legacy
+                # nodes).
+                "graph_id": row[8],
+                "scopes": row[9] or [],
+                "delegation_depth": row[10],
+                "created_by_key_id": row[11],
             }
             for row in keys.result_set
         ]
@@ -4576,6 +5156,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     from tortoise.supabase_control import (
         revoke_api_key as _sb_revoke,
     )
+    # C3 (#2112) code-review P1: a deleg-NULL SCOPED key (e.g. graphs:read-
+    # only, minted for least privilege) must not destroy every team key —
+    # same caller-class rule as the mint gate (D13 row 4). deleg=0 keys
+    # 403 at the DI gate before this; legacy full-access keys and session
+    # faces pass.
+    _require_keys_manage(team, "revoke API keys")
     if is_supabase_enabled():
         try:
             row = api_key_by_id(get_control_plane(), key_id)
@@ -4677,14 +5263,17 @@ class KeyEnabledToggle(BaseModel):
     # re-enable a disabled key, so it is treated as absent there). `enabled`
     # was previously required — making it optional is backward-compatible
     # (existing callers still send it). At least one field must be present
-    # (422 on an empty body).
+    # (422 on an empty body). C3 (#2112): ``scopes`` (shrink-only — a
+    # strict subset of the key's current scopes; expansion is 422 — expand
+    # = revoke+recreate, §5.4) routes the shrink branch.
     enabled: bool | None = None
     name: str | None = None
+    scopes: list[str] | None = None
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> KeyEnabledToggle:
         if not self.model_fields_set:
-            raise ValueError("At least one of enabled or name is required")
+            raise ValueError("At least one of enabled, name or scopes is required")
         return self
 
 
@@ -4710,6 +5299,9 @@ async def toggle_api_key_enabled(
     from tortoise.supabase_control import (
         set_api_key_name as _sb_set_name,
     )
+    from tortoise.supabase_control import (
+        set_api_key_scopes as _sb_set_scopes,
+    )
     if is_supabase_enabled():
         cp = get_control_plane()
         row = api_key_by_id(cp, key_id)
@@ -4725,6 +5317,37 @@ async def toggle_api_key_enabled(
             # owner is using.
             raise HTTPException(status_code=409, detail="Cannot modify a session key")
         result = {"key_id": key_id}
+        # C3 (#2112) shrink branch: {scopes} replaces the current scopes
+        # with a STRICT SUBSET (expand = revoke+recreate, §5.4 — 422). The
+        # key must not be a revoked/session key (guards above); shrinking a
+        # disabled key is allowed (disabled ≠ revoked). Emptying a deleg-NULL
+        # scoped key is ALSO 422: scopes=[] + deleg NULL reclassifies it as
+        # legacy_full_access (full access) — a capability EXPANSION through
+        # the shrink endpoint (code-review F2). ALL scopes validation runs
+        # BEFORE the enabled/name writes so a 422 is a no-op (code-review:
+        # partial-application fix — a superset body must not persist
+        # enabled=false then error).
+        if "scopes" in body.model_fields_set:
+            current = row.get("scopes") or []
+            requested = body.scopes or []
+            unknown = [s for s in requested if s not in _OWNER_SCOPE_ALLOWLIST]
+            if unknown:
+                raise HTTPException(status_code=422,
+                                    detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
+            if not set(requested) <= set(current):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Scope expansion is not allowed — revoke and "
+                           "recreate the key to expand scopes.",
+                )
+            if not requested and row.get("delegation_depth") is None \
+                    and current:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Cannot empty a deleg-NULL key's scopes (that "
+                           "reclassifies it legacy full-access) — revoke and "
+                           "recreate instead.",
+                )
         # Explicit null for enabled is treated as absent (leave untouched) —
         # `None is not False` would silently RE-ENABLE a disabled key.
         if "enabled" in body.model_fields_set and body.enabled is not None:
@@ -4736,6 +5359,9 @@ async def toggle_api_key_enabled(
             cleaned = _clean_key_label(body.name)
             _sb_set_name(cp, key_id, cleaned)
             result["name"] = cleaned
+        if "scopes" in body.model_fields_set:
+            _sb_set_scopes(cp, key_id, body.scopes or [])
+            result["scopes"] = body.scopes or []
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
     # (registry keys are always active, preserving the #1148 no-op echo
@@ -4745,18 +5371,45 @@ async def toggle_api_key_enabled(
     # the Membership graph).
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
-        "MATCH (k:APIKey {id: $id}) RETURN k.team_id, k.revoked_at, k.created_via",
+        "MATCH (k:APIKey {id: $id}) "
+        "RETURN k.team_id, k.revoked_at, k.created_via, k.scopes, "
+        "k.delegation_depth",
         params={"id": key_id},
     ).result_set
     if not rows:
         raise HTTPException(status_code=404, detail="API key not found")
-    team_id, revoked_at, created_via = rows[0]
+    team_id, revoked_at, created_via, current_scopes, deleg = rows[0]
     await _require_owner_admin(user["user_id"], team_id)
     if revoked_at is not None:
         raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
     if created_via == "bootstrap":
         raise HTTPException(status_code=409, detail="Cannot modify a session key")
     result = {"key_id": key_id, "enabled": True}
+    # C3 (#2112) shrink branch — registry parity with the supabase lane:
+    # strict-subset scopes replace (expansion 422), never on revoked keys.
+    # Emptying a deleg-NULL scoped key is ALSO 422 (reclassifies it legacy
+    # full-access — capability expansion). ALL scopes validation runs before
+    # the name write so a 422 is a no-op (partial-application fix).
+    if "scopes" in body.model_fields_set:
+        requested = body.scopes or []
+        unknown = [s for s in requested if s not in _OWNER_SCOPE_ALLOWLIST]
+        if unknown:
+            raise HTTPException(status_code=422,
+                                detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
+        current = list(current_scopes or [])
+        if not set(requested) <= set(current):
+            raise HTTPException(
+                status_code=422,
+                detail="Scope expansion is not allowed — revoke and "
+                       "recreate the key to expand scopes.",
+            )
+        if not requested and deleg is None and current:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot empty a deleg-NULL key's scopes (that "
+                       "reclassifies it legacy full-access) — revoke and "
+                       "recreate instead.",
+            )
     if "name" in body.model_fields_set:
         cleaned = _clean_key_label(body.name)
         sdk._get_registry().query(
@@ -4764,6 +5417,12 @@ async def toggle_api_key_enabled(
             params={"id": key_id, "name": cleaned},
         )
         result["name"] = cleaned
+    if "scopes" in body.model_fields_set:
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {id: $id}) SET k.scopes = $sc",
+            params={"id": key_id, "sc": list(body.scopes or [])},
+        )
+        result["scopes"] = body.scopes or []
     return result
 
 
@@ -4850,7 +5509,7 @@ def _llm_provider_available() -> bool:
 
 
 @app.post("/v1/sessions")
-async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
+async def capture_session(body: SessionRequest, request: Request, team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Capture an agent session and extract turns as episodic Points.
 
     #1927: the session_recording OPT-OUT check is FIRST in the gate stack (before
@@ -5061,6 +5720,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     )
 
     extracted = []
+    # #2002 (W6) delete-during-capture sweep state: track whether THIS
+    # capture minted the sessionCaptured Event (only a genuine capture does;
+    # a replay of an existing session_id skips the mint) so the dead-session
+    # sweep below never touches an unbound event_id on the replay path.
+    minted_event = False
+    event_id = None
 
     # NOTE: this per-turn loop (episodic turn Points) is duplicated from
     # tortoise/sdk.py capture_session — the shared primitives #1532 D1/D2
@@ -5206,7 +5871,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # create_event, so running it would mint a new node — violating the
     # "0 new nodes" idempotency contract).
     if not session_existed:
-        event_id = None
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
@@ -5218,6 +5882,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             )
             event_id = event.get("id") or event.get("eventId")
             if event_id:
+                minted_event = True
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
                     params={"ids": [p["id"] for p in extracted],
@@ -5326,17 +5991,170 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # mutation already landed; the missing marker is surfaced as an additive
     # warning (the dashboard honestly shows no receipt → install-pending),
     # and a retry with the same session_id converges (T1-P12).
-    try:
-        _update_onboarding_state(team["team_id"], **{
-            _capture_receipt_key(body.harness): now,
-        })
+    #
+    # #2002 (W6): DELETE-during-capture race — a Settings delete can land
+    # while this capture is in flight and remove the Session AFTER the MERGE
+    # above but BEFORE the receipt write. A receipt with no Session violates
+    # the T1-P12 receipt↔Session invariant (epic risk "capture delete orphans
+    # graph data" — DE2E-11 negative). Two guards close every interleaving:
+    #   (1) PRE-CHECK: skip the receipt entirely when the Session is already
+    #       gone (the delete won; a receipt would be an orphan).
+    #   (2) POST-COMPENSATION: the delete's graph removal + receipt recompute
+    #       can land between the pre-check and the receipt PATCH — re-verify
+    #       AFTER the write and clear the just-written receipt when the
+    #       Session vanished in that window.
+    # Normal replays (session present throughout) are unaffected: the receipt
+    # lands and stays (T1-P12 convergence preserved).
+    def _session_alive() -> bool:
+        try:
+            rows = proj.g.query(
+                "MATCH (s:Session {id:$sid}) RETURN count(s)",
+                params={"sid": session_id},
+            ).result_set
+            return bool(rows) and int(rows[0][0]) > 0
+        except Exception:
+            # graph read failed — do not skip/clear a receipt on a failed
+            # read (fail-open: the receipt follows the committed capture).
+            return True
+
+    def _sweep_orphaned_writes() -> None:
+        """Best-effort removal of the nodes THIS capture wrote after the
+        delete removed the Session mid-flight (the #2002 W6 residual of the
+        same race the receipt guards close): CONTAINS wiring MATCHes nothing
+        once the Session is gone, so turn/extracted Points written in that
+        window would otherwise orphan, as would a sessionCaptured Event /
+        agentSession Source minted post-delete. EXACT-IDS only — the turn ids
+        are this request's deterministic {{sid}}_t{{i}} set and the extracted
+        ids are the ULIDs this capture minted (never a prefix/label-wide
+        delete); the Event is this capture's own eventId when minted (a
+        replay never mints and never sweeps). All guarded: a sweep failure
+        never 500s the committed capture — the delete-side reconcile and a
+        same-session re-capture (MERGE re-absorbs turn ids) self-heal."""
+        point_ids: list[str] = []
+        if isinstance(windowed, list) and len(windowed) > 0:
+            point_ids = [f"{session_id}_t{i}" for i in range(len(windowed))]
+        if isinstance(extracted, list):
+            point_ids += [p.get("id") for p in extracted if p.get("id")]
+        point_ids = list(dict.fromkeys(point_ids))
+        if point_ids:
+            # Each destructive query carries the session-absence check INSIDE
+            # the same command (FalkorDB executes per-command) so the sweep is
+            # atomic against a same-session-id re-capture that MERGEd a fresh
+            # Session between the dead-branch check and this delete: a live
+            # Session (C's re-capture owns the shared {sid}_t{i} id-space) makes
+            # the query a no-op and the re-capture re-absorbs the turns; only a
+            # truly absent Session lets the orphans through.
+            with suppress(Exception):
+                proj.g.query(
+                    "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
+                    "WHERE s IS NULL "
+                    "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p",
+                    params={"sid": session_id, "ids": point_ids},
+                )
+        if minted_event and event_id:
+            # no session guard needed — a minted eventId is a per-capture ULID
+            with suppress(Exception):
+                proj.g.query(
+                    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e",
+                    params={"eid": event_id},
+                )
+        with suppress(Exception):
+            proj.g.query(
+                "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
+                "WHERE s IS NULL "
+                "MATCH (src:Source {url:$url}) DETACH DELETE src",
+                params={"sid": session_id, "url": f"session:{session_id}"},
+            )
+
+    receipt_key = _capture_receipt_key(body.harness)
+    if _session_alive():
+        try:
+            _update_onboarding_state(team["team_id"], **{
+                receipt_key: now,
+            })
+            _record_capture_last_error(team["team_id"], body.harness, None)
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "session capture receipt write failed (non-fatal)")
+            extraction_warnings.append(
+                "session capture receipt write failed (non-fatal)")
+        else:
+            if not _session_alive():
+                # The delete won between the pre-check and the receipt PATCH
+                # — compensate (the response still 200s; the capture itself
+                # was valid). Bucket-aware like the delete-side recompute:
+                # clear ONLY when the WHOLE harness bucket is empty — a
+                # same-harness sibling Session (captured earlier, alive)
+                # keeps the receipt (T1-P12; delete-side semantics), even
+                # though THIS session's Session vanished. A failed count
+                # read leaves the receipt (fail-open; the next delete's
+                # reconcile self-heals).
+                try:
+                    bucket_empty = _session_count_by_harness(
+                        proj, body.harness) == 0
+                except Exception:
+                    bucket_empty = False
+                if bucket_empty:
+                    cleared = False
+                    with suppress(Exception):
+                        _update_onboarding_state(
+                            team["team_id"], **{receipt_key: None})
+                        cleared = True
+                    if cleared:
+                        extraction_warnings.append(
+                            "session deleted during capture — capture "
+                            "receipt cleared")
+                    else:
+                        extraction_warnings.append(
+                            "session deleted during capture — capture "
+                            "receipt clear failed (next delete reconciles)")
+                else:
+                    extraction_warnings.append(
+                        "session deleted during capture — capture receipt "
+                        "retained (sessions remain in this harness bucket)")
+                _sweep_orphaned_writes()
+    else:
+        # Session deleted mid-capture before the receipt write — never land
+        # an orphan receipt (the mutation was already removed). The capture
+        # still 200s (it was valid); the additive warning makes the removal
+        # visible. Sweep the writes THIS capture landed after the removal
+        # (exact-ids; best-effort).
+        extraction_warnings.append(
+            "session deleted during capture — capture receipt not recorded")
+        _sweep_orphaned_writes()
         _record_capture_last_error(team["team_id"], body.harness, None)
+
+    # #2002 (W6): FIRST-CAPTURE trigger (epic §2 WF-5, §4 DM-1, §8 timing pin)
+    # — at the user's FIRST capture the capture-disclosed NODE CHECKPOINT is
+    # written (idempotent keyed-MERGE step edge; FWW — a later capture is a
+    # 200 no-op) and the response marks first_capture=true so the calling
+    # in-conversation agent fires the ONE-line announcement whose COPY
+    # CONTRACT lives in tortoise/onboarding/SKILL.md §6 (W2 owns the copy;
+    # W6 owns the trigger — never duplicate the wording here). capture-
+    # disclosed is a NODE CHECKPOINT, never a card-counted step (state.py
+    # CARD_STEPS excludes it; the post-write gate eval is monotonic and only
+    # fires when the REAL fork gate was already satisfied). Hook-driven
+    # auto-capture has no in-conversation turn at capture time — the trigger
+    # still writes the checkpoint (the durable disclosure signal); the
+    # in-conversation line fires on agent-driven captures via first_capture.
+    # Non-fatal: a checkpoint hiccup never 500s a committed capture (mirrors
+    # the receipt block).
+    try:
+        legacy_mirror = bool(_get_onboarding_state(
+            team["team_id"]).get("onboarding_complete"))
+        _cd = _os.write_completed_step(
+            proj, team["team_id"], "capture-disclosed",
+            status_from_mirror=legacy_mirror)
+        first_capture = bool(_cd["created"])
+        _maybe_apply_completion(team["team_id"])
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
-            "session capture receipt write failed (non-fatal)")
+            "capture-disclosed checkpoint write failed (non-fatal)")
         extraction_warnings.append(
-            "session capture receipt write failed (non-fatal)")
+            "capture-disclosed checkpoint write failed (non-fatal)")
+        first_capture = False
 
     # P1 #1529 (D2): truthful extraction_mode on every response — "llm:<route>"
     # / "llm" on success, "empty" and "error" never claim success (the 422
@@ -5353,7 +6171,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "extraction_mode": effective_mode,
-            "errors": extraction_errors, "warnings": extraction_warnings}
+            "errors": extraction_errors, "warnings": extraction_warnings,
+            # #2002 (W6): first_capture=true exactly once per org — the
+            # trigger for the in-conversation announcement (SKILL.md §6 copy).
+            "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
     return resp
@@ -5439,7 +6260,7 @@ class InstallProbeRequest(BaseModel):
 
 @app.post("/v1/sessions/install-probe")
 async def session_install_probe(body: InstallProbeRequest,
-                                team: dict = Depends(get_current_team)):  # noqa: B008
+                                team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Record a harness install probe (Task 14, T2-P1).
 
     Opt-out decision (pinned): the probe is UNCONDITIONAL install
@@ -5927,7 +6748,7 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
 
 @app.post("/v1/sessions/commit")
-async def commit_session(request: Request, team: dict = Depends(get_current_team)):  # noqa: B008
+async def commit_session(request: Request, team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Derived-commit receiver (epic #909 slice 5b — plan §6.1 + W-3).
 
     Flow: [1] Layer-1 via commit_schema (400 missing_required_fields /
@@ -6137,12 +6958,22 @@ async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):
 
 
 @app.get("/v1/sessions/{session_id}")
-async def get_session_detail(session_id: str, team: dict = Depends(get_current_team)):  # noqa: B008
+async def get_session_detail(session_id: str, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Get a single session with its conversation turns and extracted points (#714).
 
     Returns turns (episodic Point nodes with pointKind='event', ordered by
     turn index) and extracted decisions/claims (Point nodes linked via
     CONTAINS, filtered to pointKind IN ['decision', 'statement']).
+
+    #2002 (W6): dual-auth (session JWT OR tt_ key, #1828) — the Settings
+    Captured-sessions transcript View (DE2E-11) reads on the session JWT,
+    so it renders without a fresh bootstrap mint; agents keep passing their
+    tt_ key. This mirrors list_sessions, which #2111 (C2) deliberately left
+    on the session-ungated dependency for the same dashboard surface — the
+    ungated KEY branch still runs the C2 deleg=0 dormancy gate (minted
+    least-privilege keys cannot view transcripts any more than they can
+    capture). Team-member authz: session users are membership-validated in
+    _session_user_team (?team_id= → non-member 403); keys are team-scoped.
     """
     import re
     sdk = _make_sdk(namespace=team["team_id"])
@@ -6223,6 +7054,174 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
         "turn_points": turns,
         "extracted_points": extracted,
     }
+
+
+# #2002 (W6, epic #1976): DELETE /v1/sessions/{session_id} — the Settings
+# Captured-sessions view/delete home (DE2E-11). Removes the Session node +
+# its OWNED graph subgraph (CONTAINS turn/extracted Points, the
+# sessionCaptured provenance Event, the agentSession Source stub) and cleans
+# the capture receipts (jsonb) so nothing orphans (epic §2 WF-5, §4 DM-1, §6
+# I-5). Receipts carry no session id (per-harness timestamps, T1-P12) —
+# cleanup RECOMPUTES from the remaining graph: a receipt key is cleared iff
+# ZERO Sessions remain in its harness bucket (bare receipt ↔ harness-less
+# Sessions; per-harness receipt ↔ s.harness). Authz: team-member until W10
+# RBAC — dual-auth (session JWT OR tt_ key, #1828); session users are
+# membership-validated in _session_user_team (?team_id= → non-member 403),
+# key auth is team-scoped by resolution. Delete-during-capture safety: the
+# capture path re-verifies the Session before/after its receipt write and
+# skips/clears orphaned receipts; this recompute-after-removal is the
+# delete-side half of that invariant (idempotent: a re-delete 404s).
+
+
+def _session_count_by_harness(proj, harness: str | None) -> int:
+    """Remaining :Session count for a receipt bucket. None/absent harness =
+    the bare-receipt bucket (legacy no-harness hooks; a Session MERGE never
+    stores an empty harness — the property is absent, never '')."""
+    if harness:
+        rows = proj.g.query(
+            "MATCH (s:Session) WHERE s.harness = $h RETURN count(s)",
+            params={"h": harness},
+        ).result_set
+    else:
+        rows = proj.g.query(
+            "MATCH (s:Session) WHERE s.harness IS NULL RETURN count(s)",
+        ).result_set
+    return int(rows[0][0]) if rows else 0
+
+
+def _reconcile_capture_receipts(proj, team_id: str) -> list[str]:
+    """Receipt cleanup by recompute (the delete-side half of the T1-P12
+    receipt↔Session invariant): a receipt is an orphan iff zero Sessions
+    remain in its harness bucket. Only truthy receipts are touched (clear =
+    write None — the jsonb last-error-clear precedent); probes/last-errors
+    are install-health state and stay.
+
+    Best-effort guarded: a failure to recompute (transient graph/state
+    outage mid-delete) must never turn a clean deletion into a 500 that
+    re-poisons the state — the callers (success + 404 re-delete paths) run
+    it again on the next delete, so a skipped pass self-heals.
+    """
+    try:
+        state = _get_onboarding_state(team_id)
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "capture-receipt reconcile: state read failed (skipped pass)")
+        return []
+    buckets = [(None, "session_capture_receipt")] + [
+        (h, f"session_capture_receipt_{h}") for h in sorted(_SESSION_HARNESS_VALUES)
+    ]
+    clear_fields: dict[str, None] = {}
+    cleaned: list[str] = []
+    for harness, key in buckets:
+        if not state.get(key):
+            continue
+        try:
+            empty_bucket = _session_count_by_harness(proj, harness) == 0
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture-receipt reconcile: count failed (skipped pass)")
+            continue
+        if empty_bucket:
+            clear_fields[key] = None
+            cleaned.append(key)
+    if clear_fields:
+        try:
+            _update_onboarding_state(team_id, **clear_fields)
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "capture-receipt reconcile: clear failed (skipped pass)")
+            return []
+    return cleaned
+
+
+@app.delete("/v1/sessions/{session_id}")
+async def delete_session(session_id: str, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Delete a captured session + its receipt (#2002 W6).
+
+    Team-member authz (until W10): dual-auth — a session JWT must be a
+    member of the team (?team_id= validated by _session_user_team); a tt_
+    key is team-scoped by key resolution. The session_id is resolved on the
+    team's own tenant graph, so cross-team deletion is impossible by
+    construction.
+
+    Response: 200 {deleted: true, cleaned_receipts: [...]} | 404. A 404
+    re-delete (session already gone — possibly a partial prior delete that
+    failed before its reconcile) still reconciles the receipts, so a
+    mid-delete outage self-heals on the retry.
+    """
+    sdk = _make_sdk(namespace=team["team_id"])
+    proj = sdk._get_proj()
+    url = f"session:{session_id}"
+
+    # 1) existence (the Session node is the API-visible handle — GET detail's
+    #    404 contract: same detail string). A 404 STILL reconciles the
+    #    receipts — a re-delete after a partial prior delete must finish the
+    #    orphan cleanup the first attempt never reached.
+    sess_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid}) RETURN s.id, s.harness",
+        params={"sid": session_id},
+    ).result_set
+    if not sess_rows:
+        _reconcile_capture_receipts(proj, team["team_id"])
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    # 2) provenance event ids FIRST (before the Point delete below — the
+    #    sessionCaptured Event is stamped onto the extracted Points via
+    #    p.eventId, so the gather must run while the Points still exist;
+    #    the Source's own eventId is the fallback leg for the Source-absent
+    #    materialization path). A missing Event-write leaves no eventId —
+    #    nothing to match, no dangling.
+    ev_rows = proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) "
+        "WHERE p.eventId IS NOT NULL RETURN DISTINCT p.eventId",
+        params={"sid": session_id},
+    ).result_set
+    src_rows = proj.g.query(
+        "MATCH (src:Source {url:$url}) RETURN src.eventId",
+        params={"url": url},
+    ).result_set
+    event_ids = [r[0] for r in ev_rows if r[0]]
+    if src_rows and src_rows[0][0]:
+        event_ids.append(src_rows[0][0])
+    event_ids = list(dict.fromkeys(event_ids))
+
+    # 3) turn + extracted Points wired via CONTAINS (owned by this Session;
+    #    DETACH DELETE also drops their aboutObject edges — the linked
+    #    WorkItem/Object entities themselves survive: deleting a transcript
+    #    never deletes the issue/entity it referenced).
+    proj.g.query(
+        "MATCH (s:Session {id:$sid})-[:CONTAINS]->(p:Point) DETACH DELETE p",
+        params={"sid": session_id},
+    )
+
+    # 4) the sessionCaptured provenance Event(s) by the collected ids.
+    if event_ids:
+        proj.g.query(
+            "MATCH (e:Event) WHERE e.eventId IN $ids DETACH DELETE e",
+            params={"ids": event_ids},
+        )
+
+    # 5) the agentSession Source stub (url = session:{id}) + the Session.
+    proj.g.query(
+        "MATCH (src:Source {url:$url}) DETACH DELETE src",
+        params={"url": url},
+    )
+    proj.g.query(
+        "MATCH (s:Session {id:$sid}) DETACH DELETE s",
+        params={"sid": session_id},
+    )
+
+    # 6) receipt cleanup by recompute (AFTER the graph removal). The removal
+    #    steps above are individually atomic but the SEQUENCE is not — a
+    #    failure between them leaves a partial deletion; the reconcile is
+    #    guarded (best-effort) so a mid-delete outage can never 500 AFTER
+    #    the Session is gone and strand an orphaned receipt, and the 404
+    #    re-delete path above finishes any skipped pass.
+    cleaned = _reconcile_capture_receipts(proj, team["team_id"])
+    return {"deleted": True, "cleaned_receipts": cleaned}
 
 
 # ── Session endpoints (E2/E5/E6/E7) — JWT-authed, JWKS-verified (D1 #568) ──
@@ -6678,10 +7677,372 @@ async def _create_team_registry_lane(sdk, name: str, user: dict) -> dict:
             "tier": "free", "name": name}
 
 
-@app.post("/v1/graphs")
+# ── C2 (#2111): the ONE provisioning service ───────────────────────────────
+# Both POST /v1/teams/{team_id}/graphs (key-driven) and POST /v1/graphs
+# (session alias) route through _provision_graph — one tier gate, one quota
+# gate, one mint, one rollback, one 201 envelope (epic plan §5.2/W1/§6.2).
+
+# Tier gate: only tiers whose default graph FILLS the quota are blocked
+# (free=1, anon=1 — the default occupies slot 1; anon addition recorded in
+# the plan D2 note, free-pin unchanged). Solo=2 passes and gets exactly 1
+# custom; pro/team are unlimited (Gate #2 decision). 402 is the
+# upgrade-CTA response, checked AFTER the suspension check (#1853: a
+# suspended FREE team must 403 SUSPENDED, never 402) and BEFORE the
+# quota gate per W1 ordering (E2E-3 pin — never any-4xx for a tier
+# block).
+_GRAPH_TIER_BLOCKED = {"free", "anon"}
+
+# Per-team provisioning lock — serializes the atomic count-then-insert
+# quota gate (E2E-11 no oversubscription). Registry mode has no
+# transactions, so the lock + post-insert re-count is the mechanism.
+# Single-process caveat (documented like the signup-token lane): a
+# multi-worker selfhost degrades "exactly 1" to "0 succeed" on the
+# re-count backstop — never over-subscribes.
+_PROVISION_LOCKS: dict[str, asyncio.Lock] = {}
+_PROVISION_LOCKS_GUARD = threading.Lock()
+
+
+def _provision_lock(team_id: str) -> asyncio.Lock:
+    with _PROVISION_LOCKS_GUARD:
+        lock = _PROVISION_LOCKS.get(team_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _PROVISION_LOCKS[team_id] = lock
+        return lock
+
+
+async def _graph_quota_gate(team: dict) -> None:
+    """Quota gate — 409 + X-Graph-Quota when at cap (distinct from the
+    402 tier gate; D2/D3). Fail-closed: counting errors raise 500, never
+    a silent pass (#686). No 80% warn band in v1 (Gate #2 — unreachable
+    at free=1/solo=2, dormant until a finite pro/team cap exists).
+
+    Known mode divergence (review #2b arch, recorded): sdk.graph_count's
+    Supabase branch drift-swallows to 1 (default-only) on ANY read error
+    — C1's pre-C1-schema compat — so this 500 branch is registry-mode
+    reachable but Supabase-lane dormant during a degraded control plane
+    (the count degrades to the default). The post-insert re-count backstop
+    in _provision_graph has the same property; a genuine partial outage
+    where reads fail but the insert lands is the only over-subscription
+    window, and it requires the control plane to serve degraded reads
+    while accepting writes. C5/C7 handoff: narrow the swallow to the
+    404-class (table missing) and re-raise transport errors."""
+    limits = _team_limits_from_node(team)
+    max_graphs = limits.get("max_graphs")
+    if max_graphs is None:
+        return  # unlimited (pro/team)
+    try:
+        count = _make_sdk(namespace="registry").graph_count(team["id"])
+    except Exception as e:
+        _logger.error("graph count failed (fail-closed #686): team=%s error=%s",
+                      team["id"], e)
+        raise HTTPException(status_code=500,
+                            detail=f"Quota check failed: {e}") from None
+    if count >= int(max_graphs):
+        raise HTTPException(
+            status_code=409,
+            headers={"X-Graph-Quota": f"{count}/{max_graphs}"},
+            detail=("Graph limit reached. Upgrade your plan to create more "
+                    "graphs."),
+        )
+
+
+async def _provision_preflight(team: dict) -> None:
+    """C2 (#2111, review #2b/arch): shared pre-flight for BOTH provision
+    endpoints (key-driven create_team_graph + session alias create_graph).
+    Suspension (403 SUSPENDED) then tier gate (402 upgrade-CTA) — #1853
+    ordering pin: a suspended FREE team must 403, never 402. Kept as ONE
+    helper so a future provisioning consumer (C5 child graphs, C7
+    dashboard) cannot re-copy the ordering wrong."""
+    _ensure_not_suspended(team)
+    if team.get("tier", "free") in _GRAPH_TIER_BLOCKED:
+        raise HTTPException(
+            status_code=402,
+            detail="Custom graphs require the Pro plan. Upgrade to create "
+                   "multiple graphs.",
+            headers={"X-Upgrade-CTA": "pro"},
+        )
+
+
+def _provision_graph(team: dict, name: str,
+                     requested_scopes: list | None,
+                     caller_key_id: str | None,
+                     session_user_id: str | None = None) -> dict:
+    """The ONE mint flow. Caller holds the per-team lock (or this is
+    called within it). Returns the 201 envelope. On ANY post-write
+    failure the graph rolls back (D11 — no orphan graph/key).
+
+    session_user_id (session alias only): recorded as the minted key's
+    creator (#1511 attribution — session mints carry the user UUID;
+    key-driven mints record "api" and the caller key id rides
+    created_by_key_id — P2-6, NEVER a key id in created_by)."""
+    sdk = _make_sdk(namespace="registry")
+    graph = None
+    minted = None
+    try:
+        # Graph write (both modes). Supabase: graphs row via the seam
+        # (C1 deferred the INSERT; C2 owns it). Registry: _graph_create
+        # persists the Graph node (status active).
+        from tortoise.supabase_control import (
+            get_control_plane,
+            insert_graph,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            gid = f"g_{_short_id()}"
+            ns = f"team_{team['id']}_{gid}"
+            now = datetime.now(UTC).isoformat()
+            insert_graph(cp, {
+                "id": gid, "team_id": team["id"], "name": name,
+                "kind": "custom", "namespace": ns, "status": "active",
+                "recording": None, "created_at": now,
+            })
+            graph = {"id": gid, "name": name, "kind": "custom",
+                     "namespace": ns, "status": "active",
+                     "created_at": now}
+        else:
+            g = sdk._graph_create(team["id"], name, kind="custom")
+            graph = {"id": g["graph_id"], "name": name, "kind": "custom",
+                     "namespace": g["namespace"], "status": "active",
+                     "created_at": datetime.now(UTC).isoformat()}
+
+        # Post-insert re-count backstop (D3/E2E-11): the per-process lock
+        # serializes count-then-insert within one worker, but a multi-worker
+        # deploy (registry selfhost or PostgREST Supabase) can interleave two
+        # pre-checks. Re-count AFTER the write; over cap → roll back the
+        # just-inserted graph + 409 (never over-subscribe — degrades to
+        # "loser rolls back" instead of a silent overshoot).
+        limits = _team_limits_from_node(team)
+        max_graphs = limits.get("max_graphs")
+        if max_graphs is not None:
+            try:
+                after = sdk.graph_count(team["id"])
+            except Exception as e:
+                _logger.error(
+                    "post-insert re-count failed (fail-closed #686): "
+                    "team=%s error=%s", team["id"], e)
+                _rollback_graph(team["id"], graph)
+                raise HTTPException(status_code=500,
+                                    detail=f"Quota check failed: {e}") from None
+            if after > int(max_graphs):
+                _rollback_graph(team["id"], graph)
+                graph = None  # rolled back — the except must not re-delete
+                raise HTTPException(
+                    status_code=409,
+                    headers={"X-Graph-Quota": f"{after}/{max_graphs}"},
+                    detail=("Graph limit reached. Upgrade your plan to create "
+                            "more graphs."),
+                )
+
+        # Key mint (scopes ∩ child policy, deleg=0, tk_) — the ONE shared
+        # mint C3 consumes. Key-cap failure raises _KeyCapExceeded → the
+        # except below rolls back the graph (no graph-without-key).
+        minted = _mint_graph_key(team["id"], graph["id"],
+                                 requested_scopes, caller_key_id,
+                                 session_user_id=session_user_id)
+        return {
+            "graph": {
+                "id": graph["id"], "name": graph["name"],
+                "kind": graph["kind"], "namespace": graph["namespace"],
+                "status": graph["status"], "created_at": graph["created_at"],
+            },
+            "key": {
+                "id": minted["id"], "graph_id": minted["graph_id"],
+                "scopes": minted["scopes"],
+                "created_at": minted["created_at"],
+            },
+            "key_plaintext": minted["key_plaintext"],
+            "revealed_once": True,
+        }
+    except _KeyCapExceeded:
+        # Roll back the graph (the key never landed) — no orphan.
+        _rollback_graph(team["id"], graph)
+        raise HTTPException(
+            status_code=409,
+            detail="API key limit reached. Delete a key or upgrade your plan "
+                   "to create more graph keys.",
+        ) from None
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Cross-worker dup-name race (Supabase lane): the partial unique
+        # index uq_graphs_team_name_active catches the interleaved INSERT
+        # the per-process lock cannot see (registry selfhost has no unique
+        # index — see the plan's multi-worker caveat). PostgREST maps the
+        # 23505 unique_violation to HTTP 409; surface it as the same 409
+        # the app-level pre-check raises, not a 500 (the row never
+        # committed, so nothing to roll back — but keep the graph/minted
+        # vars null-consistent for the rollback below).
+        if is_supabase_enabled() and "HTTP 409" in str(e):
+            raise HTTPException(
+                status_code=409,
+                detail="Graph name already exists",
+            ) from None
+        # Rollback: delete the graph row/node + revoke EVERY key minted for
+        # this graph (D11 — #1686/#1748 no-orphan invariants). Review P1
+        # (code-review #1): `minted` stays None when _mint_graph_key raises
+        # AFTER its key write commits (apikey_create's edge/audit queries;
+        # insert_api_key response handling) — relying on the returned dict
+        # would orphan that key (the graph is deleted, so the delete-
+        # cascade can never find it). Revoke by graph_id instead: the
+        # just-inserted graph is brand-new, so every key with that id was
+        # minted by THIS call and is safe to revoke.
+        try:  # noqa: SIM105
+            _revoke_graph_keys(team["id"], graph["id"] if graph else None)
+        except Exception:
+            pass
+        if minted is not None:
+            try:  # noqa: SIM105
+                _revoke_minted_key(team["id"], minted["id"])
+            except Exception:
+                pass
+        _rollback_graph(team["id"], graph)
+        _logger.error("graph provisioning failed (rolled back): team=%s "
+                      "name=%s error=%s", team["id"], name, e)
+        raise HTTPException(status_code=500,
+                            detail="Graph provisioning failed") from None
+
+
+def _rollback_graph(team_id: str, graph: dict | None) -> None:
+    """Rollback a minted graph (D11). Supabase: delete the row by id.
+    Registry: DETACH DELETE the node. Best-effort — the rollback itself
+    failing must not mask the original error."""
+    if graph is None:
+        return
+    try:
+        from tortoise.supabase_control import (
+            delete_graph_row,
+            get_control_plane,
+            is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            delete_graph_row(get_control_plane(), team_id, graph["id"])
+        else:
+            _make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (g:Graph {id:$gid, team_id:$tid}) DETACH DELETE g",
+                params={"gid": graph["id"], "tid": team_id},
+            )
+    except Exception as e:
+        _logger.error("graph rollback failed for %s (leak risk): %s",
+                      graph.get("id"), e)
+
+
+def _revoke_minted_key(team_id: str, key_id: str) -> None:
+    """Revoke a minted key that landed after a graph rollback (D11)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        revoke_api_key,
+    )
+    if is_supabase_enabled():
+        revoke_api_key(get_control_plane(), key_id)
+    else:
+        _make_sdk(namespace="registry").apikey_revoke(key_id)
+
+
+def _revoke_graph_keys(team_id: str, graph_id: str | None) -> None:
+    """Revoke EVERY key bound to a graph — the rollback path for a mint
+    failure where the minted dict never returned (code-review P1:
+    _mint_graph_key can raise AFTER its key write commits — apikey_create's
+    edge/audit queries, insert_api_key response handling — leaving an
+    authenticating key bound to a graph that is about to be deleted; the
+    delete-cascade can never find it once the graph row/node is gone).
+    graph_id-scoped revocation is the only safe discovery. No-op when
+    graph_id is None (no graph write happened)."""
+    if graph_id is None:
+        return
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        graph_key_ids as sb_graph_key_ids,
+    )
+    from tortoise.supabase_control import (
+        revoke_api_key as sb_revoke,
+    )
+    sdk = _make_sdk(namespace="registry")
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        for kid in sb_graph_key_ids(cp, team_id, graph_id):
+            try:  # noqa: SIM105
+                sb_revoke(cp, kid)
+            except Exception:
+                pass
+    else:
+        for kid in sdk.graph_key_ids(team_id, graph_id):
+            try:  # noqa: SIM105
+                sdk.apikey_revoke(kid)
+            except Exception:
+                pass
+
+
+@app.post("/v1/teams/{team_id}/graphs", status_code=201)
+async def create_team_graph(team_id: str, body: dict,
+                            key_ctx: dict = Depends(get_current_team_gated)):  # noqa: B008
+    """C2 (#2111) — key-driven provisioning (epic W1). Auth: a key with the
+    graphs:create scope. One-level-deep by construction: a MINTED key
+    (deleg=0) can never hold graphs:create (child policy + DB CHECK) and
+    is rejected at the get_current_team_gated dependency FIRST
+    (KEY_NOT_USER_MINTED — E2E-4-negative) before this body runs; the
+    inline deleg check below is retained defense-in-depth (reactivates at
+    C5's data flip when gated deps route deleg=0 keys) plus the legacy
+    key_id=None guard."""
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="name required")
+    if key_ctx.get("team_id") != team_id:
+        # Cross-team key → 404 (no existence oracle, P1 #6).
+        raise HTTPException(status_code=404, detail="Unknown team")
+    if key_ctx.get("delegation_depth") == 0 or key_ctx.get("key_id") is None:
+        # Minted/unknown key → 403 (one-level-deep: minted keys cannot
+        # provision, E2E-4).
+        raise HTTPException(status_code=403,
+                            detail="Minted keys cannot provision graphs")
+    scopes = key_ctx.get("scopes") or []
+    if "graphs:create" not in scopes and not key_ctx.get("legacy_full_access"):
+        raise HTTPException(status_code=403,
+                            detail="Missing graphs:create scope")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    await _provision_preflight(team)
+    async with _provision_lock(team_id):
+        # Duplicate-active check INSIDE the lock (registry has no unique
+        # index — P2 from review: the app check is the registry guard).
+        existing = _make_sdk(namespace="registry").graph_list(team_id)
+        if any(g["name"] == name and g.get("status") != "deleted"
+               for g in existing):
+            raise HTTPException(status_code=409, detail="Graph name already exists")
+        await _graph_quota_gate(team)
+        provisioned = _provision_graph(team, name, body.get("scopes"),
+                                       key_ctx.get("key_id"))
+        # #528 analytics (plan Task 4 Step 6) — success-only, fire-and-
+        # forget; key-driven mints fall back to the team id as distinct_id
+        # (created_by is "api" there by convention). Never gates the mint.
+        await asyncio.to_thread(
+            api_key_created,
+            key_ctx.get("created_by") or team["id"], team["id"],
+            provisioned["key_plaintext"][:10],
+            provisioned["key"]["id"], "provision",
+        )
+        # #308 R2 key-create evaluation (the 0015 trigger recorded the
+        # event; the mint may push the team over the threshold).
+        await _abuse_evaluate_keys(team["id"])
+        return provisioned
+
+
+@app.post("/v1/graphs", status_code=201)
 async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # noqa: B008
-    """E5 — create a graph in a team (team↔graph 1:N). Free/Solo caps
-    enforced here (402 soft-block → upgrade CTA, UX-D4)."""
+    """E5 — session-authed alias for the ONE provisioning service (C2).
+    Existing dashboard caller; the response CHANGES from the old top-level
+    {graph_id, name, kind, graph_name} to the nested 201 envelope
+    (plan §6.2 contract — verified 2026-09-02: the only in-repo consumer,
+    dashboard createGraph (main.jsx), reads status only, so the shape
+    change is safe; C7 owns any UI that surfaces the envelope). The stale
+    402 here is REMOVED: the shared service owns tier(402)+quota(409)
+    semantics (D2)."""
     team_id = body.get("team_id")
     name = (body.get("name") or "").strip()
     if not team_id or not name:
@@ -6689,42 +8050,176 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
     membership = await _membership_team(user["user_id"], team_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
-
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
+    await _provision_preflight(team)
+    async with _provision_lock(team_id):
+        existing = _make_sdk(namespace="registry").graph_list(team_id)
+        if any(g["name"] == name and g.get("status") != "deleted"
+               for g in existing):
+            raise HTTPException(status_code=409, detail="Graph name already exists")
+        await _graph_quota_gate(team)
+        # Session-alias mint: record WHO minted (#1511 attribution parity
+        # with create_api_key — session mints carry the user UUID, not "api").
+        provisioned = _provision_graph(team, name, body.get("scopes"), None,
+                                       session_user_id=user["user_id"])
+        # #528 analytics (plan Task 4 Step 6) — success-only; the session
+        # user is the distinct_id.
+        await asyncio.to_thread(
+            api_key_created,
+            user["user_id"], team["id"],
+            provisioned["key_plaintext"][:10],
+            provisioned["key"]["id"], "provision",
+        )
+        # #308 R2 key-create evaluation (mirror create_api_key).
+        await _abuse_evaluate_keys(team["id"])
+        return provisioned
 
-    # #1853: a suspended team cannot create graphs (parity with the key
-    # path) — checked here because _membership_team itself stays pure for
-    # the /v1/team/alerts appeal flow.
+
+@app.delete("/v1/graphs/{graph_id}")
+async def delete_graph(graph_id: str, team_id: str,
+                      key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
+    """C2 (#2111) — delete lifecycle (epic W3/E2E-8). Auth: a key with the
+    graphs:delete scope, or an owner/admin session user (the dual-auth
+    dependency resolves BOTH faces: key → get_current_team; session JWT →
+    _session_user_team). Soft-delete tombstone + cascade: revoke graph keys
+    (401 next use), drop the ACL user (C4 seam), free the quota slot, allow
+    name reuse. Default graph → 403 (code guard, mode-agnostic).
+
+    #1148 gate + deleg gate (C2): the dashboard-key-login gate only rejects
+    legacy ``tt_`` keys on flag-off teams. The C2 deleg gate (in
+    get_current_team_session) rejects MINTED deleg=0 keys — and
+    ``_mint_graph_key`` never stamps graphs:delete (child policy ∩
+    _MINTABLE_SCOPES = read/write only), so a graph-lifecycle tk_ key must
+    be an OWNER-minted deleg=NULL scoped key (create_api_key surface —
+    C3 #2112 consumes the C2 shared mint with this contract). C5 #2114
+    flips deleg=0 on per-graph data surfaces; graph management stays
+    owner-class."""
+    if key_ctx.get("team_id") != team_id:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
     _ensure_not_suspended(team)
-
-    # #683: centralized graph-limit enforcement via fail-closed quota
-    limits = _team_limits_from_node(team)
-    _check_team_limit(limits, "graphs")
-
+    # Auth: key with graphs:delete (or legacy full access) — else the
+    # caller is a session user whose membership role must be owner/admin.
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "graphs:delete" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing graphs:delete scope")
+    else:
+        # Session-authed: the caller's membership role must be owner/admin.
+        membership = await _membership_team(
+            key_ctx.get("session_user_id") or "", team_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
     sdk = _make_sdk(namespace="registry")
-    g = sdk._graph_create(team_id, name, kind="custom")
-    return {"graph_id": g["graph_id"], "name": name, "kind": "custom",
-            "graph_name": g["namespace"]}
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+        soft_delete_graph,
+    )
+    from tortoise.supabase_control import (
+        graph_key_ids as sb_graph_key_ids,
+    )
+    # Default-graph guard: the Supabase derived id is the literal
+    # 'default' (no row exists — derived from teams.graph_name); the
+    # registry kind='default' node carries a random gid. Guard BOTH: the
+    # literal id (mode-agnostic callers may use either) AND a kind lookup
+    # (else registry default → 404, P1 review note).
+    if graph_id == "default":
+        raise HTTPException(status_code=403,
+                            detail="Cannot delete the default graph")
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        rows = cp.query(
+            "graphs", select=["kind", "status"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+        kind = rows[0].get("kind") if rows else None
+    else:
+        kind_rows = sdk._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        kind = kind_rows[0][0] if kind_rows else None
+    if kind == "default":
+        raise HTTPException(status_code=403,
+                            detail="Cannot delete the default graph")
+    if kind is None:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    if is_supabase_enabled():
+        deleted = soft_delete_graph(cp, team_id, graph_id)
+        key_ids = sb_graph_key_ids(cp, team_id, graph_id)
+    else:
+        deleted = sdk.graph_delete(team_id, graph_id)
+        key_ids = sdk.graph_key_ids(team_id, graph_id)
+    if not deleted:
+        # Kind was non-default and present a moment ago — belt-and-
+        # suspenders only (no code path reaches here).
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    # Cascade: revoke every key bound to the graph (401 on next use).
+    # Best-effort per key (mirrors _revoke_graph_keys) — the tombstone is
+    # ALREADY committed, so one key's revoke failure must never 500 a
+    # committed delete (a client retry converges idempotently). Revocation
+    # failures are logged; a leftover active key would surface on the team
+    # key list (GET /v1/team/keys) and via apikey revoke retries — the
+    # tombstoned graph itself is invisible to GET /v1/graphs (status
+    # filter), so no list key_count reconciliation exists for it.
+    from tortoise.supabase_control import revoke_api_key as sb_revoke
+    for kid in key_ids:
+        try:
+            if is_supabase_enabled():
+                sb_revoke(get_control_plane(), kid)
+            else:
+                sdk.apikey_revoke(kid)
+        except Exception:
+            _logger.error(
+                "delete_graph cascade revoke failed (key stays active): "
+                "team=%s graph=%s key=%s", team_id, graph_id, kid,
+                exc_info=True,
+            )
+    _acl_user_drop_hook(graph_id)
+    return Response(status_code=204)
 
 
 @app.get("/v1/graphs")
 async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # noqa: B008
-    """E7 — list graphs in a team (graph switcher)."""
+    """E7 — list graphs in a team (graph switcher). C2 (#2111): rows gain
+    status + key_count; point_count dropped (no consumer; a per-row
+    data-plane count on every list). Default-first via the seam."""
     membership = await _membership_team(user["user_id"], team_id)
     if membership is None:
         raise HTTPException(status_code=403, detail="No membership in team")
     team = await _team_node(team_id)
     if team is None:
         raise HTTPException(status_code=404, detail="Unknown team")
-    # #1853: suspended teams are locked down (alerts stays open — see
-    # _ensure_not_suspended).
     _ensure_not_suspended(team)
     sdk = _make_sdk(namespace="registry")
     graphs = sdk.graph_list(team_id)
-    return [{"graph_id": g["graph_id"], "name": g["name"],
-             "kind": g["kind"], "point_count": 0} for g in graphs]
+    from tortoise.supabase_control import (
+        count_graph_keys,
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    out = []
+    for g in graphs:
+        if g.get("status") == "deleted":
+            continue  # tombstones not listed (C2 D5; C7 may add with_deleted)
+        if is_supabase_enabled():
+            key_count = count_graph_keys(
+                get_control_plane(), team_id, g["graph_id"])
+        else:
+            key_count = sdk.graph_active_key_count(team_id, g["graph_id"])
+        out.append({
+            "graph_id": g["graph_id"], "name": g["name"],
+            "kind": g["kind"], "status": g.get("status", "active"),
+            "key_count": key_count,
+        })
+    return out
 
 
 
@@ -9069,8 +10564,12 @@ def _drop_team_graph_strict(team_id: str, graph_name: str | None = None) -> None
     silently swallows drop errors, which would let the sweep delete the
     teams row and orphan the FalkorDB graph with no retry. Raising keeps
     the teams row as the retry anchor — the next sweep finds the team
-    again and retries the drop. FalkorDBLite (no ``delete_graph``) is
-    not an error — it is skipped exactly like the best-effort variant.
+    again and retries the drop. Since #2163 the drop runs on EVERY lane
+    (embedded + FalkorDB Cloud) via select_graph(...).delete(); an
+    ABSENT-graph raise is treated as success inside the impl (the graph
+    being gone is the desired end state — the anchor must converge), so
+    a raise reaching the sweep means a real failure (auth/connection)
+    and the retry anchor fires when it should.
     """
     _drop_team_graph_impl(team_id, graph_name)
 
@@ -9079,10 +10578,28 @@ def _drop_team_graph_impl(team_id: str, graph_name: str | None = None) -> None:
     target = graph_name or f"team_{team_id}"
     sdk = _make_sdk(namespace=team_id)
     proj = sdk._get_proj()
-    if hasattr(proj.db, "delete_graph"):
-        proj.db.delete_graph(target)
-    else:
-        _logger.debug("delete_graph not available (FalkorDBLite) — skipped")
+    # #2163: proj.db is falkordb.FalkorDB on BOTH lanes (embedded redislite
+    # + server/docker/cloud — the projection builds self.g via
+    # db.select_graph on both). The pip client has NO ``delete_graph``
+    # attribute (only select_graph/list_graphs/udf_*), so the old
+    # hasattr(delete_graph) probe was false on FalkorDB Cloud and the purge
+    # sweep silently skipped every drop — the teams row was deleted and the
+    # graph orphaned with no retry (the #926 retry-anchor design broke).
+    # select_graph(target).delete() issues GRAPH.DELETE on both clients —
+    # the same call the mint-failure rollback paths use (hosted_api.py).
+    # #2163 re-review P0: GRAPH.DELETE on an ABSENT graph RAISES ("Invalid
+    # graph operation on empty key", v4.16.7) — treat that family as success
+    # so the #926 retry anchor converges (a graph dropped by an earlier
+    # sweep, never minted, or manually removed must not poison the team row
+    # forever); genuine failures (auth, dead connection) still propagate and
+    # keep the row for retry.
+    try:
+        proj.db.select_graph(target).delete()
+    except Exception as e:
+        if is_missing_graph_error(e):
+            _logger.debug("graph %s already absent — skipping", target)
+        else:
+            raise
 
 
 def _purge_registry_team(sdk, team_id: str, graph_name: str | None = None) -> None:
@@ -9914,9 +11431,9 @@ async def claim_team(request: Request):
     except Exception:
         body = {}
     api_key = (body or {}).get("api_key") or ""
-    if not isinstance(api_key, str) or not api_key.startswith("tt_"):
+    if not isinstance(api_key, str) or not api_key.startswith(API_KEY_PREFIXES):
         raise HTTPException(status_code=400,
-                            detail="api_key (tt_...) is required")
+                            detail=f"api_key ({'/'.join(API_KEY_PREFIXES)}...) is required")
 
     # 4. resolve the pasted key through the SAME auth path (revocation,
     #    expiry, suspension, abuse hooks) — 401 on invalid/revoked keys.
@@ -9931,6 +11448,15 @@ async def claim_team(request: Request):
             raise _control_plane_unavailable() from None
         raise
     team_id = team["team_id"]
+    # C2 (#2111, review #2b arch): claim resolves the key OUTSIDE every
+    # deleg gate (no get_current_team_gated/session dep). Safe today ONLY
+    # by runtime invariant (claim requires an anon team; deleg=0 keys
+    # cannot exist there — provisioning is tier-gated and both faces
+    # require membership of a claimed team). Symmetric hardening: reject
+    # minted keys here too, so a future change that lets graphs exist on
+    # anon teams cannot silently turn the claim funnel into a
+    # deleg=0-reachable identity-escalation lane.
+    _reject_minted_delegated_key(team, "claim")
 
     # 5. fail-closed: the resolved team must still be anon (an unclaimed
     #    owner row). First-claim-wins; a claimed team is a 409 even when the
@@ -10020,8 +11546,8 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     if not is_supabase_enabled():
         raise HTTPException(status_code=400, detail="Claim is hosted-mode only")
     api_key = body.api_key
-    if not isinstance(api_key, str) or not api_key.startswith("tt_"):
-        raise HTTPException(status_code=400, detail="api_key (tt_...) is required")
+    if not isinstance(api_key, str) or not api_key.startswith(API_KEY_PREFIXES):
+        raise HTTPException(status_code=400, detail=f"api_key ({'/'.join(API_KEY_PREFIXES)}...) is required")
     email = (body.email or "").strip().lower()
     password = body.password or ""
     if "@" not in email or len(password) < 6:
@@ -10038,6 +11564,10 @@ async def claim_email(request: Request, body: ClaimEmailRequest):
     if team is None:
         raise HTTPException(status_code=401, detail="Invalid API key")
     team_id = team["team_id"]
+    # C2 (#2111, review #2b arch): same deleg-0 hardening as /v1/claim —
+    # claim_email resolves outside every deleg gate; safe by the anon-team
+    # invariant today, reject minted keys anyway for symmetry.
+    _reject_minted_delegated_key(team, "claim")
     try:
         anon = is_anon_team(cp, team_id)
     except RuntimeError:
@@ -10111,7 +11641,7 @@ async def claim_status(request: Request):
     """
     session = await verify_session_jwt(request)  # 401 on invalid
     api_key = request.headers.get("X-Claim-Key")
-    if not api_key or not api_key.startswith("tt_"):
+    if not api_key or not api_key.startswith(API_KEY_PREFIXES):
         return {"claimable": False, "need_key": True}
     from tortoise.supabase_control import (
         get_control_plane,
@@ -11082,7 +12612,7 @@ async def _session_key_supabase(body: dict, request: Request, user: dict) -> dic
 
 
 @app.get("/v1/context")
-async def session_context(team: dict = Depends(get_current_team)):  # noqa: B008
+async def session_context(team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Memory digest for agent session-start hooks (tortoise context CLI).
 
     Mirrors TortoiseSDK.session_context() so hosted users get the same
@@ -11100,7 +12630,7 @@ async def session_context(team: dict = Depends(get_current_team)):  # noqa: B008
 @app.get("/v1/issue-insight")
 async def issue_insight(title: str, body: str | None = None,
                         repo: str | None = None, limit: int = Query(2, ge=1, le=20),
-                        team: dict = Depends(get_current_team)):  # noqa: B008
+                        team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Graph insight for a would-be issue (#1196) — REST mirror of
     TortoiseSDK.issue_insight() for hosted tenants.
 
@@ -11539,6 +13069,27 @@ _PATCH_REJECTED_STEP_FIELDS = {
     "harness_connected", "first_points_filed", "decide_completed",
     "capture_disclosed", "team_named",
 }
+
+
+@app.get("/v1/capabilities", response_model=dict)
+async def get_capabilities(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """Return the pullable builder capability catalog (#2004 W8, epic I-7).
+
+    The indexers+extractors registry rows from tool_registry.py
+    ``CAPABILITY_CATALOG`` (R2-9 — no new infra): one canonical list for the
+    registry endpoint AND the dashboard's build-path catalog read (W8
+    replaced W1's static placeholder source with this endpoint; the
+    dashboard's first build-fork render marks the catalog-presented
+    checkpoint via the existing W1/W5 mechanism — presentation only, never
+    a billing gate). Org-independent static registry data (no graph
+    touch — never 'unavailable'); dual-auth like the onboarding state reads.
+
+    Contract: ``200 {modules: [{name, kind: indexer|extractor, description,
+    available}]}`` — names/descriptions are the presented copy; every named
+    module file carries the catalog-reference note (W8b sweep)."""
+    from tortoise.tool_registry import capability_catalog
+    del team  # auth-context presence only — the catalog is org-independent
+    return {"modules": capability_catalog()}
 
 
 @app.get("/v1/onboarding/state", response_model=OnboardingStateResponse)
@@ -11997,7 +13548,7 @@ def _create_onboarding_team_lane(team: dict, name: str,
 
 
 @app.post("/v1/demo")
-async def public_demo(team: dict = Depends(get_current_team)):  # noqa: B008
+async def public_demo(team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Public demo graph creation (Q4) — auth-gated, team-isolated.
 
     Reuses the same seeding logic as /internal/demo but requires a Bearer
@@ -13606,7 +15157,7 @@ async def _team_restore_lock(team_id: str) -> asyncio.Lock:
 
 
 @app.post("/backups", status_code=201)
-async def backups_create(team: dict = Depends(get_current_team)):  # noqa: B008
+async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Trigger an on-demand backup of the team graph (Pro tier)."""
     team_id = team.get("team_id")
     if not team_id:

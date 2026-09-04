@@ -1,0 +1,179 @@
+# Weekly e2e-live orphan reconciliation (#2189) — READ-ONLY detector.
+#
+# Closes the #2189 gap: the welcome-e2e-monitor's live signup smoke mints real
+# prod rows on a red run, and the #2140 incident (222 orphan teams/api_keys +
+# 12 auth users + 222 FalkorDB graphs over ~14 days, found only by a manual CI
+# audit) proved nothing periodic verified the OUTPUT stays clean. #2144 stops
+# the route drift that caused the bleed (the monitor now stubs the whole app
+# origin with a fail-closed tripwire); this job counts `e2e-live-*` rows in
+# prod weekly and auto-files an issue on detection with the counts. The #2146
+# cleanup scripts + runbook (docs/runbook/2146-e2e-live-orphan-cleanup.md)
+# stay the remediation — executed manually by an operator, never by this job.
+#
+# Runs graph-scripts/e2e_live_reconcile.py — read-only SELECTs via the
+# Management API (SUPABASE_ACCESS_TOKEN). Exit codes: 0 = clean (every count
+# <= threshold 0), 1 = bleed detected (JSON doc has the counts), 2 =
+# could-not-determine (missing token / HTTP / transport error) — fail-closed:
+# a dead check must never look green (#2140: "a deaf monitor is not a
+# detection layer").
+#
+# NEVER gates merges: schedule + workflow_dispatch only (no push/PR trigger) —
+# a red reconcile is an ops signal, not a CI gate (#2189 acceptance).
+name: e2e-live-reconcile
+
+on:
+  schedule:
+    - cron: '0 3 * * 1'   # Mondays 03:00 UTC — catches a recurrence within a week of onset (~1/10th the #2140 scale)
+  workflow_dispatch:      # manual run (fault-injection / post-cleanup verification)
+
+concurrency:
+  group: e2e-live-reconcile
+  # Read-only job — cancelling an overlap is safe and prevents double auto-file
+  # issues when a manual dispatch races the weekly cron.
+  cancel-in-progress: true
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # #2144 pattern: the auto-file steps POST to the issues API with
+    # GITHUB_TOKEN; the org's restricted default token has no write scope (the
+    # #2140 403 deaf-monitor). Minimal scopes: contents: read for checkout,
+    # issues: write for the auto-file curls.
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Reconcile e2e-live-* rows in prod (read-only detector)
+        id: reconcile
+        # rc semantics (from the script): 0 = clean, 1 = bleed detected (some
+        # count > threshold), 2 = could-not-determine. --json keeps stdout
+        # machine-only (ONE JSON line = the doc); human diagnostics go to
+        # stderr and are surfaced in the log below. The doc is stashed in
+        # /tmp for the auto-file payload steps (same runner, same job).
+        run: |
+          set +e
+          OUT="$(python3 graph-scripts/e2e_live_reconcile.py --json 2>/tmp/e2e_live_reconcile.err)"
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ -n "$OUT" ]; then
+            printf '%s\n' "$OUT" > /tmp/e2e_live_reconcile.json
+            printf 'reconcile-json: %s\n' "$OUT"
+          fi
+          if [ -s /tmp/e2e_live_reconcile.err ]; then
+            cat /tmp/e2e_live_reconcile.err >&2
+          fi
+          exit "$rc"
+        env:
+          SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
+      - name: Auto-file issue on bleed detection (#2189 — #2144 curl pattern)
+        # rc=1 only: counts exist, so the "N orphaned prod rows" title is
+        # factual. rc=2 (could-not-determine) files a DISTINCT issue below —
+        # no counts exist, and a fake "N rows" title would be noise.
+        # GitHub Actions implicitly wraps bare `if:` expressions in
+        # success() — but this step only runs when the reconcile step
+        # FAILED (rc=1/rc=2), so success() is false and the auto-file would
+        # be skipped exactly when it must fire (#2189 review P0 — the
+        # #2140 deaf-monitor class recreated at the issue layer). always()
+        # overrides the implicit status check; the rc compare still gates.
+        # Same pattern as post-merge-validation.yml (#1438).
+        if: always() && steps.reconcile.outputs.rc == '1'
+        run: |
+          # #2140: --fail-with-body so a failed issue create (403/429/etc.)
+          # fails the step loudly instead of silently skipping the file
+          # (curl -s exits 0 on HTTP errors — the deaf-monitor class). The
+          # payload JSON is built by python from the reconcile doc (counts),
+          # never string-interpolated.
+          PAYLOAD="$(python3 - <<'PY'
+          import json
+          import os
+
+          with open("/tmp/e2e_live_reconcile.json") as fh:
+              d = json.load(fh)
+          run_id = os.environ["GITHUB_RUN_ID"]
+          run_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+              f"/actions/runs/{run_id}"
+          )
+          order = ("teams", "users", "api_keys", "memberships", "invitations",
+                   "abuse", "analytics", "audit")
+          counts = d["counts"]
+          summary = " ".join(f"{k}={counts.get(k, 0)}" for k in order)
+          offenders = d.get("offenders") or {}
+          lines = []
+          for kind, o in offenders.items():
+              line = f"- {kind}: {o['count']}"
+              if o.get("emails"):
+                  line += f" ({', '.join(o['emails'])})"
+              lines.append(line)
+          body = (
+              f"Weekly read-only e2e-live reconciliation (#2189) found orphaned prod rows "
+              f"left by a live-test path (welcome-e2e-monitor). This job only detects — it "
+              f"never deletes.\n\n"
+              f"Run: {run_url}\n\n"
+              f"Counts (project `{d['project_ref']}`, threshold {d['threshold']}):\n"
+              f"```\n{summary}\n```\n"
+          )
+          if lines:
+              body += "\nOffenders above threshold:\n" + "\n".join(lines) + "\n"
+          if not d.get("shape_clean", True):
+              body += (
+                  "\nNOTE: some rows deviate from the #2146 guard email shape "
+                  "`^e2e-live-[0-9a-f]{8}@premise-labs.dev$` — review them before cleanup.\n"
+              )
+          body += (
+              "\nRemediation (manual, operator-reviewed): docs/runbook/2146-e2e-live-orphan-"
+              "cleanup.md — dry-run, then execute, via graph-scripts/2146_e2e_live_orphan_"
+              "cleanup.py (read the runbook guards first). The cleanup script deletes; this "
+              "job never does.\n"
+          )
+          title = f"e2e-live reconcile: {d['max']} orphaned prod row{'s' if d['max'] != 1 else ''} (run {run_id})"
+          print(json.dumps({"title": title, "body": body, "labels": ["bug"]}))
+          PY
+          )"
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues" \
+            -d "$PAYLOAD"
+      - name: Auto-file issue when the reconcile could not read counts (#2189 — #2140 lesson)
+        # rc=2 (guard/transport failure: missing token, HTTP/5xx, network,
+        # response-shape drift) must NEVER be a silent red run — #2140's core
+        # lesson was a monitor that failed for ~14 days with nobody hearing.
+        # This is a distinct "check could not run" issue, NOT an "N orphaned
+        # rows" one (no counts exist on exit 2).
+        if: always() && steps.reconcile.outputs.rc == '2'
+        run: |
+          PAYLOAD="$(python3 - <<'PY'
+          import json
+          import os
+
+          run_id = os.environ["GITHUB_RUN_ID"]
+          run_url = (
+              f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
+              f"/actions/runs/{run_id}"
+          )
+          title = f"e2e-live reconcile: check could not read prod counts (run {run_id})"
+          body = (
+              f"The weekly e2e-live reconciliation (#2189) failed BEFORE it could read counts — "
+              f"the check fails closed (exit 2) so a broken/dead check never looks green.\n\n"
+              f"Run: {run_url}\n\n"
+              f"Expected causes: SUPABASE_ACCESS_TOKEN secret missing/rotated, a Management API "
+              f"HTTP/transport error, or an unexpected response shape. Inspect the run log, then "
+              f"re-run via workflow_dispatch once resolved.\n"
+          )
+          print(json.dumps({"title": title, "body": body, "labels": ["bug"]}))
+          PY
+          )"
+          # #2144: --fail-with-body so a failed issue create fails the step
+          # loudly (never the #2140 deaf-monitor class).
+          curl --fail-with-body -sS -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues" \
+            -d "$PAYLOAD"

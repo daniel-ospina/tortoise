@@ -45,6 +45,12 @@ here as ``build_master_list()`` — an overlay over the v1
 v1 enforcer; adding non-kind sections to it would pollute
 ``value_extractor._object_kind_vocab``). The expansion is delivered by this
 module per design doc §3.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session extractor' (the 5-stage narrative-first session pipeline) —
+tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename an
+extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations
 

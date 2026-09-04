@@ -12,6 +12,12 @@ Usage:
     python -m tortoise.session_indexer <file_path>
     python -m tortoise.session_indexer --model ollama:llama3.2:3b <file_path>
     python -m tortoise.session_indexer --dir <directory> --batch
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog modules
+'Session extractor' (session-file metadata extraction) and 'Document indexer'
+(session .md file indexing) — tortoise/tool_registry.py CAPABILITY_CATALOG.
+If you add or rename an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 

@@ -941,6 +941,20 @@ def set_api_key_name(cp, key_id: str, name: str | None) -> None:
     )
 
 
+def set_api_key_scopes(cp, key_id: str, scopes: list[str]) -> None:
+    """C3 (#2112): shrink a key's scopes to a strict subset (PATCH
+    /v1/team/keys/{id} {scopes}). The endpoint validates subset-ness before
+    calling; expansion is 422 (expand = revoke+recreate, §5.4). The row's
+    scopes column is the flat JSONB allowlist — resolve_api_key reads it,
+    so a shrunken key's effective scopes change immediately."""
+    cp.query(
+        "api_keys",
+        method="PATCH",
+        filters=[("id", "eq", key_id)],
+        json_body={"scopes": list(scopes)},
+    )
+
+
 def set_dashboard_key_login(cp, team_id: str, enabled: bool) -> None:
     """#1148: set whether API-key login is accepted for the dashboard
     (management surface). Claimed owners toggle this (session-authed,
@@ -2049,26 +2063,37 @@ def team_by_name(cp, name: str) -> dict | None:
     return rows[0] if rows else None
 
 
-def team_api_keys(cp, team_id: str) -> list[dict]:
+def team_api_keys(cp, team_id: str,
+                  graph_id: str | None = None) -> list[dict]:
     """ALL api_keys rows for a team (revoked included — the dashboard lists
     them with their revoked_at; registry parity), newest first.
     #1708 D7: additive created_via/expires_at so the dashboard can classify
-    ephemeral session keys from API data instead of a prefix heuristic."""
+    ephemeral session keys from API data instead of a prefix heuristic.
+    C3 (#2112): optional graph_id filter (surface 12 — per-graph key panel)
+    + the C1 tenancy columns ride the select (scopes/delegation/graph_id/
+    created_by_key_id) so the list renders scope state."""
+    select = ["id", "key_prefix", "created_at", "last_used_at",
+              "revoked_at", "enabled", "name", "created_via", "expires_at",
+              "graph_id", "scopes", "delegation_depth", "created_by_key_id"]
+    filters = [("team_id", "eq", team_id)]
+    if graph_id is not None:
+        filters.append(("graph_id", "eq", graph_id))
     rows = cp.query(
         "api_keys",
-        select=["id", "key_prefix", "created_at", "last_used_at",
-                "revoked_at", "enabled", "name", "created_via", "expires_at"],
-        filters=[("team_id", "eq", team_id)],
+        select=select,
+        filters=filters,
     )
     rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return rows
 
 
 def api_key_by_id(cp, key_id: str) -> dict | None:
-    """One api_keys row by id (revoke lookup — team-scoping + already-revoked)."""
+    """One api_keys row by id (revoke/shrink lookup — team-scoping +
+    already-revoked + current scopes for the C3 shrink subset check)."""
     rows = cp.query(
         "api_keys",
-        select=["team_id", "revoked_at", "created_via", "enabled", "name"],
+        select=["team_id", "revoked_at", "created_via", "enabled", "name",
+                "scopes", "graph_id", "delegation_depth", "created_by_key_id"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None
@@ -2257,6 +2282,65 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
             "recording": r.get("recording"),
         })
     return out
+
+
+# ── C2 (#2111): graph write + lifecycle seams (provisioning service) ────────
+
+def insert_graph(cp, row: dict) -> None:
+    """Insert a graphs row (Supabase-mode mint). C1 deliberately deferred
+    the INSERT; C2's provisioning service owns the write. Raises on failure
+    (a mint must not claim success for an unpersisted graph)."""
+    cp.query("graphs", method="POST", json_body=row)
+
+
+def delete_graph_row(cp, team_id: str, graph_id: str) -> None:
+    """Hard-delete a graphs row by (id, team) — the rollback path for a
+    failed mint (D11: no orphan graph). Never touches the default graph
+    (no row exists for it — it is derived from teams.graph_name)."""
+    cp.query("graphs", method="DELETE",
+             filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)])
+
+
+def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
+    """Soft-delete a graphs row (status='deleted' tombstone — the v1
+    lifecycle). Returns True when a non-default row was tombstoned, False
+    when nothing matched (unknown graph OR the default — callers
+    distinguish by a prior kind lookup for the 403 default-guard)."""
+    rows = cp.query(
+        "graphs", select=["kind"],
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+    )
+    if not rows:
+        return False
+    if rows[0].get("kind") == "default":
+        return False
+    cp.query(
+        "graphs", method="PATCH",
+        filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        json_body={"status": "deleted"},
+    )
+    return True
+
+
+def count_graph_keys(cp, team_id: str, graph_id: str) -> int:
+    """Active (non-revoked) api_keys bound to a graph — the key_count
+    source for GET /v1/graphs (surface 5)."""
+    rows = cp.query(
+        "api_keys", select=["id"],
+        filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id),
+                 ("revoked_at", "is", None)],
+    )
+    return len(rows)
+
+
+def graph_key_ids(cp, team_id: str, graph_id: str) -> list[str]:
+    """All api_keys ids bound to a graph (revoked or not) — the delete
+    cascade source (every key dies with the graph, E2E-8)."""
+    rows = cp.query(
+        "api_keys", select=["id"],
+        filters=[("graph_id", "eq", graph_id), ("team_id", "eq", team_id)],
+    )
+    return [r["id"] for r in rows]
 
 
 # ── Stripe webhook billing state (plan Task 10 — #771 review P1) ───────────

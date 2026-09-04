@@ -684,10 +684,12 @@ def test_bless_rejects_invalid_run_metrics() -> None:
             "failure_classes": [],
         }
 
-    bad_string = _full(); bad_string["salient_unit_survival_macro"] = "0.9"
+    bad_string = _full()
+    bad_string["salient_unit_survival_macro"] = "0.9"
     with pytest.raises(ValueError, match="run metrics are not valid"):
         schema.bless_baseline(previous, _run_with(bad_string), justification="string metric")
-    out_of_range = _full(); out_of_range["salient_unit_survival_macro"] = 1.7
+    out_of_range = _full()
+    out_of_range["salient_unit_survival_macro"] = 1.7
     with pytest.raises(ValueError, match="run metrics are not valid"):
         schema.bless_baseline(previous, _run_with(out_of_range), justification="impossible target")
     # First-publish path validates too. NOTE (W2-b #2098, F5 resolution): an
@@ -939,8 +941,8 @@ def test_validate_gold_reports_non_object_fixture() -> None:
     fixture that parses to a NON-dict (corrupted fixture file) reports issues
     — never crashes. The validators' list[str]-of-issues contract holds on
     garbage documents, not just garbage fields inside dicts."""
-    from tests.eval.write_path import corpus as corpus_mod
     import tests.eval.write_path.schema as schema_mod
+    from tests.eval.write_path import corpus as corpus_mod
 
     gold = corpus_mod.load_gold(COMMITTED_SESSIONS[0])
     issues = schema_mod.validate_gold(gold, fixture=["not", "a", "fixture"])
@@ -955,8 +957,8 @@ def test_validate_gold_non_object_fixture_still_checks_gold() -> None:
     gold↔fixture CROSS-checks — the gold-only content checks (schema_version,
     unknown keys, planted/salient units) still run. A malformed fixture must
     never mask a malformed gold."""
-    from tests.eval.write_path import corpus as corpus_mod
     import tests.eval.write_path.schema as schema_mod
+    from tests.eval.write_path import corpus as corpus_mod
 
     gold = corpus_mod.load_gold(COMMITTED_SESSIONS[0])
     gold["schema_version"] = 999  # gold is malformed regardless of fixture
@@ -972,8 +974,8 @@ def test_validate_baseline_rejects_partial_metric_vocabulary() -> None:
     metrics snapshot fewer than the full METRIC_VALUES vocabulary (a
     hand-edited partial baseline would silently shrink the CI-gate compare
     set). Mirrors the bless-path completeness rule."""
-    from tests.eval.write_path import corpus as corpus_mod
     import tests.eval.write_path.schema as schema_mod
+    from tests.eval.write_path import corpus as corpus_mod
 
     full = corpus_mod.load_baseline()
     full["judge_pin"] = "judge-write-path-v1"

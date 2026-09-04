@@ -1,6 +1,10 @@
 // #1708 D8: session-key classification from server-provided API data,
 // extracted pure so it's unit-testable with node --test (no harness).
 // (k: key row, activeKey: the current session's plaintext key, or null)
+// NOTE (#2166): isSessionKey is NOT imported by main.jsx anymore — the API
+// Keys page renders durable keys only (isManagedKey below). Retained for the
+// #2167 browser-auth workstream + registry-lane stale-cache handling — not on
+// the current UI path. isActiveKey is the live protection in main.jsx.
 export function isSessionKey(k, activeKey) {
   if (!k || k.revoked_at) return false
   if (k.created_via === 'bootstrap' || !!k.expires_at) return true
@@ -15,4 +19,14 @@ export function isSessionKey(k, activeKey) {
 // UI, even when it is a durable key (created_via 'provisioned'):
 export function isActiveKey(k, activeKey) {
   return !!activeKey && !k.revoked_at && (k.key_prefix === String(activeKey).slice(0, 10))
+}
+// #2166: durable product keys are the ONLY rows the API Keys page shows.
+// Auto-minted session credentials (created_via 'bootstrap', or any row with an
+// expiry set) are the dashboard's own access keys — never presented as API
+// keys for using the product. Durable = user/agent-created keys the user can
+// name, toggle, revoke, and (later) scope or give a validity window. Disabled
+// (enabled:false) durable rows stay managed — the toggle needs them visible.
+export function isManagedKey(k) {
+  if (!k) return false
+  return !(k.created_via === 'bootstrap' || !!k.expires_at)
 }

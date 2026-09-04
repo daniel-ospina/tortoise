@@ -2178,3 +2178,21 @@ class FalkorProjection(
         svbp = TortoiseSVBP(**svbp_kwargs)
         svbp.run(factors, evidence=evidence)
         return svbp
+
+
+def is_missing_graph_error(e: Exception) -> bool:
+    """True when a graph error means the graph no longer exists (idempotent).
+
+    #2163: GRAPH.DELETE (select_graph(name).delete()) raises on an ABSENT
+    graph — real server text (v4.16.7, empirically verified): "Invalid graph
+    operation on empty key". Graph-drop callers treat this family as SUCCESS
+    so the deleted-team purge sweep's #926 retry anchor converges (a graph
+    dropped by a previous sweep, never minted, or manually removed must not
+    keep the team row poisoned forever); genuine failures (auth, dead
+    connection) still propagate. Canonical prod copy — tests/_embedded.py's
+    private _is_missing_graph_error is kept in sync with these patterns.
+    """
+    s = str(e).lower()
+    return any(k in s for k in ("graph not found", "no such graph",
+                                "does not exist", "unknown graph",
+                                "invalid graph operation", "empty key"))

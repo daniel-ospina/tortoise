@@ -1,8 +1,11 @@
 // sessionKey.test.js — run with node --test (Node 20+, zero deps: the
 // predicate is pure, no jsdom/React needed) (#1708 D8).
+// NOTE (#2166): isSessionKey tests remain valid pure-function tests; the export
+// is retained for #2167/registry-lane and is not on the current UI path (the
+// API Keys page uses isManagedKey + isActiveKey).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { isSessionKey, isActiveKey } from './sessionKey.js'
+import { isSessionKey, isActiveKey, isManagedKey } from './sessionKey.js'
 
 test('bootstrap session key is a session key', () => {
   assert.equal(isSessionKey({ created_via: 'bootstrap', expires_at: null, revoked_at: null }, null), true)
@@ -31,4 +34,31 @@ test('stale-cache (no created_via field) active-key fallback protects the live s
   const live = 'tt_livesess_abcdefgh'
   assert.equal(isSessionKey({ key_prefix: live.slice(0, 10), revoked_at: null }, live), true)
   assert.equal(isSessionKey({ key_prefix: 'tt_otherkey', revoked_at: null }, live), false)
+})
+// #2166: isManagedKey — what the API Keys page actually shows (durable only).
+test('managed: durable provisioned key', () => {
+  assert.equal(isManagedKey({ created_via: 'provisioned', expires_at: null, revoked_at: null }), true)
+})
+test('managed: durable recovery key (even revoked — audit history)', () => {
+  assert.equal(isManagedKey({ created_via: 'recovery', expires_at: null, revoked_at: '2026-08-03T00:00:00Z' }), true)
+})
+test('managed: legacy registry key (NULL created_via, no expiry)', () => {
+  assert.equal(isManagedKey({ created_via: null, expires_at: null }), true)
+  assert.equal(isManagedKey({}), true)
+})
+test('not managed: bootstrap session credential is never a table row', () => {
+  assert.equal(isManagedKey({ created_via: 'bootstrap', expires_at: null, revoked_at: null }), false)
+  // even after the reconcile sweep revokes an expired bootstrap — still not a product key
+  assert.equal(isManagedKey({ created_via: 'bootstrap', revoked_at: '2026-08-03T00:00:00Z' }), false)
+})
+test('not managed: any expiring row is an access credential, not a key', () => {
+  assert.equal(isManagedKey({ created_via: 'provisioned', expires_at: '2026-08-02T00:00:00Z', revoked_at: null }), false)
+})
+test('managed: disabled durable key stays managed (toggle must stay reachable)', () => {
+  assert.equal(isManagedKey({ created_via: 'provisioned', enabled: false, expires_at: null }), true)
+  assert.equal(isManagedKey({ enabled: false, expires_at: null }), true)
+})
+test('managed: null row is never managed', () => {
+  assert.equal(isManagedKey(null), false)
+  assert.equal(isManagedKey(undefined), false)
 })
