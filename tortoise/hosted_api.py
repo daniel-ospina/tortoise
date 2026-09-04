@@ -624,20 +624,33 @@ _DREAM_BATCH_MAX = 200
 _DREAM_QUEUE_TTL_S = 600
 
 
-def _enqueue_dream(team_id: str, dirty_roots: list[str]) -> None:
-    """Enqueue affected roots for a tenant's next dream cycle."""
+def _dream_key(team_id: str, graph_namespace: str | None) -> str:
+    """C5 #2114 (sweep parity): the dream queue is PER GRAPH — a write on a
+    custom graph must drain THAT graph, never the team default. Team-wide
+    keys/session writes (graph_namespace None) keep the legacy team key."""
+    return team_id if graph_namespace is None else f"{team_id}::{graph_namespace}"
+
+
+def _enqueue_dream(team_id: str, dirty_roots: list[str],
+                   *, graph_namespace: str | None = None) -> None:
+    """Enqueue affected roots for a tenant's next dream cycle (per graph)."""
     if not dirty_roots:
         return
-    q = _DREAM_QUEUES.setdefault(team_id, asyncio.Queue())
+    key = _dream_key(team_id, graph_namespace)
+    q = _DREAM_QUEUES.setdefault(key, asyncio.Queue())
     for root in dirty_roots[: _DREAM_BATCH_MAX]:
         q.put_nowait(root)
-    if team_id not in _DREAM_TASKS or _DREAM_TASKS[team_id].done():
-        _DREAM_TASKS[team_id] = asyncio.create_task(_dream_worker(team_id))
+    if key not in _DREAM_TASKS or _DREAM_TASKS[key].done():
+        _DREAM_TASKS[key] = asyncio.create_task(_dream_worker(team_id, key))
 
 
-async def _dream_worker(team_id: str) -> None:
-    """Drain one tenant's queue with debounce, then run incremental dream."""
-    q = _DREAM_QUEUES.get(team_id)
+async def _dream_worker(team_id: str, key: str | None = None) -> None:
+    """Drain one tenant's queue with debounce, then run incremental dream.
+    C5: key carries the graph (team_id, or team_id::<graph_namespace> for a
+    custom graph) — the drain opens the DIRTY graph, never the default."""
+    if key is None:
+        key = team_id
+    q = _DREAM_QUEUES.get(key)
     if q is None:
         return
     try:
@@ -648,7 +661,9 @@ async def _dream_worker(team_id: str) -> None:
             roots.append(q.get_nowait())
         if not roots:
             return
-        sdk = _make_sdk(namespace=team_id)
+        gns = key.split("::", 1)[1] if "::" in key else None
+        sdk = (_make_sdk(graph_name=gns) if gns is not None
+               else _make_sdk(namespace=team_id))
         try:
             # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
             sdk._mark_dirty(roots)
@@ -662,16 +677,16 @@ async def _dream_worker(team_id: str) -> None:
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
-            "dream worker failed for tenant %s", team_id
+            "dream worker failed for tenant %s graph %s", team_id, key
         )
     finally:
         # Reschedule if more roots arrived during the drain.
         if not q.empty():
-            _DREAM_TASKS[team_id] = asyncio.create_task(_dream_worker(team_id))
-        elif team_id in _DREAM_QUEUES and team_id in _DREAM_TASKS:
+            _DREAM_TASKS[key] = asyncio.create_task(_dream_worker(team_id, key))
+        elif key in _DREAM_QUEUES and key in _DREAM_TASKS:
             # Idle: evict the queue (TTL guard) unless a new write re-adds it.
-            _DREAM_QUEUES.pop(team_id, None)
-            _DREAM_TASKS.pop(team_id, None)
+            _DREAM_QUEUES.pop(key, None)
+            _DREAM_TASKS.pop(key, None)
 
 
 # ── Rate Limiter ──────────────────────────────────────────────────
@@ -3033,7 +3048,16 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # Dreaming (#85): enqueue the new point's dirty roots for background EP
     # stabilization (non-blocking — fast path is never gated on the dream).
-    _enqueue_dream(team["team_id"], list(sdk._dirty_roots))
+    # C5 (#2114, sweep parity): the enqueue rides the WRITTEN graph — a
+    # custom-graph key's write must drain the custom graph, never the team
+    # default (sdk is the _data_sdk-resolved graph).
+    _enqueue_dream(team["team_id"], list(sdk._dirty_roots),
+                   # graph-bound key → ITS custom graph; team-wide/session →
+                   # the legacy team-keyed drain (graph_namespace is always
+                   # set by C1 even for team-wide keys — team_{id} or a
+                   # selfhost team_{name} — so gate on graph_id).
+                   graph_namespace=(team.get("graph_namespace")
+                                    if team.get("graph_id") else None))
     # Log audit event
     await _async_audit(
         request, team["team_id"], "point_create",

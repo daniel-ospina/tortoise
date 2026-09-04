@@ -84,6 +84,11 @@ metering.py per-team `write_ops` pool: ops from ANY of the team's graphs count o
 5. **Tests (D-C5-8):** `tests/test_tenancy_spine.py` both-planes suite + regression pins (E2E-5/E2E-10) + quota single-count + sweep coverage. Exact-shape/existing suite green (hosted_api 242 docker + carve-out).
 6. **Docs:** plan review log + C6 handoff (delivery-shape + session_recording override owned by #2115).
 
+## Review log
+- **Task 2 (data-plane conversion) done**: graph-data + sessions/context/insight/backups route via _data_sdk + _require_scope; team-level surfaces (overview/packs/onboarding/restore) reject graph-bound keys; deleg=0 data-scoped children activate (dormancy pins updated to the C5 contract).
+- **Task 3 (MCP) done**: graph-scope ContextVars + _get_team_sdk custom-graph routing + _enforce_mcp_tool_scope at the call-tool dispatch; C2 MCP pins green under the narrowed gate.
+- **Task 4 (sweeps) PARTIAL**: the dream drain is now per-graph (a custom-graph write's dirty roots drain THAT graph — the old team-keyed drain would dream the DEFAULT graph). **Deferred (documented residual):** backup_sweep + event-retention sweep custom-graph passes need per-graph STATE keying (read_team_state/manifest/drift alarms are team-scoped — a naive per-graph loop would false-drift) + incident semantics review; pinned as a follow-up (C6 handoff / ops) — the default-graph sweep is unchanged and safe.
+
 ## Risks
 
 | R | Risk | Mitigation |
