@@ -71,6 +71,16 @@ class TestCliContext:
         out = capsys.readouterr().out
         assert "no prior sessions" in out
 
+    def test_empty_graph_notice_names_local_source(self, db_env, capsys):
+        """#2209: the empty notice still names which memory is answering
+        (local) — a hosted key must never flip the source invisibly."""
+        rc = _run_context()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "no prior sessions" in out
+        assert "Source: local" in out
+        assert "hosted" not in out
+
     def test_with_points_prints_digest(self, db_env, capsys):
         """Points → digest includes 'Tortoise memory' header + decision line."""
         db_env.create_point(kind="decision", content="Use FalkorDB as primary graph store")
@@ -83,12 +93,55 @@ class TestCliContext:
         assert "Use FalkorDB as primary graph store" in out
         assert "file new decisions with tortoise_create_point" in out
 
+    def test_with_points_digest_header_names_local_source(self, db_env, capsys):
+        """#2209: the digest header says which memory is answering — local
+        mode prints '— local', never a silent hosted label."""
+        db_env.create_point(kind="decision", content="Use FalkorDB as primary graph store")
+
+        rc = _run_context()
+        assert rc == 0
+        out = capsys.readouterr().out
+        assert "# Tortoise memory (from previous sessions) — local" in out
+        assert "hosted" not in out
+
     def test_empty_prints_to_stdout_not_stderr(self, db_env, capsys):
         """Empty notice goes to stdout (so it's injected, not swallowed)."""
         _run_context()
         captured = capsys.readouterr()
         assert "no prior sessions" in captured.out
         assert "no prior sessions" not in captured.err
+
+
+class TestContextSourceLabel:
+    """#2209: _context_source_label derives the hosted header label from the
+    resolved API URL (scheme/path stripped) — default Premise host, custom
+    self-hosted URLs, and unparseable fallbacks."""
+
+    def test_default_premise_host(self):
+        from tortoise.__main__ import _context_source_label
+        assert _context_source_label("https://api.premiselabs.co") == "hosted (api.premiselabs.co)"
+
+    def test_custom_self_hosted_url_strips_scheme_and_path(self):
+        from tortoise.__main__ import _context_source_label
+        assert _context_source_label("https://tortoise.example.com/v1") == "hosted (tortoise.example.com)"
+        assert _context_source_label("http://localhost:8080") == "hosted (localhost:8080)"
+
+    def test_userinfo_stripped_from_netloc(self):
+        """#2209 review P2: a credentialed api_url must never leak basic-auth
+        userinfo into the digest header."""
+        from tortoise.__main__ import _context_source_label
+        assert _context_source_label("https://user:pass@api.premiselabs.co") == "hosted (api.premiselabs.co)"
+        assert _context_source_label("https://u:p@host.example.com/v1") == "hosted (host.example.com)"
+
+    def test_unparseable_url_falls_back_to_raw(self):
+        from tortoise.__main__ import _context_source_label
+        # urlsplit raises ValueError on a malformed IPv6 bracket — exercises
+        # the except branch (a bare "not a url" never raises: spaces are
+        # legal in netloc, so it takes the netloc branch above).
+        assert _context_source_label("[::1") == "hosted ([::1)"
+        assert _context_source_label("https://user:pass@[::1") == "hosted ([::1)"
+        assert _context_source_label("") == "hosted"
+        assert _context_source_label(None) == "hosted"
 
 
 class TestCliOnboardDbTarget:

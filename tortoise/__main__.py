@@ -2041,6 +2041,29 @@ def _cmd_create_point(args) -> int:
     return 0
 
 
+def _context_source_label(api_url: str | None) -> str:
+    """Hosted-mode source label for the session-start digest header (#2209).
+
+    Names which memory is answering so a stored hosted key can never
+    silently flip the hook's digest local to hosted without a visible
+    switch. Returns 'hosted (<host>)' with scheme/path stripped (e.g.
+    'hosted (api.premiselabs.co)'); falls back to the raw URL when it has
+    no parseable host. Userinfo (basic-auth credentials) is stripped so a
+    credentialed api_url never leaks into the injected digest (review P2,
+    #2209). Local mode uses the plain 'local' label at the call site.
+    """
+    from urllib.parse import urlsplit
+    url = (api_url or "").strip()
+    if not url:
+        return "hosted"
+    try:
+        netloc = urlsplit(url if "://" in url else f"//{url}").netloc
+    except ValueError:
+        return f"hosted ({url.rsplit('@', 1)[-1]})"
+    netloc = netloc.rsplit("@", 1)[-1]  # never echo userinfo (user:pass@)
+    return f"hosted ({netloc or url})"
+
+
 def _cmd_context(args) -> int:
     """Print a compact memory digest for agent session-start injection.
 
@@ -2050,6 +2073,10 @@ def _cmd_context(args) -> int:
 
     Hosted mode (\".tortoise\" config): calls the hosted API.
     Local mode (embedded/Docker): uses TortoiseSDK.session_context().
+
+    #2209: the digest header always names which memory is answering
+    ("hosted (api.premiselabs.co)" vs "local") — a stored hosted key must
+    never swap the source silently.
     """
     import json as _json, os as _os, sys as _sys  # noqa: E401, I001
 
@@ -2065,6 +2092,10 @@ def _cmd_context(args) -> int:
         print(f"Warning: config at {e} is corrupt or unreadable — falling back "
               "to local memory mode.", file=_sys.stderr)
         api_key = None
+
+    # #2209: which memory is answering — computed once the resolver has
+    # picked a mode, stamped on the digest header / empty notice below.
+    source_label = _context_source_label(api_url) if api_key else "local"
 
     if api_key:
         # ── Hosted: query the API ──
@@ -2098,10 +2129,10 @@ def _cmd_context(args) -> int:
             return 1
 
     if data.get("no_prior_sessions") or not (data.get("diary_entries") or data.get("recent_points") or data.get("recent_events")):
-        print("<Tortoise memory is empty — no prior sessions yet.>")
+        print(f"<Tortoise memory is empty — no prior sessions yet. Source: {source_label}>")
         return 0
 
-    print("# Tortoise memory (from previous sessions)")
+    print(f"# Tortoise memory (from previous sessions) — {source_label}")
 
     diary = data.get("diary_entries") or []
     if diary:
