@@ -14056,6 +14056,11 @@ async def onboarding_seed(body: OnboardingSeedRequest,
     Dual-auth (session JWT OR tt_ key) like the checkpoint; the team always
     comes from the auth context. """
     team_id = team["team_id"]
+    # C5 #2114: seed WRITES the two anchor Subjects into the DEFAULT graph
+    # (team-level onboarding state, main-side #2156) — write scope required
+    # + graph-bound keys rejected (cross-graph write prevention).
+    _require_scope(team, "graphs:write", "onboarding seed")
+    _reject_graph_bound_team_surface(team, "onboarding seed")
     # identity refs from the auth context (never client-supplied):
     # session_user_id is the JWT user UUID; created_by is a user UUID on
     # session-minted keys but the EMAIL on register-lane keys (legacy) — an

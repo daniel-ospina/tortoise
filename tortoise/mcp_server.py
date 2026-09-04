@@ -451,6 +451,10 @@ WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     "tortoise_onboarding_session_recording",
     "tortoise_get_source_reliability",
     "tortoise_onboarding_github_connect",  # stores credentials + team state
+    # main-side #2156 landed during the C5 rebase — onboarding_seed writes
+    # the two anchor Subjects into the DEFAULT graph (derived write-set test
+    # caught it at the rebased head).
+    "tortoise_onboarding_seed",
 })
 
 
@@ -2704,6 +2708,9 @@ def tortoise_onboarding_seed(org_name: str | None = None,
     (collisions[] — ask for a disambiguated name), or 'seeded'
     (two Subjects + memberOf + org_subject_id + first-points-filed).
     Compact orgs seed-lite (org-anchor Subject only, no person ask)."""
+    # C5 #2114: the anchors file into the team DEFAULT graph — graph-bound
+    # keys rejected (REST twin onboarding seed parity).
+    _reject_graph_bound_mcp_team_surface("onboarding seed")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}

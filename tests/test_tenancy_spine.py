@@ -203,8 +203,8 @@ def test_backup_vanished_graph_fails_closed(spine_env):
     GRAPH_NOT_FOUND (not a 500)."""
     sdk, tid, _g, tc, _def_pt = spine_env
     # Pro tier with backups live (same decouple as test_hosted_api #656)
-    from tortoise import pricing as _pricing
     import tortoise.hosted_api as ha_mod
+    from tortoise import pricing as _pricing
     try:
         _orig_gate = _pricing.daily_backups_enabled
         _pricing.daily_backups_enabled = lambda tier: tier == "pro"

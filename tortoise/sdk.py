@@ -12860,9 +12860,18 @@ class TortoiseSDK:
         ]
         if matches:
             m = matches[0]
+            delegation_depth = m.get("delegation_depth")
+            scopes = m.get("scopes") or []
+            # C5 #2114 (parity): REST's registry-lane resolution derives the
+            # D2 owner class (deleg NULL + scopes [] → legacy_full_access)
+            # at hosted_api.py:1560 — apikey_verify is the MCP registry lane
+            # and MUST carry the same field or the C5 scope gate 403s every
+            # tt_/legacy owner key on the selfhost MCP surface.
             return {"team_id": m["team_id"], "key_id": m["id"],
-                    "delegation_depth": m.get("delegation_depth"),
-                    "scopes": m.get("scopes") or []}
+                    "delegation_depth": delegation_depth,
+                    "scopes": scopes,
+                    "legacy_full_access": (delegation_depth is None)
+                    and (scopes == [])}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────
