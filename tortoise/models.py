@@ -11,6 +11,7 @@ network/key; the tested surface is `build_request` / `parse_response`.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import urllib.request
@@ -36,7 +37,12 @@ def _emit_usage_sink(model, usage) -> None:
       block; the call still counts).
     """
     sink = getattr(model, "usage_sink", None)
-    if sink is not None:
+    if sink is None:
+        return
+    with contextlib.suppress(Exception):
+        # round-2 code-review P2: a metering observer must NEVER flip a call
+        # outcome — a raising/poisoned sink degrades to a silent no-op at
+        # the fire site (the provider response was already parsed).
         sink(provider=getattr(model, "provider", None),
              model_id=model.id, usage=usage, usage_present=bool(usage))
 

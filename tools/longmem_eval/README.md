@@ -478,6 +478,19 @@ until a collector registers them. Only the `run_main`/`run_evaluation`
 pipeline records usage today; retrieval-only runs never call the reader/
 judge → no usage keys.
 
+**Bounded-loss windows** (round-2 code-review, PR #2250 — same status as
+the documented post-drain late-fire bound above):
+
+- A kill-9 between a SUCCESS question's usage drain and the trailing
+  checkpoint write loses that envelope (no replica exists on the success
+  path); on resume the question re-runs and re-bills, so the report counts
+  the re-run's spend only. Window is the drain→save gap under flock.
+- Failure/breaker-open spend is protected by the A4 replica (kill-9-safe
+  failure-entry usage); the replica is the CUMULATIVE qid envelope
+  (payload + drained rows), so a `--retry-failed` re-attempt that burns
+  fewer tokens than the persisted payload still folds its exact un-saved
+  delta on the next resume.
+
 ```bash
 # offline smoke (--mock mocks reader+judge only — the extractor is real,
 # so the post-#2185 smoke report GAINS exactly one top-level key: "usage")

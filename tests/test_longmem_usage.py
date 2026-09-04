@@ -496,16 +496,155 @@ def test_move_failed_qid_to_overhead_then_payload_roundtrip():
     assert oh["by_stage"]["judge"]["openai"]["gpt-4o"]["calls"] == 1
     # overhead payload round-trips through JSON (checkpoint wire form)
     json.dumps(payload)
-    # __preflight__ checkpoint spelling normalizes to the keyless lane
-    preflight_form = {k: (v if k != "__no_key__" else {"__preflight__": v})
-                      for k, v in payload.items()}
-    c3 = UsageCollector()
-    merged = {}
-    for inner in preflight_form.values():
-        pass
     # normalize: rename __no_key__ → __preflight__ then merge into c3
     payload2 = {("__preflight__" if k == "__no_key__" else k): v
                 for k, v in payload.items()}
+    c3 = UsageCollector()
     c3.merge_overhead_payload(payload2)
     oh3 = c3.drain_overhead()
     assert oh3["total"]["calls"] == 2
+
+
+# ── round-2 code-review regressions (#2250) ─────────────────────────────────
+
+def test_sanitizer_rejects_poison_usage_never_raises():
+    """Security review P2: non-dict / NaN / Infinity / 1e400-int / bool
+    usage payloads degrade to {} — a poisoned provider response or tampered
+    checkpoint can never crash aggregation (the sanitizer is the choke
+    point that keeps poison out of every row)."""
+    c = _fresh()
+    usage.set_question_key("qPoison")
+    poison = [
+        ["not", "a", "dict"],           # malformed provider response
+        {"prompt_tokens": float("nan")},
+        {"prompt_tokens": float("inf")},
+        {"prompt_tokens": 10 ** 400},
+        {"prompt_tokens": True},
+    ]
+    for bad in poison:
+        c.record(stage="reader", provider="openrouter", model_id="m",
+                 usage=bad, usage_present=True)
+    # a VALID row with an unknown extra key keeps the known scalar (the
+    # sanitizer drops only the unknown key, never the whole row)
+    c.record(stage="reader", provider="openrouter", model_id="m",
+             usage={"prompt_tokens": 5, "unknown_key": {"a": 1}},
+             usage_present=True)
+    env = c.drain_question("qPoison")
+    assert env["total"]["prompt_tokens"] == 5
+    assert env["total"]["completion_tokens"] == 0
+    assert env["total"]["calls"] == len(poison) + 1
+
+
+def test_merge_and_fold_preserve_detail_keys():
+    """Bug-scan P2: a fixed-key merge silently dropped reasoning_tokens /
+    flattened nested detail whenever spend passed through the overhead
+    store; merges and folds now sum over the UNION of scalar keys."""
+    c = _fresh()
+    usage.set_question_key("qFail")
+    c.record(stage="ingest", provider="deepseek-direct",
+             model_id="deepseek-v4-flash",
+             usage={"prompt_tokens": 10, "completion_tokens": 4,
+                    "reasoning_tokens": 3,
+                    "prompt_tokens_details": {"cached_tokens": 6}},
+             usage_present=True)
+    env = c.drain_to_overhead("qFail")
+    assert env is not None
+    lane = env["by_stage"]["ingest"]["deepseek-direct"]
+    lane = lane["deepseek-v4-flash"]
+    assert lane["reasoning_tokens"] == 3
+    assert lane["prompt_tokens_details_cached_tokens"] == 6
+    oh = c.drain_overhead()
+    lane = oh["by_stage"]["ingest"]["deepseek-direct"]
+    lane = lane["deepseek-v4-flash"]
+    assert lane["reasoning_tokens"] == 3
+    assert lane["prompt_tokens_details_cached_tokens"] == 6
+    # fold path preserves the detail keys too
+    c2 = UsageCollector()
+    assert c2.fold_replica(
+        "qFail", {"ingest": {"deepseek-direct": {"deepseek-v4-flash": {
+            "prompt_tokens": 10, "completion_tokens": 4, "calls": 1,
+            "reasoning_tokens": 3, "usage_present": True}}}}) is True
+    oh2 = c2.drain_overhead()
+    lane2 = oh2["by_stage"]["ingest"]["deepseek-direct"]
+    assert lane2["deepseek-v4-flash"]["reasoning_tokens"] == 3
+
+
+def test_drain_to_overhead_returns_cumulative_envelope():
+    """Bug-scan P2: a --retry-failed re-attempt whose burn is SMALLER than
+    the already-persisted payload must still fold its exact un-saved delta;
+    drain_to_overhead returns payload + candidate (the A4 replica is now
+    cumulative), so the shortfall fold reconstructs the spend exactly."""
+    c = _fresh()
+    usage.set_question_key("qFail")
+    # attempt-1 terminal failure: 300 prompt burned + drained + payload saved
+    c.record(stage="reader", provider="openrouter", model_id="m",
+             usage={"prompt_tokens": 300, "completion_tokens": 10},
+             usage_present=True)
+    c.drain_to_overhead("qFail")
+    payload = c.overhead_payload()
+    # a NEW resume process loads the payload, re-attempts, and burns FEWER
+    # tokens (200) before a kill-9 between the failure upsert and the
+    # trailing save.
+    c2 = UsageCollector()
+    c2.merge_overhead_payload(payload)
+    usage.set_question_key("qFail")
+    c2.record(stage="reader", provider="openrouter", model_id="m",
+              usage={"prompt_tokens": 200, "completion_tokens": 5},
+              usage_present=True)
+    rep = c2.drain_to_overhead("qFail")
+    assert rep["total"]["prompt_tokens"] == 500  # payload 300 + burn 200
+    # a third process loads payload 300 and folds the cumulative replica
+    c3 = UsageCollector()
+    c3.merge_overhead_payload(payload)
+    assert c3.fold_replica("qFail", rep["by_stage"]) is True
+    oh = c3.drain_overhead()
+    assert oh["total"]["prompt_tokens"] == 500
+    assert oh["total"]["calls"] == 2
+
+
+def test_calls_without_usage_disclosed_and_lane_flags_conservative():
+    """Bug-scan P2: a lane whose rows MIX usage-bearing and usage-less
+    responses keeps usage_present False (unknown spend is never silently
+    priced) AND discloses the count of unknown rows."""
+    c = _fresh()
+    usage.set_question_key("q")
+    c.record(stage="reader", provider="openrouter", model_id="m",
+             usage={"prompt_tokens": 5}, usage_present=True)
+    c.record(stage="reader", provider="openrouter", model_id="m",
+             usage=None, usage_present=False)
+    env = c.drain_question("q")
+    lane = env["by_stage"]["reader"]["openrouter"]["m"]
+    assert lane["usage_present"] is False
+    assert lane["calls_without_usage"] == 1
+    assert lane["prompt_tokens"] == 5
+    # same semantics survive the overhead merge (union sum, AND flag)
+    c2 = _fresh()
+    usage.set_question_key("q2")
+    c2.record(stage="reader", provider="openrouter", model_id="m",
+              usage={"prompt_tokens": 5}, usage_present=True)
+    c2.record(stage="reader", provider="openrouter", model_id="m",
+              usage=None, usage_present=False)
+    c2.drain_to_overhead("q2")
+    oh = c2.drain_overhead()
+    lane = oh["by_stage"]["reader"]["openrouter"]["m"]
+    assert lane["usage_present"] is False
+    assert lane["calls_without_usage"] == 1
+
+
+def test_keyless_rows_after_clear_land_in_overhead():
+    """Security review P2: clear_question_key() unbinds the main-thread
+    key — a straggler call fired AFTER the question's drains complete lands
+    under __no_key__ overhead, never on the last question's bucket."""
+    c = _fresh()
+    usage.set_question_key("qLast")
+    c.record(stage="reader", provider="openrouter", model_id="m",
+             usage={"prompt_tokens": 5}, usage_present=True)
+    c.drain_question("qLast")
+    usage.clear_question_key()
+    c.record(stage="reader", provider="openrouter", model_id="m",
+             usage={"prompt_tokens": 7}, usage_present=True)
+    assert c.drain_question("qLast") is None
+    oh = c.drain_overhead()
+    lane = oh["by_stage"]["reader"]["openrouter"]["m"]
+    assert lane["prompt_tokens"] == 7
+

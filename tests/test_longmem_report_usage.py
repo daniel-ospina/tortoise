@@ -277,3 +277,44 @@ def test_pricing_does_not_mutate_outcome_llm_usage():
     before = copy.deepcopy(outcomes)
     _report(outcomes)
     assert outcomes[0]["llm_usage"] == before[0]["llm_usage"]
+
+
+# ── round-2 code-review regressions (#2250) ─────────────────────────────────
+
+def test_per_question_estimated_is_stable_boolean():
+    """Guidance review P3: per-question ``estimated`` must be a stable bool
+    (the envelope breakdown's ``estimated`` is a LIST of estimated lanes),
+    matching the README schema."""
+    lme_usage.reset_collector()
+    c = lme_usage.get_collector()
+    lme_usage.set_question_key("q-est")
+    # deepseek-chat on openrouter is an estimated alias lane
+    c.record(stage="reader", provider="openrouter",
+             model_id="deepseek/deepseek-chat",
+             usage={"prompt_tokens": 1000, "completion_tokens": 100},
+             usage_present=True)
+    env = c.drain_question("q-est")
+    lme_usage.clear_question_key()
+    lme_usage.reset_collector()
+    block = _report([_outcome("q-est", llm_usage=env)])["usage"]
+    est = block["per_question"]["q-est"]["estimated"]
+    assert isinstance(est, bool) and est is True
+
+
+def test_llm_calls_never_below_usage_rows():
+    """Guidance review P4 (plan Task-7 acceptance): the per-question usage
+    rows (metered responses) can never EXCEED the attempt counter
+    llm_calls — a drift check pinning the two counters' semantics."""
+    env = _env(reader_tokens=(1000, 200), judge_tokens=(500, 50))
+    # 2 lanes fire 2 sink rows; the run reports 3 attempts
+    usage_rows = sum(
+        bucket.get("calls", 0)
+        for stage in (env.get("by_stage") or {}).values()
+        for prov in stage.values()
+        for bucket in prov.values())
+    assert usage_rows == 2
+    assert usage_rows <= _outcome("q", llm_usage=env)["llm_calls"]
+    # a ROWLESS outcome (mock run) carries no llm_usage and 0 calls
+    outcome = _outcome("q-mock")
+    assert "llm_usage" not in outcome
+    assert outcome["llm_calls"] == 3  # attempt counter stays (pre-#2185)

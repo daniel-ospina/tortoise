@@ -34,6 +34,7 @@ Envelope JSON shape (carried on outcomes and in the report):
         "reader": {"openrouter": {"gpt-4o-2024-08-06": {
             "prompt_tokens": 10, "completion_tokens": 4, "calls": 2,
             "usage_present": true,           # false when ANY row had no usage
+            "calls_without_usage": 1,         # rows w/o a usage block (when >0)
             "prompt_cache_hit_tokens": 5,    # present only when recorded
             "prompt_tokens_details_cached_tokens": 8}},  # flattened nested
       }},
@@ -43,8 +44,14 @@ Envelope JSON shape (carried on outcomes and in the report):
 Only known scalar usage keys survive (sanitizer): prompt_tokens,
 completion_tokens, total_tokens, reasoning_tokens, prompt_cache_hit_tokens,
 prompt_cache_miss_tokens, and ``prompt_tokens_details.cached_tokens``
-(flattened to ``prompt_tokens_details_cached_tokens``). A usage dict made
+(flattened to ``prompt_tokens_details_cached_tokens``). Every accepted
+scalar is finite + magnitude-bounded. A usage dict made
 up ONLY of unknown keys logs a loud warning instead of vanishing silently.
+Merges/folds (overhead store, checkpoints) preserve the detail keys (union
+scalar sum — never a fixed-key list). "usage_present" stays conservatively
+false when ANY row in the lane lacked a usage block (unknown spend is never
+silently priced); "calls_without_usage" discloses how many rows were
+unknown.
 
 Drain semantics: ``drain_question`` SWAPS the qid bucket under the lock —
 every row is drained exactly once. A late fire (a deadline-killed daemon
@@ -58,6 +65,7 @@ from __future__ import annotations
 
 import contextvars
 import logging
+import math
 import threading
 
 logger = logging.getLogger(__name__)
@@ -86,11 +94,11 @@ _QUESTION_KEY: contextvars.ContextVar[str | None] = (
 
 # ── module-level collector singleton (A2) ───────────────────────────────────
 
-_collector: "UsageCollector | None" = None
+_collector: UsageCollector | None = None
 _collector_lock = threading.Lock()
 
 
-def get_collector() -> "UsageCollector":
+def get_collector() -> UsageCollector:
     """The run-level collector singleton (lazy init on first use)."""
     global _collector
     if _collector is None:
@@ -124,7 +132,14 @@ def current_question_key() -> str | None:
 
 def _sanitize_usage(usage: dict | None) -> dict:
     """Keep only the known scalar usage keys; flatten the nested cache
-    detail; warn loudly when a non-empty usage dict has NO known keys."""
+    detail; warn loudly when a non-empty usage dict has NO known keys.
+
+    Round-2 code-review hardening: non-dict usage (a malformed provider
+    response) degrades to {} — never raises (a metering observer must not
+    flip call outcomes); every accepted scalar is finite + magnitude-
+    bounded via ``_bounded`` (poison never reaches the buckets)."""
+    if not isinstance(usage, dict):
+        return {}
     usage = usage or {}
     out: dict = {}
     for k, v in usage.items():
@@ -133,24 +148,47 @@ def _sanitize_usage(usage: dict | None) -> dict:
             if flat:
                 for fk in flat:
                     fv = v.get(fk)
-                    if isinstance(fv, (int, float)):
-                        out[f"{k}_{fk}"] = int(fv) if isinstance(fv, bool) else fv
+                    if (isinstance(fv, bool)
+                            or not isinstance(fv, (int, float))):
+                        continue
+                    if _bounded(fv):
+                        out[f"{k}_{fk}"] = (int(fv)
+                                              if float(fv).is_integer()
+                                              else fv)
             continue
         if k in _KNOWN_USAGE_KEYS and isinstance(v, (int, float)) \
-                and not isinstance(v, bool):
+                and not isinstance(v, bool) and _bounded(v):
             out[k] = int(v) if float(v).is_integer() else v
     if usage and not out:
         logger.warning(
             "usage row carried NO known usage keys (all dropped by the "
             "sanitizer): %s — the lane still counts a call but its tokens "
-            "are unknown", sorted(usage)[:6])
+            "are unknown", sorted(str(k) for k in usage)[:6])
     return out
+
+
+def _bounded(v: int | float) -> bool:
+    """A magnitude-bounded FINITE scalar (mirrors report._numeric): bools,
+    NaN/Infinity and abs(v) > 1e300 are excluded, never converted — the
+    sanitizer is the choke point keeping poison out of every usage row
+    (round-2 code-review P2: json.loads accepts NaN/Infinity/arbitrary-
+    precision literals; a tampered provider response or checkpoint must
+    never crash aggregation or round() into inf)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    if abs(v) > 1e300:
+        return False
+    return not (isinstance(v, float) and not math.isfinite(v))
 
 
 # ── the collector ───────────────────────────────────────────────────────────
 
 _CANONICAL_BUCKET_KEYS = frozenset({
     "prompt_tokens", "completion_tokens", "calls", "usage_present"})
+
+
+_NON_ACCUMULATING_KEYS = frozenset({
+    "calls", "calls_without_usage", "usage_present"})
 
 
 def _emit_bucket(bucket: dict) -> dict:
@@ -196,7 +234,14 @@ class UsageCollector:
 
     def record(self, *, stage: str, provider: str | None, model_id: str,
                usage: dict | None, usage_present: bool) -> None:
-        """Accumulate one sink row under the current question key."""
+        """Accumulate one sink row under the current question key.
+
+        ``calls_without_usage`` counts the rows whose provider response
+        carried NO usage block (round-2 code-review P2 disclosure);
+        ``usage_present`` stays CONSERVATIVELY False when ANY row in the
+        bucket lacked usage — a lane with unknown spend is never silently
+        priced (the count above tells the reader how many rows were
+        unknown)."""
         sanitized = _sanitize_usage(usage)
         qid = _QUESTION_KEY.get() or NO_KEY
         key = (stage, provider if provider is not None else "unknown",
@@ -210,6 +255,9 @@ class UsageCollector:
                 "calls": 0, "usage_present": True,
             })
             bucket["calls"] += 1
+            bucket["calls_without_usage"] = (
+                bucket.get("calls_without_usage", 0)
+                + (0 if usage_present else 1))
             bucket["usage_present"] = (
                 bucket["usage_present"] and usage_present)
             for k, v in sanitized.items():
@@ -254,14 +302,24 @@ class UsageCollector:
 
     @staticmethod
     def _merge_buckets(target: dict, src: dict) -> None:
+        """Sum src into target over the UNION of scalar keys — cache/reasoning
+        detail keys recorded on one bucket survive a merge (round-2 code-review
+        P2: a fixed-key merge silently dropped reasoning_tokens / flattened
+        nested detail whenever spend passed through the overhead store).
+        usage_present ANDs (conservative: one unknown row flags the lane
+        unpriced); calls / calls_without_usage accumulate."""
         tgt = target
         tgt["calls"] += src.get("calls", 0)
         tgt["usage_present"] = (
             tgt["usage_present"] and src.get("usage_present", True))
-        for k in ("prompt_tokens", "completion_tokens",
-                  "prompt_cache_hit_tokens", "prompt_cache_miss_tokens",
-                  "total_tokens"):
-            tgt[k] = tgt.get(k, 0) + src.get(k, 0)
+        tgt["calls_without_usage"] = (
+            tgt.get("calls_without_usage", 0)
+            + src.get("calls_without_usage", 0))
+        for k, v in src.items():
+            if k in _NON_ACCUMULATING_KEYS:
+                continue
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                tgt[k] = tgt.get(k, 0) + v
 
     def drain_question(self, qid: str) -> dict | None:
         """Atomically swap + aggregate the qid's rows (drained exactly once)."""
@@ -281,12 +339,32 @@ class UsageCollector:
 
     def drain_to_overhead(self, qid: str) -> dict | None:
         """Drain the qid's CUMULATIVE envelope into the overhead store and
-        return it (the failure/breaker callers persist the returned
-        envelope as a kill-9-safe replica on the entry/outcome)."""
-        env = self.drain_question(qid)
-        if env is not None:
-            self.merge_overhead_payload({qid: env["by_stage"]})
-        return env
+        return the FULL cumulative qid envelope (payload rows already in the
+        store + the just-drained rows — round-2 code-review P2: a
+        --retry-failed re-attempt whose burn is smaller than the already-
+        persisted payload would otherwise write a replica that folds
+        nothing, permanently losing the drained rows on the next kill-9).
+
+        Callers (breaker-open / terminal-failure paths) persist the returned
+        envelope as the kill-9-safe replica on the entry/outcome; the A4
+        load fold reconstructs exactly the drained-but-unsaved delta.
+        Returns None when the qid had no rows (nothing to move / persist)."""
+        with self._lock:
+            buckets = self._rows.pop(qid, None)
+            if buckets is None:
+                return None
+            target = self._overhead.setdefault(qid, {})
+            for key, bucket in buckets.items():
+                tgt = target.setdefault(key, {
+                    "prompt_tokens": 0, "completion_tokens": 0,
+                    "prompt_cache_hit_tokens": 0,
+                    "prompt_cache_miss_tokens": 0,
+                    "total_tokens": 0,
+                    "calls": 0, "usage_present": True,
+                })
+                self._merge_buckets(tgt, bucket)
+            merged = self._to_envelope(target)
+        return merged
 
     def fold_replica(self, qid: str, by_stage: dict) -> bool:
         """A4 kill-9 read-back: fold a checkpoint replica's usage into the
@@ -294,7 +372,12 @@ class UsageCollector:
         — never the overlap (idempotent on resume: a replica whose burn is
         already in the payload folds nothing; a kill -9 between the failure
         upsert and the trailing save leaves the payload short by exactly
-        the replica's un-saved rows).
+        the replica's un-saved rows). The replica is the CUMULATIVE qid
+        envelope (drain_to_overhead returns payload+candidate), so a
+        --retry-failed re-attempt whose burn is smaller than the already-
+        persisted payload still folds its exact un-saved delta (round-2
+        code-review P2). Folds over the union of scalar keys so cache /
+        reasoning detail survives.
 
         Returns True when any shortfall was folded."""
         folded = False
@@ -312,15 +395,29 @@ class UsageCollector:
                             "calls": 0, "usage_present": True,
                         })
                         changed = False
-                        for k in ("prompt_tokens", "completion_tokens",
-                                  "prompt_cache_hit_tokens",
-                                  "prompt_cache_miss_tokens", "total_tokens",
-                                  "calls"):
-                            shortfall = max(0, bucket.get(k, 0)
-                                            - tgt.get(k, 0))
+                        for k, v in bucket.items():
+                            if k in _NON_ACCUMULATING_KEYS:
+                                continue
+                            if not isinstance(v, (int, float)) \
+                                    or isinstance(v, bool):
+                                continue
+                            shortfall = max(0, v - tgt.get(k, 0))
                             if shortfall:
                                 tgt[k] = tgt.get(k, 0) + shortfall
                                 changed = True
+                        calls_shortfall = max(
+                            0, bucket.get("calls", 0) - tgt.get("calls", 0))
+                        if calls_shortfall:
+                            tgt["calls"] = tgt.get("calls", 0) + calls_shortfall
+                            changed = True
+                        cu_shortfall = max(
+                            0, bucket.get("calls_without_usage", 0)
+                            - tgt.get("calls_without_usage", 0))
+                        if cu_shortfall:
+                            tgt["calls_without_usage"] = (
+                                tgt.get("calls_without_usage", 0)
+                                + cu_shortfall)
+                            changed = True
                         if changed:
                             tgt["usage_present"] = (
                                 tgt["usage_present"]
@@ -449,7 +546,7 @@ def _walk_members(model) -> list:
                              (list, tuple)))
     if not wrapper:
         if (hasattr(model, "complete")
-                and callable(getattr(model, "complete"))):
+                and callable(model.complete)):
             return [model]
         return []
     members: list = []

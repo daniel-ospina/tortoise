@@ -65,9 +65,12 @@ to the last ``/``) → unpriced (None). "deepseek/deepseek-v4-flash" and
 """
 from __future__ import annotations
 
+import math
+
 #: Bump ONLY when the map below changes (the report's pricing snapshot pins
-#: this so published numbers carry their exact map version).
-PRICING_MAP_VERSION = "2026-09-03"
+#: this so published numbers carry their exact map version). Bumped 2026-09-04
+#: when the openrouter gpt-4o-2024-08-06 row was added (round-2 code review).
+PRICING_MAP_VERSION = "2026-09-04"
 
 PRICING_MAP: dict[str, dict[str, dict]] = {
     "openrouter": {
@@ -94,6 +97,16 @@ PRICING_MAP: dict[str, dict[str, dict]] = {
                        "table (deepseek-chat is the v4-flash alias)"),
             "verified_on": "2026-09-03", "estimated": True,
             "note": "alias resolution — verify at next map update"},
+        "gpt-4o-2024-08-06": {
+            "prompt_per_1m": 2.625, "completion_per_1m": 10.5,
+            "cache_read_per_1m": None,
+            "source": ("openrouter.ai/openai/gpt-4o-2024-08-06 listing = "
+                       "OpenAI list ($2.50/$10) + ~5% platform fee"),
+            "verified_on": "2026-09-03", "estimated": True,
+            "note": ("covers the judge lane when the official spec "
+                      "openai:gpt-4o-2024-08-06 is SERVED via openrouter "
+                      "(a both-keys env resolves the openrouter transport; "
+                      "the lane records the bare model id)")},
     },
     "deepseek": {
         "deepseek-v4-flash": {
@@ -200,16 +213,30 @@ def price_usage_envelope(envelope: dict | None
         "lanes": lanes,
         "unpriced": unpriced,
         "priced": priced,
-        "estimated": [l for l in lanes if l.get("estimated")],
+        "estimated": [lane for lane in lanes if lane.get("estimated")],
         "map_version": PRICING_MAP_VERSION,
     }
 
 
 def _price_lane(stage: str, provider: str, model: str, bucket: dict,
                 entry: dict | None) -> dict:
-    prompt = bucket.get("prompt_tokens", 0)
-    completion = bucket.get("completion_tokens", 0)
-    hit = bucket.get(_CACHE_KEY, 0) or 0
+    def _tok(key: str) -> int | float:
+        """Bounded token read: poison in a tampered checkpoint bucket (non-
+        finite / |v| > 1e300 / bool) is excluded, never converted — the lane
+        degrades to unpriced instead of crashing report assembly (round-2
+        code-review P2, mirroring report._numeric)."""
+        v = bucket.get(key, 0) or 0
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return 0
+        if abs(v) > 1e300:
+            return 0
+        if isinstance(v, float) and not math.isfinite(v):
+            return 0
+        return v
+
+    prompt = _tok("prompt_tokens")
+    completion = _tok("completion_tokens")
+    hit = _tok(_CACHE_KEY)
     usage_present = bucket.get("usage_present", True)
     row: dict = {
         "stage": stage, "provider": provider, "model": model,
@@ -219,6 +246,12 @@ def _price_lane(stage: str, provider: str, model: str, bucket: dict,
         "usage_present": usage_present,
         "cache_discount_applied": False, "cache_discount_unpriced": False,
     }
+    calls_without_usage = bucket.get("calls_without_usage", 0) or 0
+    if isinstance(calls_without_usage, bool) \
+            or not isinstance(calls_without_usage, (int, float)) or abs(calls_without_usage) > 1e300 or (isinstance(calls_without_usage, float)
+          and not math.isfinite(calls_without_usage)):
+        calls_without_usage = 0
+    row["calls_without_usage"] = int(calls_without_usage)
     if entry is None:
         row.update(priced=False,
                    reason="unknown_model" if usage_present

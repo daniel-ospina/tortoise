@@ -3725,6 +3725,12 @@ def run_evaluation(
                     _usage_env = lme_usage.get_collector().drain_question(qid)
                     if _usage_env is not None:
                         outcome["llm_usage"] = _usage_env
+                    # round-2 code-review P2: unbind the question key once
+                    # the qid's drains complete — a later MAIN-THREAD straggler
+                    # call (end-of-run checks) must land under __no_key__
+                    # overhead, never on the last question's evidence bucket.
+                    # (Daemon late-fires keep their copy_context snapshot.)
+                    lme_usage.clear_question_key()
                     with _lock:
                         outcomes.append(outcome)
                         done[qid] = outcome
@@ -3808,6 +3814,7 @@ def run_evaluation(
                         _usage_env = lme_usage.get_collector().drain_to_overhead(qid)
                         if _usage_env is not None:
                             dropped_outcome["usage"] = _usage_env
+                        lme_usage.clear_question_key()
                         if resume_reattempt:
                             # #1786 (review P2): a --retry-failed re-attempt
                             # that ends breaker-open must NOT leave the
@@ -3911,6 +3918,7 @@ def run_evaluation(
                     # entry as the kill-9-safe replica — the A4 load fold
                     # reconstructs the spend when the checkpoint save lost it.
                     _usage_env = lme_usage.get_collector().drain_to_overhead(qid)
+                    lme_usage.clear_question_key()
 
                     with _lock:
                         # Counter semantics (P1-6): the in-run R2 DOES
@@ -4028,7 +4036,7 @@ def run_evaluation(
     try:
         lme_usage.get_collector().sweep_to_overhead()
         usage_overhead = lme_usage.get_collector().drain_overhead()
-    except Exception:  # noqa: BLE001 — metering must never crash a run
+    except Exception:
         usage_overhead = None
 
     return outcomes, outcomes_to_report(

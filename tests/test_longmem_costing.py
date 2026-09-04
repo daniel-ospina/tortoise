@@ -129,7 +129,7 @@ def test_judge_gpt4o_lane():
 
 
 def test_multi_lane_totals_additive():
-    usd, priced, breakdown = price_usage_envelope(_env({
+    usd, _, breakdown = price_usage_envelope(_env({
         ("reader", "openrouter", "deepseek/deepseek-v4-flash"): {
             "prompt_tokens": 1_000_000, "completion_tokens": 0,
             "calls": 1, "usage_present": True},
@@ -182,7 +182,7 @@ def test_cache_hit_priced_at_reduced_rate_when_verified():
     the reduced cache_read rate (prompt_tokens INCLUDES the cached tokens)."""
     rate = lookup_rate("openrouter", "deepseek/deepseek-v4-flash")
     cache_read = rate["cache_read_per_1m"]
-    usd, priced, breakdown = price_usage_envelope(_env({
+    usd, _, breakdown = price_usage_envelope(_env({
         ("ingest", "openrouter", "deepseek/deepseek-v4-flash"): {
             "prompt_tokens": 1000, "completion_tokens": 0,
             "prompt_cache_hit_tokens": 800,  # 800 cached of 1000
@@ -199,7 +199,7 @@ def test_cache_tokens_without_verified_rate_flagged_not_silent():
     """gpt-4o entry has no cache_read (unverified): cache-hit tokens present
     → the lane is full-priced BUT flagged (never silently discounted, never
     silently full-priced without disclosure)."""
-    usd, priced, breakdown = price_usage_envelope(_env({
+    usd, _, breakdown = price_usage_envelope(_env({
         ("judge", "openai", "gpt-4o-2024-08-06"): {
             "prompt_tokens": 1000, "completion_tokens": 0,
             "prompt_cache_hit_tokens": 900,
@@ -212,7 +212,7 @@ def test_cache_tokens_without_verified_rate_flagged_not_silent():
 
 def test_reasoning_not_double_counted():
     """reasoning_tokens ride completion_tokens — only completion is billed."""
-    usd, priced, breakdown = price_usage_envelope(_env({
+    usd, _, _ = price_usage_envelope(_env({
         ("ingest", "deepseek-direct", "deepseek-v4-flash"): {
             "prompt_tokens": 10_000, "completion_tokens": 2000,
             "reasoning_tokens": 1500,  # included in completion_tokens
@@ -242,4 +242,75 @@ def test_usage_present_false_lane_unpriced_loud():
     assert priced is False
     assert breakdown["unpriced"] and breakdown["unpriced"][0][
         "usage_present"] is False
+    assert usd == 0.0
+
+
+# ── round-2 code-review regressions (#2250) ─────────────────────────────────
+
+def test_openrouter_gpt4o_judge_lane_prices_estimated():
+    """Bug-scan P2: the judge lane is served via the openrouter transport in
+    a both-keys env (spec openai:gpt-4o-2024-08-06 + OPENROUTER_API_KEY) and
+    records the BARE model id — the map must price it (estimated: OpenRouter
+    list = OpenAI list + ~5% platform fee), not report $0/priced:false."""
+    rate = lookup_rate("openrouter", "gpt-4o-2024-08-06")
+    assert rate is not None
+    assert rate["estimated"] is True
+    # the vendor-prefixed OpenRouter spelling resolves via the bare fallback
+    rate2 = lookup_rate("openrouter", "openai/gpt-4o-2024-08-06")
+    assert rate2 is not None
+    usd, priced, breakdown = price_usage_envelope(_env({
+        ("judge", "openrouter", "gpt-4o-2024-08-06"): {
+            "prompt_tokens": 1000, "completion_tokens": 100,
+            "calls": 1, "usage_present": True},
+    }))
+    assert priced is True
+    assert math.isclose(usd, (1000 * 2.625 + 100 * 10.5) / 1e6,
+                        abs_tol=1e-9)
+    assert breakdown["lanes"][0]["estimated"] is True
+
+
+def test_poison_lane_values_never_crash_pricing():
+    """Security review P2 belt: a tampered checkpoint bucket carrying
+    non-finite / >1e300 / bool token values degrades to 0 (lane priced at
+    0 tokens — never OverflowError / inf round at report assembly).
+    Round-2 addendum: the calls_without_usage scalar gets the SAME
+    finite + magnitude guard before int() (int(inf) raises OverflowError
+    — the exact round-1 crash class on the scalar this round added)."""
+    _, priced, breakdown = price_usage_envelope(_env({
+        ("judge", "openai", "gpt-4o-2024-08-06"): {
+            "prompt_tokens": float("nan"),
+            "completion_tokens": 10 ** 400,
+            "calls": 1, "usage_present": True,
+            "calls_without_usage": float("inf")},
+    }))
+    lane = breakdown["lanes"][0]
+    assert lane["prompt_tokens"] == 0
+    assert lane["completion_tokens"] == 0
+    assert lane["calls_without_usage"] == 0
+    assert math.isclose(lane["usd"], 0.0, abs_tol=1e-12)
+    assert priced is True  # the lane IS priceable — tokens just bounded out
+    # NaN variant (int(nan) raises ValueError — must also degrade)
+    _, _, breakdown = price_usage_envelope(_env({
+        ("judge", "openai", "gpt-4o-2024-08-06"): {
+            "prompt_tokens": 1, "completion_tokens": 1,
+            "calls": 1, "usage_present": True,
+            "calls_without_usage": float("nan")},
+    }))
+    assert breakdown["lanes"][0]["calls_without_usage"] == 0
+
+
+def test_lane_calls_without_usage_disclosed():
+    """Bug-scan P2: the lane row discloses how many calls lacked a usage
+    block (calls_without_usage) alongside the conservative priced:false
+    flag when ANY row was usage-less."""
+    usd, _, breakdown = price_usage_envelope(_env({
+        ("reader", "openrouter", "deepseek/deepseek-v4-flash"): {
+            "prompt_tokens": 1000, "completion_tokens": 0,
+            "calls": 2, "usage_present": False,
+            "calls_without_usage": 1},
+    }))
+    lane = breakdown["lanes"][0]
+    assert lane["calls_without_usage"] == 1
+    assert lane["priced"] is False
+    assert lane["reason"] == "usage_present_false"
     assert usd == 0.0

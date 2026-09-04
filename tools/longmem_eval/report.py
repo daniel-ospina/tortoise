@@ -34,8 +34,8 @@ from typing import Any
 
 from tortoise.embeddings import EMBEDDING_MODEL
 
-from .dataset_audit import is_trusted
 from .costing import PRICING_MAP_VERSION
+from .dataset_audit import is_trusted
 
 # R3 (#1542) D5: the dense-leg methodology is ALWAYS emitted — a report can
 # never be keyless about the vector strategy (MemDelta pinning: embedder
@@ -340,6 +340,22 @@ def _failure_grade(error_class: Any) -> str:
     if isinstance(error_class, str) and error_class in RECOVERABLE_EVAL_FAILURE_CLASSES:
         return "recoverable"
     return "hard"
+
+
+def _bounded_int(v: Any) -> int:
+    """int() coercion for usage-total reads that NEVER crashes: non-numeric /
+    non-finite / |v| > 1e300 values (a tampered checkpoint can carry
+    NaN/Infinity/arbitrary-precision literals) degrade to 0 instead of
+    raising ValueError/OverflowError at report assembly (round-2 code-review
+    P2 — mirrors _numeric's fail-closed posture; the sanitizer is the
+    primary choke point, this is the report-side belt)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    if abs(v) > 1e300:
+        return 0
+    if isinstance(v, float) and not math.isfinite(v):
+        return 0
+    return int(v)
 
 
 def _numeric(v: Any) -> bool:
@@ -726,13 +742,15 @@ def _usage_report_block(completed: list[dict[str, Any]],
         cost, priced, _bd = price_usage_envelope(env)
         qid = o.get("question_id")
         per_question[str(qid)] = {
-            "prompt_tokens": int(total.get("prompt_tokens", 0) or 0),
-            "completion_tokens": int(
-                total.get("completion_tokens", 0) or 0),
-            "calls": int(total.get("calls", 0) or 0),
+            "prompt_tokens": _bounded_int(total.get("prompt_tokens", 0)),
+            "completion_tokens": _bounded_int(
+                total.get("completion_tokens", 0)),
+            "calls": _bounded_int(total.get("calls", 0)),
             "cost_usd": cost,
             "priced": priced,
-            "estimated": _bd.get("estimated") or False,
+            # stable boolean (round-2 code-review P3): the breakdown's
+            # ``estimated`` is a LIST of estimated lanes.
+            "estimated": bool(_bd.get("estimated")),
         }
         pq_cost += cost
         pq_all_priced = pq_all_priced and priced
@@ -748,10 +766,10 @@ def _usage_report_block(completed: list[dict[str, Any]],
         oh_cost = cost
         oh_priced = priced
         overhead = {
-            "prompt_tokens": int(oh_total.get("prompt_tokens", 0) or 0),
-            "completion_tokens": int(
-                oh_total.get("completion_tokens", 0) or 0),
-            "calls": int(oh_total.get("calls", 0) or 0),
+            "prompt_tokens": _bounded_int(oh_total.get("prompt_tokens", 0)),
+            "completion_tokens": _bounded_int(
+                oh_total.get("completion_tokens", 0)),
+            "calls": _bounded_int(oh_total.get("calls", 0)),
             "cost_usd": cost,
             "priced": priced,
             "estimated": bool(bd.get("estimated")),

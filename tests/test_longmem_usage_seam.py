@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import math
 import urllib.request
 
 import pytest
@@ -36,7 +37,6 @@ from tortoise.model_adapters import (
     VeniceModel,
 )
 from tortoise.models import OpenAICompatModel
-
 
 # ── stub transport helpers (repo convention: monkeypatch Session.post) ──────
 
@@ -156,7 +156,7 @@ def test_build_judge_sets_resolved_provider(monkeypatch):
 # ── OpenRouterModel ─────────────────────────────────────────────────────────
 
 def test_openrouter_sink_fires_with_response_local_usage(monkeypatch):
-    log, fake = _fake_post_logger()
+    _, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     calls, sink = _record_sink()
     model = OpenRouterModel("deepseek/deepseek-v4-flash")
@@ -175,7 +175,7 @@ def test_openrouter_sink_fires_with_response_local_usage(monkeypatch):
 
 
 def test_openrouter_no_sink_keeps_mirrors(monkeypatch):
-    log, fake = _fake_post_logger()
+    _, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     model = OpenRouterModel("deepseek/deepseek-v4-flash")  # no sink set
     out = model.complete(system="s", user="u")
@@ -184,10 +184,52 @@ def test_openrouter_no_sink_keeps_mirrors(monkeypatch):
     assert model.last_completion_tokens == 7
 
 
+def test_raising_sink_never_flips_call_outcome(monkeypatch):
+    """Security review P2: the seam is exception-safe — a raising/poisoned
+    sink must degrade to a silent no-op at the fire site, never flip an
+    otherwise-valid LLM call into a failure/retry."""
+    _, fake = _fake_post_logger()
+    monkeypatch.setattr(requests.sessions.Session, "post", fake)
+
+    class _Boom:
+        def __call__(self, **kw):
+            raise RuntimeError("metering observer exploded")
+
+    model = OpenRouterModel("deepseek/deepseek-v4-flash")
+    model.usage_sink = _Boom()
+    out = model.complete(system="s", user="u")
+    assert out == "ok"  # the call SUCCEEDS despite the raising sink
+    assert model.last_prompt_tokens == 11
+
+    # a poison usage DICT (NaN) also cannot raise through the sink — the
+    # collector sanitizer is the choke point (list usage crashes the
+    # PRE-EXISTING mirror code on the product path — pre-#2185 behavior,
+    # out of seam scope; see models.py OpenAICompatModel.parse_response).
+    poison = OpenRouterModel("deepseek/deepseek-v4-flash")
+    calls, sink = _record_sink()
+    poison.usage_sink = sink
+
+    class _PoisonResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"choices": [{"message": {"content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": float("nan")}}
+
+    monkeypatch.setattr(requests.sessions.Session, "post",
+                        lambda *a, **k: _PoisonResp())
+    out = poison.complete(system="s", user="u")
+    assert out == "ok"
+    assert calls[0]["usage_present"] is True
+    assert math.isnan(calls[0]["usage"]["prompt_tokens"])
+
+
 # ── DeepSeekDirectModel (its OWN complete body — must not be missed) ────────
 
 def test_deepseek_direct_sink_fires(monkeypatch):
-    log, fake = _fake_post_logger()
+    _, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     calls, sink = _record_sink()
     model = DeepSeekDirectModel("deepseek-v4-flash")
@@ -204,7 +246,7 @@ def test_deepseek_direct_sink_fires(monkeypatch):
 # ── VeniceModel (inherits OpenRouterModel.complete) ─────────────────────────
 
 def test_venice_sink_inherited(monkeypatch):
-    log, fake = _fake_post_logger()
+    _, fake = _fake_post_logger()
     monkeypatch.setattr(requests.sessions.Session, "post", fake)
     calls, sink = _record_sink()
     model = VeniceModel("deepseek/deepseek-v4-flash")

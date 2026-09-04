@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 
-from tools.longmem_eval import usage as lme_usage
 from tools.longmem_eval import run as runner
+from tools.longmem_eval import usage as lme_usage
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
 
@@ -199,7 +199,7 @@ def test_e2e_failed_question_spend_reports_as_overhead(tmp_path):
     assert block["overhead"]["completion_tokens"] == 100 + 20
     assert block["overhead"]["calls"] == 2
     assert set(block["per_question"]) == set()  # no completed outcome
-    assert {l["stage"] for l in block["overhead"]["lanes"]} == {
+    assert {lane["stage"] for lane in block["overhead"]["lanes"]} == {
         "reader", "judge"}
 
     # kill-9 safety: the checkpoint failure entry carries the usage replica
