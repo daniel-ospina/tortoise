@@ -56,11 +56,16 @@ Extract the derivations main.jsx cannot test: `graphsMeter(rows, tier)` →
   → ∞). Free/solo used/total.
 - Table cols: Name | Kind | Status | Keys | actions ([Keys] [Delete]); default
   row: no [Delete], badge "default".
-- **Key panel**: click [Keys] on a row → inline panel under the table listing
-  that graph's keys from GET /v1/team/keys (filter rows by graph_id — the
-  default-graph keys have graph_id NULL; per-graph rows carry graph_id) with
-  mint + revoke (owner/admin gate like members). Mint → POST /v1/team/keys
-  {graph_id} → the response key_plaintext opens the SAME reveal modal.
+- **Key panel**: click [Keys] on a CUSTOM row → inline panel under the table
+  listing that graph's keys from GET /v1/team/keys?graph_id= with mint +
+  revoke (owner/admin gate like members). Mint → POST /v1/team/keys
+  {graph_id, scopes:[graphs:read,graphs:write]} → the response key_plaintext
+  opens the SAME reveal modal. **The DEFAULT graph row has NO [Keys] action**
+  (review P1-1): the server has no per-graph key surface for the default
+  graph (_ensure_graph_exists 404s default-kind nodes) — its keys are the
+  team-wide graph_id-NULL rows managed on the API Keys tab.
+- **Tier lock**: free/anon only (review P1-2 — solo is NOT 402-tier-blocked;
+  pricing.json max_graphs=2; its create form stays until the 409 quota gate).
 - **Reveal modal**: one-time — mounted ONLY from a mint response; state
   `revealKey` {plaintext, name}; copy button (navigator.clipboard, failure →
   key stays visible in the modal text, never re-fetched — the API never
