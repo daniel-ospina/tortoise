@@ -3797,14 +3797,25 @@ function claimIntentInFlight() {
     setGraphBusy(true)
     setGraphMsg('')
     try {
+      const tok = sessionTokenRef.current
+      if (!tok) throw new Error('No session')
+      // Raw fetch, not api(): DELETE /v1/graphs returns 204 no-body and
+      // api() always calls res.json() (would throw on the empty body).
       const q = `?team_id=${encodeURIComponent(currentTeamId)}`
-      await api(`/v1/graphs/${encodeURIComponent(graphId)}${q}`, { method: 'DELETE', useSession: true })
+      const res = await fetch(`${API_BASE}/v1/graphs/${encodeURIComponent(graphId)}${q}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${tok}` },
+      })
+      if (!res.ok) {
+        const b = await res.json().catch(() => ({}))
+        throw new Error(b.detail || `HTTP ${res.status}`)
+      }
       if (teamIdRef.current !== _teamAtCall) return
       setConfirmDeleteId(null)
       if (panelGraphId === graphId) closeGraphPanel()
       await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) setGraphMsg('Could not delete graph — try again.')
+      if (teamIdRef.current === _teamAtCall) setGraphMsg(e.message || 'Could not delete graph — try again.')
     } finally {
       setGraphBusy(false)
     }
