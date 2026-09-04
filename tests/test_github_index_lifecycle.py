@@ -101,6 +101,7 @@ def client(tmp_path):
         from tortoise.hosted_api import get_current_team
         app.dependency_overrides[get_current_team] = lambda: {
             "team_id": team_id, "tier": "free", "key_id": "k1",
+            "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
         }
