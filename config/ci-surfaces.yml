@@ -102,6 +102,16 @@ surfaces:
   - test_suspension_parity.py
   - test_telegram_push.py
   - test_turnstile_signup.py
+  # W3-a (#2099): the W3 harness real-replay gate — replay of the
+  # volunteering-memory scripted-conversation corpus (tests/eval/harness/)
+  # through the REAL session→graph seams on hermetic per-cell graphs.
+  # Deterministic M2 echo lane vs its OWN committed baselines/m2.json:
+  # PASS on a clean replay; REGRESSION on write-path/recall/routing
+  # regressions (the always-live source-isolation E2E-4 gate catches
+  # misrouted team cells).  Also covers the hermetic schema/corpus tests.
+  - eval/harness/test_harness_benchmark.py
+  - eval/harness/test_harness_schema.py
+  - eval/harness/test_harness_corpus.py
   # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
   # boundary PR (hosted capture code changes) must run the real-pipeline
   # replay gate against the write-path corpus. The deterministic M2 echo

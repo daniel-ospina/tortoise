@@ -29,19 +29,18 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # harness pkg
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # tests/
 
-from eval.harness import corpus, grading, schema  # noqa: E402
-from eval.write_path import runner as wp  # noqa: E402 — hermetic SDK + snapshot primitives
+from eval.harness import corpus, grading, schema
+from eval.write_path import runner as wp
 
 HARNESS_DIR = corpus.HARNESS_DIR
 REPO_ROOT = HARNESS_DIR.parent.parent.parent
@@ -116,15 +115,13 @@ def _session_graph(cells: dict[str, object], key: str, run_id: str) -> object:
 
 
 def _teardown_cells(cells: dict[str, object]) -> None:
+    import contextlib
+
     for sdk in cells.values():
-        try:
+        with contextlib.suppress(Exception):
             sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with contextlib.suppress(Exception):
             sdk.close()
-        except Exception:  # noqa: BLE001
-            pass
     cells.clear()
 
 
@@ -159,11 +156,11 @@ def preflight(root: Path = HARNESS_DIR, *, posture: str = "llm") -> dict:
         # writer fixture, and a writer fixture must have a reader.
         cont = (gold.get("continuity") or {})
         writer_session = cont.get("writer_session")
-        if fixture.get("suite") == "continuity" and writer_session:
-            if writer_session not in corpus.session_ids(root):
-                issues.append(
-                    f"gold {sid}: continuity writer {writer_session!r} not in corpus"
-                )
+        if (fixture.get("suite") == "continuity" and writer_session
+                and writer_session not in corpus.session_ids(root)):
+            issues.append(
+                f"gold {sid}: continuity writer {writer_session!r} not in corpus"
+            )
         if fixture.get("writer") and gold.get("suite") == "continuity":
             reader_sid = sid.replace("writer", "reader")
             if reader_sid not in corpus.session_ids(root):
@@ -198,7 +195,7 @@ def snapshot_points(sdk, session_id: str) -> list[dict]:
     """The session's memory points (points stamped with the session's
     sessionCaptured eventId, excluding the episodic turn echo — same surface
     write_path/runner.snapshot_session reads; ported to return points only)."""
-    snap = wp.snapshot_session(sdk, session_id)  # noqa: SLF001 — product snapshot
+    snap = wp.snapshot_session(sdk, session_id)
     return snap["points"]
 
 
@@ -226,7 +223,7 @@ def cell_points(sdk) -> list[dict]:
     ).result_set
     points: list[dict] = []
     for row in rows:
-        point = wp._row_to_point(row)  # noqa: SLF001 — shared row mapping
+        point = wp._row_to_point(row)
         points.append(point)
     return points
 
@@ -329,7 +326,7 @@ def replay_and_grade(
 # ── The run ────────────────────────────────────────────────────────────────
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+    return datetime.now(UTC).isoformat(timespec="seconds").replace(
         "+00:00", "Z"
     )
 
@@ -342,7 +339,7 @@ def _git_head() -> str:
         )
         if out.returncode == 0:
             return out.stdout.strip() or "unknown"
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return "unknown"
 
@@ -446,7 +443,7 @@ def run_benchmark(
                         f"[{date}] {session_id} ({gold.get('suite')}, "
                         f"cell={key}) ok", file=progress, flush=True
                     )
-            except Exception as exc:  # noqa: BLE001 — carried in the report
+            except Exception as exc:
                 runner_errors.append(
                     f"{session_id}: replay raised {type(exc).__name__}: {exc}"
                 )
@@ -495,7 +492,7 @@ def run_benchmark(
                     f"{result['isolation']['own_anchors_total']} present, "
                     f"violations={result['isolation']['violations']}"
                 )
-            except Exception as exc:  # noqa: BLE001 — carried in the report
+            except Exception as exc:
                 runner_errors.append(
                     f"isolation pass {key}: raised {type(exc).__name__}: {exc}"
                 )
@@ -540,7 +537,7 @@ def run_benchmark(
             failure_origin = "hash_mismatch"
         elif resolved_config != baseline.get("config"):
             failure_origin = "config_mismatch"
-        elif baseline.get("judge_pin") and JUDGE_PIN != baseline.get("judge_pin"):
+        elif baseline.get("judge_pin") and baseline.get("judge_pin") != JUDGE_PIN:
             failure_origin = "judge_pin_mismatch"
         elif not (baseline.get("metrics") or {}):
             failure_origin = None  # first-run-pending

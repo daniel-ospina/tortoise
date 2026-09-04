@@ -14,8 +14,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from eval.write_path import schema as ws
 from eval.harness import schema
+from eval.write_path import schema as ws
 
 HARNESS_DIR = Path(__file__).resolve().parent
 FIXTURES_DIR = HARNESS_DIR / "fixtures"
@@ -107,7 +107,7 @@ def verify_manifest(root: Path = HARNESS_DIR) -> dict:
     manifest_path = root / "_manifest.json"
     try:
         manifest = schema.read_json(manifest_path)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         return {"ok": False, "missing": [], "extra": [],
                 "mismatched": [], "malformed": f"{type(exc).__name__}: {exc}",
                 "fixtures_hash": ""}

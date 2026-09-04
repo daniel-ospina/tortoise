@@ -175,12 +175,11 @@ def validate_fixture(fixture: dict) -> list[str]:
         # A know_to_ask/push fixture must have at least one user turn that
         # gold marks should_retrieve — but that cross-check lives in
         # validate_gold (gold is the authority). Here we only require shape.
-        if suite == "isolation":
-            if not isinstance(fixture.get("team"), str):
-                issues.append(
-                    "fixture.suite=isolation requires a fixture.team string "
-                    "(the isolation suite replays per-team fixtures)"
-                )
+        if suite == "isolation" and not isinstance(fixture.get("team"), str):
+            issues.append(
+                "fixture.suite=isolation requires a fixture.team string "
+                "(the isolation suite replays per-team fixtures)"
+            )
     return issues
 
 

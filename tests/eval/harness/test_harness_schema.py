@@ -8,12 +8,14 @@ inconclusive, reflex-gated standing bars, the always-live isolation gate).
 from __future__ import annotations
 
 import pytest
-
 from eval.harness import grading, schema
 from eval.harness.schema import (
-    FALSE_FIRE_TOLERANCE, KTA_FAILURE_TOLERANCE, PUSH_PRECISION_FLOOR,
-    SOURCE_ISOLATION_TOLERANCE,
-    VERDICT_INCONCLUSIVE, VERDICT_PASS, VERDICT_REGRESSION,
+    FALSE_FIRE_TOLERANCE,
+    KTA_FAILURE_TOLERANCE,
+    PUSH_PRECISION_FLOOR,
+    VERDICT_INCONCLUSIVE,
+    VERDICT_PASS,
+    VERDICT_REGRESSION,
 )
 
 HASH_A = "sha256:" + "a" * 64

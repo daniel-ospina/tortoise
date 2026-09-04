@@ -36,10 +36,10 @@ import json
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))  # noqa: E402 — harness pkg
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # noqa: E402 — tests/
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from eval.harness import corpus, schema  # noqa: E402
+from eval.harness import corpus, schema
 
 CORPUS_SEED = 42
 MIN_SESSIONS = 6          # ≥ 2 per graded-today suite (write_back/continuity/isolation)
@@ -419,9 +419,8 @@ def render_corpus() -> dict[str, bytes]:
         outputs[gy_rel] = _dump_json_bytes(gy)
         file_digests[fx_rel] = schema.sha256_bytes(outputs[fx_rel])
         file_digests[gy_rel] = schema.sha256_bytes(outputs[gy_rel])
-        for anchors in (gold.get("write_back", {}).get("planted_points", [])
-                        if gold.get("suite") == "write_back" else []):
-            anchor_count += 1
+        anchor_count += len(gold.get("write_back", {}).get("planted_points", [])
+                          if gold.get("suite") == "write_back" else [])
         cont = gold.get("continuity") or {}
         anchor_count += len(cont.get("reader_planted", []))
         if gold.get("suite") == "isolation":
@@ -535,7 +534,6 @@ def validate_committed(root: Path | None = None) -> list[str]:
         cfg_posture = (baseline.get("config") or {}).get("extractor_posture")
         if cfg_posture != posture:
             issues.append(f"{rel}: config.extractor_posture {cfg_posture!r} != {posture!r}")
-    manifest = corpus.load_manifest(root)
     verification = corpus.verify_manifest(root)
     if not verification["ok"]:
         issues.append(

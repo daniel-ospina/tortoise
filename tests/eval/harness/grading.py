@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import re
 
-
 # ── Content matching ────────────────────────────────────────────────────────
 
 def _norm(text: str) -> str:

@@ -73,20 +73,16 @@ def sdk_factory():
         return sdk
 
     yield _make
+    import contextlib
+
     for sdk, _dir in created:
-        try:
+        with contextlib.suppress(Exception):
             sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with contextlib.suppress(Exception):
             sdk.close()
-        except Exception:  # noqa: BLE001
-            pass
     for _sdk, _dir in created:
-        try:
+        with contextlib.suppress(Exception):
             shutil.rmtree(_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _tmp_corpus(tmp_path: Path) -> Path:
