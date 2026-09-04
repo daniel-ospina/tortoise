@@ -731,9 +731,10 @@ function claimIntentInFlight() {
 
   const [authed, setAuthed] = React.useState(false)
   const [authUnavailable, setAuthUnavailable] = React.useState('')
-  // #1559: a session-key mint failure (e.g. 429 rate limit) must surface an
-  // actionable error — never the silent "Redirecting to the sign-in page…"
-  // shell (which does NOT redirect and left users stuck).
+  // #1559: a session-resolution / mount or team-load failure (e.g. 429 rate
+  // limit, 5xx, suspension) must surface an actionable error — never the
+  // silent "Redirecting to the sign-in page…" shell (which does NOT redirect
+  // and left users stuck).
   const [mountError, setMountError] = React.useState('')
   const [team, setTeam] = React.useState(null)
   const [keys, setKeys] = React.useState([])
@@ -2694,7 +2695,7 @@ function claimIntentInFlight() {
       } catch (e) {
         // #1559/#1567 (review P0): never leave the user on the silent
         // redirect shell — authed was set EARLY, so an escaped throw (e.g.
-        // localStorage blocked in private mode after a successful mint)
+        // localStorage blocked in private mode during the mount / team load)
         // would otherwise leave mountError set-but-unrendered (the card is
         // !authed-gated). Flip authed so the card + Retry render.
         setMountError((e && e.message) || 'Something went wrong loading the dashboard — try again.')
@@ -2808,9 +2809,10 @@ function claimIntentInFlight() {
       if (e && e.suspended) setSuspended(e.suspended)  // #308
       setError(e.message === 'Invalid API key' ? 'Invalid API key — check your key and try again.' : e.message)
       setAuthed(false)
-      // #1559 (review P2): a /v1/team or load 5xx after a successful mint
-      // must NOT leave the silent redirect shell — same class as the mint
-      // failure. The error card (mountError) is the only renderable state.
+      // #1559 (review P2): a /v1/team or load 5xx during the session-only
+      // mount must NOT leave the silent redirect shell — same class as the
+      // mount/load failure. The error card (mountError) is the only
+      // renderable state.
       // #1719 (Task 6): 5xx → the honest unavailable copy (never a raw
       // "Internal server error" string).
       // #1842 P2-4: the #1830 null-key path captures teamAtCompleteLogin ===
@@ -2893,7 +2895,9 @@ function claimIntentInFlight() {
       }
       try { window.setLastAuthMethod('email'); setLastAuthMethod('email') } catch { /* best-effort */ }
       // #1148 review P2: the mount effect bootstraps only on first load —
-      // reload so it picks up the fresh session and mints the bootstrap key.
+      // reload so the mount re-resolves the fresh session and runs the
+      // session-only landing (loadTeams → completeLogin(''), no bootstrap-key
+      // mint at login).
       window.location.reload()
     } catch (err) {
       setError((err && err.message) || 'Something went wrong — try again.')
@@ -4780,10 +4784,15 @@ function claimIntentInFlight() {
                                 const check = durableConnectKey('', pasted, keys)
                                 if (check.source === 'bootstrap' || check.source === 'revoked' || check.source === 'disabled') {
                                   // #2246 (review, P2): paste-error — role- and
-                                  // state-branched. Members cannot rotate /
-                                  // regenerate keys (rotate = mint, allowed,
-                                  // + revoke old, server owner-gated), so only
-                                  // owners get the create/rotate path. The
+                                  // state-branched. Rotate/trash/create are
+                                  // owner/admin-only as DASHBOARD policy
+                                  // (client isOwnerAdmin render gates) —
+                                  // server-side, only PATCH /v1/team/keys/{id}
+                                  // (toggle/rename) and the dashboard-login
+                                  // toggle are _require_owner_admin-gated;
+                                  // mint (POST) and revoke (DELETE) are
+                                  // ungated for member sessions. Only owners
+                                  // get the create/rotate path. The
                                   // REMEDY must also match the SOURCE:
                                   // bootstrap/expiring rows are FILTERED from
                                   // the API Keys table (managedKeys =
@@ -5769,9 +5778,13 @@ function claimIntentInFlight() {
               {/* #2246 (review, P1/P2): member key creation is gated
                   CLIENT-side as dashboard policy — the server POST
                   /v1/team/keys has NO role gate (members CAN mint
-                  server-side), but every row action is isOwnerAdmin-gated
-                  and rotation is owner-only via the server-gated revoke leg.
-                  The dashboard treats key management as owner/admin-managed
+                  server-side). Owner/admin-only key management is a CLIENT
+                  policy: every row action + the create form are isOwnerAdmin
+                  render-gated; server role-gates cover ONLY PATCH
+                  /v1/team/keys/{id} (toggle/rename) and the dashboard-login
+                  toggle (_require_owner_admin) — mint (POST) and revoke
+                  (DELETE) pass for member sessions. The dashboard treats key
+                  management as owner/admin-managed
                   (Members tab + wizard member gate precedent), so members get
                   a notice + the paste-into-setup escape instead of the create
                   form. P2 (layout): the member notice renders as a FULL-WIDTH

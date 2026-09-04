@@ -192,9 +192,12 @@ anon claim/Protect surface is gated by early returns before the removed regions.
     embeddable (hashes only). **Role-aware gate copy**: `isOwnerAdmin` is in render
     scope — members get a paste/ask-an-owner variant instead of the create form
     (dashboard policy — corrected on review: the server POST /v1/team/keys has NO
-    owner/admin role gate, so members CAN mint server-side; member create is gated
-    CLIENT-side, consistent with rotate staying owner/admin-only via the
-    server-gated revoke leg). Paste-error copy reworded (drop the 24h
+    owner/admin role gate, so members CAN mint server-side. Owner/admin-only key
+    management is a CLIENT policy: every row action + the create form are
+    isOwnerAdmin render-gated; server role-gates cover ONLY PATCH
+    /v1/team/keys/{id} (toggle/rename) and the dashboard-login toggle
+    (_require_owner_admin) — mint (POST) and revoke (DELETE) pass for member
+    sessions). Paste-error copy reworded (drop the 24h
     clause; bootstrap/revoked/disabled rejection stays). A dim "shown once" one-liner sits
     above the snippet when `wizardDurableKey`/welcomeKey supply the key. **wizardMint-
     DurableKey 403 catch** (~L3546): the dashboard_key_login=false wording is stale
