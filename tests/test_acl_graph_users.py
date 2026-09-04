@@ -31,10 +31,10 @@ def _server_uri_set() -> bool:
     return scheme in _SUPPORTED and bool(urlparse(uri).hostname)
 
 
-pytestmark = pytest.mark.skipif(
-    not _server_uri_set(),
-    reason="docker lane only — per-graph ACL needs a server FalkorDB (URI set)")
-
+# Single skipif (re-review P2): _HAS_FALKORDB subsumes the URI check — it is
+# only ever True when a URI is set (else-branch False), so a URI-less run
+# skips here with the module-absence reason (docker lane only: per-graph ACL
+# needs a server FalkorDB; bare redis → module no-ops → skip).
 # falkordb module present gate (bare redis → module no-ops → skip).
 # RETRIES: a freshly-provisioned falkordb container answers the health
 # PING before MODULE LIST is populated (the module registers a beat after
@@ -58,7 +58,8 @@ else:
 
 pytestmark = pytest.mark.skipif(
     not _HAS_FALKORDB,
-    reason="no falkordb module on the target server — ACL layer no-ops")
+    reason="docker lane only — needs a server FalkorDB with the module "
+           "(no URI set, or bare redis — ACL layer no-ops)")
 
 
 def _patch_tortoise_sdk_init(db_path):
