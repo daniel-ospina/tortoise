@@ -72,6 +72,17 @@ if _OriginalFalkorDB is not None:
             super().__init__(*args, **kwargs)
             import atexit as _atexit
             self._t_closed = False
+            # #2203: track this client for the terminating-signal teardown
+            # (SIGTERM/SIGHUP/ignored-SIGINT close every live embedded server
+            # before the parent dies). Path-based constructions only — a
+            # host=/port= construction is server mode (no redis child to
+            # reap; its pool belongs to a live remote server). Presence check
+            # mirrors redislite's own (RedisMixin.__init__: 'host' in kwargs
+            # or 'port' in kwargs → server mode). Weak registry: never pins
+            # the client, so #1475 close-on-GC stays intact.
+            if "host" not in kwargs and "port" not in kwargs:
+                from tortoise.embedded_lifecycle import register_embedded_client
+                register_embedded_client(self)
             # #1371: route the atexit seam through the fast-close wrapper
             # (ephemeral test servers) so interpreter exit does not spend
             # 3-4s per leaked server on redislite's response-waiting close.
