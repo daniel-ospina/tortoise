@@ -912,6 +912,16 @@ function claimIntentInFlight() {
     const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
     return `You've reached your plan's limit of ${limit} API keys. Upgrade to add more — or regenerate an existing key instead.`
   }
+  // #2229: rotate-path cap notice. Rotate mints the REPLACEMENT before
+  // revoking the old key, so a team AT max_api_keys 402s on the mint leg —
+  // the generic notice's "regenerate instead" tail would loop here
+  // (regenerating needs the same free slot). Truthful escape: revoke an
+  // unused key first (non-held rows have trash) or upgrade.
+  function rotateCapNoticeFrom(message, team_) {
+    const m = String(message || '').match(/limit reached \((\d+)\)/)
+    const limit = m ? m[1] : (team_?.max_api_keys ?? '2')
+    return `You're at your plan's limit of ${limit} API keys. Rotating creates the replacement before revoking this one, so revoke an unused key first — or upgrade to add more.`
+  }
 
   // #1147: shared mint — POST /v1/team/keys and return the plaintext key.
   // `name` (optional) is the key label — sent only when non-empty.
@@ -4122,15 +4132,21 @@ function claimIntentInFlight() {
     // bootstrap-pool growth), works in both auth modes, and the replacement
     // becomes the active key (shown once). Available on every tier:
     // regenerating does not grow the key count.
+    // #2229: now reachable from the UI — the held durable row's Rotate
+    // button (previously zero UI callers). The old row's label carries into
+    // the replacement mint so an in-place rotate keeps the row's identity.
     if (busy) return
-    if (!confirm('Regenerate this API key? A new key is created and the current one is revoked (shown once). Applications using the old key will stop working.')) return
+    if (!confirm('Rotate this API key? A new key is created and this one is revoked — shown once. Applications using the old key will stop working.')) return
     setCapNotice('')
     setError('')
     setBusy(true)
     try {
       const _teamAtCall = currentTeamId
       const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
-      const newKeyVal = await mintKey(activeKey)
+      // #2229: label carry-over — the row may leave the closure list mid-
+      // flight (switch/refresh) — degrade to an unlabeled mint.
+      const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
+      const newKeyVal = await mintKey(activeKey, (oldRow && oldRow.name) || undefined)
       // Revoke the old key — its mechanical revoke keeps skip-clear: the
       // replacement is already minted, so the slot-aware clear must NOT fire
       // mid-flow (the unconditional install below is the sole writer).
@@ -4150,7 +4166,8 @@ function claimIntentInFlight() {
     } catch (e) {
       if (teamIdRef.current === currentTeamId) {
         if (e.status === 402) {
-          setCapNotice(upgradeNoticeFrom(e.message, team))
+          // #2229: rotate-specific cap copy — see rotateCapNoticeFrom.
+          setCapNotice(rotateCapNoticeFrom(e.message, team))
           setError('')
         } else {
           setError(e.message)
@@ -5997,15 +6014,31 @@ function claimIntentInFlight() {
                       {k.revoked_at ? <span className="revoked">revoked</span>
                         : k.enabled === false ? <span className="dim">disabled</span>
                         : <span className="live">active</span>}
-                      {/* #2166 (review P2): the held durable key's missing actions must be
-visible — visible text, not a hover-only title. Rotate = create a new key,
-then revoke this one (delete/toggle stay suppressed while in use). */}
+                      {/* #2166 (review P2): the held durable key's missing actions stay
+visible — visible text, not a hover-only title. #2229: rotate IS available
+on the held row (action cell) — replace-first semantics; toggle/delete stay
+suppressed while in use. */}
                       {!k.revoked_at && isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && (
-                        <div className="dim small">in use by this dashboard — to rotate, create a new key and revoke this one</div>
+                        <div className="dim small">in use by this dashboard</div>
                       )}
                     </td>
-                    <td>{!k.revoked_at && !isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && isOwnerAdmin && (
-                      <span className="key-actions">
+                    <td>{!k.revoked_at && isOwnerAdmin && (
+                      isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) ? (
+                        /* #2229: the held durable row's ONLY action is Rotate — a
+                           replacement is minted first (label carried over), then this
+                           one is revoked; the new durable becomes the held key
+                           (shown once). Delete/toggle stay suppressed while in use. */
+                        <span className="key-actions">
+                          <button
+                            className="ghost small key-rotate"
+                            disabled={busy}
+                            onClick={() => regenerateKey(k.id)}
+                            aria-label={`Rotate key ${k.key_prefix || k.id?.slice(0, 8)}`}
+                            title="Rotate key — creates a replacement and revokes this one"
+                          >Rotate</button>
+                        </span>
+                      ) : (
+                        <span className="key-actions">
                         {/* #1148-ux review: on/off toggle (new keys default on) */}
                         <button
                           className="key-toggle"
@@ -6024,6 +6057,7 @@ then revoke this one (delete/toggle stay suppressed while in use). */}
                           title="Delete key"
                         >🗑</button>
                       </span>
+                      )
                     )}</td>
                   </tr>
                 ))}

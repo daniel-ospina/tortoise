@@ -12,7 +12,8 @@ dashboard fixture (scope doc §S5, AC5 follow-up #2178):
     - provisioned disabled → "disabled" — NOT "active" (the #2166 lie)
     - recovery held key (the dashboard's own durable credential — #2167:
       localStorage-seeded + adopted via the mount probe, no mint) → "active" + the visible
-      "in use by this dashboard" note, toggle/trash suppressed, rename kept
+      "in use by this dashboard" note, toggle/trash suppressed, rename kept,
+      Rotate available (#2229 — the held row's one replace-first action)
     - recovery non-live residual → active + actionable (known limitation,
       provenance needs server data)
     - legacy NULL created_via → active + actionable
@@ -91,6 +92,13 @@ TEAM_ROW = {
 HELD_KEY = "tt_live_recovery_key_abcdef0123456789"
 HELD_PREFIX = HELD_KEY[:10]  # tt_live_re
 
+# #2229 rotate-flow constants: the mocked replacement mint returns this
+# plaintext + a row whose key_prefix is its slice(0,10) (the install lands
+# isActiveKey on the new row, mirroring the #2167 probe-adopt mechanics).
+ROT_HELD_ID = "key_mixed_03"  # the fixture's held durable row
+ROT_NEW_HELD = "tt_rot_new_abcdef0123456789"
+ROT_NEW_PREFIX = ROT_NEW_HELD[:10]  # tt_rot_new
+
 # Neutral hex-suffix prefixes — never embed banned user-facing vocabulary.
 PREFIXES = {
     "active_ctl": "tt_0a1b2c3d",      # row 1: provisioned enabled (positive control)
@@ -138,8 +146,9 @@ def _mixed_keys_fixture() -> list[dict]:
         # 2. provisioned, disabled → truthful "disabled", toggle off + rename/trash
         _key_row("key_mixed_02", p["disabled"], "staging",
                  created_via="provisioned", enabled=False),
-        # 3. recovery, held prefix → "active" + visible in-use note; the
-        #    dashboard's own durable credential (probe-adopted from the slot).
+        # 3. recovery, held prefix → "active" + visible in-use note + the
+        #    Rotate action (#2229 — mint-first compose); the dashboard's own
+        #    durable credential (probe-adopted from the slot).
         _key_row("key_mixed_03", p["held"], "dashboard (held)",
                  created_via="recovery"),
         # 4. recovery, non-live → active + actionable (residual-durable
@@ -304,6 +313,10 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
     expect(ctl.locator(".key-toggle")).to_have_attribute("data-on", "true")
     expect(ctl.locator(".key-trash")).to_be_visible()
     expect(ctl.locator(".key-rename")).to_be_visible()
+    # #2229 scope: rotate renders on the HELD row only — non-held durables
+    # keep toggle/trash and get NO rotate (rotating a non-held key would
+    # adopt the replacement into the browser's held slot — wrong semantics).
+    expect(ctl.locator(".key-rotate")).to_have_count(0)
 
     # ── Row 2: disabled is "disabled", NOT "active" (the #2166 lie) ──
     dis = page.locator("tbody tr", has_text=PREFIXES["disabled"])
@@ -317,13 +330,16 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
     expect(dis.locator(".key-rename")).to_be_visible()
 
     # ── Row 3: the held durable key — visible in-use note, no toggle/trash,
-    #    rename kept (the #2166 P2 disclosure, not a hover title) ──
+    #    rename kept, ROTATE available (#2166 P2 disclosure + #2229: the
+    #    held row's replace-first action; the old two-step dead-end guidance
+    #    is gone from the shipped DOM) ──
     held = page.locator("tbody tr", has_text=HELD_PREFIX)
     expect(held.locator("span.live")).to_contain_text("active")
-    expect(held).to_contain_text(
-        "in use by this dashboard — to rotate, create a new key and revoke this one")
+    expect(held).to_contain_text("in use by this dashboard")
+    expect(held).not_to_contain_text("create a new key and revoke this one")
     expect(held.locator(".key-toggle")).to_have_count(0)
     expect(held.locator(".key-trash")).to_have_count(0)
+    expect(held.locator(".key-rotate")).to_be_visible()
     expect(held.locator(".key-rename")).to_be_visible()
 
     # ── Row 4: recovery non-live residual → active + actionable ──
@@ -331,6 +347,7 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
     expect(res.locator("span.live")).to_contain_text("active")
     expect(res.locator(".key-toggle")).to_be_visible()
     expect(res.locator(".key-trash")).to_be_visible()
+    expect(res.locator(".key-rotate")).to_have_count(0)  # held-row-only scope (#2229)
 
     # ── Row 5: legacy NULL created_via → active + actionable ──
     leg = page.locator("tbody tr", has_text=PREFIXES["legacy_null"])
@@ -366,6 +383,146 @@ def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) 
     expect(body).not_to_contain_text("ephemeral")
     expect(body).not_to_contain_text("durable")
     expect(body).not_to_contain_text("session credential")
+
+
+def test_rotate_held_durable_key_replaces_in_place(page: Page) -> None:
+    """#2229: the held durable row's Rotate action — one click + confirm →
+    the replacement is minted FIRST (POST /v1/team/keys, old row's label
+    carried over), the old key is revoked (DELETE /v1/team/keys/{id}), the
+    new durable becomes the held key (slot/teamKeysRef/apiKey — the #2167
+    rule-7 install), and the old row re-renders truthful "revoked" with NO
+    actions. Zero POST /v1/session/key (the #2167 tripwire stays armed —
+    rotate is a client-side durable compose, never a bootstrap mint).
+
+    Stateful harness (the shared _wire_mixed_harness serves a STATIC keys
+    list — this flow mutates it): the mint handler appends the replacement
+    row + returns its plaintext; the DELETE handler stamps revoked_at on the
+    held row; the final loadAll re-reads the mutated list."""
+    keys = _mixed_keys_fixture()
+    session_mints: list = []
+    minted_bodies: list = []
+    dialog_messages: list = []
+
+    def handle(route):
+        url = route.request.url
+        if url.startswith(API_HOST):
+            path = urllib.parse.urlsplit(url).path
+            method = route.request.method
+            if path.endswith("/v1/session/key") and method == "POST":
+                # #2167 zero-mint tripwire — rotate must never mint a session key.
+                session_mints.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/team/keys") and method == "POST":
+                # The rotate replacement mint. #2229: label carry-over — the
+                # body must echo the old row's name ("dashboard (held)").
+                minted_bodies.append(route.request.post_data or "")
+                row = _key_row("key_rot_2229", ROT_NEW_PREFIX,
+                               "dashboard (held)", created_via="provisioned")
+                keys.append(row)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"id": row["id"],
+                                               "api_key": ROT_NEW_HELD,
+                                               "key_prefix": row["key_prefix"]}))
+                return
+            if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
+                for k in keys:
+                    if k["id"] == ROT_HELD_ID:
+                        k["revoked_at"] = "2026-08-03T12:00:00.000Z"
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"revoked": True, "key_id": ROT_HELD_ID}))
+                return
+            if path.endswith("/v1/teams") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([TEAM_ROW]))
+                return
+            if path.endswith("/v1/team/keys") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": keys}))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(TEAM_ROW))
+                return
+            route.fulfill(status=401, content_type="application/json",
+                          body=json.dumps({"detail": "unauthorized"}))
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.context.add_cookies([{
+        "name": "sb-tortoise-auth-token",
+        "value": urllib.parse.quote(json.dumps(_session_json("u-rotate2229"))),
+        "domain": ".premiselabs.co", "path": "/",
+    }])
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{HELD_KEY}');")
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("tbody tr")).to_have_count(7, timeout=15_000)
+
+    # Scope pin: EXACTLY one .key-rotate in the whole table (held row only).
+    expect(page.locator(".key-rotate")).to_have_count(1)
+    held = page.locator("tbody tr", has_text=HELD_PREFIX)
+    expect(held.locator(".key-rotate")).to_be_visible()
+
+    # native confirm() — accept it (Playwright's default auto-dismiss would
+    # abort the rotate before the mint).
+    page.on("dialog", lambda d: (dialog_messages.append(d.message), d.accept()))
+    held.locator(".key-rotate").click()
+
+    # Old held row → truthful "revoked", terminal (no in-use note, no actions).
+    old = page.locator("tbody tr", has_text=HELD_PREFIX)
+    expect(old.locator("span.revoked")).to_contain_text("revoked", timeout=15_000)
+    expect(old).not_to_contain_text("in use by this dashboard")
+    expect(old.locator(".key-rotate")).to_have_count(0)
+    expect(old.locator(".key-toggle")).to_have_count(0)
+    expect(old.locator(".key-trash")).to_have_count(0)
+    expect(old.locator(".key-rename")).to_have_count(0)
+
+    # Replacement row → the new held durable: label carried over, in-use
+    # note, Rotate available, toggle/trash suppressed (never delete-without-
+    # replacement while in use).
+    newrow = page.locator("tbody tr", has_text=ROT_NEW_PREFIX)
+    expect(newrow).to_contain_text("dashboard (held)", timeout=15_000)
+    expect(newrow.locator("span.live")).to_contain_text("active")
+    expect(newrow).to_contain_text("in use by this dashboard")
+    expect(newrow.locator(".key-rotate")).to_be_visible()
+    expect(newrow.locator(".key-toggle")).to_have_count(0)
+    expect(newrow.locator(".key-trash")).to_have_count(0)
+    # 7 managed rows + the replacement (the revoked old row stays listed).
+    expect(page.locator("tbody tr")).to_have_count(8)
+    # Still exactly one rotate affordance in the table (the new held row).
+    expect(page.locator(".key-rotate")).to_have_count(1)
+
+    # The KEY_STORAGE slot holds the replacement — never a revoked/bootstrap
+    # key (the #2167 steady-state invariant, rule 7 install).
+    assert page.evaluate("localStorage.getItem('tortoise_api_key')") == ROT_NEW_HELD
+    # The confirm fired once, with the rotate copy.
+    assert len(dialog_messages) == 1, f"expected one confirm dialog, got {dialog_messages}"
+    assert "Rotate this API key?" in dialog_messages[0]
+    # The mint carried the old row's label (in-place rotate identity).
+    assert len(minted_bodies) == 1, f"expected one mint, got {minted_bodies}"
+    assert json.loads(minted_bodies[0]).get("name") == "dashboard (held)"
+    # Zero session-key mints — rotate is a durable compose only.
+    assert session_mints == [], f"zero-mint tripwire: POST /v1/session/key fired: {session_mints}"
 
 
 def test_held_key_prefix_is_unique_in_fixture(page: Page) -> None:
