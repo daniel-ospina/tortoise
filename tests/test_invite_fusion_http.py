@@ -28,6 +28,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import email_notify
 from tortoise.hosted_api import app, get_current_user
 
@@ -39,27 +40,6 @@ _U_ALICE = "9f2c1a40-0000-4a00-8000-00000000000f"
 _U_CAROL = "9f2c1a40-0000-4a00-8000-000000000010"
 
 V2_ACCEPT = "application/vnd.tortoise.onboarding+json;version=2"
-
-
-def _patch_tortoise_sdk_init(db_path: str):
-    import tortoise.hosted_api as ha_mod
-
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    # #1470: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests and would leak the prior test's DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig_init
-
-
-def _restore_tortoise_sdk_init(original_init):
-    import tortoise.hosted_api as ha_mod
-
-    ha_mod.TortoiseSDK.__init__ = original_init
 
 
 # #1556: hold registry SDKs alive — _get_registry() drops the SDK ref;
@@ -75,18 +55,22 @@ def client():
             "user_id": _U1,
             "email": "owner@example.com",
         }
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
-            while _REG_SDKS:
-                try:  # noqa: SIM105
-                    _REG_SDKS.pop().close()
-                except Exception:
-                    pass
+        # #2143 tripwire / #2127: the shared helper (patch __init__ → temp
+        # DB, TORTOISE_DB_PATH pin, deterministic anchor close-then-clear at
+        # enter; pop-env → restore __init__ → close anchors → clear overrides
+        # at exit) replaces the local _patch/_restore churn-shape — the local
+        # clear-without-close copy reds the test-lint tripwire at collection.
+        with patched_tortoise_sdk(db_path):
+            try:
+                with TestClient(app) as tc:
+                    yield tc
+            finally:
+                app.dependency_overrides.clear()
+                while _REG_SDKS:
+                    try:  # noqa: SIM105
+                        _REG_SDKS.pop().close()
+                    except Exception:
+                        pass
 
 
 @pytest.fixture
