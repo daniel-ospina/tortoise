@@ -67,6 +67,7 @@ from tortoise.quota import (
 from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     TortoiseSDK,
+    _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
@@ -6248,16 +6249,33 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         effective_mode = "replayed"
     else:
         effective_mode = "llm"
+    # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
+    # capture write path (after promotion + provenance stamp + operators are
+    # wired, and BEFORE the verb enrichment read below) the extracted claims
+    # are promoted draft→live and the BOUNDED ingest EP pass calibrates them
+    # (local = write-triggered refresh over the dirty roots — never a
+    # full-graph pass). Shared with the SDK mirror via
+    # sdk._apply_capture_ingest_ep (byte-parity). A replay (session_existed)
+    # extracts nothing — the helper no-ops on an empty claim set. Fail-open:
+    # a promotion/EP hiccup never 500s a committed capture — additive
+    # warning only; the enrichment read below then reports the TRUE post-EP
+    # graph state (never fabricated ep_updated — anti-gaming).
+    if extracted:
+        _apply_capture_ingest_ep(
+            sdk, [p["id"] for p in extracted],
+            warn=extraction_warnings.append,
+        )
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
     # keys (D8).  ``resp["points"]`` (the raw extracted list, load-bearing
     # for legacy consumers) is ENRICHED in place — each point gains
-    # status/ep_updated/dedup keys read from the graph AFTER the write, so
-    # the verb reports only what is true (anti-gaming): ep_updated = the
-    # point actually carries persisted EP alpha/beta (Phase C turns this on
-    # with the ingest EP pass); dedup = "new" only for points this request
-    # minted (REPHRASE/content-hash classification lands in Phase D).
+    # status/ep_updated/dedup keys read from the graph AFTER the write (and
+    # after the Phase C ingest EP pass), so the verb reports only what is
+    # true (anti-gaming): ep_updated = the point actually carries persisted
+    # EP alpha/beta (Phase C turns this on with the ingest EP pass); dedup =
+    # "new" only for points this request minted (REPHRASE/content-hash
+    # classification lands in Phase D).
     from tortoise.write_verb import (
         DEDUP_NEW,
         STATUS_OK,

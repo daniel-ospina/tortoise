@@ -93,6 +93,115 @@ def test_capture_session_shape(sdk):
     assert isinstance(res["warnings"], list)
 
 
+def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
+    """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
+    USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state
+    DIFFERS from the post-ingest state (extracted claims recall with real EP
+    posteriors).
+
+    ROOT CAUSE (Phase C): capture wrote extracted claims via the #131 draft
+    default and wired their IMPL/NAND operators as draft (#780 extraction
+    operators) — EP's BFS expansion excludes draft subgraphs
+    (include_draft=False default), so the ingest EP pass could never
+    calibrate the captured claims (has_ep False — structurally). Phase C
+    promotes the extracted claims AND their operators to live on the capture
+    path ONLY (never the create_point global default), then runs a BOUNDED
+    ingest EP pass (mode=local — dirty-root refresh, never full-graph) at
+    the END of the capture write path.
+
+    The M2 echo lane is used so the conversation produces a WIRED claim pair
+    (IMPL operator): operator-less claims have no EP factors and honestly
+    stay uncalibrated (the trivial stamp covers lastDreamedAt only —
+    anti-gaming, no fabricated α/β)."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The auth dead-end is the top issue "
+                                     "because it blocks every deploy."},
+        {"role": "assistant", "content": "Therefore we should ship serve "
+                                           "--http first."},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["ok"] is True, res
+    ids = [p["id"] for p in res["points"]]
+    assert len(ids) >= 2, res
+    proj = sdk._get_proj()
+
+    # 1) The extracted (non-episodic) claim points are LIVE at capture ...
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+        params={"ids": ids},
+    ).result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert set(by_id) == set(ids), f"extracted points missing: {set(ids) - set(by_id)}"
+    assert all(st == "live" for st in by_id.values()), by_id
+    # ... with their capture operators (a live claim wired through a draft
+    # operator stays EP-inert — the #780 live-only BFS never selects it).
+    op_rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+        "WHERE c.id IN $ids RETURN DISTINCT o.id, o.status",
+        params={"ids": ids},
+    ).result_set
+    assert op_rows, "the cue-word conversation must produce capture operators"
+    assert all(st == "live" for _oid, st in op_rows), op_rows
+    # ... while the episodic turn stream STAYS draft (turn stream, not beliefs).
+    turn_rows = proj.g.query(
+        "MATCH (t:Point) WHERE t.is_episodic = true RETURN DISTINCT t.status"
+    ).result_set
+    assert turn_rows and all(st == "draft" for (st,) in turn_rows), turn_rows
+
+    # 2) The bounded ingest EP pass calibrated the wired claims: stored α/β
+    # (has_ep True — the pre-ingestion uncalibrated state has DIFFERED) and
+    # the user-visible confidence surface (get_confidence) reads real
+    # posteriors, not the unmeasured Beta(1,1) default.
+    cal = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids AND "
+        "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+        "RETURN count(n)",
+        params={"ids": ids},
+    ).result_set
+    assert cal[0][0] == len(ids), \
+        f"every wired claim must calibrate post-ingest ({cal[0][0]}/{len(ids)})"
+    for pid in ids:
+        conf = sdk.get_confidence(pid, require_calibration=False)
+        assert conf.get("mean") is not None, conf
+        assert conf.get("variance") is not None, conf
+        assert conf.get("effective_n") is not None and conf["effective_n"] > 0, conf
+
+    # 3) Negative control — the create_point GLOBAL default is untouched: a
+    # claim created through the ordinary draft path stays EP-inert (no
+    # persisted α/β) after the same local dream. Capture-scoped promotion
+    # (not an EP-semantics change) is the differentiator.
+    draft_pid = sdk.create_point(
+        "statement", "a non-captured draft claim stays EP-inert")["id"]
+    sdk.dream(mode="local", require_calibration=False, warm_start=False)
+    drow = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, "
+        "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+        params={"id": draft_pid},
+    ).result_set
+    assert drow[0][0] == "draft" and drow[0][1] is False, \
+        f"global draft default changed by Phase C: {drow}"
+
+
+def test_capture_w5_phase_c_full_dream_effective_post_capture(sdk, monkeypatch):
+    """W5 Phase C (#2104): promotion makes the W2 runner's post-capture full
+    dream EFFECTIVE — pre-fix a capture-then-dream(full=True) sequence was
+    structurally total_affected 0 / coverage 0.0 (draft subgraphs excluded by
+    EP's BFS, #780). Post-fix the same sequence reaches the captured claims."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The auth dead-end is the top issue "
+                                     "because it blocks every deploy."},
+        {"role": "assistant", "content": "Therefore we should ship serve "
+                                           "--http first."},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["ok"] is True and res["extracted"] >= 2
+    d = sdk.dream(full=True, require_calibration=False, warm_start=False)
+    assert d.get("total_affected") >= 2, d
+    assert d.get("coverage") > 0.0, d
+
+
 def test_capture_session_turns_are_speaker_tagged(sdk):
     sdk.capture_session(CONV)
     proj = sdk._get_proj()
