@@ -118,9 +118,13 @@ def test_harness_replay_grades_real_surfaces(sdk_factory):
     # the run's notes NAME the failure class.
     assert report["metrics"]["know_to_ask_failure_rate"] == 1.0
     assert any("no-reflex" in n for n in report["notes"])
-    # Every session emitted (never skipped) and every capture was ok.
+    # Every session emitted (never skipped) and every capture was ok — the
+    # BPRE gate corpus excludes the pinned holdout (frozen for the W4
+    # reflex), which the run's notes state.
+    expected = set(corpus.session_ids()) - set(corpus.holdout_ids())
     seen = {r["session_id"] for r in report["session_results"]}
-    assert seen == set(corpus.session_ids())
+    assert seen == expected
+    assert any("BPRE mode" in n for n in report["notes"])
     for result in report["session_results"]:
         assert result["emitted"] is True
         assert result["capture_ok"] is True
@@ -184,6 +188,24 @@ def test_harness_replay_determinism_and_graded_reflex_gate(sdk_factory, tmp_path
     assert runner.validate_receipt(receipt) == []
     assert receipt["verdict"] == schema.VERDICT_REGRESSION
     assert receipt["failure_origin"] == "gate_regression"
+
+
+def test_full_mode_includes_pinned_holdout(sdk_factory):
+    """--full (mode=full) replays the WHOLE corpus including the pinned
+    holdout (the W4 reflex's frozen evaluation set); BPRE excludes it.  The
+    holdout membership is never seed-derived — the run's session set is a
+    pure function of mode."""
+    report_bpre = _run_all(sdk_factory)
+    assert report_bpre["run_status"] == "completed"
+    assert set(report_bpre["resolved_config"]) >= {"mode", "holdout_excluded"}
+    assert report_bpre["resolved_config"]["mode"] == "BPRE"
+    report_full = runner.run_benchmark(config={"mode": "full"})
+    assert report_full["run_status"] == "completed"
+    bpre_sids = {r["session_id"] for r in report_bpre["session_results"]}
+    full_sids = {r["session_id"] for r in report_full["session_results"]}
+    assert bpre_sids == full_sids - set(corpus.holdout_ids())
+    assert full_sids == set(corpus.session_ids())
+    assert corpus.holdout_ids()
 
 
 def test_isolation_gate_catches_misrouted_teams(sdk_factory):

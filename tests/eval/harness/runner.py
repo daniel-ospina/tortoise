@@ -371,6 +371,18 @@ def run_benchmark(
     run_id = run_id or f"w3h-{uuid.uuid4().hex[:12]}"
     notes = list(notes or [])
     env_posture = _env_posture()
+    # A3 confound guard (issue indicator 2, plan §6.5): the m2 echo lane is
+    # ONLY hermetic when the LLM seam is mocked — an m2-labeled run with an
+    # ambient provider key but no mock would silently extract with the REAL
+    # LLM (LLM data compared vs an m2 baseline — the exact confound the
+    # harness exists to kill). Fail closed: m2 posture requires the mock.
+    if env_posture == "m2" and os.environ.get("TORTOISE_SESSION_LLM_MOCK", "").strip().lower() != "1":
+        raise RunError(
+            "env posture m2 (TORTOISE_SESSION_EXTRACTOR=m2) requires "
+            "TORTOISE_SESSION_LLM_MOCK=1 — without the mock seam an ambient "
+            "provider key would run the real LLM (A3 confound); set both or "
+            "unset EXTRACTOR"
+        )
     resolved_config = dict(corpus.BASELINE_CONFIG)
     resolved_config.pop("extractor_posture", None)  # env owns the posture
     if config is not None:
@@ -383,6 +395,12 @@ def run_benchmark(
             )
         resolved_config.update(config)
     resolved_config["extractor_posture"] = env_posture
+    # BPRE (default): the gate corpus EXCLUDES the pinned holdout fixtures
+    # (the frozen evaluation set reserved for the W4 reflex).  --full opts
+    # into the whole corpus (mode=full).
+    hard_stop_usd = float(os.environ.get("HARD_STOP_USD", "0") or 0)
+    if hard_stop_usd:
+        notes.append(f"HARD_STOP_USD={hard_stop_usd} armed")
     date = _now_iso()
     commit = _git_head()
 
@@ -398,7 +416,21 @@ def run_benchmark(
         )
     baseline = pf["baseline"]
     fixtures_hash = pf["fixtures_hash"]
-    selected = session_ids or corpus.session_ids(root)
+    run_mode = resolved_config.get("mode", "BPRE")
+    if session_ids:
+        selected = list(session_ids)
+    elif run_mode == "BPRE":
+        # Gate corpus = all sessions minus the pinned holdout (reserved for
+        # the W4 reflex's frozen evaluation).  The exclusion is a run-time
+        # property of mode — the corpus + hash are mode-independent.
+        selected = [s for s in corpus.session_ids(root)
+                    if s not in corpus.holdout_ids(root)]
+        notes.append(
+            f"BPRE mode: {len(corpus.holdout_ids(root))} holdout fixtures "
+            f"excluded; gate corpus = {len(selected)} sessions"
+        )
+    else:
+        selected = corpus.session_ids(root)
     missing = [s for s in selected if s not in corpus.session_ids(root)]
     if missing:
         return _failed_report(
@@ -742,7 +774,10 @@ def _main(argv: list[str] | None = None) -> int:
         progress = None
         if "--progress" in args:
             progress = sys.stderr
-        report = run_benchmark(progress=progress)
+        run_config = None
+        if "--full" in args:
+            run_config = {"mode": "full"}  # include the pinned holdout
+        report = run_benchmark(progress=progress, config=run_config)
         print(
             f"run {report['run_id']}: status={report['run_status']} "
             f"verdict={report['verdict']} origin={report['failure_origin']}"
