@@ -715,7 +715,7 @@ Evidence aging is **user-configurable with a light default** — NOT blunt time 
 > **Decision log (v3.2, #398 open question):** temporal decay granularity = **deferred**
 > (per-field / per-sourceType decay curves NOT shipped). Retained: the validated
 > `0.95^years` modulation, T0-exempt, keyed on `sourceDate` else `ingestedAt`, recomputed
-> per EP run via provenance-marked inherited baselines (`baseline_source='inherited'`,
+> per EP run via provenance-marked inherited baselines (`baseline_source='inherited-from-source'`,
 > per-point time gate). Differentiated per-tier aging (§10 "ages differently") is a
 > §10-implied follow-up; the extension point is the source-type registry's per-kind
 > default/tier slot.
