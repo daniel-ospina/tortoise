@@ -39,7 +39,15 @@ BASELINE_CONFIG: dict = {
     "lanes": ["verbatim", "facts", "dream"],
     "mode": "BPRE",          # cost-bounded default; `--full` is opt-in
     "harness": "all",        # seams graded
-    "seed": 42,              # deterministic within-run ordering only
+    "seed": 42,               # deterministic within-run ordering only
+    # Extractor posture (REVIEW-FIX, PR #2183 findings 1+4): "llm" = product
+    # lane (real v2 extractor, publishable numbers, standing leakage bar
+    # applies); "m2" = deterministic echo lane (byte-reproducible CI gate;
+    # leakage is structural on the echo lane, so its gate is determinism).
+    # Posture is part of the resolved-config comparability surface — a run on
+    # one lane never compares against a baseline on the other (config
+    # mismatch ⇒ inconclusive).
+    "extractor_posture": "llm",
 }
 
 FIXTURE_GLOB = "fixtures/*.json"
@@ -160,20 +168,42 @@ def verify_manifest(root: Path = WRITE_PATH_DIR) -> dict:
     }
 
 
-def first_run_pending_baseline(root: Path = WRITE_PATH_DIR) -> dict:
+def baseline_path(root: Path = WRITE_PATH_DIR, *, posture: str = "llm") -> Path:
+    """Per-posture baseline file (REVIEW-FIX, PR #2183 findings 1+4).
+
+    ``baselines/main.json`` = the product (``llm``) lane baseline — real v2
+    extractor numbers, fix-wave convergence target.
+    ``baselines/m2.json`` = the deterministic (``m2``) echo-lane baseline —
+    the CI-gate lane, byte-reproducible; its gate is determinism/reproduction
+    (leakage is structural on the echo lane, so the product leakage bar does
+    not apply to it).
+    """
+    return root / "baselines" / ("m2.json" if posture == "m2" else "main.json")
+
+
+def load_baseline(root: Path = WRITE_PATH_DIR, *, posture: str = "llm") -> dict:
+    return schema.read_json(baseline_path(root, posture=posture))
+
+
+def first_run_pending_baseline(root: Path = WRITE_PATH_DIR, *, posture: str = "llm") -> dict:
     """The first-run-pending baseline (benchmark-first state).
 
     Empty ``metrics``/``history`` + null ``judge_pin``/``justification``: no
     quality bar is preset — the corpus + runner measure the CURRENT write path
     first, then targets are set from first-run data.  W2-b publishes the first
     (expected-bad) number per the fix-wave protocol and replaces this file via
-    ``schema.bless_baseline`` with a justification.
+    ``schema.bless_baseline`` with a justification.  ``posture`` names the
+    extractor lane the pending baseline belongs to (its config snapshot
+    carries ``extractor_posture`` so a run on the other lane is a config
+    mismatch ⇒ inconclusive, never a silent cross-posture bless).
     """
+    config = dict(BASELINE_CONFIG)
+    config["extractor_posture"] = posture
     return {
         "schema_version": schema.SCHEMA_VERSION,
         "fixtures_hash": compute_fixtures_hash(root),
         "judge_pin": None,
-        "config": dict(BASELINE_CONFIG),
+        "config": config,
         "justification": None,
         "metrics": {},
         "history": [],

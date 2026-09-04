@@ -25,7 +25,9 @@ tests/eval/write_path/
   fixtures/<session>.json         # {session_id, harness, conversation} ONLY
   gold/<session>.gold.json        # SEALED — the entire answer key
   _manifest.json                  # sha256 of every fixture + gold file
-  baselines/main.json             # committed baseline (first-run-pending state)
+  baselines/main.json             # committed PRODUCT-lane baseline (posture llm)
+  baselines/m2.json               # committed CI-lane baseline (posture m2, deterministic)
+  receipts/                       # validated run receipts (llm + m2 lanes)
   test_write_path_corpus.py       # contract tests (S4/S15)
 ```
 
@@ -69,15 +71,25 @@ the session-capture boundary set (`claude`, `claude-desktop`, `claude-web`,
 * `distractor_leakage_tolerance: 1` — research-recommended ≤1/run (gbrain
   measured 1/86); supersedes the epic's literal "zero" wording.
 
-**Baseline (DM-5):** committed `baselines/main.json`, first-run-pending:
-empty `metrics`/`history`, null `judge_pin`/`justification`. This is the
-**benchmark-first** posture — NO preset quality bar. The W2-b runner
+**Baseline (DM-5):** TWO posture-keyed committed baselines (posture split,
+#2098 round 2): `baselines/main.json` = the PRODUCT lane (extractor posture
+`llm`, real v2 extractor — the number the W4 gate / W7 publication consume,
+gated manually at bless with `justification`), and `baselines/m2.json` = the
+deterministic CI lane (extractor posture `m2`, TORTOISE_SESSION_EXTRACTOR=m2
+echo seam — byte-reproducible, compared on every write-path PR: verdict PASS
+on clean replay, REGRESSION on parser/write-back/provenance/event-stamp/
+session-emission regressions). Each starts first-run-pending: empty
+`metrics`/`history`, null `judge_pin`/`justification` — the
+**benchmark-first** posture, NO preset quality bar. The W2-b runner
 publishes the first (expected-bad) number per the fix-wave protocol and
 blesses a real baseline with a `justification` (`schema.bless_baseline`).
 The `--compare` verdict vocabulary is `pass | regression | inconclusive`;
-corpus-hash or resolved-config mismatch ⇒ `inconclusive`, never a
-rubber-stamp; blessing a regression REQUIRES a non-null `justification`
-string.
+corpus-hash, resolved-config, or extractor-posture mismatch ⇒
+`inconclusive`, never a rubber-stamp; blessing a regression REQUIRES a
+non-null `justification` string. Cross-posture compares are config
+mismatches (never a silent cross-extractor pass/regression); the standing
+leakage bar (≤1/run) is a PRODUCT-lane bar (the m2 echo lane structurally
+leaks — its gate is determinism/reproduction).
 
 ## Regeneration protocol (fix-wave / corpus-bless)
 
@@ -90,14 +102,17 @@ uv run python tests/eval/write_path/generate_corpus.py --validate # full committ
 * Re-running the generator is **byte-deterministic** (sorted keys, fixed
   indent, no timestamps) for the frozen corpus = `fixtures/` + `gold/` +
   `_manifest.json` — the fix-wave guarantee (re-run the SAME frozen corpus +
-  pinned judge).  `baselines/main.json` is deliberately OUTSIDE that drift
-  scope: it changes legitimately when W2-b blesses a published run, and the
-  generator never clobbers a published (non-pending) baseline.
-* A **gold-only edit** changes `_manifest.json` + `baselines/main.json`
+  pinned judge).  `baselines/{main,m2}.json` are deliberately OUTSIDE that
+  drift scope: they change legitimately when W2-b blesses a published run,
+  and the generator never clobbers a published (non-pending) baseline.
+* A **gold-only edit** changes `_manifest.json` + BOTH baselines'
   `fixtures_hash` ⇒ committed baselines are invalidated (E2E-2 negative gate:
   mismatch ⇒ `inconclusive`, never a silent pass).
-* Intentional fixture change = **corpus-bless** (deliberate regeneration
-  reviewed in the PR diff); blessing a regression requires `justification`.
+* Intentional fixture change = **corpus-bless** (`--corpus-bless`, deliberate
+  regeneration reviewed in the PR diff — the history entry's
+  `corpus_change: true` marker is what reviewers check); intentional judge-
+  protocol bump = **protocol-bless** (`--protocol-bless`, `protocol_change`
+  marker); blessing a regression requires `justification`.
 
 ## Sealed-key discipline
 
