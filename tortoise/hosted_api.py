@@ -1824,13 +1824,22 @@ def _assert_graph_owned(team: dict, graph_id: str,
     )
     try:
         if is_supabase_enabled():
-            rows = get_control_plane().query("graphs", select=["id"],
-                                             filters=[("id", "eq", graph_id),
-                                                      ("team_id", "eq", team["team_id"])])
+            rows = get_control_plane().query(
+                "graphs", select=["id", "namespace"],
+                filters=[("id", "eq", graph_id),
+                         ("team_id", "eq", team["team_id"])])
             if not rows:
                 raise HTTPException(
                     status_code=404,
                     detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"})
+            if rows[0].get("namespace") != graph_namespace:
+                # C5 (review P2): namespace parity with the registry lane —
+                # a drifted/renamed graphs row must fail closed (never open
+                # a shifted namespace). Mirrors GRAPH_MISMATCH below.
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_MISMATCH",
                             "message": "graph not found for key"})
             return
         # Registry: the Graph node must exist AND belong to the team AND
@@ -3240,7 +3249,13 @@ async def dream(
         else:
             # Drain whatever is queued plus any in-memory dirty roots.
             # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
-            q = _DREAM_QUEUES.get(team["team_id"])
+            # C5 (#2114, review P2): create_point enqueues under the
+            # COMPOSITE key for graph-bound keys — read the same key or the
+            # manual drain misses the queued roots.
+            _dk = _dream_key(team["team_id"],
+                             (team.get("graph_namespace")
+                              if team.get("graph_id") else None))
+            q = _DREAM_QUEUES.get(_dk)
             queued_roots: list[str] = []
             if q is not None and not q.empty():
                 while not q.empty():
@@ -6623,6 +6638,9 @@ async def session_install_probe(body: InstallProbeRequest,
     (get_current_team) IS required: probes are per-team onboarding state.
     """
     now = datetime.now(UTC).isoformat()
+    # C5 #2114 (review P2): the probe writes onboarding state (registry/team
+    # node) — team-level surface; graph-bound keys rejected.
+    _reject_graph_bound_team_surface(team, "install probe")
     key = f"install_probe_{body.harness}"
     try:
         _update_onboarding_state(team["team_id"], **{key: now})
@@ -14064,6 +14082,10 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
     was rewired by #1728 to PATCH /v1/onboarding/state (session JWT), while
     the MCP tool registry (tortoise_onboarding_session_recording) still
     drives this endpoint with a tt_ key; both must work."""
+    # C5 #2114 (review P2): the toggle writes onboarding state (registry/team
+    # node) — team-level surface; graph-bound keys rejected (cross-graph
+    # write prevention).
+    _reject_graph_bound_team_surface(team, "session recording toggle")
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
@@ -14219,6 +14241,12 @@ async def public_demo(team: dict = Depends(get_current_team_gated)):  # noqa: B0
     Reuses the same seeding logic as /internal/demo but requires a Bearer
     tt_ key instead of the internal key. Idempotent (sentinel check).
     """
+    # C5 #2114 (code-review P1): the demo seed writes ~13 Points into the
+    # team's DEFAULT graph — a graph-bound key seeding it would be a
+    # cross-graph write; a graphs:read-only key seeding it would be a
+    # read→write scope bypass. Demo is a default-graph team surface.
+    _reject_graph_bound_team_surface(team, "demo seed")
+    _require_scope(team, "graphs:write", "demo seed")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     existing = proj.g.query(
@@ -15830,6 +15858,10 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
     _require_backup_tier(team)
     # C5 #2114: a backup is a full-graph read (least-privilege parity with
     # read access — the key can already read every node) → graphs:read.
+    # Accepted residual (code-review P2): a read-only key can generate
+    # repeated dump artifacts (storage amplification) — data-exposure parity
+    # is sound (read == full visibility); a per-key backup rate limit or
+    # graphs:write requirement is a follow-up if storage cost matters.
     _require_scope(team, "graphs:read", "backups_create")
     sdk = None
     registry_sdk = None

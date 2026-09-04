@@ -417,6 +417,14 @@ WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
     "tortoise_mine_conversations", "tortoise_approve_merge",
     "tortoise_promote_point",
+    # C5 #2114 (code-review P1): the destructive/mutating _rw() tools a
+    # graphs:read-only key must NEVER invoke — a read-only key deleting
+    # points/entities or mutating operators/sources is a write-scope
+    # bypass. Membership asserted by test_every_node_creating_tool_* +
+    # test_no_write_tool_counted_as_read (extended in C5).
+    "tortoise_delete_point", "tortoise_delete", "tortoise_delete_entity",
+    "tortoise_set_point_baseline", "tortoise_set_source_tier",
+    "tortoise_annotate_operator",
 })
 
 

@@ -753,6 +753,28 @@ class TestIntrospection:
         missing = {method_to_tool[m] for m in wrapped_methods} - ms.WRITE_TOOL_NAMES
         assert not missing, f"write tools missing from WRITE_TOOL_NAMES: {missing}"
 
+    def test_destructive_mutating_tools_never_read_classified(self):
+        """C5 #2114 (code-review P1): the NON-wrapped destructive/mutating
+        tools carry _rw() annotations but bypass _quota_gated — they must
+        still be classified as writes (WRITE_TOOL_NAMES) so the MCP scope
+        gate (graphs:write required) + read-velocity metering treat them as
+        writes. A graphs:read-only key invoking any of these would otherwise
+        be a write-scope bypass (deleting points/entities, mutating
+        operators/sources)."""
+        import tortoise.mcp_server as ms
+        destructive = {
+            "tortoise_delete_point",      # DESTRUCTIVE — cannot be undone
+            "tortoise_delete",            # destructive
+            "tortoise_delete_entity",     # destructive
+            "tortoise_set_point_baseline",  # mutates claims
+            "tortoise_set_source_tier",   # mutates source metadata
+            "tortoise_annotate_operator",  # mutates operator state
+        }
+        missing = destructive - ms.WRITE_TOOL_NAMES
+        assert not missing, (
+            f"destructive/mutating tools missing from WRITE_TOOL_NAMES "
+            f"(a graphs:read-only MCP key could invoke them): {missing}")
+
     def test_mcp_read_hook_classification(self, monkeypatch):
         """maybe_record_mcp_read: writes skipped, reads counted, selfhost and
         no-team skipped, kill-switch respected."""

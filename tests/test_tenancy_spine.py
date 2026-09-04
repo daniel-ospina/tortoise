@@ -40,8 +40,8 @@ def _spine_env(tmp_path):
     """
     import tortoise.hosted_api as ha_mod
 
+    import tortoise.hosted_api as ha_mod
     db_path = os.path.join(tmp_path, "spine.db")
-    _patch_tortoise_sdk_init(db_path)
     os.environ["TORTOISE_DB_PATH"] = db_path
     sdk = ha_mod._make_sdk(namespace="registry")
     tid = f"spine-{abs(hash(str(tmp_path))) % 100000}"
@@ -88,13 +88,18 @@ def _mint_key(sdk, team_id, *, scopes, graph_id=None, deleg=None):
 
 @pytest.fixture
 def spine_env(tmp_path):
-    gen = _spine_env(tmp_path)
+    """Patch (temp-db SDK init) → seed → yield → restore (patch, overrides,
+    env). The patch/restore share ONE scope so a later test FILE in the same
+    pytest process is never poisoned (hosted_api's _setup restores the same
+    seam; the C3/C5 cross-file lesson)."""
+    import tortoise.hosted_api as ha_mod
+    _orig_init = _patch_tortoise_sdk_init(
+        os.path.join(str(tmp_path), "spine.db"))
     try:
-        yield gen
+        yield _spine_env(tmp_path)
     finally:
-        # Teardown hygiene: clear the module fixture leak the C3 tests
-        # taught us about (dependency overrides + env).
-        import tortoise.hosted_api as ha_mod
+        from tests.test_hosted_api import _restore_tortoise_sdk_init
+        _restore_tortoise_sdk_init(_orig_init)
         ha_mod.app.dependency_overrides.clear()
         os.environ.pop("TORTOISE_DB_PATH", None)
 
