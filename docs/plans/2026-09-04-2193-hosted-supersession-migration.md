@@ -33,7 +33,7 @@
 **Acceptance:** Worktree on `feat/2193-supersession-migration` @a0f5bc47 (created via hub-worktree.sh — the dirty local checkout predates #2164 and is NEVER an edit base); parity + E5 green at base.
 **Files:** none (environment)
 
-**Step 1.1** — Worktree exists (done). Verify base: `git log --oneline -1` = a0f5bc47; `grep -c "def apply_supersessions" tortoise/commit_ops.py` = 1.
+**Step 1.1** — Worktree exists (done). Verify base: `git log --oneline -2` → plan-doc commit `44059cc0` on top of `a0f5bc47` (edit base = a0f5bc47 — do NOT reset, the plan doc rides the branch tip into the PR); `grep -c "def apply_supersessions" tortoise/commit_ops.py` = 1.
 **Step 1.2** — `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_commit_supersession_parity.py tests/test_commit_endpoint.py -q` → 60 passed.
 **Step 1.3** — Confirm §6b region: `sed -n '6687,6741p' tortoise/hosted_api.py` and §7 precedent `sed -n '6752,6766p'`. (Line numbers may drift if main moved — re-anchor the START via `grep -n "for sr in payload.supersessions"`, the TAIL boundary via `grep -n "for pr in reconcile.points"` (replace through the line BEFORE it — never swallow the reconcile.points loop), and §7 via `grep -n "apply_payload_operators"`.)
 
@@ -124,14 +124,14 @@
 **Intent:** Remove every "(phase-2) hosted §6b"-deferral/divergence reference the migration eliminates.
 **Acceptance:** Sweep clean; no stale citations remain anywhere.
 **Files:**
-- Modify: `tortoise/commit_ops.py` (139-143, 145-154, 278-279), `docs/event-catalog.md` (line 18), `tests/test_capture_session.py` (1522-1525 edit; ~1461 verify-only — the OUT-OF-BAND/idempotency clause stays TRUE post-migration, no edit), `tests/test_status_projection.py` (~174 verify/edit reframe to LEGACY §6b shape; 258-262, 277 reframe), `docs/ONTOLOGY.md` (132, 357 — annotate #2193 resolved)
+- Modify: `tortoise/commit_ops.py` (139-143, 145-154, 278-279), `docs/event-catalog.md` (line 18), `tests/test_capture_session.py` (1522-1526 edit; ~1461 verify-only — the OUT-OF-BAND/idempotency clause stays TRUE post-migration, no edit), `tests/test_status_projection.py` (~174 verify/edit reframe to LEGACY §6b shape; 258-262, 277 reframe), `docs/ONTOLOGY.md` (132, 357 — annotate #2193 resolved)
 
 **Step 5.1** — commit_ops.py: "(phase-2) hosted §6b" → "hosted commit endpoint (_execute_commit_writes §6b, migrated in #2193)"; drop "deliberate divergence from hosted §6b's blind LIMIT 1" → "a blind LIMIT 1 would fold an arbitrary carrier".
 **Step 5.2** — event-catalog.md:18 → all three producers emit via shared apply_supersessions (id-style kwargs incl. session_id).
 **Step 5.3** — test_capture_session.py:1522-1526 (divergent keep-first test docstring): replace the WHOLE lead-in + parenthetical block ("This pins the helper's deliberate divergence from hosted §6b's blind clobber (the M5 PHASE-2 GAP: ... NOT fixed in-PR)") ending before "The helper-routed keep-first is the one consumer discipline" → "hosted §6b migrated onto the helper in #2193 — this is now the ONE discipline; the helper-routed keep-first is the one consumer discipline that never blind-overwrites."
 **Step 5.4** — test_status_projection.py:258-277 (legacy §6b id-only replay test docstrings): reframe as LEGACY-FORMAT replay compatibility ("historical id-only lines produced pre-#2193 replay unchanged; the hosted producer moved to the kwargs shape in #2193").
 **Step 5.5** — ONTOLOGY.md #2193 rows: annotate resolved (fold now keep-first per Object).
-**Step 5.6** — Sweep: `git grep -nE "phase-2\) hosted|deliberate divergence from hosted|journals id-only and omits session_id|6140-6185|hosted_api.py:6140|M5 PHASE-2 GAP|T9's parity harness|blind clobber|currently passes the"` → no output (the extended set gates the 5.3/5.4 edits, not just the doc sweeps).
+**Step 5.6** — Sweep (scoped away from the plan doc's own quotes): `git grep -nE "phase-2\) hosted|deliberate divergence from hosted|journals id-only and omits .?session_id|phase-2 migration tracked|6140-6185|hosted_api.py:6140|M5 PHASE-2 GAP|T9's parity harness|blind clobber|currently passes the" -- ':!docs/plans'` → no output (the extended set gates the 5.3/5.4 edits, not just the doc sweeps; the backtick-tolerant `.?session_id` + `phase-2 migration tracked` terms gate the 5.2 event-catalog edit).
 **Step 5.7** — Full supersession suite green + commit.
 
 ### Task 6: Full verification + PR
