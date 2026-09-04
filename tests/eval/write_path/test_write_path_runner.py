@@ -520,3 +520,47 @@ def test_cli_protocol_bless_repins_judge_bump(tmp_path):
     assert committed["judge_pin"] == "judge-write-path-v2"
     assert committed["history"][-1].get("protocol_change") is True
     assert schema.validate_baseline(committed) == []
+
+
+def test_run_origin_judge_pin_mismatch(tmp_path, monkeypatch):
+    """REVIEW-FIX (round-3 N3): a judge-pin-drifted inconclusive run must be
+    distinguishable from a benign first-run-pending inconclusive - the
+    receipt origin is judge_pin_mismatch, not None."""
+    root = _tmp_corpus(tmp_path)
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # Reset m2.json to first-run-pending (the copied corpus carries the
+    # PUBLISHED m2 baseline - this test needs a fresh lane to bless).
+    pending = corpus.first_run_pending_baseline(root, posture="m2")
+    (root / "baselines" / "m2.json").write_text(
+        json.dumps(pending, indent=2) + "\n", encoding="utf-8")
+    # Publish an m2 baseline under the mechanical pin (run config must carry
+    # the m2 posture to match the pending baseline's config snapshot).
+    baseline = corpus.load_baseline(root, posture="m2")
+    run_config = dict(corpus.BASELINE_CONFIG)
+    run_config["extractor_posture"] = "m2"
+    run = {
+        "date": "2026-09-01T00:00:00Z",
+        "fixtures_hash": baseline["fixtures_hash"],
+        "config": run_config,
+        "metrics": {
+            "salient_unit_survival_macro": 0.5,
+            "salient_unit_survival_strict": 0.5,
+            "distractor_leakage_per_run": 1,
+            "sessions_emitting": 1.0,
+            "quote_fidelity": 1.0,
+            "provenance_accuracy": 1.0,
+        },
+        "judge_pin": JUDGE_PIN_MECHANICAL,
+        "failure_classes": [],
+    }
+    first = schema.bless_baseline(baseline, run, justification="first baseline")
+    (root / "baselines" / "m2.json").write_text(
+        json.dumps(first, indent=2) + "\n", encoding="utf-8")
+    # Force the run under a DIFFERENT judge pin (protocol drift).
+    monkeypatch.setattr(runner.judge, "JUDGE_PIN_MECHANICAL",
+                        "judge-write-path-v2-different")
+    report = runner.run_benchmark(root=root)
+    assert report["run_status"] == "completed"
+    assert report["verdict"] == schema.VERDICT_INCONCLUSIVE
+    assert report["failure_origin"] == "judge_pin_mismatch"

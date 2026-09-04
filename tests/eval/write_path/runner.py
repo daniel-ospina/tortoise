@@ -59,7 +59,7 @@ Validated by ``validate_receipt`` before any commit.
 
 Exit contract (CLI): 0 = completed non-regression, 1 = regression or
 runner_error (the CI-gate signal), 2 = inconclusive (nothing committed yet /
-config or corpus drift — the umbrella aggregates receipts, never exit
+config, corpus, or judge-pin drift — the umbrella aggregates receipts, never exit
 codes; a CI wiring must map 2 explicitly, never treat it as pass).
 """
 from __future__ import annotations
@@ -89,7 +89,8 @@ RUNS_DIR = Path(__file__).resolve().parent / "runs"
 RUN_STATUS_VALUES = frozenset({"completed", "failed", "skipped"})
 VERDICT_VALUES = schema.VERDICT_VALUES
 FAILURE_ORIGIN_VALUES = frozenset(
-    {"config_mismatch", "hash_mismatch", "runner_error", "gate_regression", None}
+    {"config_mismatch", "hash_mismatch", "judge_pin_mismatch",
+     "runner_error", "gate_regression", None}
 )
 
 # CLI exit codes
@@ -639,11 +640,15 @@ def run_benchmark(
     if verdict == schema.VERDICT_REGRESSION:
         failure_origin = "gate_regression"
     elif verdict == schema.VERDICT_INCONCLUSIVE:
-        # Distinguish config vs hash mismatch for the receipt origin.
+        # Distinguish config / hash / judge-pin / pending for the receipt
+        # origin (round-3 N3: a pin-drifted inconclusive must not be
+        # indistinguishable from a benign first-run-pending one).
         if fixtures_hash != baseline.get("fixtures_hash"):
             failure_origin = "hash_mismatch"
         elif resolved_config != baseline.get("config"):
             failure_origin = "config_mismatch"
+        elif baseline.get("judge_pin") and judge_pin != baseline.get("judge_pin"):
+            failure_origin = "judge_pin_mismatch"
         elif not (baseline.get("metrics") or {}):
             failure_origin = None  # first-run-pending — nothing to compare yet
     if not cost_tracked:
@@ -670,7 +675,7 @@ def run_benchmark(
         "corpus_hash": fixtures_hash,
         "judge_pin": judge_pin,
         "resolved_config": resolved_config,
-        "cost_usd": round(total_cost, 6) if cost_tracked else round(total_cost, 6),
+        "cost_usd": round(total_cost, 6),  # partial-sum when mixed; 0.0 + note when untracked
         "metrics": metrics,
         "quote_spans_total": quote_spans_total,
         "session_results": session_results,
@@ -1006,13 +1011,24 @@ def _main(argv: list[str] | None = None) -> int:
                     return EXIT_RUNNER_ERROR
             elif corpus_bless and not hash_changed:
                 print("cannot bless: --corpus-bless given but the run is on the "
-                      "SAME corpus (no fixtures_hash change) — use the ordinary bless",
-                      file=sys.stderr)
+                      "SAME corpus (no fixtures_hash change)" +
+                      (" and the --protocol-bless flag is redundant here"
+                       if protocol_bless else "") +
+                      " — use the ordinary bless", file=sys.stderr)
                 return EXIT_RUNNER_ERROR
             elif protocol_bless and not pin_changed:
                 print("cannot bless: --protocol-bless given but the run uses the "
-                      "SAME judge pin — use the ordinary bless", file=sys.stderr)
+                      "SAME judge pin" +
+                      (" and the --corpus-bless flag is redundant here"
+                       if corpus_bless else "") +
+                      " — use the ordinary bless", file=sys.stderr)
                 return EXIT_RUNNER_ERROR
+            elif corpus_bless and protocol_bless and not (hash_changed and pin_changed):
+                # A legitimate corpus regeneration PLUS a judge bump needs BOTH
+                # flags (schema requires both changes blessed deliberately); a
+                # run that changes only one with both flags falls through to the
+                # schema-level rejection below with its precise message.
+                pass
         run = {
             "date": receipt["date"],
             "fixtures_hash": receipt["corpus_hash"],

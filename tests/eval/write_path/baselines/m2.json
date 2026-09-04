@@ -107,7 +107,7 @@
         "ep_update_missing",
         "ep_update_missing"
       ],
-      "justification": "first m2 deterministic-lane baseline (CI can-fail gate): echo lane macro 0.972/strict 0.0/leakage 11 (structural on echo \u2014 the product leakage bar does not apply to m2; its gate is determinism) / sessions 1.0 / quote 1.0 (vacuous, no quotes in gold) / provenance 1.0"
+      "justification": "first m2 deterministic-lane baseline (CI can-fail gate): echo lane macro 0.972/strict 0.0/leakage 11 (structural on echo \u2014 the product leakage bar does not apply to m2; its gate is determinism) / sessions 1.0 / quote 1.0 (vacuous, no quotes in gold) / provenance 1.0 Receipt: receipts/w2b-m2-lane-2026-09-03.json (run w2b-076cbbdfcf6d, clean-head replay reproduced these numbers byte-identically, verdict PASS)."
     }
   ]
 }

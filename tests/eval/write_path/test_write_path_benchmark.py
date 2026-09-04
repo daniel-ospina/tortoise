@@ -162,14 +162,17 @@ def test_bpre_lane_determinism_and_provenance_regression_fails(sdk_factory, tmp_
        regression the gate must catch even when content retention looks
        fine.
 
-    The committed baseline used here is a synthetic schema-valid fixture
-    (all-1.0 targets, leakage 0) written into a byte-identical tmp corpus.
-    The echo lane's honest leakage (> 1) makes it structurally unable to
-    bless a real baseline (the schema's gold-locked tolerance) — which is
-    itself the designed fix-wave trigger; the deterministic lane's job is
-    the GATE machinery, exercised against synthetic targets (the real first
-    baseline is published by the real-LLM lane, runner CLI, with a
-    justification)."""
+    The regression-EXERCISING baseline here is a synthetic schema-valid
+    fixture (all-1.0 targets, leakage 0) written into a byte-identical tmp
+    corpus — synthetic because the real committed m2.json is PASS-at-
+    reproduction (the deterministic echo lane reproduces it byte-identically,
+    which is the gate's comparison target). The synthetic all-1.0 target is
+    the can-fail probe: the echo lane cannot meet it (observed leakage 11 > 0
+    committed), so verdict REGRESSION fires — the gate machinery under test.
+    The real committed baselines: m2.json (deterministic echo lane, leakage
+    11 structural — its gate is determinism/reproduction, not the product
+    leakage bar) and main.json (product lane, published by the real-LLM lane
+    with justification per the fix-wave protocol)."""
     report1 = _run_all(sdk_factory)
     assert report1["run_status"] == "completed"
     metrics1 = report1["metrics"]

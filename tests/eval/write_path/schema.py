@@ -919,19 +919,13 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
                 "rubber-stamp)"
             )
         verdict = None  # first number — nothing regresses against it yet
-    elif hash_changed and corpus_bless:
-        # REVIEW-FIX (corpus-bless): an INTENTIONAL corpus regeneration — the
-        # new corpus has no comparability with the old (different planted
-        # content), so there is NO compare: the run's numbers re-pin the
-        # baseline against the new hash. The justification MUST name the
-        # corpus change (the runner CLI blesses via --corpus-bless with a
-        # justification naming the change).
-        verdict = None
-    elif pin_changed and protocol_bless:
-        # REVIEW-FIX (round-3 F2): a deliberate judge-protocol re-pin on an
-        # unchanged corpus — no compare (a different grading protocol has no
-        # comparability with the old); the new numbers re-pin under the new
-        # pin. History records ``protocol_change``.
+    elif (hash_changed and corpus_bless) or (pin_changed and protocol_bless):
+        # REVIEW-FIX (corpus-bless / round-3 F2 protocol-bless): an
+        # INTENTIONAL corpus regeneration and/or judge-protocol re-pin has no
+        # comparability with the old (different corpus content / different
+        # grading protocol) — NO compare: the run's numbers re-pin. Each
+        # sanctioned change records its history marker below (both markers
+        # when both changed — a corpus regeneration PLUS a judge bump).
         verdict = None
     else:
         verdict = compare_run(
