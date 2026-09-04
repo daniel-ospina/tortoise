@@ -211,21 +211,19 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
                  f"{supersedes_by!r} is not an Object in the payload "
                  f"entities or the graph (dangling successor)")
             continue
-        if len(sb_rows) > 1:
-            warn(f"entity supersession {ref!r} skipped — successor "
-                 f"{supersedes_by!r} matches {len(sb_rows)} Objects by "
-                 f"name — skipped (never-guess)")
-            continue
-        # #2164 review (P2): the fold stores supersededBy truncated to 200
-        # chars (_fold_object_superseded: str(...)[:200]) — truncate ONCE
-        # here, AFTER the successor-visibility probe above (which must see
-        # the FULL successor name), so the keep-first probe, the journaled
-        # event, and the stored fold value all agree. Pre-fix the conflict
-        # probe compared the incoming UNtruncated value against the
-        # fold-stored truncated one — long successor names produced spurious
-        # "conflict … keep-first" warnings and same-successor dedup never
-        # fired for the same successor.
-        supersedes_by = supersedes_by[:200]
+        # NB: >1 successor rows are NOT skipped here — the alias scan below
+        # (post ref-side resolution) decides. Duplicate names are only
+        # harmful when a candidate is the target itself; otherwise the fold
+        # is deterministic (display-string-only successor).
+        # #2164 review (P2, ISSUE C): the fold stores supersededBy truncated
+        # to 200 chars (_fold_object_superseded: str(...)[:200] — mirrors the
+        # write-path name cap, sdk.py name[:200]) — the DEDUP/keep-first
+        # probe below compares against the STORED (truncated) form so a
+        # long same-successor re-ingest dedups instead of warning. The FULL
+        # name is kept for the journaled event (round-2 review, ISSUE 2 —
+        # §11: the event log is truth; replay re-truncates identically at
+        # the fold, so journal fidelity costs nothing at storage). No
+        # truncation happens here — only at the compare and the fold.
         rows = proj.g.query(
             "MATCH (o:Object) WHERE o.id IN $ids OR o.name IN $names "
             "RETURN o.id, o.name, o.status, o.supersededBy",
@@ -283,32 +281,72 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             from tortoise.sdk import _entity_name_id
             legacy_no_id = True
             obj_id = _entity_name_id("Object", obj_name)
-        # #2164 review (P1 advisory): the string-equality self-guard above
-        # only catches ref == supersedes_by on the SAME string — a MIXED
-        # id/name self-reference (superseded = the Object's canonical id,
-        # supersedes_by = that same Object's name) slips it and would fold a
-        # LIVE Object onto ITSELF (status='superseded', supersededBy=<its own
-        # name>) → it vanishes from recall_state's default view, exactly the
-        # ISSUE A harm class. Resolve the successor row (captured in the
-        # visibility probe above) against the ref-side resolution. Id
-        # equality is unambiguous; for legacy id-less rows the successor
-        # probe can only have found the ref-side object when both lack ids
-        # AND the names are identical (never-guess: duplicate names with
-        # distinct ids are NOT self-aliasing — they are a legit supersession
-        # between same-named objects and must proceed).
-        sb_id, sb_name = sb_rows[0]
-        if sb_id and obj_id and sb_id == obj_id:
+        # #2164 review (P1 advisory + round-2 ISSUE 4): the string-equality
+        # self-guard above only catches ref == supersedes_by on the SAME
+        # string. Two remaining hazards share one root — a successor
+        # candidate that IS the ref-side Object:
+        #   (a) MIXED id/name self-reference (superseded = the canonical id,
+        #       supersedes_by = that same Object's name) would fold a LIVE
+        #       Object onto ITSELF (status='superseded', supersededBy=<its
+        #       own name>) → it vanishes from recall_state's default view
+        #       (the ISSUE A harm class via a different spelling);
+        #   (b) duplicate-named successors: a blind LIMIT 1 could pick the
+        #       target as "the successor" — the same self-fold in disguise.
+        # Scan ALL successor rows for id equality against the ref-side
+        # resolution: canonical id equality is unambiguous proof that the
+        # record's successor is the target itself → skip (never-guess). When
+        # NO candidate aliases the target, duplicate-named successors are
+        # NOT a blocker — the fold stores only the successor DISPLAY string
+        # (supersedes_by) and never references a successor node, so the fold
+        # result is deterministic across same-named candidates. (Pre-
+        # round-2 the >1-name probe skipped the whole record, silently
+        # unfolding legit supersessions whose ref side was an unambiguous
+        # canonical id.) Legacy id-less self-spellings cannot reach this
+        # scan: legacy refs resolve by name (obj_name == ref), so a
+        # self-alias there requires supersedes_by == ref — already absorbed
+        # by the string-equality guard above.
+        real_obj_id = obj_id  # pre-synthesis: None for legacy id-less rows
+        # Self-alias ⇔ EVERY successor candidate is the target itself — i.e.
+        # no DISTINCT successor exists under that name (a pure self-fold with
+        # nothing left visible as the successor). If the candidate set
+        # contains any other Object (duplicate names, BOTH live), the record
+        # "<target> superseded by <name>" is meaningful — B (a live
+        # same-named Object) is the successor, and the fold stores only the
+        # display name (never a node ref), so folding is deterministic and
+        # correct regardless of which duplicate the probe matched. Legacy
+        # id-less rows can never make this True: a legacy target resolves by
+        # name (obj_name == ref), so a self-alias there requires
+        # supersedes_by == ref — already absorbed by the string-equality
+        # guard above; any id-less row reaching this scan is a DISTINCT
+        # successor (different name) and correctly forces all() to False.
+        all_candidates_are_target = bool(sb_rows) and all(
+            sid is not None and real_obj_id is not None
+            and sid == real_obj_id
+            for sid, _sname in sb_rows)
+        if all_candidates_are_target:
             warn(f"supersession record skipped (self-supersession via "
                  f"id/name aliasing): {record!r} resolves both sides to "
-                 f"{obj_name!r} (id {obj_id!r})")
-            continue
-        if legacy_no_id and not sb_id and obj_name == sb_name:
-            warn(f"supersession record skipped (self-supersession via "
-                 f"id/name aliasing): {record!r} resolves both sides to "
-                 f"{obj_name!r} (legacy id-less)")
+                 f"{obj_name!r} (id {real_obj_id!r}) — no distinct "
+                 f"successor exists under that name")
             continue
         if (o_status or "") == "superseded":
-            if (o_sb or "") == supersedes_by:
+            # stored supersededBy is truncated to 200 by the fold — compare
+            # against the truncated form (round-2 ISSUE C): a long
+            # same-successor re-ingest dedups instead of spurious conflict.
+            supersedes_by_stored = supersedes_by[:200]
+            if (o_sb or "") == supersedes_by_stored:
+                if len(o_sb or "") >= 200 and len(supersedes_by) > 200:
+                    # round-2 review (ISSUE 1): the stored fold value was
+                    # ITSELF truncated — a DIVERGENT successor sharing the
+                    # same 200-char prefix is indistinguishable from an
+                    # idempotent re-ingest. Keep-first outcome is identical
+                    # (the fold never blind-overwrites), but be loud that
+                    # identity beyond the cap is unverified rather than
+                    # silently absorbing a possible divergence.
+                    warn(f"supersession ref {ref!r} re-folded to a "
+                         f"successor sharing a 200-char prefix with the "
+                         f"stored fold — treated as idempotent (keep-first); "
+                         f"identity beyond the name cap is not verified")
                 # same successor already folded — idempotent dedup no-op
                 continue
             warn(f"supersession ref {ref!r} already superseded by "

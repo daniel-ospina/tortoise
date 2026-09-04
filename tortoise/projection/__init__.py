@@ -1297,6 +1297,7 @@ class FalkorProjection(
                 # embedding, validFrom/To, extractedFrom, provenanceSource.
                 self._upsert_point_props(p)
 
+        supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
             ev = self._norm(ev)
@@ -1355,15 +1356,45 @@ class FalkorProjection(
                 # into Object.status, but the rebuild chain had no branch — a
                 # journaled ObjectSuperseded silently fell through and the
                 # Object reverted to status='live' on JSONL wipe+rebuild.
-                # Mirror the apply() dispatch (replay is the fold's source of
-                # truth: a replayed event re-applies the same idempotent SET).
-                self._fold_object_superseded(ev)
+                # Mirror the apply() dispatch — but defer the fold to a
+                # trailing sweep (below, after this loop): a journaled
+                # producer (connector EventRecorded → _upsert_event produces-
+                # edge MERGE ON CREATE, or a later ObjectRegistered) can
+                # legitimately re-create the Object AFTER the fold event sits
+                # in the journal. Folding chronologically inside this loop
+                # would no-op (0 rows) while the object does not yet exist,
+                # then the later re-creation resurrects it status='live' —
+                # a dead Object reappearing in recall_state's default view.
+                # Replay the fold only once every object-creation event has
+                # run: the fold is an idempotent SET, so ordering vs its own
+                # registration is irrelevant and later re-creations are
+                # re-folded correctly.
+                supersede_folds.append(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
             # ConfidenceChanged: no graph effect (audit-only event)
+
+        # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
+        # creation events (see the branch above). Warn on 0-row folds — a
+        # fold that matched nothing during rebuild means the journal claims
+        # a supersession whose Object never re-existed (the pre-#2194
+        # capture OD2 gap: capture-created Objects are not journaled as
+        # ObjectRegistered, so their folds can only match when another
+        # journaled producer re-created the same-named Object). The fold is
+        # idempotent — a superseded Object that is later re-created by a
+        # future event is caught on the NEXT rebuild, but this rebuild's
+        # graph is honest about what it could not fold.
+        for ev in supersede_folds:
+            matched = self._fold_object_superseded(ev)
+            if matched == 0:
+                logger.warning(
+                    "rebuild: ObjectSuperseded fold matched no Object "
+                    "(event_id=%s superseded_by=%r) — object not "
+                    "re-created by any journaled event (OD2 capture gap?)",
+                    ev.get("event_id"), ev.get("supersedes_by"))
 
         # Pass 1b tail: restore :Batch marker nodes AND the Point.batch_id
         # enforcement links from the pre-wipe snapshot (#990) — quarantine

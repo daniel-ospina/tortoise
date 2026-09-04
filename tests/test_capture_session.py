@@ -1666,14 +1666,19 @@ def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
         f"mixed alias folded plan-X onto itself: {state!r}"
 
 
-def test_apply_supersessions_dup_name_distinct_id_not_self(sdk):
-    """#2164 review (P1 advisory, inverse): two DIFFERENT Objects that
-    share a name (distinct canonical ids) make the successor probe
-    ambiguous — the helper must NEVER guess which one is the successor
-    (never-guess skip with a warning, mirroring the ref-side >1-name
-    discipline). Blind LIMIT 1 would have folded A to a successor picked
-    arbitrarily — and if it picked A itself, that is precisely the
-    self-aliasing fold the advisory warns about."""
+def test_apply_supersessions_dup_name_successor_not_self(sdk):
+    """#2164 review (P1 advisory, inverse + round-2 ISSUE 4): duplicate-
+    named Objects (distinct canonical ids) do NOT make a supersession
+    ambiguous — the fold stores only the successor DISPLAY string (never a
+    node ref), so when a DISTINCT same-named successor exists, folding is
+    deterministic and correct. Target A (named plan-X) superseded by
+    "plan-X" where B (also named plan-X, live) exists → A IS superseded by
+    B-in-effect: applied=1, A folded, B untouched. Self-alias fires ONLY
+    when EVERY candidate is the target itself (no distinct successor) —
+    covered by test_apply_supersessions_mixed_id_name_self_alias_skipped.
+    Blind LIMIT 1 (pre-round-2) that picked A as its own successor would
+    have been the self-fold; the alias scan makes the distinct successor
+    visible."""
     from tortoise.commit_ops import apply_supersessions
 
     proj = sdk._get_proj()
@@ -1684,7 +1689,7 @@ def test_apply_supersessions_dup_name_distinct_id_not_self(sdk):
         params={"n": "plan-X"}).result_set[0][0]
     # object B ALSO named plan-X — force a second, distinct-id node directly
     # (create_entity would dedup by name; the raw write models a legacy/corrupt
-    # duplicate-name state the guard must tolerate)
+    # duplicate-name state the helper must tolerate)
     proj.g.query(
         "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'live'})",
         params={"id": "obj-planx-dup-b", "n": "plan-X",
@@ -1695,14 +1700,16 @@ def test_apply_supersessions_dup_name_distinct_id_not_self(sdk):
         [{"superseded": id_a, "supersedes_by": "plan-X",
           "evidence": "A replaced by duplicate-named B"}],
         session_id="sess_dup", warn=warns.append)
-    assert applied == 0, "ambiguous successor must never apply"
-    assert any("never-guess" in w for w in warns), warns
+    assert applied == 1, "A IS superseded — a distinct successor exists"
     assert not any("self-supersession" in w for w in warns), warns
     rows = proj.g.query(
-        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
-    assert len(rows) == 2, f"both duplicates must still exist: {rows}"
-    assert all(r[1] == "live" for r in rows), \
-        "NEITHER duplicate may be folded on an ambiguous successor ref"
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status, "
+        "o.supersededBy").result_set
+    by_id = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_id[id_a] == ("superseded", "plan-X"), \
+        f"A must fold to superseded by plan-X: {by_id}"
+    assert by_id["obj-planx-dup-b"] == ("live", None), \
+        f"B (the distinct successor) must stay live: {by_id}"
 
 
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the

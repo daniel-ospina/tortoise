@@ -207,6 +207,53 @@ class TestProjectionFold:
         finally:
             sdk.close()
 
+    def test_rebuild_all_fold_before_registration_still_folds(self, tmp_path):
+        """#2164 round-2 review (second-model ISSUE 1): the rebuild fold
+        sweep must run AFTER all object-creation events, not chronologically.
+        A journaled producer can legitimately place the ObjectSuperseded
+        event BEFORE the ObjectRegistered/object-creation that recreates the
+        Object (connector EventRecorded produces-edge MERGE ON CREATE, or a
+        later registration): chronological folding would no-op (0 rows — the
+        Object does not exist yet) and the later re-creation would then
+        resurrect it status='live' — a dead Object reappearing in
+        recall_state's default view. Two-sweep: registration first, fold
+        after → superseded survives regardless of journal order."""
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t2164f.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.id",
+                params={"n": "strategy-A"}).result_set
+            oid = rows[0][0] if rows else None
+            if not oid:
+                sdk.create_entity("object", "strategy-A",
+                                  objectKind="core:strategy")
+                rows = sdk._get_proj().g.query(
+                    "MATCH (o:Object {name:$n}) RETURN o.id",
+                    params={"n": "strategy-A"}).result_set
+                oid = rows[0][0]
+            # FOLD FIRST — the adversarial journal order (a later journaled
+            # producer re-creates the Object AFTER the supersession event).
+            sdk._emit_event("ObjectSuperseded", id=oid, name="strategy-A",
+                            supersedes_by="strategy-B")
+            # registration AFTER the fold event — the two-sweep rebuild must
+            # fold this (chronological replay would no-op + resurrect live)
+            sdk._emit_event("ObjectRegistered", id=oid, name="strategy-A",
+                            objectKind="core:strategy")
+            sdk._get_proj().rebuild_all(str(events))
+            rows = sdk._get_proj().g.query(
+                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                params={"n": "strategy-A"}).result_set
+            assert rows, "journaled ObjectRegistered must recreate the target"
+            assert rows[0][0] == "superseded", (
+                "chronological replay resurrected the superseded Object to "
+                f"live: {rows[0]!r} — the fold sweep must run after creation")
+            assert rows[0][1] == "strategy-B", rows[0]
+        finally:
+            sdk.close()
+
     def test_rebuild_all_legacy_6b_id_only_shape_supersedes(self, tmp_path):
         """#2164 legacy §6b id-only shape: hosted_api §6b currently passes the
         payload dict POSITIONALLY to _emit_event (GraphEvent-store only) with
