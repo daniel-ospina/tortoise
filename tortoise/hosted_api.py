@@ -13373,12 +13373,17 @@ def _graph_has_team_namespace(team_id: str) -> bool:
     try:
         from tortoise.sdk import TortoiseSDK
         # #2179: direct TortoiseSDK(namespace="registry") construction
-        # (bypasses _registry_anchor's keepalive lock) is SAFE-BY-TOPOLOGY
-        # here: called synchronously on the asyncio single-loop request path
-        # (no concurrent first-open on the embedded db_path — sync code runs
-        # on the one loop, and the #2172 lock's busy-flag read is
-        # GIL-atomic), it closes explicitly below, and it is wrapped in
-        # try/except returning True (graph-up-unknown) on failure. Do NOT
+        # (bypasses _registry_anchor's keepalive lock) is bounded here NOT by
+        # loop topology but by: HTTP callers run synchronously on the asyncio
+        # single loop, MCP-tool callers (FastMCP runs sync tools in a
+        # threadpool — tortoise_onboarding_state/demo_create/seed) share the
+        # same-process embedded daemon and the anchor is usually already warm
+        # from boot reconcile, every construction closes explicitly below
+        # (no keepalive store-and-drop pattern — no unclosed-loser leak
+        # class), and it is wrapped in try/except returning True
+        # (graph-up-unknown) on failure. It is NOT protected by the #2172
+        # lock's check-then-create barrier — if this ever grows a keepalive
+        # store shape, route it through _registry_anchor() first. Do NOT
         # route through _registry_anchor without first deciding the
         # path-divergence (#2179 follow-up): this bare construction resolves
         # via config.resolve_db_path() → ~/.tortoise/tortoise.db when

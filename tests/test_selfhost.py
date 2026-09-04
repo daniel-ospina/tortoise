@@ -341,9 +341,10 @@ class TestSubprocessSmoke:
 # (keep in sync): a counting __init__ parks ~300ms to widen the pre-fix
 # window, then asserts 1 anchor + N fresh SDKs, no closed-aware orphan,
 # and a sentinel written via the anchor reads back through every returned
-# SDK (decoupled-server guard). Round 3 pre-seeds a PATH-DRIFTED anchor
-# (bound to seed.db, stored under the round key) so the in-lock stale
-# evict + recreate branch is exercised under contention too.
+# SDK (decoupled-server guard). The third iteration (round 2, 0-based)
+# pre-seeds a PATH-DRIFTED anchor (bound to seed.db, stored under the
+# round key) so the in-lock stale evict + recreate branch is exercised
+# under contention too.
 def test_sdk_concurrent_first_calls_single_anchor(monkeypatch):
     import threading
     import time
