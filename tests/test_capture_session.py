@@ -242,11 +242,21 @@ def test_capture_w5_phase_c_promotion_is_rebuild_durable(tmp_path, monkeypatch):
             for e in op_promos:
                 oid = e["point"]["id"]
                 orow = rproj.g.query(
-                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    "MATCH (n:Point {id:$id}) RETURN n.status, "
+                    "n.is_operator, n.op_type",
                     params={"id": oid},
                 ).result_set
-                assert orow and orow[0][0] == "live", \
+                # LIVE status AND operator identity survive rebuild — the
+                # status-SET-only replay must NOT recompute is_operator/
+                # op_type from the flat snapshot (#2256 review P1: a full
+                # upsert would silently convert operators to claims).
+                assert orow, f"operator {oid} missing after rebuild"
+                assert orow[0][0] == "live", \
                     f"rebuild must restore operator {oid} as live (got {orow})"
+                assert orow[0][1] is True, \
+                    f"rebuild must keep operator {oid} is_operator (got {orow})"
+                assert orow[0][2] in ("IMPL", "NAND"), \
+                    f"rebuild must keep operator {oid} op_type (got {orow})"
         finally:
             rebuilt.close()
     finally:
