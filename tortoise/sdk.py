@@ -2242,10 +2242,18 @@ class TortoiseSDK:
             )
             event_id = event.get("id") or event.get("eventId")
             if event_id:
+                # W5 (#2104, S1): the SDK mirror stamps the full write
+                # provenance alongside the ontology-compliant eventId —
+                # byte-parity with hosted_api's capture stamp (the W2
+                # benchmark grades provenance_accuracy over these fields).
+                source_harness = harness or "unknown"
                 proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "SET n.eventId=$eid, n.source_session=$sid, "
+                    "    n.source_harness=$harness, n.ingested_at=$ing",
                     params={"ids": [p["id"] for p in extracted],
-                            "eid": event_id},
+                            "eid": event_id, "sid": session_id,
+                            "harness": source_harness, "ing": now},
                 )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
