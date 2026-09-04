@@ -375,6 +375,7 @@ surfaces:
   - test_ep_quadrature.py
   - test_ep_selector.py
   - test_ep_sources.py
+  - test_2199_decide_calibration.py
   - test_file_human_approval.py
   - test_gmm_proofs.py
   - test_issue94_annotate_ep_batch.py
@@ -585,6 +586,7 @@ carve_out:
 - bench/test_smoke_embedded.py
 push_extra: []
 durations:
+  test_2199_decide_calibration.py: 8.5
   test_calibration.py: 52.1
   test_battery_setup.py: 26.0
   test_main_guards.py: 19.5

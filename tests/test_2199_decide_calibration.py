@@ -101,6 +101,28 @@ class TestDecisionPartsBornLive:
         assert pt["status"] == "draft"
         assert pt.get("baseline_set") in (None, False)
 
+    def test_explicit_live_status_keeps_manual_control_no_default(self, sdk):
+        """An EXPLICIT status='live' decide part must NOT get a system-default:
+        the caller asked for manual control (e.g. a capture/commit receiver
+        filing a sourced decide part live — it must stay inherit-eligible so a
+        tiered source's belief is applied at EP time, never frozen at the flat
+        medium default). Born-live-without-status is the ONLY auto path."""
+        p = sdk.create_point("option", "Sourced live option", status="live",
+                             extractedFrom="https://docs.example/tiered")
+        pt = sdk.get_point(p["id"])
+        assert pt["status"] == "live"
+        assert pt.get("baseline_set") in (None, False)
+        assert pt.get("baseline_source") is None
+        # And with a tiered source, inheritance applies at EP time (no
+        # system-default token blocking it).
+        sdk._get_proj().g.query(
+            "MATCH (s:Source {url:$url}) SET s.credibilityTier='T0'",
+            params={"url": "https://docs.example/tiered"},
+        )
+        sdk._apply_source_inheritance(recency_decay=1.0)
+        assert sdk.get_point(p["id"])["baseline_source"] == \
+            BASELINE_SOURCE_INHERITED
+
     def test_statement_without_status_unchanged_draft_no_default(self, sdk):
         """Non-decide kinds are untouched — no silent uniform anywhere."""
         p = sdk.create_point("statement", "Plain claim")
@@ -285,6 +307,35 @@ class TestDocumentedDecideFlowFirstTry:
         pt2 = sdk.get_point(mit["id"])
         assert pt2["baseline_source"] == BASELINE_SOURCE_SET_BY_AUTHOR
         assert pt2["ep_alpha"] == 2 and pt2["ep_beta"] == 1
+
+    def test_remitigating_legacy_uncalibrated_mitigation_heals_it(self, sdk):
+        """Re-mitigating a PRE-#2199 mitigation (live statement, no baseline)
+        stamps the system default so the documented first-run EP never trips
+        the fail-closed CalibrationError on legacy graphs (P2-2 review)."""
+        opt = sdk.create_point("option", "Option A")
+        finding = sdk.create_point("evidence", "Supports A")
+        op = sdk.create_operator("IMPL", finding["id"], [opt["id"]])
+        # Simulate a legacy mitigation point with NO baseline.
+        proj = sdk._get_proj()
+        from tortoise.ids import ulid as _ulid
+        mid = _ulid()
+        proj.g.query(
+            "CREATE (m:Point {id:$id, content:$c, pointKind:'statement', "
+            "mitigation_strength:0.3, is_operator:false})",
+            params={"id": mid, "c": "[MITIGATION] legacy reason"},
+        )
+        proj.g.query(
+            "MATCH (m:Point {id:$mid}), (op:Point {id:$oid}) "
+            "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
+            params={"mid": mid, "oid": op["id"]},
+        )
+        assert sdk.get_point(mid).get("baseline_set") in (None, False)
+        healed = sdk.mitigate_operator(op["id"], "Updated reason", 0.2)
+        assert healed["id"] == mid
+        pt = sdk.get_point(mid)
+        assert pt["baseline_set"] is True
+        assert pt["baseline_source"] == BASELINE_SOURCE_SYSTEM_DEFAULT
+        assert (pt["ep_alpha"], pt["ep_beta"]) == (3, 1)
 
     def test_mitigate_unknown_credibility_fails_loud(self, sdk):
         opt = sdk.create_point("option", "Option A")

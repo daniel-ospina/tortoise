@@ -1944,7 +1944,16 @@ class TortoiseSDK:
             alpha, beta = cred_prior
             self.set_point_baseline(pid, alpha, beta,
                                     source=BASELINE_SOURCE_SET_BY_AUTHOR)
-        elif kind in DECIDE_PART_KINDS and status == "live":
+        elif not explicit_status and kind in DECIDE_PART_KINDS:
+            # #2199: system default applies ONLY to decide parts that were
+            # BORN live (no explicit status in the call) — a caller that
+            # explicitly passed a status keeps full manual control per the
+            # docstring: no auto default. This matters for sourced decide
+            # parts filed live from a capture/commit receiver: they must stay
+            # inherit-eligible (baseline_source IS NULL) so a tiered source's
+            # belief is applied at EP time instead of being frozen at the
+            # flat medium default (which would silently overwrite source
+            # belief — never-write-source-inheritance class).
             from tortoise.source_credibility import credibility_prior
             alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
             self.set_point_baseline(pid, alpha, beta,
@@ -4492,12 +4501,21 @@ class TortoiseSDK:
                               mitigation_strength=strength)
             # An explicit belief on the idempotent-update path re-baselines
             # (never silently ignored). No credibility → keep whatever the
-            # mitigation already carries (system-default from creation, or an
-            # earlier author statement).
+            # mitigation already carries — EXCEPT a legacy pre-#2199
+            # mitigation with NO baseline at all: that is the exact
+            # uncalibrated-live-evidence case the decide flow must not leave
+            # behind (it would trip the fail-closed CalibrationError on the
+            # documented first-run EP). Heal it with the system default so a
+            # legacy mitigation becomes rankable on the next re-mitigation.
             if author_prior is not None:
                 self.set_point_baseline(
                     mid, author_prior[0], author_prior[1],
                     source=BASELINE_SOURCE_SET_BY_AUTHOR)
+            elif not self.get_point(mid).get("baseline_set"):
+                alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+                self.set_point_baseline(
+                    mid, alpha, beta,
+                    source=BASELINE_SOURCE_SYSTEM_DEFAULT)
             return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
