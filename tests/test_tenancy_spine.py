@@ -40,7 +40,6 @@ def _spine_env(tmp_path):
     """
     import tortoise.hosted_api as ha_mod
 
-    import tortoise.hosted_api as ha_mod
     db_path = os.path.join(tmp_path, "spine.db")
     os.environ["TORTOISE_DB_PATH"] = db_path
     sdk = ha_mod._make_sdk(namespace="registry")
