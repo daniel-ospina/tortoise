@@ -402,6 +402,7 @@ def test_rotate_held_durable_key_replaces_in_place(page: Page) -> None:
     session_mints: list = []
     minted_bodies: list = []
     dialog_messages: list = []
+    order: list = []  # F3 (review): pin mint-before-revoke ordering
 
     def handle(route):
         url = route.request.url
@@ -417,6 +418,7 @@ def test_rotate_held_durable_key_replaces_in_place(page: Page) -> None:
             if path.endswith("/v1/team/keys") and method == "POST":
                 # The rotate replacement mint. #2229: label carry-over — the
                 # body must echo the old row's name ("dashboard (held)").
+                order.append("mint")
                 minted_bodies.append(route.request.post_data or "")
                 row = _key_row("key_rot_2229", ROT_NEW_PREFIX,
                                "dashboard (held)", created_via="provisioned")
@@ -427,6 +429,7 @@ def test_rotate_held_durable_key_replaces_in_place(page: Page) -> None:
                                                "key_prefix": row["key_prefix"]}))
                 return
             if path.endswith(f"/v1/team/keys/{ROT_HELD_ID}") and method == "DELETE":
+                order.append("delete")
                 for k in keys:
                     if k["id"] == ROT_HELD_ID:
                         k["revoked_at"] = "2026-08-03T12:00:00.000Z"
@@ -521,6 +524,10 @@ def test_rotate_held_durable_key_replaces_in_place(page: Page) -> None:
     # The mint carried the old row's label (in-place rotate identity).
     assert len(minted_bodies) == 1, f"expected one mint, got {minted_bodies}"
     assert json.loads(minted_bodies[0]).get("name") == "dashboard (held)"
+    # F3 (review): mint MUST precede the revoke (the at-cap 402 rationale is
+    # mint-first — the old key authorizes until the replacement exists; a
+    # revoke-first regression would reintroduce the revoked-key-held window).
+    assert order == ["mint", "delete"], f"rotate ordering violated: {order}"
     # Zero session-key mints — rotate is a durable compose only.
     assert session_mints == [], f"zero-mint tripwire: POST /v1/session/key fired: {session_mints}"
 

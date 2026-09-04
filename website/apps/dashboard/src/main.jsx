@@ -4147,9 +4147,20 @@ function claimIntentInFlight() {
       // flight (switch/refresh) — degrade to an unlabeled mint.
       const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
       const newKeyVal = await mintKey(activeKey, (oldRow && oldRow.name) || undefined)
+      // Round-29 (review P1): NEVER revoke without installing — if the team
+      // moved during the mint RTT, bail BEFORE the destructive leg (the old
+      // row may not belong to the now-selected team; revoking it would leave
+      // a revoked held credential + a lost replacement plaintext). The minted
+      // replacement stays as a visible team-A durable (same accepted orphan
+      // semantics as createKey's identity guard). Mirrors revokeKey's
+      // Round-20 capture pattern.
+      if (teamIdRef.current !== _teamAtCall) return
       // Revoke the old key — its mechanical revoke keeps skip-clear: the
-      // replacement is already minted, so the slot-aware clear must NOT fire
-      // mid-flow (the unconditional install below is the sole writer).
+      // H2 slot-clear leg must NOT fire mid-flow. NOTE (comment accuracy):
+      // revokeKey's tail loadAll still runs the rule-5 classifyHeldKey drop
+      // on the just-revoked old key (interim clear) — the unconditional
+      // install below rewrites slot/apiKey/teamKeysRef on the same tick, so
+      // the end state is the replacement, never a revoked key.
       await revokeKey(keyId, { skipConfirm: true, skipBootstrap: true })
       if (teamIdRef.current !== _teamAtCall) return
       // #2167 (rule 7): install the replacement UNCONDITIONALLY (H3) —
