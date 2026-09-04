@@ -698,7 +698,8 @@ def test_bless_rejects_invalid_run_metrics() -> None:
     # legitimized: compare_run treats leakage > tolerance as regression on
     # every subsequent run (see test_leakage_above_tolerance_always_regresses).
     pending = _synthetic_pending_baseline()
-    leaky = _full(); leaky["distractor_leakage_per_run"] = 9
+    leaky = _full()
+    leaky["distractor_leakage_per_run"] = 9  # #2174-lint E702
     blessed = schema.bless_baseline(
         pending, _run_with(leaky), justification="first baseline — over-tolerance leakage named as failure class"
     )
@@ -820,7 +821,7 @@ def test_bless_refuses_inconclusive_compare() -> None:
         "metrics": {"salient_unit_survival_macro": 0.9},
         "failure_classes": [],
     }
-    with pytest.raises(ValueError, match="corpus drift|fixtures_hash differs"):
+    with pytest.raises(ValueError, match=r"corpus drift|fixtures_hash differs"):  # #2174-lint RUF043
         schema.bless_baseline(previous, run, justification="cannot bless a mismatched corpus")
 
 
