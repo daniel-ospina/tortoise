@@ -35,10 +35,24 @@ pytestmark = pytest.mark.skipif(
     not _server_uri_set(),
     reason="docker lane only — per-graph ACL needs a server FalkorDB (URI set)")
 
-# falkordb module present gate (bare redis → module no-ops → skip):
+# falkordb module present gate (bare redis → module no-ops → skip).
+# RETRIES: a freshly-provisioned falkordb container answers the health
+# PING before MODULE LIST is populated (the module registers a beat after
+# redis accepts connections) — CI's fast lane hit this startup race and
+# all 14 tests vacuous-skipped, tripping the skip-fail guard (PR #2220).
+# Bounded: only when a URI is set, ≤ 5 attempts × 2s. A genuine absence
+# (bare redis behind a docker URI) still lands False → skip; in the docker
+# lane that skip reds the skip-fail guard, which is CORRECT (the lane
+# promises falkordb — silent-green would mask the probe regression).
 if _server_uri_set():
-    _probe = acl._admin_client()
-    _HAS_FALKORDB = _probe is not None and acl._falkordb_present(_probe)
+    import time as _time
+    _HAS_FALKORDB = False
+    for _attempt in range(5):
+        _probe = acl._admin_client()
+        if _probe is not None and acl._falkordb_present(_probe):
+            _HAS_FALKORDB = True
+            break
+        _time.sleep(2)
 else:
     _HAS_FALKORDB = False
 
