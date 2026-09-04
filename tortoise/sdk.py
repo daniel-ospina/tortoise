@@ -12617,7 +12617,9 @@ class TortoiseSDK:
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
                       delegation_depth: int | None = None,
-                      prefix: str = "tt_") -> dict:
+                      prefix: str = "tt_",
+                      name: str | None = None,
+                      created_via: str | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
@@ -12628,7 +12630,11 @@ class TortoiseSDK:
         (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
         NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
         the provisioning service mint tk_ per-graph keys (epic vocabulary);
-        existing callers unchanged.
+        existing callers unchanged. C3 (#2112): ``name`` (user-facing label,
+        20260825000001 parity — the hosted create_api_key lane passes it)
+        and ``created_via`` (mint-source classification — "provisioned" /
+        "agent_signup" etc.) ride the node as optional props; absent =
+        legacy nodes without them.
 
         Registry-side invariant (code-review #2b, mirrors the Supabase DB
         CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
@@ -12667,7 +12673,8 @@ class TortoiseSDK:
         reg = self._get_registry()
         # C1 (#2110): include non-None tenancy props in the CREATE (absent =
         # old callers unchanged; old registry nodes without the props resolve
-        # with safe defaults).
+        # with safe defaults). C3 (#2112): name/created_via ride the same
+        # optional-props pattern.
         extra = ""
         params = {"id": kid, "tid": team_id, "kh": key_hash,
                   "kp": key_prefix, "cb": created_by, "now": now}
@@ -12679,6 +12686,10 @@ class TortoiseSDK:
             extra += ", created_by_key_id:$cbk"; params["cbk"] = created_by_key_id  # noqa: E702 (baseline #1503)
         if delegation_depth is not None:
             extra += ", delegation_depth:$dd"; params["dd"] = delegation_depth  # noqa: E702 (baseline #1503)
+        if name is not None:
+            extra += ", name:$nm"; params["nm"] = name  # noqa: E702 (baseline #1503)
+        if created_via is not None:
+            extra += ", created_via:$cv"; params["cv"] = created_via  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"

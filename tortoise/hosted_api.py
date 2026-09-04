@@ -1719,6 +1719,23 @@ async def _session_user_team(request: Request, user: dict) -> dict:
     return team
 
 
+def _require_keys_manage(team: dict, surface: str) -> None:
+    """C3 (#2112) code-review P1: a deleg-NULL SCOPED key (deleg NULL but
+    scopes non-empty → NOT legacy_full_access) is a least-privilege
+    credential — the mint gate (D13 row 4) requires keys:manage, and so
+    must the other key-management surfaces (revoke, list). Legacy
+    full-access keys (deleg NULL, scopes=[]) are the owner class and pass;
+    deleg=0 keys never reach here (the DI dormancy gate 403s them first);
+    session faces pass (no key_id)."""
+    if team.get("key_id") is not None \
+            and not team.get("legacy_full_access") \
+            and "keys:manage" not in (team.get("scopes") or []):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Missing keys:manage scope to {surface}",
+        )
+
+
 def _reject_minted_delegated_key(team: dict, surface: str) -> None:
     """C2 (#2111) one-level-deep guard (code-review security P1): a MINTED
     (deleg=0) per-graph key must NEVER reach account-management or
@@ -2115,14 +2132,6 @@ class CheckoutResponse(BaseModel):
 
 class PortalResponse(BaseModel):
     portal_url: str
-
-
-class CreateKeyResponse(BaseModel):
-    id: str
-    key: str  # plaintext — shown once
-    key_prefix: str
-    created_at: str
-    name: str | None = None  # optional user-facing label (20260825000001)
 
 
 class KeyListResponse(BaseModel):
@@ -4516,6 +4525,17 @@ async def create_demo_graph(request: Request):
 # (chk_minted_key_no_escalation) is the backstop.
 _MINTABLE_SCOPES = ("graphs:read", "graphs:write")
 
+# C3 (#2112): the FULL allowlist an OWNER-class mint may request (§5.4 —
+# scopes, all-off default). Write-implies-read is a resolve-time
+# classification (C5 enforces it per-surface); the allowlist here is the
+# mint-time vocabulary. Escalation = the difference from _MINTABLE_SCOPES
+# (graphs:create/delete/keys:manage/team:manage — never inherited by
+# key-minted children; DB CHECK chk_minted_key_no_escalation backstops).
+_OWNER_SCOPE_ALLOWLIST = (
+    "graphs:read", "graphs:write", "graphs:create",
+    "graphs:delete", "team:manage", "keys:manage",
+)
+
 
 class _KeyCapExceeded(Exception):
     """max_api_keys reached — caller maps to 409 + graph rollback (D4)."""
@@ -4538,42 +4558,54 @@ def _team_node_sync_limits(team_id: str) -> dict:
     return _team_limits_from_node(node) if node else {}
 
 
-def _mint_graph_key(team_id: str, graph_id: str,
-                    requested_scopes: list | None,
-                    caller_key_id: str | None,
-                    session_user_id: str | None = None) -> dict:
-    """Mint a per-graph key (tk_ prefix, deleg=0) — the ONE mint.
+def _mint_key(team_id: str, *, graph_id: str | None = None,
+              scopes: list | None = None,
+              delegation_depth: int | None = None,
+              caller_key_id: str | None = None,
+              session_user_id: str | None = None,
+              prefix: str | None = None,
+              created_via: str = "provisioned",
+              name: str | None = None) -> dict:
+    """C3 (#2112) — the ONE low-level key write (registry + Supabase).
+    Generalized from C2's _mint_graph_key (D14 — never re-implemented):
+    graph_id is OPTIONAL (None = team-wide key → default graph), scopes
+    arrive ALREADY validated/filtered by the caller class (owner mint may
+    carry escalation; key mint ∩ child policy), delegation_depth is 0 for
+    key-minted children or None for owner-minted keys.
 
     Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
-    graph_id, created_by_key_id, created_at}. key_plaintext appears ONLY in
-    this return (reveal-once: the caller puts it in the 201 envelope and
-    nowhere else; hash-only stored). Raises _KeyCapExceeded when the team
-    is at max_api_keys (caller maps 409 + graph rollback).
+    graph_id, created_by_key_id, created_at}. key_plaintext appears ONLY
+    in this return (reveal-once: the caller puts it in the 201 envelope /
+    mint response and nowhere else; hash-only stored). Raises
+    _KeyCapExceeded when the team is at max_api_keys (caller maps 409).
+    C4 (#2113) ACL seam fires for graph-bound mints (fail-soft no-op).
     """
     import uuid
 
     from tortoise.auth import lookup_hash
+
+    # Key-cap gate (pre-check; the caller rolls back on _KeyCapExceeded —
+    # the provisioning caller rolls back the graph, no graph-without-key).
+    from tortoise.quota import _count_resource
     from tortoise.supabase_control import (
         get_control_plane,
         insert_api_key,
         is_supabase_enabled,
     )
-
-    # Child policy: requested ∩ mintable (escalation scopes never inherited;
-    # empty result → the safe default read-only).
-    scopes = [s for s in (requested_scopes or [])
-              if s in _MINTABLE_SCOPES] or ["graphs:read"]
-
-    # Key-cap gate (pre-check; the graph already exists at call time — the
-    # caller rolls back the graph on _KeyCapExceeded, no graph-without-key).
-    from tortoise.quota import _count_resource
     max_keys = _team_node_sync_limits(team_id).get("max_api_keys")
     if max_keys is not None:
         count = _count_resource(team_id, "api_keys")
         if count >= int(max_keys):
             raise _KeyCapExceeded()
 
-    api_key = f"tk_{uuid.uuid4().hex}"
+    # D15: scoped (or graph-bound) keys are the epic's single tk_ type;
+    # a legacy-shape mint (no scopes, no graph) keeps tt_ so existing
+    # dashboard/CLI {} bodies are byte-identical.
+    final_scopes = list(scopes or [])
+    if prefix is None:
+        prefix = "tk_" if (final_scopes or graph_id) else "tt_"
+
+    api_key = f"{prefix}{uuid.uuid4().hex}"
     key_prefix = api_key[:10]
     kid = _short_id()
     now = datetime.now(UTC).isoformat()
@@ -4592,16 +4624,17 @@ def _mint_graph_key(team_id: str, graph_id: str,
             "team_id": team_id,
             "lookup_hash": lookup_hash(api_key),
             "key_prefix": key_prefix,
-            "created_via": "provisioned",
+            "created_via": created_via,
             "created_by": created_by,
             "created_at": now,
             "revoked_at": None,
             "expires_at": None,
+            "name": name,
             # C1 columns: graph scope + allowlist + mint lineage
             "graph_id": graph_id,
-            "scopes": scopes,
+            "scopes": final_scopes,
             "created_by_key_id": caller_key_id,
-            "delegation_depth": 0,
+            "delegation_depth": delegation_depth,
         })
     else:
         sdk = _make_sdk(namespace="registry")
@@ -4611,9 +4644,9 @@ def _mint_graph_key(team_id: str, graph_id: str,
         # id; a revealed plaintext must verify against the stored hash).
         created = sdk.apikey_create(
             team_id, session_user_id or "api",
-            graph_id=graph_id, scopes=scopes,
-            created_by_key_id=caller_key_id, delegation_depth=0,
-            prefix="tk_",
+            graph_id=graph_id, scopes=final_scopes or None,
+            created_by_key_id=caller_key_id, delegation_depth=delegation_depth,
+            prefix=prefix, name=name, created_via=created_via,
         )
         kid = created["id"]
         api_key = created["api_key"]
@@ -4621,18 +4654,78 @@ def _mint_graph_key(team_id: str, graph_id: str,
 
     # C4 (#2113) seam: ACL user created at mint (defense-in-depth). Fail-soft
     # no-op when C4 is absent — surface-6 assertions run at capstone (#2118).
-    _acl_user_create_hook(graph_id, team_id)
+    if graph_id:
+        _acl_user_create_hook(graph_id, team_id)
 
     return {
         "id": kid,
         "key_plaintext": api_key,
         "key_prefix": key_prefix,
-        "scopes": scopes,
-        "delegation_depth": 0,
+        "scopes": final_scopes,
+        "delegation_depth": delegation_depth,
         "graph_id": graph_id,
         "created_by_key_id": caller_key_id,
         "created_at": now,
     }
+
+
+def _mint_graph_key(team_id: str, graph_id: str,
+                    requested_scopes: list | None,
+                    caller_key_id: str | None,
+                    session_user_id: str | None = None) -> dict:
+    """C2 (#2111) provisioning wrapper over the ONE low-level mint (D14).
+    Graph-bound (graph_id required), deleg=0 child (never inherits
+    escalation — child policy ∩ _MINTABLE_SCOPES), tk_ prefix. C3's
+    standalone endpoints call _mint_key directly with the caller-class
+    matrix (D13); this wrapper keeps C2's provisioning callers unchanged.
+
+    Returns {id, key_plaintext, key_prefix, scopes, delegation_depth,
+    graph_id, created_by_key_id, created_at}. Raises _KeyCapExceeded when
+    the team is at max_api_keys (caller maps 409 + graph rollback).
+    """
+    # Child policy: requested ∩ mintable (escalation scopes never inherited;
+    # empty result → the safe default read-only).
+    scopes = [s for s in (requested_scopes or [])
+              if s in _MINTABLE_SCOPES] or ["graphs:read"]
+    return _mint_key(
+        team_id, graph_id=graph_id, scopes=scopes,
+        delegation_depth=0, caller_key_id=caller_key_id,
+        session_user_id=session_user_id, prefix="tk_",
+    )
+
+
+def _ensure_graph_exists(team_id: str, graph_id: str) -> None:
+    """C3 (#2112): a graph-bound mint references an existing CUSTOM graph.
+
+    The default graph is bound via a team-wide key (graph_id ABSENT —
+    resolution maps it to the default namespace); there is no per-graph key
+    for the default graph. The literal "default" is the supabase seam's
+    DERIVED row id (no graphs row — teams.graph_name) and the registry
+    default node (kind='default', real gid g_<hex>) is not key-bindable, so
+    both 404 here (mirrors delete_graph's kind pre-lookup: a custom graph
+    must be a non-deleted row/node)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    if is_supabase_enabled():
+        rows = get_control_plane().query(
+            "graphs", select=["kind", "status"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+        row = rows[0] if rows else None
+        ok = row is not None and row.get("status") != "deleted" \
+            and row.get("kind") != "default"
+    else:
+        sdk = _make_sdk(namespace="registry")
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "RETURN g.kind, g.status",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        ok = bool(rows) and rows[0][1] != "deleted" and rows[0][0] != "default"
+    if not ok:
+        raise HTTPException(status_code=404, detail="Unknown graph")
 
 
 def _acl_user_create_hook(graph_id: str, team_id: str) -> None:
@@ -4665,9 +4758,16 @@ def _acl_user_drop_hook(graph_id: str) -> None:
         _logger.warning("ACL user drop failed for graph %s (non-blocking): %s", graph_id, e)
 
 
-@app.post("/v1/team/keys", response_model=CreateKeyResponse)
+@app.post("/v1/team/keys")
 async def create_api_key(request: Request, response: Response, team: dict = Depends(get_current_team_session)):  # noqa: B008
     """Generate a new API key for the team.
+
+    C3 (#2112): the body may carry {graph_id?, scopes?, name?} — a scoped
+    mint routes the D13 delegation matrix (session/legacy-owner → deleg
+    NULL owner key with the full allowlist; scoped keys:manage key →
+    deleg=0 child ∩ child policy, escalation request 403; deleg=0 caller
+    → 403). Bodies default to {} (legacy clients) → the byte-identical
+    pre-C3 owner mint (tt_, deleg NULL, no scopes).
 
     #765 (plan Task 8 writer inventory): Supabase mode inserts the api_keys
     row via the seam (lookup_hash + key_prefix + created_via='provisioned'),
@@ -4676,10 +4776,11 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     which stays for selfhost. The registry path is the #767 review note
     (PR #851 P1) surface this migration closes: no production window exists
     because #765 lands before the single-deploy flip (#771).
-
-    The body is optional and currently carries one field: `name` — an
-    optional user-facing label (migration 20260825000001) so dashboards/CLI
-    can remember which key is which. Bodies default to {} (legacy clients)."""
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
     # C2 (#2111) one-level-deep guard: a MINTED (deleg=0) caller key can
     # NEVER mint another key — the child policy (deleg=0 keys cannot
     # escalate) covers this capability surface, not just scope columns
@@ -4689,50 +4790,164 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
     if team.get("key_id") is not None and team.get("delegation_depth") == 0:
         raise HTTPException(status_code=403,
                             detail="Minted keys cannot mint new keys")
-    _check_team_limit(team, "api_keys")
-    # Key label (optional): read the body defensively — mint bodies are
-    # usually `{}` (dashboard/CLI), so a name is best-effort, never a
-    # failure mode for a mint.
+    # Key label + C3 (#2112) scoped-mint body: {name?, graph_id?, scopes?}.
+    # Read the body defensively — mint bodies are usually `{}` (dashboard/
+    # CLI), so parse failures degrade to the legacy owner mint, never a
+    # failure mode.
     name = None
+    graph_id = None
+    requested_scopes = None
     try:
         raw = await _read_capped_body(request, _BODY_MAX_BYTES, _BODY_413_DETAIL)
         payload = _json.loads(raw)
-        name = _clean_key_label(payload.get("name")) if isinstance(payload, dict) else None
+        if isinstance(payload, dict):
+            name = _clean_key_label(payload.get("name"))
+            graph_id = payload.get("graph_id")
+            requested_scopes = payload.get("scopes")
     except HTTPException:
         raise
     except Exception:
         name = None
-    import uuid
 
-    from tortoise.auth import lookup_hash
-    from tortoise.supabase_control import (
-        get_control_plane,
-        insert_api_key,
-        is_supabase_enabled,
-    )
-    api_key = f"tt_{uuid.uuid4().hex}"
-    key_hash = hash_api_key(api_key)
-    key_prefix = api_key[:10]
-    kid = _short_id()
-    now = datetime.now(UTC).isoformat()
+    is_key_caller = team.get("key_id") is not None
+    caller_scopes = team.get("scopes") or []
+    caller_legacy_full = bool(team.get("legacy_full_access"))
+
+    # D13 caller-class matrix. The DEFAULT (no scopes + no graph_id in the
+    # body) is the legacy owner-class mint — byte-identical response, tt_,
+    # 402 key-cap (D3 asymmetry preserved). A SCOPED mint (scopes and/or
+    # graph_id) routes the D13 rules. A scoped deleg-NULL key with a {}
+    # body is NOT an owner-class mint (it can only mint a deleg=0 child) —
+    # cap class 409, not the legacy 402.
+    scoped_request = bool(requested_scopes) or bool(graph_id)
+    # NOTE (code-review): bool() collapses an explicit `"scopes": []` onto
+    # the absent case — a session/legacy-full owner face POSTing
+    # {"scopes": []} mints the legacy owner-class full-access tt_ key,
+    # exactly like {} (empty allowlist dropped). Owner-class faces may
+    # already mint full-access via {}, so this is not an escalation; the
+    # response omits the C3 fields (no signal the empty array was dropped),
+    # mirroring the shrink branch's treatment of scopes=[] + deleg NULL as
+    # legacy_full_access. Deleg-NULL scoped keys can never reach this branch
+    # with [] (their {} mint is the deleg=0 child path below).
+    child_mint = is_key_caller and not caller_legacy_full
+    try:
+        if not scoped_request:
+            # Legacy {} mint — D13 caller-class gate: SESSION faces and
+            # legacy full-access (deleg-NULL, scopes=[]) OWNER-class keys
+            # mint the byte-identical pre-C3 tt_ key (402 key-cap, D3). A
+            # scoped deleg-NULL key (even WITH keys:manage) may NOT mint a
+            # full-access owner key — its {} mint routes the row-3/row-4
+            # semantics: 403 without keys:manage (no mint capability); a
+            # deleg=0 child with lineage (created_by_key_id + deleg=0) when
+            # it has keys:manage — never an escalation to the owner class.
+            # deleg=0 callers never reach here (central gate).
+            if is_key_caller and not caller_legacy_full:
+                if "keys:manage" not in caller_scopes:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Missing keys:manage scope to mint keys",
+                    )
+                # keys:manage scoped key + {} body → deleg=0 child with the
+                # child-policy default scope (C2 parity), tk_ prefix.
+                minted = _mint_key(
+                    team["team_id"], scopes=["graphs:read"],
+                    delegation_depth=0, caller_key_id=team["key_id"],
+                    session_user_id=team.get("session_user_id"),
+                    prefix="tk_", name=name,
+                )
+            else:
+                _check_team_limit(team, "api_keys")
+                minted = _mint_key(
+                    team["team_id"], name=name,
+                    session_user_id=team.get("session_user_id"),
+                )
+        else:
+            if not isinstance(requested_scopes, list):
+                raise HTTPException(status_code=422,
+                                    detail="scopes must be an array of allowlisted scope strings")
+            unknown = [s for s in requested_scopes
+                       if not isinstance(s, str) or s not in _OWNER_SCOPE_ALLOWLIST]
+            if unknown:
+                # code-review: key=str keeps a non-str member (e.g. int in a
+                # crafted body) from raising TypeError in sorted() → the 422
+                # must never degrade to a 500.
+                raise HTTPException(status_code=422,
+                                    detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
+            # Key caller WITHOUT the mint capability (D13): a scoped deleg-NULL
+            # key that lacks keys:manage may not mint. Legacy full-access keys
+            # (scopes=[]) are the owner class and pass (C1 legacy_full_access).
+            if is_key_caller and not caller_legacy_full \
+                    and "keys:manage" not in caller_scopes:
+                raise HTTPException(status_code=403,
+                                    detail="Missing keys:manage scope to mint keys")
+            # Key caller WITH mint capability → deleg=0 child (one-level-deep):
+            # scopes ∩ child policy; an escalation-scope REQUEST from a key is a
+            # 403 (§6.3 — never silently stripped). SESSION faces and legacy
+            # full-access (owner-class) callers fail the `not caller_legacy_full`
+            # term and fall through to the else → owner-class deleg-NULL mint
+            # with the full allowlist (D13 rows 1-2).
+            if is_key_caller and not caller_legacy_full:
+                requested = set(requested_scopes)
+                escalation = requested - set(_MINTABLE_SCOPES)
+                if escalation:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="Minted keys cannot hold escalation scopes: "
+                               + ",".join(sorted(escalation)),
+                    )
+                delegation_depth = 0
+                caller_key_id = team["key_id"]
+                # Child keys default to graphs:read when no data scope requested
+                # (C2 parity).
+                final_scopes = requested_scopes or ["graphs:read"]
+                prefix = "tk_"
+            else:
+                # Owner-class (session/legacy-full) scoped mint. An EXPLICIT
+                # empty scopes array with a graph_id would mint a deleg-NULL
+                # scopes=[] graph-bound key — resolution derives
+                # legacy_full_access=(deleg NULL and scopes==[]) True = FULL
+                # access, while the response echoes scopes:[] (reads as least
+                # privilege). Same footgun the shrink branch 422s (F2) — 422
+                # here: per-graph keys require ≥1 explicit scope. (An empty
+                # array WITHOUT graph_id never reaches this branch — it
+                # collapses to the legacy {} owner mint.)
+                if graph_id is not None and not requested_scopes:
+                    raise HTTPException(
+                        status_code=422,
+                        detail="Per-graph keys require at least one scope.",
+                    )
+                delegation_depth = None
+                caller_key_id = None
+                final_scopes = requested_scopes
+                prefix = None  # auto: tk_ when scopes/graph, else tt_
+            # Graph-bound mint → the graph must exist (404).
+            if graph_id is not None:
+                _ensure_graph_exists(team["team_id"], graph_id)
+            minted = _mint_key(
+                team["team_id"], graph_id=graph_id, scopes=final_scopes,
+                delegation_depth=delegation_depth, caller_key_id=caller_key_id,
+                session_user_id=team.get("session_user_id"),
+                prefix=prefix, name=name,
+            )
+    except _KeyCapExceeded:
+        # D3 asymmetry (pinned): the LEGACY owner mint keeps the historical
+        # 402 (its pre-check _check_team_limit fires first; this is the race
+        # backstop); the SCOPED mint + deleg=0 child mints surface the C2
+        # _KeyCapExceeded 409 semantic. Never a 500.
+        is_owner_class_mint = not scoped_request and not child_mint
+        raise HTTPException(
+            status_code=402 if is_owner_class_mint else 409,
+            detail=("API key limit reached." if not is_owner_class_mint
+                    else "API key limit reached (legacy mint — upgrade or revoke)"),
+        ) from None
+
+    kid = minted["id"]
+    api_key = minted["key_plaintext"]
+    key_prefix = minted["key_prefix"]
+    now = minted["created_at"]
+
     if is_supabase_enabled():
         cp = get_control_plane()
-        insert_api_key(cp, {
-            "id": kid,
-            "team_id": team["team_id"],
-            "lookup_hash": lookup_hash(api_key),
-            "key_prefix": key_prefix,
-            "created_via": "provisioned",  # NOT NULL in 0007; counts vs the
-            # recovery-mint cap like the registry's NULL created_via rows
-            "created_by": team.get("session_user_id") or "api",  # #1511: the
-            # session user UUID when the mint was session-authed (so
-            # dashboard-minted keys can drive the /v1/session/login exchange);
-            # key-auth/override mints keep "api" (registry parity).
-            "created_at": now,
-            "revoked_at": None,
-            "expires_at": None,
-            "name": name,  # 20260825000001: optional user-facing label
-        })
         # #528 analytics — actor id from the team's active memberships when
         # resolvable (one seam query), else a team_id-prefixed id (request.
         # state only carries team_id here). Registry path below reads the
@@ -4756,15 +4971,6 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
         )
     else:
         sdk = _make_sdk(namespace="registry")
-        # #1753: created_via/expires_at prop parity with agent_signup + the
-        # Supabase lane (like the #1709 mint at ~7365) — without them the
-        # selfhost dashboard lists durable keys as "ephemeral · session"
-        # and hides rename. expires_at:null = never (durable key).
-        sdk._get_registry().query(
-            "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, key_prefix:$kp, "
-            "created_by:$cb, created_via:'provisioned', created_at:$now, expires_at:null, name:$name})",
-            params={"id": kid, "tid": team["team_id"], "kh": key_hash, "kp": key_prefix, "cb": "api", "now": now, "name": name},
-        )
         # #528 analytics — actor user id from the team's Membership graph when
         # resolvable (key creation is rare; one extra registry lookup), else a
         # team_id-prefixed id (request.state only carries team_id here).
@@ -4793,17 +4999,28 @@ async def create_api_key(request: Request, response: Response, team: dict = Depe
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
 
-    return {
+    resp = {
         "id": kid,
         "key": api_key,
         "key_prefix": key_prefix,
         "created_at": now,
         "name": name,
     }
+    if scoped_request or child_mint:
+        # C3 (#2112) scoped/delegated-mint fields — ABSENT on the legacy {}
+        # owner-class path so pre-C3 clients see the byte-identical shape
+        # (exact-equality pin in test_writer_inventory pins
+        # {id,key,key_prefix,created_at,name}); a keys:manage {} child mint
+        # DOES carry deleg=0 + scopes (not owner class).
+        resp["graph_id"] = minted.get("graph_id")
+        resp["scopes"] = minted.get("scopes")
+        resp["delegation_depth"] = minted.get("delegation_depth")
+    return resp
 
 
 @app.get("/v1/team/keys")
-async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+async def list_api_keys(graph_id: str | None = None,
+                        team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """List API keys for the team (hashes only — no plaintext).
 
     #1828: dual-auth (session JWT OR tt_ key) — the dashboard's overview API
@@ -4813,13 +5030,23 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
     #1828 review P1: ungated — a key-driven agent keeps listing keys on a
     flag-off team (the #1148 gate stays scoped to the management set).
 
+    C3 (#2112) code-review P2: a deleg-NULL SCOPED key (not owner class)
+    must not enumerate the team's key inventory (ids/prefixes/graph
+    bindings/lineage) — keys:manage required for scoped key faces (same
+    caller-class rule as mint/revoke). Legacy full-access keys, session
+    faces, and deleg=0 (already 403 at the DI dormancy gate) unaffected.
+
     #765 (plan Task 8 reader inventory): Supabase mode reads api_keys via
     the seam (ALL rows incl. revoked — the dashboard shows revoked keys
     with their revoked_at; registry parity). Registry path stays for
     selfhost. #1708 D7: additive created_via/expires_at in BOTH lanes
     (agent_signup #1709, create_api_key #1753 and session_key mints all
     write them at mint time; the registry list stays None-tolerant for
-    LEGACY nodes minted before those fixes)."""
+    LEGACY nodes minted before those fixes). C3 (#2112): optional
+    ?graph_id= filter (per-graph key panel — surface 12) + the C1 tenancy
+    columns ride the rows (scopes/delegation_depth/graph_id/created_by_key_id).
+    """
+    _require_keys_manage(team, "list API keys")
     from tortoise.supabase_control import (
         get_control_plane,
         is_supabase_enabled,
@@ -4827,7 +5054,8 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
     )
     if is_supabase_enabled():
         try:
-            keys = team_api_keys(get_control_plane(), team["team_id"])
+            keys = team_api_keys(get_control_plane(), team["team_id"],
+                                 graph_id=graph_id)
         except Exception:
             import logging
             logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -4847,19 +5075,36 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
                     # #1708 D7: session-key metadata (additive, non-breaking)
                     "created_via": row.get("created_via"),
                     "expires_at": row.get("expires_at"),
+                    # C3 (#2112) C1 tenancy columns (additive — absent on
+                    # pre-C1 rows → JSON null is additive-safe).
+                    "graph_id": row.get("graph_id"),
+                    "scopes": row.get("scopes") or [],
+                    "delegation_depth": row.get("delegation_depth"),
+                    "created_by_key_id": row.get("created_by_key_id"),
                 }
                 for row in keys
             ]
         }
     sdk = _make_sdk(namespace="registry")
     try:
-        keys = sdk._get_registry().query(
-            "MATCH (k:APIKey {team_id: $tid}) "
-            "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
-            "k.name, k.created_via, k.expires_at "
-            "ORDER BY k.created_at DESC",
-            params={"tid": team["team_id"]},
-        )
+        if graph_id is not None:
+            keys = sdk._get_registry().query(
+                "MATCH (k:APIKey {team_id: $tid, graph_id: $gid}) "
+                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, "
+                "k.revoked_at, k.name, k.created_via, k.expires_at, "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "ORDER BY k.created_at DESC",
+                params={"tid": team["team_id"], "gid": graph_id},
+            )
+        else:
+            keys = sdk._get_registry().query(
+                "MATCH (k:APIKey {team_id: $tid}) "
+                "RETURN k.id, k.key_prefix, k.created_at, k.last_used_at, k.revoked_at, "
+                "k.name, k.created_via, k.expires_at, "
+                "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id "
+                "ORDER BY k.created_at DESC",
+                params={"tid": team["team_id"]},
+            )
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception("list_api_keys failed")
@@ -4880,6 +5125,12 @@ async def list_api_keys(team: dict = Depends(get_current_team_session_ungated)):
                 # additive-safe.
                 "created_via": row[6],
                 "expires_at": row[7],
+                # C3 (#2112): C1 tenancy props (None-tolerant for legacy
+                # nodes).
+                "graph_id": row[8],
+                "scopes": row[9] or [],
+                "delegation_depth": row[10],
+                "created_by_key_id": row[11],
             }
             for row in keys.result_set
         ]
@@ -4905,6 +5156,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     from tortoise.supabase_control import (
         revoke_api_key as _sb_revoke,
     )
+    # C3 (#2112) code-review P1: a deleg-NULL SCOPED key (e.g. graphs:read-
+    # only, minted for least privilege) must not destroy every team key —
+    # same caller-class rule as the mint gate (D13 row 4). deleg=0 keys
+    # 403 at the DI gate before this; legacy full-access keys and session
+    # faces pass.
+    _require_keys_manage(team, "revoke API keys")
     if is_supabase_enabled():
         try:
             row = api_key_by_id(get_control_plane(), key_id)
@@ -5006,14 +5263,17 @@ class KeyEnabledToggle(BaseModel):
     # re-enable a disabled key, so it is treated as absent there). `enabled`
     # was previously required — making it optional is backward-compatible
     # (existing callers still send it). At least one field must be present
-    # (422 on an empty body).
+    # (422 on an empty body). C3 (#2112): ``scopes`` (shrink-only — a
+    # strict subset of the key's current scopes; expansion is 422 — expand
+    # = revoke+recreate, §5.4) routes the shrink branch.
     enabled: bool | None = None
     name: str | None = None
+    scopes: list[str] | None = None
 
     @model_validator(mode="after")
     def _at_least_one_field(self) -> KeyEnabledToggle:
         if not self.model_fields_set:
-            raise ValueError("At least one of enabled or name is required")
+            raise ValueError("At least one of enabled, name or scopes is required")
         return self
 
 
@@ -5039,6 +5299,9 @@ async def toggle_api_key_enabled(
     from tortoise.supabase_control import (
         set_api_key_name as _sb_set_name,
     )
+    from tortoise.supabase_control import (
+        set_api_key_scopes as _sb_set_scopes,
+    )
     if is_supabase_enabled():
         cp = get_control_plane()
         row = api_key_by_id(cp, key_id)
@@ -5054,6 +5317,37 @@ async def toggle_api_key_enabled(
             # owner is using.
             raise HTTPException(status_code=409, detail="Cannot modify a session key")
         result = {"key_id": key_id}
+        # C3 (#2112) shrink branch: {scopes} replaces the current scopes
+        # with a STRICT SUBSET (expand = revoke+recreate, §5.4 — 422). The
+        # key must not be a revoked/session key (guards above); shrinking a
+        # disabled key is allowed (disabled ≠ revoked). Emptying a deleg-NULL
+        # scoped key is ALSO 422: scopes=[] + deleg NULL reclassifies it as
+        # legacy_full_access (full access) — a capability EXPANSION through
+        # the shrink endpoint (code-review F2). ALL scopes validation runs
+        # BEFORE the enabled/name writes so a 422 is a no-op (code-review:
+        # partial-application fix — a superset body must not persist
+        # enabled=false then error).
+        if "scopes" in body.model_fields_set:
+            current = row.get("scopes") or []
+            requested = body.scopes or []
+            unknown = [s for s in requested if s not in _OWNER_SCOPE_ALLOWLIST]
+            if unknown:
+                raise HTTPException(status_code=422,
+                                    detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
+            if not set(requested) <= set(current):
+                raise HTTPException(
+                    status_code=422,
+                    detail="Scope expansion is not allowed — revoke and "
+                           "recreate the key to expand scopes.",
+                )
+            if not requested and row.get("delegation_depth") is None \
+                    and current:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Cannot empty a deleg-NULL key's scopes (that "
+                           "reclassifies it legacy full-access) — revoke and "
+                           "recreate instead.",
+                )
         # Explicit null for enabled is treated as absent (leave untouched) —
         # `None is not False` would silently RE-ENABLE a disabled key.
         if "enabled" in body.model_fields_set and body.enabled is not None:
@@ -5065,6 +5359,9 @@ async def toggle_api_key_enabled(
             cleaned = _clean_key_label(body.name)
             _sb_set_name(cp, key_id, cleaned)
             result["name"] = cleaned
+        if "scopes" in body.model_fields_set:
+            _sb_set_scopes(cp, key_id, body.scopes or [])
+            result["scopes"] = body.scopes or []
         return result
     # Registry mode (selfhost): no enabled column — enabled is a no-op echo
     # (registry keys are always active, preserving the #1148 no-op echo
@@ -5074,18 +5371,45 @@ async def toggle_api_key_enabled(
     # the Membership graph).
     sdk = _make_sdk(namespace="registry")
     rows = sdk._get_registry().query(
-        "MATCH (k:APIKey {id: $id}) RETURN k.team_id, k.revoked_at, k.created_via",
+        "MATCH (k:APIKey {id: $id}) "
+        "RETURN k.team_id, k.revoked_at, k.created_via, k.scopes, "
+        "k.delegation_depth",
         params={"id": key_id},
     ).result_set
     if not rows:
         raise HTTPException(status_code=404, detail="API key not found")
-    team_id, revoked_at, created_via = rows[0]
+    team_id, revoked_at, created_via, current_scopes, deleg = rows[0]
     await _require_owner_admin(user["user_id"], team_id)
     if revoked_at is not None:
         raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
     if created_via == "bootstrap":
         raise HTTPException(status_code=409, detail="Cannot modify a session key")
     result = {"key_id": key_id, "enabled": True}
+    # C3 (#2112) shrink branch — registry parity with the supabase lane:
+    # strict-subset scopes replace (expansion 422), never on revoked keys.
+    # Emptying a deleg-NULL scoped key is ALSO 422 (reclassifies it legacy
+    # full-access — capability expansion). ALL scopes validation runs before
+    # the name write so a 422 is a no-op (partial-application fix).
+    if "scopes" in body.model_fields_set:
+        requested = body.scopes or []
+        unknown = [s for s in requested if s not in _OWNER_SCOPE_ALLOWLIST]
+        if unknown:
+            raise HTTPException(status_code=422,
+                                detail=f"Unknown scope(s): {sorted(unknown, key=str)}")
+        current = list(current_scopes or [])
+        if not set(requested) <= set(current):
+            raise HTTPException(
+                status_code=422,
+                detail="Scope expansion is not allowed — revoke and "
+                       "recreate the key to expand scopes.",
+            )
+        if not requested and deleg is None and current:
+            raise HTTPException(
+                status_code=422,
+                detail="Cannot empty a deleg-NULL key's scopes (that "
+                       "reclassifies it legacy full-access) — revoke and "
+                       "recreate instead.",
+            )
     if "name" in body.model_fields_set:
         cleaned = _clean_key_label(body.name)
         sdk._get_registry().query(
@@ -5093,6 +5417,12 @@ async def toggle_api_key_enabled(
             params={"id": key_id, "name": cleaned},
         )
         result["name"] = cleaned
+    if "scopes" in body.model_fields_set:
+        sdk._get_registry().query(
+            "MATCH (k:APIKey {id: $id}) SET k.scopes = $sc",
+            params={"id": key_id, "sc": list(body.scopes or [])},
+        )
+        result["scopes"] = body.scopes or []
     return result
 
 

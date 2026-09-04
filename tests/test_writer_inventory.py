@@ -44,6 +44,13 @@ TEST_TEAM = {
     "team_id": "team-free-001",
     "key_id": "key-001",
     "tier": "free",
+    # C1/C2 tenancy fields (tt_ legacy-key resolution dict — deleg NULL,
+    # scopes [] → legacy_full_access owner class).
+    "graph_id": None,
+    "scopes": [],
+    "legacy_full_access": True,
+    "delegation_depth": None,
+    "created_by_key_id": None,
     "max_users": 1,
     "max_graphs": 1,
     "max_points": 10000,
