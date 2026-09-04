@@ -5489,7 +5489,12 @@ class SessionRequest(BaseModel):
     # (the shared _capture_turn_window helper in the handler — both paths
     # produce byte-identical stored turns). Non-str content is coerced in the
     # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
-    session_id: str | None = None
+    # W5 P2 (review round 1): session_id becomes the point-level provenance
+    # source_session — an unbounded caller string would amplify onto every
+    # extracted point (N x len).  Bounded at 256 (real ids are ULIDs / the
+    # session_uuid pattern); over-long ids fail the boundary 422 BEFORE the
+    # recording gate (S2 verified order: boundary first).
+    session_id: str | None = Field(None, max_length=256)
     metadata: dict | None = None
     # #1727 Slice 2 (Task 11, T1-P3 pinned): harness is OPTIONAL (None default)
     # so pre-installed hooks and SDK callers that POST without it never 422;
@@ -6254,21 +6259,42 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         build_write_verb,
     )
     if extracted:
-        rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
-            "coalesce(n.pointKind, 'statement'), "
-            "coalesce(n.status, 'live'), "
-            "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
-            params={"ids": [p["id"] for p in extracted]},
-        ).result_set
-        facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
-                 for r in rows}
+        try:
+            # P1 (review round 1): the enrichment read runs AFTER the writes
+            # are committed — a transient graph failure here must NEVER 500 a
+            # committed capture (D4 posture: additive warning, never raise).
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                "coalesce(n.pointKind, 'statement'), "
+                "coalesce(n.status, 'live'), "
+                "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+                params={"ids": [p["id"] for p in extracted]},
+            ).result_set
+            found = {r[0] for r in rows}
+            facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
+                     for r in rows}
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "write-verb enrichment read failed (non-fatal)")
+            extraction_warnings.append(
+                "write-verb enrichment read failed (non-fatal)")
+            found, facts = set(), {}
         for p in extracted:
-            kind, status, has_ep = facts.get(p.get("id"),
-                                             ("statement", "live", False))
-            p.setdefault("kind", kind)
-            # P2-2 (review): the frozen verb's per-point schema names the id
-            # ``point_id`` — add the alias (additive; legacy ``id`` stays).
+            # Facts are reported ONLY for ids the graph actually returned —
+            # a swept/deleted point (W6 delete race) or a failed M2 write
+            # must never be fabricated as live/new (anti-gaming, P2-2).
+            pid = p.get("id")
+            if pid not in found or pid not in facts:
+                extraction_warnings.append(
+                    f"point {pid} missing from graph post-write — "
+                    "not reported in the write verb")
+                continue
+            kind, status, has_ep = facts[pid]
+            # Graph truth wins over the extractor's claimed kind (P2-2).
+            p["kind"] = kind
+            # Frozen-verb schema names the id ``point_id`` — additive alias
+            # (legacy ``id`` stays; legacy consumers are byte-safe).
             p.setdefault("point_id", p.get("id"))
             p["status"] = status
             p["ep_updated"] = has_ep

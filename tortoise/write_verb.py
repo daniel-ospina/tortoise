@@ -137,11 +137,15 @@ def build_write_verb(
     return verb
 
 
-def assert_provenance(provenance: dict | None) -> str | None:
+def assert_provenance(provenance: dict | None) -> dict | None:
     """Return the PROVENANCE_MISSING error block when a provenance dict does
-    not carry all three required keys, else None.  The rejection seam the
-    write path calls BEFORE writing (a write without provenance is rejected,
-    never written-then-lamented)."""
+    not carry all three required keys, else None.  The rejection seam write
+    surfaces call BEFORE writing when provenance is caller-supplied (a write
+    without provenance is rejected, never written-then-lamented).  The
+    capture surface builds provenance SERVER-SIDE from session_id/harness/
+    now (never caller-optional beyond harness, which normalizes to
+    "unknown"), so the seam is defensive there and live on surfaces where
+    the caller stamps provenance."""
     if not provenance:
         return error_block(ERROR_PROVENANCE_MISSING)
     missing = [

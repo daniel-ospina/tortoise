@@ -1778,6 +1778,46 @@ class TestSessionCaptureWriteVerb:
         assert first["extracted"] == 0
 
 
+    def test_capture_session_id_overlong_rejected_boundary_422(self, client):
+        """P2 (review round 1): session_id becomes the point-level
+        source_session — unbounded caller strings would amplify onto every
+        extracted point.  Over-long ids fail the boundary 422 (Pydantic
+        max_length) BEFORE the recording gate."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "x" * 500,
+        })
+        assert r.status_code == 422, r.text
+
+    def test_capture_enrichment_failure_never_500s_committed_capture(
+            self, client, monkeypatch):
+        """P1 (review round 1): a transient failure in the post-write
+        enrichment read must NOT 500 a committed capture (D4 posture) — it
+        degrades to an additive warning and the verb reports what it could."""
+        # _GuardedGraph is __slots__-locked and the underlying redislite
+        # Graph handle is created fresh per SDK — patch at the HANDLE CLASS
+        # level (test-scoped); the boom is selective so unrelated queries in
+        # the same window pass through untouched.
+        from redislite.falkordb_client import Graph as _Graph
+        _orig = _Graph.query
+
+        def _selective_boom(self, cypher, params=None, timeout=None):
+            if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
+                raise RuntimeError("transient graph failure")
+            return _orig(self, cypher, params=params, timeout=timeout)
+
+        monkeypatch.setattr(_Graph, "query", _selective_boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-enrich-fail-session",
+        })
+        # Committed + 200; the failure is additive, never a 500.
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        assert any("enrichment read failed" in w for w in body["warnings"])
+
+
 class TestSessionList:
     """GET /v1/sessions — list captured sessions."""
 
