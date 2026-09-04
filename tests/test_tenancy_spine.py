@@ -126,7 +126,7 @@ def test_cross_graph_read_denied_app_layer(spine_env):
 def test_read_only_key_write_denied_everywhere(spine_env):
     """Indicator 4: a graphs:read key's write is 403 at every converted
     surface — points (POST), sessions (POST), dream, commit."""
-    sdk, tid, g, tc, def_pt = spine_env
+    sdk, tid, g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["graphs:read"], graph_id=g["graph_id"])
     h = {"Authorization": f"Bearer {token}"}
     for method, path, body in [
@@ -165,7 +165,7 @@ def test_read_write_key_writes_own_graph(spine_env):
 def test_team_wide_key_default_graph_regression(spine_env):
     """E2E-5: a team-wide (graph_id NULL) scoped key + a legacy key keep the
     DEFAULT-graph flows — the default point IS visible."""
-    sdk, tid, g, tc, def_pt = spine_env
+    sdk, tid, _g, tc, def_pt = spine_env
     # Team-wide scoped key (deleg NULL, graphs:read).
     token = _mint_key(sdk, tid, scopes=["graphs:read"])
     r = tc.get("/v1/points",
@@ -185,7 +185,7 @@ def test_team_wide_key_default_graph_regression(spine_env):
 def test_vanished_graph_fails_closed(spine_env):
     """A key bound to a graph that no longer exists fails closed (404/403)
     — it must NEVER open the team default."""
-    sdk, tid, g, tc, def_pt = spine_env
+    sdk, tid, _g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["graphs:read"],
                       graph_id="g_ghost_missing")
     r = tc.get("/v1/points", headers={"Authorization": f"Bearer {token}"})
@@ -196,7 +196,7 @@ def test_team_level_surface_rejects_graph_bound(spine_env):
     """D-C5-2 team surfaces: a graph-bound key on /v1/team (overview reads
     the DEFAULT graph) is rejected outright — no default-graph leak via a
     team-level endpoint."""
-    sdk, tid, g, tc, def_pt = spine_env
+    sdk, tid, g, tc, _def_pt = spine_env
     token = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
                       graph_id=g["graph_id"])
     r = tc.get("/v1/team", headers={"Authorization": f"Bearer {token}"})
