@@ -27,6 +27,7 @@ from __future__ import annotations  # noqa: I001
 
 import logging
 import math
+import re
 from datetime import datetime, timezone
 
 from .search_engine import (  # noqa: E402, RUF100
@@ -72,8 +73,6 @@ W4_RELEVANCE_TOKEN_MIN_LEN = 4
 
 def _significant_tokens(text: str) -> set[str]:
     """Casefolded alphanumeric tokens ≥ W4_RELEVANCE_TOKEN_MIN_LEN."""
-    import re
-
     return {
         tok for tok in re.findall(r"[a-z0-9]+", (text or "").casefold())
         if len(tok) >= W4_RELEVANCE_TOKEN_MIN_LEN
