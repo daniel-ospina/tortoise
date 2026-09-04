@@ -138,7 +138,14 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     full provenance) + _fold_object_superseded (count-verified).
     #2164: shared by capture (_extract_session_v2), eval ingest_v2,
     and (phase-2) hosted §6b. warn() receives every skip/failure —
-    never a silent drop. Returns the number of records applied.
+    never a silent drop — with ONE explicit asymmetry (final-review
+    P3): terminal pt_ olds are treated as idempotent re-ingests and
+    skipped SILENTLY regardless of the claimed successor (no
+    divergence probe — supersede_point would raise on a terminal old);
+    terminal ENTITY olds warn keep-first when the claimed successor
+    diverges from the stored one. Real capture cannot reach either
+    branch (S3 terminal exclusion) — the out-of-band path is
+    defense-in-depth. Returns the number of records applied.
     """
     if warn is None:
         warn = _logger.warning

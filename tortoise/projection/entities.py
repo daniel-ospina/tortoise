@@ -388,21 +388,27 @@ class _EntityHandlers:
         if not oid and not name:
             return 0
         supersedes_by = str(ev.get("supersedes_by") or "")[:200]
-        now = _now_iso()
+        # #2164 final-review P4: prefer the journaled event's ORIGINAL ts —
+        # rebuild pass-1b replays the raw journaled event (sdk._emit_event
+        # stamps ts on the JSONL line) — without this a JSONL wipe+rebuild
+        # drifted supersededAt to rebuild time. Live callers (apply_super-
+        # sessions' fold_ev carries no ts) fall back to now.
+        superseded_at = ev.get("ts") or _now_iso()
         if oid:
             result = self.g.query(
                 "MATCH (o:Object {id:$id}) "
                 "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$now "
+                "    o.supersededAt=$sa "
                 "RETURN o.id LIMIT 1",
-                params={"id": oid, "sb": supersedes_by, "now": now})
+                params={"id": oid, "sb": supersedes_by, "sa": superseded_at})
         else:
             result = self.g.query(
                 "MATCH (o:Object {name:$name}) "
                 "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$now "
+                "    o.supersededAt=$sa "
                 "RETURN o.id LIMIT 1",
-                params={"name": name, "sb": supersedes_by, "now": now})
+                params={"name": name, "sb": supersedes_by,
+                        "sa": superseded_at})
         return len(result.result_set)
 
     def _upsert_document(self, ev: dict) -> None:

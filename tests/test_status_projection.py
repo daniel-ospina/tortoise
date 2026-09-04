@@ -186,13 +186,24 @@ class TestProjectionFold:
             # (event.update(extra)) so supersededBy survives the replay.
             sdk._emit_event("ObjectSuperseded", id=oid, name="strategy-A",
                             supersedes_by="strategy-B")
+            # #2164 final-review P4: capture the journaled emission ts — the
+            # fold must replay supersededAt from the event (its original ts),
+            # not drift it to rebuild time.
+            from tortoise.log import EventLog
+            journaled = [ev for ev in
+                         EventLog(str(events / "events.jsonl")).read_all()
+                         if ev.get("type") == "ObjectSuperseded"]
             sdk._get_proj().rebuild_all(str(events))
             rows = sdk._get_proj().g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+                "MATCH (o:Object {name:$n}) RETURN o.status, "
+                "o.supersededBy, o.supersededAt",
                 params={"n": "strategy-A"}).result_set
             assert rows, "journaled ObjectRegistered must recreate the target"
             assert rows[0][0] == "superseded", "status reverted to live on replay"
             assert rows[0][1] == "strategy-B", "supersededBy lost on replay"
+            assert journaled and rows[0][2] == journaled[-1]["ts"], (
+                "supersededAt must replay the journaled event ts, not drift "
+                "to rebuild time")
         finally:
             sdk.close()
 
