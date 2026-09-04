@@ -28,6 +28,15 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // session mode; durableConnectKey + usableDurableRows resolve the connect
 // step's gate from the keys-table rows.
 import { isManagedKey, durableConnectKey } from './sessionKey.js'
+import {
+  activeGraphId,
+  graphCanDelete,
+  graphMintBody,
+  graphsMeter,
+  sortedGraphRows,
+  tierCreateLocked,
+  tierUpgradeUrl,
+} from './graphs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
 import {
@@ -1134,6 +1143,24 @@ function claimIntentInFlight() {
   // 'still loading' from 'failed'.
   const [backupsStatus, setBackupsStatus] = React.useState('loading')
   const [newGraphName, setNewGraphName] = React.useState('')
+  // C7 #2116: per-graph key panel + one-time reveal + delete lifecycle.
+  // panelKeys is null until the first load for the OPEN row (panelKeysStatus
+  // distinguishes closed/loading/ok/error — mirrors graphsStatus).
+  const [panelGraphId, setPanelGraphId] = React.useState(null) // open key-panel row's graph_id
+  const [panelKeys, setPanelKeys] = React.useState(null)
+  const [panelKeysStatus, setPanelKeysStatus] = React.useState('closed') // closed|loading|ok|error
+  const [graphKeyName, setGraphKeyName] = React.useState('')
+  const [graphBusy, setGraphBusy] = React.useState(false) // panel mint / graph delete in flight
+  const [graphMsg, setGraphMsg] = React.useState('') // inline panel error (402/409/409 etc.)
+  const [confirmDeleteId, setConfirmDeleteId] = React.useState(null) // custom row awaiting delete confirm
+  // Panel-request sequence — a slow open must not clobber a NEWER open's
+  // panel (panelGraphId in the handler closure is stale by design).
+  const graphPanelReqRef = React.useRef(0)
+  // One-time key reveal (C7 indicator 2 / surface 4): {plaintext, title} —
+  // the ONLY place a minted plaintext is ever shown. Set from a create-graph
+  // or per-graph mint response; cleared on dismiss / team switch; no route
+  // ever re-shows it (the API never re-serves plaintext).
+  const [revealKey, setRevealKey] = React.useState(null)
   const teamIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
@@ -3061,6 +3088,9 @@ function claimIntentInFlight() {
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
     setWelcomeKey('')
+    // C7 #2116 (R1): the one-time reveal is session-scoped — a logout must
+    // never leave plaintext mounted for the next login.
+    setRevealKey(null)
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
@@ -3444,6 +3474,16 @@ function claimIntentInFlight() {
     setGraphs([])
     setGraphsLoaded(false) // Round-27: per-team loaded flag — no '0' flash on switch
     setGraphsStatus('loading') // #1842 P2-1: mirror the membersStatus reset
+    // C7 #2116: a team switch must not carry the previous team's open panel
+    // (its keys are graph-bound to the OLD team) or a mounted one-time
+    // plaintext across teams.
+    graphPanelReqRef.current += 1 // invalidate any in-flight panel open
+    setPanelGraphId(null)
+    setPanelKeys(null)
+    setPanelKeysStatus('closed')
+    setGraphMsg('')
+    setConfirmDeleteId(null)
+    setRevealKey(null)
     setCurrentGraphId(null)
     setTeam(null)          // Fix B: clear key-scoped overview state too
     setStaleFired(false)   // #1858: reset the per-load stale latch on EVERY switch — incl. null→null from the terminal '—' state, where the reset effect's team dep doesn't fire
@@ -3605,14 +3645,31 @@ function claimIntentInFlight() {
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
         body: JSON.stringify({ team_id: currentTeamId, name: newGraphName.trim() }),
       })
+      const b = await res.json().catch(() => ({}))
       if (!res.ok) {
-        const b = await res.json().catch(() => ({}))
         if (res.status === 402) {
           setError('Graph limit reached for this tier — upgrade to add more graphs.')
-          setBusy(false)
+          return
+        }
+        if (res.status === 409) {
+          // C2 #2111: the provisioning service owns quota (409) — graph cap
+          // OR API-key cap (the create mints the graph's first key; a full
+          // key table rolls the graph back with a 409). The detail is
+          // authoritative (plan §6.2 contract).
+          setError(b.detail || 'Graph limit reached — delete a graph or upgrade.')
           return
         }
         throw new Error(b.detail || `HTTP ${res.status}`)
+      }
+      // C7 #2116 (surface 4): the C2 nested envelope carries the graph's
+      // FIRST key one time ({graph, key, key_plaintext, revealed_once}). The
+      // plaintext exists ONLY here — hash-only storage server-side — so the
+      // reveal modal is the sole render, never a route (no show-key page).
+      if (b && b.key_plaintext) {
+        setRevealKey({
+          plaintext: b.key_plaintext,
+          title: b.graph && b.graph.name ? `Graph ${b.graph.name} created` : 'Graph created',
+        })
       }
       setNewGraphName('')
       await Promise.all([loadGraphs(currentTeamId), loadTeams()])
@@ -3624,6 +3681,132 @@ function claimIntentInFlight() {
       if (teamIdRef.current === _teamAtCall) setError(e.message)
     } finally {
       setBusy(false)
+    }
+  }
+
+  // C7 #2116 — per-graph key panel actions (indicator 3). The panel is
+  // owner/admin-managed (mirrors the members gate); mint + revoke ride the
+  // session JWT like every management call (#2255 ADR-010 posture).
+  async function openGraphPanel(graphId) {
+    if (panelGraphId === graphId) { closeGraphPanel(); return }
+    const seq = ++graphPanelReqRef.current
+    setPanelGraphId(graphId)
+    setPanelKeysStatus('loading')
+    setPanelKeys(null)
+    setGraphMsg('')
+    setGraphKeyName('')
+    const _teamAtCall = currentTeamId
+    try {
+      const rows = await graphKeysFor(currentTeamId, graphId)
+      if (graphPanelReqRef.current !== seq || teamIdRef.current !== _teamAtCall) return // stale open/team
+      setPanelKeys(rows)
+      setPanelKeysStatus('ok')
+    } catch {
+      if (graphPanelReqRef.current === seq && teamIdRef.current === _teamAtCall) setPanelKeysStatus('error')
+    }
+  }
+
+  function closeGraphPanel() {
+    setPanelGraphId(null)
+    setPanelKeys(null)
+    setPanelKeysStatus('closed')
+    setGraphMsg('')
+    setGraphKeyName('')
+  }
+
+  // GET /v1/team/keys?team_id=…&graph_id=… (the server-side per-graph filter
+  // — C3 #2112). Mirrors loadKeys' api() call shape.
+  async function graphKeysFor(teamId, graphId) {
+    if (!teamId || !graphId) return []
+    const q = `?team_id=${encodeURIComponent(teamId)}&graph_id=${encodeURIComponent(graphId)}`
+    const data = await api(`/v1/team/keys${q}`, { useSession: true })
+    const rows = Array.isArray(data) ? data : (data && data.keys) || []
+    return rows
+  }
+
+  // Per-graph mint → POST /v1/team/keys {graph_id, scopes} (scoped session
+  // mint; scopes are the data-plane pair — graphs.js GRAPH_KEY_SCOPES). The
+  // response's .key plaintext is shown ONCE in the reveal modal.
+  async function mintGraphKey() {
+    const gid = panelGraphId
+    if (!gid || graphBusy || !graphKeyName.trim()) return
+    setGraphBusy(true)
+    setGraphMsg('')
+    const _teamAtCall = currentTeamId
+    try {
+      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      const resp = await api(`/v1/team/keys${q}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        useSession: true,
+        body: JSON.stringify(graphMintBody(gid, graphKeyName)),
+      })
+      const plaintext = resp && (resp.key || resp.api_key)
+      if (!plaintext) throw new Error('Mint response did not include a key')
+      if (teamIdRef.current !== _teamAtCall) return
+      setGraphKeyName('')
+      setRevealKey({ plaintext, title: `Key for ${graphNameFor(gid) || 'graph'} created` })
+      await refreshPanelAndCounts(gid)
+    } catch (e) {
+      if (teamIdRef.current === _teamAtCall) {
+        const detail = e && e.detail ? e.detail : (e && e.message)
+        setGraphMsg(detail || 'Could not mint key — try again.')
+      }
+    } finally {
+      setGraphBusy(false)
+    }
+  }
+
+  async function refreshPanelAndCounts(gid) {
+    const _teamAtCall = currentTeamId
+    const rows = await graphKeysFor(currentTeamId, gid).catch(() => null)
+    if (teamIdRef.current !== _teamAtCall) return
+    if (rows) { setPanelKeys(rows); setPanelKeysStatus('ok') }
+    loadGraphs(currentTeamId) // key_count column refresh
+  }
+
+  function graphNameFor(gid) {
+    const g = (graphs || []).find((x) => x.graph_id === gid)
+    return g ? g.name : ''
+  }
+
+  // Panel revoke — window.confirm names the row (mirrors the API-Keys
+  // revokeKey UX: name · prefix · created). Owner/admin-only render gate.
+  async function revokePanelKey(keyId) {
+    const row = (panelKeys || []).find((k) => (k.id || k.key_id) === keyId)
+    const rowName = (row && row.name) || 'this graph key'
+    const rowDesc = [rowName, row && row.key_prefix, row && (row.created_at || row.createdAt || '')].filter(Boolean).join(' · ')
+    if (!confirm(`Revoke ${rowName}? Applications using it will stop working.\n\n${rowDesc}`)) return
+    setGraphMsg('')
+    const _teamAtCall = currentTeamId
+    try {
+      await api(`/v1/team/keys/${keyId}`, { method: 'DELETE', useSession: true })
+      if (teamIdRef.current !== _teamAtCall) return
+      await refreshPanelAndCounts(panelGraphId)
+    } catch (e) {
+      if (teamIdRef.current === _teamAtCall) setGraphMsg('Could not revoke key — try again.')
+    }
+  }
+
+  // Delete a CUSTOM graph (indicator 4). The default graph row never shows
+  // the action (graphs.js graphCanDelete) and the server 403s the default
+  // as a code guard. Inline confirm (confirmDeleteId) then DELETE.
+  async function deleteGraphRow(graphId) {
+    const _teamAtCall = currentTeamId
+    if (!graphId || !currentTeamId) return
+    setGraphBusy(true)
+    setGraphMsg('')
+    try {
+      const q = `?team_id=${encodeURIComponent(currentTeamId)}`
+      await api(`/v1/graphs/${encodeURIComponent(graphId)}${q}`, { method: 'DELETE', useSession: true })
+      if (teamIdRef.current !== _teamAtCall) return
+      setConfirmDeleteId(null)
+      if (panelGraphId === graphId) closeGraphPanel()
+      await Promise.all([loadGraphs(currentTeamId), loadTeams()]) // count meter refresh
+    } catch (e) {
+      if (teamIdRef.current === _teamAtCall) setGraphMsg('Could not delete graph — try again.')
+    } finally {
+      setGraphBusy(false)
     }
   }
 
@@ -5940,33 +6123,171 @@ function claimIntentInFlight() {
             <div className="row">
               <h2>Graphs</h2>
               {authMode === 'session' ? (
-                <div className="inline-form">
-                  <input
-                    placeholder="New graph name"
-                    aria-label="New graph name"
-                    value={newGraphName}
-                    onChange={(e) => setNewGraphName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && createGraph()}
-                  />
-                  <button onClick={createGraph} disabled={busy || !newGraphName.trim()}>+ Create</button>
-                </div>
+                tierCreateLocked(team && team.tier) ? (
+                  /* C7 indicator 5: free/solo create is locked with the 🔒
+                     + upgrade CTA (the server would 409 anyway — their cap
+                     is reached; the locked state is the honest pre-empt). */
+                  <span className="dim small">
+                    🔒 Your plan includes {team && team.max_graphs} graph
+                    {(team && team.max_graphs) !== 1 ? 's' : ''} —{' '}
+                    <button className="ghost" onClick={upgrade}>Upgrade to add more</button>
+                  </span>
+                ) : (
+                  <div className="inline-form">
+                    <input
+                      placeholder="New graph name"
+                      aria-label="New graph name"
+                      value={newGraphName}
+                      onChange={(e) => setNewGraphName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && createGraph()}
+                    />
+                    <button onClick={createGraph} disabled={busy || !newGraphName.trim()}>+ Create</button>
+                  </div>
+                )
               ) : (
                 <span className="dim small">Sign in required</span>
               )}
             </div>
+            {authMode === 'session' && graphsStatus === 'ok' && graphsLoaded && (
+              /* C7 indicator 1: the graph-count meter (used · cap).
+                 max_graphs null → ∞ (pro/team); free=1 / solo=2 show
+                 used/total. The server's 409 cap-reject is authoritative. */
+              <p className="dim small" aria-label="Graph usage meter">
+                {graphsMeter(sortedGraphRows(graphs), team && team.max_graphs).label}
+              </p>
+            )}
             <table>
-              <thead><tr><th>Name</th><th>Kind</th><th>Graph ID</th></tr></thead>
+              <thead><tr><th>Name</th><th>Kind</th><th>Status</th><th>Keys</th><th><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
-                {authMode === 'session' && graphs.length === 0 && <tr><td colSpan="3" className="dim">No graphs yet — create your first one above.</td></tr>}
-                {graphs.map((g) => (
-                  <tr key={g.graph_id}>
-                    <td><code>{g.name}</code></td>
+                {graphsStatus === 'loading' && authMode === 'session' && <tr><td colSpan="5" className="dim">Loading graphs…</td></tr>}
+                {graphsStatus === 'denied' && <tr><td colSpan="5" className="dim">Graph list is only visible to members.</td></tr>}
+                {graphsStatus === 'error' && <tr><td colSpan="5" className="dim">Couldn't load graphs — check your connection and try again.</td></tr>}
+                {graphsStatus === 'ok' && graphs.length === 0 && <tr><td colSpan="5" className="dim">No graphs yet — create your first one above.</td></tr>}
+                {graphsStatus === 'ok' && sortedGraphRows(graphs).map((g) => (
+                  <tr key={g.graph_id} className={confirmDeleteId === g.graph_id ? 'graph-delete-arm' : undefined}>
+                    <td><code>{g.name}</code>{g.kind === 'default' && <span className="badge">default</span>}</td>
                     <td>{g.kind}</td>
-                    <td><code>{g.graph_id}</code></td>
+                    <td>{g.status === 'active' ? 'active' : <span className="revoked">{g.status}</span>}</td>
+                    <td>{g.key_count != null ? g.key_count : '—'}</td>
+                    <td>
+                      <button
+                        className="ghost small"
+                        onClick={() => openGraphPanel(g.graph_id)}
+                        aria-expanded={panelGraphId === g.graph_id}
+                        aria-label={`Manage keys for graph ${g.name}`}
+                      >
+                        {panelGraphId === g.graph_id ? 'Close' : 'Keys'}
+                      </button>
+                      {graphCanDelete(g) && confirmDeleteId === g.graph_id ? (
+                        <span className="graph-del-confirm">
+                          Delete {g.name}? Data and keys are removed permanently.{' '}
+                          <button className="ghost small danger" disabled={graphBusy} onClick={() => deleteGraphRow(g.graph_id)}>Delete</button>{' '}
+                          <button className="ghost small" disabled={graphBusy} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
+                        </span>
+                      ) : (
+                        graphCanDelete(g) && (
+                          <button
+                            className="ghost small"
+                            onClick={() => { setConfirmDeleteId(g.graph_id); setGraphMsg('') }}
+                            aria-label={`Delete graph ${g.name}`}
+                          >
+                            Delete
+                          </button>
+                        )
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            {panelGraphId && (
+              <div className="graph-key-panel" aria-label={`Keys for ${graphNameFor(panelGraphId) || 'graph'}`}>
+                <div className="graph-key-panel-head">
+                  <strong>Keys for {graphNameFor(panelGraphId) || 'this graph'}</strong>
+                  <button className="ghost small" onClick={closeGraphPanel}>Close</button>
+                </div>
+                {!isOwnerAdmin && <p className="dim small">Only owners and admins can manage graph keys.</p>}
+                {isOwnerAdmin && (
+                  <div className="inline-form">
+                    <input
+                      placeholder="Key label (optional)"
+                      aria-label="New graph key label"
+                      value={graphKeyName}
+                      onChange={(e) => setGraphKeyName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && graphKeyName.trim() && mintGraphKey()}
+                    />
+                    <button className="ghost small" onClick={mintGraphKey} disabled={graphBusy || !graphKeyName.trim()}>+ Mint key</button>
+                  </div>
+                )}
+                {graphMsg && <div className="error banner">{graphMsg}</div>}
+                {panelKeysStatus === 'loading' && <p className="dim small">Loading keys…</p>}
+                {panelKeysStatus === 'error' && <p className="dim small">Couldn't load keys — try again.</p>}
+                {panelKeysStatus === 'ok' && panelKeys.length === 0 && <p className="dim small">No keys for this graph yet — mint one above (shown once).</p>}
+                {panelKeysStatus === 'ok' && panelKeys.length > 0 && (
+                  <table>
+                    <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
+                    <tbody>
+                      {panelKeys.map((k) => (
+                        <tr key={k.id || k.key_id} className={k.revoked_at ? 'row-dim' : undefined}>
+                          <td>{k.name ? <span className="key-name">{k.name}</span> : <span className="dim">—</span>}</td>
+                          <td><code>{k.key_prefix || (k.id || '').slice(0, 12)}</code></td>
+                          <td>{fmtTime(k.created_at || k.createdAt)}</td>
+                          <td>{k.revoked_at ? <span className="revoked">revoked</span> : <span>active</span>}</td>
+                          <td>
+                            {!k.revoked_at && isOwnerAdmin && (
+                              <button
+                                className="ghost small"
+                                disabled={graphBusy}
+                                onClick={() => revokePanelKey(k.id || k.key_id)}
+                                aria-label={`Revoke key ${k.key_prefix || (k.id || '').slice(0, 8)}`}
+                              >
+                                Revoke
+                              </button>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )}
+            {revealKey && (
+              /* C7 indicator 2: the ONE-TIME reveal modal. Mounted only from
+                 a mint response (create-graph envelope or per-graph mint);
+                 the plaintext exists nowhere else (hash-only storage) — no
+                 show-key route ever re-renders it. Clipboard failure keeps
+                 the key visible in the modal text; dismissing clears state. */
+              <div className="modal-backdrop">
+                <div className="modal" role="dialog" aria-modal="true" aria-label="New key — shown once">
+                  <h2>{revealKey.title}</h2>
+                  <p className="dim small">Your new key — <strong>shown once</strong>. Copy it now; you won't see it again.</p>
+                  <code className="key-value">{revealKey.plaintext}</code>
+                  <div className="claim-actions">
+                    <button className="ghost" onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(revealKey.plaintext)
+                        setRevealKey(null)
+                      } catch {
+                        // Clipboard unavailable (e.g. non-secure context): the
+                        // key stays visible so the user can copy by hand — it is
+                        // never re-fetched or re-shown elsewhere. Select the key
+                        // text itself for a manual Ctrl/Cmd+C.
+                        const el = document.querySelector('.modal .key-value')
+                        const range = document.createRange()
+                        if (el) {
+                          range.selectNodeContents(el)
+                          const sel = window.getSelection()
+                          sel.removeAllRanges()
+                          sel.addRange(range)
+                        }
+                      }
+                    }}>Copy &amp; done</button>
+                    <button className="ghost" onClick={() => setRevealKey(null)}>I saved it</button>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
 
