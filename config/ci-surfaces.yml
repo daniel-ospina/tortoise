@@ -378,6 +378,7 @@ surfaces:
   - test_issue94_annotate_ep_batch.py
   - test_kappa.py
   - test_ranking.py
+  - test_ranking_w4b.py
   - test_recall_gaps_subgraph.py
   - test_recall_state.py
   - test_source_credibility.py
@@ -504,6 +505,7 @@ tier1:
 - test_onboarding_variants.py
 - test_quota.py
 - test_ranking.py
+- test_ranking_w4b.py
 - test_reaper_orphan.py
 - test_sdk_dedup.py
 - test_sdk_ep.py
