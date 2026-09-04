@@ -21,10 +21,48 @@ const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main
 // machinery, but explanatory PROSE may still name the deleted helpers (e.g.
 // "the held-key machinery ... was deleted"). Strip // and /* */ comments so
 // prose stays legal while any code reference still fails the grep.
+// #2246 review (F): the strip is QUOTE-AWARE — a naive regex strip turned
+// `//` INSIDE string/template literals into comment text (e.g.
+// 'https://…' → 'https:'), so a banned token embedded in a URL string became
+// invisible to the code greps (evadable). The state machine below strips
+// comments only when NOT inside a single/double-quoted string or backtick
+// template (minimal escape handling) — strings stay intact, so a code-form
+// usage (string literal included) still fails the grep while comment-only
+// mentions still pass.
 function stripComments(src) {
-  return src
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/\/\/[^\n]*/g, '')
+  let out = ''
+  let i = 0
+  const n = src.length
+  while (i < n) {
+    const c = src[i]
+    const next = src[i + 1]
+    if (c === '/' && next === '/') {
+      // line comment — run to (not incl.) the newline
+      while (i < n && src[i] !== '\n') i++
+    } else if (c === '/' && next === '*') {
+      // block comment — run past the closing */
+      i += 2
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) i++
+      i += 2
+    } else if (c === '"' || c === "'" || c === '`') {
+      // string / template literal — copy verbatim to its unescaped close so
+      // a `//` inside the literal is never misread as a comment start
+      const quote = c
+      out += c
+      i++
+      while (i < n) {
+        const sc = src[i]
+        if (sc === '\\') { out += sc + (src[i + 1] || ''); i += 2; continue }
+        out += sc
+        i++
+        if (sc === quote) break
+      }
+    } else {
+      out += c
+      i++
+    }
+  }
+  return out
 }
 const mainJsxCode = stripComments(mainJsx)
 
@@ -34,8 +72,10 @@ test('#2167: zero mintSessionKey( call sites remain in main.jsx', () => {
 })
 
 test('#2167: no bootstrap-purpose /v1/session/key POST string remains (recovery inline is exempt)', () => {
-  // recoverKey legitimately keeps `purpose: 'recovery'` — match ONLY the
-  // bootstrap purpose (any quoting style).
+  // #2246: recoverKey (the dashboard's only POST /v1/session/key consumer)
+  // is DELETED — the recovery purpose + endpoint remain for NON-dashboard
+  // consumers only (SDK/CLI/selfhost), so match ONLY the bootstrap purpose
+  // (any quoting style).
   const boot = mainJsx.match(/purpose\s*:\s*['"]bootstrap['"]/g) || []
   assert.deepEqual(boot, [], `bootstrap-purpose mints must be deleted: ${boot}`)
 })

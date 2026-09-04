@@ -45,7 +45,11 @@ export function usableDurableRows(keyRows) {
 // step should embed from server key rows (GET /v1/team/keys — which lists
 // ALL rows incl. bootstrap, kept unfiltered in state so prefix matching
 // works, #2166). Returns { key, durable, source }:
-//   - welcomeKey present → durable (first-time A13 provisioned key)
+//   - welcomeKey present → durable (first-time A13 provisioned key) — UNLESS
+//     keyRows is a loaded non-empty array and the welcome plaintext's prefix
+//     row is absent/revoked/disabled: the shown-once reveal is then STALE
+//     (rotated/revoked/disabled after it was shown) and must fall through to
+//     the rows/paste resolution as if welcomeKey were absent (#2246 review)
 //   - apiKey (session-held plaintext OR a pasted candidate) matches a durable
 //     row (created_via != bootstrap, no expires_at, not revoked, not disabled)
 //     → { key: apiKey, durable: true, source: 'durable' } — the connect step
@@ -62,7 +66,21 @@ export function usableDurableRows(keyRows) {
 // apiKey param with the pasted plaintext — revoked/disabled/bootstrap rows
 // must still reject (the escape hatch's whole point).
 export function durableConnectKey(welcomeKey, apiKey, keyRows) {
-  if (welcomeKey) return { key: welcomeKey, durable: true, source: 'welcome' }
+  // #2246 (review, P1): row-truth stale check on the in-memory welcome
+  // plaintext — post-#2246 the table actions are uniform one-click (rotate /
+  // revoke / disable), so a welcomeKey whose prefix row is gone/revoked/
+  // disabled must NOT win. Check only when keyRows is a LOADED non-empty
+  // array (null/[] = not loaded yet — the pre-load welcome reveal must keep
+  // working; the provisioned row lands in the same loadAll response). When
+  // stale, set the welcome plaintext aside and proceed as if it were absent
+  // so the normal rows/paste resolution (rows-durable / none / durable /
+  // bootstrap / revoked / disabled / unknown) runs.
+  let welcome = welcomeKey
+  if (welcome && Array.isArray(keyRows) && keyRows.length > 0) {
+    const row = keyRows.find((k) => k && k.key_prefix && welcome.startsWith(k.key_prefix))
+    if (!row || row.revoked_at || row.enabled === false) welcome = ''
+  }
+  if (welcome) return { key: welcome, durable: true, source: 'welcome' }
   if (!apiKey) {
     const usable = usableDurableRows(keyRows)
     return { key: '', durable: false, source: usable.length ? 'rows-durable' : 'none' }

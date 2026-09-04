@@ -529,3 +529,107 @@ def test_rotate_durable_key_replaces_in_place_without_holding(page: Page) -> Non
     assert slot is None, f"#2246: rotate must never install the replacement, got {slot!r}"
     assert session_mints == [], f"zero-mint tripwire: {session_mints}"
     assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+
+
+def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
+    """#2167 F2 (the plan's step-10 two-team CI case — structurally invisible
+    to a single-team suite): with ZERO keys (no stored durable, no mint), a
+    multi-membership user whose SELECTED team ≠ first membership sees the
+    SELECTED team's Backups data. The session-mode /backups call must pin
+    ?team_id=<selected> (rule 2) — the pre-#2167 shape team-scoped by the KEY
+    header, so a zero-key + non-default-team session silently rendered the
+    first membership's backups (server /backups → ungated → resolves
+    memberships[0] without the param). Zero POST /v1/session/key throughout."""
+    import re as _re
+    # NOTE: the shell reads t.team_name (main.jsx) — `name` alone renders
+    # empty (identity.py fixture convention); team_name drives the switcher.
+    team_a = {"team_id": "team_a", "team_name": "Alpha", "tier": "free",
+              "role": "owner", "anon": False}
+    team_b = {"team_id": "team_b", "team_name": "Bravo", "tier": "free",
+              "role": "owner", "anon": False}
+    backup_reads: list = []
+    mint_calls: list = []
+
+    def handle(route):
+        url = route.request.url
+        if url.startswith(API_HOST):
+            path = urllib.parse.urlsplit(url).path
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            tid = (qs.get("team_id") or ["team_a"])[0]
+            if path.endswith("/v1/session/key") and route.request.method == "POST":
+                mint_calls.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/teams") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([team_a, team_b]))
+                return
+            if path.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # onboarded → the shell stays in the dashboard (no wizard)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+                return
+            if path.endswith("/v1/user/identity") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                                "banner": {"show": False}}))
+                return
+            if path.endswith("/backups"):
+                backup_reads.append(tid)
+                # distinct per-team payloads — wrong-team data is VISIBLE
+                rows = [{"id": "bk-b1"}, {"id": "bk-b2"}] if tid == "team_b" else [{"id": "bk-a1"}]
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": rows}))
+                return
+            if path.endswith("/v1/team/keys"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": []}))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                t = team_b if tid == "team_b" else team_a
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(t))
+                return
+            if path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.context.add_cookies([{
+        "name": "sb-tortoise-auth-token",
+        "value": urllib.parse.quote(json.dumps(_session_json("u-two-team"))),
+        "domain": ".premiselabs.co", "path": "/",
+    }])
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    # Switch to Bravo (≠ first membership) via the account menu — session-only
+    # (zero keys held: the switch adopts nothing and mints nothing).
+    # expect_response pumps the Playwright sync event loop while waiting —
+    # the ?team_id= pin must reach the API (a dropped pin cannot false-pass).
+    page.get_by_role("button", name=_re.compile(r"Account menu")).click()
+    with page.expect_response(lambda r: "/backups" in r.url and "team_id=team_b" in r.url,
+                              timeout=15000):
+        page.locator(".account-menu").get_by_role("button", name="Bravo").click()
+    # The Backups read after the switch must pin team_b (rule 2).
+    expect(page.locator("body")).to_contain_text("Bravo", timeout=15_000)
+    assert "team_b" in backup_reads, f"/backups must pin ?team_id=team_b after the switch: {backup_reads}"
+    # UI check: open the API Keys tab (the relocated BackupsCard) — the
+    # count reflects team B's payload, never Alpha's.
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("body")).to_contain_text("Backups", timeout=15_000)
+    assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"

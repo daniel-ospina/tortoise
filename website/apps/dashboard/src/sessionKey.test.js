@@ -99,13 +99,51 @@ test('rows: disabled durable excluded even when enabled field absent semantics d
 // #1998 fold-in: durableConnectKey — the connect step must embed a DURABLE
 // key, never the 24h bootstrap session credential (finding on PR #2161).
 // #2246: session mode passes apiKey '' — the gate resolves from rows.
-test('connect: welcomeKey (first-time provisioned) is always durable', () => {
-  const w = durableConnectKey('tt_welcome_abcdefgh', 'tt_bootstrap_x', [
-    { key_prefix: 'tt_bootstra', created_via: 'bootstrap', expires_at: '2026-09-04T00:00:00Z' },
+// #2246 review (P1): welcomeKey is row-truth-checked — when keyRows is a
+// loaded non-empty array and the welcome plaintext's prefix row is absent /
+// revoked / disabled, the shown-once reveal is STALE and must NOT win.
+test('connect: welcomeKey before the rows load (null) always wins — pre-load reveal', () => {
+  const w = durableConnectKey('tt_welcome_abcdefgh', 'tt_bootstrap_x', null)
+  assert.equal(w.durable, true)
+  assert.equal(w.key, 'tt_welcome_abcdefgh')
+  assert.equal(w.source, 'welcome')
+})
+test('connect: welcomeKey with matching usable row (rows loaded) → welcome', () => {
+  const w = durableConnectKey('tt_welcome_abcdefgh', '', [
+    { key_prefix: 'tt_welcome', created_via: 'provisioned', expires_at: null, revoked_at: null, enabled: true },
+    row('tt_other_ab', { created_via: 'provisioned' }),
   ])
   assert.equal(w.durable, true)
   assert.equal(w.key, 'tt_welcome_abcdefgh')
   assert.equal(w.source, 'welcome')
+})
+test('connect: welcomeKey STALE when its row is revoked (rows loaded) → rows resolution, never welcome', () => {
+  const w = durableConnectKey('tt_welcome_abcdefgh', '', [
+    { key_prefix: 'tt_welcome', created_via: 'provisioned', expires_at: null, revoked_at: '2026-09-04T00:00:00Z' },
+    row('tt_other_ab', { created_via: 'provisioned' }),
+  ])
+  assert.equal(w.durable, false)
+  assert.equal(w.key, '') // stale welcome plaintext must never embed
+  assert.equal(w.source, 'rows-durable') // falls through: another usable row exists
+})
+test('connect: welcomeKey STALE when its row is disabled/absent (rows loaded) → none', () => {
+  const dis = durableConnectKey('tt_welcome_abcdefgh', '', [
+    { key_prefix: 'tt_welcome', created_via: 'provisioned', expires_at: null, revoked_at: null, enabled: false },
+  ])
+  assert.equal(dis.durable, false)
+  assert.equal(dis.source, 'none')
+  const absent = durableConnectKey('tt_welcome_abcdefgh', '', [
+    row('tt_other_ab', { created_via: 'provisioned' }),
+  ])
+  assert.equal(absent.durable, false)
+  assert.equal(absent.key, '')
+  assert.equal(absent.source, 'rows-durable') // absent row + usable row → rows-durable
+})
+test('connect: welcomeKey with rows NOT loaded (null/empty) → welcome (pre-load reveal)', () => {
+  assert.equal(durableConnectKey('tt_welcome_abcdefgh', '', null).durable, true)
+  assert.equal(durableConnectKey('tt_welcome_abcdefgh', '', null).source, 'welcome')
+  assert.equal(durableConnectKey('tt_welcome_abcdefgh', '', []).source, 'welcome')
+  assert.equal(durableConnectKey('tt_welcome_abcdefgh', '', []).key, 'tt_welcome_abcdefgh')
 })
 test('connect: durable provisioned apiKey (row match, no expiry) embeds as-is', () => {
   const live = 'tt_durable_abcdefgh'

@@ -903,8 +903,12 @@ def test_logout_redirects_to_auth(page: Page) -> None:
     page, never the dead redirect shell. #2246 rule-8 hygiene RETAINED: the
     logout wipe still fires on the app origin (the KEY_STORAGE slot is
     already purged by the session mount, but logout's removeItem is the
-    belt — the slot never survives a sign-out). Requires the loop harness: a
-    valid session cookie → dashboard renders → Log out → /auth."""
+    belt — the slot never survives a sign-out). #2246 review round-1: the
+    residue is RE-SEEDED after the mount purge so the logout click is the
+    ONLY remaining wipe — otherwise the final wipe-cookie assert would pass
+    vacuously if logout's own wipe regressed (the mount purge already fired
+    one removeItem). Requires the loop harness: a valid session cookie →
+    dashboard renders → Log out → /auth."""
     durable = "tt_loop_durable_abcdef0123456789"
     _wire_prod_domains(page)
     page.context.add_cookies([{
@@ -936,6 +940,11 @@ def test_logout_redirects_to_auth(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
     # the session mount purged the residue (no held key in state)
     assert page.evaluate("localStorage.getItem('tortoise_api_key')") is None
+    # #2246 review round-1: the mount purge ALREADY fired one removeItem (the
+    # patched wipe cookie above). Re-seed the residue NOW so the logout click
+    # below is the only remaining wipe — the final cookie assert then pins
+    # logout's own removeItem instead of passing on the mount purge's cookie.
+    page.evaluate(f"localStorage.setItem('tortoise_api_key', '{durable}')")
     page.locator(".account-blob-btn").click()
     expect(page.locator(".account-menu-logout")).to_be_visible()
     page.locator(".account-menu-logout").click()

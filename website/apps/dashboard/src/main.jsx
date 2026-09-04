@@ -945,12 +945,14 @@ function claimIntentInFlight() {
   // `name` (optional) is the key label — sent only when non-empty.
   async function mintKey(activeKey, name) {
     // #2167 rule 4: session-mode durable-key CREATE (shared by createKey +
-    // #2211's wizardMintDurableKey) rides the session JWT + pins
-    // ?team_id=<selected> (multi-membership correctness — server honors it
-    // membership-checked with a suspension 403, zero server changes) and
-    // NEVER merges a key-preference header (a held key must not shadow the
-    // session). The key-mode/claim surface (authMode 'apikey' — no session
-    // JWT exists there) keeps the activeKey header as its authenticator.
+    // #2211's wizardMintDurableKey + regenerateKey's rotate mint) rides the
+    // session JWT + pins ?team_id=<selected> (multi-membership correctness —
+    // server honors it membership-checked with a suspension 403, zero server
+    // changes) and NEVER merges a key-preference header (a held key must not
+    // shadow the session). #2246 (ADR-010): every mintKey call site passes ''
+    // for activeKey — no key-mode/claim caller exists (that surface never
+    // calls api()); the activeKey param is vestigial (kept for signature
+    // stability).
     const q = (sessionTokenRef.current && currentTeamId) ? `?team_id=${encodeURIComponent(currentTeamId)}` : ''
     const k = await api(`/v1/team/keys${q}`, {
       method: 'POST',
@@ -1185,9 +1187,11 @@ function claimIntentInFlight() {
     // #2167 rule 1 (defense-in-depth): with a session JWT present a key
     // Authorization merged from opts.headers must never override the session
     // on a dual-auth endpoint (the old shape let a held key shadow the
-    // session). Key-mode callers (authMode 'apikey' — no session JWT exists
-    // there) keep the key header as their authenticator; the mount stored-
-    // key probe is a raw fetch and unaffected by design (rule-1 exemption).
+    // session). #2246 (ADR-010): the mount stored-key probe (the old rule-1
+    // exemption) is DELETED — a session-authed browser never holds a key, so
+    // api() is session-JWT-only in every reachable state. authMode 'apikey'
+    // is the sessionless claim-paste screen, which returns before the chrome
+    // and never calls api() (the claim flows use raw fetch).
     if (sessionTokenRef.current) hdrs.Authorization = `Bearer ${sessionTokenRef.current}`
     if (hasBody && !hdrs['Content-Type'] && !hdrs['content-type']) hdrs['Content-Type'] = 'application/json'
     const res = await fetch(`${API_BASE}${path}`, { ...opts, headers: hdrs })
@@ -1676,10 +1680,12 @@ function claimIntentInFlight() {
   const [wizardConnectBusy, setWizardConnectBusy] = React.useState(false)
   const [wizardConnectError, setWizardConnectError] = React.useState('')
   // #1998 fold-in (durable connect key, PR #2161 finding): the connect step's
-  // universal command must embed a DURABLE key. When the live session key is
-  // a 24h bootstrap credential (returning user), the wizard mints a durable
-  // provisioned key on demand (POST /v1/team/keys) — held here, shown once in
-  // the command snippet; cap error routes to the API Keys tab (regenerate).
+  // universal command must embed a DURABLE key. #2246 (ADR-010): the browser
+  // never holds a session credential — the gate sources from the usable
+  // durable ROWS or the first-timer welcomeKey, and when a usable durable
+  // exists the wizard mints a fresh provisioned key on demand (POST
+  // /v1/team/keys) — held HERE in-memory, shown once in the command snippet;
+  // cap error routes to the API Keys tab (regenerate).
   const [wizardDurableKey, setWizardDurableKey] = React.useState('')
   const [wizardDurableBusy, setWizardDurableBusy] = React.useState(false)
   const [wizardDurableError, setWizardDurableError] = React.useState('')
@@ -2139,7 +2145,7 @@ function claimIntentInFlight() {
       // refire lands the correct count. Bump the refresh seq so any
       // in-flight pre-seed team response is dropped (code-review P2).
       teamRefreshSeqRef.current += 1
-      refreshTeam(welcomeKey || '', undefined, teamRefreshSeqRef.current).catch(() => {})
+      refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
       // #1691: reflect the subject in the account username (display_name)
       // — best-effort; the graph Subject is the source of truth.
       if (subj && subj.id && supabaseClient) {
@@ -2168,20 +2174,20 @@ function claimIntentInFlight() {
   // the setTeams refresh + loadBackups re-fetch are harmless.
   async function finishWelcomeLoads() {
     await loadTeams().catch(() => {})
-    loadBackups(welcomeKey || '').catch(() => {})
+    loadBackups('').catch(() => {})
     // #1906: the first-timer path never ran loadAll (keys+sessions) — the
     // Overview 'API Keys' card stayed 0 until reload. loadTeams just
     // pinned currentTeamId (Round-8), so loadAll's ?team_id= targets the
     // new team. Fire-and-forget like completeLogin's card loads; each
     // loader carries its own staleness guard.
-    loadAll(welcomeKey || '').catch(() => {})
+    loadAll('').catch(() => {})
     // #1906: refetch the team so the Overview 'Data points' card reflects
     // the seeded graph — team.point_count was captured at provisioning
     // (pre-seed, 0). Also covers the header-exit-without-seed case (0
     // stays 0 — honest).
     // Pass the current refresh seq: if a seed refire bumps it mid-flight,
     // this pre-seed response is dropped (it must not clobber the count).
-    refreshTeam(welcomeKey || '', undefined, teamRefreshSeqRef.current).catch(() => {})
+    refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
     // #1847: re-fire the onboarding-state load NOW that the team exists —
     // the mount-time refreshOnboarding() fired BEFORE provisioning (mount
     // gate → provisionInApp) and 403'd 'No team membership' for first-timers,
@@ -2545,11 +2551,11 @@ function claimIntentInFlight() {
             // #2167 (rule 9, F8 — round-2 reviewer P2): an ALL-suspended
             // membership set makes the server 403 the teams LIST itself
             // (list_my_teams raises the _suspended_detail() dict when every
-            // membership is suspended — hosted_api.py). This is the ACTUAL
-            // fresh-login suspension vector post-mint-removal — the mount
-            // probe + 5d branch never run because teamsList stays empty.
-            // Parse the 403 dict so the appeal CTA renders instead of the
-            // generic teams error card.
+            // membership is suspended — hosted_api.py). #2246 (ADR-010): this
+            // catch is now the SOLE fresh-login suspension vector — the mount
+            // stored-key probe + its adopt/5d branches were deleted, so the
+            // 403 always lands here. Parse the 403 dict so the appeal CTA
+            // renders instead of the generic teams error card.
             try {
               const b = await teamsRes.json()
               teamsSuspendDetail = suspendedFromDetail(b && b.detail)
@@ -2703,13 +2709,13 @@ function claimIntentInFlight() {
     // used an undefined `jl` (dead code); this is the real refetch.
     // P2 (code-review): key param so the refetch targets the selected team —
     // the overview cards + header tier badge read /v1/team, which resolves
-    // the team from the API key.
-    // #1828 (review): the Team card now rides the SESSION JWT (dual-auth
-    // get_current_team_session) when signed in — pinned ?team_id= so
-    // multi-membership users resolve the SELECTED team, not the first
-    // membership; the api() helper's useSession only wins when a session JWT
-    // is present, so the key stays the fallback for key-only callers
-    // (stored-key reuse / switchTeam with a fresh mint).
+    // the team from the session + pinned ?team_id=.
+    // #2246 (ADR-010): the read rides the SESSION JWT (dual-auth
+    // get_current_team_session) + pinned ?team_id= so multi-membership users
+    // resolve the SELECTED team, not the first membership. The key param is
+    // unused in session mode — the key-only fallback callers (stored-key
+    // reuse / switchTeam with a fresh mint) were deleted with the held key;
+    // all call sites pass '' (kept for signature stability).
     const _teamAtCall = expectedTeamId || teamIdRef.current
     const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
     const t = await api(`/v1/team${q}`, sessionTokenRef.current
@@ -2759,18 +2765,21 @@ function claimIntentInFlight() {
     // loader carries its own teamIdRef staleness guard, so racing them
     // against the team fetch is safe; /v1/team still owns setTeam +
     // setAuthed (the section gate) below. (loadGraphs/loadMembers ride
-    // the currentTeamId effect, fired at mount by the stored-key path and
-    // now by the mint path too.)
+    // the currentTeamId effect, fired by the mount pin of the session-only
+    // landing — #1912 first-healthy pin before completeLogin('') — and by
+    // switchTeam.)
     const cardLoads = Promise.all([
       loadAll(key),
       loadTeams(),
       loadBackups(key),
     ]).catch(() => {})
     try {
-      // #1828 (review): session-driven Team card — pinned ?team_id= so the
-      // session resolves the MINTED/stored-key team, not the first
-      // membership (multi-membership users); the key remains the fallback
-      // when no session JWT exists (api() useSession only wins with one).
+      // #1828 (review) / #2246 (ADR-010): session-driven Team card — the
+      // session-only landing's #1912 first-healthy pin fed completeLogin(''),
+      // so the read goes out pinned ?team_id=<selected> and resolves the
+      // SELECTED team, not the first membership (multi-membership users).
+      // api() useSession is the only auth leg — no key fallback exists in
+      // session mode (the held-key/stored-key callers are deleted).
       const q = teamAtCompleteLogin ? `?team_id=${encodeURIComponent(teamAtCompleteLogin)}` : ''
       const t = await api(`/v1/team${q}`, sessionTokenRef.current
         ? { useSession: true }
@@ -2900,9 +2909,12 @@ function claimIntentInFlight() {
   async function claimSignIn(provider) {
     setClaimError('')
     // #1511 (code-review P2): the claim uses the VISIBLE input (apiKey
-    // state mirrored into the ref) — what's on screen is what's used. A
-    // pre-filled stored key is visible and deliberate; a wrong-team key
-    // 403s with the claim error. No hidden localStorage fallback.
+    // state mirrored into the ref) — what's on screen is what's used.
+    // #2246 (ADR-010): the apiKey initializer is zeroed and the legacy
+    // KEY_STORAGE slot is purged on session mounts, so the paste box starts
+    // EMPTY and holds exactly what the user pasted — no pre-filled stored
+    // key antecedent. A wrong-team key 403s with the claim error. No hidden
+    // localStorage fallback.
     const k = (apiKeyRef.current || '').trim()
     if (!k.startsWith('tt_')) {
       setClaimError('Paste your tt_ API key above, then connect a login to claim your organization.')
@@ -3042,6 +3054,9 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
+    // session-scoped; drop it with the other key state on logout.
+    setWelcomeKey('')
     setGraphs([])
     setGraphsLoaded(false) // Round-27: symmetry with switchTeam
     setMembers(null)
@@ -3102,8 +3117,9 @@ function claimIntentInFlight() {
     // 3-active bootstrap cap + max_api_keys deadlock no longer blocks the
     // overview itself (the mint still matters for agent keys + management
     // writes). Multi-team: pin ?team_id= so the cards track the team
-    // switcher (session resolution defaults to the first membership); the
-    // key param is accepted for backwards-compatible callers but unused.
+    // switcher (session resolution defaults to the first membership).
+    // #2246 (ADR-010): the key param is unused in session mode — all call
+    // sites pass '' (kept for signature stability only).
     const q = _teamAtCall ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
     try {
       const [k, s] = await Promise.all([
@@ -3140,8 +3156,9 @@ function claimIntentInFlight() {
         if (sessionTokenRef.current !== tok) return
         setTeams(list)
         // Round-8: guard on teamIdRef (sync write, no render-closure race) —
-        // the stored-key bootstrap path already set it for the key's team, so
-        // a multi-team reload must NOT clobber it with the first team.
+        // the session-only landing's #1912 first-healthy pin (set before
+        // completeLogin('')) / switchTeam / finishWelcomeLoads already set it,
+        // so a multi-team reload must NOT clobber it with the first team.
         // #1912: skip suspended rows when auto-selecting — a suspended
         // membership must not become the default team (healthy teams stay
         // selectable).
@@ -3351,18 +3368,17 @@ function claimIntentInFlight() {
   }
 
   // #1998 fold-in (PR #2161 finding): the connect step must source a DURABLE
-  // key, not the 24h bootstrap session credential. Mints via POST /v1/team/keys
-  // (the same endpoint the API Keys tab's create uses — created_via
-  // 'provisioned', durable, counts vs max_api_keys). Auth NOTE (#2167 rule 1
-  // inversion, round-2 reviewer F3): with a session JWT present, api()
-  // FORCE-OVERRIDES the request Authorization with the session token, and
-  // mintKey (rule 4) sends NO key header + pins ?team_id= in session mode —
-  // the mint authenticates as the session, and the team-key header is the
-  // authenticator only in key-mode (no session JWT on the tab). A bootstrap
-  // session key CAN mint (server deleg gate only rejects delegation_depth=0
-  // minted keys). The plaintext is shown ONCE — the connect command embeds it
-  // (the reveal); afterwards the key is managed/regenerable from the API Keys
-  // tab.
+  // key — a bootstrap access credential stops authenticating within a day.
+  // Mints via POST /v1/team/keys (the same endpoint the API Keys tab's create
+  // uses — created_via 'provisioned', durable, counts vs max_api_keys).
+  // #2246 (ADR-010): the mint rides the session JWT (rule 4 — mintKey sends
+  // NO key header + pins ?team_id=); the session IS the authenticator — no
+  // browser-held key is involved. Verified server fact (hosted_api.py): POST
+  // /v1/team/keys has NO owner/admin role gate (members CAN mint server-side)
+  // — this affordance is owner/admin-only as DASHBOARD policy (render-gated),
+  // never a server role check. The plaintext is shown ONCE — the connect
+  // command embeds it (the reveal); afterwards the key is managed/regenerable
+  // from the API Keys tab.
   async function wizardMintDurableKey() {
     if (wizardDurableBusy) return
     setWizardDurableBusy(true)
@@ -3394,15 +3410,16 @@ function claimIntentInFlight() {
       // key count). Free tier max_api_keys = 2.
       if (e?.status === 402) {
         setWizardDurableError('You\'ve reached your plan\'s limit of API keys — regenerate one in the API Keys tab (shown once there), then paste it below.')
-      } else if (e?.status === 403) {
-        // #2246 (role-aware): the reachable mint-403 is the non-owner MEMBER
-        // case (the server keys:manage gate is role-scoped; session mints pass
-        // the dashboard_key_login flag, so the old flag wording is gone). The
-        // escape is pasting an existing durable key (from an agent config /
-        // another device) or asking an owner/admin to create one.
-        setWizardDurableError('Your role can\'t manage keys in this Organization — paste an existing durable key below (an owner or admin can create/rotate keys in the API Keys tab).')
       } else {
-        setWizardDurableError(e?.message || 'Could not create a durable setup key — try again.')
+        // #2246 (review): reachable mint failures here are the 402 cap above,
+        // a suspension 403, or transport — the server POST /v1/team/keys has
+        // NO owner/admin role gate (verified hosted_api.py: create_api_key
+        // only checks _check_team_limit), so a member never 403s server-side;
+        // member key creation is gated CLIENT-side as dashboard policy (the
+        // connect-step member copy + API Keys tab notice) and this handler's
+        // callers are owner/admin-gated renders. A suspension 403 falls
+        // through to its own message.
+        setWizardDurableError(e?.message || 'Could not create a new setup key — try again.')
       }
     } finally {
       setWizardDurableBusy(false)
@@ -3445,6 +3462,12 @@ function claimIntentInFlight() {
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
+    // #2246 (review, P1): welcomeKey is TEAM-scoped shown-once plaintext — a
+    // switch must not leak the previous team's plaintext into the new team's
+    // snippet/connect surfaces (welcomeKey feeds snippetKey, the re-entry/
+    // first-data cards, and the connect gate). Same convention as the
+    // wizardDurableKey drop above.
+    setWelcomeKey('')
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -3756,14 +3779,15 @@ function claimIntentInFlight() {
   }
 
   // Load team-scoped data whenever the active team changes. Members + graphs
-  // are JWT team-scoped; the key-scoped overview data (team/keys/sessions/
-  // backups) is reloaded in switchTeam/completeLogin with the team's key.
+  // are JWT team-scoped; the overview data (team/keys/sessions/backups) is
+  // reloaded in switchTeam/completeLogin pinned to the selected team — every
+  // read rides the session JWT + ?team_id= (#2246: no held key exists).
   React.useEffect(() => {
     if (currentTeamId) {
       teamIdRef.current = currentTeamId
       // #1893 (code-review P1): the mount-time refreshOnboarding() fired
       // BEFORE the team resolved (unpinned — server resolves memberships[0],
-      // which is the WRONG team for a multi-membership user whose stored-key
+      // which is the WRONG team for a multi-membership user whose SELECTED
       // team is not the first membership). Re-fetch now that the team is
       // known, so onboarding (and the scope surface) track the selected
       // team. teamIdRef is set above, so the pinned GET targets the right
@@ -4090,6 +4114,33 @@ function claimIntentInFlight() {
   // the full payload (#2246).
   const managedKeys = (keys || []).filter(isManagedKey)
 
+  // #2246 (review, P1): row-truth invalidation of in-memory plaintext. Post-
+  // #2246 the keys-table actions are uniform one-click (Rotate/revoke/disable
+  // on every durable row) — rotating/revoking/disabling the row whose
+  // plaintext we hold in memory (welcomeKey — the first-timer's shown-once
+  // reveal — or wizardDurableKey — a connect-step mint/paste) must invalidate
+  // that in-memory plaintext so the snippet/connect surfaces re-gate. The
+  // deleted classifyHeldKey drop hook owned this invariant pre-#2246 (the
+  // held slot was cleared when its row died); with no held slot these state
+  // strings are the only key material left, so the keys-table reload is the
+  // row-truth source. Guard: keys null/[] = not loaded yet — do nothing, so
+  // the pre-load welcome reveal is never cleared (the provisioned row IS in
+  // the loadAll response after finishWelcomeLoads). Deps [keys] only: a
+  // clear changes welcomeKey/wizardDurableKey, never keys, so no loop.
+  React.useEffect(() => {
+    if (!keys || keys.length === 0) return
+    const rowFor = (plaintext) => {
+      if (!plaintext) return null
+      return keys.find((k) => k && k.key_prefix && plaintext.startsWith(k.key_prefix)) || null
+    }
+    for (const [plaintext, clear] of [[welcomeKey, setWelcomeKey], [wizardDurableKey, setWizardDurableKey]]) {
+      if (!plaintext) continue
+      const r = rowFor(plaintext)
+      if (!r || r.revoked_at || r.enabled === false) clear('')
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [keys])
+
   // #714 (main): session detail view
   async function fetchSessionDetail(sessionId) {
     setDetailLoading(true)
@@ -4393,13 +4444,16 @@ function claimIntentInFlight() {
   // #1831 P2-1 / #2246: the wizard's setup commands embed the user's key —
   // never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
-  // #1998 fold-in (PR #2161 finding): the embedded key must be DURABLE. The
-  // 24h bootstrap session key minted at login (created_via 'bootstrap',
-  // expires_at = now+24h) would kill any agent configured with it within a
-  // day — so a bootstrap/unknown key is NEVER embedded; the connect step
+  // #1998 fold-in (PR #2161 finding): the embedded key must be DURABLE — a
+  // bootstrap access credential (created_via 'bootstrap', expires_at =
+  // now+24h) stops authenticating within a day and would kill any agent
+  // configured with it. #2246 (ADR-010): the browser never holds such a
+  // credential (the "minted at login" holder is gone) — the gate sources
+  // from the usable durable ROWS or the first-timer welcomeKey, and
+  // wizardDurableKey = a durable key minted (or pasted) at the connect step
+  // this session. A bootstrap/unknown key is NEVER embedded; the connect step
   // shows the durable-key gate (mint via POST /v1/team/keys or route to the
-  // API Keys tab) instead. wizardDurableKey = a durable key minted at the
-  // connect step this session.
+  // API Keys tab) instead.
   // #2246 (ADR-010): session mode passes apiKey '' (no held key) —
   // durableConnectKey resolves the gate from the keys-table ROWS
   // (usableDurableRows): 'welcome' (first-timer reveal) or wizardDurableKey
@@ -4643,15 +4697,18 @@ function claimIntentInFlight() {
                         // usable durable exists (its plaintext was shown once
                         // at creation and is unrecoverable from the table —
                         // create here or rotate there); 'none' = create one.
-                        // Role-aware: members can't mint (server 403) — paste
-                        // or ask an owner/admin.
+                        // Role-aware: key creation is owner/admin DASHBOARD
+                        // policy — the server POST /v1/team/keys has no role
+                        // gate (members CAN mint server-side; verified
+                        // hosted_api.py), so the member gate here is client-
+                        // side: paste an existing key or ask an owner/admin.
                         <>
                           <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
                             {!isOwnerAdmin
-                              ? 'Only owners and admins can create or rotate keys for this Organization — paste an existing durable key below, or ask an owner/admin for the setup command.'
+                              ? 'Only owners and admins can create or rotate keys in this dashboard. Paste an API key below (from your agents or an owner/admin), or ask an owner/admin to share the setup command.'
                               : (durableConnect.source === 'rows-durable'
-                                  ? 'This Organization already has durable API key(s) — each plaintext was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
-                                  : 'The setup command embeds an API key for this Organization. Keys are shown once when created — create a durable key now (shown once), or create/regenerate one in the API Keys tab.')}
+                                  ? 'This Organization already has API key(s) — each plaintext was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
+                                  : 'The setup command embeds an API key for this Organization. Keys are shown once when created — create a new key now (shown once), or create/regenerate one in the API Keys tab.')}
                           </p>
                           {wizardDurableError && (
                             <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
@@ -4661,7 +4718,7 @@ function claimIntentInFlight() {
                             <div className="wizard-nav-actions">
                               {isOwnerAdmin && (
                                 <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
-                                  {wizardDurableBusy ? 'Creating…' : 'Create a durable setup key'}
+                                  {wizardDurableBusy ? 'Creating…' : 'Create a new setup key'}
                                 </button>
                               )}
                               <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
@@ -4674,8 +4731,8 @@ function claimIntentInFlight() {
                           <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                             <input
                               type="password"
-                              aria-label="Paste a durable API key"
-                              placeholder="…or paste a durable key (tt_…)"
+                              aria-label="Paste an API key"
+                              placeholder="…or paste an API key (tt_…)"
                               value={wizardDurablePaste}
                               onChange={(e) => { setWizardDurablePaste(e.target.value); setWizardDurableError('') }}
                               style={{ flex: 1, minWidth: 0, padding: '0.5rem 0.65rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 13, color: 'inherit' }}
@@ -4699,7 +4756,19 @@ function claimIntentInFlight() {
                                 // the server; shown once, cleared on use.
                                 const check = durableConnectKey('', pasted, keys)
                                 if (check.source === 'bootstrap' || check.source === 'revoked' || check.source === 'disabled') {
-                                  setWizardDurableError('That key can\'t be used in the setup command (bootstrap keys expire within 24 hours; revoked and disabled keys never authenticate). Regenerate a durable key in the API Keys tab and paste the new one.')
+                                  // #2246 (review): paste-error — role- and
+                                  // state-branched. Members cannot rotate /
+                                  // regenerate keys (rotate = mint, allowed,
+                                  // + revoke old, server owner-gated), so only
+                                  // owners get the create/rotate path; both
+                                  // tails keep the state-specific reason.
+                                  const reason = check.source === 'bootstrap'
+                                    ? 'It was created for a login session, so it stops working after 24 hours'
+                                    : 'Revoked and disabled keys never authenticate'
+                                  const remedy = isOwnerAdmin
+                                    ? 'Create or rotate a key in the API Keys tab and paste the new one.'
+                                    : 'Ask an owner or admin to create or rotate a key for you, then paste it here.'
+                                  setWizardDurableError(`That key can't be used in the setup command. ${reason} — ${remedy}`)
                                   return
                                 }
                                 if (!/^tt_/.test(pasted)) {
@@ -5663,17 +5732,30 @@ function claimIntentInFlight() {
             )}
             <div className="row">
               <h2>API Keys</h2>
-              <div className="inline-form">
-                <input
-                  placeholder="Label (e.g. CI, staging)"
-                  aria-label="New key label"
-                  value={newKeyName}
-                  maxLength={64}
-                  onChange={(e) => setNewKeyName(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && createKey()}
-                />
-                <button onClick={createKey} disabled={busy}>+ New key</button>
-              </div>
+              {/* #2246 (review, P1): member key creation is gated CLIENT-side
+                  as dashboard policy — the server POST /v1/team/keys has NO
+                  role gate (members CAN mint server-side), but every row
+                  action is isOwnerAdmin-gated and rotation is owner-only via
+                  the server-gated revoke leg. The dashboard treats key
+                  management as owner/admin-managed (Members tab + wizard
+                  member gate precedent), so members get a notice + the
+                  paste-into-setup escape instead of the create form. Mirrors
+                  the graphs tab's sign-in-required span layout. */}
+              {isOwnerAdmin ? (
+                <div className="inline-form">
+                  <input
+                    placeholder="Label (e.g. CI, staging)"
+                    aria-label="New key label"
+                    value={newKeyName}
+                    maxLength={64}
+                    onChange={(e) => setNewKeyName(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && createKey()}
+                  />
+                  <button onClick={createKey} disabled={busy}>+ New key</button>
+                </div>
+              ) : (
+                <span className="dim small">Only owners and admins can create or rotate keys. Paste an existing key into the setup step to connect an agent.</span>
+              )}
             </div>
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {capNotice && (

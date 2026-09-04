@@ -190,14 +190,19 @@ anon claim/Protect surface is gated by early returns before the removed regions.
     `'rows-durable'` branch copy routes to create-here or rotate/regenerate in the API
     Keys tab (paste escape stays) — copy must NOT imply an existing row's key is
     embeddable (hashes only). **Role-aware gate copy**: `isOwnerAdmin` is in render
-    scope — members get a paste/ask-an-owner variant instead of a create button that
-    would 403 (member mints 403 server-side). Paste-error copy reworded (drop the 24h
+    scope — members get a paste/ask-an-owner variant instead of the create form
+    (dashboard policy — corrected on review: the server POST /v1/team/keys has NO
+    owner/admin role gate, so members CAN mint server-side; member create is gated
+    CLIENT-side, consistent with rotate staying owner/admin-only via the
+    server-gated revoke leg). Paste-error copy reworded (drop the 24h
     clause; bootstrap/revoked/disabled rejection stays). A dim "shown once" one-liner sits
     above the snippet when `wizardDurableKey`/welcomeKey supply the key. **wizardMint-
     DurableKey 403 catch** (~L3546): the dashboard_key_login=false wording is stale
     (session mints pass the flag); reword to the reachable member/role case — "your
     role can't manage keys — paste an existing durable key below (an owner or admin
-    can create/rotate in the API Keys tab)".
+    can create/rotate in the API Keys tab)". [Corrected on review: no member-role 403
+    catch exists — the server has no role gate to 403 on, so the catch merges to a
+    generic transport/suspension error and the member gate is client-side policy copy.]
 16. **Overview/re-entry card ternaries L5721-5800** → apiKey truthiness becomes
     `(apiKey || welcomeKey)` EVERYWHERE it gates copy — the re-entry ternary L5726, its
     companion `{!apiKey && <Go to API Keys →>}` L5729, the first-data card ternary
