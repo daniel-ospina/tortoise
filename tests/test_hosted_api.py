@@ -328,6 +328,9 @@ class TestVersionEndpoint:
         body = r.json()
         assert body["version"] == tortoise.__version__
         assert "commit_sha" in body
+        # #2208 review F5: openapi info.version must mirror the package
+        # version (was a stale hardcoded "0.1.0") — pin it so drift fails loud.
+        assert app.version == tortoise.__version__
 
     def test_version_is_public_no_auth(self, unauth_client):
         """Skew detection must work BEFORE auth — no Authorization header."""
