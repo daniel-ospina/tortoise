@@ -775,10 +775,13 @@ def run_benchmark(
         elif not (baseline.get("metrics") or {}):
             failure_origin = None  # first-run-pending
     # Round-3 P1: a PARTIAL selection (explicit session_ids ≠ the
-    # mode-implied corpus) can never PASS a committed baseline — a
+    # mode-implied corpus) is NEVER a surface-valid comparison — a
     # within-suite session excision would otherwise duck a one-fixture
-    # regression with a byte-identical config.
-    if partial and verdict == schema.VERDICT_PASS:
+    # regression with a byte-identical config (P3 widening: subset metrics
+    # are not comparable against full-corpus aggregates in EITHER
+    # direction, so a would-be REGRESSION is inconclusive too, never a
+    # misleading gate_regression).
+    if partial and verdict != schema.VERDICT_INCONCLUSIVE:
         verdict = schema.VERDICT_INCONCLUSIVE
         failure_origin = "config_mismatch"  # selection ≠ blessed corpus
         notes.append(
