@@ -268,8 +268,9 @@ def _open_graphs_tab(page: Page, team_row: dict,
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     page.locator('[data-tab="graphs"]').click()
-    # The graphs table is the active tab's <table> (rows: default + custom).
-    expect(page.locator("table tbody tr")).to_have_count(2, timeout=15_000)
+    # The graphs table is the active tab's <table> — one row per fixture row.
+    expected_rows = len(graphs) if graphs is not None else 2
+    expect(page.locator("table tbody tr")).to_have_count(expected_rows, timeout=15_000)
 
 
 def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
@@ -283,8 +284,7 @@ def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
     # Meter: '2 graphs · ∞ cap' (default + custom rows, max_graphs null).
     expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("2 graphs · ∞ cap")
     rows = page.locator("table tbody tr")
-    expect(rows.first).to_contain_text("default")
-    expect(rows.first).to_contain_text("default", exact=False)  # kind column
+    expect(rows.first).to_contain_text("default")  # name + badge
     # The default row: NO Delete AND NO Keys action (its keys are the
     # team-wide rows on the API Keys tab — P1-1 review fix); custom rows
     # have both.
