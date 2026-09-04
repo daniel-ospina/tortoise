@@ -1612,10 +1612,26 @@ jobs:
         # is set); CARVE_OUT=1 permits the URI-less embedded run. Same -k as
         # the #2172 proof gate.
         run: |
-          set -e
+          set -eo pipefail
           timeout -s INT -k 10 15m python -m pytest tests/test_hosted_api.py \
             -k "concurrent_first_calls or registry_anchor_reuses or reuses_healthy_anchor or rebinds_stale_anchor" \
-            -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1
+            -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1 2>&1 | tee /tmp/pytest-d14.log
+          # #2188 review P3-1: fail-closed on a silent all-skip — a URI leak
+          # or broadened skip hook would skip all 5 embedded_only guards and
+          # exit 0. Assert the 5 PASSED lines are actually present.
+          passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
+          echo "D14 guards passed: $passed"
+          [ "$passed" -ge 5 ] || { echo "::error::expected 5 D14 guards to RUN (got $passed passed — all-skip?)"; exit 1; }
+      - name: Upload D14 log (measurement artifact, #2188)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-d14-hosted-api
+          path: |
+            /tmp/pytest-d14.log
+            /tmp/junit-d14.xml
+          if-no-files-found: ignore
 
   canary-streak:
     # Epic #1647 Task 9 Step 6 (D-3=A): the instrumented canary-drop streak.
