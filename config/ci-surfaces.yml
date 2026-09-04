@@ -114,6 +114,19 @@ surfaces:
   - eval/harness/test_harness_benchmark.py
   - eval/harness/test_harness_schema.py
   - eval/harness/test_harness_corpus.py
+  # W3-b (#2100): the why-layer suite gate — seeds the shared E2E-1
+  # planted-conflict corpus (40 points, content-pinned to W4-a's E2E-1
+  # seeding via the jointly-pinned corpus manifest), assembles the canonical
+  # why-blocks through the REAL tortoise.why assembly, and grades the four
+  # why-questions from the surfaced context ALONE (A11).  Deterministic m2
+  # lane vs its OWN committed baselines/m2.json: the standing E2E-7 bars
+  # (conflict-surfacing >= 0.95, dig-deeper navigation >= 0.95, 0 clean
+  # false positives) REGRESSION a W4 assembly that cannot answer.  Also
+  # covers the hermetic schema/grading/A4 tests.
+  - eval/why_suite/test_why_suite_benchmark.py
+  - eval/why_suite/test_why_suite_schema.py
+  - eval/why_suite/test_why_suite_grading.py
+  - eval/why_suite/test_why_suite_ab.py
   # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
   # boundary PR (hosted capture code changes) must run the real-pipeline
   # replay gate against the write-path corpus. The deterministic M2 echo
