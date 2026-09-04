@@ -29,7 +29,11 @@ import logging
 import math
 from datetime import datetime, timezone
 
-from .search_engine import _beta_variance, CONTESTED_VARIANCE_THRESHOLD  # noqa: E402, RUF100
+from .search_engine import (  # noqa: E402, RUF100
+    _beta_variance,
+    _exclude_status_clause,
+    CONTESTED_VARIANCE_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +63,10 @@ DEFAULT_HALF_LIFE_DAYS = 30.0
 # not reorder the tail.  Strictly > 0 so a boost never lowers a score.
 W4_CONTESTED_BOOST = 0.05
 # Significant-token floor: query/counter-claim overlap needs tokens ≥ this
-# many alphanumerics (stopwords and 1-2 char tokens never count as a
-# conflict-relevance signal).
+# many alphanumerics (1-3 char function words and subword noise never count;
+# a >=4-char generic word DOES count — the floor is lexical, not
+# stopword-filtered, a documented tradeoff for zero-vocabulary zero-cost
+# relevance).
 W4_RELEVANCE_TOKEN_MIN_LEN = 4
 
 
@@ -99,10 +105,20 @@ def resolve_contested_relevance(
     The counter-claim resolution mirrors why.py's canonical conflict shape:
     a NANDer ``c`` NANDs INTO the point — either a direct operator-less
     statement or a NAND operator whose counterargument is its INPUT source
-    at idx 0 (the NAND edge into the target sits at idx > 0)."""
+    at idx 0 (the NAND edge into the target sits at idx > 0).  Mirroring
+    why.py also means: terminal-status counter-claims are excluded
+    (``_exclude_status_clause('c')``), each contested point's claims are
+    budget-capped at why.py's W4_MAX_CONFLICTS (a boost never fires on a
+    conflict the canonical why-layer wouldn't surface), and the whole read
+    + row-processing is fail-open — ranking must never break from
+    enrichment (non-str raw-graph content is coerced, never raised)."""
     if not contested_ids or not query:
         return {}
     try:
+        try:  # single source of truth: the why-layer UI budget
+            from .why import W4_MAX_CONFLICTS as _claim_budget
+        except Exception:  # pragma: no cover — defensive
+            _claim_budget = 2
         rows = projection.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids AND n.is_operator = false "
             "MATCH (c:Point)-[r:NAND]->(n) "
@@ -111,20 +127,21 @@ def resolve_contested_relevance(
             "WHERE c.id <> n.id AND (src.id IS NULL OR src.id <> n.id) AND ("
             "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
             "  (c.is_operator = false OR c.is_operator IS NULL)) "
+            "AND " + _exclude_status_clause("c") + " "
             "RETURN n.id, coalesce(src.content, c.label, c.content, '')",
             params={"ids": contested_ids},
         ).result_set
+        by_id: dict[str, list[str]] = {}
+        for pid, content in rows:
+            by_id.setdefault(pid, []).append(str(content or ""))
+        boosts: dict[str, float] = {}
+        for pid, claims in by_id.items():
+            if _query_touches_conflict(query, claims[:_claim_budget]):
+                boosts[pid] = W4_CONTESTED_BOOST
+        return boosts
     except Exception as e:  # pragma: no cover — defensive
         logger.warning("contested-relevance read failed: %s", e)
         return {}
-    by_id: dict[str, list[str]] = {}
-    for pid, content in rows:
-        by_id.setdefault(pid, []).append(content or "")
-    boosts: dict[str, float] = {}
-    for pid, claims in by_id.items():
-        if _query_touches_conflict(query, claims):
-            boosts[pid] = W4_CONTESTED_BOOST
-    return boosts
 
 
 def recency_decay(age_days: float, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
@@ -248,8 +265,10 @@ class GraphRanker:
             cb = contested_boosts.get(r.get("id"), 0.0)
             if cb:
                 # W4-b: bounded relevance-gated contested boost, folded into
-                # the graph term (flag-off/irrelevant ⇒ 0 ⇒ unchanged).
-                graph_boost = round(graph_boost + cb, 4)
+                # the graph term (flag-off/irrelevant ⇒ 0 ⇒ unchanged).  The
+                # clamp keeps the documented [0, 1] graph_boost invariant even
+                # when a maxed structural boost meets the W4-b increment.
+                graph_boost = round(min(1.0, graph_boost + cb), 4)
             recency = self.recency_boost(r, sig)
             final = (
                 self.similarity_weight * norm_sim

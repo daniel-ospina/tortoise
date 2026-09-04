@@ -230,6 +230,40 @@ class TestGraphRankerBoost:
         assert by_id["twin_hot"]["final_score"] == by_id["twin_calm"]["final_score"]
         assert "w4_contested_boost" not in by_id["twin_hot"]
 
+    def test_flag_on_resolution_is_one_batch_read(self, monkeypatch):
+        """S8 at the rerank level: N contested ids resolve in exactly ONE
+        resolution query under flag-on + query; the signal fetch is the
+        ranker's own (not counted here)."""
+        fake = _graph_ranker_fake([
+            ("twin_hot", "flocking zebra behavior is social"),
+            ("twin_hot", "another cache claim"),
+        ])
+        ranker = GraphRanker(projection=fake)
+        monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+        ranker.rerank(_twin_results(), query="zebra finch social behavior")
+        assert fake.nand_query_count == 1
+
+    def test_non_str_counter_claim_never_raises(self, monkeypatch):
+        """Fail-open contract: raw-graph writes can leave a non-str
+        content/label on a NANDer — the resolver coerces and returns boosts
+        instead of crashing the recall/search turn."""
+        class _RawFake(_FakeProjection):
+            pass
+
+        fake = _RawFake(
+            point_rows=[
+                _point_row("twin_calm", 10.0, 10.0),
+                _point_row("twin_hot", 2.0, 2.0),
+            ],
+            counter_claims=[("twin_hot", 12345)],  # non-str raw content
+        )
+        ranker = GraphRanker(projection=fake)
+        monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+        ranked = ranker.rerank(_twin_results(), query="zebra finch social behavior")
+        # No crash; the non-str claim matches nothing and the boost is inert.
+        assert fake.nand_query_count == 1
+        assert all("w4_contested_boost" not in r["graph_ranking"] for r in ranked)
+
     def test_irrelevant_conflict_is_ranked_noise_free(self, monkeypatch):
         """S7 negative: the query touches the point (it matched retrieval)
         but NOT the conflict — the counter-claim shares no significant token
@@ -337,6 +371,31 @@ def _seed_twin_conflict(sdk, counter_content: str) -> tuple[str, str, str]:
     return calm["id"], hot["id"], cc["id"]
 
 
+def test_integration_recall_state_surface_boosts_contested_only(ranked_sdk, monkeypatch):
+    """P2-2 (review): the recall_state surface threads the query — the
+    epic's main path — so an E2E through it must show the contested boost on
+    the contested POINT and its absence on OBJECT rows (objects aggregate
+    means; they are never contested, never boosted)."""
+    calm, hot, _cc = _seed_twin_conflict(
+        ranked_sdk, "flocking zebra behavior is social, not migratory")
+    obj = ranked_sdk.create_object("zebra finch habitat", "concept")
+    proj = ranked_sdk._get_proj()
+    proj.g.query(
+        "MATCH (p:Point {id:$id}) MATCH (o:Object {id:$oid}) "
+        "CREATE (p)-[:aboutObject]->(o)",
+        params={"id": hot, "oid": obj["id"]},
+    )
+    monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+    out = ranked_sdk.recall_state("zebra finch social behavior", limit=20)
+    recs = {r["id"]: r.get("recall_ranking", {}) for r in out}
+    assert hot in recs and calm in recs
+    assert recs[hot]["w4_contested_boost"] == W4_CONTESTED_BOOST
+    assert "w4_contested_boost" not in recs[calm]
+    obj_ids = [r["id"] for r in out if r.get("entity_type") == "object"]
+    for oid in obj_ids:
+        assert "w4_contested_boost" not in recs[oid]
+
+
 def test_integration_conflict_relevant_query_outranks_twin(ranked_sdk, monkeypatch):
     calm, hot, _cc = _seed_twin_conflict(
         ranked_sdk, "flocking zebra behavior is social, not migratory")
@@ -350,6 +409,15 @@ def test_integration_conflict_relevant_query_outranks_twin(ranked_sdk, monkeypat
     ).result_set[0]
     assert _beta_variance(float(row[0]), float(row[1])) > CONTESTED_VARIANCE_THRESHOLD
 
+    off = _run_fts_graph(ranked_sdk, flag_on=False)
+    by_off = {r["id"]: r["graph_ranking"] for r in off}
+    # Causality pre-assertion: the boost, NOT a structural or retrieval
+    # artifact, must be the differentiator — so first pin the flag-off
+    # baseline score of both twins (retrieval min-max noise is identical
+    # on/off because the pool and similarities do not change).
+    hot_off = by_off[hot]["final_score"]
+    calm_off = by_off[calm]["final_score"]
+
     monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
     results = ranked_sdk.tortoise_fts_query(
         "zebra finch migration", limit=10, order_by="graph")
@@ -359,8 +427,18 @@ def test_integration_conflict_relevant_query_outranks_twin(ranked_sdk, monkeypat
     # the contested twin OUTRANKS its uncontested twin.
     assert ids.index(hot) < ids.index(calm)
     by_id = {r["id"]: r for r in results}
-    assert by_id[hot]["graph_ranking"]["w4_contested_boost"] > 0
-    assert by_id[hot]["graph_ranking"]["final_score"] > by_id[calm]["graph_ranking"]["final_score"]
+    on_hot = by_id[hot]["graph_ranking"]
+    on_calm = by_id[calm]["graph_ranking"]
+    assert on_hot["w4_contested_boost"] == W4_CONTESTED_BOOST
+    assert on_hot["final_score"] > on_calm["final_score"]
+    # Causal delta: flag-on moves the contested twin UP by exactly the
+    # boost effect (W4_CONTESTED_BOOST x graph_boost_weight = 0.0175 in
+    # final-score space) and leaves the uncontested twin untouched.  If the
+    # boost were inert, hot_final(on) == hot_off and the ordering asserts
+    # above could pass on retrieval noise alone.
+    assert on_calm["final_score"] == calm_off  # calm never boosted
+    assert on_hot["final_score"] - hot_off == pytest.approx(
+        W4_CONTESTED_BOOST * 0.35, abs=2e-3)
 
 
 def _run_fts_graph(sdk, flag_on: bool, monkeypatch=None):

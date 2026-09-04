@@ -10568,7 +10568,13 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            ranked = ranker.rerank(dicts, entity_type=entity_type, query=query)[:limit]
+            # W4-b (#2102): thread the query for the contested-relevance boost
+            # ONLY when the caller opted into W4 enrichment — w4_enrich=False
+            # suppresses the why-layer keys AND the boost together (order and
+            # keys must never disagree).
+            ranked = ranker.rerank(
+                dicts, entity_type=entity_type,
+                query=(query if w4_enrich else None))[:limit]
             # W4 (#2101): additive why-layer enrichment (flag-gated) — search
             # surface; recall_state's pool and the ask lane inherit it through
             # their own calls. Zero-LLM, bounded reads, fail-open (items
