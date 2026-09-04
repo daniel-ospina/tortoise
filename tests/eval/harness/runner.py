@@ -357,8 +357,12 @@ def run_benchmark(
     log: list[str] | None = None,
     null_reflex: bool = True,
     config: dict | None = None,
+    progress=None,
 ) -> dict:
     """Full harness run: preflight → cell replay → grade → aggregate.
+
+    ``progress`` is an optional file-like for per-session progress lines
+    (the llm product lane is slow; a silent run is undiagnosable).
 
     Returns the run report (receipt-ready)::
 
@@ -437,11 +441,21 @@ def run_benchmark(
                 session_results.append(result)
                 telemetry = {}
                 notes.append(f"{session_id}: cell={key} suite={gold.get('suite')}")
+                if progress is not None:
+                    print(
+                        f"[{date}] {session_id} ({gold.get('suite')}, "
+                        f"cell={key}) ok", file=progress, flush=True
+                    )
             except Exception as exc:  # noqa: BLE001 — carried in the report
                 runner_errors.append(
                     f"{session_id}: replay raised {type(exc).__name__}: {exc}"
                 )
                 telemetry = {}
+                if progress is not None:
+                    print(
+                        f"[{date}] {session_id} raised "
+                        f"{type(exc).__name__}: {exc}", file=progress, flush=True
+                    )
             session_cost = telemetry.get("llm_cost_usd")
             if session_cost is None:
                 cost_tracked = False
@@ -686,7 +700,8 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
             "as warranted"
         )
         return 1
-    report = run_benchmark(root=root, run_id=run_id, notes=notes)
+    report = run_benchmark(root=root, run_id=run_id, notes=notes,
+                           progress=sys.stderr)
     if report["run_status"] != "completed":
         print(
             f"run failed ({report['failure_origin']}): "
@@ -727,7 +742,10 @@ def _main(argv: list[str] | None = None) -> int:
         ("--bless", "--compare", "--bless-corpus", "--bless-protocol")
     )
     if "--compare" in args or run_only:
-        report = run_benchmark()
+        progress = None
+        if "--progress" in args:
+            progress = sys.stderr
+        report = run_benchmark(progress=progress)
         print(
             f"run {report['run_id']}: status={report['run_status']} "
             f"verdict={report['verdict']} origin={report['failure_origin']}"

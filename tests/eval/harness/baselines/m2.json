@@ -14,9 +14,37 @@
     ]
   },
   "fixtures_hash": "sha256:ded9706426ba6b9ae541c8753ca5c6fbc22ed0555b559af2cd153fcf25ddff21",
-  "history": [],
-  "judge_pin": null,
-  "justification": null,
-  "metrics": {},
+  "history": [
+    {
+      "date": "2026-09-04T04:43:38Z",
+      "failure_classes": [
+        "blessed via CLI",
+        "cw01_writer_ingest: cell=pair_cw01_writer_ingest suite=continuity",
+        "cw02_writer_ember: cell=pair_cw02_writer_ember suite=continuity",
+        "iso_a_mercury: cell=team_team_a suite=isolation"
+      ],
+      "justification": "m2 echo-lane full-corpus replay at clean head 594cf466 (deterministic, byte-reproducible): write_back_fidelity 1.0, continuity_recall 1.0, source_isolation 0 (E2E-4 gate green). know_to_ask_failure 1.0 + push 0.0 are the honest NULL-reflex numbers (graded seam lands with W4; config.reflex=null keeps reflex bars off until then).",
+      "values": {
+        "continuity_recall": 1.0,
+        "false_fire_rate": 0.0,
+        "know_to_ask_failure_rate": 1.0,
+        "push_precision": 0.0,
+        "push_recall": 0.0,
+        "source_isolation_violations": 0,
+        "write_back_fidelity": 1.0
+      }
+    }
+  ],
+  "judge_pin": "w3-volunteering-memory-mechanical-v1",
+  "justification": "m2 echo-lane full-corpus replay at clean head 594cf466 (deterministic, byte-reproducible): write_back_fidelity 1.0, continuity_recall 1.0, source_isolation 0 (E2E-4 gate green). know_to_ask_failure 1.0 + push 0.0 are the honest NULL-reflex numbers (graded seam lands with W4; config.reflex=null keeps reflex bars off until then).",
+  "metrics": {
+    "continuity_recall": 1.0,
+    "false_fire_rate": 0.0,
+    "know_to_ask_failure_rate": 1.0,
+    "push_precision": 0.0,
+    "push_recall": 0.0,
+    "source_isolation_violations": 0,
+    "write_back_fidelity": 1.0
+  },
   "schema_version": 1
 }
