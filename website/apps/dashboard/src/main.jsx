@@ -2493,12 +2493,28 @@ function claimIntentInFlight() {
         // List memberships up front so the mint targets a concrete team
         // (P1: multi-membership users cannot mint without team_id).
         let teamsList = []
+        let teamsSuspendDetail = null
         try {
           const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
             headers: { Authorization: `Bearer ${session.access_token}` },
           })
           if (teamsRes.ok) {
             teamsList = await teamsRes.json()
+          } else if (teamsRes.status === 403) {
+            // #2167 (rule 9, F8 — round-2 reviewer P2): an ALL-suspended
+            // membership set makes the server 403 the teams LIST itself
+            // (list_my_teams raises the _suspended_detail() dict when every
+            // membership is suspended — hosted_api.py). This is the ACTUAL
+            // fresh-login suspension vector post-mint-removal — the mount
+            // probe + 5d branch never run because teamsList stays empty.
+            // Parse the 403 dict so the appeal CTA renders instead of the
+            // generic teams error card.
+            try {
+              const b = await teamsRes.json()
+              teamsSuspendDetail = suspendedFromDetail(b && b.detail)
+            } catch {
+              // non-JSON 403 body — fall through to the fail-closed generic
+            }
           }
           if (teamsRes.ok && Array.isArray(teamsList)) {
             // Round-12: SIGNED_OUT during this fetch must not resurrect teams
@@ -2510,6 +2526,13 @@ function claimIntentInFlight() {
             // #1566 (code-review P1): a transient API failure is NOT 'no
             // teams' — fail CLOSED to the error card rather than flipping an
             // existing user into a surprise provisioning (key rotation).
+            if (teamsSuspendDetail) {
+              setAuthed(false)
+              setMountError(teamsSuspendDetail.message || 'Organization suspended')
+              setSuspended(teamsSuspendDetail)
+              setChecking(false)
+              return
+            }
             throw new Error('Could not load your teams — try again.')
           }
         } catch (e) {
@@ -2663,20 +2686,20 @@ function claimIntentInFlight() {
             apiKeyRef.current = ''
           } else if (decision.action === 'keep-suspended') {
             // 5d: the KEY lane returns 403 {detail:{code:'SUSPENDED',…}} on
-            // a suspended team (hosted_api.py L1620-1623) — the stored
-            // durable is recoverable, so it is KEPT (slot untouched). The
-            // blocking error card + appeal CTA renders ONLY when every
-            // membership is suspended AND the selection did not move
-            // mid-probe (the F8 probe case — pre-change parity: the old
-            // mint-403 leg blocked the same way). A healthy alternate
-            // membership (or a mid-probe switch) falls through to the
-            // session-only tail — the #1912 pin below lands the first
-            // HEALTHY team and completeLogin renders it, so a stored
-            // durable on a suspended team never traps a multi-membership
-            // user with a healthy team (the pre-change probe failure fell
-            // through to a mint for the first selectable team — reviewer
-            // P2, PR #2232). The suspension then surfaces via the session
-            // reads when that team is selected.
+            // a suspended team — the stored durable is recoverable, so it is
+            // KEPT (slot untouched). A healthy alternate membership (or a
+            // mid-probe switch) falls through to the session-only tail — the
+            // #1912 pin below lands the first HEALTHY team and completeLogin
+            // renders it, so a stored durable on a suspended team never traps
+            // a multi-membership user with a healthy team (the pre-change
+            // probe failure fell through to a mint for the first selectable
+            // team — reviewer P2, PR #2232). The suspension then surfaces via
+            // the session reads when that team is selected. The all-suspended
+            // blocking card below is a DEFENSIVE belt only: the server 403s
+            // the /v1/teams LIST itself when every membership is suspended
+            // (list_my_teams), so production dies at the teams-fetch catch
+            // (round-2 reviewer F1) — that catch is the real F8 fresh-login
+            // mechanism and renders the same appeal card.
             const allSuspended = !teamsList.some((t) => !t.suspended_at)
             if (allSuspended && teamIdRef.current === teamAtProbe) {
               setSuspended(decision.detail)
@@ -2695,6 +2718,17 @@ function claimIntentInFlight() {
           // UI — unrecoverable), and a membership-gone key is reaped only
           // by a later durable-flow overwrite (pre-existing semantics).
         }
+        // #2167 (round-2 reviewer P3): a mid-probe switch/recoverKey owns
+        // the key state — bail the state-clearing tail + duplicate loads.
+        // The pre-change continuation had the same guard via mintedTeamId;
+        // without it, a probe resolving AFTER the user moved to another team
+        // (or installed a deliberate durable via recoverKey) would clobber
+        // that team's apiKey state with ''/null and fire a duplicate
+        // completeLogin. The dead-key material drops above already ran where
+        // warranted (and their slot write is equality-guarded); the moved
+        // selection's own loadAll/completeLogin finishes untouched. The slot
+        // itself is never rewritten here, so nothing leaks across mounts.
+        if (teamAtProbe !== null && teamIdRef.current !== teamAtProbe) return
         // #1912 (phase-7 reviewer 1 P1): the mount mint was the ONLY fresh-
         // session team pin before completeLogin. On every no-key / drop /
         // transient landing, pin the first HEALTHY team BEFORE completeLogin
@@ -2702,9 +2736,9 @@ function claimIntentInFlight() {
         // _session_user_team resolves memberships[0]) and a suspended FIRST
         // membership 403s into the error card on every reload of a multi-
         // membership user with a healthy second team (the #1912 bug class).
-        // All-suspended teams still fall through unpinned → 403 → appeal
-        // banner (rule 9 intact). The 5b-adopt branch already pinned the
-        // key's team above.
+        // (An all-suspended session 403s the teams fetch itself and renders
+        // the appeal card there — round-2 reviewer F1.) The 5b-adopt branch
+        // already pinned the key's team above.
         if (!key && !teamIdRef.current && teamsList.length) {
           const firstHealthy = teamsList.find((t) => !t.suspended_at) || teamsList[0]
           if (firstHealthy) {
@@ -3428,11 +3462,12 @@ function claimIntentInFlight() {
   // #1998 fold-in (PR #2161 finding): the connect step must source a DURABLE
   // key, not the 24h bootstrap session credential. Mints via POST /v1/team/keys
   // (the same endpoint the API Keys tab's create uses — created_via
-  // 'provisioned', durable, counts vs max_api_keys). Auth NOTE: mintKey passes
-  // Authorization: Bearer <activeKey> which api() merges AFTER the session JWT
-  // (opts.headers win, main.jsx api()) — so the mint authenticates as the team
-  // key (team pinning, the createKey precedent), falling back to the session
-  // JWT only when no key exists (#1830 recoverable-mint case). A bootstrap
+  // 'provisioned', durable, counts vs max_api_keys). Auth NOTE (#2167 rule 1
+  // inversion, round-2 reviewer F3): with a session JWT present, api()
+  // FORCE-OVERRIDES the request Authorization with the session token, and
+  // mintKey (rule 4) sends NO key header + pins ?team_id= in session mode —
+  // the mint authenticates as the session, and the team-key header is the
+  // authenticator only in key-mode (no session JWT on the tab). A bootstrap
   // session key CAN mint (server deleg gate only rejects delegation_depth=0
   // minted keys). The plaintext is shown ONCE — the connect command embeds it
   // (the reveal); afterwards the key is managed/regenerable from the API Keys

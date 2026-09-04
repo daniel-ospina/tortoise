@@ -641,10 +641,14 @@ def test_probe_401_drops_stored_key_and_renders_session_only(page: Page) -> None
 
 
 def test_probe_403_suspended_dict_keeps_key_and_renders_appeal(page: Page) -> None:
-    """#2167 rule 5d + F8 (probe path): a stored DURABLE on a SUSPENDED team
-    probes 403 {detail:{code:'SUSPENDED',…}} on the KEY lane (hosted_api.py
-    L1620-1623) — the recoverable durable is KEPT (slot retained) and the
-    appeal path renders. Never a mint, never a drop."""
+    """#2167 rule 9 + F8 (the ACTUAL fresh-login suspension mechanism): an
+    ALL-suspended membership set makes the server 403 the /v1/teams LIST
+    with the _suspended_detail() dict (list_my_teams — hosted_api.py), so a
+    stored DURABLE on the suspended team never even reaches the mount probe
+    (5d is a defensive belt for a hypothetical 200 list). The teams-fetch
+    catch parses the 403 dict → the recoverable durable is KEPT (slot
+    retained — nothing on this path writes the slot) and the appeal path
+    renders. Never a mint, never a drop."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-susp"
@@ -664,19 +668,7 @@ def test_probe_403_suspended_dict_keeps_key_and_renders_appeal(page: Page) -> No
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
             if path.endswith("/v1/teams"):
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"team_id": "team_susp", "name": "Suspended Co",
-                                                "suspended_at": "2026-09-01T00:00:00Z"}]))
-                return
-            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
-                auth = (route.request.headers.get("authorization") or "")
-                if auth.startswith("Bearer tt_"):
-                    # the probe (key lane): suspended team → 403 dict
-                    route.fulfill(status=403, content_type="application/json",
-                                  body=json.dumps({"detail": {"code": "SUSPENDED",
-                                                                "message": "Suspended for review",
-                                                                "appeal_url": "https://premise-labs.dev/appeal"}}))
-                    return
+                # the REAL contract: every membership suspended → 403 dict
                 route.fulfill(status=403, content_type="application/json",
                               body=json.dumps({"detail": {"code": "SUSPENDED",
                                                             "message": "Suspended for review",
@@ -698,20 +690,22 @@ def test_probe_403_suspended_dict_keeps_key_and_renders_appeal(page: Page) -> No
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # the appeal path renders (blocking error card + CTA, pre-change parity)
+    # the appeal path renders (blocking error card + CTA)
     expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
     expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
     assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
-    # 5d: the recoverable durable is KEPT — slot untouched
+    # the recoverable durable is KEPT — slot untouched (nothing on the
+    # 403-teams path writes it; the mount probe never ran)
     slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
-    assert slot == held_key, f"5d must retain the slot, got {slot!r}"
+    assert slot == held_key, f"the suspended team's durable must be retained, got {slot!r}"
 
 
 def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
-    """#2167 rule 9 + F8 (session-read path — the ACTUAL fresh-login
-    mechanism): a suspended team + NO stored key → the mount runs session-only
-    and the session-authed team read hits _suspended_detail()'s 403 dict →
-    the appeal banner renders. (Distinct from the rule-5d probe test above.)"""
+    """#2167 rule 9 + F8 (fresh login, NO stored key): an ALL-suspended
+    membership set 403s the /v1/teams LIST with the _suspended_detail() dict
+    (list_my_teams) — the session-authed teams fetch IS the fresh-login
+    suspension vector post-mint-removal. The catch parses the dict → the
+    appeal banner renders. (Distinct from the stored-durable test above.)"""
     import time as _time
     import urllib.parse as _up
     user_id = "u-susp2"
@@ -729,12 +723,7 @@ def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
             if path.endswith("/v1/teams"):
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"team_id": "team_susp", "name": "Suspended Co",
-                                                "suspended_at": "2026-09-01T00:00:00Z"}]))
-                return
-            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
-                # session read → _suspended_detail() 403 dict (#308/#1912)
+                # the REAL contract: every membership suspended → 403 dict
                 route.fulfill(status=403, content_type="application/json",
                               body=json.dumps({"detail": {"code": "SUSPENDED",
                                                             "message": "Suspended for review",
