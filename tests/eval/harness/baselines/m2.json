@@ -33,10 +33,30 @@
         "source_isolation_violations": 0,
         "write_back_fidelity": 1.0
       }
+    },
+    {
+      "date": "2026-09-04T05:36:30Z",
+      "failure_classes": [
+        "blessed via CLI",
+        "BPRE mode: 3 holdout fixtures excluded; gate corpus = 15 sessions",
+        "cw01_writer_ingest: cell=pair_cw01_writer_ingest suite=continuity",
+        "iso_a_mercury: cell=team_team_a suite=isolation"
+      ],
+      "justification": "m2 echo-lane BPRE replay at clean head eba2a254 (holdout excluded \u2014 pinned kta02 + cw02 pair frozen for the W4 reflex; corrects the pre-mode-fix 18-session snapshot): write_back_fidelity 1.0, continuity_recall 1.0, source_isolation 0 (E2E-4 gate green). kta failure 1.0 / push 0.0 = honest NULL-reflex numbers (graded seam lands with W4; reflex bars inactive while config.reflex=null).",
+      "values": {
+        "continuity_recall": 1.0,
+        "false_fire_rate": 0.0,
+        "know_to_ask_failure_rate": 1.0,
+        "push_precision": 0.0,
+        "push_recall": 0.0,
+        "source_isolation_violations": 0,
+        "write_back_fidelity": 1.0
+      },
+      "verdict": "pass"
     }
   ],
   "judge_pin": "w3-volunteering-memory-mechanical-v1",
-  "justification": "m2 echo-lane full-corpus replay at clean head 594cf466 (deterministic, byte-reproducible): write_back_fidelity 1.0, continuity_recall 1.0, source_isolation 0 (E2E-4 gate green). know_to_ask_failure 1.0 + push 0.0 are the honest NULL-reflex numbers (graded seam lands with W4; config.reflex=null keeps reflex bars off until then).",
+  "justification": "m2 echo-lane BPRE replay at clean head eba2a254 (holdout excluded \u2014 pinned kta02 + cw02 pair frozen for the W4 reflex; corrects the pre-mode-fix 18-session snapshot): write_back_fidelity 1.0, continuity_recall 1.0, source_isolation 0 (E2E-4 gate green). kta failure 1.0 / push 0.0 = honest NULL-reflex numbers (graded seam lands with W4; reflex bars inactive while config.reflex=null).",
   "metrics": {
     "continuity_recall": 1.0,
     "false_fire_rate": 0.0,

@@ -722,13 +722,10 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
     posture's committed baseline."""
     baseline_path = corpus.baseline_path(root, posture=posture)
     pending = corpus.load_baseline(root, posture=posture)
-    if pending.get("metrics") and not (corpus_bless or protocol_bless):
-        print(
-            f"baseline already published (metrics={sorted(pending['metrics'])}); "
-            "re-bless requires a fresh run + --corpus-bless/--protocol-bless "
-            "as warranted"
-        )
-        return 1
+    # No pre-emptive block here: bless_baseline's guards are authoritative
+    # (drift / config-mismatch / inconclusive raise; a regression re-publish
+    # records its verdict in history per the fix-wave protocol).  A re-bless
+    # MUST carry a justification naming the correction.
     report = run_benchmark(root=root, run_id=run_id, notes=notes,
                            progress=sys.stderr)
     if report["run_status"] != "completed":
