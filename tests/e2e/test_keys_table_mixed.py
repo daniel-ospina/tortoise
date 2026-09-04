@@ -10,8 +10,8 @@ dashboard fixture (scope doc §S5, AC5 follow-up #2178):
   DURABLE rows render (the only rows a user can act on):
     - provisioned active → "active" + full actions (positive control)
     - provisioned disabled → "disabled" — NOT "active" (the #2166 lie)
-    - recovery held key (the dashboard's own durable credential, minted via
-      the bootstrap-429 → recovery fallback) → "active" + the visible
+    - recovery held key (the dashboard's own durable credential — #2167:
+      localStorage-seeded + adopted via the mount probe, no mint) → "active" + the visible
       "in use by this dashboard" note, toggle/trash suppressed, rename kept
     - recovery non-live residual → active + actionable (known limitation,
       provenance needs server data)
@@ -32,10 +32,11 @@ empty-keys tests untouched"):
   `wrangler@4 pages dev . --port 8788` from website/ (auth) +
   `wrangler@4 pages dev dist --port 8790` from website/apps/dashboard/.
 - Cookie-seeded session (sb-tortoise-auth-token on .premiselabs.co) →
-  app.premiselabs.co (proxied to :8790). The mount mints via bootstrap 429
-  → recovery 200 (mirrors test_bootstrap_cap_falls_back_to_recovery_mint)
-  returning the HELD plaintext; isActiveKey fires only on the fixture row
-  whose key_prefix is its slice(0,10) — the load-bearing unique prefixes.
+  app.premiselabs.co (proxied to :8790). #2167: the mount NEVER mints — the
+  HELD durable is localStorage-seeded and adopted via the mount's key-lane
+  probe (GET /v1/team → 200 TEAM_ROW); POST /v1/session/key is a loud-500
+  zero-mint tripwire. isActiveKey fires only on the fixture row whose
+  key_prefix is its slice(0,10) — the load-bearing unique prefixes.
 - Mocked /v1/teams rows carry role:'owner' (no existing dashboard e2e mock
   supplies role → isOwnerAdmin would be false → every action assertion
   vacuous).
@@ -82,9 +83,10 @@ TEAM_ROW = {
     "role": "owner",
 }
 
-# The held durable credential: the recovery mint's plaintext. isActiveKey
-# compares key_prefix === plaintext.slice(0,10) → fixture row must carry the
-# prefix `tt_live_re`; every OTHER row needs a distinct prefix or it would
+# The held durable credential: plaintext seeded into localStorage at mount
+# (adopted by the #2167 mount probe). isActiveKey compares
+# key_prefix === plaintext.slice(0,10) → fixture row must carry the prefix
+# `tt_live_re`; every OTHER row needs a distinct prefix or it would
 # double-fire isActiveKey (and the positive control would lose its actions).
 HELD_KEY = "tt_live_recovery_key_abcdef0123456789"
 HELD_PREFIX = HELD_KEY[:10]  # tt_live_re
@@ -137,10 +139,10 @@ def _mixed_keys_fixture() -> list[dict]:
         _key_row("key_mixed_02", p["disabled"], "staging",
                  created_via="provisioned", enabled=False),
         # 3. recovery, held prefix → "active" + visible in-use note; the
-        #    dashboard's own durable credential (minted via recovery fallback).
+        #    dashboard's own durable credential (probe-adopted from the slot).
         _key_row("key_mixed_03", p["held"], "dashboard (held)",
                  created_via="recovery"),
-        # 4. recovery, non-live → active + actionable (recovery-residual
+        # 4. recovery, non-live → active + actionable (residual-durable
         #    limitation: provenance needs server data — separate issue).
         _key_row("key_mixed_04", p["recovery_resid"], "recovery leftover",
                  created_via="recovery"),
@@ -189,11 +191,15 @@ def _absent_via_legacy() -> dict:
     return row
 
 
-def _wire_mixed_harness(page: Page, keys: list[dict]) -> None:
+def _wire_mixed_harness(page: Page, keys: list[dict], mint_calls: list | None = None) -> None:
     """Cookie-seeded session + layered api mock (gate.py style, §S5): teams
-    rows with role:'owner', bootstrap 429 → recovery 200 mint returning the
-    held plaintext, GET /v1/team/keys returns the mixed fixture."""
+    rows with role:'owner', a localStorage-seeded HELD_KEY adopted via the
+    mount probe (GET /v1/team with the key's Bearer → 200 TEAM_ROW → 5b
+    adopt — #2167: the mount never mints), GET /v1/team/keys returns the
+    mixed fixture. POST /v1/session/key is a loud 500 + counter — the
+    #2167 zero-mint tripwire (no dashboard interaction may mint)."""
     user_id = "u-mixed2178"
+    mint_calls = mint_calls if mint_calls is not None else []
 
     def handle(route):
         url = route.request.url
@@ -202,20 +208,12 @@ def _wire_mixed_harness(page: Page, keys: list[dict]) -> None:
             # query-stripped path so /v1/team/keys?team_id=… still resolves.
             path = urllib.parse.urlsplit(url).path
             if path.endswith("/v1/session/key") and route.request.method == "POST":
-                body = json.loads(route.request.post_data or "{}")
-                if body.get("purpose") == "bootstrap":
-                    # #1566: the 3-active bootstrap cap → the mount must fall
-                    # back to the recovery mint (the held key is genuinely
-                    # durable — created_via recovery).
-                    route.fulfill(status=429, content_type="application/json",
-                                  body=json.dumps({"detail": "Too many active session keys — wait for expiry"}))
-                    return
-                if body.get("purpose") != "recovery":
-                    route.fulfill(status=422, content_type="application/json",
-                                  body=json.dumps({"detail": "purpose must be 'bootstrap' or 'recovery'"}))
-                    return
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"key": HELD_KEY, "team_id": TEAM_ID}))
+                # #2167 zero-mint tripwire: no dashboard interaction may issue
+                # POST /v1/session/key (the endpoint stays for recovery +
+                # non-dashboard consumers, but the mount never calls it).
+                mint_calls.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
                 return
             if path.endswith("/v1/teams") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
@@ -234,6 +232,8 @@ def _wire_mixed_harness(page: Page, keys: list[dict]) -> None:
                               body=json.dumps({"backups": []}))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                # #2167: this 200 also answers the MOUNT PROBE (the raw
+                # key-authed GET /v1/team) → the seeded HELD_KEY is adopted.
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps(TEAM_ROW))
                 return
@@ -258,19 +258,38 @@ def _wire_mixed_harness(page: Page, keys: list[dict]) -> None:
         "value": urllib.parse.quote(json.dumps(_session_json(user_id))),
         "domain": ".premiselabs.co", "path": "/",
     }])
+    # #2167: the held durable arrives via localStorage (the post-#2211
+    # durable-only world) — the mount probe adopts it; the mint route that
+    # used to supply it is gone.
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{HELD_KEY}');")
 
 
-def _open_keys_tab(page: Page) -> None:
-    """Boot the dashboard shell (mint falls back to recovery with the held
-    key) and open the API Keys tab — the fixture rows load at mount (loadAll
-    rides the session JWT, #1828) and render on tab activation."""
-    _wire_mixed_harness(page, _mixed_keys_fixture())
+def _open_keys_tab(page: Page, mint_calls: list | None = None) -> None:
+    """Boot the dashboard shell (localStorage-seeded durable adopted via the
+    mount probe) and open the API Keys tab — the fixture rows load at mount
+    (loadAll rides the session JWT, #1828) and render on tab activation."""
+    _wire_mixed_harness(page, _mixed_keys_fixture(), mint_calls=mint_calls)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     page.locator('[data-tab="keys"]').click()
     # The keys table is the only <table> in the active tab's DOM (BackupsCard
     # is a div card; other tab sections don't render when inactive).
     expect(page.locator("tbody tr")).to_have_count(7, timeout=15_000)
+
+
+def test_zero_session_key_posts_on_boot_and_keys_tab(page: Page) -> None:
+    """#2167 F1/F6 (CI home): a fresh session login + keys-tab open issues
+    ZERO POST /v1/session/key — the mount probe adopts the seeded durable
+    and every render rides the session JWT. The route is a loud 500 + counter
+    so a regression mint fails the journey instead of silently passing."""
+    mint_calls: list = []
+    _open_keys_tab(page, mint_calls=mint_calls)
+    assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
+    # The probe-adopted held key renders as the dashboard's durable row
+    # (in-use suppression) — the durable-only world's mount path.
+    held = page.locator("tbody tr", has_text=HELD_PREFIX)
+    expect(held.locator("span.live")).to_contain_text("active")
+    expect(held).to_contain_text("in use by this dashboard")
 
 
 def test_mixed_table_shows_only_durable_rows_with_truthful_statuses(page: Page) -> None:
@@ -388,3 +407,107 @@ def test_bootstrap_rows_never_render_a_session_zone(page: Page) -> None:
     # And the keys state holds 11 rows server-side — the client is filtering,
     # not the mock (the fixture itself is the 11-row §S5 matrix).
     assert len(_mixed_keys_fixture()) == 11
+
+
+def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
+    """#2167 F2 (the plan's step-10 two-team CI case — structurally invisible
+    to a single-team suite): with ZERO keys (no stored durable, no mint), a
+    multi-membership user whose SELECTED team ≠ first membership sees the
+    SELECTED team's Backups data. The session-mode /backups call must pin
+    ?team_id=<selected> (rule 2) — the pre-#2167 shape team-scoped by the KEY
+    header, so a zero-key + non-default-team session silently rendered the
+    first membership's backups (server /backups → ungated → resolves
+    memberships[0] without the param). Zero POST /v1/session/key throughout."""
+    import re as _re
+    # NOTE: the shell reads t.team_name (main.jsx) — `name` alone renders
+    # empty (identity.py fixture convention); team_name drives the switcher.
+    team_a = {"team_id": "team_a", "team_name": "Alpha", "tier": "free",
+              "role": "owner", "anon": False}
+    team_b = {"team_id": "team_b", "team_name": "Bravo", "tier": "free",
+              "role": "owner", "anon": False}
+    backup_reads: list = []
+    mint_calls: list = []
+
+    def handle(route):
+        url = route.request.url
+        if url.startswith(API_HOST):
+            path = urllib.parse.urlsplit(url).path
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            tid = (qs.get("team_id") or ["team_a"])[0]
+            if path.endswith("/v1/session/key") and route.request.method == "POST":
+                mint_calls.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/teams") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([team_a, team_b]))
+                return
+            if path.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # onboarded → the shell stays in the dashboard (no wizard)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+                return
+            if path.endswith("/v1/user/identity") and route.request.method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                                "banner": {"show": False}}))
+                return
+            if path.endswith("/backups"):
+                backup_reads.append(tid)
+                # distinct per-team payloads — wrong-team data is VISIBLE
+                rows = [{"id": "bk-b1"}, {"id": "bk-b2"}] if tid == "team_b" else [{"id": "bk-a1"}]
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": rows}))
+                return
+            if path.endswith("/v1/team/keys"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": []}))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                t = team_b if tid == "team_b" else team_a
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(t))
+                return
+            if path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.context.add_cookies([{
+        "name": "sb-tortoise-auth-token",
+        "value": urllib.parse.quote(json.dumps(_session_json("u-two-team"))),
+        "domain": ".premiselabs.co", "path": "/",
+    }])
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    # Switch to Bravo (≠ first membership) via the account menu — session-only
+    # (zero keys held: the switch adopts nothing and mints nothing).
+    # expect_response pumps the Playwright sync event loop while waiting —
+    # the ?team_id= pin must reach the API (a dropped pin cannot false-pass).
+    page.get_by_role("button", name=_re.compile(r"Account menu")).click()
+    with page.expect_response(lambda r: "/backups" in r.url and "team_id=team_b" in r.url,
+                              timeout=15000):
+        page.locator(".account-menu").get_by_role("button", name="Bravo").click()
+    # The Backups read after the switch must pin team_b (rule 2).
+    expect(page.locator("body")).to_contain_text("Bravo", timeout=15_000)
+    assert "team_b" in backup_reads, f"/backups must pin ?team_id=team_b after the switch: {backup_reads}"
+    # UI check: open the API Keys tab (the relocated BackupsCard) — the
+    # count reflects team B's payload, never Alpha's.
+    page.locator('[data-tab="keys"]').click()
+    expect(page.locator("body")).to_contain_text("Backups", timeout=15_000)
+    assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
