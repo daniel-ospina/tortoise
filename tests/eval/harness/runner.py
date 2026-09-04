@@ -877,6 +877,10 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
             }
             for r in report.get("session_results", [])
         ],
+        # First-class elision marker (second-model P2): a receipt built from
+        # a report with no per-session rows says so EXPLICITLY — the marker
+        # is produced by the builder, never hand-authored.
+        "session_results_elided": not bool(report.get("session_results")),
         "notes": report.get("notes", []),
         "log": report.get("log", []),
     }
@@ -984,6 +988,16 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
         )
         return 2
     try:
+        # failure_classes names ACTUAL failure signals (second-model P3):
+        # the null-reflex class when the reflex seam is null, plus any
+        # session-level failures from the run — never the operational notes.
+        failure_classes = []
+        if report.get("resolved_config", {}).get("reflex") == "null":
+            failure_classes.append("no-reflex")
+        failure_classes.extend(
+            line for line in report.get("log", [])
+            if "raised" in line or "capture ok=False" in line
+        )
         blessed = schema.bless_baseline(
             pending, {
                 "date": report["date"],
@@ -991,7 +1005,7 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
                 "judge_pin": report["judge_pin"],
                 "config": report["resolved_config"],
                 "metrics": report["metrics"],
-                "failure_classes": report.get("notes", [])[:4],
+                "failure_classes": failure_classes[:4],
             },
             justification=justification,
             corpus_bless=corpus_bless, protocol_bless=protocol_bless,

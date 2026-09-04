@@ -110,7 +110,10 @@ def grade_push(session_id: str, gold: dict, injected: dict[int, list[str]],
             silent_turns.append(turn)
     prec_num = prec_den = rec_num = rec_den = 0
     for turn, required in gold_required.items():
-        injected_turn = (injected.get(turn) or [])[:budget]
+        # Unique injected pointers per turn (round-1/4 P2: duplicate injected
+        # ids must not over-count recall past 1.0 — recall measures GOLD
+        # coverage, so multiplicity on the injected side is meaningless).
+        injected_turn = list(dict.fromkeys((injected.get(turn) or [])[:budget]))
         rec_den += len(required)
         rec_num += sum(1 for pid in injected_turn if pid in required)
         prec_den += len(injected_turn)

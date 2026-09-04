@@ -58,7 +58,11 @@ justification naming the failure class; `--bless-corpus` (fixture/gold
 regeneration) and `--bless-protocol` (judge/reflex re-pin) are the
 sanctioned markers.  Receipts live in `receipts/` (§6.6 shape: run_status /
 verdict / failure_origin / commit / corpus_hash / judge_pin /
-resolved_config / cost_usd + per-session detail).
+resolved_config / cost_usd + per-session rows).  Completed receipts carry
+per-session rows (an explicit `session_results_elided` marker covers the
+pre-persistence llm-lane receipt — the product lane's per-session detail is
+regenerated on its next re-run; the deterministic m2 receipts are fully
+reproducible).
 
 ## Run it
 
@@ -81,9 +85,9 @@ uv run python tests/eval/harness/generate_corpus.py --check   # byte-identical
 uv run python tests/eval/harness/generate_corpus.py --validate
 
 # tests
-uv run pytest tests/eval/harness/ -q          # schema 39 + corpus 10 hermetic
+uv run pytest tests/eval/harness/ -q          # schema+corpus+grading 52 hermetic
 TORTOISE_SESSION_LLM_MOCK=1 TORTOISE_SESSION_EXTRACTOR=m2 \
-  uv run pytest tests/eval/harness/test_harness_benchmark.py -q   # real replay
+  uv run pytest tests/eval/harness/test_harness_benchmark.py -q   # real replay (9)
 ```
 
 ## Failure classes (fix-wave protocol)

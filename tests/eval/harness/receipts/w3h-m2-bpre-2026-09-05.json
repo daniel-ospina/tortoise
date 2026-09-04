@@ -1,11 +1,11 @@
 {
-  "commit": "eba2a2545d5a5613a81d9e8cef661a64c4619d0e",
+  "commit": "16d67cab3c40686c97ba11daa4e0df6caa19763a",
   "corpus_hash": "sha256:ded9706426ba6b9ae541c8753ca5c6fbc22ed0555b559af2cd153fcf25ddff21",
   "cost_usd": 0.0,
-  "date": "2026-09-04T05:37:04Z",
+  "date": "2026-09-04T09:09:43Z",
   "failure_origin": null,
   "judge_pin": "w3-volunteering-memory-mechanical-v1",
-  "justification": "m2 echo-lane BPRE full replay at clean head eba2a254 \u2014 receipt for the corrected baselines/m2.json (holdout excluded)",
+  "justification": "m2 echo-lane BPRE reproduction at clean head (post review rounds) \u2014 regenerated with the union-probe isolation shape (other_anchors_probed present); deterministic lane reproduces the committed m2.json byte-for-byte",
   "log": [
     "parser round-trip ok (pi, 2 turns)",
     "parser round-trip ok (pi, 4 turns)",
@@ -53,11 +53,10 @@
     "cw01_reader_ingest: cell=pair_cw01_writer_ingest suite=continuity",
     "iso_cw_a_reader_orion: cell=team_team_a suite=continuity",
     "iso_cw_b_reader_orion: cell=team_team_b suite=continuity",
-    "isolation team_team_a: own 3/3 present, violations=0",
-    "isolation team_team_b: own 3/3 present, violations=0",
+    "isolation team_team_a: own 5/5 present, 5 other-team anchors probed, violations=0",
+    "isolation team_team_b: own 5/5 present, 5 other-team anchors probed, violations=0",
     "no-reflex: know_to_ask/push graded on the NULL reflex (nothing injected) \u2014 the kta failure / push precision numbers are the honest pre-W4 baseline; the standing kta/false-fire/push bars activate when a baseline is published with config.reflex=graded",
-    "cost not tracked: the capture seam reported no llm_cost_usd \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure",
-    "reproduction run: this receipt was captured from a SECOND deterministic-lane run ~40s after the blessed run (byte-identical metrics \u2014 the echo lane is reproducible); the blessed history entry carries no run_id, so the receipt pins the commit + hash + metrics the baseline records."
+    "cost not tracked: the capture seam reported no llm_cost_usd \u2014 receipt cost_usd is 0.0 with this note, never a silently-fake measured figure"
   ],
   "receipt_version": 1,
   "resolved_config": {
@@ -74,7 +73,7 @@
       "write_back"
     ]
   },
-  "run_id": "w3h-m2-bpre-2026-09-04",
+  "run_id": "w3h-m2-bpre-2026-09-05",
   "run_status": "completed",
   "session_results": [
     {
@@ -145,6 +144,7 @@
       "suite": "write_back",
       "write_back": {
         "missing": [],
+        "provenance_required": true,
         "survived": 1,
         "total": 1,
         "unprovenanced": 0
@@ -164,6 +164,7 @@
       "suite": "write_back",
       "write_back": {
         "missing": [],
+        "provenance_required": true,
         "survived": 1,
         "total": 1,
         "unprovenanced": 0
@@ -194,7 +195,10 @@
       "cell": "sess_push01_lumen_decisions",
       "continuity": null,
       "emitted": true,
-      "false_fire": null,
+      "false_fire": {
+        "fires": 0,
+        "silent_required": 2
+      },
       "isolation": null,
       "kta": null,
       "memory_point_count": null,
@@ -213,7 +217,10 @@
       "cell": "sess_push02_ember_onboarding",
       "continuity": null,
       "emitted": true,
-      "false_fire": null,
+      "false_fire": {
+        "fires": 0,
+        "silent_required": 2
+      },
       "isolation": null,
       "kta": null,
       "memory_point_count": null,
@@ -241,6 +248,7 @@
       "suite": "write_back",
       "write_back": {
         "missing": [],
+        "provenance_required": true,
         "survived": 3,
         "total": 3,
         "unprovenanced": 0
@@ -260,6 +268,7 @@
       "suite": "write_back",
       "write_back": {
         "missing": [],
+        "provenance_required": true,
         "survived": 3,
         "total": 3,
         "unprovenanced": 0
@@ -326,8 +335,9 @@
       "emitted": true,
       "false_fire": null,
       "isolation": {
-        "own_anchors_present": 3,
-        "own_anchors_total": 3,
+        "other_anchors_probed": 5,
+        "own_anchors_present": 5,
+        "own_anchors_total": 5,
         "violation_anchors": [],
         "violations": 0
       },
@@ -345,8 +355,9 @@
       "emitted": true,
       "false_fire": null,
       "isolation": {
-        "own_anchors_present": 3,
-        "own_anchors_total": 3,
+        "other_anchors_probed": 5,
+        "own_anchors_present": 5,
+        "own_anchors_total": 5,
         "violation_anchors": [],
         "violations": 0
       },
@@ -358,5 +369,6 @@
       "write_back": null
     }
   ],
+  "session_results_elided": false,
   "verdict": "pass"
 }

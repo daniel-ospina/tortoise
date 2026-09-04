@@ -232,6 +232,18 @@ class TestGraders:
         assert result["push"] == {"prec_num": 1, "prec_den": 2,
                                   "recall_num": 1, "recall_den": 2}
 
+    def test_push_duplicate_injection_cannot_exceed_recall_1(self):
+        """Second-model P2: duplicate injected pointer ids must not over-count
+        recall past 1.0 (recall measures unique GOLD coverage)."""
+        gold = {"suite": "push", "per_turn": [
+            {"turn": 1, "should_retrieve": True, "pointers": ["a"]},
+        ]}
+        result = grading.grade_push("s", gold, injected={1: ["a", "a", "a"]})
+        assert result["push"]["recall_num"] == 1
+        assert result["push"]["recall_den"] == 1
+        assert result["push"]["prec_num"] == 1
+        assert result["push"]["prec_den"] == 1  # deduped before the budget
+
     def test_write_back_fidelity_and_provenance(self):
         gold = {"suite": "write_back", "write_back": {
             "planted_points": ["alpha decision", "beta decision"],
