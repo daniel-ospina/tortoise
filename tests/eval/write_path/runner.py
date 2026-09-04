@@ -43,6 +43,14 @@ Blindness / grading discipline:
   inconclusive); the m2 lane blesses its own committed m2.json baseline
   (determinism gate) while the llm lane owns main.json + the standing
   leakage quality bar.
+* **Cost (G9, round-3)**: receipts record ``cost_usd`` from capture
+  telemetry ``llm_cost_usd`` when the extractor seam reports it, with an
+  explicit cost-not-tracked / cost-partial note otherwise. Today NO seam
+  reports ``llm_cost_usd`` (the mock never does; the real v2 extractor's
+  telemetry does not yet surface it), so real-LLM-lane runs record 0.0 with
+  the note — HARD_STOP_USD / per-run cost guarding cannot operate until the
+  extractor seam reports cost (fix-wave item for the W5 wave; disclosed,
+  never silently faked).
 
 Receipts follow the epic §6.6 contract (run_status / verdict /
 failure_origin / commit / corpus_hash / judge_pin / resolved_config /
@@ -425,16 +433,30 @@ def run_benchmark(
     log = log if log is not None else []
     run_id = run_id or f"w2b-{uuid.uuid4().hex[:12]}"
     notes = list(notes or [])
+    # REVIEW-FIX (round-3 F3): the extractor posture is derived EXCLUSIVELY
+    # from the env seam (TORTOISE_SESSION_EXTRACTOR=m2 selects the echo
+    # lane). BASELINE_CONFIG carries a posture DEFAULT (llm) for snapshot
+    # shape, but it is NOT part of the caller-overridable surface: a
+    # caller-supplied ``config`` may NOT relabel the run's posture (an
+    # llm-labeled run executed under m2 env, or an m2-labeled run under llm
+    # env, would compare against the wrong lane's baseline and/or dodge the
+    # llm standing leakage bar — the dishonest cross-extractor compare
+    # finding 4 was meant to forbid). Any config posture that contradicts
+    # the env seam is rejected; the env always wins.
+    env_posture = _env_posture()
     resolved_config = dict(corpus.BASELINE_CONFIG)
+    resolved_config.pop("extractor_posture", None)  # env owns it (round-3 F3)
     if config is not None:
+        config_posture = config.get("extractor_posture")
+        if config_posture is not None and config_posture != env_posture:
+            raise ValueError(
+                "extractor_posture in config "
+                f"({config_posture!r}) contradicts the env lane selector "
+                f"({env_posture!r}) — the env seam owns the posture"
+            )
         resolved_config.update(config)
-    posture = resolved_config.setdefault("extractor_posture", _env_posture())
-    # REVIEW-FIX (findings 1+4): the m2 echo lane ALWAYS runs the m2 posture
-    # (its env is the lane selector), and an llm run never inherits m2's env
-    # by accident.
-    if _env_posture() == "m2":
-        resolved_config["extractor_posture"] = "m2"
-        posture = "m2"
+    resolved_config["extractor_posture"] = env_posture
+    posture = env_posture
     date = _now_iso()
     commit = _git_head_short()
 
@@ -443,9 +465,15 @@ def run_benchmark(
         # REVIEW-FIX (PR #2183 review finding 6): corpus-hash/manifest drift
         # is the audit-grade ``hash_mismatch`` origin (E2E-2 — a gold-only
         # edit must surface as the hash failure it is), not a generic
-        # runner_error. Everything else stays runner_error.
+        # runner_error. Everything else stays runner_error. Round-3 F7: the
+        # classifier keys on the ACTUAL drift issue prefixes (the preflight
+        # drift checks that report ``fixtures_hash ... corpus drift`` and the
+        # manifest verification failures) rather than substring-matching any
+        # issue text that happens to contain "hash"/"manifest" (a malformed
+        # manifest schema issue is a corpus-validity failure, not drift).
         drift_issues = [i for i in pf["issues"]
-                        if "hash" in i or "drift" in i or "manifest" in i]
+                        if "corpus drift" in i
+                        or i.startswith("manifest verification failed")]
         origin = "hash_mismatch" if drift_issues else "runner_error"
         return _failed_report(
             run_id, date, commit, pf["fixtures_hash"], resolved_config,
@@ -605,6 +633,7 @@ def run_benchmark(
         metrics, baseline,
         resolved_config=resolved_config,
         run_fixtures_hash=fixtures_hash,
+        run_judge_pin=judge_pin,  # round-3 G2: protocol-honest compare
     )
     failure_origin = None
     if verdict == schema.VERDICT_REGRESSION:
@@ -617,12 +646,20 @@ def run_benchmark(
             failure_origin = "config_mismatch"
         elif not (baseline.get("metrics") or {}):
             failure_origin = None  # first-run-pending — nothing to compare yet
-    if not cost_tracked and total_cost == 0.0:
-        notes.append(
-            "cost not tracked: the extractor seam reported no llm_cost_usd "
-            "(mock/unknown adapter) — receipt cost_usd is 0.0 with this note, "
-            "never a silently-fake measured figure"
-        )
+    if not cost_tracked:
+        if total_cost > 0.0:
+            notes.append(
+                "cost partial: some sessions reported llm_cost_usd and others "
+                "did not — receipt cost_usd is the tracked PARTIAL sum "
+                f"({round(total_cost, 6)}), understating true cost; never read "
+                "it as a full measured figure"
+            )
+        else:
+            notes.append(
+                "cost not tracked: the extractor seam reported no llm_cost_usd "
+                "in any session (mock/unknown adapter) — receipt cost_usd is "
+                "0.0 with this note, never a silently-fake measured figure"
+            )
     return {
         "run_id": run_id,
         "date": date,
@@ -633,7 +670,7 @@ def run_benchmark(
         "corpus_hash": fixtures_hash,
         "judge_pin": judge_pin,
         "resolved_config": resolved_config,
-        "cost_usd": round(total_cost, 6) if cost_tracked else 0.0,
+        "cost_usd": round(total_cost, 6) if cost_tracked else round(total_cost, 6),
         "metrics": metrics,
         "quote_spans_total": quote_spans_total,
         "session_results": session_results,
@@ -759,6 +796,7 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
         "resolved_config": report.get("resolved_config"),
         "cost_usd": report.get("cost_usd"),
         "metrics": report.get("metrics"),
+        "quote_spans_total": report.get("quote_spans_total"),
         "justification": justification,
     }
     detail = {
@@ -877,8 +915,15 @@ def _main(argv: list[str] | None = None) -> int:
                          help="accept an INTENTIONAL corpus regeneration "
                               "(fixtures_hash change) — the justification "
                               "must name the corpus change; records it in history")
+    p_bless.add_argument("--protocol-bless", action="store_true",
+                         help="accept an INTENTIONAL judge-protocol re-pin "
+                              "(judge_pin change on an unchanged corpus) — the "
+                              "justification must name the protocol change; "
+                              "records it in history (round-3 G2: the sanctioned "
+                              "re-pin path for a judge bump)")
     p_bless.add_argument("--write", action="store_true",
-                         help="write the blessed baseline to baselines/main.json")
+                         help="write the blessed baseline to its posture file "
+                              "(main.json for llm receipts, m2.json for m2)")
     p_bless.add_argument("--root", type=Path, default=corpus.WRITE_PATH_DIR)
 
     p_val = sub.add_parser("validate-receipt", help="validate a receipt document")
@@ -935,29 +980,38 @@ def _main(argv: list[str] | None = None) -> int:
         previous = corpus.load_baseline(args.root, posture=bless_posture)
         previous_metrics = previous.get("metrics") or {}
         corpus_bless = args.corpus_bless
+        protocol_bless = args.protocol_bless
         hash_changed = bool(previous.get("fixtures_hash")) and \
             receipt["corpus_hash"] != previous.get("fixtures_hash")
+        pin_changed = bool(previous.get("judge_pin")) and \
+            receipt.get("judge_pin") != previous.get("judge_pin")
         if receipt["verdict"] == schema.VERDICT_INCONCLUSIVE:
             # Inconclusive is blessable ONLY as the first publish against the
             # pending baseline (no committed targets yet — benchmark-first)
-            # or as a --corpus-bless of an intentional regeneration (new
-            # corpus ⇒ no comparability ⇒ re-pin, recorded in history).
-            if previous_metrics and not corpus_bless:
+            # or as a --corpus-bless / --protocol-bless of an INTENTIONAL
+            # change (new corpus or new judge protocol ⇒ no comparability ⇒
+            # re-pin, recorded in history).
+            if previous_metrics and not (corpus_bless or protocol_bless):
                 print("cannot bless an inconclusive run against committed targets "
-                      "(use --corpus-bless for an intentional corpus regeneration)",
+                      "(use --corpus-bless for a corpus regeneration or "
+                      "--protocol-bless for a judge re-pin)",
                       file=sys.stderr)
                 return EXIT_RUNNER_ERROR
-            if not corpus_bless:
+            if not (corpus_bless or protocol_bless):
                 if receipt["corpus_hash"] != previous.get("fixtures_hash"):
                     print("cannot bless first publish: corpus hash mismatch", file=sys.stderr)
                     return EXIT_RUNNER_ERROR
                 if receipt["resolved_config"] != previous.get("config"):
                     print("cannot bless first publish: resolved-config mismatch", file=sys.stderr)
                     return EXIT_RUNNER_ERROR
-            elif not hash_changed:
+            elif corpus_bless and not hash_changed:
                 print("cannot bless: --corpus-bless given but the run is on the "
                       "SAME corpus (no fixtures_hash change) — use the ordinary bless",
                       file=sys.stderr)
+                return EXIT_RUNNER_ERROR
+            elif protocol_bless and not pin_changed:
+                print("cannot bless: --protocol-bless given but the run uses the "
+                      "SAME judge pin — use the ordinary bless", file=sys.stderr)
                 return EXIT_RUNNER_ERROR
         run = {
             "date": receipt["date"],
@@ -975,6 +1029,7 @@ def _main(argv: list[str] | None = None) -> int:
             blessed = schema.bless_baseline(
                 previous, run, justification=args.justification,
                 corpus_bless=corpus_bless,
+                protocol_bless=protocol_bless,
             )
         except ValueError as exc:
             print(f"cannot bless: {exc}", file=sys.stderr)

@@ -333,8 +333,13 @@ surfaces:
   - eval/write_path/test_write_path_benchmark.py
   ep:
   - test_a9_direct_edge_traversal.py
-  # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes (the
-  # strict-survival dimension) must run the replay gate.
+  # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes must run
+  # the deterministic replay gate. NOTE (posture split, #2098 round 2): the
+  # strict-survival dimension is pinned at 0.0 on the m2 lane until the
+  # EP-pass fix-wave lands (dream EP coverage 0.0 today) — what this surface
+  # senses is dream CRASH/runner-error + parser/write-back/provenance
+  # regressions, not strict-survival deltas; strict becomes a live dimension
+  # once the fix-wave creates headroom.
   - eval/write_path/test_write_path_benchmark.py
   - test_calibration.py
   - test_calibration_tools.py

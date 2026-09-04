@@ -1126,3 +1126,55 @@ def test_validate_baseline_rejects_wrong_posture_file() -> None:
     m2_b = schema.read_json(corpus.WRITE_PATH_DIR / "baselines" / "m2.json")
     assert main_b["config"]["extractor_posture"] == "llm"
     assert m2_b["config"]["extractor_posture"] == "m2"
+
+
+def test_protocol_bless_repins_judge_protocol_change() -> None:
+    """REVIEW-FIX (round-3 F2): a legitimate judge-protocol bump (judge_pin
+    change on an UNCHANGED corpus) deadlocks the ordinary bless path (pin
+    change = new protocol = non-comparable) — protocol_bless=True is the
+    sanctioned re-pin path: accepts with justification, records
+    protocol_change, re-pins WITHOUT a compare."""
+    previous = _sample_published_baseline()  # judge-write-path-v1
+    run = {
+        "date": "2026-09-20T00:00:00Z",
+        "fixtures_hash": previous["fixtures_hash"],
+        "judge_pin": "judge-write-path-v2",  # protocol bump, unchanged corpus
+        "config": previous["config"],
+        "metrics": dict(previous["metrics"]),
+        "failure_classes": [],
+    }
+    # Ordinary bless: pin change is a protocol change — rejected.
+    with pytest.raises(ValueError, match="judge_pin differs"):
+        schema.bless_baseline(previous, dict(run), justification="protocol bump")
+    # protocol_bless: sanctioned re-pin, no compare, history marks it.
+    blessed = schema.bless_baseline(
+        previous, dict(run), justification="judge v2 protocol (blind-salience fix)",
+        protocol_bless=True)
+    assert blessed["judge_pin"] == "judge-write-path-v2"
+    assert schema.validate_baseline(blessed) == []
+    assert blessed["history"][-1].get("protocol_change") is True
+    assert "verdict" not in blessed["history"][-1], \
+        "a protocol re-pin has no compare (different grading protocol)"
+
+
+def test_compare_run_judge_pin_mismatch_is_inconclusive() -> None:
+    """REVIEW-FIX (round-3 F2): compare_run returns inconclusive when the run
+    was graded under a different judge pin than the committed baseline — the
+    runner gate + CI replay are protocol-honest (never a silent pass/regression
+    against a different grading protocol)."""
+    baseline = _sample_published_baseline()  # judge-write-path-v1
+    verdict = schema.compare_run(
+        dict(baseline["metrics"]), baseline,
+        resolved_config=baseline["config"],
+        run_fixtures_hash=baseline["fixtures_hash"],
+        run_judge_pin="judge-write-path-v2",
+    )
+    assert verdict == schema.VERDICT_INCONCLUSIVE
+    # Same pin ⇒ normal directional compare.
+    verdict = schema.compare_run(
+        dict(baseline["metrics"]), baseline,
+        resolved_config=baseline["config"],
+        run_fixtures_hash=baseline["fixtures_hash"],
+        run_judge_pin=baseline["judge_pin"],
+    )
+    assert verdict == schema.VERDICT_PASS

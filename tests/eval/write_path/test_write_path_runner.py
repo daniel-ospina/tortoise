@@ -378,7 +378,18 @@ def test_cli_corpus_bless_refreshes_published_baseline(tmp_path, capsys):
         "judge_pin": JUDGE_PIN_MECHANICAL,
         "failure_classes": [],
     }
-    schema.bless_baseline(baseline, run, justification="first baseline")
+    blessed_first = schema.bless_baseline(baseline, run, justification="first baseline")
+    # REVIEW-FIX (round-3 F5): actually PUBLISH the first baseline on disk
+    # (write to the baseline file) so the CLI corpus-bless below runs against
+    # a PUBLISHED baseline with committed targets — the branch this test's
+    # name + docstring claim to cover. (Previously the bless result was
+    # discarded, leaving main.json pending and silently testing the
+    # first-publish path instead.)
+    target = root / "baselines" / "main.json"
+    target.write_text(json.dumps(blessed_first, indent=2) + "\n", encoding="utf-8")
+    committed_check = corpus.load_baseline(root)
+    assert committed_check.get("metrics"), \
+        "precondition: baseline must be PUBLISHED (non-empty metrics) on disk"
     # A drifted (post-regeneration) run receipt on the PUBLISHED baseline.
     receipt_path = tmp_path / "drifted-receipt.json"
     receipt_path.write_text(json.dumps({
@@ -415,4 +426,97 @@ def test_cli_corpus_bless_refreshes_published_baseline(tmp_path, capsys):
     committed = corpus.load_baseline(root)
     assert committed["fixtures_hash"] == "sha256:regenerated-corpus"
     assert committed["history"][-1].get("corpus_change") is True
+    assert schema.validate_baseline(committed) == []
+
+
+def test_run_rejects_config_posture_contradicting_env(tmp_path, monkeypatch):
+    """REVIEW-FIX (round-3 F3): a caller-supplied config may NOT relabel the
+    run's extractor posture against the env lane selector — an llm-labeled
+    config under m2 env (or vice versa) would compare against the wrong
+    lane's baseline and/or dodge the llm standing leakage bar."""
+    root = _tmp_corpus(tmp_path)
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # config says llm, env says m2 — contradiction is rejected up front.
+    with pytest.raises(ValueError, match="contradicts the env lane selector"):
+        runner.run_benchmark(
+            root=root, config={"extractor_posture": "llm"})
+    # env-aligned config posture is fine (env still owns the final label).
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "")  # llm lane
+    report = runner.run_benchmark(root=root)  # no env m2 → llm default
+    assert report["run_status"] == "completed"
+    assert report["resolved_config"]["extractor_posture"] == "llm"
+
+
+def test_run_notes_vacuous_quote_fidelity_and_untracked_cost(tmp_path, monkeypatch):
+    """REVIEW-FIX (F2/F3 honesty): a corpus whose gold never quotes yields a
+    VACUOUS quote_fidelity 1.0 — the report notes it + carries the numeric
+    quote_spans_total (never read as a real fidelity bar); a seam that
+    reports no llm_cost_usd fires the explicit cost-not-tracked note."""
+    root = _tmp_corpus(tmp_path)
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    report = runner.run_benchmark(root=root)
+    assert report["run_status"] == "completed"
+    assert report["quote_spans_total"] == 0
+    notes = "\n".join(report.get("notes", []))
+    assert "VACUOUS" in notes and "quote_spans_total=0" in notes
+    assert "cost not tracked" in notes
+    assert report["cost_usd"] == 0.0
+
+
+def test_cli_protocol_bless_repins_judge_bump(tmp_path):
+    """REVIEW-FIX (round-3 G2): --protocol-bless is the operational re-pin
+    path for a legitimate judge-protocol bump — the ordinary CLI bless
+    rejects the pin change; --protocol-bless accepts it with justification
+    and records protocol_change in history."""
+    root = _tmp_corpus(tmp_path)
+    # Publish a baseline first (llm posture, judge-write-path-v1).
+    baseline = corpus.load_baseline(root, posture="llm")
+    run = {
+        "date": "2026-09-01T00:00:00Z",
+        "fixtures_hash": baseline["fixtures_hash"],
+        "config": dict(corpus.BASELINE_CONFIG),
+        "metrics": {
+            "salient_unit_survival_macro": 0.55,
+            "salient_unit_survival_strict": 0.31,
+            "distractor_leakage_per_run": 0,
+            "sessions_emitting": 1.0,
+            "quote_fidelity": 1.0,
+            "provenance_accuracy": 1.0,
+        },
+        "judge_pin": JUDGE_PIN_MECHANICAL,
+        "failure_classes": [],
+    }
+    first = schema.bless_baseline(baseline, run, justification="first baseline")
+    (root / "baselines" / "main.json").write_text(
+        json.dumps(first, indent=2) + "\n", encoding="utf-8")
+    # A receipt under the NEW judge pin (same corpus, same numbers).
+    receipt_path = tmp_path / "protocol-receipt.json"
+    receipt_path.write_text(json.dumps({
+        "run_id": "w2b-protocol-v2", "date": "2026-09-25T00:00:00Z",
+        "run_status": "completed", "verdict": schema.VERDICT_INCONCLUSIVE,
+        "failure_origin": None, "commit": "abc123",
+        "corpus_hash": baseline["fixtures_hash"], "judge_pin": "judge-write-path-v2",
+        "resolved_config": dict(corpus.BASELINE_CONFIG),
+        "cost_usd": 0.0, "metrics": run["metrics"],
+        "session_results": [], "notes": [], "log": [],
+    }))
+    # Ordinary bless rejects the pin change (protocol change, not comparable).
+    exit_code = runner._main([
+        "bless", "--receipt", str(receipt_path),
+        "--justification", "should fail without protocol-bless",
+        "--root", str(root),
+    ])
+    assert exit_code == runner.EXIT_RUNNER_ERROR
+    # --protocol-bless re-pins with justification.
+    exit_code = runner._main([
+        "bless", "--receipt", str(receipt_path), "--protocol-bless",
+        "--justification", "judge v2 protocol (blind-salience prompt fix)",
+        "--write", "--root", str(root),
+    ])
+    assert exit_code == runner.EXIT_OK
+    committed = corpus.load_baseline(root, posture="llm")
+    assert committed["judge_pin"] == "judge-write-path-v2"
+    assert committed["history"][-1].get("protocol_change") is True
     assert schema.validate_baseline(committed) == []

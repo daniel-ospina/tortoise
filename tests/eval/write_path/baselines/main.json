@@ -107,7 +107,7 @@
         "content_missing",
         "content_missing"
       ],
-      "justification": "first published baseline (bad number, per fix-wave protocol) \u2014 macro 30.6% / strict 0.0% / leakage 0; failure classes: strict survival 0 driven by dream EP pass coverage 0.0 (0 points affected); extraction nondeterminism observed (leakage 2\u21920 across runs, llm:deepseek-direct)"
+      "justification": "first published baseline (bad number, per fix-wave protocol) \u2014 macro 30.6% / strict 0.0% / leakage 0; failure classes: strict survival 0 driven by dream EP pass coverage 0.0 (0 points affected); extraction nondeterminism observed (leakage 2\u21920 across runs, llm:deepseek-direct) PROVENANCE NOTE (round-3 G3): this original first-publish number (macro 0.3056) was produced by a run on the pre-commit working tree; it is not byte-reproducible at any pinned commit and was superseded by history[1]'s clean-head re-run (see its receipt). quote_fidelity 1.0 is VACUOUS (the corpus gold contains no double-quoted spans) \u2014 a floor, not a fidelity bar."
     },
     {
       "date": "2026-09-03T21:48:18Z",
@@ -193,7 +193,7 @@
         "content_missing",
         "ep_update_missing"
       ],
-      "justification": "re-run at clean PR head 20d3c4ba (review F1: prior receipt pinned 795a0209 which predates the runner code \u2014 irreproducible). macro 0.25 vs 0.3056 = LLM extraction jitter between runs (same code, same frozen corpus, same judge pin); strict 0.0 + leakage 0 unchanged; the receipt now pins the runner commit so the number reproduces",
+      "justification": "re-run at clean PR head 20d3c4ba (review F1: prior receipt pinned 795a0209 which predates the runner code \u2014 irreproducible). macro 0.25 vs 0.3056 = LLM extraction jitter between runs (same code, same frozen corpus, same judge pin): the RUN re-executes at the pinned commit, but the NUMBER is subject to documented LLM jitter (0.25\u20130.31) \u2014 reproduce the pipeline, not the figure. strict 0.0 + leakage 0 unchanged; quote_fidelity 1.0 VACUOUS (no quoted spans in gold). receipt: receipts/w2b-2026-09-03-first.json (run w2b-f3e4905bfbff).",
       "verdict": "regression"
     }
   ]

@@ -601,7 +601,7 @@ def _validate_history_entry(entry: dict, index: int, issues: list[str]) -> None:
     where = f"baseline.history[{index}]"
     _reject_unknown_keys(
         entry,
-        frozenset({"date", "values", "failure_classes", "justification", "verdict", "corpus_change"}),
+        frozenset({"date", "values", "failure_classes", "justification", "verdict", "corpus_change", "protocol_change"}),
         where,
         issues,
     )
@@ -744,7 +744,7 @@ def validate_baseline(baseline: dict) -> list[str]:
     return issues
 
 
-def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run_fixtures_hash: str) -> str:
+def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run_fixtures_hash: str, run_judge_pin: str | None = None) -> str:
     """The --compare verdict for a run against the committed baseline.
 
     Verdict vocabulary (plan §4.3.3): ``pass`` | ``regression`` | ``inconclusive``.
@@ -758,6 +758,11 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run
       vice versa) compares DIFFERENT extractors — numbers are only comparable
       within a posture. The posture rides inside resolved_config, so the
       ordinary config-equality check rejects cross-posture compares.
+    * judge-pin mismatch (REVIEW-FIX finding 3/F2 round 3): a run graded
+      under a DIFFERENT judge prompt than the committed baseline is a
+      PROTOCOL CHANGE — ``inconclusive``, never a silent pass/regression
+      against a different grading protocol. Requires the caller to pass
+      ``run_judge_pin``; without it (no pin available) the check is skipped.
     * first-run-pending baseline (empty metrics = no committed targets) ⇒
       ``inconclusive`` — targets are set FROM first-run data (benchmark-first
       decision), so there is nothing to regress against yet.
@@ -768,6 +773,10 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run
     if run_fixtures_hash != baseline.get("fixtures_hash"):
         return VERDICT_INCONCLUSIVE
     if resolved_config != baseline.get("config"):
+        return VERDICT_INCONCLUSIVE
+    committed_pin = baseline.get("judge_pin")
+    if run_judge_pin is not None and committed_pin \
+            and run_judge_pin != committed_pin:
         return VERDICT_INCONCLUSIVE
     committed_metrics = baseline.get("metrics") or {}
     if not committed_metrics:
@@ -805,7 +814,7 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run
 
 
 def bless_baseline(previous: dict, run: dict, *, justification: str,
-                   corpus_bless: bool = False) -> dict:
+                   corpus_bless: bool = False, protocol_bless: bool = False) -> dict:
     """Produce the next committed baseline from a run result.
 
     Blessing ALWAYS requires a non-empty ``justification`` string — every
@@ -824,6 +833,16 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
     legitimate regeneration deadlocks (plan §8.2 R8 mitigation: "corpus-bless
     mode for intentional fixture changes").
 
+    ``protocol_bless`` — REVIEW-FIX (PR #2183 round-3 finding F2): a
+    legitimate judge-protocol bump (judge_pin change on an UNCHANGED corpus)
+    has no open bless path through the ordinary guards (which treat a pin
+    change as a new, non-comparable protocol). protocol_bless=True is the
+    sanctioned re-pin path: accepts the pin change with a justification,
+    records ``protocol_change`` in history, and re-pins WITHOUT a compare
+    (a different grading protocol has no comparability with the old — the
+    new numbers are a fresh protocol baseline, not an improvement/regression
+    on the old one).
+
     Two ordinary cases (no corpus change):
     * **first publish** — ``previous`` is the first-run-pending baseline
       (empty ``metrics``): the run's metrics become the first committed
@@ -836,7 +855,8 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
     Judge-pin comparability (REVIEW-FIX finding 3): a run whose judge_pin
     differs from the previous baseline's pin is a PROTOCOL CHANGE — compared
     as inconclusive (never silently regressed/passed against a different
-    grading protocol), unless corpus_bless re-pins.
+    grading protocol) unless ``protocol_bless`` re-pins (round-3 F2 — the
+    sanctioned re-pin path).
     """
     if not isinstance(justification, str) or not justification.strip():
         raise ValueError("blessing a baseline requires a non-empty justification string")
@@ -858,6 +878,7 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
     first_publish = not previous_metrics
     hash_changed = bool(previous.get("fixtures_hash")) and \
         run["fixtures_hash"] != previous.get("fixtures_hash")
+    pin_changed = bool(previous_pin) and judge_pin != previous_pin
     if hash_changed and not corpus_bless:
         raise ValueError(
             "cannot bless: run fixtures_hash differs from the committed "
@@ -866,13 +887,13 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
             "recording the corpus change; for accidental drift, restore the "
             "frozen corpus before publishing."
         )
-    if not first_publish and not hash_changed and previous_pin \
-            and judge_pin != previous_pin:
+    if pin_changed and not protocol_bless:
         raise ValueError(
             "cannot bless: run judge_pin differs from the committed baseline's "
             f"pin ({previous_pin!r} vs {judge_pin!r}) — a judge-protocol change "
-            "is a new protocol, not a comparable run (bless a fresh baseline "
-            "or re-run under the pinned judge)"
+            "is a new protocol, not a comparable run (re-run under the pinned "
+            "judge, or use protocol_bless=True with a justification to "
+            "deliberately re-pin to the new protocol)"
         )
     if first_publish:
         # No committed targets to compare against — but the pending baseline
@@ -880,15 +901,18 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
         # (hash or resolved-config mismatch) must not silently re-pin the
         # baseline to the wrong corpus (E2E-2 negative discipline). A
         # corpus_bless on the pending baseline re-pins the new corpus
-        # deliberately (the pending baseline has no numbers to protect).
+        # deliberately (the pending baseline has no numbers to protect) — but
+        # ONLY when the corpus actually changed (REVIEW-FIX round-3 F4: the
+        # flag alone must not bypass the guards on an unchanged corpus).
+        hash_and_bless = hash_changed and corpus_bless
         if run["fixtures_hash"] != previous.get("fixtures_hash") \
-                and not corpus_bless:
+                and not hash_and_bless:
             raise ValueError(
                 "cannot bless first publish: run fixtures_hash does not match the "
                 "committed pending baseline (corpus drift) — regenerate/verify the "
                 "frozen corpus before publishing"
             )
-        if run["config"] != previous.get("config") and not corpus_bless:
+        if run["config"] != previous.get("config") and not hash_and_bless:
             raise ValueError(
                 "cannot bless first publish: run config does not match the committed "
                 "baseline config snapshot (config mismatch ⇒ inconclusive, never a "
@@ -900,7 +924,14 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
         # new corpus has no comparability with the old (different planted
         # content), so there is NO compare: the run's numbers re-pin the
         # baseline against the new hash. The justification MUST name the
-        # corpus change (the runner CLI enforces a --corpus-change note).
+        # corpus change (the runner CLI blesses via --corpus-bless with a
+        # justification naming the change).
+        verdict = None
+    elif pin_changed and protocol_bless:
+        # REVIEW-FIX (round-3 F2): a deliberate judge-protocol re-pin on an
+        # unchanged corpus — no compare (a different grading protocol has no
+        # comparability with the old); the new numbers re-pin under the new
+        # pin. History records ``protocol_change``.
         verdict = None
     else:
         verdict = compare_run(
@@ -908,12 +939,14 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
             previous,
             resolved_config=run["config"],
             run_fixtures_hash=run["fixtures_hash"],
+            run_judge_pin=judge_pin,
         )
         if verdict == VERDICT_INCONCLUSIVE:
             raise ValueError(
                 f"cannot bless: compare verdict is {VERDICT_INCONCLUSIVE} "
-                f"(config or fixtures_hash mismatch) — re-run on the frozen corpus "
-                f"with the resolved config before blessing"
+                f"(config, fixtures_hash, or judge_pin mismatch) — re-run on the "
+                f"frozen corpus with the resolved config + pinned judge before "
+                f"blessing"
             )
     # REVIEW-FIX (F3, code-review gate): a published baseline must carry the
     # FULL graded-metric vocabulary — a partial bless (a lane that failed to
@@ -940,6 +973,8 @@ def bless_baseline(previous: dict, run: dict, *, justification: str,
     }
     if hash_changed and corpus_bless:
         history_entry["corpus_change"] = True
+    if pin_changed and protocol_bless:
+        history_entry["protocol_change"] = True
     if verdict is not None:
         history_entry["verdict"] = verdict
     return {

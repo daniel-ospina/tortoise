@@ -373,8 +373,9 @@ def aggregate_metrics(session_results: list[dict]) -> dict:
         # canonical 6-metric vocabulary (the bless gate validates against
         # METRIC_VALUES); vacuity is surfaced as a separate REPORT-level
         # ``quote_spans_total`` field + runner note so the committed 1.0 is
-        # never read as a real fidelity bar (see runner: quote note + receipt
-        # carry ``quote_vacuous``).
+        # never read as a real fidelity bar (the note text names the vacuity;
+        # the report carries the numeric span count; build_receipt copies
+        # quote_spans_total into the receipt for auditors).
         "quote_fidelity": (grounded / quote_total if quote_total else 1.0),
         "provenance_accuracy": (prov_present / prov_total if prov_total else 0.0),
     }
