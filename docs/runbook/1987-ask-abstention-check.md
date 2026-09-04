@@ -505,3 +505,81 @@ evidence (single-sided).
 **Merge was BLOCKED pending the full (a) graded `_abs` verdict and the (d)
 live-judge spot-check ≥ 0.8.** Both now measured (2026-08-30 above): (a)
 PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
+
+---
+
+## Live-key pilot runs (2026-09-02) — the first REAL measurements
+
+> OPENROUTER_API_KEY provided by the owner 2026-09-02. All runs: qwen3.8-max
+> reader via OpenRouter, gpt-4o judge via OpenRouter (`openrouter:openai/gpt-4o-2024-08-06`),
+> docker FalkorDB lane, deterministic ingest unless noted. These REPLACE the
+> earlier "PENDING KEYS" entries — recorded, not fabricated.
+
+### M5 7-Q content-error test (deterministic ingest) — 6/7 valid, overall 0.5
+
+| qid | type | verdict | notes |
+|---|---|---|---|
+| e831120c | multi-session | ✅ correct (3.5 weeks) | content error FIXED by qwen |
+| b0479f84 | single-session-preference | ✅ correct (Dynasties) | FIXED by qwen |
+| 0100672e | multi-session | ✅ correct ($12/mug) | FIXED by qwen |
+| gpt4_8279ba02 | temporal-reasoning | ❌ abstained | ev@5=0, vector-leg only — RETRIEVAL gap |
+| gpt4_7a0daae1 | temporal-reasoning | ❌ abstained | ev@5=0 — RETRIEVAL gap |
+| gpt4_6ed717ea | temporal-reasoning | ❌ abstained | ev@5=0 — RETRIEVAL gap |
+| 830ce83f | knowledge-update | ⚠️ reader crash | `NoneType.strip` — fixed by the None-guard (below) |
+
+**M5 gate (ii) reading:** 3/7 content errors FIXED outright (qwen gets them
+right where deepseek produced wrong content). The 3 temporal abstentions are
+retrieval gaps (gold never in context — qwen cannot answer what it cannot
+see), NOT reader content errors. 1 crashed on the empty-response bug. The
+"0/7 content-error recurrences" criterion is directionally met: qwen did not
+reproduce any of the 7 as CONTENT errors (correct or abstained, never
+hallucinated wrong content).
+
+### Stratified 50-Q pilot (deterministic ingest, 4 workers) — 45 outcomes, overall 0.622
+
+Type mix mirrors the 500 (7 user / 13 multi / 13 temporal / 8 KU / 6 asst / 3 pref).
+Watchdog `leg_dead` cut the last question (50/50) — 45 outcomes + 5 failures
+in the checkpoint.
+
+| class | accuracy |
+|---|---|
+| single-session-user | 7/7 = 1.00 |
+| single-session-assistant | 6/6 = 1.00 |
+| single-session-preference | 2/2 = 1.00 |
+| knowledge-update | 6/7 = 0.86 |
+| multi-session | 7/10 = 0.70 |
+| temporal-reasoning | **0/13 = 0.00** |
+
+**Failure decomposition (17 wrong):** 14 = retrieval-gap (ev@5=0 — gold turn
+never retrieved, `leg_mix={"vector":12}` FTS-leg silent), 3 = reader-error
+(gold in context, qwen answered wrong: "50 pounds", "$65 total" vs $185,
+magazine count).
+
+**The dominant product finding: temporal-reasoning retrieval.** The gold
+turns for "how many days ago…" questions carry DATE properties; the lexical
+FTS leg finds nothing on these queries and the vector leg alone cannot rank
+the gold turn into the top-12 context. This is the #2070 retrieval-lever
+target class (A4 search-keys PRF / A6 cap raise / fusion weights) — the
+levers are shipped but not yet tuned. Next step: measure the 50-Q with
+A4/A6 levers ON, then re-run.
+
+### Product bug found live: LLMReader empty-response crash (#2134-adjacent)
+
+qwen via OpenRouter returned completions with EMPTY content on 4/5 pilot
+failures + 830ce83f — `LLMReader.answer().strip()` AttributeError'd on None
+(`'NoneType' object has no attribute 'strip'`), failing whole questions as
+`reader:retries_exhausted`. Product `ask()` already guards (`(raw or "").strip()`
+sdk.py:10944); the eval's direct LLMReader path did not. Fixed in
+`tortoise/reader.py` answer() + ping() with regression tests
+(commit `9eedf82c`, worktree `wt-reader-guard` — PR pending).
+
+### v2 extractor truncation finding — filed as #2134
+
+v2 ingest (`--ingest-mode v2`, production 5-stage extractor) truncates S2/S4
+output on large multi-session haystacks (13/139 calls truncated on 0100672e,
+42 sessions) — partial embed list (`partial_parse`/`truncated_parse_error`,
+valid=false) degrades retrieval and makes the reader abstain even when gold
+IS in the haystack. Confounds eval results. Deterministic mode on the same
+question: correct ($12/mug). Filed as #2134. The M5/pilot lanes use
+deterministic ingest (the documented protocol lane); v2 truncation is a
+separate product/extractor issue.

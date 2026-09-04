@@ -449,10 +449,14 @@ decision, vision, strategy, plan, goal, target, humanApproval, event   # LEGACY 
 ### Object Kind Vocabulary (core)
 
 ```
-Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other,
+Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard, other,
 strategy, plan, goal, target    # commitment-state family (state-centric, 2026-08-12) — states that
                                 # commitments produce; carry lifecycle + derived confidence
 ```
+> **Problem family (2026-08-31):** `Problem` = a deviation between actual and desired state
+> (violates a core `standard`). The problem-family parent: packs subclass it (dev:`bug`,
+> dev:`incident`, product-strategy:`customerProblem`) and `risk` is its EPISTEMIC mode — a
+> Point claiming a problem may occur, superseded when it materializes into an actual problem.
 > **State-centric alignment (2026-08-12):** `strategy`/`plan`/`goal`/`target`
 > are STATE objects (superseded when a new commitment lands — the old strategy
 > is deprecated, the new one promoted). Pack pointKinds used as options
@@ -750,6 +754,28 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
   (recomputed on write events, consistency-checked on read, stamped with
   `reliability_derived_at`) — the derivation is the truth, the cache is a
   performance artifact.
+
+---
+
+## §11.5 Object Confidence — Compositional Projection (2026-08-31)
+
+Object confidence is derived at read time (never stored — same philosophy as status
+projection, §2) as the **compensating mean** of two evidence sets:
+
+1. the mean EP posterior of Points `aboutObject → O` (existing derivation), and
+2. the derived confidence of O's parts via declared **composition channels** —
+   pack relations with `semantics: hasPart` / `contains` / `measuredBy`:
+   `{ confidence(C) : (O)-[:hasPart|contains|measuredBy]->(C) }`.
+
+Propagation flows **child → parent** (reverse traversal of the declared edge),
+recursive over the composition DAG with fixpoint iteration (reusing EP convergence).
+A drop in any child lowers the parent, but the mean is compensating — *"unless
+another child rises"*. v1: composition channels only; signed channels
+(`mechanism: NAND`, e.g. `competesWith`) deferred.
+
+Objects remain nouns — no object-level operators. The projection only walks
+structural edges at read time; the epistemic layer (Points) is unchanged and is
+the bottom of the recursion (leaf confidence = mean EP of attached points).
 
 ---
 
