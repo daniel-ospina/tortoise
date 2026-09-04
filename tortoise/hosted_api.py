@@ -5528,7 +5528,12 @@ class SessionRequest(BaseModel):
     # (the shared _capture_turn_window helper in the handler — both paths
     # produce byte-identical stored turns). Non-str content is coerced in the
     # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
-    session_id: str | None = None
+    # W5 P2 (review round 1): session_id becomes the point-level provenance
+    # source_session — an unbounded caller string would amplify onto every
+    # extracted point (N x len).  Bounded at 256 (real ids are ULIDs / the
+    # session_uuid pattern); over-long ids fail the boundary 422 BEFORE the
+    # recording gate (S2 verified order: boundary first).
+    session_id: str | None = Field(None, max_length=256)
     metadata: dict | None = None
     # #1727 Slice 2 (Task 11, T1-P3 pinned): harness is OPTIONAL (None default)
     # so pre-installed hooks and SDK callers that POST without it never 422;
@@ -5631,7 +5636,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 team: dict) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
-    surfaces can never drift on gate order (403 → 422 → 503 → 402).
+    surfaces can never drift on gate order.
+
+    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old
+    "403 → 422 → 503 → 402" was stale, pre-#1927):
+      1. boundary 422 — invalid harness / conversation shape (Pydantic
+         SessionRequest validation fires BEFORE the handler on REST; the MCP
+         tool's SessionRequest construction maps the same failure to its
+         422-equivalent error dict) — recording-off never masks a malformed
+         payload;
+      2. 409 — session_recording disabled (state-conflict);
+      3. 503 — no LLM provider;
+      4. 400 — turn cap > MAX_SESSION_TURNS;
+      5. 422 — empty/blank stored-window transcript (handler-level);
+      6. 402 — quota (skipped when session_existed).
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -5963,10 +5981,31 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             event_id = event.get("id") or event.get("eventId")
             if event_id:
                 minted_event = True
+                # W5 (#2104, S1): the provenance stamp now carries the full
+                # write provenance (source_session / source_harness /
+                # ingested_at) alongside the ontology-compliant eventId —
+                # the W2 benchmark grades provenance_accuracy over these
+                # fields; a write without them is the PROVENANCE_MISSING
+                # rejection (write_verb.assert_provenance).
+                # NAMESPACE NOTE (review round-2, deferred): mining.py:518
+                # (_temporal_wire) also SETs n.source_session with MINING
+                # values — a mining post-pass over capture-derived points
+                # can overwrite this stamp.  Reconcile (rename/coalesce)
+                # before W2 provenance_accuracy reads source_session;
+                # tracked on #2104.
+                # P2-1 (review): FalkorDB SET null DELETES the property — a
+                # no-harness capture (T1-P3: harness optional) must still
+                # carry a provenance field, so None normalizes to "unknown"
+                # (the Session-merge conditional can't apply: the stamp is
+                # one shared SET for all points).
+                source_harness = body.harness or "unknown"
                 proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "SET n.eventId=$eid, n.source_session=$sid, "
+                    "    n.source_harness=$harness, n.ingested_at=$ing",
                     params={"ids": [p["id"] for p in extracted],
-                            "eid": event_id},
+                            "eid": event_id, "sid": session_id,
+                            "harness": source_harness, "ing": now},
                 )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
@@ -6248,6 +6287,73 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         effective_mode = "replayed"
     else:
         effective_mode = "llm"
+    # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
+    # verb (memory_write_v1) — protocol_version REQUIRED, provenance
+    # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
+    # keys (D8).  ``resp["points"]`` (the raw extracted list, load-bearing
+    # for legacy consumers) is ENRICHED in place — each point gains
+    # status/ep_updated/dedup keys read from the graph AFTER the write, so
+    # the verb reports only what is true (anti-gaming): ep_updated = the
+    # point actually carries persisted EP alpha/beta (Phase C turns this on
+    # with the ingest EP pass); dedup = "new" only for points this request
+    # minted (REPHRASE/content-hash classification lands in Phase D).
+    from tortoise.write_verb import (
+        DEDUP_NEW,
+        STATUS_OK,
+        STATUS_PARTIAL,
+        build_write_verb,
+    )
+    skipped = 0
+    if extracted:
+        try:
+            # P1 (review round 1): the enrichment read runs AFTER the writes
+            # are committed — a transient graph failure here must NEVER 500 a
+            # committed capture (D4 posture: additive warning, never raise).
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                "coalesce(n.pointKind, 'statement'), "
+                "coalesce(n.status, 'live'), "
+                "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+                params={"ids": [p["id"] for p in extracted]},
+            ).result_set
+            facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
+                     for r in rows}
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "write-verb enrichment read failed (non-fatal)")
+            extraction_warnings.append(
+                "write-verb enrichment read failed (non-fatal)")
+            facts = {}
+        skipped = 0
+        for p in extracted:
+            # Facts are applied ONLY for ids the graph actually returned —
+            # a swept/deleted point (W6 delete race) or a failed M2 write is
+            # NEVER fabricated as live/new (anti-gaming, P2-2).  The raw
+            # extractor dict still rides resp["points"] un-enriched (its own
+            # draft/kind claims — honest as extractor output), the additive
+            # warning says so, and the verb downgrades to partial.
+            pid = p.get("id")
+            if pid not in facts:
+                skipped += 1
+                extraction_warnings.append(
+                    f"point {pid} missing from graph post-write — "
+                    "reported un-enriched in the write verb")
+                continue
+            kind, status, has_ep = facts[pid]
+            # Graph truth wins over the extractor's claimed kind (P2-2).
+            p["kind"] = kind
+            # Frozen-verb schema names the id ``point_id`` — additive alias
+            # (legacy ``id`` stays; legacy consumers are byte-safe).
+            p.setdefault("point_id", p.get("id"))
+            p["status"] = status
+            p["ep_updated"] = has_ep
+            p["dedup"] = DEDUP_NEW
+    verb_status = STATUS_OK
+    if extraction_errors or skipped:
+        # skipped: at least one extracted point could not be verified
+        # post-write — the verb is partial, never an unqualified ok.
+        verb_status = STATUS_PARTIAL
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "extraction_mode": effective_mode,
@@ -6257,7 +6363,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
-    return resp
+    # W5 (#2104): the memory_write_v1 envelope wraps the (additive) legacy
+    # response — protocol_version, status, provenance, error; the verb's
+    # per-point entries ride the enriched ``resp["points"]`` list (extra
+    # wins on merge, D8).
+    return build_write_verb(
+        source_session=session_id,
+        source_harness=body.harness or "unknown",
+        ingested_at=now,
+        status=verb_status,
+        error=None,
+        extra=resp,
+    )
 
 
 # ── #1727 Slice 2 (Task 11): per-harness receipt + last-error helpers ──────
