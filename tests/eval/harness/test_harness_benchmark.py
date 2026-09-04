@@ -150,14 +150,18 @@ def test_harness_replay_determinism_and_graded_reflex_gate(sdk_factory, tmp_path
     assert pending["fixtures_hash"] == report1["corpus_hash"]
     fixture_config = dict(corpus.BASELINE_CONFIG)
     fixture_config["extractor_posture"] = "m2"
-    fixture_config["reflex"] = "graded"  # the W4 posture — bars are live
-    # All-1.0 / at-bar targets: the null-reflex lane cannot meet kta 0.00.
+    # config.reflex stays null (config parity with the run's resolved config
+    # — a graded-reflex baseline is a config mismatch => inconclusive, which
+    # is itself the protocol guard under test in the hermetic schema tests).
+    # The can-fail probe: commit the AT-TARGET kta snapshot (0.00, the shape
+    # the W4 graded-reflex re-bless will commit) — the null-reflex lane runs
+    # at failure 1.0 > 0.00 => REGRESSION, pure directional (bars off).
     fixture_baseline = {
         "schema_version": 1,
         "fixtures_hash": report1["corpus_hash"],
         "judge_pin": runner.JUDGE_PIN,
         "config": fixture_config,
-        "justification": "synthetic graded-reflex baseline (integration test)",
+        "justification": "synthetic at-target baseline (integration test)",
         "metrics": {
             "know_to_ask_failure_rate": 0.0,
             "false_fire_rate": 0.0,
