@@ -198,15 +198,23 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # (payload entities were already written when capture calls this;
         # eval/hosted write entities before supersessions too). A dangling
         # successor would be INVISIBLE — recall_state excludes superseded
-        # Objects — so it is warned + skipped before any fold.
+        # Objects — so it is warned + skipped before any fold. Never-guess:
+        # duplicate names (distinct ids) are ambiguous — the successor probe
+        # must NOT pick one by LIMIT 1 (the same discipline the ref-side
+        # probe below applies to ITS >1-name matches).
         sb_rows = proj.g.query(
-            "MATCH (o:Object {name:$sb}) RETURN o.id LIMIT 1",
+            "MATCH (o:Object {name:$sb}) RETURN o.id, o.name",
             params={"sb": supersedes_by},
         ).result_set
         if not sb_rows:
             warn(f"entity supersession {ref!r} skipped — successor "
                  f"{supersedes_by!r} is not an Object in the payload "
                  f"entities or the graph (dangling successor)")
+            continue
+        if len(sb_rows) > 1:
+            warn(f"entity supersession {ref!r} skipped — successor "
+                 f"{supersedes_by!r} matches {len(sb_rows)} Objects by "
+                 f"name — skipped (never-guess)")
             continue
         # #2164 review (P2): the fold stores supersededBy truncated to 200
         # chars (_fold_object_superseded: str(...)[:200]) — truncate ONCE
@@ -275,6 +283,30 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             from tortoise.sdk import _entity_name_id
             legacy_no_id = True
             obj_id = _entity_name_id("Object", obj_name)
+        # #2164 review (P1 advisory): the string-equality self-guard above
+        # only catches ref == supersedes_by on the SAME string — a MIXED
+        # id/name self-reference (superseded = the Object's canonical id,
+        # supersedes_by = that same Object's name) slips it and would fold a
+        # LIVE Object onto ITSELF (status='superseded', supersededBy=<its own
+        # name>) → it vanishes from recall_state's default view, exactly the
+        # ISSUE A harm class. Resolve the successor row (captured in the
+        # visibility probe above) against the ref-side resolution. Id
+        # equality is unambiguous; for legacy id-less rows the successor
+        # probe can only have found the ref-side object when both lack ids
+        # AND the names are identical (never-guess: duplicate names with
+        # distinct ids are NOT self-aliasing — they are a legit supersession
+        # between same-named objects and must proceed).
+        sb_id, sb_name = sb_rows[0]
+        if sb_id and obj_id and sb_id == obj_id:
+            warn(f"supersession record skipped (self-supersession via "
+                 f"id/name aliasing): {record!r} resolves both sides to "
+                 f"{obj_name!r} (id {obj_id!r})")
+            continue
+        if legacy_no_id and not sb_id and obj_name == sb_name:
+            warn(f"supersession record skipped (self-supersession via "
+                 f"id/name aliasing): {record!r} resolves both sides to "
+                 f"{obj_name!r} (legacy id-less)")
+            continue
         if (o_status or "") == "superseded":
             if (o_sb or "") == supersedes_by:
                 # same successor already folded — idempotent dedup no-op

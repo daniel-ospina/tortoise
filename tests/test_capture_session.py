@@ -1632,6 +1632,79 @@ def test_apply_supersessions_pt_self_supersession_skipped(sdk):
         "the self-referencing point must stay live"
 
 
+def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
+    """#2164 review (P1 advisory): the string-equality self-guard only
+    catches ref == supersedes_by on the SAME string — a MIXED id/name
+    self-reference (superseded = the Object's canonical id,
+    supersedes_by = that same Object's name) must ALSO be skipped. The
+    successor visibility probe resolves the successor's id; when it equals
+    the ref-side resolution's id, both sides are the SAME Object → folding
+    would set status='superseded', supersededBy=<its own name> and remove
+    the live Object from recall_state's default view (ISSUE A harm class).
+    Id equality is unambiguous; distinct-id duplicate names are a LEGIT
+    supersession and must NOT be skipped."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    # canonical id minted by create_entity
+    obj_id = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    assert obj_id, "create_entity must mint the canonical id"
+    warns: list[str] = []
+    # mixed alias: superseded = canonical id, supersedes_by = same Object's name
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": obj_id, "supersedes_by": "plan-X",
+          "evidence": "self lifecycle (id/name alias)"}],
+        session_id="sess_alias", warn=warns.append)
+    assert applied == 0, "id/name-aliased self-supersession must never apply"
+    assert any("self-supersession" in w for w in warns), warns
+    state = _entity_fold_state(proj, "plan-X")
+    assert state == ("live", None), \
+        f"mixed alias folded plan-X onto itself: {state!r}"
+
+
+def test_apply_supersessions_dup_name_distinct_id_not_self(sdk):
+    """#2164 review (P1 advisory, inverse): two DIFFERENT Objects that
+    share a name (distinct canonical ids) make the successor probe
+    ambiguous — the helper must NEVER guess which one is the successor
+    (never-guess skip with a warning, mirroring the ref-side >1-name
+    discipline). Blind LIMIT 1 would have folded A to a successor picked
+    arbitrarily — and if it picked A itself, that is precisely the
+    self-aliasing fold the advisory warns about."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    # object A named plan-X
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    # object B ALSO named plan-X — force a second, distinct-id node directly
+    # (create_entity would dedup by name; the raw write models a legacy/corrupt
+    # duplicate-name state the guard must tolerate)
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'live'})",
+        params={"id": "obj-planx-dup-b", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by duplicate-named B"}],
+        session_id="sess_dup", warn=warns.append)
+    assert applied == 0, "ambiguous successor must never apply"
+    assert any("never-guess" in w for w in warns), warns
+    assert not any("self-supersession" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    assert len(rows) == 2, f"both duplicates must still exist: {rows}"
+    assert all(r[1] == "live" for r in rows), \
+        "NEITHER duplicate may be folded on an ambiguous successor ref"
+
+
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the
 #    method directly (no env var needed) ─────────────────────────────────
 
