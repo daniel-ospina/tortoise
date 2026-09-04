@@ -51,7 +51,12 @@ def client(tmp_path):
         from tortoise.hosted_api import get_current_team
         app.dependency_overrides[get_current_team] = lambda: {
             "team_id": "test-team-1", "tier": "free", "key_id": "k1",
-            "max_users": 1, "max_graphs": 1, "max_teams": 1,
+            # C5 #2114: key_id-bearing dicts must carry the C2 owner class —
+            # deleg-NULL + scopes [] resolves legacy_full_access True at auth
+            # time (see test_hosted_api TEST_TEAM). A scope-less minted shape
+            # would 403 the C5 _require_scope gates on the seeded endpoints.
+            "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
+            "max_teams": 1,
             # #1922: the demo seed is now quota-gated — the team dict must
             # carry max_points (the fail-closed points cap) or the check
             # 500s.
@@ -134,6 +139,7 @@ class TestPublicDemo:
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
         app.dependency_overrides[get_current_team] = lambda tid=tid: {
             "team_id": tid, "tier": "free", "key_id": "k1",
+            "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 0,  # at cap — count(0) >= limit(0)
         }
@@ -162,6 +168,7 @@ class TestPublicDemo:
         tid = f"team-demo-{uuid.uuid4().hex[:8]}"
         app.dependency_overrides[get_current_team] = lambda tid=tid: {
             "team_id": tid, "tier": "free", "key_id": "k1",
+            "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
         }
@@ -283,6 +290,7 @@ def test_q3_and_wizard_write_same_keys(tmp_path):
     TortoiseSDK.__init__ = _patched
     _app.dependency_overrides[get_current_team] = lambda: {
         "team_id": "team-1728-q3", "tier": "free", "key_id": "k1",
+            "legacy_full_access": True,
     }
     try:
         with TestClient(_app) as tc:
@@ -550,7 +558,12 @@ class TestOnboardingTeam:
         from tortoise.hosted_api import get_current_team
         app.dependency_overrides[get_current_team] = lambda: {
             "team_id": "test-team-1", "tier": "free", "key_id": "k1",
-            "max_users": 1, "max_graphs": 1, "max_teams": 1,
+            # C5 #2114: key_id-bearing dicts must carry the C2 owner class —
+            # deleg-NULL + scopes [] resolves legacy_full_access True at auth
+            # time (see test_hosted_api TEST_TEAM). A scope-less minted shape
+            # would 403 the C5 _require_scope gates on the seeded endpoints.
+            "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
+            "max_teams": 1,
             "session_user_id": None,
         }
         r = client.post("/v1/onboarding/team", json={"name": "orphan"})

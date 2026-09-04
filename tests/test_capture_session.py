@@ -2508,7 +2508,9 @@ def test_client_commit_id_capture_parity(sdk, monkeypatch):
 
 _CONSENT_TEAM = {
     "team_id": "team-1727-consent", "tier": "free", "key_id": "k-1727",
-    "max_points": 100000,
+    # C5 #2114: C2 owner class (legacy tt_ key) — scope-less key_id dicts
+    # 403 the capture gates otherwise.
+    "legacy_full_access": True, "max_points": 100000,
 }
 
 

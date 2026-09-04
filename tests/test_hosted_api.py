@@ -114,8 +114,12 @@ def _patch_tortoise_sdk_init(db_path: str):
 
     _orig_init = ha_mod.TortoiseSDK.__init__
 
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
+        # graph_name (C5 #2114 D-C5-1 seam): forward it — swallowing the
+        # kwarg would silently open the DEFAULT team graph for a custom
+        # graph request (cross-graph test blindness).
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
     # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
@@ -4575,36 +4579,80 @@ class TestProvisioningService:
         finally:
             gen.close()
 
-    def test_minted_key_dormant_on_data_plane(self, tmp_path):
-        """C2 #2111 (code-review security P1, #2b — posture pin): a MINTED
-        deleg=0 per-graph key is DORMANT until C5 #2114 routes resolved
-        graph scope into every request path. C1's fail-closed invariant (a
-        graph-bound key must never widen onto the default graph) is
-        unenforceable at the data plane before the spine — no endpoint
-        consumes graph_id/scopes yet — so deleg=0 keys authenticate to NO
-        capability surface: not management (KEY_NOT_USER_MINTED via
-        get_current_team_session), not raw data reads (GET /v1/points →
-        KEY_NOT_USER_MINTED via get_current_team_gated), not MCP (403 in
-        TeamResolutionMiddleware). They stay mintable / revocable /
-        listable — the provisioning lifecycle. C5 flips this off
-        deliberately with per-graph routing."""
+    def test_minted_key_activated_with_data_scope(self, tmp_path):
+        """C5 #2114 (D-C5-7 — replaces the C2/C3 dormancy pin): a MINTED
+        deleg=0 key with a DATA scope activates on the bound graph — but
+        ONLY its own graph (app-layer isolation, ACL OFF), and NEVER beyond
+        its scopes: a graphs:read child reads its custom graph, cannot read
+        the team default's points (cross-graph denied by _data_sdk's
+        ownership pre-check), cannot WRITE (graphs:read lacks graphs:write →
+        _require_scope 403), and a deleg=0 key without any data scope stays
+        dormant (KEY_NOT_USER_MINTED)."""
         import uuid
         gen = TestProvisioningService()._setup(tmp_path, "pro", None)
         sdk, tid, tc = next(gen)
         try:
             from tortoise.auth import hash_api_key
+            # A real custom graph the child binds to (registry Graph node
+            # with the derived namespace — the ownership pre-check reads it).
+            g = sdk._graph_create(tid, "minted-g", kind="custom")
+            gid = g["graph_id"]
+            # Write a point to the DEFAULT graph (the cross-graph probe: the
+            # child must never see it).
+            sdk.create_point("default-only", content="default only")
             token = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
                 "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
-                "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
                 "scopes:['graphs:read'], delegation_depth:0})",
-                params={"id": "minted-dormant", "tid": tid,
-                        "kh": hash_api_key(token), "kp": token[:10]},
+                params={"id": "minted-active", "tid": tid,
+                        "kh": hash_api_key(token), "kp": token[:10],
+                        "gid": gid},
             )
-            # Raw data read (list points) — formerly the uncovered lane:
-            # deleg=0 must 403, never a team-wide read.
+            h = {"Authorization": f"Bearer {token}"}
+            # 1) reads ITS graph: the custom graph is empty → [] (the
+            #    default graph's point must NOT surface — cross-graph).
+            r = tc.get("/v1/points", headers=h)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            names = [p if isinstance(p, str)
+                     else (p.get("name") or p.get("id")) for p in body]
+            assert "default-only" not in names, (
+                "minted child saw the default graph's points (cross-graph): "
+                f"{names}")
+            # 2) graphs:read ≠ write → 403 INSUFFICIENT_SCOPE on a write.
+            r = tc.post("/v1/points",
+                        json={"content": "child-write"}, headers=h)
+            assert r.status_code == 403, r.text
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "INSUFFICIENT_SCOPE", \
+                    detail
+            # 3) a deleg=0 key bound to a VANISHED graph fails closed (404 —
+            #    never widens onto the default) .
+            dead = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:'g_ghost', "
+                "scopes:['graphs:read'], delegation_depth:0})",
+                params={"id": "minted-ghost", "tid": tid,
+                        "kh": hash_api_key(dead), "kp": dead[:10]},
+            )
             r = tc.get("/v1/points",
-                       headers={"Authorization": f"Bearer {token}"})
+                       headers={"Authorization": f"Bearer {dead}"})
+            assert r.status_code in (403, 404), r.text
+            # 4) a deleg=0 key with NO data scope stays dormant on data.
+            nodata = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
+                "scopes:['keys:manage'], delegation_depth:0})",
+                params={"id": "minted-nodata", "tid": tid,
+                        "kh": hash_api_key(nodata), "kp": nodata[:10],
+                        "gid": gid},
+            )
+            r = tc.get("/v1/points",
+                       headers={"Authorization": f"Bearer {nodata}"})
             assert r.status_code == 403, r.text
             detail = r.json()["detail"]
             if isinstance(detail, dict):
