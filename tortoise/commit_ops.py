@@ -169,7 +169,13 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
     idempotency mechanism (dedup same-successor / keep-first
     divergence). pt_ terminal olds remain unreachable via capture
     (S3 point exclusion + supersede_point's own guard); their silent
-    idempotent skip guards out-of-band delivery. Returns the number of
+    idempotent skip guards out-of-band delivery. Same-commit supersession
+    CHAINS (A→B and B→C in one payload) must be emitted in fold order
+    ([A→B, B→C]): the visible-successor gate skips a fold whose successor
+    this same payload has already terminalized — reverse order silently
+    leaves A live and unjournaled (order-sensitivity tracked in #2249;
+    extractor-side emission currently preserves embed/LLM order with no
+    sort). Returns the number of
     records applied.
     """
     if warn is None:

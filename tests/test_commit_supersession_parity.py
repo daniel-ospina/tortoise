@@ -312,3 +312,68 @@ def test_hosted_commit_wires_apply_supersessions_once(monkeypatch, tmp_path):
     assert recorded_warns and recorded_warns[-1][0] == "__probe__", (
         "the passed warn callable must delegate to hosted_api._logger.warning"
     )
+
+
+def test_hosted_commit_summary_log_reserves_warning_for_real_warns(
+    monkeypatch, tmp_path,
+):
+    """#2193 (review R2) — the commit-level summary log must NOT WARNING on
+    the helper's documented SILENT class (applied<total with zero warns = a
+    silent no-op/absorb, e.g. an idempotent re-dedup); WARNING is reserved
+    for records that actually warned. Drives the real call site against a
+    scripted apply_supersessions: full apply → INFO; partial with warn →
+    WARNING."""
+    import tortoise.commit_ops as commit_ops
+
+    def make_spy(returns):
+        def spy(proj, sdk_, records, **kwargs):
+            return returns(records, kwargs)
+
+        return spy
+
+    def run_commit(spy_fn, monkeypatch_, tmp_path_):
+        monkeypatch_.setattr(commit_ops, "apply_supersessions", spy_fn)
+        # record BOTH levels — the summary log picks info or warning.
+        lines: list[tuple[str, str]] = []
+
+        def _info(msg, *a, **k):
+            lines.append(("info", str(msg)))
+
+        def _warn(msg, *a, **k):
+            lines.append(("warning", str(msg)))
+
+        monkeypatch_.setattr(hosted_api._logger, "info", _info)
+        monkeypatch_.setattr(hosted_api._logger, "warning", _warn)
+        old_pt_id = _pt_id(OLD_PT_CONTENT)
+        new_pt_id = _pt_id(NEW_PT_CONTENT)
+        sdk = TortoiseSDK(str(tmp_path_ / "summary.db"))
+        _seed_baseline(sdk, old_pt_id)
+        payload, plan = _commit_payload_and_plan(old_pt_id, new_pt_id)
+        hosted_api._execute_commit_writes(sdk, payload, plan)
+        return lines
+
+    # (1) full apply, helper never warns → the summary log goes INFO.
+    lines = run_commit(
+        make_spy(lambda records, kwargs: len(records)), monkeypatch, tmp_path,
+    )
+    assert any(
+        level == "info" and "supersessions applied=" in msg
+        for level, msg in lines
+    ), f"full apply must log INFO summary, got {lines}"
+    assert not any(
+        level == "warning" and "supersessions applied=" in msg
+        for level, msg in lines
+    ), f"full apply must NOT WARNING-summary, got {lines}"
+
+    # (2) one record skipped with a real warn → WARNING summary.
+    def partial_with_warn(proj, sdk_, records, **kwargs):
+        kwargs["warn"]("ref %r not found — skipped", "pt_deadbeef")
+        return max(0, len(records) - 1)
+
+    lines = run_commit(
+        partial_with_warn, monkeypatch, tmp_path,
+    )
+    assert any(
+        level == "warning" and "supersessions applied=" in msg
+        for level, msg in lines
+    ), f"a real warn must WARNING-summary, got {lines}"

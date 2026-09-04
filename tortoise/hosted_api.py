@@ -7172,8 +7172,12 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # never blind-overwrites), self-supersession skip, >1-name never-guess,
     # visible-successor gate, legacy id-less canonical-id synthesis. Skips
     # surface via _logger.warning (hosted attribution) — except the helper's
-    # ONE documented silent class (idempotent no-ops: terminal pt_ re-ingest
-    # and entity same-successor dedup, which warn() never fires for); per-
+    # documented SILENT class (no warn()): entity same-successor dedup
+    # (idempotent no-op) and terminal pt_ absorbs REGARDLESS of the claimed
+    # successor (no divergence probe — the #2164 P3 asymmetry; divergent
+    # pt_ re-claims are out-of-band-only, S3 point search excludes terminal
+    # priors, #1391). The summary log therefore INFOs zero-warn applies even
+    # when applied<total — a WARNING means a record actually warned. Per-
     # record fail-open (warn-only — never fails the commit). Same-commit
     # supersession chains must be emitted in fold order ([A→B, B→C]) — the
     # visible-successor gate skips a fold whose successor this payload has
@@ -7186,9 +7190,11 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
 
     def _supersession_warn(msg, *args, **kwargs):
         # warn-counting delegation: the summary log must not WARNING on the
-        # helper's documented SILENT idempotent no-ops (applied < total with
-        # zero warns = benign overlap, e.g. a re-committed same-successor
-        # dedup); WARNING is reserved for records that actually warned.
+        # helper's documented SILENT class (entity same-successor dedup and
+        # terminal pt_ absorbs never call warn()) — applied < total with
+        # zero warns is a silent no-op/absorb, not an operator signal;
+        # WARNING is reserved for records that actually warned (real skips:
+        # dangling/self/never-guess/keep-first conflicts, emit failures).
         nonlocal warned
         warned += 1
         _logger.warning(msg, *args, **kwargs)
