@@ -340,8 +340,11 @@ def test_tombstoned_graph_patch_404_and_capture_403(spine_env, monkeypatch):
                  json={"recording": True},
                  headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 404, r.text
-    # A key minted BEFORE the delete (revoke cascade is best-effort) fails
-    # closed at the recording gate — never captures into the dead namespace.
+    # A graph-bound key on the deleted graph fails closed at the recording
+    # gate — never captures into the dead namespace. (Minted after the
+    # delete: a genuinely pre-delete key is cascade-revoked and 401s at
+    # auth before reaching the gate — the post-delete mint is the reachable
+    # regression that exercises the gate's tombstone guard.)
     key = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
                     graph_id=g["graph_id"])
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")

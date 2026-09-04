@@ -13422,6 +13422,14 @@ def _session_recording_allowed(team: dict) -> tuple[bool, str]:
         # the user's explicit opt-out — a per-graph override NEVER re-enables
         # it (R9: opt-out never silently re-enabled). Overrides may only
         # RESTRICT when the team is ON.
+        #
+        # Round-2b P3 (cause layering): a GRAPH-BOUND key on a dead graph
+        # still surfaces ITS OWN 403 (GRAPH_NOT_FOUND) even on an opted-out
+        # team — probe the override (which fails closed on vanish/tombstone)
+        # and ignore its value, so remediation points at the dead key, not
+        # the team toggle. Team-wide keys short-circuit (no extra read).
+        if team.get("graph_id"):
+            _graph_recording_override(team)
         return False, "team"
     override = _graph_recording_override(team)
     if override is not None:
