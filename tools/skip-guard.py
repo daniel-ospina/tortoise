@@ -447,11 +447,22 @@ def emit_manifest(files: list[str], marker: str, output: Path,
     if runner is None:
         proc = subprocess.run(cmd, capture_output=True, text=True)
         rc, collected = proc.returncode, proc.stdout
+        _err = proc.stderr
     else:
         rc, collected = runner(cmd)
+        _err = ""
     if rc != 0:
         print(f"emit-manifest: collect-only failed (rc={rc}) — no manifest "
               f"written (fail-closed)", file=sys.stderr)
+        # Surface the swallowed reason — a fail-closed gate that hides WHICH
+        # file failed collection turns every runner hiccup into archaeology.
+        # Print the tail of pytest's captured stderr/stdout (best-effort).
+        for _label, _chunk in (("stderr", _err), ("stdout", collected)):
+            _lines = [ln for ln in (_chunk or "").splitlines() if ln.strip()]
+            if _lines:
+                print(f"emit-manifest: -- {_label} tail --", file=sys.stderr)
+                for _ln in _lines[-20:]:
+                    print(f"  {_ln[:300]}", file=sys.stderr)
         return rc
     nodeids = collect_only_nodeids(collected)
     lines = [
