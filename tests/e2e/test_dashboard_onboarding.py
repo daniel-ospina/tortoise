@@ -53,8 +53,13 @@ def _wire(page: Page, *, provision: bool, seed_objects: list = None, onboarding_
                               body=json.dumps([{"team_id": "team_o", "name": "Onboarding Test"}]))
                 return
             if path.endswith("/v1/session/key") and method == "POST":
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"key": "tt_onb_key_1234567890abcdef", "team_id": "team_o"}))
+                # #2167: the mount NEVER mints a bootstrap key (the old
+                # tt_onb_key mint mock is gone) — loud 500 + counter so a
+                # regression mint fails the journey instead of silently
+                # passing the wizard walk.
+                cap["session_key_posts"] = cap.get("session_key_posts", 0) + 1
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
@@ -174,6 +179,10 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     page.get_by_role("button", name="Open my dashboard →").click()
     assert not any("onboarding_complete" in p for p in cap["state"]), \
         f"done step must NOT patch onboarding_complete: {cap['state']}"
+    # #2167: the whole wizard journey issues ZERO POST /v1/session/key (the
+    # mount mint is deleted; connect-step durable sourcing is #2211-owned and
+    # rides POST /v1/team/keys)
+    assert cap.get("session_key_posts", 0) == 0, f"zero-mint violated: {cap.get('session_key_posts')} session-key POSTs"
 
 
 def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:

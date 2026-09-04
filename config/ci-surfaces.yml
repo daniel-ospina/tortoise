@@ -4,6 +4,8 @@ surfaces:
   - test_1162_add_operator_local_svbp.py
   - test_abuse.py
   - test_abuse_integration.py
+  - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
+  - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
   - test_api.py
@@ -83,6 +85,7 @@ surfaces:
   - test_selfhost_rest.py
   - test_ask_api.py
   - test_ask_gating.py
+  - test_commit_supersession_parity.py
   - test_session_auth.py
   - test_session_capture_e2e.py
   - test_session_context.py
@@ -102,6 +105,25 @@ surfaces:
   - test_suspension_parity.py
   - test_telegram_push.py
   - test_turnstile_signup.py
+  # W3-a (#2099): the W3 harness real-replay gate — replay of the
+  # volunteering-memory scripted-conversation corpus (tests/eval/harness/)
+  # through the REAL session→graph seams on hermetic per-cell graphs.
+  # Deterministic M2 echo lane vs its OWN committed baselines/m2.json:
+  # PASS on a clean replay; REGRESSION on write-path/recall/routing
+  # regressions (the always-live source-isolation E2E-4 gate catches
+  # misrouted team cells).  Also covers the hermetic schema/corpus tests.
+  - eval/harness/test_harness_benchmark.py
+  - eval/harness/test_harness_schema.py
+  - eval/harness/test_harness_corpus.py
+  # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
+  # boundary PR (hosted capture code changes) must run the real-pipeline
+  # replay gate against the write-path corpus. The deterministic M2 echo
+  # lane replays and compares vs its OWN committed baselines/m2.json
+  # (posture-matched; PR #2183): verdict PASS on a clean replay, REGRESSION
+  # when a write-path regression moves the metrics — the can-fail CI gate.
+  # First-match ownership (api before eval) is fine: the tier-2 union
+  # includes it whenever api OR eval matches.
+  - eval/write_path/test_write_path_benchmark.py
   battery:
   - test_battery_arms.py
   - test_battery_judge.py
@@ -141,6 +163,7 @@ surfaces:
   - test_canary_classify.py
   - test_canonical.py
   - test_capture_session.py
+  - test_capture_session_supersession_e2e.py
   - test_ci_selection.py
   - test_connector_loader.py
   - test_connector_secrets.py
@@ -323,10 +346,22 @@ surfaces:
   - test_value_extractor.py
   - test_wipe_server.py
   - test_wiring_phase01.py
+  - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
+  # W2-b (#2098): BPRE write-path gate — core fallback catches engine
+  # code with no surface mapping (tortoise/session_import/ parsers etc.).
+  - eval/write_path/test_write_path_benchmark.py
   ep:
   - test_a9_direct_edge_traversal.py
+  # W2-b (#2098): BPRE write-path gate — dream.py EP-pass changes must run
+  # the deterministic replay gate. NOTE (posture split, #2098 round 2): the
+  # strict-survival dimension is pinned at 0.0 on the m2 lane until the
+  # EP-pass fix-wave lands (dream EP coverage 0.0 today) — what this surface
+  # senses is dream CRASH/runner-error + parser/write-back/provenance
+  # regressions, not strict-survival deltas; strict becomes a live dimension
+  # once the fix-wave creates headroom.
+  - eval/write_path/test_write_path_benchmark.py
   - test_calibration.py
   - test_calibration_tools.py
   - test_decide.py
@@ -350,6 +385,7 @@ surfaces:
   - test_issue94_annotate_ep_batch.py
   - test_kappa.py
   - test_ranking.py
+  - test_ranking_w4b.py
   - test_recall_gaps_subgraph.py
   - test_recall_state.py
   - test_source_credibility.py
@@ -379,6 +415,8 @@ surfaces:
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
+  - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
   - test_onboarding_variants.py
   - test_onboarding_w4_settings.py  # #2000 (W4): docker-lane Settings-surface toggle-persistence tests
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
@@ -444,6 +482,9 @@ surfaces:
   - eval/retrieval/test_run.py
   - longmem_eval/test_vector_arm.py
   - eval/write_path/test_write_path_corpus.py
+  - eval/write_path/test_write_path_grading.py
+  - eval/write_path/test_write_path_runner.py
+  - eval/write_path/test_write_path_benchmark.py
   - mini_beir/test_mini_beir.py
   - test_backfill_embeddings_force.py
   - test_calibrate_thresholds.py
@@ -473,6 +514,7 @@ tier1:
 - test_onboarding_variants.py
 - test_quota.py
 - test_ranking.py
+- test_ranking_w4b.py
 - test_reaper_orphan.py
 - test_sdk_dedup.py
 - test_sdk_ep.py

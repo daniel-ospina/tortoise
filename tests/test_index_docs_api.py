@@ -106,6 +106,7 @@ def client(tmp_path):
         from tortoise.hosted_api import get_current_team
         app.dependency_overrides[get_current_team] = lambda: {
             "team_id": team_id, "tier": "free", "key_id": "k1",
+            "legacy_full_access": True,
             "max_users": 1, "max_graphs": 1, "max_teams": 1,
             "max_points": 10000,
         }
@@ -627,6 +628,7 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
     from tortoise.hosted_api import get_current_team
     app.dependency_overrides[get_current_team] = lambda: {
         "team_id": "some-other-team", "tier": "free", "key_id": "k2",
+        "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
     }
     rb = provisioned.tc.get(f"/v1/index/docs/{job_id}")
@@ -634,6 +636,7 @@ def test_cross_team_job_poll_404(provisioned, mock_github, ingest_base):
     # team A still polls fine
     app.dependency_overrides[get_current_team] = lambda: {
         "team_id": provisioned.team_id, "tier": "free", "key_id": "k1",
+        "legacy_full_access": True,
         "max_users": 1, "max_graphs": 1, "max_teams": 1, "max_points": 10000,
     }
     body = _poll_until(provisioned.tc, job_id, "completed")

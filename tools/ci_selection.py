@@ -99,7 +99,7 @@ SOURCE_PATTERNS = {
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
             "tools/ask_spotcheck_probe.py"),
-    "api": ("tortoise/hosted_api.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+    "api": ("tortoise/hosted_api.py", "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py
@@ -112,6 +112,12 @@ SOURCE_PATTERNS = {
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
+    # W2-b (#2098) BPRE trigger (plan §2.1) is wired at the TEST-FILE level
+    # instead of here: the write-path benchmark gate file is registered on
+    # the api (hosted capture/provenance), core (session_import fallback),
+    # ep (dream EP pass), and eval surfaces, so a PR touching any of those
+    # source paths runs the replay gate via the matched surface's files
+    # without displacing the surface's existing selection.
     "eval": ("tools/longmem_eval/", "tools/mini_beir/",
              "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
              "tools/pair_label_runner.py", "benchmarks/",

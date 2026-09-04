@@ -47,6 +47,13 @@ TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
     "tier": "free",
+    # C1/C2 tenancy fields (the resolution dict a tt_ legacy key would
+    # produce: deleg NULL, scopes [] → legacy_full_access owner class).
+    "graph_id": None,
+    "scopes": [],
+    "legacy_full_access": True,
+    "delegation_depth": None,
+    "created_by_key_id": None,
     # get_current_team always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
@@ -107,8 +114,12 @@ def _patch_tortoise_sdk_init(db_path: str):
 
     _orig_init = ha_mod.TortoiseSDK.__init__
 
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
+        # graph_name (C5 #2114 D-C5-1 seam): forward it — swallowing the
+        # kwarg would silently open the DEFAULT team graph for a custom
+        # graph request (cross-graph test blindness).
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
     # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
@@ -302,6 +313,55 @@ class TestHealthEndpoints:
         assert body["hashing"] == "pbkdf2_hmac_sha256"
         assert "api_auth_enforced" in body
         assert isinstance(body["api_auth_enforced"], bool)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Build/version surface (#2208)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestVersionEndpoint:
+    """GET /v1/version — public version/sha surface so clients (and the
+    onboarding skill) can detect an outdated server before authenticating.
+    """
+
+    def test_version_returns_package_version(self, client):
+        import tortoise
+
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"] == tortoise.__version__
+        assert "commit_sha" in body
+        # #2208 review F5: openapi info.version must mirror the package
+        # version (was a stale hardcoded "0.1.0") — pin it so drift fails loud.
+        assert app.version == tortoise.__version__
+
+    def test_version_is_public_no_auth(self, unauth_client):
+        """Skew detection must work BEFORE auth — no Authorization header."""
+        r = unauth_client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"]
+
+    def test_version_commit_sha_reads_env(self, client, monkeypatch):
+        """commit_sha mirrors the deploy-time TORTOISE_GIT_SHA (baked by
+        deploy-hosted.yml); None when no deploy pipeline set it."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "16075c8f2ff182b44614d6a83dc4d92933ae70db")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] == "16075c8f2ff182b44614d6a83dc4d92933ae70db"
+
+        monkeypatch.delenv("TORTOISE_GIT_SHA")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
+
+    def test_version_commit_sha_blank_env_is_null(self, client, monkeypatch):
+        """An empty (not unset) TORTOISE_GIT_SHA must not leak as "" — null."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1587,6 +1647,184 @@ class TestSessionCapture:
         assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
 
 
+class TestSessionCaptureWriteVerb:
+    """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
+    verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
+    per-point status/ep_updated/dedup enriched in place (D8 additive); the
+    provenance stamp carries source_session/source_harness/ingested_at
+    (S1); and the gate order pins the S2 amendment (boundary 422 precedes
+    the recording-off 409)."""
+
+    CONVERSATION = [  # noqa: RUF012
+        {"role": "user", "content": "W5 write-verb provenance contract test."},
+    ]
+
+    def test_capture_response_speaks_write_verb(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-verb-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        assert body["status"] in ("ok", "partial")
+        assert body["error"] is None
+        prov = body["provenance"]
+        assert prov["source_session"] == "w5-verb-session"
+        assert prov["source_harness"] == "codex"
+        assert prov["ingested_at"]
+        # Legacy surface intact (D8) + per-point verb facts enriched.
+        assert body["extracted"] == len(body["points"])
+        for p in body["points"]:
+            assert "ep_updated" in p and "dedup" in p and "status" in p
+            assert p.get("point_id") == p.get("id")  # frozen-verb schema alias
+
+    def test_capture_no_harness_normalizes_provenance_unknown(self, client):
+        """P2-1 (review): a no-harness capture (T1-P3: harness optional) must
+        still carry a complete provenance — source_harness normalizes to
+        "unknown" in the stamp AND the envelope (FalkorDB SET null would
+        DELETE the property, leaving provenance incomplete)."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-noharness-session",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["provenance"]["source_harness"] == "unknown"
+        import tortoise.hosted_api as ha_mod
+        ids = [p["id"] for p in body["points"]]
+        if ids:
+            rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.source_harness",
+                params={"ids": ids},
+            ).result_set
+            for row in rows:
+                assert row[0] == "unknown"
+
+    def test_capture_points_stamped_with_provenance(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-provenance-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert ids, "mock extraction produced no points"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+            "n.source_session, n.source_harness, n.ingested_at, n.eventId",
+            params={"ids": ids},
+        ).result_set
+        by_id = {r[0]: r for r in rows}
+        for pid in ids:
+            assert pid in by_id, f"{pid} missing from graph"
+            _id, src_sess, src_har, ingested, event_id = by_id[pid]
+            assert src_sess == "w5-provenance-session"
+            assert src_har == "pi"
+            assert ingested
+            assert event_id  # ontology-compliant provenance kept
+
+    def test_capture_gate_boundary_422_before_409(self, client):
+        """S2 amendment (verified order): the boundary 422 (invalid harness
+        — Pydantic SessionRequest validation, fires before the handler on
+        REST) precedes the recording-off 409.  Recording off must never mask
+        a malformed payload."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "harness": "not-a-real-harness",  # boundary failure
+        })
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "harness" in r.text.lower()
+
+    def test_capture_gate_409_when_recording_off(self, client):
+        """Recording off + VALID payload -> 409 (state-conflict), no Session
+        write, no receipt."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-recording-off-session",
+        })
+        assert r.status_code == 409, r.text
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": "w5-recording-off-session"},
+        ).result_set
+        assert rows[0][0] == 0  # no Session write when recording off
+
+    def test_capture_replay_zero_new_nodes_verb_ok(self, client):
+        """Idempotency: re-POST of the same session_id (recording on) writes
+        0 new nodes — extraction is skipped, the verb still speaks ok."""
+        for _ in range(2):
+            r = client.post("/v1/sessions", json={
+                "conversation": self.CONVERSATION,
+                "session_id": "w5-replay-session",
+            })
+            assert r.status_code == 200, r.text
+        first = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-replay-session",
+        }).json()
+        assert first["protocol_version"] == "memory_write_v1"
+        # A replay extracts nothing new: the verb reports the (empty)
+        # point set honestly.
+        assert first["extracted"] == 0
+
+
+    def test_capture_session_id_overlong_rejected_boundary_422(self, client):
+        """P2 (review round 1): session_id becomes the point-level
+        source_session — unbounded caller strings would amplify onto every
+        extracted point.  Over-long ids fail the boundary 422 (Pydantic
+        max_length) BEFORE the recording gate."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "x" * 500,
+        })
+        assert r.status_code == 422, r.text
+
+    def test_capture_enrichment_failure_never_500s_committed_capture(
+            self, client, monkeypatch):
+        """P1 (review round 1): a transient failure in the post-write
+        enrichment read must NOT 500 a committed capture (D4 posture) — it
+        degrades to an additive warning and the verb reports what it could."""
+        # _GuardedGraph is __slots__-locked and the underlying redislite
+        # Graph handle is created fresh per SDK — patch at the HANDLE CLASS
+        # level (test-scoped); the boom is selective so unrelated queries in
+        # the same window pass through untouched.
+        from redislite.falkordb_client import Graph as _Graph
+        _orig = _Graph.query
+
+        def _selective_boom(self, cypher, params=None, timeout=None):
+            if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
+                raise RuntimeError("transient graph failure")
+            return _orig(self, cypher, params=params, timeout=timeout)
+
+        monkeypatch.setattr(_Graph, "query", _selective_boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-enrich-fail-session",
+        })
+        # Committed + 200; the failure is additive, never a 500.
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        # facts={} -> every extracted point is skipped -> the verb is
+        # PARTIAL, never an unqualified ok over unverifiable points.
+        assert body["status"] == "partial"
+        assert any("enrichment read failed" in w for w in body["warnings"])
+
+
 class TestSessionList:
     """GET /v1/sessions — list captured sessions."""
 
@@ -1828,6 +2066,16 @@ def internal_client():
 
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
         _orig_init = _patch_tortoise_sdk_init(db_path)
+        # C3 (#2112): seed the Team node the auth override bypasses — the
+        # registry mint path (sdk.apikey_create) validates the team exists
+        # (mirror of the client fixture's seed; production teams always
+        # exist — the override skips the resolution that would have found
+        # them).
+        import tortoise.hosted_api as ha_mod2
+        ha_mod2._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (t:Team {id:$id})",
+            params={"id": TEST_TEAM_ID},
+        )
 
         try:
             with TestClient(app) as tc:
@@ -3246,6 +3494,422 @@ def test_make_sdk_rebinds_stale_anchor(monkeypatch):
     finally:
         ha._FALLBACK_KEEPALIVE.pop(ns, None)
 
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_make_sdk_concurrent_first_calls_single_anchor(monkeypatch):
+    """#2172: concurrent first _make_sdk calls for one namespace must create
+    exactly ONE keepalive anchor. The check-then-create race (two threads
+    both spawning on the same embedded db_path; the setdefault loser dropped
+    UNCLOSED → daemon socket unlinked mid-test → 503 / redis.socket
+    ConnectionError — the #2065/#2172 double-upload flake class) is closed
+    by _KEEPALIVE_LOCK. Regression: an __init__ construction probe scoped to
+    each round's db asserts post-fix counts (1 anchor + 2 fresh SDKs), no
+    ORPHAN construction (pre-fix: a 4th construction — the loser's anchor —
+    dropped unclosed), returned SDKs are distinct live clients attached to
+    the anchor's data-bearing server (sentinel round-trip), NOT the shared
+    anchor itself. The probe parks each counted construction ~300ms so the
+    pre-fix double-create is ~deterministic (the winner's construction is
+    held open while the loser reaches its own); under the lock only one
+    anchor construction can exist, so the park only costs time and can never
+    deadlock (join timeout is the net). Each round races a FRESH db file (no
+    daemon SAVE/socket teardown churn between rounds) and round 3 seeds a
+    STALE path-drifted anchor so the in-lock stale-evict + re-check branch is
+    exercised under contention too."""
+    import threading
+    import time
+    import uuid
+
+    import tortoise.hosted_api as ha
+
+    ns = f"anchor-race-{uuid.uuid4().hex}"
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for _round in range(4):
+                if _round == 3:
+                    # Seed an anchor bound to a DIFFERENT path so this round
+                    # races from a stored-but-stale keepalive entry. Seed
+                    # constructions target seed.db — the round counter (filters
+                    # on round-3.db) is not installed yet, so they aren't
+                    # counted; they also don't park (db mismatch).
+                    seed_db = os.path.join(td, "seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    seeded_fresh = ha._make_sdk(namespace=ns)
+                    seeded_fresh.close()
+                    stale = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+                    assert stale is not None, "seed anchor not stored"
+                    ha._FALLBACK_KEEPALIVE[ns] = stale  # pre-store: both threads see it
+                db = os.path.join(td, f"round-{_round}.db")
+                monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(_barrier=barrier, _results=results, _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(ha._make_sdk(namespace=ns))
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, daemon=True)
+                           for _ in range(2)]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=30)
+                        assert not t.is_alive(), (
+                            f"round {_round}: _make_sdk hung — a lock "
+                            f"regression would deadlock here")
+                    assert not errors, f"round {_round}: thread raised: {errors!r}"
+                    anchors = [v for k, v in ha._FALLBACK_KEEPALIVE.items()
+                               if k == ns]
+                    # Dict keys are unique, so this list has 0 or 1 entries —
+                    # a miss means the anchor was never stored (e.g. a fix
+                    # that builds but never inserts).
+                    assert anchors, (
+                        f"round {_round}: no anchor stored for {ns!r}")
+                    anchor = anchors[0]
+                    assert anchor._proj is not None, "anchor not connected"
+                    assert ha._anchor_usable(anchor, db) is True
+                    # Lower bound, not equality: a legitimate env-fault
+                    # recovery (the lock winner's eager connect fails, the
+                    # loser's in-lock re-check evicts it and recreates) adds
+                    # a second, CLOSED anchor construction on correct code.
+                    # The discriminator is the closed-aware orphan assert.
+                    assert len(constructed) >= 1 + len(results), (
+                        f"round {_round}: expected >= 1 anchor + 1 per "
+                        f"returned fresh SDK = {1 + len(results)} "
+                        f"constructions, got {len(constructed)} — an anchor "
+                        f"or fresh SDK was never built")
+                    # Fresh-per-request contract: returned SDKs are NOT the
+                    # shared anchor (a regression returning it would share
+                    # mutable session state across requests — the #493 class).
+                    assert all(s is not anchor for s in results), (
+                        f"round {_round}: a returned SDK IS the shared anchor")
+                    assert len({id(s) for s in results}) == 2, (
+                        f"round {_round}: returned SDKs are not distinct")
+                    returned = {id(s) for s in results}
+                    # Closed-aware orphan check: every construction must be
+                    # the stored anchor, a returned SDK, or a CLOSED evicted
+                    # candidate (the env-fault recovery path closes what it
+                    # evicts). Pre-fix the #2172 loser was dropped OPEN —
+                    # unclosed and unaccounted — which is exactly the leak.
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"round {_round}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2172 race) leaks here")
+                    # Data-plane probe: a node written through the anchor's
+                    # graph must be readable via every returned SDK — proves
+                    # they attach to the anchor's data-bearing daemon, not a
+                    # silently-empty or other-path server (#1607/#2065). Raw
+                    # graph query through _get_proj().g is the established
+                    # test idiom (test_index_surfacing.py).
+                    sentinel = f"race-{ns}-{_round}"
+                    anchor._get_proj().g.query(
+                        "CREATE (n:RaceSentinel {rk: $rk})", {"rk": sentinel})
+                    for sdk in results:
+                        seen = sdk._get_proj().g.query(
+                            "MATCH (n:RaceSentinel {rk: $rk}) RETURN count(n)",
+                            {"rk": sentinel}).result_set[0][0]
+                        assert seen == 1, (
+                            f"round {_round}: returned SDK missed the "
+                            f"anchor's write — decoupled server")
+                    if _round == 3:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2172 prevents")
+                        assert stale._proj is None
+                finally:
+                    # Deterministic round teardown (close-then-pop, #1950):
+                    # shut every daemon we started. Under FIXED code nothing
+                    # was dropped (the orphans assert proved it).
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            leftover = ha._FALLBACK_KEEPALIVE.pop(ns, None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_registry_anchor_reuses_healthy_anchor(monkeypatch):
+    """#2172: the registry anchor's healthy-hit fast path (lock-free return
+    of the stored anchor) must never replace or evict a healthy anchor.
+    _make_sdk's twin is pinned by test_make_sdk_reuses_healthy_anchor; the
+    registry path is request-hot in embedded selfhost mode (four per-request
+    helpers call _registry_anchor) and pre-fix used a replacement-prone
+    direct assignment, so pin it explicitly."""
+    import tortoise.hosted_api as ha
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            db = os.path.join(td, "registry.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db)
+            anchor1 = ha._registry_anchor()
+            assert ha._FALLBACK_KEEPALIVE.get("registry") is anchor1
+            assert ha._anchor_usable(anchor1, db) is True
+            # second call: same object — no eviction, no replacement
+            anchor2 = ha._registry_anchor()
+            assert anchor2 is anchor1, "healthy anchor replaced"
+            assert ha._FALLBACK_KEEPALIVE.get("registry") is anchor1
+            assert anchor1._proj is not None
+        finally:
+            leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_registry_anchor_concurrent_first_calls_single_anchor(monkeypatch):
+    """#2172: _registry_anchor() and _make_sdk(namespace="registry") share
+    the "registry" keepalive key through TWO separate check-then-set code
+    paths — the lock must serialize BOTH so a concurrent cold start yields
+    one anchored server. Mode 1 (registry ×2): concurrent _registry_anchor()
+    calls must return the SAME object — identity is the direct check, since
+    _registry_anchor returns the stored anchor itself; pre-fix the
+    direct-assignment loser leaked its own unclosed anchor and each thread
+    returned a different one. Mode 2 (make_sdk-vs-registry): the mixed
+    cold-start race (hosted_api.py:991 pattern) must produce exactly one
+    anchor plus one fresh SDK, distinct and attached to the same server.
+    Mode 3 (registry-stale-race): seeds a path-drifted "registry" anchor so
+    the concurrent stale-evict branch is exercised for this path too. The
+    same ~300ms construction park makes the pre-fix race ~deterministic."""
+    import threading
+    import time
+
+    import tortoise.hosted_api as ha
+
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    modes = (
+        ("registry-x2",
+         (ha._registry_anchor, ha._registry_anchor),
+         True, False),
+        ("make-sdk-vs-registry",
+         (lambda: ha._make_sdk(namespace="registry"), ha._registry_anchor),
+         False, False),
+        ("registry-stale-race",
+         (ha._registry_anchor, ha._registry_anchor),
+         True, True),
+    )
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for label, callers, expect_identity, seed_stale in modes:
+                if seed_stale:
+                    # Seed an anchor on a drifted path (see test 1 round 3).
+                    seed_db = os.path.join(td, f"{label}-seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    seeded_fresh = ha._make_sdk(namespace="registry")
+                    seeded_fresh.close()
+                    stale = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+                    assert stale is not None, "seed anchor not stored"
+                    ha._FALLBACK_KEEPALIVE["registry"] = stale
+                db = os.path.join(td, f"{label}.db")
+                monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(fn, _barrier=barrier, _results=results,
+                        _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(fn())
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, args=(fn,), daemon=True)
+                           for fn in callers]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=30)
+                        assert not t.is_alive(), (
+                            f"{label}: cold-start call hung — a lock "
+                            f"regression would deadlock here")
+                    assert not errors, f"{label}: thread raised: {errors!r}"
+                    anchor = ha._FALLBACK_KEEPALIVE.get("registry")
+                    assert anchor is not None, f"{label}: anchor not stored"
+                    assert anchor._proj is not None, f"{label}: not connected"
+                    assert ha._anchor_usable(anchor, db) is True
+                    fresh_count = sum(1 for s in results if s is not anchor)
+                    # Lower bound, not equality — a legit env-fault recovery
+                    # (winner's eager connect fails; loser's in-lock re-check
+                    # evicts + recreates) adds a second, CLOSED anchor
+                    # construction on correct code. The discriminator is the
+                    # closed-aware orphan assert below.
+                    assert len(constructed) >= 1 + fresh_count, (
+                        f"{label}: expected >= 1 anchor + 1 per returned "
+                        f"fresh SDK = {1 + fresh_count} constructions, got "
+                        f"{len(constructed)} — an anchor was never built")
+                    if expect_identity:
+                        if results[0] is results[1]:
+                            assert results[0] is anchor, f"{label}: wrong object"
+                        else:
+                            # Distinct results carry two signatures.
+                            # Regression: the pre-fix direct-assignment loser
+                            # was dropped OPEN — two open distinct anchors.
+                            # Env-fault recovery (CORRECT code): the winner's
+                            # eager connect failed and the loser's in-lock
+                            # re-check evicted + CLOSED it, then created the
+                            # stored anchor. _t_closed disambiguates, so the
+                            # test stays red on the bug and green on the
+                            # fault, with a self-diagnosing message.
+                            assert (
+                                getattr(results[0], "_t_closed", False)
+                                or getattr(results[1], "_t_closed", False)
+                            ), (
+                                f"{label}: two OPEN distinct anchors — the "
+                                f"#2172 double-create (the env-fault recovery "
+                                f"closes the evicted anchor; an open dropped "
+                                f"anchor is the regression signature)")
+                            assert anchor in results, (
+                                f"{label}: evicted anchor not replaced")
+                    else:
+                        if sum(1 for s in results if s is anchor) == 1:
+                            # Healthy shape: the _registry_anchor caller
+                            # returned the stored anchor; the _make_sdk
+                            # caller returned a distinct fresh SDK attached
+                            # to the same server (sentinel proves it).
+                            assert len({id(s) for s in results}) == 2, (
+                                f"{label}: results not distinct")
+                            fresh = next(s for s in results
+                                         if s is not anchor)
+                            sentinel = f"race-registry-{label}"
+                            anchor._get_proj().g.query(
+                                "CREATE (n:RaceSentinel {rk: $rk})",
+                                {"rk": sentinel})
+                            seen = fresh._get_proj().g.query(
+                                "MATCH (n:RaceSentinel {rk: $rk}) "
+                                "RETURN count(n)",
+                                {"rk": sentinel}).result_set[0][0]
+                            assert seen == 1, (
+                                f"{label}: fresh SDK missed the anchor's "
+                                f"write — decoupled server")
+                        else:
+                            # Env-fault recovery shape (mirror of the
+                            # identity branch): the lock winner's eager
+                            # connect failed, the loser's in-lock re-check
+                            # evicted + CLOSED the winner's anchor and built
+                            # the stored one — which NO caller returns
+                            # (_make_sdk never returns the anchor). Results
+                            # are exactly [closed evicted anchor, live fresh
+                            # SDK]; the data-plane check proves the live SDK
+                            # attaches to the STORED anchor's daemon.
+                            evicted = [s for s in results
+                                       if getattr(s, "_t_closed", False)]
+                            assert len(evicted) == 1, (
+                                f"{label}: stored anchor missing from "
+                                f"results with {len(evicted)} closed "
+                                f"result(s) — expected exactly the one "
+                                f"evicted anchor (two OPEN distinct results "
+                                f"would be the #2172 double-create)")
+                            live = next(s for s in results
+                                        if not getattr(s, "_t_closed", False))
+                            assert live is not anchor, (
+                                f"{label}: live result IS the stored anchor")
+                            assert anchor._proj is not None
+                            sentinel = f"race-registry-{label}-fault"
+                            anchor._get_proj().g.query(
+                                "CREATE (n:RaceSentinel {rk: $rk})",
+                                {"rk": sentinel})
+                            seen = live._get_proj().g.query(
+                                "MATCH (n:RaceSentinel {rk: $rk}) "
+                                "RETURN count(n)",
+                                {"rk": sentinel}).result_set[0][0]
+                            assert seen == 1, (
+                                f"{label}: surviving SDK missed the stored "
+                                f"anchor's write — decoupled server")
+                    returned = {id(s) for s in results}
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"{label}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2172 race) leaks here")
+                    if seed_stale:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2172 prevents")
+                        assert stale._proj is None
+                finally:
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            # Leave no anchored "registry" server bound to our tempdir for
+            # whichever test runs next (it cold-starts its own).
+            leftover = ha._FALLBACK_KEEPALIVE.pop("registry", None)
+            if leftover is not None:
+                try:  # noqa: SIM105
+                    leftover.close()
+                except Exception:
+                    pass
+
+
 class TestRateLimitRealClientIP:
     """#1559: the per-IP rate-limit fallback must key on the REAL client IP
     (request.state.client_ip — the Fly-Client-IP when
@@ -3915,36 +4579,80 @@ class TestProvisioningService:
         finally:
             gen.close()
 
-    def test_minted_key_dormant_on_data_plane(self, tmp_path):
-        """C2 #2111 (code-review security P1, #2b — posture pin): a MINTED
-        deleg=0 per-graph key is DORMANT until C5 #2114 routes resolved
-        graph scope into every request path. C1's fail-closed invariant (a
-        graph-bound key must never widen onto the default graph) is
-        unenforceable at the data plane before the spine — no endpoint
-        consumes graph_id/scopes yet — so deleg=0 keys authenticate to NO
-        capability surface: not management (KEY_NOT_USER_MINTED via
-        get_current_team_session), not raw data reads (GET /v1/points →
-        KEY_NOT_USER_MINTED via get_current_team_gated), not MCP (403 in
-        TeamResolutionMiddleware). They stay mintable / revocable /
-        listable — the provisioning lifecycle. C5 flips this off
-        deliberately with per-graph routing."""
+    def test_minted_key_activated_with_data_scope(self, tmp_path):
+        """C5 #2114 (D-C5-7 — replaces the C2/C3 dormancy pin): a MINTED
+        deleg=0 key with a DATA scope activates on the bound graph — but
+        ONLY its own graph (app-layer isolation, ACL OFF), and NEVER beyond
+        its scopes: a graphs:read child reads its custom graph, cannot read
+        the team default's points (cross-graph denied by _data_sdk's
+        ownership pre-check), cannot WRITE (graphs:read lacks graphs:write →
+        _require_scope 403), and a deleg=0 key without any data scope stays
+        dormant (KEY_NOT_USER_MINTED)."""
         import uuid
         gen = TestProvisioningService()._setup(tmp_path, "pro", None)
         sdk, tid, tc = next(gen)
         try:
             from tortoise.auth import hash_api_key
+            # A real custom graph the child binds to (registry Graph node
+            # with the derived namespace — the ownership pre-check reads it).
+            g = sdk._graph_create(tid, "minted-g", kind="custom")
+            gid = g["graph_id"]
+            # Write a point to the DEFAULT graph (the cross-graph probe: the
+            # child must never see it).
+            sdk.create_point("default-only", content="default only")
             token = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
                 "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
-                "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
                 "scopes:['graphs:read'], delegation_depth:0})",
-                params={"id": "minted-dormant", "tid": tid,
-                        "kh": hash_api_key(token), "kp": token[:10]},
+                params={"id": "minted-active", "tid": tid,
+                        "kh": hash_api_key(token), "kp": token[:10],
+                        "gid": gid},
             )
-            # Raw data read (list points) — formerly the uncovered lane:
-            # deleg=0 must 403, never a team-wide read.
+            h = {"Authorization": f"Bearer {token}"}
+            # 1) reads ITS graph: the custom graph is empty → [] (the
+            #    default graph's point must NOT surface — cross-graph).
+            r = tc.get("/v1/points", headers=h)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            names = [p if isinstance(p, str)
+                     else (p.get("name") or p.get("id")) for p in body]
+            assert "default-only" not in names, (
+                "minted child saw the default graph's points (cross-graph): "
+                f"{names}")
+            # 2) graphs:read ≠ write → 403 INSUFFICIENT_SCOPE on a write.
+            r = tc.post("/v1/points",
+                        json={"content": "child-write"}, headers=h)
+            assert r.status_code == 403, r.text
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "INSUFFICIENT_SCOPE", \
+                    detail
+            # 3) a deleg=0 key bound to a VANISHED graph fails closed (404 —
+            #    never widens onto the default) .
+            dead = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:'g_ghost', "
+                "scopes:['graphs:read'], delegation_depth:0})",
+                params={"id": "minted-ghost", "tid": tid,
+                        "kh": hash_api_key(dead), "kp": dead[:10]},
+            )
             r = tc.get("/v1/points",
-                       headers={"Authorization": f"Bearer {token}"})
+                       headers={"Authorization": f"Bearer {dead}"})
+            assert r.status_code in (403, 404), r.text
+            # 4) a deleg=0 key with NO data scope stays dormant on data.
+            nodata = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
+                "scopes:['keys:manage'], delegation_depth:0})",
+                params={"id": "minted-nodata", "tid": tid,
+                        "kh": hash_api_key(nodata), "kp": nodata[:10],
+                        "gid": gid},
+            )
+            r = tc.get("/v1/points",
+                       headers={"Authorization": f"Bearer {nodata}"})
             assert r.status_code == 403, r.text
             detail = r.json()["detail"]
             if isinstance(detail, dict):
@@ -4311,3 +5019,610 @@ class TestProvisioningConcurrency:
             assert sdk.graph_count(tid) <= 2
         finally:
             gen.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# C3 (#2112): key lifecycle — scoped mint (D13), list enrichment, shrink-only
+# PATCH, deleg=0 dormancy on management (E2E-4 half / E2E-9 / E2E-12)
+
+class TestC3KeyLifecycle:
+    """C3 (#2112) key lifecycle (registry lane). E2E-9 scoped-key matrix,
+    E2E-12 shrink surfaces, E2E-4 minted-key-cannot-manage half. Session
+    mints ride the client fixture's auth override (session_user_id None →
+    created_by "api"); key-driven mints pop the override and authenticate
+    with the real minted token (registry resolve)."""
+
+    def _setup(self, tmp_path, max_api_keys: int = 20):
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "test.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-c3-{abs(hash(tmp_path.name)) % 100000}"
+        _seed_team_graphs(sdk, tid, "pro", None, max_api_keys=max_api_keys)
+        try:
+            with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+            # C3 hygiene: this class bypasses the module client fixture, so
+            # nothing else clears dependency_overrides — a leaked
+            # get_current_user/get_current_team override would bleed into the
+            # NEXT test file in the same pytest process (dashboard_login's
+            # Supabase-mode owner check 403s on the stale user).
+            app.dependency_overrides.clear()
+
+    def _session_mint(self, tc, tid, body):
+        """Session-face mint: the client fixture override supplies the team
+        dict with key_id REMOVED (a session JWT face — key_id None →
+        owner-class session mint; TEST_TEAM carries a key_id by default)."""
+        team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
+        team_dict.pop("key_id", None)
+        team_dict.pop("delegation_depth", None)
+        app.dependency_overrides[get_current_team] = lambda: team_dict
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": _U1, "tid": tid},
+        )
+        return tc.post("/v1/team/keys", json=body)
+
+    def test_session_mint_scoped_owner_key_201(self, tmp_path):
+        """E2E-9 setup: an owner-session mint carries scopes incl. escalation
+        (deleg NULL — owner class), tk_ prefix, and the envelope echoes the
+        scope state + reveal-once plaintext."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {
+                "name": "devops",
+                "scopes": ["graphs:create", "graphs:delete",
+                           "team:manage", "keys:manage"],
+            })
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert sorted(body["scopes"]) == sorted(
+                ["graphs:create", "graphs:delete", "team:manage", "keys:manage"])
+            assert body["delegation_depth"] is None  # owner class
+            assert body["graph_id"] is None  # team-wide
+            # Minted once, hash-only stored (verify against the stored hash).
+            rows_h = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.key_hash",
+                params={"id": body["id"]},
+            ).result_set
+            from tortoise.auth import verify_api_key
+            assert verify_api_key(body["key"], rows_h[0][0]) is True
+            # Registry node carries the scopes + owner delegation.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes, k.delegation_depth",
+                params={"id": body["id"]},
+            ).result_set
+            assert sorted(rows[0][0]) == sorted(
+                ["graphs:create", "graphs:delete", "team:manage", "keys:manage"])
+            assert rows[0][1] is None
+        finally:
+            gen.close()
+
+    def test_scoped_key_mint_deleg0_child(self, tmp_path):
+        """E2E-9/J7: a keys:manage-scoped owner key mints a deleg=0 child —
+        scopes ∩ child policy (no escalation), created_by_key_id = caller,
+        tk_ prefix."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # Owner key WITH keys:manage (mint capability).
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)  # real key auth
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {owner}"},
+                        json={"scopes": ["graphs:read", "graphs:write"]})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] == 0  # child
+            assert sorted(body["scopes"]) == ["graphs:read", "graphs:write"]
+            # created_by_key_id lineage recorded on the node.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by_key_id, "
+                "k.delegation_depth",
+                params={"id": body["id"]},
+            ).result_set
+            assert rows[0][0] is not None  # caller key id
+            assert rows[0][1] == 0
+        finally:
+            gen.close()
+
+    def test_escalation_request_from_key_403(self, tmp_path):
+        """E2E-4/E2E-9: a key-minted path requesting escalation scopes → 403
+        (never silently stripped — §6.3)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {owner}"},
+                        json={"scopes": ["graphs:read", "keys:manage"]})
+            assert r.status_code == 403, r.text
+            assert "escalation" in r.text.lower()
+        finally:
+            gen.close()
+
+    def test_key_without_keys_manage_cannot_mint_403(self, tmp_path):
+        """J2: a scoped deleg-NULL key WITHOUT keys:manage may not mint."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {reader}"},
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+        finally:
+            gen.close()
+
+    def test_unknown_scope_422_and_unknown_graph_404(self, tmp_path):
+        """422 on an off-allowlist scope; 404 on a graph-bound mint to an
+        unknown graph OR the literal "default" (the default graph is bound
+        by a team-wide key — graph_id absent — never a per-graph mint; the
+        supabase "default" id is a DERIVED row with no graphs-table row, so
+        an api_keys FK to it would 500)."""
+        gen = self._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {"scopes": ["graphs:explode"]})
+            assert r.status_code == 422, r.text
+            r = self._session_mint(tc, tid, {
+                "graph_id": "g_no_such_graph", "scopes": ["graphs:read"],
+            })
+            assert r.status_code == 404, r.text
+            # Literal "default" is not key-bindable (custom-only).
+            r = self._session_mint(tc, tid, {
+                "graph_id": "default", "scopes": ["graphs:read"],
+            })
+            assert r.status_code == 404, r.text
+        finally:
+            gen.close()
+
+    def test_graph_bound_empty_scopes_422(self, tmp_path):
+        """SECOND-MODEL-GATE S2 pin: a graph-bound mint with an EXPLICIT
+        empty scopes array would mint a deleg-NULL scopes=[] key that
+        resolution derives legacy_full_access=True (FULL access) while the
+        response echoes scopes:[] — the F2 footgun on the mint path. 422."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            g = sdk._graph_create(tid, "acme", kind="custom")
+            r = self._session_mint(tc, tid, {
+                "graph_id": g["graph_id"], "scopes": [],
+            })
+            assert r.status_code == 422, r.text
+            assert "at least one scope" in r.text
+        finally:
+            gen.close()
+
+    def test_legacy_body_mint_unchanged_tt(self, tmp_path):
+        """D15/R2: a {} body still mints the byte-identical legacy tt_ key —
+        the C3 fields are ABSENT because create_api_key conditionally adds
+        them only when scoped_request or child_mint (not via a response
+        model)."""
+        gen = self._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {})
+            assert r.status_code == 200, r.text
+            assert r.json()["key"].startswith("tt_")
+            assert "scopes" not in r.json()
+            assert "delegation_depth" not in r.json()
+            assert "graph_id" not in r.json()
+            assert "name" in r.json()  # pre-C3 field kept (None when unset)
+        finally:
+            gen.close()
+
+    def test_list_enriches_and_filters_by_graph(self, tmp_path):
+        """E2E-12: list rows carry the C1 tenancy columns; ?graph_id= narrows."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # Custom graph + two keys (one bound to it).
+            g = sdk._graph_create(tid, "acme", kind="custom")
+            gid = g["graph_id"]
+            app.dependency_overrides[get_current_team] = \
+                lambda: dict(TEST_TEAM, team_id=tid, session_user_id=_U1, key_id=None)
+            r1 = tc.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
+            assert r1.status_code == 200, r1.text
+            kid_teamwide = r1.json()["id"]
+            r2 = tc.post("/v1/team/keys",
+                         json={"graph_id": gid, "scopes": ["graphs:read"]})
+            assert r2.status_code == 200, r2.text
+            kid_graphbound = r2.json()["id"]
+            listed = tc.get("/v1/team/keys").json()["keys"]
+            by_id = {k["id"]: k for k in listed}
+            assert by_id[kid_teamwide]["graph_id"] is None
+            assert by_id[kid_graphbound]["graph_id"] == gid
+            assert by_id[kid_teamwide]["scopes"] == ["graphs:read"]
+            assert "delegation_depth" in by_id[kid_teamwide]
+            assert "created_by_key_id" in by_id[kid_teamwide]
+            # graph_id filter narrows to the bound key only.
+            filtered = tc.get("/v1/team/keys",
+                              params={"graph_id": gid}).json()["keys"]
+            assert [k["id"] for k in filtered] == [kid_graphbound]
+        finally:
+            gen.close()
+
+    def test_shrink_scopes_and_expand_422(self, tmp_path):
+        """E2E-12: PATCH {scopes} shrinks (write → read subset reflected in
+        the row); an expand-attempt → 422 (revoke+recreate semantics)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides[get_current_team] = \
+                lambda: dict(TEST_TEAM, team_id=tid, session_user_id=_U1, key_id=None)
+            import tortoise.hosted_api as ha_mod
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            app.dependency_overrides[get_current_user] = \
+                lambda: {"user_id": _U1, "email": "owner@example.com"}
+            r = tc.post("/v1/team/keys", json={
+                "scopes": ["graphs:read", "graphs:write"]})
+            kid = r.json()["id"]
+            # Shrink: read+write → read.
+            r = tc.patch(f"/v1/team/keys/{kid}", json={"scopes": ["graphs:read"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["scopes"] == ["graphs:read"]
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes",
+                params={"id": kid},
+            ).result_set
+            assert rows[0][0] == ["graphs:read"]
+            # Expand attempt → 422.
+            r = tc.patch(f"/v1/team/keys/{kid}",
+                         json={"scopes": ["graphs:read", "graphs:write"]})
+            assert r.status_code == 422, r.text
+            # Unknown scope in a shrink → 422.
+            r = tc.patch(f"/v1/team/keys/{kid}", json={"scopes": ["team:manage"]})
+            assert r.status_code == 422, r.text
+        finally:
+            gen.close()
+
+    def test_minted_deleg0_key_cannot_manage_403(self, tmp_path):
+        """E2E-4 half: a deleg=0 child key hitting mint/revoke → 403 (the
+        central deleg gate in get_current_team_session fires first). Shrink
+        is session-gated (E2E-12 surface — get_current_user dep), so a key
+        face 401s there rather than reaching the deleg gate; E2E-4's
+        management set is create/delete/mint/revoke — shrink is not in it."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)
+            child = tc.post("/v1/team/keys",
+                            headers={"Authorization": f"Bearer {owner}"},
+                            json={"scopes": ["graphs:read"]}).json()["key"]
+            # Child mint → 403 (deleg gate).
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {child}"},
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 403, r.text
+            # Child revoke → 403.
+            other = sdk.apikey_create(tid, "owner-test")["api_key"]
+            r = tc.delete(f"/v1/team/keys/{other}",
+                          headers={"Authorization": f"Bearer {child}"})
+            assert r.status_code == 403, r.text
+        finally:
+            gen.close()
+
+
+class TestC3KeyCapAndEscalationBackstop:
+    """C3 (#2112): max_api_keys 409 on the scoped mint (D3 asymmetry — the
+    legacy {} owner mint keeps its historical 402), plus the registry SDK
+    escalation backstop (mirror of the Supabase DB CHECK)."""
+
+    def test_scoped_mint_at_cap_409_legacy_402(self, tmp_path):
+        """D3 pin: a SCOPED mint at max_api_keys → 409; the legacy {} owner
+        mint → 402 (its historical _check_team_limit semantic)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path, max_api_keys=1)
+        sdk, tid, tc = next(gen)
+        try:
+            # One key already exists (fills the cap of 1).
+            sdk.apikey_create(tid, "owner-test")
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
+            team_dict.pop("key_id", None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            # Scoped mint → 409 (the _KeyCapExceeded semantic).
+            r = tc.post("/v1/team/keys",
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 409, r.text
+            # Legacy {} mint → 402 (historical 402 semantic preserved).
+            r = tc.post("/v1/team/keys", json={})
+            assert r.status_code == 402, r.text
+        finally:
+            gen.close()
+
+    def test_registry_apikey_create_escalation_backstop(self, tmp_path):
+        """C2 #2b registry backstop: apikey_create(deleg=0 + escalation
+        scope) raises ControlPlaneError — selfhost parity with the Supabase
+        DB CHECK chk_minted_key_no_escalation."""
+        from tortoise.exceptions import ControlPlaneError
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, _tc = next(gen)
+        try:
+            with pytest.raises(ControlPlaneError, match="escalation"):
+                sdk.apikey_create(tid, "owner-test",
+                                  delegation_depth=0,
+                                  scopes=["graphs:read", "keys:manage"])
+            # deleg NULL + escalation scopes is the OWNER class — allowed.
+            ok = sdk.apikey_create(tid, "owner-test", scopes=["keys:manage"])
+            assert ok["api_key"].startswith("tt_")
+        finally:
+            gen.close()
+
+    def test_scoped_key_legacy_body_mint_403_or_deleg0(self, tmp_path):
+        """D13 row-3/4 P1 regression (VGATE #2112): a deleg-NULL SCOPED key
+        cannot mint a full-access owner key via the legacy {} body. Without
+        keys:manage → 403 (row 4). WITH keys:manage → a deleg=0 child with
+        lineage (created_by_key_id + deleg=0) and the child-policy default
+        scope — never an escalation to the owner class."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            # Reader key (graphs:read only) → {} mint 403 (no mint capability).
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])["api_key"]
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {reader}"},
+                        json={})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+            # keys:manage key → {} mint yields a deleg=0 child, NOT a
+            # full-access owner key.
+            mgr = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"])
+            mgr_id = mgr["id"]
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {mgr['api_key']}"},
+                        json={})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] == 0
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by_key_id, "
+                "k.delegation_depth, k.scopes",
+                params={"id": body["id"]},
+            ).result_set
+            assert rows[0][0] == mgr_id  # lineage stamped
+            assert rows[0][1] == 0
+            assert rows[0][2] == ["graphs:read"]  # child-policy default
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_legacy_mint_ok(self, tmp_path):
+        """D13 row 2 back-compat: a legacy full-access key (deleg NULL,
+        scopes=[]) is the owner class — its legacy {} mint still mints a
+        full-access owner key (E2E-5)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            legacy = sdk.apikey_create(tid, "owner-test")  # {} default = legacy
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tt_")  # byte-identical legacy
+            assert "delegation_depth" not in body  # owner class, no C3 fields
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_scoped_mint_owner_deleg_null(self, tmp_path):
+        """D13 row 2 scoped-body cell (VGATE F1 pin): a legacy full-access
+        key minting a SCOPED body gets the OWNER-class deleg-NULL mint with
+        the requested allowlisted scope — NOT a deleg=0 child / 403. Escalation
+        scopes ride too (owner class, like a session mint)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            legacy = sdk.apikey_create(tid, "owner-test")
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={"scopes": ["graphs:create", "graphs:write"]})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] is None  # owner class
+            assert sorted(body["scopes"]) == ["graphs:create", "graphs:write"]
+            # Escalation scope allowed for owner-class callers.
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={"scopes": ["keys:manage"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["delegation_depth"] is None
+            assert r.json()["scopes"] == ["keys:manage"]
+        finally:
+            gen.close()
+
+    def test_shrink_to_empty_deleg_null_422(self, tmp_path):
+        """VGATE F2 pin: emptying a deleg-NULL scoped key's scopes would
+        reclassify it legacy full-access (scopes=[] + deleg NULL →
+        legacy_full_access) — a capability EXPANSION via the shrink endpoint.
+        422, both deleg-NULL and deleg=0 targets stay safe."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            # deleg-NULL scoped owner key.
+            scoped = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read", "graphs:write"])
+            # shrink to [] via session face (owner admin).
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": _U1, "email": "owner@example.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}",
+                         json={"scopes": []})
+            assert r.status_code == 422, r.text
+            assert "legacy full-access" in r.text or "Cannot empty" in r.text
+            # A real shrink (write→read) still works.
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}",
+                         json={"scopes": ["graphs:read"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["scopes"] == ["graphs:read"]
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_within_cap_ok(self, tmp_path):
+        """Sanity: the legacy {} gate + cap asymmetry leaves the pinned
+        legacy 402 intact (max_api_keys=1; owner-class {} mint hits 402, not
+        a spurious 403 from the caller-class gate)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path, max_api_keys=1)
+        sdk, tid, tc = next(gen)
+        try:
+            sdk.apikey_create(tid, "owner-test")  # fill cap
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            r = tc.post("/v1/team/keys", json={})
+            assert r.status_code == 402, r.text
+        finally:
+            gen.close()
+
+
+class TestC3ReviewGatePins:
+    """Code-review fix pins (PR #2196 round 1): deleg-NULL SCOPED keys are
+    least-privilege — revoke/list require keys:manage (P1/P2); the shrink
+    PATCH validates all scopes before applying enabled/name (no partial
+    application); the unknown-scope 422 survives non-str members (no 500)."""
+
+    def test_scoped_reader_key_cannot_revoke_or_list(self, tmp_path):
+        """P1 pin: a deleg-NULL graphs:read-only key (NOT owner class) cannot
+        revoke another team key nor enumerate the key inventory. Legacy
+        full-access keys and keys:manage scoped keys still can."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            owner = sdk.apikey_create(tid, "owner-test")  # legacy full-access
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])["api_key"]
+            mgr = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage"])["api_key"]
+            victim = sdk.apikey_create(tid, "owner-test")
+            # Reader cannot revoke the victim key.
+            r = tc.delete(f"/v1/team/keys/{victim['id']}",
+                          headers={"Authorization": f"Bearer {reader}"})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+            # Reader cannot list the team's key inventory.
+            r = tc.get("/v1/team/keys",
+                       headers={"Authorization": f"Bearer {reader}"})
+            assert r.status_code == 403, r.text
+            # Victim still alive.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at",
+                params={"id": victim["id"]},
+            ).result_set
+            assert rows[0][0] is None
+            # Legacy full-access key CAN revoke (owner class, back-compat).
+            r = tc.delete(f"/v1/team/keys/{victim['id']}",
+                          headers={"Authorization": f"Bearer {owner['api_key']}"})
+            assert r.status_code == 200, r.text
+            # keys:manage deleg-NULL key CAN list.
+            r = tc.get("/v1/team/keys",
+                       headers={"Authorization": f"Bearer {mgr}"})
+            assert r.status_code == 200, r.text
+            assert len(r.json()["keys"]) >= 3
+        finally:
+            gen.close()
+
+    def test_shrink_422_is_noop_for_enabled_and_name(self, tmp_path):
+        """P2 partial-application pin: a PATCH body with a superset scopes
+        array + enabled:false + name must 422 WITHOUT persisting ANY of them
+        (validation runs before any mutation). Registry lane: enabled is a
+        no-op echo (no column) so the discriminating mutation is the name
+        write — pre-fix code persisted k.name before the scopes 422; the
+        post-fix code validates scopes first."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)
+            scoped = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])
+            # session face owner
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": _U1, "email": "owner@example.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}", json={
+                "enabled": False,
+                "name": "scratch",
+                "scopes": ["graphs:read", "graphs:write"],  # superset → 422
+            })
+            assert r.status_code == 422, r.text
+            # Nothing persisted: scopes AND name unchanged (pre-fix registry
+            # code wrote k.name before the 422 — this assert catches it).
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes, k.name",
+                params={"id": scoped["id"]},
+            ).result_set
+            assert rows[0][0] == ["graphs:read"]
+            assert rows[0][1] != "scratch"
+        finally:
+            gen.close()
+
+    def test_unknown_scope_nonstr_422_not_500(self, tmp_path):
+        """P2 TypeError pin: a crafted body with a non-str scope member must
+        422 (never 500 from sorted() over mixed types)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint_owner(tc, tid,
+                                         {"scopes": ["graphs:read", 123]})
+            assert r.status_code == 422, r.text
+        finally:
+            gen.close()
+
+    def _session_mint_owner(self, tc, tid, body):
+        import tortoise.hosted_api as ha_mod
+        team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
+        team_dict.pop("key_id", None)
+        app.dependency_overrides[get_current_team] = lambda: team_dict
+        sdk = ha_mod._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": _U1, "tid": tid},
+        )
+        return tc.post("/v1/team/keys", json=body)

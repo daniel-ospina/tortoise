@@ -1110,7 +1110,8 @@ class TortoiseSDK:
     """
 
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
-                 event_log_path: str | None = None):
+                 event_log_path: str | None = None,
+                 graph_name: str | None = None):
         import os, re  # noqa: E401, I001
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
@@ -1145,6 +1146,22 @@ class TortoiseSDK:
                     "Use alphanumeric, hyphens, underscores; max 64 chars."
                 )
         self._namespace = namespace
+        # C5 #2114 (D-C5-1): explicit FULL graph-name override — the data-plane
+        # tenancy seam. Custom graphs (team_{tid}_{gid}) cannot be expressed
+        # through ``namespace`` (the _get_proj derivation would prepend
+        # ``team_`` → ``team_team_{tid}_{gid}``). When set, _get_proj binds the
+        # projection to ``graph_name`` VERBATIM (default-graph callers never
+        # pass it — they keep the namespace derivation, byte-identical).
+        # Charset mirrors the namespace rule (+128 len for team_{tid}_{gid});
+        # mutually exclusive with ``namespace`` by construction (the spine
+        # passes exactly one).
+        if graph_name is not None and not re.match(
+                r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$', graph_name):
+            raise ValueError(
+                f"Invalid graph_name {graph_name!r}. "
+                "Use alphanumeric, hyphens, underscores; max 128 chars."
+            )
+        self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
@@ -1261,6 +1278,11 @@ class TortoiseSDK:
             if self._namespace == "registry":
                 # Control-plane SDK: shared registry main graph.
                 graph_name = "registry_tortoise"
+            elif self._graph_name is not None:
+                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+                # team_{tid}_{gid} graph). Never a namespace derivation — the
+                # name is used verbatim.
+                graph_name = self._graph_name
             elif self._namespace:
                 if self._namespace.startswith(("test_", "tortoise_test")):
                     # Test namespace: isolate on a test-prefixed graph so the
@@ -2061,6 +2083,16 @@ class TortoiseSDK:
         edge). The deterministic regex loop is removed as a product
         path — LLM extraction is the default and no-key fails closed.
 
+        Supersession records are REAL-BACKEND-ONLY, by construction: the v2
+        extractor forms conversation-driven supersessions only when its S3
+        search resolves against the real graph — extractor_v2 skips the search
+        entirely when the active backend is not "real" (the ``mode != "real"``
+        degraded branch: embedded/FalkorDBLite — the real graph, FalkorDB via
+        docker/redis URI or hosted API, is required), so capture over
+        embedded/FalkorDBLite produces ZERO supersession records (structurally
+        — the supersedes refs never resolve). Not a bug; do not debug it as
+        one.
+
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
         "extraction_mode", "extraction_provider", "ok", "errors",
@@ -2232,10 +2264,18 @@ class TortoiseSDK:
             )
             event_id = event.get("id") or event.get("eventId")
             if event_id:
+                # W5 (#2104, S1): the SDK mirror stamps the full write
+                # provenance alongside the ontology-compliant eventId —
+                # byte-parity with hosted_api's capture stamp (the W2
+                # benchmark grades provenance_accuracy over these fields).
+                source_harness = harness or "unknown"
                 proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "SET n.eventId=$eid, n.source_session=$sid, "
+                    "    n.source_harness=$harness, n.ingested_at=$ing",
                     params={"ids": [p["id"] for p in extracted],
-                            "eid": event_id},
+                            "eid": event_id, "sid": session_id,
+                            "harness": source_harness, "ing": now},
                 )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
@@ -2425,6 +2465,15 @@ class TortoiseSDK:
         graph — entities via create_entity, points via create_point with the
         content-addressed ids, events via create_event, IMPL/NAND via
         create_operator — then wires session CONTAINS + aboutObject edges.
+        Supersessions ride the payload's ``supersessions`` channel (#2164):
+        ``commit_ops.apply_supersessions`` applies each record AFTER the
+        entities/points it references exist (ordering contract) — ``pt_`` refs
+        → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
+        entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
+        full provenance) + the ``_fold_object_superseded`` status fold. Every
+        fold miss/skip/failure is surfaced through the shared meta
+        ``warnings`` channel — supersession application is best-effort and
+        never a silent drop (and never fails capture).
 
         Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
         consumes it): ``extracted`` is the same [{id, kind, text}] contract
@@ -2493,16 +2542,33 @@ class TortoiseSDK:
         proj = self._get_proj()
 
         # ── entities ──
+        entity_failures: list[str] = []
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            try:  # noqa: SIM105
+            try:
                 self.create_entity("object", name,
                                    objectKind=str(e.get("kind", "core:other")),
                                    is_episodic=False)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+            except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
+                # old `except: pass` was indicator-4 hygiene — a swallowed
+                # create_entity failure silently stranding an Object a
+                # supersession record then references. Per-item failures are
+                # surfaced as additive WARNINGS + a count line (never a
+                # silent drop) — warning-grade BY DESIGN, a DELIBERATE
+                # channel divergence from the points loop (:2581-2587),
+                # where a per-point write failure is an ERROR appended to
+                # meta errors (mode flips to 'error' and capture FAILS):
+                # lost point content is unrecoverable, while an entity
+                # write failure leaves recall-by-name intact for
+                # pre-existing Objects.
+                entity_failures.append(
+                    f"{type(exc).__name__}: entity write failed for {name}: {exc}")
+        if entity_failures:
+            warnings.extend(entity_failures)
+            warnings.append(
+                f"{len(entity_failures)} extracted entit(y/ies) failed to write")
 
         # ── points + aboutObject edges + session CONTAINS ──
         extracted: list[dict] = []
@@ -2575,6 +2641,17 @@ class TortoiseSDK:
                 proj, self, ops,
                 point_content_by_id=lambda pid: _payload_point_content_by_id(
                     payload, pid))
+        # #2164: supersessions — client-derived records (the deterministic
+        # channel for the Object status fold; §6b parity). pt_ → supersede()
+        # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
+        # entities exist (ordering contract). Warnings ride meta — never a
+        # silent drop. Best-effort — never fail capture (hosted §6b rule).
+        try:
+            from tortoise.commit_ops import apply_supersessions
+            apply_supersessions(proj, self, payload.get("supersessions") or [],
+                                session_id=session_id, warn=warnings.append)
+        except Exception as exc:  # pragma: no cover - defensive outer bound
+            _logger.warning("supersession apply failed: %s", exc, exc_info=True)
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.
@@ -9600,7 +9677,7 @@ class TortoiseSDK:
         # #25: optional graph-informed rerank (persisted EP confidence,
         # operator connectivity, recency). Off by default (backward compat).
         if graph_ranker is not None and results:
-            results = graph_ranker.rerank(results, entity_type="point")
+            results = graph_ranker.rerank(results, entity_type="point", query=q)
 
         return results
 
@@ -10568,7 +10645,13 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            ranked = ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            # W4-b (#2102): thread the query for the contested-relevance boost
+            # ONLY when the caller opted into W4 enrichment — w4_enrich=False
+            # suppresses the why-layer keys AND the boost together (order and
+            # keys must never disagree).
+            ranked = ranker.rerank(
+                dicts, entity_type=entity_type,
+                query=(query if w4_enrich else None))[:limit]
             # W4 (#2101): additive why-layer enrichment (flag-gated) — search
             # surface; recall_state's pool and the ask lane inherit it through
             # their own calls. Zero-LLM, bounded reads, fail-open (items
@@ -11564,7 +11647,7 @@ class TortoiseSDK:
 
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
-        ranked = ranker.rerank(merged, entity_type="point")
+        ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
         ranked = [
@@ -12617,7 +12700,9 @@ class TortoiseSDK:
                       scopes: list | None = None,
                       created_by_key_id: str | None = None,
                       delegation_depth: int | None = None,
-                      prefix: str = "tt_") -> dict:
+                      prefix: str = "tt_",
+                      name: str | None = None,
+                      created_via: str | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
@@ -12628,7 +12713,11 @@ class TortoiseSDK:
         (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
         NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
         the provisioning service mint tk_ per-graph keys (epic vocabulary);
-        existing callers unchanged.
+        existing callers unchanged. C3 (#2112): ``name`` (user-facing label,
+        20260825000001 parity — the hosted create_api_key lane passes it)
+        and ``created_via`` (mint-source classification — "provisioned" /
+        "agent_signup" etc.) ride the node as optional props; absent =
+        legacy nodes without them.
 
         Registry-side invariant (code-review #2b, mirrors the Supabase DB
         CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
@@ -12667,7 +12756,8 @@ class TortoiseSDK:
         reg = self._get_registry()
         # C1 (#2110): include non-None tenancy props in the CREATE (absent =
         # old callers unchanged; old registry nodes without the props resolve
-        # with safe defaults).
+        # with safe defaults). C3 (#2112): name/created_via ride the same
+        # optional-props pattern.
         extra = ""
         params = {"id": kid, "tid": team_id, "kh": key_hash,
                   "kp": key_prefix, "cb": created_by, "now": now}
@@ -12679,6 +12769,10 @@ class TortoiseSDK:
             extra += ", created_by_key_id:$cbk"; params["cbk"] = created_by_key_id  # noqa: E702 (baseline #1503)
         if delegation_depth is not None:
             extra += ", delegation_depth:$dd"; params["dd"] = delegation_depth  # noqa: E702 (baseline #1503)
+        if name is not None:
+            extra += ", name:$nm"; params["nm"] = name  # noqa: E702 (baseline #1503)
+        if created_via is not None:
+            extra += ", created_via:$cv"; params["cv"] = created_via  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
             "key_prefix:$kp, created_by:$cb, created_at:$now"
@@ -12766,9 +12860,18 @@ class TortoiseSDK:
         ]
         if matches:
             m = matches[0]
+            delegation_depth = m.get("delegation_depth")
+            scopes = m.get("scopes") or []
+            # C5 #2114 (parity): REST's registry-lane resolution derives the
+            # D2 owner class (deleg NULL + scopes [] → legacy_full_access)
+            # at hosted_api.py:1560 — apikey_verify is the MCP registry lane
+            # and MUST carry the same field or the C5 scope gate 403s every
+            # tt_/legacy owner key on the selfhost MCP surface.
             return {"team_id": m["team_id"], "key_id": m["id"],
-                    "delegation_depth": m.get("delegation_depth"),
-                    "scopes": m.get("scopes") or []}
+                    "delegation_depth": delegation_depth,
+                    "scopes": scopes,
+                    "legacy_full_access": (delegation_depth is None)
+                    and (scopes == [])}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────

@@ -138,7 +138,7 @@ jobs:
                   workflow_id: 'python-ci.yml',
                   event: 'push',           // filters out pull_request + schedule runs
                   head_sha: sha,
-                  per_page: 100,  # #1474 review P3: a SHA with >10 reruns must still see the newest run
+                  per_page: 100,  // #1474 review P3: a SHA with >10 reruns must still see the newest run
                 });
                 const candidates = (runs.data && runs.data.workflow_runs) || [];
                 if (candidates.length === 0) {
@@ -163,6 +163,52 @@ jobs:
               core.warning(`post-merge dedup fell open (error: ${err.message})`);
             }
             for (const [k, v] of Object.entries(out)) core.setOutput(k, v);
+
+  lint:
+    # #2174: ruff gate on main pushes. CI lint (agent-infra-ci / lint in
+    # ci.yml) runs ONLY on pull_request events — lint-red code merged
+    # silently 3× in one session (#2130 sdk.py E702, #2138 dead-ARG001-noqa
+    # RUF100, #2155 w2a E702+I001), red'ing every subsequent PR's merge-ref
+    # until an out-of-band fix PR landed. This job runs ruff on EVERY push
+    # to main and FAILS loudly on the merge commit. NEVER deduped: python-ci
+    # push runs do not run ruff, so dedup-check must not skip this job (it
+    # has no `skip != 'true'` guards — the whole point is it always runs).
+    needs: dedup-check   # only for best-effort PR attribution on failure
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}  # deterministic — mid-run main advance must not move the tree
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'  # pyproject requires-python >= 3.12
+      - name: Install ruff (CI-pinned ==0.16.4)
+        run: pip install ruff==0.16.4
+      - name: Ruff check . (repo config — E/F/B/UP/I/SIM/RUF, #1503 baseline)
+        id: ruff
+        run: ruff check .
+      - name: Comment on the merged PR (best-effort attribution)
+        # Only on an actual ruff finding — an earlier infra flake (checkout /
+        # pip network) would leave this step skipped, not commented.
+        if: steps.ruff.outcome == 'failure'
+        env:
+          PR_NUMBER: ${{ needs.dedup-check.outputs.pr_number }}
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = process.env.PR_NUMBER;
+            if (!pr) {
+              core.warning('post-merge lint failed but no PR attribution — see the merge commit check');
+              return;
+            }
+            await github.rest.issues.createComment({
+              issue_number: parseInt(pr, 10),
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `⚠️ This PR **failed post-merge ruff lint** (run ${context.runId}). CI lint only runs on PR events, so every subsequent PR's merge-ref lint is red until this is fixed. Reproduce locally with \`pip install ruff==0.16.4 && ruff check .\` and open a fix PR.`,
+            });
 
   validate:
     # #1474: this job is the check branch protection tracks. `if: always()` +
@@ -256,7 +302,23 @@ jobs:
           set -o pipefail  # don't let `tail` mask a pip failure
           # pytest-asyncio: tests/test_github_indexer.py uses @pytest.mark.asyncio
           # (mirrors the python-ci.yml '.[test,embeddings]' surface, #493).
-          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio 2>&1 | tail -2
+          pip install -e '.[embeddings]' falkordblite pytest pytest-timeout pytest-asyncio uv 2>&1 | tail -2
+          # uv (#2216): test_battery_corpus.py::test_builder_determinism_cross_process
+          # and tests/eval/retrieval/test_gate_1349.py::test_cli_python_dash_m_entrypoint
+          # shell out to bare `uv run` (default groups = dev included) — the runner
+          # has no uv by default, so both died with FileNotFoundError: 'uv' on every
+          # main merge. Pre-warm the FULL uv project env (uv sync --frozen, dev
+          # group included) so the subprocess `uv run` is a genuine no-op instead of
+          # a cold 1-3 min sync inside the subprocess timeout. Mirrors the
+          # python-ci.yml test job pre-warm verbatim (#2216). (--no-dev here would
+          # mismatch the bare `uv run` consumer and force a dev-group re-sync in
+          # the subprocess.)
+          # #1917 (CI unblock): some ubuntu-latest runner images ship a stale
+          # workspace .venv that uv refuses to touch (uv #13986 / #9423 —
+          # "failed to create directory .venv: File exists"). Remove it so uv sync
+          # recreates the pre-warmed env (same result, tolerant of the stale dir).
+          rm -rf .venv
+          uv sync --frozen
       - name: Clean stale redislite orphans (issue #1005 tempdir pollution)
         if: needs.dedup-check.outputs.skip != 'true'
         # Leaky shared runners accumulate redislite tempdirs from every
@@ -339,6 +401,14 @@ jobs:
           # so the run step cannot drift (single source of truth).
           echo "$SLOW_IGNORES" > /tmp/pmv-slow-ignores
           python3 tools/skip-guard.py --emit-manifest "tests/" --marker "not track_b" --ignore tests/e2e $SLOW_IGNORES --output /tmp/pmv-expected-nodeids.txt
+      # #2216: INTERMITTENT GRAPH.COPY "could not fork" — NOT a code regression.
+      # Under full-suite docker memory load on the shared runner, the dr_endpoints /
+      # writer_inventory restore tests (TestDrDrill::*, TestCreateTeam::
+      # test_backup_round_trip_dashboard_created_team) can fail with "Restore swap
+      # failed ... GRAPH.COPY failed, could not fork" — an OS fork/resource
+      # exhaustion, not a product bug. Verified: clears on isolated re-run and
+      # passes locally (docker + embedded) on the identical tree. If a PMV red
+      # shows ONLY this class, re-run instead of investigating as a regression.
       - name: Run tests (docker lane, per-test timeout)
         id: tests
         if: needs.dedup-check.outputs.skip != 'true'

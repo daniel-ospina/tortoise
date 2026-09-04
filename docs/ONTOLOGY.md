@@ -129,12 +129,12 @@ Each layer answers a different question. All four are live mechanisms.
 | **Semantic** | Who/what exists? | Subject, Object (incl. Document), Source | Nouns. Standing structural relations (owns, memberOf, hasPart) via plain edges. |
 | **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
-| **Procedural** | What is the current state of work? | Event + projected status on Object | **Status is derived, not stored.** An Object's status (in_progress, completed, failed) is projected at query time from its event stream — the events are the truth, the status is a read-only projection. |
+| **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the truth (§11), status is a performance cache, non-monotone across writers (#2193). |
 
 > **State-centric model (core hypothesis, 2026-08-12 — the graph stores STATE, not decisions):**
 > The record is three layers. **State** — Objects/options carry their lifecycle
 > (promoted/deprecated/superseded — the Episodic layer's events are the truth;
-> status is a read-only projection) and their **confidence** (derived from the
+> status is a fold cache over the events — never the truth itself) and their **confidence** (derived from the
 > attached Points). **Points** — the logic: statements (pointKind `statement` —
 > the only extraction point kind; hypothesis folded into confidence) connected
 > to the state they argue about (aboutObject); IMPL/NAND/MITIGATES among them
@@ -354,7 +354,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
 | `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
 | `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
-| `status` | string | — | `pav:status` | ❌ | Projected from event stream (in_progress, completed, failed) — **derived at query time, NOT stored** |
+| `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — **the event stream is the truth (§11 cache doctrine); the property is a performance cache, non-monotone across writers (#2193)** |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
@@ -425,7 +425,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | name/title | — | name | name | title | — | title |
 | createdAt | ✅ | ✅ | ✅ | ✅ | ✅ startedAt | ✅ ingestedAt |
 | updatedAt | ✅ | ❌ | ❌ | ✅ | — | ✅ |
-| status | status | ❌ (planned) | ❌ (projected, not stored) | doc_status | — | — |
+| status | status | ❌ (planned) | ✅ (fold cache — event-derived) | doc_status | — | — |
 | responsibility | authoredBy | — | edge (§3.5) | — | — | — |
 | ownership | — | — | edge (§3.5) | — | — | — |
 | management | — | — | edge (§3.5) | — | — | — |
@@ -482,7 +482,7 @@ occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted
 > TIMELINE record of a commitment (the resolution is expressed as lifecycle
 > writes on the state objects); `occurrence` covers extracted happenings;
 > `turn` covers capture turn records. The Episodic layer is the truth for
-> lifecycle: Object status is projected from its event stream (§2).
+> lifecycle: Object status is a fold cache over its event stream — never authoritative on its own (§2).
 
 > **#909 §4.3 #1:** `AgentSession` (EXACT code spelling — capital A; sdk.py `ingest_corpus`/session_indexer.py) is the canonical kind for session-capture Events; `sessionCaptured` (the core kind written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**.
 
@@ -727,7 +727,7 @@ Evidence aging is **user-configurable with a light default** — NOT blunt time 
 When an evidence source's confidence changes, downstream propositions that
 depend on it through operator chains are **re-evaluated, not stored-flagged**.
 Invalidation is a *derived* cascade — consistent with the ontology's
-"status is derived, not stored" principle (§2, §11):
+"Object.status is a cache of the event stream, never authoritative" doctrine (§2, §11):
 
 ```
 supersede_point / invalidate_point          (§3.1: mark old outdated:true,

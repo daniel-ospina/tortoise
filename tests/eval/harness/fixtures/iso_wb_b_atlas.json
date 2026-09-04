@@ -1,0 +1,16 @@
+{
+  "holdout": false,
+  "seed": 14,
+  "suite": "write_back",
+  "team": "team_b",
+  "turns": [
+    {
+      "content": "Team B note: the 'Atlas' migration is BLOCKED on a schema review.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded.",
+      "role": "assistant"
+    }
+  ]
+}

@@ -941,6 +941,20 @@ def set_api_key_name(cp, key_id: str, name: str | None) -> None:
     )
 
 
+def set_api_key_scopes(cp, key_id: str, scopes: list[str]) -> None:
+    """C3 (#2112): shrink a key's scopes to a strict subset (PATCH
+    /v1/team/keys/{id} {scopes}). The endpoint validates subset-ness before
+    calling; expansion is 422 (expand = revoke+recreate, §5.4). The row's
+    scopes column is the flat JSONB allowlist — resolve_api_key reads it,
+    so a shrunken key's effective scopes change immediately."""
+    cp.query(
+        "api_keys",
+        method="PATCH",
+        filters=[("id", "eq", key_id)],
+        json_body={"scopes": list(scopes)},
+    )
+
+
 def set_dashboard_key_login(cp, team_id: str, enabled: bool) -> None:
     """#1148: set whether API-key login is accepted for the dashboard
     (management surface). Claimed owners toggle this (session-authed,
@@ -1367,6 +1381,14 @@ def team_email(cp, team_id: str) -> str | None:
     """Read ``teams.email`` for a team (None when the row is missing)."""
     rows = cp.query("teams", select=["email"], filters=[("id", "eq", team_id)])
     return rows[0]["email"] if rows else None
+
+
+def team_name(cp, team_id: str) -> str | None:
+    """Read ``teams.name`` (the org display name) for a team (None when the
+    row is missing) — #1999 (W3) hosted seed anchor data (DM-3: org display
+    name ← teams.name, never invented)."""
+    rows = cp.query("teams", select=["name"], filters=[("id", "eq", team_id)])
+    return rows[0]["name"] if rows else None
 
 
 def update_team_email(cp, team_id: str, email: str) -> None:
@@ -2049,26 +2071,37 @@ def team_by_name(cp, name: str) -> dict | None:
     return rows[0] if rows else None
 
 
-def team_api_keys(cp, team_id: str) -> list[dict]:
+def team_api_keys(cp, team_id: str,
+                  graph_id: str | None = None) -> list[dict]:
     """ALL api_keys rows for a team (revoked included — the dashboard lists
     them with their revoked_at; registry parity), newest first.
     #1708 D7: additive created_via/expires_at so the dashboard can classify
-    ephemeral session keys from API data instead of a prefix heuristic."""
+    ephemeral session keys from API data instead of a prefix heuristic.
+    C3 (#2112): optional graph_id filter (surface 12 — per-graph key panel)
+    + the C1 tenancy columns ride the select (scopes/delegation/graph_id/
+    created_by_key_id) so the list renders scope state."""
+    select = ["id", "key_prefix", "created_at", "last_used_at",
+              "revoked_at", "enabled", "name", "created_via", "expires_at",
+              "graph_id", "scopes", "delegation_depth", "created_by_key_id"]
+    filters = [("team_id", "eq", team_id)]
+    if graph_id is not None:
+        filters.append(("graph_id", "eq", graph_id))
     rows = cp.query(
         "api_keys",
-        select=["id", "key_prefix", "created_at", "last_used_at",
-                "revoked_at", "enabled", "name", "created_via", "expires_at"],
-        filters=[("team_id", "eq", team_id)],
+        select=select,
+        filters=filters,
     )
     rows.sort(key=lambda r: r.get("created_at") or "", reverse=True)
     return rows
 
 
 def api_key_by_id(cp, key_id: str) -> dict | None:
-    """One api_keys row by id (revoke lookup — team-scoping + already-revoked)."""
+    """One api_keys row by id (revoke/shrink lookup — team-scoping +
+    already-revoked + current scopes for the C3 shrink subset check)."""
     rows = cp.query(
         "api_keys",
-        select=["team_id", "revoked_at", "created_via", "enabled", "name"],
+        select=["team_id", "revoked_at", "created_via", "enabled", "name",
+                "scopes", "graph_id", "delegation_depth", "created_by_key_id"],
         filters=[("id", "eq", key_id)],
     )
     return rows[0] if rows else None

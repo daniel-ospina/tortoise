@@ -5,9 +5,14 @@ from pathlib import Path  # noqa: F401
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "menu-bar"))
-import premise_bar  # noqa: I001
+try:
+    import premise_bar
+except ImportError:  # premise_bar imports rumps — macOS-only (CI/Linux hosts skip)
+    premise_bar = None
 
 # Rest of tests unchanged from the working version above
+
+@unittest.skipUnless(premise_bar is not None, "premise_bar requires macOS rumps (menu bar app launcher)")
 class TestConfigLoading(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False)  # noqa: SIM115
@@ -28,6 +33,7 @@ class TestConfigLoading(unittest.TestCase):
         premise_bar.CONFIG_PATH = "/tmp/nonexistent-premise-config.json"
         self.assertIsInstance(premise_bar.load_config(),list)
 
+@unittest.skipUnless(premise_bar is not None, "premise_bar requires macOS rumps (menu bar app launcher)")
 class TestServiceChecks(unittest.TestCase):
     def test_check_http_offline(self):
         self.assertFalse(premise_bar.check_http("http://localhost:19999",timeout=1))

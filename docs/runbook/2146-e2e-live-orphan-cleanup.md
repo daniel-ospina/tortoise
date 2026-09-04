@@ -15,8 +15,12 @@ ownedBy: epistemic-team
 > (merged, worktree HEAD `92562f03`) prevents NEW mints; this runbook removes
 > the ~100+ orphans that remain.
 >
-> **Status: enumeration DONE against prod (read-only). Deletion NOT executed —
-> operator-gated.** Scripts are dry-run by default.
+> **Status: EXECUTED against prod on 2026-09-03 — all 222 e2e-live teams +
+> api_keys + auth users purged (Supabase, audit trail 222 rows) and all 222
+> team_* FalkorDB Cloud graphs dropped (run 33762514825). Verified 0 rows
+> remaining. Issues #2140/#2146 closed.** The scripts + queries below stay as
+> the standing remediation for any future recurrence (see #2189's weekly
+> reconcile for automatic detection).
 
 ---
 
