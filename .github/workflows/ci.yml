@@ -520,7 +520,7 @@ jobs:
         run: |
           cd website
           for attempt in 1 2; do
-            npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > /tmp/wrangler.log 2>&1 &
             echo $! > /tmp/wrangler.pid
@@ -534,10 +534,23 @@ jobs:
             echo "attempt ${attempt} timed out — retrying"
             kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
             pkill -f 'wrangler.*8788' 2>/dev/null || true
+            pkill workerd 2>/dev/null || true
+            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
+            # with > anyway, and deleting after the LAST attempt would remove
+            # the only evidence before the final cat (review P1 — a double
+            # failure must still surface wrangler's own diagnostics).
             sleep 3
           done
-          echo "::error::wrangler dev server failed to start"
-          tail -50 /tmp/wrangler.log || true
+          # Final cleanup: flush the log + free :8788 before surfacing it
+          # below — a future failure must NOT be a black box.
+          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill workerd 2>/dev/null || true
+          sleep 2
+          echo "::error::wrangler dev server failed to start (2 attempts)"
+          echo "--- /tmp/wrangler.log ---"
+          cat /tmp/wrangler.log || true
+          echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
       - name: Run welcome page E2E (mocked against the local preview) (#373/#1511)
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
@@ -589,12 +602,20 @@ jobs:
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
+          # wrangler pinned to 4.127.0 (@4 floats to latest each run — same
+          # drift class as the ruff pin, agent-infra#414). 2026-09-04 ~04:00Z
+          # a runner-fleet cold-npx stall broke this boot on EVERY PR (the
+          # #2178/#2211 hardening class): /tmp/wrangler.log stayed EMPTY — the
+          # cold npx install never finished inside the 120s budget. 4.127.0 is
+          # the version verified to start (macOS in 5s, cold linux ~90s); the
+          # retry's 2nd attempt reuses the warm npm cache.
+          #
           # --compatibility-date pinned: wrangler defaults to "today", but the
           # bundled workerd lags a day behind (max date < today) → dev server
           # fails to start. Any stable date ≤ workerd's max works; the
           # middleware uses only stable APIs (next()/ASSETS.fetch).
           for attempt in 1 2; do
-            npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
               --compatibility-date=2024-09-23 \
               > /tmp/wrangler.log 2>&1 &
             echo $! > /tmp/wrangler.pid
@@ -610,10 +631,23 @@ jobs:
             echo "attempt ${attempt} timed out — retrying"
             kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
             pkill -f 'wrangler.*8788' 2>/dev/null || true
+            pkill workerd 2>/dev/null || true
+            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
+            # with > anyway, and deleting after the LAST attempt would remove
+            # the only evidence before the final cat (review P1 — a double
+            # failure must still surface wrangler's own diagnostics).
             sleep 3
           done
-          echo "::error::wrangler dev server failed to start"
-          tail -50 /tmp/wrangler.log || true
+          # Final cleanup: flush the log + free :8788 before surfacing it
+          # below — a future failure must NOT be a black box.
+          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill workerd 2>/dev/null || true
+          sleep 2
+          echo "::error::wrangler dev server failed to start (2 attempts)"
+          echo "--- /tmp/wrangler.log ---"
+          cat /tmp/wrangler.log || true
+          echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
       - name: Run legal pages E2E suite (#657)
         # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
