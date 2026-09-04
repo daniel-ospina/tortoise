@@ -124,6 +124,18 @@ explicit commits not) — do not re-flag in future reviews.
 namespace (graphs.namespace is NOT NULL — 20260901000001; a null would 500
 the PostgREST INSERT) and converges on a concurrent duplicate POST (re-read
 + PATCH the winner — no duplicate-key 500).
+(c2, round 1b) #1927 master kill: the team OFF toggle is the user's explicit
+opt-out — a per-graph override (graph 0 OR custom) NEVER re-enables it (R9).
+Overrides may only RESTRICT when the team is ON. This inverts my earlier
+"graph beats team" reading of E2E-6 (the epic fixture only pins override-
+false + team ON).
+(c3, round 1b) tombstones: soft-deleted graphs are not patchable (404) and
+never an override source — a ghost key on a deleted graph fails closed 403
+at the recording gate (status guard with coalesce — pre-C1 nodes lack the
+prop).
+(c4, round 1b) the per-capture override read is drift-safe (a graphs-table
+query failure degrades to inherit-team-default — never 500s every capture)
++ list_graphs carries recording read-back.
 
 ## Tasks
 

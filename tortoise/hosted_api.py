@@ -6588,6 +6588,11 @@ def _record_capture_last_error(team_id: str, harness: str | None,
     key = _capture_last_error_key(harness)
     if key is None:
         return
+    if detail is not None and not isinstance(detail, str):
+        # C5/C6 error details are {error_code, message} dicts (scope 403s,
+        # GRAPH_NOT_FOUND) — the dashboard sub-line is text; a Python repr
+        # would leak structure. Stringify to the message.
+        detail = str(detail.get("message") or detail)
     _update_onboarding_state(team_id, **{key: detail})
 
 
@@ -8572,7 +8577,8 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
         else:
             rows = cp.query(
                 "graphs", select=["kind"],
-                filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+                filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                         ("status", "eq", "active")],
             )
             kind = rows[0].get("kind") if rows else None
         if kind is None:
@@ -8582,13 +8588,14 @@ async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
         # Registry: probe the node (id match OR kind='default' for the
         # literal id) so unknown graphs 404 before any write.
         rows = sdk._get_registry().query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind",
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
             params={"tid": team_id},
         ).result_set
         if graph_id == "default":
-            found = any(r[1] == "default" for r in rows)
+            found = any(r[1] == "default" and r[2] != "deleted" for r in rows)
         else:
-            found = any(r[0] == graph_id for r in rows)
+            found = any(r[0] == graph_id and r[2] != "deleted" for r in rows)
         if not found:
             raise HTTPException(status_code=404, detail="Unknown graph")
         written = sdk.graph_set_recording(team_id, graph_id, body.recording)
@@ -8737,6 +8744,10 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # 
         out.append({
             "graph_id": g["graph_id"], "name": g["name"],
             "kind": g["kind"], "status": g.get("status", "active"),
+            # C6 #2115 (round-1 P2): recording read-back — the seam carries
+            # it in both lanes (registry node prop / supabase row); closes
+            # the write-only override gap (PATCH echoes, list confirms).
+            "recording": g.get("recording"),
             "key_count": key_count,
         })
     return out
@@ -13339,41 +13350,61 @@ def _graph_recording_override(team: dict) -> bool | None:
     )
     team_id = team["team_id"]
     gid = team.get("graph_id")  # None → the default graph
-    if is_supabase_enabled():
-        cp = get_control_plane()
-        if gid:
+    try:
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            if gid:
+                rows = cp.query(
+                    "graphs", select=["recording"],
+                    filters=[("id", "eq", gid), ("team_id", "eq", team_id),
+                             ("status", "eq", "active")],
+                )
+                if not rows:
+                    raise HTTPException(
+                        status_code=403,
+                        detail={"error_code": "GRAPH_NOT_FOUND",
+                                "message": "graph not found for key"})
+                return rows[0].get("recording")
             rows = cp.query(
                 "graphs", select=["recording"],
-                filters=[("id", "eq", gid), ("team_id", "eq", team_id)],
+                filters=[("team_id", "eq", team_id), ("kind", "eq", "default"),
+                         ("status", "eq", "active")],
             )
+            return rows[0].get("recording") if rows else None
+        sdk = _make_sdk(namespace="registry")
+        if gid:
+            rows = sdk._get_registry().query(
+                "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+                "WHERE coalesce(g.status, 'active') <> 'deleted' "
+                "RETURN g.recording",
+                params={"gid": gid, "tid": team_id},
+            ).result_set
             if not rows:
+                # Active-node lookup missed — the node may be absent (vanish,
+                # 403) OR a tombstone (soft-deleted — also fail closed; a
+                # ghost key on a deleted graph must not capture).
                 raise HTTPException(
                     status_code=403,
                     detail={"error_code": "GRAPH_NOT_FOUND",
                             "message": "graph not found for key"})
-            return rows[0].get("recording")
-        rows = cp.query(
-            "graphs", select=["recording"],
-            filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
-        )
-        return rows[0].get("recording") if rows else None
-    sdk = _make_sdk(namespace="registry")
-    if gid:
+            return rows[0][0]
         rows = sdk._get_registry().query(
-            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.recording",
-            params={"gid": gid, "tid": team_id},
+            "MATCH (g:Graph {team_id:$tid, kind:'default'}) "
+            "WHERE coalesce(g.status, 'active') <> 'deleted' "
+            "RETURN g.recording",
+            params={"tid": team_id},
         ).result_set
-        if not rows:
-            raise HTTPException(
-                status_code=403,
-                detail={"error_code": "GRAPH_NOT_FOUND",
-                        "message": "graph not found for key"})
-        return rows[0][0]
-    rows = sdk._get_registry().query(
-        "MATCH (g:Graph {team_id:$tid, kind:'default'}) RETURN g.recording",
-        params={"tid": team_id},
-    ).result_set
-    return rows[0][0] if rows else None
+        return rows[0][0] if rows else None
+    except HTTPException:
+        raise
+    except Exception:
+        # Drift-safe (round-1 P2): a graphs-table read failure (migration
+        # one behind — the graph_metadata/graph_count convention) or a
+        # registry hiccup must NEVER 500 every capture — degrade to
+        # inherit-team-default for this request. A graph-bound key on a
+        # genuinely vanished ACTIVE node still 403s above (row-absent, not
+        # query-failure).
+        return None
 
 
 def _session_recording_allowed(team: dict) -> tuple[bool, str]:
@@ -13385,11 +13416,17 @@ def _session_recording_allowed(team: dict) -> tuple[bool, str]:
     Returns (allowed, surface) where surface names the deciding layer for
     the 409 message (``graph`` vs ``team``).
     """
+    state = _get_onboarding_state(team["team_id"])
+    if not state.get("session_recording"):
+        # #1927 master kill (round-1 decision c2): the team-level OFF is
+        # the user's explicit opt-out — a per-graph override NEVER re-enables
+        # it (R9: opt-out never silently re-enabled). Overrides may only
+        # RESTRICT when the team is ON.
+        return False, "team"
     override = _graph_recording_override(team)
     if override is not None:
         return bool(override), "graph"
-    state = _get_onboarding_state(team["team_id"])
-    return bool(state.get("session_recording")), "team"
+    return True, "team"
 
 
 def _onboarding_defaults() -> dict:

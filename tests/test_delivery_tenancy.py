@@ -287,9 +287,11 @@ def test_recording_null_inherits_team_default(spine_env, monkeypatch):
     assert r.status_code == 409, r.text
 
 
-def test_graph_override_beats_team_off(spine_env, monkeypatch):
-    """E2E-6: a graph recording=true override beats a team OFF toggle —
-    opt-out never silently re-engaged, but a graph's explicit choice wins."""
+def test_team_off_master_kill_beats_graph_override(spine_env, monkeypatch):
+    """R9 (round-1 decision c2): the #1927 team OFF is a MASTER KILL — a
+    per-graph recording=true override NEVER re-enables a team that opted
+    out (opt-out never silently re-enabled). Overrides may only RESTRICT
+    when the team is ON."""
     sdk, tid, g, tc, _def_pt = spine_env
     key = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
                     graph_id=g["graph_id"])
@@ -302,10 +304,54 @@ def test_graph_override_beats_team_off(spine_env, monkeypatch):
     assert r.status_code == 200, r.text
     monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
     r = tc.post("/v1/sessions", json={
-        "session_id": "s-graph-beats", "conversation": _CONV,
+        "session_id": "s-team-off", "conversation": _CONV,
     }, headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 409, r.text
+    assert _session_count(g["namespace"], tid) == 0
+
+
+def test_default_graph_override_true_team_off_409(spine_env, monkeypatch):
+    """Round-1 P2: the DEFAULT graph's override is the same data plane as
+    the dashboard toggle — override true must NOT defeat the team OFF."""
+    sdk, tid, _g, tc, _def_pt = spine_env
+    mgr = _mint_key(sdk, tid, scopes=["team:manage"])
+    from tortoise.hosted_api import _update_onboarding_state
+    _update_onboarding_state(tid, session_recording=False)
+    r = tc.patch(f"/v1/graphs/default?team_id={tid}",
+                 json={"recording": True},
+                 headers={"Authorization": f"Bearer {mgr}"})
     assert r.status_code == 200, r.text
-    assert _session_count(g["namespace"], tid) == 1
+    wide = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"])
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    r = tc.post("/v1/sessions", json={
+        "session_id": "s-default-off", "conversation": _CONV,
+    }, headers={"Authorization": f"Bearer {wide}"})
+    assert r.status_code == 409, r.text
+
+
+def test_tombstoned_graph_patch_404_and_capture_403(spine_env, monkeypatch):
+    """Round-1 P2: a soft-deleted graph is not patchable (404) and a key on
+    it cannot capture (fail closed) — no dead writes on tombstones."""
+    sdk, tid, g, tc, _def_pt = spine_env
+    # Registry lane tombstone via graph_delete.
+    sdk.graph_delete(tid, g["graph_id"])
+    mgr = _mint_key(sdk, tid, scopes=["team:manage"])
+    r = tc.patch(f"/v1/graphs/{g['graph_id']}?team_id={tid}",
+                 json={"recording": True},
+                 headers={"Authorization": f"Bearer {mgr}"})
+    assert r.status_code == 404, r.text
+    # A key minted BEFORE the delete (revoke cascade is best-effort) fails
+    # closed at the recording gate — never captures into the dead namespace.
+    key = _mint_key(sdk, tid, scopes=["graphs:read", "graphs:write"],
+                    graph_id=g["graph_id"])
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    r = tc.post("/v1/sessions", json={
+        "session_id": "s-dead-graph", "conversation": _CONV,
+    }, headers={"Authorization": f"Bearer {key}"})
+    assert r.status_code == 403, r.text
+    detail = r.json().get("detail")
+    if isinstance(detail, dict):
+        assert detail.get("error_code") == "GRAPH_NOT_FOUND", detail
 
 
 def test_vanished_graph_capture_fails_closed(spine_env, monkeypatch):
