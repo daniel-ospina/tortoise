@@ -2563,6 +2563,7 @@ _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
     "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
     "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+    "tortoise_onboarding_seed",  # #1999 (W3)
 })
 
 # 60s per-team TTL cache for the tools/list gate — the onboarding-state read
@@ -2639,6 +2640,45 @@ def tortoise_onboarding_demo_create() -> dict:
 def tortoise_onboarding_state() -> dict:
     """Return this team's onboarding progress (Q6 verification step)."""
     return _onboarding_state()
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+def tortoise_onboarding_seed(org_name: str | None = None,
+                             person_name: str | None = None) -> dict:
+    """File the two onboarding anchor Subjects for this team (#1999, W3):
+    Organization (Subject/organization) + User (Subject/naturalPerson)
+    linked memberOf — interactive, ontology-precise.
+
+    Interactive (WF-2): call WITHOUT names to discover gaps (the person
+    display name is email-derived and needs user confirmation — never
+    invented) or collisions (a same-name Subject that is not this org/user —
+    disambiguation required, never a silent merge); call WITH the
+    user-confirmed names to file. Returns status:
+    'needs_confirmation' (gaps[] — ask the user), 'collision'
+    (collisions[] — ask for a disambiguated name), or 'seeded'
+    (two Subjects + memberOf + org_subject_id + first-points-filed).
+    Compact orgs seed-lite (org-anchor Subject only, no person ask)."""
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    from tortoise.hosted_api import (
+        HTTPException as _HTTPException,
+    )
+    from tortoise.hosted_api import (
+        _run_onboarding_seed,
+        _team_email,
+    )
+    try:
+        return _run_onboarding_seed(
+            team_id, org_name=org_name, person_name=person_name,
+            person_email=_team_email(team_id))
+    except _HTTPException as exc:
+        # 503 graph-down (fail-loud FLOW write) etc. — surfaced honestly,
+        # never a silent skip (agent retries when the graph is back).
+        return {"error": str(exc.detail),
+                "status": getattr(exc, "status_code", 500)}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"error": f"seed failed: {exc}"}
 
 
 @mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
@@ -2732,12 +2772,14 @@ def tortoise_session_capture(conversation: list[dict],
                              session_id: str | None = None) -> dict:
     """File an agent session into the graph (T3 workflows prompt surface).
 
-    Server-enforced gates (identical to POST /v1/sessions): the team's
-    ``session_recording`` opt-out flag is checked FIRST (409 when disabled),
-    then the provider 503 / quota 402 / empty-422 gates. Returns the capture
-    result on success, or an honest error dict on failure (the per-harness
-    last-error state key is recorded on non-2xx, cleared on 2xx — same
-    receipt semantics as the REST path).
+    Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
+    #2093 S2): boundary 422 (invalid harness/shape — SessionRequest
+    construction below) -> 409 (recording off) -> 503 (no provider) -> 400
+    (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
+    capture result (a memory_write_v1 envelope, #2104) on success, or an
+    honest error dict on failure (the per-harness last-error state key is
+    recorded on non-2xx, cleared on 2xx — same receipt semantics as the
+    REST path).
     """
     from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits  # noqa: I001
     team_id = _current_team_id.get()

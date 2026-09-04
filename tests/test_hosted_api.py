@@ -312,6 +312,55 @@ class TestHealthEndpoints:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Build/version surface (#2208)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestVersionEndpoint:
+    """GET /v1/version — public version/sha surface so clients (and the
+    onboarding skill) can detect an outdated server before authenticating.
+    """
+
+    def test_version_returns_package_version(self, client):
+        import tortoise
+
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"] == tortoise.__version__
+        assert "commit_sha" in body
+        # #2208 review F5: openapi info.version must mirror the package
+        # version (was a stale hardcoded "0.1.0") — pin it so drift fails loud.
+        assert app.version == tortoise.__version__
+
+    def test_version_is_public_no_auth(self, unauth_client):
+        """Skew detection must work BEFORE auth — no Authorization header."""
+        r = unauth_client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"]
+
+    def test_version_commit_sha_reads_env(self, client, monkeypatch):
+        """commit_sha mirrors the deploy-time TORTOISE_GIT_SHA (baked by
+        deploy-hosted.yml); None when no deploy pipeline set it."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "16075c8f2ff182b44614d6a83dc4d92933ae70db")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] == "16075c8f2ff182b44614d6a83dc4d92933ae70db"
+
+        monkeypatch.delenv("TORTOISE_GIT_SHA")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
+
+    def test_version_commit_sha_blank_env_is_null(self, client, monkeypatch):
+        """An empty (not unset) TORTOISE_GIT_SHA must not leak as "" — null."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Auth Matrix
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1592,6 +1641,184 @@ class TestSessionCapture:
         r2 = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
+
+
+class TestSessionCaptureWriteVerb:
+    """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
+    verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
+    per-point status/ep_updated/dedup enriched in place (D8 additive); the
+    provenance stamp carries source_session/source_harness/ingested_at
+    (S1); and the gate order pins the S2 amendment (boundary 422 precedes
+    the recording-off 409)."""
+
+    CONVERSATION = [  # noqa: RUF012
+        {"role": "user", "content": "W5 write-verb provenance contract test."},
+    ]
+
+    def test_capture_response_speaks_write_verb(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-verb-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        assert body["status"] in ("ok", "partial")
+        assert body["error"] is None
+        prov = body["provenance"]
+        assert prov["source_session"] == "w5-verb-session"
+        assert prov["source_harness"] == "codex"
+        assert prov["ingested_at"]
+        # Legacy surface intact (D8) + per-point verb facts enriched.
+        assert body["extracted"] == len(body["points"])
+        for p in body["points"]:
+            assert "ep_updated" in p and "dedup" in p and "status" in p
+            assert p.get("point_id") == p.get("id")  # frozen-verb schema alias
+
+    def test_capture_no_harness_normalizes_provenance_unknown(self, client):
+        """P2-1 (review): a no-harness capture (T1-P3: harness optional) must
+        still carry a complete provenance — source_harness normalizes to
+        "unknown" in the stamp AND the envelope (FalkorDB SET null would
+        DELETE the property, leaving provenance incomplete)."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-noharness-session",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["provenance"]["source_harness"] == "unknown"
+        import tortoise.hosted_api as ha_mod
+        ids = [p["id"] for p in body["points"]]
+        if ids:
+            rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.source_harness",
+                params={"ids": ids},
+            ).result_set
+            for row in rows:
+                assert row[0] == "unknown"
+
+    def test_capture_points_stamped_with_provenance(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-provenance-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert ids, "mock extraction produced no points"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+            "n.source_session, n.source_harness, n.ingested_at, n.eventId",
+            params={"ids": ids},
+        ).result_set
+        by_id = {r[0]: r for r in rows}
+        for pid in ids:
+            assert pid in by_id, f"{pid} missing from graph"
+            _id, src_sess, src_har, ingested, event_id = by_id[pid]
+            assert src_sess == "w5-provenance-session"
+            assert src_har == "pi"
+            assert ingested
+            assert event_id  # ontology-compliant provenance kept
+
+    def test_capture_gate_boundary_422_before_409(self, client):
+        """S2 amendment (verified order): the boundary 422 (invalid harness
+        — Pydantic SessionRequest validation, fires before the handler on
+        REST) precedes the recording-off 409.  Recording off must never mask
+        a malformed payload."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "harness": "not-a-real-harness",  # boundary failure
+        })
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "harness" in r.text.lower()
+
+    def test_capture_gate_409_when_recording_off(self, client):
+        """Recording off + VALID payload -> 409 (state-conflict), no Session
+        write, no receipt."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-recording-off-session",
+        })
+        assert r.status_code == 409, r.text
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": "w5-recording-off-session"},
+        ).result_set
+        assert rows[0][0] == 0  # no Session write when recording off
+
+    def test_capture_replay_zero_new_nodes_verb_ok(self, client):
+        """Idempotency: re-POST of the same session_id (recording on) writes
+        0 new nodes — extraction is skipped, the verb still speaks ok."""
+        for _ in range(2):
+            r = client.post("/v1/sessions", json={
+                "conversation": self.CONVERSATION,
+                "session_id": "w5-replay-session",
+            })
+            assert r.status_code == 200, r.text
+        first = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-replay-session",
+        }).json()
+        assert first["protocol_version"] == "memory_write_v1"
+        # A replay extracts nothing new: the verb reports the (empty)
+        # point set honestly.
+        assert first["extracted"] == 0
+
+
+    def test_capture_session_id_overlong_rejected_boundary_422(self, client):
+        """P2 (review round 1): session_id becomes the point-level
+        source_session — unbounded caller strings would amplify onto every
+        extracted point.  Over-long ids fail the boundary 422 (Pydantic
+        max_length) BEFORE the recording gate."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "x" * 500,
+        })
+        assert r.status_code == 422, r.text
+
+    def test_capture_enrichment_failure_never_500s_committed_capture(
+            self, client, monkeypatch):
+        """P1 (review round 1): a transient failure in the post-write
+        enrichment read must NOT 500 a committed capture (D4 posture) — it
+        degrades to an additive warning and the verb reports what it could."""
+        # _GuardedGraph is __slots__-locked and the underlying redislite
+        # Graph handle is created fresh per SDK — patch at the HANDLE CLASS
+        # level (test-scoped); the boom is selective so unrelated queries in
+        # the same window pass through untouched.
+        from redislite.falkordb_client import Graph as _Graph
+        _orig = _Graph.query
+
+        def _selective_boom(self, cypher, params=None, timeout=None):
+            if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
+                raise RuntimeError("transient graph failure")
+            return _orig(self, cypher, params=params, timeout=timeout)
+
+        monkeypatch.setattr(_Graph, "query", _selective_boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-enrich-fail-session",
+        })
+        # Committed + 200; the failure is additive, never a 500.
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        # facts={} -> every extracted point is skipped -> the verb is
+        # PARTIAL, never an unqualified ok over unverifiable points.
+        assert body["status"] == "partial"
+        assert any("enrichment read failed" in w for w in body["warnings"])
 
 
 class TestSessionList:

@@ -340,6 +340,7 @@ surfaces:
   - test_value_extractor.py
   - test_wipe_server.py
   - test_wiring_phase01.py
+  - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
@@ -378,6 +379,7 @@ surfaces:
   - test_issue94_annotate_ep_batch.py
   - test_kappa.py
   - test_ranking.py
+  - test_ranking_w4b.py
   - test_recall_gaps_subgraph.py
   - test_recall_state.py
   - test_source_credibility.py
@@ -407,6 +409,8 @@ surfaces:
   - test_onboarding_integration.py
   - test_onboarding_state.py        # #2001 (W5): canonical module unit tests (lane-agnostic)
   - test_onboarding_state_split.py  # #2001 (W5): docker-lane graph-held FLOW-state tests
+  - test_onboarding_seed.py         # #1999 (W3): shared seed-core unit tests (lane-agnostic)
+  - test_onboarding_seed_endpoint.py  # #1999 (W3): docker-lane seed/decide/completion tests
   - test_onboarding_variants.py
   - test_onboarding_w4_settings.py  # #2000 (W4): docker-lane Settings-surface toggle-persistence tests
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
@@ -504,6 +508,7 @@ tier1:
 - test_onboarding_variants.py
 - test_quota.py
 - test_ranking.py
+- test_ranking_w4b.py
 - test_reaper_orphan.py
 - test_sdk_dedup.py
 - test_sdk_ep.py

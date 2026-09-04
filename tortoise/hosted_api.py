@@ -34,6 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
 
+import tortoise
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
@@ -486,7 +487,7 @@ async def _lifespan(app):
         yield
 
 
-app = FastAPI(title="Tortoise Hosted API", version="0.1.0", lifespan=_lifespan)
+app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1301,12 +1302,32 @@ async def health_security():
         "api_auth_enforced": auth_enforced,
     }
 
+
+@app.get("/v1/version")
+async def version_info() -> dict:
+    """Deployed build surface — clients detect an outdated server (#2208).
+
+    Public (no auth, like /health): a client or onboarding skill reads this
+    BEFORE authenticating to compare the running server against the version
+    it expects (skew detection — the #2208 failure class shipped code whose
+    server had silently drifted behind main). ``version`` is the package
+    version (tortoise.__version__, mirrors pyproject.toml); ``commit_sha`` is
+    the exact deploy commit, baked at deploy time by deploy-hosted.yml
+    (TORTOISE_GIT_SHA=${GITHUB_SHA} staged into the release env). Null when
+    no deploy pipeline set it (selfhost / local dev). Never touches the DB.
+    """
+    return {
+        "version": tortoise.__version__,
+        "commit_sha": os.environ.get("TORTOISE_GIT_SHA") or None,
+    }
+
+
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
 
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe", "/v1/session/login"}
+SKIP_AUTH = {"/health", "/health/ready", "/v1/version", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe", "/v1/session/login"}
 
 
 async def _invoke_override(override, request: Request) -> dict:
@@ -5468,7 +5489,12 @@ class SessionRequest(BaseModel):
     # (the shared _capture_turn_window helper in the handler — both paths
     # produce byte-identical stored turns). Non-str content is coerced in the
     # handler turn loop (P1 #1529 D10) — no validator-side crash surface.
-    session_id: str | None = None
+    # W5 P2 (review round 1): session_id becomes the point-level provenance
+    # source_session — an unbounded caller string would amplify onto every
+    # extracted point (N x len).  Bounded at 256 (real ids are ULIDs / the
+    # session_uuid pattern); over-long ids fail the boundary 422 BEFORE the
+    # recording gate (S2 verified order: boundary first).
+    session_id: str | None = Field(None, max_length=256)
     metadata: dict | None = None
     # #1727 Slice 2 (Task 11, T1-P3 pinned): harness is OPTIONAL (None default)
     # so pre-installed hooks and SDK callers that POST without it never 422;
@@ -5571,7 +5597,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 team: dict) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
     the ``tortoise_session_capture`` MCP tool (mcp_server.py) so the two
-    surfaces can never drift on gate order (403 → 422 → 503 → 402).
+    surfaces can never drift on gate order.
+
+    VERIFIED gate order (#2093 S2 amendment — the impl docstring's old
+    "403 → 422 → 503 → 402" was stale, pre-#1927):
+      1. boundary 422 — invalid harness / conversation shape (Pydantic
+         SessionRequest validation fires BEFORE the handler on REST; the MCP
+         tool's SessionRequest construction maps the same failure to its
+         422-equivalent error dict) — recording-off never masks a malformed
+         payload;
+      2. 409 — session_recording disabled (state-conflict);
+      3. 503 — no LLM provider;
+      4. 400 — turn cap > MAX_SESSION_TURNS;
+      5. 422 — empty/blank stored-window transcript (handler-level);
+      6. 402 — quota (skipped when session_existed).
     ``request`` is optional (the MCP tool has no HTTP Request) — audit and
     abuse recording degrade to a best-effort stub.
     """
@@ -5903,10 +5942,31 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             event_id = event.get("id") or event.get("eventId")
             if event_id:
                 minted_event = True
+                # W5 (#2104, S1): the provenance stamp now carries the full
+                # write provenance (source_session / source_harness /
+                # ingested_at) alongside the ontology-compliant eventId —
+                # the W2 benchmark grades provenance_accuracy over these
+                # fields; a write without them is the PROVENANCE_MISSING
+                # rejection (write_verb.assert_provenance).
+                # NAMESPACE NOTE (review round-2, deferred): mining.py:518
+                # (_temporal_wire) also SETs n.source_session with MINING
+                # values — a mining post-pass over capture-derived points
+                # can overwrite this stamp.  Reconcile (rename/coalesce)
+                # before W2 provenance_accuracy reads source_session;
+                # tracked on #2104.
+                # P2-1 (review): FalkorDB SET null DELETES the property — a
+                # no-harness capture (T1-P3: harness optional) must still
+                # carry a provenance field, so None normalizes to "unknown"
+                # (the Session-merge conditional can't apply: the stamp is
+                # one shared SET for all points).
+                source_harness = body.harness or "unknown"
                 proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "SET n.eventId=$eid, n.source_session=$sid, "
+                    "    n.source_harness=$harness, n.ingested_at=$ing",
                     params={"ids": [p["id"] for p in extracted],
-                            "eid": event_id},
+                            "eid": event_id, "sid": session_id,
+                            "harness": source_harness, "ing": now},
                 )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
@@ -6188,6 +6248,73 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         effective_mode = "replayed"
     else:
         effective_mode = "llm"
+    # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
+    # verb (memory_write_v1) — protocol_version REQUIRED, provenance
+    # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
+    # keys (D8).  ``resp["points"]`` (the raw extracted list, load-bearing
+    # for legacy consumers) is ENRICHED in place — each point gains
+    # status/ep_updated/dedup keys read from the graph AFTER the write, so
+    # the verb reports only what is true (anti-gaming): ep_updated = the
+    # point actually carries persisted EP alpha/beta (Phase C turns this on
+    # with the ingest EP pass); dedup = "new" only for points this request
+    # minted (REPHRASE/content-hash classification lands in Phase D).
+    from tortoise.write_verb import (
+        DEDUP_NEW,
+        STATUS_OK,
+        STATUS_PARTIAL,
+        build_write_verb,
+    )
+    skipped = 0
+    if extracted:
+        try:
+            # P1 (review round 1): the enrichment read runs AFTER the writes
+            # are committed — a transient graph failure here must NEVER 500 a
+            # committed capture (D4 posture: additive warning, never raise).
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                "coalesce(n.pointKind, 'statement'), "
+                "coalesce(n.status, 'live'), "
+                "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+                params={"ids": [p["id"] for p in extracted]},
+            ).result_set
+            facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
+                     for r in rows}
+        except Exception:
+            import logging
+            logging.getLogger("tortoise.api").exception(
+                "write-verb enrichment read failed (non-fatal)")
+            extraction_warnings.append(
+                "write-verb enrichment read failed (non-fatal)")
+            facts = {}
+        skipped = 0
+        for p in extracted:
+            # Facts are applied ONLY for ids the graph actually returned —
+            # a swept/deleted point (W6 delete race) or a failed M2 write is
+            # NEVER fabricated as live/new (anti-gaming, P2-2).  The raw
+            # extractor dict still rides resp["points"] un-enriched (its own
+            # draft/kind claims — honest as extractor output), the additive
+            # warning says so, and the verb downgrades to partial.
+            pid = p.get("id")
+            if pid not in facts:
+                skipped += 1
+                extraction_warnings.append(
+                    f"point {pid} missing from graph post-write — "
+                    "reported un-enriched in the write verb")
+                continue
+            kind, status, has_ep = facts[pid]
+            # Graph truth wins over the extractor's claimed kind (P2-2).
+            p["kind"] = kind
+            # Frozen-verb schema names the id ``point_id`` — additive alias
+            # (legacy ``id`` stays; legacy consumers are byte-safe).
+            p.setdefault("point_id", p.get("id"))
+            p["status"] = status
+            p["ep_updated"] = has_ep
+            p["dedup"] = DEDUP_NEW
+    verb_status = STATUS_OK
+    if extraction_errors or skipped:
+        # skipped: at least one extracted point could not be verified
+        # post-write — the verb is partial, never an unqualified ok.
+        verb_status = STATUS_PARTIAL
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
             "extraction_mode": effective_mode,
@@ -6197,7 +6324,18 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             "first_capture": bool(first_capture)}
     if meta.get("route"):
         resp["extraction_provider"] = meta.get("provider")
-    return resp
+    # W5 (#2104): the memory_write_v1 envelope wraps the (additive) legacy
+    # response — protocol_version, status, provenance, error; the verb's
+    # per-point entries ride the enriched ``resp["points"]`` list (extra
+    # wins on merge, D8).
+    return build_write_verb(
+        source_session=session_id,
+        source_harness=body.harness or "unknown",
+        ingested_at=now,
+        status=verb_status,
+        error=None,
+        extra=resp,
+    )
 
 
 # ── #1727 Slice 2 (Task 11): per-harness receipt + last-error helpers ──────
@@ -13472,6 +13610,237 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
         "noop_steps": noop_steps,
         "onboarding": _get_onboarding_projection(team_id),
     }
+
+
+# ── #1999 (W3): interactive ontology-precise seed ─────────────────────
+# POST /v1/onboarding/seed — files exactly two Subjects (Organization/
+# organization + User/naturalPerson linked memberOf, DM-3) from auth-
+# context anchor data (teams.name + team email + session user), with
+# collision detection (never silent merge of distinct identities),
+# person→naturalPerson normalization, never-invented identity (email-
+# derived person name is a PROPOSAL requiring confirmation), and the
+# fork-aware completion gate (WF-2). The seed core lives in
+# tortoise/onboarding/seed.py (graph-agnostic — W12's self-hosted path
+# reuses it); this module owns the hosted anchor-data resolution.
+
+
+def _team_name(team_id: str) -> str | None:
+    """Org display name from the control plane (teams.name / Team node)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import (
+        team_name as _sb_team_name,
+    )
+    if is_supabase_enabled():
+        return _sb_team_name(get_control_plane(), team_id)
+    sdk = _make_sdk(namespace="registry")
+    try:
+        rows = sdk._get_registry().query(
+            "MATCH (t:Team {id: $id}) RETURN t.name",
+            params={"id": team_id}).result_set
+        return rows[0][0] if rows else None
+    finally:
+        sdk.close()
+
+
+class _TeamSeedSurface:
+    """Duck-typed seed surface over the team-scoped SDK: find_subject_by_name
+    needs raw Cypher (projection), entity writes need the SDK (SubjectAdded
+    events + journal + embedding + #452 name-MERGE)."""
+
+    def __init__(self, sdk):
+        self._sdk = sdk
+
+    def query(self, cypher, **params):
+        return self._sdk._get_proj().query(cypher, **params)
+
+    def create_subject(self, name, subjectKind="other", **props):
+        return self._sdk.create_subject(name, subjectKind=subjectKind, **props)
+
+    def create_edge(self, relation, from_id, to_id):
+        return self._sdk.create_edge(relation, from_id, to_id)
+
+
+def _next_onboarding_step(team_id: str, proj) -> str | None:
+    """First incomplete fork-aware step after the seed (the decide nudge
+    target): self fork → decide; build → catalog-presented; compact →
+    harness-connected. 'done' when the gate already satisfied the status."""
+    node = _os.read_onboarding_node(proj, team_id)
+    if node is None or node.get("status") == _os.STATUS_COMPLETE:
+        return "done"
+    steps = set(_os.completed_steps(proj, team_id))
+    if bool(node.get("compact")):
+        order = ("harness-connected",)
+    elif node.get("fork") == _os.FORK_BUILD:
+        order = ("harness-connected", "catalog-presented")
+    else:
+        order = ("harness-connected", "decide-completed")
+    for step in order:
+        if step not in steps:
+            return step
+    return "done"
+
+
+def _run_onboarding_seed(team_id: str, *, org_name: str | None = None,
+                         person_name: str | None = None,
+                         person_user_id: str | None = None,
+                         person_email: str | None = None) -> dict:
+    """The W3 interactive seed runner (shared by the REST endpoint + the
+    MCP tool). Hosted anchor data: org display name ← explicit org_name or
+    teams.name; person ← explicit person_name (user-confirmed) or
+    email-prefix derivation (PROPOSAL — never silently filed); user_id /
+    email are the stable identity refs (DM-3).
+
+    Contract (WF-2 / DM-3): gaps/collisions → NO graph writes
+    (all-or-nothing — a disambiguation round never leaves a half-seed);
+    seeded → two Subjects (compact: org-anchor seed-lite only) + memberOf
+    + onboards edge/org_subject_id + first-points-filed step edge
+    (created-signal) + fork-aware gate eval. Graph-down → 503 fail-loud
+    (FLOW-bearing write, retry-safe)."""
+    from tortoise.onboarding import seed as _seed
+    if not _graph_available(team_id):
+        raise HTTPException(status_code=503,
+                            detail="Onboarding graph unavailable — retry later")
+    proj = _team_proj(team_id)
+    node = _os.read_onboarding_node(proj, team_id)
+    compact = bool((node or {}).get("compact")) if node is not None else False
+
+    org_display = (org_name or "").strip()
+    org_source = "provided" if org_display else "teams.name"
+    if not org_display:
+        org_display = _team_name(team_id) or ""
+    include_person = not compact
+    person_provided = (person_name or "").strip()
+    person_source = "provided" if person_provided else None
+
+    # never-invented-identity gate: gaps → ask (zero writes)
+    gaps: list[dict] = []
+    if not org_display:
+        gaps.append({"field": "org_name", "source": "ask",
+                      "reason": "no org display name on the control plane"})
+    if include_person and not person_provided:
+        derived = (_seed.derive_display_name_from_email(person_email)
+                   if person_email else None)
+        if derived:
+            person_source = "email-derived"
+            gaps.append({
+                "field": "person_name", "source": "email-derived",
+                "derived": derived,
+                "reason": ("display_name is not exposed — confirm the "
+                            "email-prefix name before filing"),
+            })
+        else:
+            gaps.append({"field": "person_name", "source": "ask",
+                          "reason": "no email-prefix name derivable"})
+    if gaps:
+        return {"status": "needs_confirmation", "gaps": gaps,
+                "org_name": org_display or None,
+                "org_name_source": org_source if org_display else None,
+                "person_name_source": person_source}
+
+    sdk = _make_sdk(namespace=team_id)
+    try:
+        surface = _TeamSeedSurface(sdk)
+        try:
+            report = _seed.seed_onboarding_anchors(
+                surface, org_name=org_display, org_id=team_id,
+                person_name=person_provided or None,
+                user_id=person_user_id, person_email=person_email,
+                include_person=include_person)
+        except _seed.SubjectCollision as exc:
+            return {
+                "status": "collision",
+                "collisions": [{
+                    "kind": exc.kind, "name": exc.name,
+                    "existing_id": exc.existing_id, "reason": exc.reason,
+                    "existing_refs": exc.refs,
+                }],
+                "org_name": org_display,
+                "org_name_source": org_source,
+                "person_name_source": person_source,
+                "question": (f"A Subject named {exc.name!r} already exists "
+                              "and is not this org/user. Provide a "
+                              "disambiguated name (suffix/canonical key) — "
+                              "distinct identities are never merged."),
+            }
+        # node ↔ anchor link (DM-1) + first-points-filed step edge + gate
+        legacy_mirror = bool(_get_onboarding_state(team_id).get(
+            "onboarding_complete"))
+        org_subject = report["org_subject"]
+        onboards = _os.write_onboards_edge(proj, team_id, org_subject["id"])
+        step = _os.write_completed_step(
+            proj, team_id, "first-points-filed",
+            status_from_mirror=legacy_mirror)
+        _maybe_apply_completion(team_id)
+    finally:
+        sdk.close()
+    return {
+        "status": "seeded",
+        "org_name": org_display,
+        "org_name_source": org_source,
+        "person_name_source": person_source,
+        "org_subject": report["org_subject"],
+        "user_subject": report["user_subject"],
+        "org_created": report["org_created"],
+        "person_created": report["person_created"],
+        "org_kind_normalized": report["org_kind_normalized"],
+        "person_kind_normalized": report["person_kind_normalized"],
+        "member_of": report["member_of"],
+        "onboards": onboards,
+        "steps": {"first-points-filed": step},
+        "next": _next_onboarding_step(team_id, _team_proj(team_id)),
+        "onboarding": _get_onboarding_projection(team_id),
+    }
+
+
+class OnboardingSeedRequest(BaseModel):
+    """Interactive seed — explicit (user-confirmed) names override anchor
+    data. ``extra="forbid"``: unknown fields are a 422, never a silent
+    ignore."""
+    org_name: str | None = Field(default=None, max_length=200)
+    person_name: str | None = Field(default=None, max_length=200)
+    model_config = {"extra": "forbid"}
+
+
+@app.post("/v1/onboarding/seed", response_model=dict)
+async def onboarding_seed(body: OnboardingSeedRequest,
+                          team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
+    """File the two onboarding anchor Subjects (Organization/organization +
+    User/naturalPerson linked memberOf) from auth-context anchor data.
+
+    Interactive (WF-2): call without names to discover gaps (email-derived
+    person name → needs_confirmation) or collisions (same-name Subject that
+    is not this org/user → disambiguation); call with explicit
+    user-confirmed names to file. Gaps/collisions write NOTHING — never
+    invented identity, never silent merge. Seeded → two Subjects + memberOf
+    + onboards edge + first-points-filed step edge + fork-aware gate eval.
+
+    Dual-auth (session JWT OR tt_ key) like the checkpoint; the team always
+    comes from the auth context. """
+    team_id = team["team_id"]
+    # identity refs from the auth context (never client-supplied):
+    # session_user_id is the JWT user UUID; created_by is a user UUID on
+    # session-minted keys but the EMAIL on register-lane keys (legacy) — an
+    # email must never ride the user_id ref (it would tag the person anchor
+    # with a bogus identity and break the collision predicate).
+    person_user_id = team.get("session_user_id") or team.get("created_by")
+    if person_user_id in (None, "api") or "@" in str(person_user_id):
+        person_user_id = None
+    try:
+        return _run_onboarding_seed(
+            team_id, org_name=body.org_name, person_name=body.person_name,
+            person_user_id=person_user_id,
+            person_email=team.get("email"))
+    except HTTPException:
+        raise
+    except Exception:
+        import logging
+        logging.getLogger("tortoise.api").exception(
+            "onboarding seed failed (team=%s)", team_id)
+        raise HTTPException(status_code=500,
+                            detail="Onboarding seed failed — retry-safe") from None
 
 
 @app.post("/v1/onboarding/session-recording", response_model=OnboardingStateResponse)

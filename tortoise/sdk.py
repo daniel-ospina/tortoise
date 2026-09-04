@@ -1749,6 +1749,21 @@ class TortoiseSDK:
         # above) — the explicit kwarg wins, the pop covers the nested path.
         credibility = credibility if credibility is not None \
             else props.pop("credibility", None)
+        # #2199: resolve + validate an author-stated belief BEFORE any graph
+        # write — a bad ladder word fails loud with nothing created (never a
+        # silent Beta(1,1) fallback, #7478; and never an uncalibrated live
+        # orphan left behind by a mid-create raise). The resolved Beta is
+        # applied below once the point id exists.
+        cred_prior: tuple[float, float] | None = None
+        if credibility is not None:
+            from tortoise.source_credibility import credibility_prior
+            cred_prior = credibility_prior(credibility)
+            if cred_prior is None:
+                raise ValueError(
+                    f"Unknown credibility {credibility!r}. Ladder words: "
+                    "gold / high / medium / low / unverified "
+                    "(or the T0-T4 / numeric forms)."
+                )
         # Always compute and store content hash — dedup flag only gates the
         # existing-point lookup, not hash persistence (fix #80).
         ch = _content_hash(content)
@@ -1903,19 +1918,8 @@ class TortoiseSDK:
         # 'system-default' — an EXPLICIT default with labeled provenance, never
         # a silent Beta(1,1)-as-calibrated uniform (the #7478 guard).
         # Author-set credibility on ANY kind/status is unchanged.
-        if credibility is not None:
-            from tortoise.source_credibility import credibility_prior
-            prior = credibility_prior(credibility)
-            if prior is None:
-                # Fail loud (never the pre-#2199 silent Beta(1,1) fallback —
-                # a typo'd ladder word must not masquerade as a calibrated
-                # baseline under the #7478 posture).
-                raise ValueError(
-                    f"Unknown credibility {credibility!r}. Ladder words: "
-                    "gold / high / medium / low / unverified "
-                    "(or the T0-T4 / numeric forms)."
-                )
-            alpha, beta = prior
+        if cred_prior is not None:
+            alpha, beta = cred_prior
             self.set_point_baseline(pid, alpha, beta,
                                     source=BASELINE_SOURCE_SET_BY_AUTHOR)
         elif kind in DECIDE_PART_KINDS and status == "live":
@@ -2350,10 +2354,18 @@ class TortoiseSDK:
             )
             event_id = event.get("id") or event.get("eventId")
             if event_id:
+                # W5 (#2104, S1): the SDK mirror stamps the full write
+                # provenance alongside the ontology-compliant eventId —
+                # byte-parity with hosted_api's capture stamp (the W2
+                # benchmark grades provenance_accuracy over these fields).
+                source_harness = harness or "unknown"
                 proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "SET n.eventId=$eid, n.source_session=$sid, "
+                    "    n.source_harness=$harness, n.ingested_at=$ing",
                     params={"ids": [p["id"] for p in extracted],
-                            "eid": event_id},
+                            "eid": event_id, "sid": session_id,
+                            "harness": source_harness, "ing": now},
                 )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
@@ -9859,7 +9871,7 @@ class TortoiseSDK:
         # #25: optional graph-informed rerank (persisted EP confidence,
         # operator connectivity, recency). Off by default (backward compat).
         if graph_ranker is not None and results:
-            results = graph_ranker.rerank(results, entity_type="point")
+            results = graph_ranker.rerank(results, entity_type="point", query=q)
 
         return results
 
@@ -10827,7 +10839,13 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            ranked = ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            # W4-b (#2102): thread the query for the contested-relevance boost
+            # ONLY when the caller opted into W4 enrichment — w4_enrich=False
+            # suppresses the why-layer keys AND the boost together (order and
+            # keys must never disagree).
+            ranked = ranker.rerank(
+                dicts, entity_type=entity_type,
+                query=(query if w4_enrich else None))[:limit]
             # W4 (#2101): additive why-layer enrichment (flag-gated) — search
             # surface; recall_state's pool and the ask lane inherit it through
             # their own calls. Zero-LLM, bounded reads, fail-open (items
@@ -11823,7 +11841,7 @@ class TortoiseSDK:
 
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
-        ranked = ranker.rerank(merged, entity_type="point")
+        ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
         ranked = [
