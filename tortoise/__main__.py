@@ -1,9 +1,31 @@
 """CLI entry point: python -m tortoise <command>"""
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+
+# #2201: single source of truth for markdown discovery. `tortoise init` and
+# `tortoise onboard` print a "Found N markdown files" count and the indexer
+# walks the SAME files — the count and the walk must agree. Non-content dirs
+# (.venv, venv, .git, node_modules, __pycache__) are excluded: files there are
+# never repo content, so counting them made the onboard announce hundreds of
+# files it would never index (652 announced vs 527 walked in the #2201 repro).
+
+
+def _markdown_files(root: Path | str) -> list[Path]:
+    """Sorted *.md files under `root` that the indexer will actually read.
+
+    Excludes anything beneath a non-content directory (.venv, venv, .git,
+    node_modules, __pycache__ — component match, so `docs/venv/` is dropped
+    the same way the indexer always dropped it, while `docs/venv-setup/` is
+    kept). Used by the init/onboard counts AND the indexer walk so the
+    announced count always matches the walk.
+    """
+    excluded = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
+    root = Path(root)
+    return sorted(f for f in root.rglob("*.md") if not excluded.intersection(f.parts))
+
 
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
@@ -595,7 +617,9 @@ def _cmd_init(args):
         )
         if result.returncode == 0:
             repo_root = result.stdout.strip()
-            md_count = len(list(__import__("pathlib").Path(repo_root).rglob("*.md")))
+            # #2201: share the indexer's discovery so the count excludes .venv
+            # and other non-content dirs (previously counted everything).
+            md_count = len(_markdown_files(repo_root))
             auto_index = getattr(args, 'yes', False)
             if md_count > 0:
                 if auto_index:
@@ -2757,7 +2781,9 @@ def _cmd_onboard(args) -> int:
     )
     if result.returncode == 0:
         repo_root = result.stdout.strip()
-        md_count = len(list(Path(repo_root).rglob("*.md")))
+        # #2201: count only what the indexer will walk — .venv and other
+        # non-content dirs are excluded (previously inflated the count).
+        md_count = len(_markdown_files(repo_root))
         if md_count > 0:
             print(f"  Found {md_count} markdown files. Indexing…")
             # #1362: frontmatter validation is OPTIONAL + warn-only — surface
@@ -3626,13 +3652,10 @@ def _cmd_index_github(args):
             print(f"Clone failed: {result.stderr}", file=sys.stderr)
             return 1
 
-    # Walk .md files
-    md_files = sorted(repo_path.rglob("*.md"))
-    # ponytail: skip node_modules, .git, venv
-    md_files = [f for f in md_files if ".git/" not in str(f)
-                and "node_modules/" not in str(f)
-                and "venv/" not in str(f)
-                and "__pycache__" not in str(f)]
+    # Walk .md files — shared discovery (#2201): skips non-content dirs
+    # (.venv, venv, .git, node_modules, __pycache__) the same way the
+    # init/onboard counts do, so what we announce is what we read.
+    md_files = _markdown_files(repo_path)
     total = len(md_files)
     if total == 0:
         print("No markdown files found.")
@@ -3687,11 +3710,19 @@ def _cmd_index_github(args):
     # Users can swap to LLM models via tortoise ingest for richer extraction.
     point_model = MockModel("cheap")
     relation_model = MockModel("reason")
-    indexed, skipped, errors = 0, 0, 0
+    indexed, skipped, unreadable, errors = 0, 0, 0, 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
-        raw_text = fp.read_text(encoding="utf-8")
+        try:
+            raw_text = fp.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            # #2201: one unreadable file (dangling symlink, permission error,
+            # bad encoding) must never abort the whole run — skip it with a
+            # warning and keep indexing the rest.
+            unreadable += 1
+            print(f"  [{i}/{total}] {rel}… ⚠ skipped (unreadable: {e})")
+            continue
         # ponytail: strip frontmatter before hashing — extractor may add
         # frontmatter, which would change the hash on the next run.
         text_for_hash = raw_text
@@ -3738,7 +3769,8 @@ def _cmd_index_github(args):
         pass
 
     print()
-    print(f"Done: {indexed} indexed, {skipped} skipped, {errors} errors")
+    print(f"Done: {indexed} indexed, {skipped} skipped, "
+          f"{unreadable} unreadable, {errors} errors")
     if indexed > 0:
         print(f"  Log: {log_path}")
         print(f"  Graph: query with tortoise_suggest_entry_points()")  # noqa: F541

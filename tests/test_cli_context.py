@@ -862,3 +862,72 @@ def test_index_sessions_constructor_failure_clean_error(monkeypatch, capsys, tmp
     assert "graph unreachable" in err
     assert "Traceback" not in err
 
+
+class TestOnboardCountExcludesNonContentDirs:
+    """#2201: both 'Found N markdown files' ANNOUNCE sites (init auto-index and
+    the onboard step-3 index) share the indexer's discovery — .venv and other
+    non-content dirs must not inflate the announced count (the 652-announced
+    vs 527-walked divergence from the issue repro)."""
+
+    @staticmethod
+    def _repo_with_junk(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "README.md").write_text("# readme\n\ncontent\n")
+        junk = repo / ".venv"
+        junk.mkdir()
+        (junk / "junk.md").write_text("# junk\n\nbody\n")
+        return repo
+
+    @staticmethod
+    def _embedded_env(monkeypatch, tmp_path):
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+    def test_onboard_announce_count_excludes_venv(self, tmp_path, monkeypatch, capsys):
+        """`tortoise onboard` step 3 announces only the README (1 md file) —
+        the .venv/junk.md must not inflate the count the indexer walks."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run, \
+             mock.patch.object(m, "_cmd_index_github", return_value=0):
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            rc = m._cmd_onboard(mock.Mock(path=None, cmd="onboard"))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "  Found 1 markdown files. Indexing…" in out, out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert "Onboarding complete." in out
+
+    def test_init_autoindex_announce_count_excludes_venv(self, tmp_path,
+                                                        monkeypatch, capsys):
+        """`tortoise init --yes` auto-index announce counts the README only —
+        same shared discovery as the indexer (#2201)."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch("subprocess.run") as fake_run, \
+             mock.patch("subprocess.Popen") as fake_popen, \
+             mock.patch("tortoise.projection.FalkorProjection"), \
+             mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            rc = m._cmd_init(mock.Mock(
+                path=None, cmd="init", yes=True, api_key=None))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Found 1 markdown files in this repo. Auto-indexing…" in out, out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert fake_popen.called
+
