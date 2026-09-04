@@ -19,7 +19,8 @@ Covered contracts (issue indicators 1-6):
   3. Per-graph key panel — list (graph_id-filtered rows), mint (POST body
      carries {graph_id, scopes: graphs:read+write}), revoke (owner/admin).
   4. Delete action on custom rows only; the default graph row has no Delete.
-  5. Free/solo tier → create locked with 🔒 + upgrade CTA (no create form).
+  5. Free/anon tier → create locked with 🔒 + upgrade CTA (no create form;
+     solo keeps its create form — pricing.json max_graphs=2, 409 quota gate).
   6. Inline error surfacing: 409 (cap) on create → the error banner text.
 
 Harness posture (mirrors #2246 ADR-010 session-only):
@@ -246,14 +247,11 @@ def _wire_graphs_harness(page: Page, team_row: dict,
 
 
 def _team_key_rows(graph_keys: dict[str, list[dict]]) -> list[dict]:
-    """The API-Keys tab's rows: the union of per-graph rows + any legacy
-    team-wide (NULL graph_id) rows the caller seeds under 'team'."""
+    """The API-Keys tab's rows: the union of every bucket the caller
+    seeded (per-graph + any 'team' legacy graph_id-NULL rows)."""
     out: list[dict] = []
-    for gid, rows in graph_keys.items():
-        if gid == "team":
-            out.extend(rows)
-        else:
-            out.extend(rows)
+    for rows in graph_keys.values():
+        out.extend(rows)
     return out
 
 

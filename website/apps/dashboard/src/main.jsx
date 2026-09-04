@@ -3729,6 +3729,10 @@ function claimIntentInFlight() {
   async function mintGraphKey() {
     const gid = panelGraphId
     if (!gid || graphBusy) return
+    // P2-1 (review): capture the open-sequence at OPERATION START — a panel
+    // open landing during the mint POST (before the refresh) must also
+    // invalidate the refresh's write.
+    const seq = graphPanelReqRef.current
     setGraphBusy(true)
     setGraphMsg('')
     const _teamAtCall = currentTeamId
@@ -3745,7 +3749,7 @@ function claimIntentInFlight() {
       if (teamIdRef.current !== _teamAtCall) return
       setGraphKeyName('')
       setRevealKey({ plaintext, title: `Key for ${graphNameFor(gid) || 'graph'} created` })
-      await refreshPanelAndCounts(gid)
+      await refreshPanelAndCounts(gid, seq)
     } catch (e) {
       if (teamIdRef.current === _teamAtCall) {
         const detail = e && e.detail ? e.detail : (e && e.message)
@@ -3756,11 +3760,11 @@ function claimIntentInFlight() {
     }
   }
 
-  async function refreshPanelAndCounts(gid) {
+  async function refreshPanelAndCounts(gid, seq) {
     // P2-4 (review): a mint/revoke refresh is panel-scoped — a slower
-    // refresh must not clobber a NEWER panel open (openGraphPanel bumps
-    // graphPanelReqRef). Guard both the team and the open-sequence.
-    const seq = graphPanelReqRef.current
+    // refresh must not clobber a NEWER panel open. seq is captured at the
+    // OPERATION start (mint/revoke), so a panel open during the mutation
+    // await also invalidates this refresh's write. Guard team + seq.
     const _teamAtCall = currentTeamId
     const rows = await graphKeysFor(currentTeamId, gid).catch(() => null)
     if (graphPanelReqRef.current !== seq || teamIdRef.current !== _teamAtCall) return
@@ -3776,6 +3780,7 @@ function claimIntentInFlight() {
   // Panel revoke — window.confirm names the row (mirrors the API-Keys
   // revokeKey UX: name · prefix · created). Owner/admin-only render gate.
   async function revokePanelKey(keyId) {
+    const seq = graphPanelReqRef.current // P2-1: op-start seq (see mintGraphKey)
     const row = (panelKeys || []).find((k) => (k.id || k.key_id) === keyId)
     const rowName = (row && row.name) || 'this graph key'
     const rowDesc = [rowName, row && row.key_prefix, row && (row.created_at || row.createdAt || '')].filter(Boolean).join(' · ')
@@ -3785,7 +3790,7 @@ function claimIntentInFlight() {
     try {
       await api(`/v1/team/keys/${keyId}`, { method: 'DELETE', useSession: true })
       if (teamIdRef.current !== _teamAtCall) return
-      await refreshPanelAndCounts(panelGraphId)
+      await refreshPanelAndCounts(panelGraphId, seq)
     } catch (e) {
       if (teamIdRef.current === _teamAtCall) setGraphMsg('Could not revoke key — try again.')
     }
@@ -6138,9 +6143,10 @@ function claimIntentInFlight() {
               <h2>Graphs</h2>
               {authMode === 'session' ? (
                 tierCreateLocked(team && team.tier) ? (
-                  /* C7 indicator 5: free/solo create is locked with the 🔒
-                     + upgrade CTA (the server would 409 anyway — their cap
-                     is reached; the locked state is the honest pre-empt). */
+                  /* C7 indicator 5: free/anon create is locked with the 🔒
+                     + upgrade CTA (the server's 402 tier gate blocks
+                     free/anon — _GRAPH_TIER_BLOCKED; solo is NOT locked,
+                     pricing.json max_graphs=2 with a 409 quota gate). */
                   <span className="dim small">
                     🔒 Your plan includes {team && team.max_graphs} graph
                     {(team && team.max_graphs) !== 1 ? 's' : ''} —{' '}
