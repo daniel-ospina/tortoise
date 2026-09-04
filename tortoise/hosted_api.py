@@ -152,8 +152,14 @@ def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
     return proj._probe_ok()
 
 
-def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
+def _make_sdk(*, namespace: str | None = None,
+              graph_name: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
+
+    C5 #2114 (D-C5-1/D-C5-2): ``graph_name`` (a FULL DB graph name, e.g.
+    a custom ``team_{tid}_{gid}``) passes through to the SDK's explicit
+    graph-name seam — never a namespace (which would prepend ``team_``).
+    Exactly one of namespace/graph_name is set by callers.
 
     Embedded fallback: when no URI is configured (fly.toml default), the SDK
     previously received no path and FalkorProjection raised
@@ -161,8 +167,9 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     failed with 500. Using an on-disk redislite DB keeps onboarding functional
     until a production FalkorDB instance is provisioned (#7722).
     """
+    key = graph_name if graph_name is not None else (namespace or "")
     if os.environ.get("TORTOISE_DB_URI"):
-        return TortoiseSDK(namespace=namespace)
+        return TortoiseSDK(namespace=namespace, graph_name=graph_name)
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
     try:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -171,7 +178,6 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # fall back to a temp file so provisioning still works.
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
-    key = namespace or ""
     # Fast path (lock-free steady state): reuse a healthy anchor as-is — the
     # per-request fresh SDK below attaches to its daemon (the #493/#1607
     # designed shape). The probe runs outside the lock exactly as it always
@@ -202,7 +208,8 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
                 _FALLBACK_KEEPALIVE.pop(key, None)
                 anchor = None
             if anchor is None:
-                anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
+                anchor = TortoiseSDK(db_path=db_path, namespace=namespace,
+                                     graph_name=graph_name)
                 try:  # noqa: SIM105
                     anchor._get_proj()  # eager: hold the connection so the server survives
                 except Exception:
@@ -211,7 +218,8 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
                     # anchor may connect on a later call.
                     pass
                 _FALLBACK_KEEPALIVE.setdefault(key, anchor)
-    sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
+    sdk = TortoiseSDK(db_path=db_path, namespace=namespace,
+                      graph_name=graph_name)
     return sdk
 
 
@@ -616,20 +624,33 @@ _DREAM_BATCH_MAX = 200
 _DREAM_QUEUE_TTL_S = 600
 
 
-def _enqueue_dream(team_id: str, dirty_roots: list[str]) -> None:
-    """Enqueue affected roots for a tenant's next dream cycle."""
+def _dream_key(team_id: str, graph_namespace: str | None) -> str:
+    """C5 #2114 (sweep parity): the dream queue is PER GRAPH — a write on a
+    custom graph must drain THAT graph, never the team default. Team-wide
+    keys/session writes (graph_namespace None) keep the legacy team key."""
+    return team_id if graph_namespace is None else f"{team_id}::{graph_namespace}"
+
+
+def _enqueue_dream(team_id: str, dirty_roots: list[str],
+                   *, graph_namespace: str | None = None) -> None:
+    """Enqueue affected roots for a tenant's next dream cycle (per graph)."""
     if not dirty_roots:
         return
-    q = _DREAM_QUEUES.setdefault(team_id, asyncio.Queue())
+    key = _dream_key(team_id, graph_namespace)
+    q = _DREAM_QUEUES.setdefault(key, asyncio.Queue())
     for root in dirty_roots[: _DREAM_BATCH_MAX]:
         q.put_nowait(root)
-    if team_id not in _DREAM_TASKS or _DREAM_TASKS[team_id].done():
-        _DREAM_TASKS[team_id] = asyncio.create_task(_dream_worker(team_id))
+    if key not in _DREAM_TASKS or _DREAM_TASKS[key].done():
+        _DREAM_TASKS[key] = asyncio.create_task(_dream_worker(team_id, key))
 
 
-async def _dream_worker(team_id: str) -> None:
-    """Drain one tenant's queue with debounce, then run incremental dream."""
-    q = _DREAM_QUEUES.get(team_id)
+async def _dream_worker(team_id: str, key: str | None = None) -> None:
+    """Drain one tenant's queue with debounce, then run incremental dream.
+    C5: key carries the graph (team_id, or team_id::<graph_namespace> for a
+    custom graph) — the drain opens the DIRTY graph, never the default."""
+    if key is None:
+        key = team_id
+    q = _DREAM_QUEUES.get(key)
     if q is None:
         return
     try:
@@ -640,7 +661,9 @@ async def _dream_worker(team_id: str) -> None:
             roots.append(q.get_nowait())
         if not roots:
             return
-        sdk = _make_sdk(namespace=team_id)
+        gns = key.split("::", 1)[1] if "::" in key else None
+        sdk = (_make_sdk(graph_name=gns) if gns is not None
+               else _make_sdk(namespace=team_id))
         try:
             # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
             sdk._mark_dirty(roots)
@@ -654,16 +677,16 @@ async def _dream_worker(team_id: str) -> None:
     except Exception:
         import logging
         logging.getLogger("tortoise.api").exception(
-            "dream worker failed for tenant %s", team_id
+            "dream worker failed for tenant %s graph %s", team_id, key
         )
     finally:
         # Reschedule if more roots arrived during the drain.
         if not q.empty():
-            _DREAM_TASKS[team_id] = asyncio.create_task(_dream_worker(team_id))
-        elif team_id in _DREAM_QUEUES and team_id in _DREAM_TASKS:
+            _DREAM_TASKS[key] = asyncio.create_task(_dream_worker(team_id, key))
+        elif key in _DREAM_QUEUES and key in _DREAM_TASKS:
             # Idle: evict the queue (TTL guard) unless a new write re-adds it.
-            _DREAM_QUEUES.pop(team_id, None)
-            _DREAM_TASKS.pop(team_id, None)
+            _DREAM_QUEUES.pop(key, None)
+            _DREAM_TASKS.pop(key, None)
 
 
 # ── Rate Limiter ──────────────────────────────────────────────────
@@ -959,7 +982,15 @@ async def _async_audit(
     # ip_address — record the REAL client IP (state.client_ip set by
     # ClientIPMiddleware), never the Fly proxy IP (request.client.host).
     ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
-    ua = request.headers.get("user-agent")
+    # #2104 (#2260 follow-up): _async_audit is reached from the MCP-tool
+    # capture path with a fabricated request stand-in (hosted_api.py ~6222:
+    # types.SimpleNamespace(state=…, client=None) — NO .headers). A bare
+    # request.headers.get crashed the audit (AttributeError → non-fatal audit
+    # failure → an 'error' key in the capture response). Mirror the defensive
+    # getattr style used for state.client_ip above: header-less request-likes
+    # record user_agent=None instead of crashing.
+    ua = (request.headers.get("user-agent")
+          if getattr(request, "headers", None) is not None else None)
     await asyncio.to_thread(
         _audit_logger.append,
         team_id=team_id,
@@ -1783,14 +1814,151 @@ def _reject_minted_delegated_key(team: dict, surface: str) -> None:
         )
 
 
+def _assert_graph_owned(team: dict, graph_id: str,
+                        graph_namespace: str) -> None:
+    """C5 #2114 (D-C5-2): the spine's ownership pre-check — a graph-bound
+    key must open ONLY its own graph, and a vanished graph must fail closed
+    (never widen onto the default). Runs BEFORE the projection binds. The
+    registry Graph node / supabase graphs row is the authority; a mismatch
+    or missing node → 403/404 (the graph the key was minted for is gone —
+    the key is dead, not demoted).
+
+    ACL-OFF proof: this check (not FalkorDB's NOPERM) is what denies
+    cross-graph at the app layer.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    try:
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs", select=["id", "namespace"],
+                filters=[("id", "eq", graph_id),
+                         ("team_id", "eq", team["team_id"])])
+            if not rows:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"})
+            if rows[0].get("namespace") != graph_namespace:
+                # C5 (review P2): namespace parity with the registry lane —
+                # a drifted/renamed graphs row must fail closed (never open
+                # a shifted namespace). Mirrors GRAPH_MISMATCH below.
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_MISMATCH",
+                            "message": "graph not found for key"})
+            return
+        # Registry: the Graph node must exist AND belong to the team AND
+        # carry the resolved namespace (fail-closed on any drift).
+        rows = _make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "RETURN g.namespace",
+            params={"gid": graph_id, "tid": team["team_id"]},
+        ).result_set
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.warning("graph ownership probe failed for %s (fail-closed)",
+                        graph_id, exc_info=True)
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_NOT_FOUND",
+                    "message": "graph not found for key"}) from None
+    if not rows or not rows[0][0]:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "GRAPH_NOT_FOUND",
+                    "message": "graph not found for key"})
+    if rows[0][0] != graph_namespace:
+        # The key resolved to a namespace that no longer matches the node —
+        # fail closed (never open a shifted namespace).
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_MISMATCH",
+                    "message": "graph not found for key"})
+
+
+def _data_sdk(team: dict) -> TortoiseSDK:
+    """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the ONE entry
+    every team-data surface uses to open its SDK.
+
+    - graph-bound key (graph_id set): ownership pre-check THEN open the
+      resolved FULL graph name (custom team_{tid}_{gid} or a bound default)
+      via the explicit graph-name seam — cross-graph denied at the app
+      layer (ACL-OFF proof), never widened onto the team default.
+    - team-wide key / session auth (graph_id None): the DEFAULT graph via
+      the namespace path (namespace=team_id) — BYTE-IDENTICAL to today's
+      open (E2E-5 regression gate: existing team-key flows unchanged).
+      graph_namespace (t.graph_name) is NOT used here — the hosted lane
+      stores graph_name == team_{team_id}, but the selfhost legacy lane
+      (sdk.team_create team_{name}, #2023) diverges and flipping would
+      silently move those teams' data access.
+    """
+    team_id = team["team_id"]
+    gid = team.get("graph_id")
+    if gid:
+        ns = team.get("graph_namespace")
+        if not ns:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "GRAPH_NOT_FOUND",
+                        "message": "graph not found for key"})
+        _assert_graph_owned(team, gid, ns)
+        return _make_sdk(graph_name=ns)
+    return _make_sdk(namespace=team_id)
+
+
+def _require_scope(team: dict, scope: str, surface: str) -> None:
+    """C5 #2114 (D-C5-3): pre-filter scope enforcement (write implies read).
+
+    - legacy_full_access (deleg NULL + scopes==[] — tt_/tkm_ class) or
+      session auth (key_id None): allow — existing flows unchanged.
+    - scoped key: ``graphs:read`` for reads, ``graphs:write`` for writes.
+    - deleg=0 keys: same scope matrix (children carry ONLY mintable data
+      scopes — C3); a deleg=0 key with no data scope stays 403 here.
+
+    Never post-filter: the check is the FIRST statement of a data handler.
+    """
+    if team.get("legacy_full_access") or team.get("key_id") is None:
+        return
+    have = set(team.get("scopes") or [])
+    # Read op: graphs:read OR graphs:write (write implies read). Write op:
+    # graphs:write only (read never satisfies a write).
+    if scope in have or (scope == "graphs:read" and "graphs:write" in have):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={"error_code": "INSUFFICIENT_SCOPE",
+                "message": f"Key lacks {scope} scope for {surface}."})
+
+
+def _reject_graph_bound_team_surface(team: dict, surface: str) -> None:
+    """C5 #2114 (D-C5-2): team-level surfaces (packs/onboarding/overview —
+    data that lives on the DEFAULT graph or the registry, not the key's
+    graph) reject graph-bound keys outright. A per-graph key must NEVER read
+    the team default graph's data through a team-level endpoint (cross-graph
+    leak). Legacy/team-wide keys + session auth (graph_id None) pass —
+    unchanged."""
+
+    if team.get("graph_id"):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_SCOPED_TEAM_SURFACE",
+                    "message": f"Graph-scoped keys cannot access {surface}."})
+
+
 async def get_current_team_gated(request: Request) -> dict:
-    """C2 (#2111): data-plane dependency for deleg=0 dormancy. Resolves the
-    key exactly like get_current_team (kept as the pure resolution seam —
-    C1's tenancy-field contract + C5's spine read graph_id/scopes off it),
-    then rejects minted (deleg=0) keys. Every raw-get_current_team data
-    endpoint (points/search/packs/sessions/context/demo/backups) must use
-    this so a handed-out least-privilege key cannot read or write team data
-    team-wide before per-graph isolation ships (C5 #2114).
+    """C2 (#2111) → C5 (#2114): data-plane dependency. Resolves the key
+    exactly like get_current_team (C1's tenancy-field contract — C5's spine
+    reads graph_id/scopes off it), then applies the C5 deleg=0 rule: a
+    MINTED key is allowed onto data surfaces ONLY when it carries a data
+    scope (graphs:read/write — routed by _data_sdk + _require_scope);
+    minted keys without data scopes stay dormant (rejected). Pre-C5 (C2/C3)
+    this rejected ALL deleg=0 keys blanket (dormancy until per-graph
+    isolation shipped). Management surfaces keep the blanket reject via
+    get_current_team_session (the #1148 management set).
 
     Override semantics mirror get_current_team_session: FastAPI overrides
     apply at DI time, so a DIRECT call to get_current_team would bypass the
@@ -1801,8 +1969,15 @@ async def get_current_team_gated(request: Request) -> dict:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer ") and not auth[7:].startswith("eyJ"):
         team = await get_current_team(request)
-        _reject_minted_delegated_key(team, "team data until per-graph "
-                                           "isolation ships (C5)")
+        if team.get("delegation_depth") == 0 and not (
+                {"graphs:read", "graphs:write"}
+                & set(team.get("scopes") or [])):
+            # C5: deleg=0 keys WITHOUT a data scope stay dormant on data
+            # surfaces (a team:manage/keys:manage-only child has no graph
+            # data to exercise; escalation scopes never land on children —
+            # C3's mint matrix + DB CHECK).
+            _reject_minted_delegated_key(
+                team, "team data (minted key has no data scope)")
         return team
     overrides = request.app.dependency_overrides
     override = overrides.get(get_current_team)
@@ -1834,13 +2009,24 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
         # C2 (#2111) deleg gate — the gated dependency IS the management
         # set (mint/revoke/restore/billing/onboarding/delete-graph): minted
         # keys are data-plane credentials held dormant until C5 binds them
-        # per-graph; they must never reach account management. (create_api_key's
-        # endpoint gate is redundant-but-harmless defense-in-depth behind this
-        # DI gate. The _session_login_exchange gate is NOT redundant —
-        # /v1/session/login is in SKIP_AUTH and resolves the body token itself,
-        # so this dependency never runs on that path; removing the exchange's
-        # inline gate would reopen P1-2.)
-        _reject_minted_delegated_key(team, "team management")
+        # per-graph; they must never reach account management. C5 (#2114)
+        # narrows the data-plane side (gate_key_login=False — the ungated
+        # flag-off callers): a minted key WITH a data scope (graphs:read/
+        # write) is allowed onto data surfaces (routed by _data_sdk +
+        # _require_scope); without one it stays dormant there too. The
+        # gate_key_login=True management set keeps the blanket reject.
+        # (create_api_key's endpoint gate is redundant-but-harmless
+        # defense-in-depth behind this DI gate. The _session_login_exchange
+        # gate is NOT redundant — /v1/session/login is in SKIP_AUTH and
+        # resolves the body token itself, so this dependency never runs on
+        # that path; removing the exchange's inline gate would reopen P1-2.)
+        if team.get("delegation_depth") == 0 and (
+                gate_key_login
+                or not ({"graphs:read", "graphs:write"}
+                        & set(team.get("scopes") or []))):
+            _reject_minted_delegated_key(
+                team, "team management" if gate_key_login
+                else "team data (minted key has no data scope)")
         if gate_key_login:
             _check_dashboard_key_login(team, request)
         return team
@@ -2050,7 +2236,7 @@ async def _check_turnstile(request: Request, body: dict) -> None:
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
-from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator  # noqa: E402
 
 
 class CreatePointRequest(BaseModel):
@@ -2795,8 +2981,9 @@ async def create_object(body: CreateObjectRequest, request: Request,
     Wraps sdk.create_object — deterministic id by name, idempotent (a repeat
     returns the canonical node). objectKind/status/… ride the props.
     """
+    _require_scope(team, "graphs:write", "create_object")
     _check_team_limit(team, "points")
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         props = {}
         if body.status:
@@ -2833,8 +3020,9 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     audited. The onboarding seed creates the user's Subject + their Project
     as the first graph entities.
     """
+    _require_scope(team, "graphs:write", "create_subject")
     _check_team_limit(team, "points")
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         node = sdk.create_subject(body.name, subjectKind=body.subjectKind)
     except Exception:
@@ -2854,8 +3042,9 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 @app.post("/v1/points", response_model=PointResponse)
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Create a Point in the team's graph."""
+    _require_scope(team, "graphs:write", "create_point")
     _check_team_limit(team, "points")
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         result = sdk.create_point(
             content=body.content,
@@ -2876,7 +3065,16 @@ async def create_point(body: CreatePointRequest, request: Request, team: dict = 
         raise HTTPException(status_code=500, detail="Internal server error")  # noqa: B904
     # Dreaming (#85): enqueue the new point's dirty roots for background EP
     # stabilization (non-blocking — fast path is never gated on the dream).
-    _enqueue_dream(team["team_id"], list(sdk._dirty_roots))
+    # C5 (#2114, sweep parity): the enqueue rides the WRITTEN graph — a
+    # custom-graph key's write must drain the custom graph, never the team
+    # default (sdk is the _data_sdk-resolved graph).
+    _enqueue_dream(team["team_id"], list(sdk._dirty_roots),
+                   # graph-bound key → ITS custom graph; team-wide/session →
+                   # the legacy team-keyed drain (graph_namespace is always
+                   # set by C1 even for team-wide keys — team_{id} or a
+                   # selfhost team_{name} — so gate on graph_id).
+                   graph_namespace=(team.get("graph_namespace")
+                                    if team.get("graph_id") else None))
     # Log audit event
     await _async_audit(
         request, team["team_id"], "point_create",
@@ -2908,7 +3106,8 @@ async def events_poll(
     tail); malformed cursor → 400. Team scoping comes from auth + the SDK
     namespace — never client input.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "events_poll")
+    sdk = _data_sdk(team)
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
@@ -2939,7 +3138,8 @@ async def list_points(
         allowed = known_kinds()
         if kind not in allowed:
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "list_points")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
@@ -2977,7 +3177,8 @@ async def list_points(
 @app.get("/v1/points/{point_id}")
 async def get_point(point_id: str, team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Get a single Point by ID."""
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "get_point")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (p:Point {id: $id}) "
@@ -3020,6 +3221,9 @@ async def dream(
     import time as _t
 
     from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
+    # C5 #2114 (D-C5-3): dreaming mutates the graph (EP writes) → write
+    # scope, unconditional (not gated on mode).
+    _require_scope(team, "graphs:write", "dream")
     # I1 precedence: an explicit mode wins; else full=True ⇒ full; else the
     # SDK auto-selects. The budget counts FULL passes only (incl. override).
     effective_full = (mode == "full") if mode is not None else full
@@ -3044,7 +3248,7 @@ async def dream(
             )
         bucket.append(now_ts)
 
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         if mode is not None:
             result = sdk.dream(mode=mode, budget=budget)
@@ -3053,7 +3257,13 @@ async def dream(
         else:
             # Drain whatever is queued plus any in-memory dirty roots.
             # Batch mark once (P3, #85) — one reverse-BFS pair, not N.
-            q = _DREAM_QUEUES.get(team["team_id"])
+            # C5 (#2114, review P2): create_point enqueues under the
+            # COMPOSITE key for graph-bound keys — read the same key or the
+            # manual drain misses the queued roots.
+            _dk = _dream_key(team["team_id"],
+                             (team.get("graph_namespace")
+                              if team.get("graph_id") else None))
+            q = _DREAM_QUEUES.get(_dk)
             queued_roots: list[str] = []
             if q is not None and not q.empty():
                 while not q.empty():
@@ -3074,7 +3284,8 @@ async def dream_health(
     ts, coverage %, failure rate, operator counts, per-mode counts, stale
     backlog, alarm verdict (zero-output silent-death detection, A8),
     region_attempts (C5) and warm-start savings (C4)."""
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "dream_health")
+    sdk = _data_sdk(team)
     try:
         return sdk.dream_health_check()
     finally:
@@ -3091,7 +3302,8 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     works without the embedding extra; vector joins in automatically when
     embeddings are available.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "search")
+    sdk = _data_sdk(team)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
         # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
@@ -3197,7 +3409,8 @@ async def ask_question(body: AskRequest,
             status_code=429, detail=CODE_QUOTA_EXCEEDED,
             headers={"Retry-After": str(int(ask_budget_retry_after(team_id)))})
     t0 = _dt2.now(UTC)
-    sdk = _make_sdk(namespace=team_id)
+    _require_scope(team, "graphs:read", "ask_question")
+    sdk = _data_sdk(team)
     try:
         result = await run_ask_bounded(
             sdk.ask, team_id, body.question,
@@ -3261,7 +3474,8 @@ async def topic_summary(
     - contested: variance > 0.04 (destabilized posterior)
     - disputed pairs: NAND-connected where both have variance > 0.02
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "topic_summary")
+    sdk = _data_sdk(team)
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker
@@ -3289,6 +3503,7 @@ async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # 
     bootstrap-key mint (agents keep passing their tt_ key). #1828 review
     P1: ungated — overview reads stay reachable for tt_ keys on flag-off
     teams (the #1148 gate stays scoped to the management set)."""
+    _reject_graph_bound_team_surface(team, "team overview")
     sdk = _make_sdk(namespace=team["team_id"])
     # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
     # graph (half-failed provisioning, restores) must not dead-end the
@@ -3630,6 +3845,7 @@ async def list_packs(team: dict = Depends(get_current_team_gated)):  # noqa: B00
         # per-tenant. Only SKIP_AUTH/background paths reach here (they are
         # not in SKIP_AUTH, so a normal request 401s in get_current_team).
         raise HTTPException(status_code=401, detail="Authentication required")
+    _reject_graph_bound_team_surface(team, "pack catalog")
     from tortoise.pack_state import get_tenant_packs
     sdk = _make_sdk(namespace=team_id)
     try:
@@ -3690,6 +3906,10 @@ async def upload_pack_manifest(
     tenant selector exists on any surface).
     """
     await _check_sensitive_op_rate_limit(request, "pack_manifest")
+    _reject_graph_bound_team_surface(team, "pack catalog upload")
+    # C5 #2114 (re-review P1): the upload MERGEs :PackManifest/:PackInstall
+    # into the DEFAULT graph — REST twin of tortoise_pack_install (write).
+    _require_scope(team, "graphs:write", "pack manifest upload")
     team_id = team.get("team_id")
     if not team_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -5604,6 +5824,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
     for legacy no-harness hooks).
     """
+    _require_scope(team, "graphs:write", "capture_session")
     try:
         return await _capture_session_impl(body, request, team)
     except HTTPException as e:
@@ -5662,19 +5883,25 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     )
 
     # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
-    # not an enforced consent gate. The flag stays readable/settable as the
-    # dashboard's quiet off-switch: a team that disabled it gets a clear 409
-    # (state-conflict: recording policy off — NOT the old 403 consent error),
-    # capture stops (no Session write, no receipt), and the per-harness
-    # last-error surfaces the message on the dashboard row.
-    state = _get_onboarding_state(team["team_id"])
-    if not state.get("session_recording"):
-        raise HTTPException(
-            status_code=409,
-            detail="Session recording is disabled for this team. Enable it "
-                   "in the dashboard (Memory sources > Agent sessions) or via "
-                   "tortoise_onboarding_session_recording to capture sessions.",
-        )
+    # not an enforced consent gate. C6 #2115 (D-C6-3): the gate resolves
+    # PER-GRAPH — the key's graph override (D-C6-1 storage) beats the team
+    # default; NULL override inherits the team default (default-ON
+    # preserved — a per-graph NULL never flips a team ON). A disabled
+    # layer gets the same clear 409 (state-conflict: recording policy off —
+    # NOT the old 403 consent error), capture stops (no Session write, no
+    # receipt), and the per-harness last-error surfaces the message.
+    recording_ok, rec_layer = _session_recording_allowed(team)
+    if not recording_ok:
+        if rec_layer == "graph":
+            detail = ("Session recording is disabled for this graph. Enable "
+                      "it via PATCH /v1/graphs/{graph_id} (recording) or "
+                      "clear the override to inherit the team setting.")
+        else:
+            detail = ("Session recording is disabled for this team. Enable it "
+                      "in the dashboard (Memory sources > Agent sessions) or "
+                      "via tortoise_onboarding_session_recording to capture "
+                      "sessions.")
+        raise HTTPException(status_code=409, detail=detail)
 
     # #822: LLM extraction is the default (and only) capture extraction —
     # the regex loop was removed as a product path. No provider key →
@@ -5722,7 +5949,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # below skips extraction) and must never be 402-blocked by an as-if-fresh
     # estimate. The opt-out check above stays FIRST in the gate stack; the
     # sessions-limit gate below still counts Session nodes.
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
     now = datetime.now(UTC).isoformat()
@@ -5755,7 +5982,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if not session_existed:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_team_usage
-        sdk_team = _make_sdk(namespace=team["team_id"])
+        sdk_team = _data_sdk(team)
         try:
             count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
         except QuotaCheckError as e:
@@ -6408,6 +6635,11 @@ def _record_capture_last_error(team_id: str, harness: str | None,
     key = _capture_last_error_key(harness)
     if key is None:
         return
+    if detail is not None and not isinstance(detail, str):
+        # C5/C6 error details are {error_code, message} dicts (scope 403s,
+        # GRAPH_NOT_FOUND) — the dashboard sub-line is text; a Python repr
+        # would leak structure. Stringify to the message.
+        detail = str(detail.get("message") or detail)
     _update_onboarding_state(team_id, **{key: detail})
 
 
@@ -6467,6 +6699,9 @@ async def session_install_probe(body: InstallProbeRequest,
     (get_current_team) IS required: probes are per-team onboarding state.
     """
     now = datetime.now(UTC).isoformat()
+    # C5 #2114 (review P2): the probe writes onboarding state (registry/team
+    # node) — team-level surface; graph-bound keys rejected.
+    _reject_graph_bound_team_surface(team, "install probe")
     key = f"install_probe_{body.harness}"
     try:
         _update_onboarding_state(team["team_id"], **{key: now})
@@ -7011,7 +7246,8 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
             detail={"warnings": blocking, "code": "domain_rule_block"},
         )
 
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:write", "commit_session")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     store = CommitRecordStore(sdk)
 
@@ -7133,7 +7369,8 @@ async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):
     returns an empty list, never a 500 (a 500 also strips the CORS headers
     and surfaces as a misleading 'CORS blocked' to the browser).
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "list_sessions")
+    sdk = _data_sdk(team)
     try:
         rows = sdk._get_proj().g.query(
             "MATCH (s:Session) "
@@ -7173,7 +7410,8 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
     _session_user_team (?team_id= → non-member 403); keys are team-scoped.
     """
     import re
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "get_session_detail")
+    sdk = _data_sdk(team)
     try:
         proj = sdk._get_proj()
     except Exception:
@@ -7349,7 +7587,8 @@ async def delete_session(session_id: str, team: dict = Depends(get_current_team_
     failed before its reconcile) still reconciles the receipts, so a
     mid-delete outage self-heals on the retry.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:write", "delete_session")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     url = f"session:{session_id}"
 
@@ -8301,6 +8540,117 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
         return provisioned
 
 
+class GraphRecordingPatch(BaseModel):
+    """C6 #2115 — PATCH /v1/graphs body: the session_recording override.
+
+    True/False = explicit per-graph override; null = inherit the team
+    default (#1927 default-ON preserved — a per-graph NULL never flips a
+    team ON). Strings are rejected (no truthy coercion)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recording: bool | None
+
+    @field_validator("recording", mode="before")
+    @classmethod
+    def _strict_bool(cls, v):
+        # Pydantic v2 coerces 'yes'/'no'/'on' to bool — the override must be
+        # a REAL bool (or null = inherit). mode='before' sees the RAW input;
+        # reject anything that is not an actual bool. Rejections are 422s.
+        if v is not None and not isinstance(v, bool):
+            raise ValueError("recording must be true, false or null")
+        return v
+
+
+@app.patch("/v1/graphs/{graph_id}")
+async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
+                                team_id: str,
+                                key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
+    """C6 #2115 — set a graph's session_recording override (epic §6.3).
+
+    Auth: a key with the ``team:manage`` scope (or the legacy full-access
+    class — deleg NULL + scopes []), or an owner/admin session user (the
+    dual-auth dependency resolves BOTH faces like delete_graph). A MINTED
+    deleg=0 key never carries team:manage (C2/C3 child policy) → 403.
+    team:manage is a TEAM-WIDE management scope — a graph-bound key that
+    carries it (owner-minted) manages ANY graph in the team, mirroring the
+    session owner; per-graph keys never carry team:manage.
+
+    Body: ``{recording: true|false|null}`` — null removes the override
+    (inherit team default). The DEFAULT graph is settable too (recording is
+    per-graph, incl. graph 0 — registry kind='default' node / supabase
+    kind='default' row). Unknown graph → 404. Suspended team → 403 (the
+    shared dual-auth dependency enforces it).
+    """
+    if key_ctx.get("team_id") != team_id:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    # #1853: suspended teams locked down (parity with delete_graph's inline
+    # check — the dual-auth dependency also 403s, defense-in-depth).
+    _ensure_not_suspended(team)
+    # Auth: key with team:manage (or legacy full access) — else the caller
+    # is a session user whose membership role must be owner/admin.
+    # team:manage is a TEAM-WIDE management scope (graph-agnostic by design,
+    # review P2): an owner-minted key carrying it may manage ANY graph in
+    # the team (incl. graph 0); graph-bound keys never carry it (child
+    # policy ∩ _MINTABLE_SCOPES) and deleg=0 keys are rejected at the
+    # dependency.
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_team(
+            key_ctx.get("session_user_id") or "", team_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
+    # Resolve the graph (mode-branch kind read like delete_graph; the
+    # 'default' literal + real gids both resolve). The default graph is NOT
+    # deletable but IS patchable (§6.3) — only unknown graphs 404.
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import set_graph_recording as sb_set_rec
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        if graph_id == "default":
+            kind = "default"
+        else:
+            rows = cp.query(
+                "graphs", select=["kind"],
+                filters=[("id", "eq", graph_id), ("team_id", "eq", team_id),
+                         ("status", "eq", "active")],
+            )
+            kind = rows[0].get("kind") if rows else None
+        if kind is None:
+            raise HTTPException(status_code=404, detail="Unknown graph")
+        written = sb_set_rec(cp, team_id, graph_id, body.recording)
+    else:
+        # Registry: probe the node (id match OR kind='default' for the
+        # literal id) so unknown graphs 404 before any write.
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        if graph_id == "default":
+            found = any(r[1] == "default" and r[2] != "deleted" for r in rows)
+        else:
+            found = any(r[0] == graph_id and r[2] != "deleted" for r in rows)
+        if not found:
+            raise HTTPException(status_code=404, detail="Unknown graph")
+        written = sdk.graph_set_recording(team_id, graph_id, body.recording)
+    if not written:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    return {"graph_id": graph_id, "recording": body.recording}
+
+
 @app.delete("/v1/graphs/{graph_id}")
 async def delete_graph(graph_id: str, team_id: str,
                       key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
@@ -8441,6 +8791,10 @@ async def list_graphs(team_id: str, user: dict = Depends(get_current_user)):  # 
         out.append({
             "graph_id": g["graph_id"], "name": g["name"],
             "kind": g["kind"], "status": g.get("status", "active"),
+            # C6 #2115 (round-1 P2): recording read-back — the seam carries
+            # it in both lanes (registry node prop / supabase row); closes
+            # the write-only override gap (PATCH echoes, list confirms).
+            "recording": g.get("recording"),
             "key_count": key_count,
         })
     return out
@@ -12885,7 +13239,8 @@ async def session_context(team: dict = Depends(get_current_team_gated)):  # noqa
     Mirrors TortoiseSDK.session_context() so hosted users get the same
     injection payload as local users.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "session_context")
+    sdk = _data_sdk(team)
     try:
         return sdk.session_context()
     except Exception:
@@ -12905,7 +13260,8 @@ async def issue_insight(title: str, body: str | None = None,
     an unbounded parameter let callers amplify semantic-stage cost (#1196
     review c85) and out-of-range values 500'd instead of 422-ing.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "issue_insight")
+    sdk = _data_sdk(team)
     try:
         return sdk.issue_insight(title=title, body=body, repo=repo, limit=limit)
     except Exception:
@@ -13019,6 +13375,115 @@ def _get_onboarding_state(team_id: str) -> dict:
     return state
 
 
+def _graph_recording_override(team: dict) -> bool | None:
+    """C6 #2115 (D-C6-3): the session_recording override for the graph the
+    auth dict targets.
+
+    - graph-bound key (``graph_id`` set) → that graph's override (registry
+      Graph node recording prop / supabase graphs row). FAIL-CLOSED: a
+      vanished graph (graph_id set but no node/row) raises 403
+      GRAPH_NOT_FOUND — never demote a ghost key to the team default (the
+      C5 backups_create lesson; _data_sdk opens the same graph, so the
+      capture would fail downstream anyway).
+    - team-wide / session (``graph_id`` None) → the DEFAULT graph's
+      override (registry kind='default' node / supabase kind='default'
+      row — graph 0 is settable per §6.3).
+    - None = inherit the team default (#1927 default-ON preserved — a
+      per-graph NULL never flips a team ON).
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    team_id = team["team_id"]
+    gid = team.get("graph_id")  # None → the default graph
+    try:
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            if gid:
+                rows = cp.query(
+                    "graphs", select=["recording"],
+                    filters=[("id", "eq", gid), ("team_id", "eq", team_id),
+                             ("status", "eq", "active")],
+                )
+                if not rows:
+                    raise HTTPException(
+                        status_code=403,
+                        detail={"error_code": "GRAPH_NOT_FOUND",
+                                "message": "graph not found for key"})
+                return rows[0].get("recording")
+            rows = cp.query(
+                "graphs", select=["recording"],
+                filters=[("team_id", "eq", team_id), ("kind", "eq", "default"),
+                         ("status", "eq", "active")],
+            )
+            return rows[0].get("recording") if rows else None
+        sdk = _make_sdk(namespace="registry")
+        if gid:
+            rows = sdk._get_registry().query(
+                "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+                "WHERE coalesce(g.status, 'active') <> 'deleted' "
+                "RETURN g.recording",
+                params={"gid": gid, "tid": team_id},
+            ).result_set
+            if not rows:
+                # Active-node lookup missed — the node may be absent (vanish,
+                # 403) OR a tombstone (soft-deleted — also fail closed; a
+                # ghost key on a deleted graph must not capture).
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"})
+            return rows[0][0]
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {team_id:$tid, kind:'default'}) "
+            "WHERE coalesce(g.status, 'active') <> 'deleted' "
+            "RETURN g.recording",
+            params={"tid": team_id},
+        ).result_set
+        return rows[0][0] if rows else None
+    except HTTPException:
+        raise
+    except Exception:
+        # Drift-safe (round-1 P2): a graphs-table read failure (migration
+        # one behind — the graph_metadata/graph_count convention) or a
+        # registry hiccup must NEVER 500 every capture — degrade to
+        # inherit-team-default for this request. A graph-bound key on a
+        # genuinely vanished ACTIVE node still 403s above (row-absent, not
+        # query-failure).
+        return None
+
+
+def _session_recording_allowed(team: dict) -> tuple[bool, str]:
+    """C6 #2115 (D-C6-3): the EFFECTIVE session_recording for a capture.
+
+    Resolution order: the graph's override (D-C6-1 storage) → when None the
+    team default (onboarding_state.session_recording — the #1927 flag the
+    dashboard toggle + MCP tortoise_onboarding_session_recording write).
+    Returns (allowed, surface) where surface names the deciding layer for
+    the 409 message (``graph`` vs ``team``).
+    """
+    state = _get_onboarding_state(team["team_id"])
+    if not state.get("session_recording"):
+        # #1927 master kill (round-1 decision c2): the team-level OFF is
+        # the user's explicit opt-out — a per-graph override NEVER re-enables
+        # it (R9: opt-out never silently re-enabled). Overrides may only
+        # RESTRICT when the team is ON.
+        #
+        # Round-2b P3 (cause layering): a GRAPH-BOUND key on a dead graph
+        # still surfaces ITS OWN 403 (GRAPH_NOT_FOUND) even on an opted-out
+        # team — probe the override (which fails closed on vanish/tombstone)
+        # and ignore its value, so remediation points at the dead key, not
+        # the team toggle. Team-wide keys short-circuit (no extra read).
+        if team.get("graph_id"):
+            _graph_recording_override(team)
+        return False, "team"
+    override = _graph_recording_override(team)
+    if override is not None:
+        return bool(override), "graph"
+    return True, "team"
+
+
 def _onboarding_defaults() -> dict:
     """Fresh default-state dict (code-review P2): the list-typed keys
     (github_issues_scope / github_docs_scope) must NOT be shared across teams
@@ -13086,6 +13551,11 @@ def _maybe_apply_completion(team_id: str) -> bool:
             _os.write_status(proj, team_id, _os.STATUS_COMPLETE)
             try:  # created-signal invalidates the 60s MCP TTL cache (pin 18)
                 from tortoise import mcp_server as _mcp
+                # C5 #2114 (accepted residual, re-review P2): the cache pop
+                # only reaches THIS worker's in-process cache — a multi-worker
+                # deploy serves stale onboarding state from the other workers
+                # for up to the 60s TTL. Bounded + fail-open (state reads
+                # degrade to a fresh read, never a wrong authorization).
                 _mcp._onboarding_state_cache.pop(team_id, None)
             except Exception:
                 pass
@@ -13368,6 +13838,8 @@ async def get_onboarding_state(team: dict = Depends(get_current_team_session_ung
     renders without a fresh bootstrap mint. #1828 review P1: ungated — the
     #1148 dashboard-login gate stays scoped to the management set (this is
     an overview read)."""
+    # C5 #2114: onboarding state reads the DEFAULT graph — team-level surface.
+    _reject_graph_bound_team_surface(team, "onboarding")
     return {
         "onboarding": _get_onboarding_projection(team["team_id"]),
         "email": _team_email(team["team_id"]),
@@ -13382,6 +13854,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     #1828 review P3: same non-gated dual-auth as GET /v1/onboarding/state —
     the dashboard calls this with useSession: true (session-only users got
     401 under the old get_current_team key-only auth)."""
+    # C5 #2114: onboarding state lives on the DEFAULT graph + the registry
+    # Team node — a graph-bound key writing it would be a cross-graph write.
+    _reject_graph_bound_team_surface(team, "onboarding")
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     # #1727 (Task 11): translate underscore PATCH fields back to hyphenated
     # per-harness state keys (pydantic cannot carry hyphens; the allowlist
@@ -13542,6 +14017,10 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
       signal (#2001 exposes; #2006 emits events).
     - post-write fork-aware gate eval (monotonic; grandfathered no-op).
     """
+    # C5 #2114 (re-review P2): checkpoint writes onboarding FLOW state into
+    # the team's DEFAULT graph via _team_proj — a graph-bound key writing it
+    # would be a cross-graph write (team-level surface, like the siblings).
+    _reject_graph_bound_team_surface(team, "onboarding checkpoint")
     team_id = team["team_id"]
     # one operation per call
     present = [
@@ -13859,6 +14338,11 @@ async def onboarding_seed(body: OnboardingSeedRequest,
     Dual-auth (session JWT OR tt_ key) like the checkpoint; the team always
     comes from the auth context. """
     team_id = team["team_id"]
+    # C5 #2114: seed WRITES the two anchor Subjects into the DEFAULT graph
+    # (team-level onboarding state, main-side #2156) — write scope required
+    # + graph-bound keys rejected (cross-graph write prevention).
+    _require_scope(team, "graphs:write", "onboarding seed")
+    _reject_graph_bound_team_surface(team, "onboarding seed")
     # identity refs from the auth context (never client-supplied):
     # session_user_id is the JWT user UUID; created_by is a user UUID on
     # session-minted keys but the EMAIL on register-lane keys (legacy) — an
@@ -13897,6 +14381,10 @@ async def set_session_recording(body: dict, team: dict = Depends(get_current_tea
     was rewired by #1728 to PATCH /v1/onboarding/state (session JWT), while
     the MCP tool registry (tortoise_onboarding_session_recording) still
     drives this endpoint with a tt_ key; both must work."""
+    # C5 #2114 (review P2): the toggle writes onboarding state (registry/team
+    # node) — team-level surface; graph-bound keys rejected (cross-graph
+    # write prevention).
+    _reject_graph_bound_team_surface(team, "session recording toggle")
     enabled = body.get("enabled")
     if not isinstance(enabled, bool):
         raise HTTPException(status_code=400, detail="'enabled' must be a boolean")
@@ -14052,6 +14540,12 @@ async def public_demo(team: dict = Depends(get_current_team_gated)):  # noqa: B0
     Reuses the same seeding logic as /internal/demo but requires a Bearer
     tt_ key instead of the internal key. Idempotent (sentinel check).
     """
+    # C5 #2114 (code-review P1): the demo seed writes ~13 Points into the
+    # team's DEFAULT graph — a graph-bound key seeding it would be a
+    # cross-graph write; a graphs:read-only key seeding it would be a
+    # read→write scope bypass. Demo is a default-graph team surface.
+    _reject_graph_bound_team_surface(team, "demo seed")
+    _require_scope(team, "graphs:write", "demo seed")
     sdk = _make_sdk(namespace=team["team_id"])
     proj = sdk._get_proj()
     existing = proj.g.query(
@@ -15097,6 +15591,12 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
     for a freshly-minted job — concurrent POSTs can never run two walks
     (duplicate statement ids, version inflation, job-status races).
     """
+    # C5 #2114 (re-review P1): indexing WRITES entities/events/sources into
+    # the team's DEFAULT graph via a background job (invisible to the
+    # endpoint-body _make_sdk inventory). Write scope required + graph-bound
+    # keys rejected (cross-graph write prevention).
+    _require_scope(team, "graphs:write", "github index")
+    _reject_graph_bound_team_surface(team, "github index")
     org = (body.org or "").strip()
     if not org:
         raise HTTPException(status_code=400, detail="org is required")
@@ -15119,6 +15619,8 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
                          team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Re-run the GitHub diff (diff-on-poll, amend 6) for the connected org.
 
+    C5 #2114 (re-review P1): reindex WRITES into the DEFAULT graph.
+    _require_scope + graph-bound rejection (see index_github).
     The ONLY route shape (T1-P2) — no query-param alternative. Reuses the
     persisted per-repo composite cursors, so a re-poll is an incremental
     diff, not a re-ingest. Declared BEFORE /v1/index/github/{job_id} so the
@@ -15130,6 +15632,10 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
     is the legacy single-repo field (equivalent to ``repos=[repo]``). org is
     still read from the stored credentials, never the client.
     """
+    # C5 #2114 (re-review P1): reindex WRITES into the DEFAULT graph — write
+    # scope + graph-bound rejection (see index_github).
+    _require_scope(team, "graphs:write", "github reindex")
+    _reject_graph_bound_team_surface(team, "github reindex")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
@@ -15451,6 +15957,8 @@ async def index_docs(body: DocsIndexRequest | None = None,
     documents-gated (derived-constant cap) and fail-closed when the ingest
     sandbox is unset.
 
+    C5 #2114 (re-review P1): the docs job WRITES into the DEFAULT graph —
+    write scope + graph-bound rejection (see index_github).
     #1845: ``repos`` is the multi-repo scope (list of {repo, branch}); the
     legacy single ``repo``/``branch`` fields are equivalent to a one-item
     scope. Empty/absent = ALL repos (org-wide, default branch). Review
@@ -15461,6 +15969,10 @@ async def index_docs(body: DocsIndexRequest | None = None,
     org, so this is non-breaking); a mismatched/absent body.org falls back
     to the stored org.
     """
+    # C5 #2114 (re-review P1): the docs job WRITES into the DEFAULT graph —
+    # write scope + graph-bound rejection.
+    _require_scope(team, "graphs:write", "docs index")
+    _reject_graph_bound_team_surface(team, "docs index")
     # Verify GitHub connected first (seam-aware read) + resolve the REAL
     # org server-side (review P2-3: the client must not pick the org — a
     # malicious org would index any accessible repo into this team's
@@ -15661,6 +16173,13 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
+    # C5 #2114: a backup is a full-graph read (least-privilege parity with
+    # read access — the key can already read every node) → graphs:read.
+    # Accepted residual (code-review P2): a read-only key can generate
+    # repeated dump artifacts (storage amplification) — data-exposure parity
+    # is sound (read == full visibility); a per-key backup rate limit or
+    # graphs:write requirement is a follow-up if storage cost matters.
+    _require_scope(team, "graphs:read", "backups_create")
     sdk = None
     registry_sdk = None
     try:
@@ -15684,7 +16203,22 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
         # registry mode is the deterministic team_{id}. Fail-closed: a
         # resolution error 503s rather than backing up a wrong/nonexistent graph.
         from tortoise.backup_sweep import team_graph_name
-        graph_name = team_graph_name(cp_source, team_id)
+        # C5 #2114: a graph-bound key backs up ITS OWN graph (graph_namespace
+        # is the resolved FULL name — custom team_{tid}_{gid} or the default);
+        # team-wide keys/session back up the team default (today's path).
+        # FAIL-CLOSED (final-gate P1): a graph-bound key whose graph is GONE
+        # resolves graph_namespace=None — the `or` fallback would widen a
+        # ghost key onto the team DEFAULT graph (cross-graph read dump).
+        # Mirror _data_sdk: vanish → 403, never a demotion.
+        if team.get("graph_id"):
+            graph_name = team.get("graph_namespace")
+            if not graph_name:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"})
+        else:
+            graph_name = team_graph_name(cp_source, team_id)
         # #924 review P1: create_backup dumps proj.g — the SDK bound to
         # namespace=team_id resolves team_{team_id}, NOT the resolved graph.
         # For a team_{name} team the dump would be the EMPTY phantom graph
@@ -15723,6 +16257,11 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
             await asyncio.to_thread(prune_backups, storage, team_id)
         except Exception as e:
             _logger.warning("prune failed for team %s: %s", team_id, e)
+    except HTTPException:
+        # C5 #2114 (final-gate P1): the fail-closed GRAPH_NOT_FOUND 403 for
+        # a vanished graph-bound key must surface as 403, not be swallowed
+        # by the generic arm into a 500 (the file's established pattern).
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")  # noqa: B904
     except RuntimeError as e:
@@ -15752,6 +16291,13 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
+    # C5 #2114: restore is a DESTRUCTIVE team-default-graph operation (the
+    # #1148 management set) — a graph-bound key must never restore over the
+    # team default (cross-graph write). Team-wide keys + session auth pass.
+    _reject_graph_bound_team_surface(team, "backup restore")
+    # C5 #2114 (re-review P2): restore REPLACES the live graph — a
+    # deleg-NULL team-wide graphs:read-only key must never trigger it.
+    _require_scope(team, "graphs:write", "backup restore")
     if not body.confirm:
         raise HTTPException(
             status_code=400, detail="confirm=true required — restore replaces the live graph"

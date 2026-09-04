@@ -52,6 +52,9 @@ TEST_TEAM_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace �
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
+    # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
+    # data-plane gates otherwise (mirrors the #2241 migration pattern).
+    "legacy_full_access": True,
     "tier": "free",
     # get_current_team always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).

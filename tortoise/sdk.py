@@ -1110,7 +1110,8 @@ class TortoiseSDK:
     """
 
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
-                 event_log_path: str | None = None):
+                 event_log_path: str | None = None,
+                 graph_name: str | None = None):
         import os, re  # noqa: E401, I001
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
@@ -1145,6 +1146,22 @@ class TortoiseSDK:
                     "Use alphanumeric, hyphens, underscores; max 64 chars."
                 )
         self._namespace = namespace
+        # C5 #2114 (D-C5-1): explicit FULL graph-name override — the data-plane
+        # tenancy seam. Custom graphs (team_{tid}_{gid}) cannot be expressed
+        # through ``namespace`` (the _get_proj derivation would prepend
+        # ``team_`` → ``team_team_{tid}_{gid}``). When set, _get_proj binds the
+        # projection to ``graph_name`` VERBATIM (default-graph callers never
+        # pass it — they keep the namespace derivation, byte-identical).
+        # Charset mirrors the namespace rule (+128 len for team_{tid}_{gid});
+        # mutually exclusive with ``namespace`` by construction (the spine
+        # passes exactly one).
+        if graph_name is not None and not re.match(
+                r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$', graph_name):
+            raise ValueError(
+                f"Invalid graph_name {graph_name!r}. "
+                "Use alphanumeric, hyphens, underscores; max 128 chars."
+            )
+        self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
@@ -1261,6 +1278,11 @@ class TortoiseSDK:
             if self._namespace == "registry":
                 # Control-plane SDK: shared registry main graph.
                 graph_name = "registry_tortoise"
+            elif self._graph_name is not None:
+                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+                # team_{tid}_{gid} graph). Never a namespace derivation — the
+                # name is used verbatim.
+                graph_name = self._graph_name
             elif self._namespace:
                 if self._namespace.startswith(("test_", "tortoise_test")):
                     # Test namespace: isolate on a test-prefixed graph so the
@@ -12357,6 +12379,42 @@ class TortoiseSDK:
         )
         return True
 
+    def graph_set_recording(self, team_id: str, graph_id: str,
+                            value: bool | None) -> bool:
+        """C6 #2115: set the session_recording override on a Graph node.
+
+        ``value`` True/False = explicit override; None = remove the override
+        (FalkorDB SET null removes the prop → inherit team default, #1927
+        default-ON preserved). Resolves the literal ``default`` id to the
+        team's kind='default' node (the default graph IS graph 0 — settable
+        per epic §6.3); real gids match directly. Returns True when the node
+        was found (override written/cleared), False on unknown graph —
+        callers map to 404."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        # The literal ``default`` id maps to the team's kind='default' node
+        # (mode-agnostic callers use either); any other id must match a real
+        # node exactly. Soft-deleted nodes (status='deleted') are NOT
+        # patchable — treat as unknown (mirror list_graphs' tombstone skip).
+        if graph_id == "default":
+            node = next((r[0] for r in rows
+                         if r[1] == "default" and r[2] != "deleted"), None)
+        elif any(r[0] == graph_id and r[2] != "deleted" for r in rows):
+            node = graph_id
+        else:
+            node = None
+        if node is None:
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.recording = $v",
+            params={"gid": node, "tid": team_id, "v": value},
+        )
+        return True
+
     def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
         """APIKey node ids bound to a graph — the delete-cascade source
         (every key dies with the graph, E2E-8). Revoked or not — the
@@ -12838,9 +12896,18 @@ class TortoiseSDK:
         ]
         if matches:
             m = matches[0]
+            delegation_depth = m.get("delegation_depth")
+            scopes = m.get("scopes") or []
+            # C5 #2114 (parity): REST's registry-lane resolution derives the
+            # D2 owner class (deleg NULL + scopes [] → legacy_full_access)
+            # at hosted_api.py:1560 — apikey_verify is the MCP registry lane
+            # and MUST carry the same field or the C5 scope gate 403s every
+            # tt_/legacy owner key on the selfhost MCP surface.
             return {"team_id": m["team_id"], "key_id": m["id"],
-                    "delegation_depth": m.get("delegation_depth"),
-                    "scopes": m.get("scopes") or []}
+                    "delegation_depth": delegation_depth,
+                    "scopes": scopes,
+                    "legacy_full_access": (delegation_depth is None)
+                    and (scopes == [])}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────
