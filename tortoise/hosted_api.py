@@ -5188,7 +5188,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     api_keys.revoked_at via the seam — api_keys.revoked_at is the
     authoritative revocation source (P1-2), so a revoked key 401s on both
     REST and MCP. The registry path (per #7873, on _get_registry()) stays
-    for selfhost."""
+    for selfhost.
+    #2230: a ?team_id= pin is honored by the SESSION lane automatically —
+    get_current_team_session → _session_user_team resolves the pinned
+    (membership-checked) team, so revoke targets the SELECTED team for
+    multi-membership callers; the key-auth/registry lanes resolve the team
+    from the key itself and ignore the query (byte-compatible by design)."""
     from tortoise.supabase_control import (
         api_key_by_id,
         get_control_plane,
@@ -5328,7 +5333,14 @@ async def toggle_api_key_enabled(
     """#1148: enable/disable an API key (per-key toggle) and/or rename it
     (20260825000001, optional user-facing label). Disabled keys stop
     authenticating (resolve_api_key rejects enabled=false) but stay listed —
-    re-enable anytime. Session-authed + owner/admin-only. Team-scoped."""
+    re-enable anytime. Session-authed + owner/admin-only. Team-scoped.
+
+    #2230: the supabase lane honors a ?team_id= pin in session mode — the
+    key must belong to the pinned (membership-checked) team or the call
+    fails closed with 403 "Not your API key", exactly like DELETE's team
+    mismatch. No pin → the key's intrinsic team governs (backwards
+    compatible). The registry/selfhost lane below is deliberately
+    unchanged (keys are team-scoped by the key there)."""
     from tortoise.supabase_control import (
         api_key_by_id,
         get_control_plane,
@@ -5343,12 +5355,39 @@ async def toggle_api_key_enabled(
     from tortoise.supabase_control import (
         set_api_key_scopes as _sb_set_scopes,
     )
+    from tortoise.supabase_control import user_memberships as _sb_user_memberships
     if is_supabase_enabled():
         cp = get_control_plane()
         row = api_key_by_id(cp, key_id)
         if row is None:
             raise HTTPException(status_code=404, detail="API key not found")
         team_id = row.get("team_id")
+        # #2230: honor the ?team_id= pin (session mode) exactly like the
+        # DELETE handler's session resolution — the dashboard's key table is
+        # scoped to the SELECTED team, so a multi-membership caller acting in
+        # team B's context must never mutate team A's key (pre-#2230 the pin
+        # was silently ignored: a wrong-team key_id succeeded whenever the
+        # user owned both teams). Membership-check the pinned team first
+        # (mirrors _session_user_team — same 403 as the mint/list pins, no
+        # existence oracle), then fail closed on a key that is not in the
+        # pinned team with the SAME 403 DELETE raises on team mismatch. No
+        # pin → the key's intrinsic team governs (fully backwards
+        # compatible). Registry lane below is untouched (selfhost keys are
+        # team-scoped by the key itself).
+        pinned = request.query_params.get("team_id")
+        # Truthy check (mirrors _session_user_team's falsy fallback): an
+        # empty/blank ?team_id= is "no pin" — the key's intrinsic team
+        # governs, byte-compatible with the DELETE/mint lanes. A real pin
+        # fails closed exactly like DELETE's session team-mismatch.
+        if pinned:
+            if pinned not in {m["team_id"]
+                              for m in _sb_user_memberships(cp,
+                                                            user["user_id"])}:
+                raise HTTPException(status_code=403,
+                                    detail="No membership in team")
+            if pinned != team_id:
+                raise HTTPException(status_code=403,
+                                    detail="Not your API key")
         await _require_owner_admin(user["user_id"], team_id)
         if row.get("revoked_at") is not None:
             raise HTTPException(status_code=409, detail="Cannot modify a revoked key")

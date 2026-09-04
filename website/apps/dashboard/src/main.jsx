@@ -4199,7 +4199,14 @@ function claimIntentInFlight() {
     const next = !currentEnabled
     setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: next } : k))
     try {
-      const updated = await api(`/v1/team/keys/${keyId}`, {
+      // #2230: session-mode key-management PATCH pins the SELECTED team —
+      // the server PATCH honors ?team_id= membership-checked (fail-closed on
+      // a key outside the pinned team), so a multi-membership user on a
+      // non-first team toggles the key their table shows, never the default
+      // membership's (mirrors #2167 rule-4 create-side pin). Key-mode (no
+      // session JWT) stays unpinned — the key header authenticates there.
+      const q = (sessionTokenRef.current && currentTeamId) ? `?team_id=${encodeURIComponent(currentTeamId)}` : ''
+      const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
@@ -4234,7 +4241,12 @@ function claimIntentInFlight() {
     const prevName = cur.name || null
     setKeys((ks) => ks.map((k) => k.id === keyId ? { ...k, name: next } : k))
     try {
-      const updated = await api(`/v1/team/keys/${keyId}`, {
+      // #2230: pin the SELECTED team on the rename PATCH (session mode) —
+      // the URL is built from the at-call team so a mid-flight switch can
+      // never target the new team's key nor the default membership's (the
+      // post-await staleness guard below then drops the stale response).
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
@@ -4266,7 +4278,14 @@ function claimIntentInFlight() {
       // surviving the refetch.
       const revokedRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
       const revokedKeyPrefix = revokedRow ? revokedRow.key_prefix : null
-      await api(`/v1/team/keys/${keyId}`, { method: 'DELETE', useSession: true })
+      // #2230: pin the SELECTED team on the revoke DELETE (session mode) —
+      // the server resolves the session team from memberships[0] without
+      // it, so a multi-membership user whose selected team ≠ first
+      // membership got 403 "Not your API key" revoking their own key
+      // (mirrors #2167 rule-4 create-side pin; the session lane honors it
+      // membership-checked). Key-mode (no session JWT) stays unpinned.
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
+      await api(`/v1/team/keys/${keyId}${q}`, { method: 'DELETE', useSession: true })
       // Round-20: bail after the DELETE — a switch already reloaded the new
       // team's state; skip the stale clear + loadAll entirely.
       if (teamIdRef.current !== _teamAtCall) return
