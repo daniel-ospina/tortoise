@@ -84,10 +84,6 @@ def load_gold(session_id: str, root: Path = WRITE_PATH_DIR) -> dict:
     return schema.read_json(gold_path(session_id, root))
 
 
-def load_baseline(root: Path = WRITE_PATH_DIR) -> dict:
-    return schema.read_json(root / "baselines" / "main.json")
-
-
 def compute_fixtures_hash(root: Path = WRITE_PATH_DIR) -> str:
     """sha256 over every fixture + gold file (``sha256:<hex>`` of the joined digest).
 
@@ -181,6 +177,8 @@ def baseline_path(root: Path = WRITE_PATH_DIR, *, posture: str = "llm") -> Path:
     return root / "baselines" / ("m2.json" if posture == "m2" else "main.json")
 
 
+# #2174-lint F811: the single live load_baseline (posture-aware). The old
+# main.json-only def was superseded when baseline_path() gained posture.
 def load_baseline(root: Path = WRITE_PATH_DIR, *, posture: str = "llm") -> dict:
     return schema.read_json(baseline_path(root, posture=posture))
 

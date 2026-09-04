@@ -34,6 +34,7 @@ Assertions cover the can-fail gate properties the issue owns:
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import tempfile
@@ -84,19 +85,13 @@ def sdk_factory(monkeypatch):
 
     yield _make
     for sdk, _dir in created:
-        try:
+        with contextlib.suppress(Exception):  # #2174-lint SIM105
             sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with contextlib.suppress(Exception):  # #2174-lint SIM105
             sdk.close()
-        except Exception:  # noqa: BLE001
-            pass
     for _sdk, _dir in created:
-        try:
+        with contextlib.suppress(Exception):  # #2174-lint SIM105
             shutil.rmtree(_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _tmp_corpus(tmp_path: Path) -> Path:
