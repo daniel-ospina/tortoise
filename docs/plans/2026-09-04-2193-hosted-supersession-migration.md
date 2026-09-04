@@ -168,3 +168,6 @@
 5. E5 + full endpoint + capture/eval/projection suites green; commit_ops.py logic byte-unchanged (I6).
 6. Sweep clean (REQ).
 7. Delta statement in PR (REQ).
+
+---
+<!-- plan-review: status=clean -->
