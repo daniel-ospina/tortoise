@@ -47,6 +47,13 @@ TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
     "tier": "free",
+    # C1/C2 tenancy fields (the resolution dict a tt_ legacy key would
+    # produce: deleg NULL, scopes [] → legacy_full_access owner class).
+    "graph_id": None,
+    "scopes": [],
+    "legacy_full_access": True,
+    "delegation_depth": None,
+    "created_by_key_id": None,
     # get_current_team always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).
     "max_users": 1,
@@ -1828,6 +1835,16 @@ def internal_client():
 
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
         _orig_init = _patch_tortoise_sdk_init(db_path)
+        # C3 (#2112): seed the Team node the auth override bypasses — the
+        # registry mint path (sdk.apikey_create) validates the team exists
+        # (mirror of the client fixture's seed; production teams always
+        # exist — the override skips the resolution that would have found
+        # them).
+        import tortoise.hosted_api as ha_mod2
+        ha_mod2._make_sdk(namespace="registry")._get_registry().query(
+            "CREATE (t:Team {id:$id})",
+            params={"id": TEST_TEAM_ID},
+        )
 
         try:
             with TestClient(app) as tc:
@@ -4727,3 +4744,610 @@ class TestProvisioningConcurrency:
             assert sdk.graph_count(tid) <= 2
         finally:
             gen.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# C3 (#2112): key lifecycle — scoped mint (D13), list enrichment, shrink-only
+# PATCH, deleg=0 dormancy on management (E2E-4 half / E2E-9 / E2E-12)
+
+class TestC3KeyLifecycle:
+    """C3 (#2112) key lifecycle (registry lane). E2E-9 scoped-key matrix,
+    E2E-12 shrink surfaces, E2E-4 minted-key-cannot-manage half. Session
+    mints ride the client fixture's auth override (session_user_id None →
+    created_by "api"); key-driven mints pop the override and authenticate
+    with the real minted token (registry resolve)."""
+
+    def _setup(self, tmp_path, max_api_keys: int = 20):
+        import tortoise.hosted_api as ha_mod
+        db_path = os.path.join(tmp_path, "test.db")
+        _orig = _patch_tortoise_sdk_init(db_path)
+        os.environ["TORTOISE_DB_PATH"] = db_path
+        sdk = ha_mod._make_sdk(namespace="registry")
+        tid = f"team-c3-{abs(hash(tmp_path.name)) % 100000}"
+        _seed_team_graphs(sdk, tid, "pro", None, max_api_keys=max_api_keys)
+        try:
+            with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+                yield sdk, tid, tc
+        finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_tortoise_sdk_init(_orig)
+            # C3 hygiene: this class bypasses the module client fixture, so
+            # nothing else clears dependency_overrides — a leaked
+            # get_current_user/get_current_team override would bleed into the
+            # NEXT test file in the same pytest process (dashboard_login's
+            # Supabase-mode owner check 403s on the stale user).
+            app.dependency_overrides.clear()
+
+    def _session_mint(self, tc, tid, body):
+        """Session-face mint: the client fixture override supplies the team
+        dict with key_id REMOVED (a session JWT face — key_id None →
+        owner-class session mint; TEST_TEAM carries a key_id by default)."""
+        team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
+        team_dict.pop("key_id", None)
+        team_dict.pop("delegation_depth", None)
+        app.dependency_overrides[get_current_team] = lambda: team_dict
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": _U1, "tid": tid},
+        )
+        return tc.post("/v1/team/keys", json=body)
+
+    def test_session_mint_scoped_owner_key_201(self, tmp_path):
+        """E2E-9 setup: an owner-session mint carries scopes incl. escalation
+        (deleg NULL — owner class), tk_ prefix, and the envelope echoes the
+        scope state + reveal-once plaintext."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {
+                "name": "devops",
+                "scopes": ["graphs:create", "graphs:delete",
+                           "team:manage", "keys:manage"],
+            })
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert sorted(body["scopes"]) == sorted(
+                ["graphs:create", "graphs:delete", "team:manage", "keys:manage"])
+            assert body["delegation_depth"] is None  # owner class
+            assert body["graph_id"] is None  # team-wide
+            # Minted once, hash-only stored (verify against the stored hash).
+            rows_h = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.key_hash",
+                params={"id": body["id"]},
+            ).result_set
+            from tortoise.auth import verify_api_key
+            assert verify_api_key(body["key"], rows_h[0][0]) is True
+            # Registry node carries the scopes + owner delegation.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes, k.delegation_depth",
+                params={"id": body["id"]},
+            ).result_set
+            assert sorted(rows[0][0]) == sorted(
+                ["graphs:create", "graphs:delete", "team:manage", "keys:manage"])
+            assert rows[0][1] is None
+        finally:
+            gen.close()
+
+    def test_scoped_key_mint_deleg0_child(self, tmp_path):
+        """E2E-9/J7: a keys:manage-scoped owner key mints a deleg=0 child —
+        scopes ∩ child policy (no escalation), created_by_key_id = caller,
+        tk_ prefix."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # Owner key WITH keys:manage (mint capability).
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)  # real key auth
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {owner}"},
+                        json={"scopes": ["graphs:read", "graphs:write"]})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] == 0  # child
+            assert sorted(body["scopes"]) == ["graphs:read", "graphs:write"]
+            # created_by_key_id lineage recorded on the node.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by_key_id, "
+                "k.delegation_depth",
+                params={"id": body["id"]},
+            ).result_set
+            assert rows[0][0] is not None  # caller key id
+            assert rows[0][1] == 0
+        finally:
+            gen.close()
+
+    def test_escalation_request_from_key_403(self, tmp_path):
+        """E2E-4/E2E-9: a key-minted path requesting escalation scopes → 403
+        (never silently stripped — §6.3)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {owner}"},
+                        json={"scopes": ["graphs:read", "keys:manage"]})
+            assert r.status_code == 403, r.text
+            assert "escalation" in r.text.lower()
+        finally:
+            gen.close()
+
+    def test_key_without_keys_manage_cannot_mint_403(self, tmp_path):
+        """J2: a scoped deleg-NULL key WITHOUT keys:manage may not mint."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {reader}"},
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+        finally:
+            gen.close()
+
+    def test_unknown_scope_422_and_unknown_graph_404(self, tmp_path):
+        """422 on an off-allowlist scope; 404 on a graph-bound mint to an
+        unknown graph OR the literal "default" (the default graph is bound
+        by a team-wide key — graph_id absent — never a per-graph mint; the
+        supabase "default" id is a DERIVED row with no graphs-table row, so
+        an api_keys FK to it would 500)."""
+        gen = self._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {"scopes": ["graphs:explode"]})
+            assert r.status_code == 422, r.text
+            r = self._session_mint(tc, tid, {
+                "graph_id": "g_no_such_graph", "scopes": ["graphs:read"],
+            })
+            assert r.status_code == 404, r.text
+            # Literal "default" is not key-bindable (custom-only).
+            r = self._session_mint(tc, tid, {
+                "graph_id": "default", "scopes": ["graphs:read"],
+            })
+            assert r.status_code == 404, r.text
+        finally:
+            gen.close()
+
+    def test_graph_bound_empty_scopes_422(self, tmp_path):
+        """SECOND-MODEL-GATE S2 pin: a graph-bound mint with an EXPLICIT
+        empty scopes array would mint a deleg-NULL scopes=[] key that
+        resolution derives legacy_full_access=True (FULL access) while the
+        response echoes scopes:[] — the F2 footgun on the mint path. 422."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            g = sdk._graph_create(tid, "acme", kind="custom")
+            r = self._session_mint(tc, tid, {
+                "graph_id": g["graph_id"], "scopes": [],
+            })
+            assert r.status_code == 422, r.text
+            assert "at least one scope" in r.text
+        finally:
+            gen.close()
+
+    def test_legacy_body_mint_unchanged_tt(self, tmp_path):
+        """D15/R2: a {} body still mints the byte-identical legacy tt_ key —
+        the C3 fields are ABSENT because create_api_key conditionally adds
+        them only when scoped_request or child_mint (not via a response
+        model)."""
+        gen = self._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint(tc, tid, {})
+            assert r.status_code == 200, r.text
+            assert r.json()["key"].startswith("tt_")
+            assert "scopes" not in r.json()
+            assert "delegation_depth" not in r.json()
+            assert "graph_id" not in r.json()
+            assert "name" in r.json()  # pre-C3 field kept (None when unset)
+        finally:
+            gen.close()
+
+    def test_list_enriches_and_filters_by_graph(self, tmp_path):
+        """E2E-12: list rows carry the C1 tenancy columns; ?graph_id= narrows."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            # Custom graph + two keys (one bound to it).
+            g = sdk._graph_create(tid, "acme", kind="custom")
+            gid = g["graph_id"]
+            app.dependency_overrides[get_current_team] = \
+                lambda: dict(TEST_TEAM, team_id=tid, session_user_id=_U1, key_id=None)
+            r1 = tc.post("/v1/team/keys", json={"scopes": ["graphs:read"]})
+            assert r1.status_code == 200, r1.text
+            kid_teamwide = r1.json()["id"]
+            r2 = tc.post("/v1/team/keys",
+                         json={"graph_id": gid, "scopes": ["graphs:read"]})
+            assert r2.status_code == 200, r2.text
+            kid_graphbound = r2.json()["id"]
+            listed = tc.get("/v1/team/keys").json()["keys"]
+            by_id = {k["id"]: k for k in listed}
+            assert by_id[kid_teamwide]["graph_id"] is None
+            assert by_id[kid_graphbound]["graph_id"] == gid
+            assert by_id[kid_teamwide]["scopes"] == ["graphs:read"]
+            assert "delegation_depth" in by_id[kid_teamwide]
+            assert "created_by_key_id" in by_id[kid_teamwide]
+            # graph_id filter narrows to the bound key only.
+            filtered = tc.get("/v1/team/keys",
+                              params={"graph_id": gid}).json()["keys"]
+            assert [k["id"] for k in filtered] == [kid_graphbound]
+        finally:
+            gen.close()
+
+    def test_shrink_scopes_and_expand_422(self, tmp_path):
+        """E2E-12: PATCH {scopes} shrinks (write → read subset reflected in
+        the row); an expand-attempt → 422 (revoke+recreate semantics)."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides[get_current_team] = \
+                lambda: dict(TEST_TEAM, team_id=tid, session_user_id=_U1, key_id=None)
+            import tortoise.hosted_api as ha_mod
+            ha_mod._make_sdk(namespace="registry")._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            app.dependency_overrides[get_current_user] = \
+                lambda: {"user_id": _U1, "email": "owner@example.com"}
+            r = tc.post("/v1/team/keys", json={
+                "scopes": ["graphs:read", "graphs:write"]})
+            kid = r.json()["id"]
+            # Shrink: read+write → read.
+            r = tc.patch(f"/v1/team/keys/{kid}", json={"scopes": ["graphs:read"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["scopes"] == ["graphs:read"]
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes",
+                params={"id": kid},
+            ).result_set
+            assert rows[0][0] == ["graphs:read"]
+            # Expand attempt → 422.
+            r = tc.patch(f"/v1/team/keys/{kid}",
+                         json={"scopes": ["graphs:read", "graphs:write"]})
+            assert r.status_code == 422, r.text
+            # Unknown scope in a shrink → 422.
+            r = tc.patch(f"/v1/team/keys/{kid}", json={"scopes": ["team:manage"]})
+            assert r.status_code == 422, r.text
+        finally:
+            gen.close()
+
+    def test_minted_deleg0_key_cannot_manage_403(self, tmp_path):
+        """E2E-4 half: a deleg=0 child key hitting mint/revoke → 403 (the
+        central deleg gate in get_current_team_session fires first). Shrink
+        is session-gated (E2E-12 surface — get_current_user dep), so a key
+        face 401s there rather than reaching the deleg gate; E2E-4's
+        management set is create/delete/mint/revoke — shrink is not in it."""
+        gen = self._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            owner = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"],
+            )["api_key"]
+            app.dependency_overrides.pop(get_current_team, None)
+            child = tc.post("/v1/team/keys",
+                            headers={"Authorization": f"Bearer {owner}"},
+                            json={"scopes": ["graphs:read"]}).json()["key"]
+            # Child mint → 403 (deleg gate).
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {child}"},
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 403, r.text
+            # Child revoke → 403.
+            other = sdk.apikey_create(tid, "owner-test")["api_key"]
+            r = tc.delete(f"/v1/team/keys/{other}",
+                          headers={"Authorization": f"Bearer {child}"})
+            assert r.status_code == 403, r.text
+        finally:
+            gen.close()
+
+
+class TestC3KeyCapAndEscalationBackstop:
+    """C3 (#2112): max_api_keys 409 on the scoped mint (D3 asymmetry — the
+    legacy {} owner mint keeps its historical 402), plus the registry SDK
+    escalation backstop (mirror of the Supabase DB CHECK)."""
+
+    def test_scoped_mint_at_cap_409_legacy_402(self, tmp_path):
+        """D3 pin: a SCOPED mint at max_api_keys → 409; the legacy {} owner
+        mint → 402 (its historical _check_team_limit semantic)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path, max_api_keys=1)
+        sdk, tid, tc = next(gen)
+        try:
+            # One key already exists (fills the cap of 1).
+            sdk.apikey_create(tid, "owner-test")
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
+            team_dict.pop("key_id", None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            # Scoped mint → 409 (the _KeyCapExceeded semantic).
+            r = tc.post("/v1/team/keys",
+                        json={"scopes": ["graphs:read"]})
+            assert r.status_code == 409, r.text
+            # Legacy {} mint → 402 (historical 402 semantic preserved).
+            r = tc.post("/v1/team/keys", json={})
+            assert r.status_code == 402, r.text
+        finally:
+            gen.close()
+
+    def test_registry_apikey_create_escalation_backstop(self, tmp_path):
+        """C2 #2b registry backstop: apikey_create(deleg=0 + escalation
+        scope) raises ControlPlaneError — selfhost parity with the Supabase
+        DB CHECK chk_minted_key_no_escalation."""
+        from tortoise.exceptions import ControlPlaneError
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, _tc = next(gen)
+        try:
+            with pytest.raises(ControlPlaneError, match="escalation"):
+                sdk.apikey_create(tid, "owner-test",
+                                  delegation_depth=0,
+                                  scopes=["graphs:read", "keys:manage"])
+            # deleg NULL + escalation scopes is the OWNER class — allowed.
+            ok = sdk.apikey_create(tid, "owner-test", scopes=["keys:manage"])
+            assert ok["api_key"].startswith("tt_")
+        finally:
+            gen.close()
+
+    def test_scoped_key_legacy_body_mint_403_or_deleg0(self, tmp_path):
+        """D13 row-3/4 P1 regression (VGATE #2112): a deleg-NULL SCOPED key
+        cannot mint a full-access owner key via the legacy {} body. Without
+        keys:manage → 403 (row 4). WITH keys:manage → a deleg=0 child with
+        lineage (created_by_key_id + deleg=0) and the child-policy default
+        scope — never an escalation to the owner class."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            # Reader key (graphs:read only) → {} mint 403 (no mint capability).
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])["api_key"]
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {reader}"},
+                        json={})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+            # keys:manage key → {} mint yields a deleg=0 child, NOT a
+            # full-access owner key.
+            mgr = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage", "graphs:read"])
+            mgr_id = mgr["id"]
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {mgr['api_key']}"},
+                        json={})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] == 0
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.created_by_key_id, "
+                "k.delegation_depth, k.scopes",
+                params={"id": body["id"]},
+            ).result_set
+            assert rows[0][0] == mgr_id  # lineage stamped
+            assert rows[0][1] == 0
+            assert rows[0][2] == ["graphs:read"]  # child-policy default
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_legacy_mint_ok(self, tmp_path):
+        """D13 row 2 back-compat: a legacy full-access key (deleg NULL,
+        scopes=[]) is the owner class — its legacy {} mint still mints a
+        full-access owner key (E2E-5)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            legacy = sdk.apikey_create(tid, "owner-test")  # {} default = legacy
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tt_")  # byte-identical legacy
+            assert "delegation_depth" not in body  # owner class, no C3 fields
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_scoped_mint_owner_deleg_null(self, tmp_path):
+        """D13 row 2 scoped-body cell (VGATE F1 pin): a legacy full-access
+        key minting a SCOPED body gets the OWNER-class deleg-NULL mint with
+        the requested allowlisted scope — NOT a deleg=0 child / 403. Escalation
+        scopes ride too (owner class, like a session mint)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            legacy = sdk.apikey_create(tid, "owner-test")
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={"scopes": ["graphs:create", "graphs:write"]})
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["key"].startswith("tk_")
+            assert body["delegation_depth"] is None  # owner class
+            assert sorted(body["scopes"]) == ["graphs:create", "graphs:write"]
+            # Escalation scope allowed for owner-class callers.
+            r = tc.post("/v1/team/keys",
+                        headers={"Authorization": f"Bearer {legacy['api_key']}"},
+                        json={"scopes": ["keys:manage"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["delegation_depth"] is None
+            assert r.json()["scopes"] == ["keys:manage"]
+        finally:
+            gen.close()
+
+    def test_shrink_to_empty_deleg_null_422(self, tmp_path):
+        """VGATE F2 pin: emptying a deleg-NULL scoped key's scopes would
+        reclassify it legacy full-access (scopes=[] + deleg NULL →
+        legacy_full_access) — a capability EXPANSION via the shrink endpoint.
+        422, both deleg-NULL and deleg=0 targets stay safe."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            # deleg-NULL scoped owner key.
+            scoped = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read", "graphs:write"])
+            # shrink to [] via session face (owner admin).
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": _U1, "email": "owner@example.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}",
+                         json={"scopes": []})
+            assert r.status_code == 422, r.text
+            assert "legacy full-access" in r.text or "Cannot empty" in r.text
+            # A real shrink (write→read) still works.
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}",
+                         json={"scopes": ["graphs:read"]})
+            assert r.status_code == 200, r.text
+            assert r.json()["scopes"] == ["graphs:read"]
+        finally:
+            gen.close()
+
+    def test_legacy_full_access_key_within_cap_ok(self, tmp_path):
+        """Sanity: the legacy {} gate + cap asymmetry leaves the pinned
+        legacy 402 intact (max_api_keys=1; owner-class {} mint hits 402, not
+        a spurious 403 from the caller-class gate)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path, max_api_keys=1)
+        sdk, tid, tc = next(gen)
+        try:
+            sdk.apikey_create(tid, "owner-test")  # fill cap
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            r = tc.post("/v1/team/keys", json={})
+            assert r.status_code == 402, r.text
+        finally:
+            gen.close()
+
+
+class TestC3ReviewGatePins:
+    """Code-review fix pins (PR #2196 round 1): deleg-NULL SCOPED keys are
+    least-privilege — revoke/list require keys:manage (P1/P2); the shrink
+    PATCH validates all scopes before applying enabled/name (no partial
+    application); the unknown-scope 422 survives non-str members (no 500)."""
+
+    def test_scoped_reader_key_cannot_revoke_or_list(self, tmp_path):
+        """P1 pin: a deleg-NULL graphs:read-only key (NOT owner class) cannot
+        revoke another team key nor enumerate the key inventory. Legacy
+        full-access keys and keys:manage scoped keys still can."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)  # key auth
+            owner = sdk.apikey_create(tid, "owner-test")  # legacy full-access
+            reader = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])["api_key"]
+            mgr = sdk.apikey_create(
+                tid, "owner-test", scopes=["keys:manage"])["api_key"]
+            victim = sdk.apikey_create(tid, "owner-test")
+            # Reader cannot revoke the victim key.
+            r = tc.delete(f"/v1/team/keys/{victim['id']}",
+                          headers={"Authorization": f"Bearer {reader}"})
+            assert r.status_code == 403, r.text
+            assert "keys:manage" in r.text
+            # Reader cannot list the team's key inventory.
+            r = tc.get("/v1/team/keys",
+                       headers={"Authorization": f"Bearer {reader}"})
+            assert r.status_code == 403, r.text
+            # Victim still alive.
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.revoked_at",
+                params={"id": victim["id"]},
+            ).result_set
+            assert rows[0][0] is None
+            # Legacy full-access key CAN revoke (owner class, back-compat).
+            r = tc.delete(f"/v1/team/keys/{victim['id']}",
+                          headers={"Authorization": f"Bearer {owner['api_key']}"})
+            assert r.status_code == 200, r.text
+            # keys:manage deleg-NULL key CAN list.
+            r = tc.get("/v1/team/keys",
+                       headers={"Authorization": f"Bearer {mgr}"})
+            assert r.status_code == 200, r.text
+            assert len(r.json()["keys"]) >= 3
+        finally:
+            gen.close()
+
+    def test_shrink_422_is_noop_for_enabled_and_name(self, tmp_path):
+        """P2 partial-application pin: a PATCH body with a superset scopes
+        array + enabled:false + name must 422 WITHOUT persisting ANY of them
+        (validation runs before any mutation). Registry lane: enabled is a
+        no-op echo (no column) so the discriminating mutation is the name
+        write — pre-fix code persisted k.name before the scopes 422; the
+        post-fix code validates scopes first."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        sdk, tid, tc = next(gen)
+        try:
+            app.dependency_overrides.pop(get_current_team, None)
+            scoped = sdk.apikey_create(
+                tid, "owner-test", scopes=["graphs:read"])
+            # session face owner
+            team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1,
+                             key_id=None)
+            app.dependency_overrides[get_current_team] = lambda: team_dict
+            app.dependency_overrides[get_current_user] = lambda: {
+                "user_id": _U1, "email": "owner@example.com"}
+            sdk._get_registry().query(
+                "MERGE (m:Membership {user_id:$uid, team_id:$tid, "
+                "status:'active'}) SET m.role='owner'",
+                params={"uid": _U1, "tid": tid},
+            )
+            r = tc.patch(f"/v1/team/keys/{scoped['id']}", json={
+                "enabled": False,
+                "name": "scratch",
+                "scopes": ["graphs:read", "graphs:write"],  # superset → 422
+            })
+            assert r.status_code == 422, r.text
+            # Nothing persisted: scopes AND name unchanged (pre-fix registry
+            # code wrote k.name before the 422 — this assert catches it).
+            rows = sdk._get_registry().query(
+                "MATCH (k:APIKey {id:$id}) RETURN k.scopes, k.name",
+                params={"id": scoped["id"]},
+            ).result_set
+            assert rows[0][0] == ["graphs:read"]
+            assert rows[0][1] != "scratch"
+        finally:
+            gen.close()
+
+    def test_unknown_scope_nonstr_422_not_500(self, tmp_path):
+        """P2 TypeError pin: a crafted body with a non-str scope member must
+        422 (never 500 from sorted() over mixed types)."""
+        gen = TestC3KeyLifecycle()._setup(tmp_path)
+        _sdk, tid, tc = next(gen)
+        try:
+            r = self._session_mint_owner(tc, tid,
+                                         {"scopes": ["graphs:read", 123]})
+            assert r.status_code == 422, r.text
+        finally:
+            gen.close()
+
+    def _session_mint_owner(self, tc, tid, body):
+        import tortoise.hosted_api as ha_mod
+        team_dict = dict(TEST_TEAM, team_id=tid, session_user_id=_U1)
+        team_dict.pop("key_id", None)
+        app.dependency_overrides[get_current_team] = lambda: team_dict
+        sdk = ha_mod._make_sdk(namespace="registry")
+        sdk._get_registry().query(
+            "MERGE (m:Membership {user_id:$uid, team_id:$tid, status:'active'}) "
+            "SET m.role='owner'",
+            params={"uid": _U1, "tid": tid},
+        )
+        return tc.post("/v1/team/keys", json=body)
