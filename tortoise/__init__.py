@@ -81,13 +81,24 @@ if _OriginalFalkorDB is not None:
                 else:
                     if not os.path.isabs(path) and not path.startswith("~"):
                         raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
-                    # #2204: create the data dir BEFORE redislite reads its
-                    # config (see class docstring). os.path.expanduser first so
-                    # a tilde path resolves before dirname. Never fails on an
-                    # existing dir; bare filenames (impossible after the
-                    # absolute reject above) would no-op via dirname "" → ".".
-                    data_dir = os.path.dirname(os.path.expanduser(path))
+                    # #2204: expand the path BEFORE anything else reads it.
+                    # redislite derives its config ``dir`` verbatim from
+                    # os.path.dirname(path) and does NOT expanduser itself, so
+                    # an unexpanded "~" would still die with the raw
+                    # "FATAL CONFIG FILE ERROR" this guard exists to kill.
+                    # Expanding here (a) makes the absolute-check below exact,
+                    # (b) lets the makedirs target the real dir, and (c) means
+                    # super().__init__ receives the expanded path redislite
+                    # can actually open (review #2204: tilde callers never
+                    # worked before — dir "~/..." did not exist).
+                    path = os.path.expanduser(path)
+                    # Create the data dir BEFORE redislite reads its config
+                    # (see class docstring). Never fails on an existing dir;
+                    # bare filenames (impossible after the absolute reject
+                    # above) would no-op via dirname "" → ".".
+                    data_dir = os.path.dirname(path)
                     os.makedirs(data_dir or ".", exist_ok=True)
+                    args = (path, *args[1:])
             super().__init__(*args, **kwargs)
             import atexit as _atexit
             self._t_closed = False

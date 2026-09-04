@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -45,6 +46,26 @@ def _run_doctor(argv: list[str]) -> int:
     """Invoke `tortoise doctor <argv>` (main returns int)."""
     from tortoise.__main__ import main
     return main(["doctor", *argv])
+
+
+def _seed_db(db_path: str, content: str, attempts: int = 3) -> None:
+    """Boot an embedded DB at db_path and write one point.
+
+    Bounded-retried (#720 review: redislite can transiently fail to start on
+    a crowded shared TMPDIR — unix-socket ENOENT); the seed forces the
+    projection up so the DB file exists before doctor probes it.
+    """
+    import time
+    for _i in range(attempts):
+        try:
+            sdk = TortoiseSDK(db_path=db_path)
+            sdk.create_point(kind="observation", content=content)
+            sdk.close()
+            return
+        except Exception:
+            if _i == attempts - 1:
+                raise
+            time.sleep(1)
 
 
 def _health_line(out: str) -> str:
@@ -80,12 +101,17 @@ class TestDoctorPath:
     def test_doctor_db_plain_path_uses_embedded(self, clear_db_env, tmp_path, capsys):
         """--db accepts plain file paths → embedded constructor (help match)."""
         db_path = os.path.join(str(tmp_path), "via_db_flag.db")
+        # Seed an initialized DB — doctor must not create one as a side effect
+        # of a diagnostic (#2204); the health row then proves --db resolved
+        # to THIS embedded graph, not a URI connection error.
+        _seed_db(db_path, "doctor --db flag seed")
         rc = _run_doctor(["--db", db_path])
         out = capsys.readouterr().out
 
         assert rc in (0, 1)
         line = _health_line(out)
-        assert "0 Points" in line  # fresh embedded DB — not a URI connection error
+        assert "Points" in line  # embedded DB reached via --db flag
+        assert "❌" not in line  # health at the seeded target must pass
 
     def test_doctor_bad_relative_path_clean_error(self, clear_db_env, capsys):
         """Relative --path → clean error, no traceback."""
@@ -307,9 +333,7 @@ class TestDoctorDefaultResolution:
         monkeypatch.setattr(_config, "DEFAULT_DB_PATH", canonical)
         # Seed an initialized embedded DB at the canonical default (fix A
         # creates the data dir on open; the write forces the projection up).
-        sdk = TortoiseSDK(db_path=canonical)
-        sdk.create_point(kind="observation", content="doctor no-flags seed")
-        sdk.close()
+        _seed_db(canonical, "doctor no-flags seed")
 
         rc = _run_doctor([])
         out = capsys.readouterr().out
@@ -343,43 +367,55 @@ class TestDoctorDefaultResolution:
     def test_no_flags_uses_tortoise_db_path(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """TORTOISE_DB_PATH env → embedded at that path."""
         db_path = os.path.join(str(tmp_path), "env.db")
+        # Seed an initialized DB at the env target — doctor must not CREATE a
+        # DB as a side effect of a diagnostic (#2204); the health row then
+        # proves the env var won resolution by reporting THIS graph.
+        _seed_db(db_path, "doctor env-path seed")
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
         rc = _run_doctor([])
         out = capsys.readouterr().out
 
         assert rc in (0, 1)
         line = _health_line(out)
-        assert "0 Points" in line
+        assert "Points" in line
+        assert "❌" not in line  # embedded health at the env target must pass
+        assert db_path in out  # the probe row names the resolved env target
 
 
 class TestDoctorPreInit:
-    """#2204: doctor on an UNINITIALIZED environment (no data dir — a fresh
-    machine that never ran `tortoise init`) must print a clean, readable
-    first-run status instead of starting the embedded redis server, which
-    would emit a raw "*** FATAL CONFIG FILE ERROR" (redislite writes
+    """#2204: doctor on an UNINITIALIZED environment must print a clean,
+    readable first-run status instead of starting the embedded redis server,
+    which would emit a raw "*** FATAL CONFIG FILE ERROR" (redislite writes
     `dir <missing-dir>` into its config) plus a redis-server subprocess
-    traceback. The probe is SKIPPED — doctor never creates state on a
-    machine the user has not set up — and the run PASSES (rc 0, ⚠️ only).
+    traceback. The probe is SKIPPED — doctor never creates state or spawns a
+    server on a machine the user has not set up.
+
+    Verdict split (review #2204): a missing DEFAULT target is the expected
+    fresh-machine first-run state → ⚠️ + rc 0 ("doctor passes pre-init"); a
+    missing EXPLICITLY CONFIGURED target (--db/--path/TORTOISE_DB_PATH
+    pointing somewhere else) keeps a loud ❌ + rc 1 naming the path — a
+    typo'd target must read as a config error, not as a healthy first run.
     """
 
     def test_embedded_path_missing_dir_reports_not_set_up(self, clear_db_env, tmp_path, capsys):
         """--path into a NONEXISTENT directory tree → readable 'not set up
-        yet' line + rc 0, no FATAL CONFIG noise, no traceback, and NO
-        directory created (probe skipped — doctor has no side effects)."""
+        yet' line naming the configured target + rc 1 (config error), no
+        FATAL CONFIG noise, no traceback, and NO directory created (probe
+        skipped — doctor has no side effects)."""
         db_path = os.path.join(str(tmp_path), "no-such-dir", "graph", "tortoise.db")
 
         rc = _run_doctor(["--path", db_path])
         out = capsys.readouterr().out
 
-        assert rc == 0
+        assert rc == 1
         assert "FATAL CONFIG" not in out
         assert "Traceback" not in out
         assert "redis-server" not in out
         line = _health_line(out)
-        assert "⚠️" in line
+        assert "❌" in line  # configured-but-missing target is a config error
         assert "not set up yet" in line
         assert "tortoise init" in line
-        assert "❌" not in line
+        assert db_path in line  # names the misconfigured target
         # probe skipped → the missing dir tree was NOT created
         assert not os.path.exists(os.path.dirname(db_path))
 
@@ -403,6 +439,76 @@ class TestDoctorPreInit:
         assert canonical in line  # names the missing default so the hint is actionable
         assert "❌" not in line
         assert not (tmp_path / ".tortoise").exists()  # no dir created by the probe
+
+
+class TestDoctorImportHygiene:
+    """#2204 O/I/T (3) regression: importing tortoise modules on a clean env
+    must NOT emit dev-mode pepper / API-key warnings or fastmcp "Component
+    already exists" / "no handler — skipped" noise. Runs in a SUBPROCESS
+    (fresh interpreter) so module caching from earlier tests cannot mask a
+    regression, with the pepper/key env scrubbed so the dev fallback path is
+    exercised.
+    """
+
+    _SCRUB_ENV = (
+        *_DB_ENV_VARS,
+        "TORTOISE_SECRET_PEPPER", "TORTOISE_API_KEY", "OPENROUTER_API_KEY",
+        "DEEPSEEK_API_KEY", "OPENAI_API_KEY", "GEMINI_API_KEY",
+    )
+
+    def _run_py(self, code: str) -> subprocess.CompletedProcess:
+        env = dict(os.environ)
+        for k in self._SCRUB_ENV:
+            env.pop(k, None)
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env["PYTHONPATH"] = root
+        return subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, timeout=180, env=env, cwd=root,
+        )
+
+    def test_import_tortoise_auth_emits_no_warning(self):
+        """Importing tortoise.auth (pepper + key unset) is silent — the
+        dev-mode pepper warning moved from import time to first use."""
+        p = self._run_py("import tortoise.auth")
+        assert p.returncode == 0, p.stderr
+        assert p.stderr == "", p.stderr
+        assert "dev-mode pepper" not in p.stderr
+
+    def test_auth_dev_pepper_warns_once_at_first_use(self):
+        """The dev-pepper signal still fires — once per process, on first
+        hashing — never per call."""
+        p = self._run_py(
+            "import tortoise.auth as a; from tortoise.auth import hash_api_key; "
+            "hash_api_key('k1'); hash_api_key('k2'); hash_api_key('k3')"
+        )
+        assert p.returncode == 0, p.stderr
+        assert p.stderr.count("dev-mode pepper") == 1, p.stderr
+
+    def test_import_mcp_server_emits_no_fastmcp_noise(self):
+        """Importing tortoise.mcp_server emits no "Component already exists"
+        (duplicate registration) and no "registry entries have no handler"
+        lines — the pre-#2204 import noise."""
+        p = self._run_py("import tortoise.mcp_server")
+        assert p.returncode == 0, p.stderr
+        assert "Component already exists" not in p.stderr
+        assert "no handler" not in p.stderr
+
+    def test_session_capture_registered_on_mcp_instance(self):
+        """tortoise_session_capture — a registry tool whose handler existed
+        but was never registered while register_all ran mid-module — must now
+        actually reach the MCP server (#2204; the #993 entrypoint regression
+        only asserts >=70 tools + the onboarding set, so it would not catch a
+        silent absence)."""
+        p = self._run_py(
+            "import tortoise.mcp_server as m; "
+            "comps = m.mcp._local_provider._components; "
+            "names = [getattr(c, 'name', '') for c in comps.values()]; "
+            "assert 'tortoise_session_capture' in names, names; "
+            "print('OK')"
+        )
+        assert p.returncode == 0, p.stderr
+        assert "OK" in p.stdout
 
 
 class TestDoctorSessionExtraction:
@@ -583,6 +689,9 @@ class TestOnboardDoctorCall:
         """#703 follow-up: _cmd_onboard calls _cmd_doctor(Namespace(cmd='doctor'))
         — both args.db AND args.path must be read via getattr."""
         monkeypatch.setenv("TORTOISE_DB_PATH", os.path.join(str(tmp_path), "onboard.db"))
+        # Seed an initialized DB (doctor must not create one as a side effect
+        # of a diagnostic — #2204); the health row must then report THIS graph.
+        _seed_db(os.path.join(str(tmp_path), "onboard.db"), "doctor onboard seed")
 
         from tortoise.__main__ import _cmd_doctor
         rc = _cmd_doctor(argparse.Namespace(cmd="doctor"))
@@ -591,7 +700,7 @@ class TestOnboardDoctorCall:
         assert rc in (0, 1)
         assert "'Namespace' object has no attribute" not in out
         line = _health_line(out)
-        assert "0 Points" in line  # embedded check actually ran (not a misleading ❌)
+        assert "Points" in line  # embedded check actually ran (not a misleading ❌)
 
     def test_full_onboard_reaches_doctor_without_crash(self, monkeypatch, clear_db_env, tmp_path, capsys):
         """End-to-end onboard → doctor Step 5 completes (init falls back to

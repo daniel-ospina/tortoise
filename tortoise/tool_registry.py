@@ -1030,6 +1030,10 @@ class FastMCPAdapter:
     this adapter wraps each via FunctionTool.from_function() and registers
     them through mcp.add_tool().
 
+    Registration is additive-only: entries whose name is ALREADY on the mcp
+    instance (stale @mcp.tool() decorators, other registration paths) are
+    skipped, never replaced — see register_all (#2204 dedupe).
+
     Usage (in mcp_server.py):
         adapter = FastMCPAdapter(mcp)
         adapter.register_all(TOOL_REGISTRY, _handler_map)
@@ -1039,7 +1043,15 @@ class FastMCPAdapter:
         self._mcp = mcp
 
     def register_all(self, registry: list[ToolDefinition], handlers: dict[str, Callable]) -> None:
-        """Register every registry entry as an MCP tool.
+        """Register every registry entry as an MCP tool, skipping names that
+        are already registered on the mcp instance.
+
+        The skip (#2204 dedupe) covers stale @mcp.tool() decorator
+        registrations and any other registration path that ran first —
+        fastmcp's default on_duplicate="warn" would otherwise log
+        "Component already exists" and REPLACE the existing tool at import
+        time. Skipped entries are still served; they are simply served by
+        whichever registration happened first.
 
         Args:
             registry: TOOL_REGISTRY list of ToolDefinition entries.

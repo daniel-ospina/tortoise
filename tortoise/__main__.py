@@ -3854,30 +3854,60 @@ def _cmd_doctor(args):
     # can never diverge, #720 conf 78). URI → from_uri projection, plain
     # path → embedded projection via _projection_for.
     if target is not None:
-        # #2204 pre-init guard: an EMBEDDED target whose data dir does not
-        # exist is a never-initialized machine (e.g. ~/.tortoise was never
-        # created by `tortoise init`). Starting the embedded redis server
-        # there would print a raw "*** FATAL CONFIG FILE ERROR" (redislite
-        # writes `dir <db-parent>` into its config and the daemon dies at
-        # config load when that directory is missing) — report the first-run
-        # state readably instead and SKIP the probe. Doctor never creates
-        # state or spawns a server on a machine the user has not set up.
+        # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
+        # a never-initialized machine (e.g. `tortoise init` never ran).
+        # Starting the embedded redis server there would print a raw
+        # "*** FATAL CONFIG FILE ERROR" (redislite writes `dir <db-parent>`
+        # into its config and the daemon dies at config load when that
+        # directory is missing) — report the first-run state readably instead
+        # and SKIP the probe. Doctor never creates state or spawns a server
+        # on a machine the user has not set up.
+        #
+        # "Initialized" = the DB FILE exists (`tortoise init` creates both
+        # the data dir and the file): a leftover dir with no DB file is still
+        # never-initialized, and probing it would silently spawn the server
+        # and mint a fresh tortoise.db as a side effect of a diagnostic
+        # (#720 review round 4 — doctor must not create state on a target it
+        # only inspects).
+        #
+        # Verdict split (review #2204): a missing DEFAULT target is the
+        # expected fresh-machine first-run state (⚠️, rc 0 — "doctor passes
+        # pre-init"), while a missing EXPLICITLY CONFIGURED target
+        # (TORTOISE_DB_URI / TORTOISE_DB_PATH / --db / --path resolved
+        # somewhere other than the canonical default) keeps the pre-#2204
+        # loud failure (❌, rc 1) — a typo'd/renamed path must never read as
+        # a healthy first-run, it reads as a config error with the target
+        # named.
         _initialized = True
         if not is_db_uri(target) and target != ":memory:":
             try:
-                _data_dir = Path(target).expanduser().parent
-                _initialized = _data_dir.is_dir()
+                _p = Path(target).expanduser()
+                if not _p.is_file():
+                    _initialized = False
+                    if not _p.parent.is_dir():
+                        _missing = f"missing data dir {_p.parent}"
+                    else:
+                        _missing = (f"data dir {_p.parent} exists but no "
+                                    f"Tortoise DB file — `tortoise init` never "
+                                    f"completed")
+                else:
+                    _missing = None
             except Exception:
                 # unparseable path — let the real probe below surface it
                 _initialized = True
+                _missing = None
         if not _initialized:
-            results.append((
-                "Graph: health", "⚠️",
-                f"not set up yet — no Tortoise DB at {target} (missing data "
-                f"dir {_data_dir}). Run `tortoise init` to create it, or point "
-                f"doctor at your setup with TORTOISE_DB_URI / "
-                f"TORTOISE_DB_PATH / --db.",
-            ))
+            from tortoise.config import DEFAULT_DB_PATH, _abs
+            _is_default_target = target == _abs(DEFAULT_DB_PATH)
+            _icon = "⚠️" if _is_default_target else "❌"
+            _detail = (
+                f"not set up yet — no Tortoise DB at {target}"
+                + (f" ({_missing})" if _missing else "")
+                + ". Run `tortoise init` to create it, or point "
+                "doctor at your setup with TORTOISE_DB_URI / "
+                "TORTOISE_DB_PATH / --db."
+            )
+            results.append(("Graph: health", _icon, _detail))
         else:
             try:
                 from tortoise.sdk import TortoiseSDK
