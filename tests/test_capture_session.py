@@ -149,7 +149,7 @@ def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatc
     ).result_set
     assert turn_rows and all(st == "draft" for (st,) in turn_rows), turn_rows
 
-    # 2) The bounded ingest EP pass calibrated the wired claims: stored α/β
+# 2) The bounded ingest EP pass calibrated the wired claims: stored α/β
     # (has_ep True — the pre-ingestion uncalibrated state has DIFFERED) and
     # the user-visible confidence surface (get_confidence) reads real
     # posteriors, not the unmeasured Beta(1,1) default.
@@ -183,6 +183,76 @@ def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatc
         f"global draft default changed by Phase C: {drow}"
 
 
+def test_capture_w5_phase_c_promotion_is_rebuild_durable(tmp_path, monkeypatch):
+    """W5 Phase C review P1: the draft->live promotion must be REBUILD-
+    DURABLE — the raw status flip alone would revert on JSONL replay (the
+    #548 log snapshotted draft at PointAdded). The PointPromoted /
+    OperatorPromoted events (full live snapshots) must be journaled so a
+    wipe+rebuild (fold over the log) restores the claims AND their capture
+    operators as live."""
+    from tortoise.log import EventLog
+
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(db_path=str(tmp_path / "replay.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        conv = [
+            {"role": "user", "content": "The auth dead-end is the top issue "
+                                         "because it blocks every deploy."},
+            {"role": "assistant", "content": "Therefore we should ship serve "
+                                               "--http first."},
+        ]
+        res = sdk.capture_session(conv)
+        assert res["ok"] is True, res
+        ids = [p["id"] for p in res["points"]]
+        assert len(ids) >= 2, res
+
+        events_list = EventLog(events / "events.jsonl").read_all()
+        # 1) The durable log carries the promotion events WITH live snapshots.
+        promos = [e for e in events_list if e.get("type") == "PointPromoted"]
+        assert promos, "PointPromoted events must be journaled"
+        promoted_ids = {e["point"]["id"] for e in promos}
+        assert set(ids) <= promoted_ids, (
+            f"all extracted claims promoted in the log: {set(ids) - promoted_ids}")
+        assert all(e["point"].get("status") == "live" for e in promos),             "the PointPromoted snapshot must carry the LIVE state"
+        op_promos = [e for e in events_list if e.get("type") == "OperatorPromoted"]
+        assert op_promos, "OperatorPromoted events must be journaled"
+        assert all(e["point"].get("status") == "live" for e in op_promos),             "the OperatorPromoted snapshot must carry the LIVE state"
+
+        # 2) A wipe+rebuild (replay the log through a FRESH projection —
+        #    the documented recovery path, backup.py: proj.apply(ev) per
+        #    event) restores the claims and operators as live, not draft.
+        rebuilt_db = str(tmp_path / "rebuilt.db")
+        rebuilt = TortoiseSDK(db_path=rebuilt_db)
+        try:
+            rproj = rebuilt._get_proj()
+            for ev in events_list:
+                rproj.apply(ev)
+            rows = rproj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                params={"ids": list(ids)},
+            ).result_set
+            rebuilt_by_id = {r[0]: r[1] for r in rows}
+            for pid in ids:
+                assert rebuilt_by_id.get(pid) == "live", \
+                    f"rebuild must restore claim {pid} as live " \
+                    f"(got {rebuilt_by_id.get(pid)})"
+            for e in op_promos:
+                oid = e["point"]["id"]
+                orow = rproj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.status",
+                    params={"id": oid},
+                ).result_set
+                assert orow and orow[0][0] == "live", \
+                    f"rebuild must restore operator {oid} as live (got {orow})"
+        finally:
+            rebuilt.close()
+    finally:
+        sdk.close()
+
+    
 def test_capture_w5_phase_c_full_dream_effective_post_capture(sdk, monkeypatch):
     """W5 Phase C (#2104): promotion makes the W2 runner's post-capture full
     dream EFFECTIVE — pre-fix a capture-then-dream(full=True) sequence was

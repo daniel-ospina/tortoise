@@ -790,24 +790,54 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
         return
     try:
         proj = sdk._get_proj()
-        # 1. Claims -> live. Exact extracted ids only (turn points are never
-        # in this set). The draft-only guard mirrors create_operator's
-        # promote_source clause — a terminal claim is never resurrected.
-        proj.g.query(
+        # 1. Claims -> live (draft-only guard mirrors create_operator's
+        # promote_source clause — a terminal claim is never resurrected),
+        # then REBUILD-DURABLE via the PointPromoted event (review P1): the
+        # raw status flip alone would revert on JSONL replay (the #548 log
+        # snapshotted the draft state at PointAdded) — the projection's
+        # PointPromoted replay upserts the full live snapshot (projection/
+        # __init__.py:1074). Snapshot AFTER the SET so the event carries the
+        # live state. Capture auto-promotion is NOT reviewer-gated — the
+        # snapshot carries the point's own props (no fabricated reviewed).
+        # Candidate read FIRST (the SET below destroys the draft evidence):
+        # exact extracted ids, non-operator, draft-or-unset status.
+        cand_rows = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids "
             "AND (n.is_operator IS NULL OR n.is_operator = false) "
             "AND (n.status IS NULL OR n.status = 'draft') "
-            "SET n.status = 'live'",
+            "RETURN n.id",
             params={"ids": list(claim_ids)},
-        )
-        # 2. Operators of the captured claims -> live (draft-only guard).
-        proj.g.query(
+        ).result_set
+        promoted_claims = [r[0] for r in cand_rows]
+        if promoted_claims:
+            proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "SET n.status = 'live'",
+                params={"ids": promoted_claims},
+            )
+            for pid in promoted_claims:
+                sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
+        # 2. Operators of the captured claims -> live (draft-only guard),
+        # then REBUILD-DURABLE via OperatorPromoted (the R16 shape —
+        # projection/__init__.py:1082 restores live on replay). Mirror
+        # promote_point's _promote_incident_operators event exactly.
+        op_rows = proj.g.query(
             "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
             "WHERE c.id IN $ids "
             "AND (o.status IS NULL OR o.status = 'draft') "
-            "SET o.status = 'live'",
+            "RETURN DISTINCT o.id",
             params={"ids": list(claim_ids)},
-        )
+        ).result_set
+        promoted_ops = []
+        for (oid,) in op_rows:
+            proj.g.query(
+                "MATCH (o:Point {id:$oid}) "
+                "SET o.status = 'live'",
+                params={"oid": oid},
+            )
+            sdk._emit_event("OperatorPromoted", id=oid,
+                            point=sdk.get_point(oid))
+            promoted_ops.append(oid)
         # 3. Write-trigger dirty-mark (claims + reverse-BFS neighbors).
         sdk._mark_dirty(list(claim_ids))
     except Exception as e:  # noqa: BLE001, RUF100
@@ -819,9 +849,13 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
             warn(f"capture EP promotion failed: {type(e).__name__}: {e}")
         return
     try:
-        # 4. Bounded ingest EP pass (local = dirty-root refresh).
+        # 4. BOUNDED ingest EP pass (local = dirty-root refresh; review P2:
+        # mode="local" hydrates ALL graph-persisted dirty roots #1163, so an
+        # explicit budget caps the request-time EP work — this capture's
+        # claims calibrate well within it; any overflow stays dirty for the
+        # scheduler's epoch-guarded sweep).
         sdk.dream(mode="local", require_calibration=False,
-                  warm_start=False)
+                  warm_start=False, budget=100)
     except Exception as e:  # noqa: BLE001, RUF100
         _logger.warning(
             "capture ingest EP pass failed (non-fatal) for %d claims: %s",
