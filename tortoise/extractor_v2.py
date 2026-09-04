@@ -2648,20 +2648,34 @@ def _supersession_records(entity_refs: list[dict], search: dict,
 
 
 def derive_supersessions(embed_list: dict, search: dict) -> list[dict]:
-    """The minimal status-derivation mapping (state-centric model): from the
-    embed list's entity lifecycle/supersedes + the S3 search results, derive
-    'entity A superseded by entity B' pairs. This is the read-side
-    projection's input — the event stream (session event + filed points) is
-    the truth; object status is derived, not stored. Shares the resolution
-    discipline with execute_embed's recording (same helper).
+    """The minimal supersession-derivation mapping (state-centric model): from
+    the embed list's entity lifecycle/supersedes + the S3 search results,
+    derive 'entity A superseded by entity B' pairs.
+
+    #2164: Object.status is a WRITE-THROUGH FOLD CACHE over the event stream
+    (§11) — supersession records feed the ObjectSuperseded event + fold, they
+    do not derive a read-side projection. Shares the resolution discipline
+    with execute_embed's recording (same helper), including the never-guess
+    guard: a 'superseded'-lifecycle entity carrying a supersedes ref (the OLD
+    side of a replacement) is skipped — the direction is ambiguous and the
+    record would invert.
 
     Returns [{"superseded": ..., "supersedes_by": ..., "evidence": ...}].
     """
-    refs = [{"name": str(e.get("name", "")).strip(),
-             "kind": str(e.get("kind", "")).strip(),
-             "supersedes": str(e.get("supersedes") or "").strip()}
-            for e in (embed_list.get("entities", []) or [])
-            if isinstance(e, dict)]
+    refs = []
+    for e in (embed_list.get("entities", []) or []):
+        if not isinstance(e, dict):
+            continue
+        lifecycle = str(e.get("lifecycle", "") or "").strip()
+        supersedes = str(e.get("supersedes") or "").strip()
+        if lifecycle == "superseded" and supersedes \
+                and supersedes not in ("null", "None"):
+            # never-guess parity with execute_embed's collection guard —
+            # skip the ref, never derive an inverted record.
+            continue
+        refs.append({"name": str(e.get("name", "")).strip(),
+                     "kind": str(e.get("kind", "")).strip(),
+                     "supersedes": supersedes})
     return _supersession_records(refs, search)
 
 
@@ -2911,12 +2925,42 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                 "note": "no match — created"})
         lifecycle = str(e.get("lifecycle", "") or "").strip()
         supersedes_ref = str(e.get("supersedes") or "").strip()
-        if lifecycle in ("changed", "superseded"):
-            warnings.append(f"entity '{name[:60]}' lifecycle={lifecycle} is not "
-                            "expressible in the Layer-1 payload — the server "
-                            "merges entities by (name, kind); the state change "
-                            "must ride on points/events instead")
-        if supersedes_ref and supersedes_ref not in ("null", "None", ""):
+        supersedes_collected = bool(supersedes_ref and supersedes_ref
+                                    not in ("null", "None", ""))
+        # #2164 (final-review P2): the warning must not lie. The Layer-1
+        # payload (entities merge by (name, kind) — there is no Object
+        # lifecycle state to write) cannot express 'changed'-ness, and a
+        # supersession is expressible ONLY from the NEW entity's side (its
+        # supersedes ref rides payload["supersessions"], the deterministic
+        # fold channel). A 'superseded' entity CARRYING a ref is the OLD side
+        # of a replacement — the ref points AT the live successor, the OPPOSITE
+        # of the record's fixed direction (ref target = the superseded side) —
+        # recording it would INVERT and capture would fold the live successor
+        # to superseded. Never guess: warn + skip the ref; only
+        # created/changed/unchanged collect (there 'supersedes' means 'this
+        # entity replaces X' — unambiguous).
+        if lifecycle == "changed":
+            # changed-ness is attribute/value state — it belongs on points
+            # (and events), not on an Object transition.
+            warnings.append(f"entity '{name[:60]}' lifecycle='changed' is not "
+                            "expressible in the Layer-1 payload — changed-ness "
+                            "is attribute/value state and must ride on "
+                            "points/events, not on an Object transition")
+        elif lifecycle == "superseded" and supersedes_collected:
+            warnings.append(
+                f"entity '{name[:60]}' lifecycle='superseded' with "
+                f"supersedes='{supersedes_ref[:60]}' is ambiguous (direction "
+                "unclear) — supersession record skipped (never-guess); emit "
+                "the NEW entity with lifecycle='created' + "
+                "supersedes='<old>' for the canonical shape")
+        elif lifecycle == "superseded":
+            # superseded with NO supersedes ref has nothing to express — the
+            # ref is the expressible channel (→ payload["supersessions"]).
+            warnings.append(f"entity '{name[:60]}' lifecycle=superseded with no "
+                            "supersedes ref is not expressible in the Layer-1 "
+                            "payload — set supersedes=<existing id/name> for "
+                            "the supersession to ride payload['supersessions']")
+        if supersedes_collected and lifecycle != "superseded":
             entity_supersede_refs.append({"name": name, "kind": kind,
                                           "supersedes": supersedes_ref})
         payload_entities.append({

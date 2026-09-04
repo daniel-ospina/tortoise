@@ -1052,6 +1052,807 @@ def test_extract_session_v2_counts_point_write_skips(sdk, monkeypatch):
     assert meta["mode"] == "error", "a failed point write is a capture failure"
 
 
+# ── #2164 Task 3: capture applies payload supersessions (shared
+#    apply_supersessions helper — entity-level records fold Object.status
+#    via ObjectSuperseded + the projection fold; pt_ records CORRECTS) ────
+
+def test_extract_session_v2_folds_entity_supersession(sdk, monkeypatch):
+    """#2164 (Task 3): a payload supersession record (entity ref) is APPLIED
+    by capture — the superseded Object's status flips to 'superseded' with
+    supersededBy set, via the ObjectSuperseded event + projection fold.
+    Pre-fix capture IGNORED payload supersessions (Object A stayed 'live')."""
+    import tortoise.extractor_v2 as ev2
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [{"name": "approach-B", "kind": "core:strategy"}],
+               "points": [], "operators": [], "events": [],
+               "supersessions": [{"superseded": "approach-A",
+                                   "supersedes_by": "approach-B",
+                                   "evidence": "entity lifecycle supersedes"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+        params={"n": "approach-A"}).result_set
+    assert rows and rows[0][0] == "superseded", rows
+    assert rows[0][1] == "approach-B", rows
+    assert meta["mode"] == "v2"
+    assert meta["errors"] == [], meta
+
+
+def test_extract_session_v2_supersession_meta_warnings(sdk, monkeypatch):
+    """#2164 (Task 3): supersession records that cannot apply are additive
+    meta WARNINGS — never errors and never a capture failure. An unresolved
+    entity ref (no Object matches) and a dangling successor (supersedes_by
+    absent from the payload entities and the graph) both surface by ref."""
+    import tortoise.extractor_v2 as ev2
+
+    # (a) unresolved superseded ref — no Object matches "ghost-A"
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [{"name": "approach-B", "kind": "core:strategy"}],
+               "points": [], "operators": [], "events": [],
+               "supersessions": [{"superseded": "ghost-A",
+                                   "supersedes_by": "approach-B",
+                                   "evidence": "lifecycle"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    assert meta["errors"] == [], "unresolved ref is a warning, never an error"
+    assert any("ghost-A" in w for w in meta["warnings"]), meta["warnings"]
+
+    # (b) dangling successor — "ghost-B" is in neither the payload entities
+    #     nor the graph. approach-A RESOLVES, but folding it would reference
+    #     an invisible successor (recall_state excludes superseded Objects),
+    #     so the record is skipped and the Object stays live.
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    payload2 = {"session_id": "sess_p2", "story_arc": "",
+                "entities": [], "points": [], "operators": [], "events": [],
+                "supersessions": [{"superseded": "approach-A",
+                                    "supersedes_by": "ghost-B",
+                                    "evidence": "lifecycle"}],
+                "client_commit_id": "ccid2"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload2))
+    _extracted, meta2 = sdk._extract_session_v2(
+        CONV, "sess_p2", "2026-08-20T00:00:00+00:00")
+    assert meta2["errors"] == [], "dangling successor is a warning, never an error"
+    assert any("ghost-B" in w for w in meta2["warnings"]), meta2["warnings"]
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status",
+        params={"n": "approach-A"}).result_set
+    assert rows and rows[0][0] == "live", \
+        (f"fold must never fire for a dangling successor: {rows!r}")
+
+
+# ── #2164 Task 4: pt_ capture routing + terminal guard + unresolved-ref
+#    meta warnings (indicators 3 + 4) — end-to-end through
+#    _extract_session_v2 (each test fails if the helper's pt_ branch were
+#    removed; the records would never reach supersede()/CORRECTS) ────────
+
+def _capture_pt_id(content: str) -> str:
+    """Content-addressed capture point id (extractor_v2._content_id parity:
+    pt_<sha256[:62]> — E5 #1537 emits supersession refs in this format)."""
+    from tortoise.ids import content_hash
+    return f"pt_{content_hash(content)[:62]}"
+
+
+def test_extract_session_v2_routes_pt_supersession_to_supersede(sdk, monkeypatch):
+    """#2164 (Task 4): a pt_ supersession record on the capture payload
+    routes to the shared helper's CORRECTS branch — (new)-[:CORRECTS]->(old)
+    with the old point terminal (status='superseded' + outdated=True), meta
+    mode 'v2', no errors. The successor point rides payload.points (written
+    by the points loop) exactly as extractor_v2 emits it (E5 #1537); the
+    OLD point is a prior session's live statement point."""
+    import tortoise.extractor_v2 as ev2
+
+    old = _capture_pt_id("the gym moved from 6pm to 5pm")
+    new = _capture_pt_id("the gym session is now at 5pm")
+    sdk.create_point("statement", "the gym moved from 6pm to 5pm",
+                     id=old, status="live")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [{"id": new, "content": "the gym session is now at 5pm",
+                            "pointKind": "statement"}],
+               "supersessions": [{"superseded": old, "supersedes_by": new,
+                                   "evidence": "fact-value contradiction"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    proj = sdk._get_proj()
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$new})-[:CORRECTS]->(o:Point {id:$old}) "
+        "RETURN o.status, o.outdated",
+        params={"new": new, "old": old}).result_set
+    assert rows, "CORRECTS edge missing — pt_ record never reached supersede()"
+    status, outdated = rows[0]
+    assert status == "superseded", rows
+    assert outdated is True, rows
+    assert meta["mode"] == "v2"
+    assert meta["errors"] == [], meta
+
+
+def test_extract_session_v2_terminal_old_is_silent_noop(sdk, monkeypatch):
+    """#2164 (Task 4): re-ingesting a pt_ supersession record whose OLD
+    point is ALREADY terminal is an idempotent silent no-op — no raise, no
+    NEW meta warning naming the ref (the helper's terminal probe pre-empts
+    supersede_point's raise — sdk.supersede_point rejects terminal olds),
+    and no duplicate CORRECTS edge."""
+    import tortoise.extractor_v2 as ev2
+
+    old = _capture_pt_id("the gym moved from 6pm to 5pm")
+    new = _capture_pt_id("the gym session is now at 5pm")
+    sdk.create_point("statement", "the gym moved from 6pm to 5pm",
+                     id=old, status="live")
+    sdk.create_point("statement", "the gym session is now at 5pm",
+                     id=new, status="draft")
+    sdk.supersede(old, new)  # first application — old now terminal
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [],
+               "supersessions": [{"superseded": old, "supersedes_by": new,
+                                   "evidence": "fact-value contradiction"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    assert meta["errors"] == [], meta
+    assert not any(old in w for w in meta["warnings"]), meta["warnings"]
+    n = sdk._get_proj().g.query(
+        "MATCH (n:Point)-[:CORRECTS]->(o:Point {id:$old}) RETURN count(n)",
+        params={"old": old}).result_set[0][0]
+    assert n == 1, f"re-ingest must be idempotent: {n} CORRECTS edges"
+
+
+def test_extract_session_v2_draft_old_point_supersedeable(sdk, monkeypatch):
+    """#2164 (Task 4): a capture-DRAFT old point (the points loop writes
+    status='draft') CAN be superseded by a later session's E5 record — the
+    supersede guard rejects only retracted/superseded/archived, so draft is
+    not terminal. Pins that a session-N draft is correctable by session-N+1."""
+    import tortoise.extractor_v2 as ev2
+
+    old = _capture_pt_id("deploy target is serve --http")
+    new = _capture_pt_id("deploy target is serve --https")
+    sdk.create_point("statement", "deploy target is serve --http",
+                     id=old, status="draft")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [{"id": new, "content": "deploy target is serve --https",
+                            "pointKind": "statement"}],
+               "supersessions": [{"superseded": old, "supersedes_by": new,
+                                   "evidence": "fact-value contradiction"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point {id:$new})-[:CORRECTS]->(o:Point {id:$old}) "
+        "RETURN o.status",
+        params={"new": new, "old": old}).result_set
+    assert rows, ("draft old point must be supersedeable — CORRECTS edge "
+                  "missing")
+    assert rows[0][0] == "superseded", rows
+    assert meta["errors"] == [], meta
+
+
+def test_extract_session_v2_pt_ref_meta_warnings(sdk, monkeypatch):
+    """#2164 (Task 4, indicator 4): the pt_ branch's fail-open skips surface
+    as meta WARNINGS with the specific cause — never an error, never a
+    silent drop. (a) unresolved pt_ ref (old point absent → 'not found');
+    (b) dangling successor (new point absent → supersede()'s No point guard
+    is caught + warned, and the old point is NOT terminalized — a CORRECTS
+    edge to a nonexistent point would be dangling)."""
+    import tortoise.extractor_v2 as ev2
+
+    # (a) unresolved OLD ref — the successor IS written by the points loop
+    ghost_old = _capture_pt_id("ghost old point never captured")
+    new = _capture_pt_id("the successor that does exist")
+    payload = {"session_id": "sess_p1", "story_arc": "",
+               "entities": [], "events": [], "operators": [],
+               "points": [{"id": new, "content": "the successor that does exist",
+                            "pointKind": "statement"}],
+               "supersessions": [{"superseded": ghost_old,
+                                   "supersedes_by": new,
+                                   "evidence": "lifecycle"}],
+               "client_commit_id": "ccid"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload))
+    _extracted, meta = sdk._extract_session_v2(
+        CONV, "sess_p1", "2026-08-20T00:00:00+00:00")
+    assert meta["errors"] == [], \
+        "unresolved pt_ ref is a warning, never an error"
+    assert any(ghost_old in w and "not found" in w
+               for w in meta["warnings"]), meta["warnings"]
+    n = sdk._get_proj().g.query(
+        "MATCH (:Point)-[:CORRECTS]->() RETURN count(*)").result_set[0][0]
+    assert n == 0, f"no CORRECTS may fire for an unresolved ref: {n}"
+
+    # (b) dangling successor — the OLD point exists + is live, the new does
+    #     not. The helper probes both endpoints but supersede()'s own
+    #     missing-new guard raises BEFORE any mutation — the raise is caught
+    #     and warned; the old point must stay live (never terminalized onto
+    #     a phantom).
+    old = _capture_pt_id("the point that gets corrected")
+    ghost_new = _capture_pt_id("ghost successor never written")
+    sdk.create_point("statement", "the point that gets corrected",
+                     id=old, status="live")
+    payload2 = {"session_id": "sess_p2", "story_arc": "",
+                "entities": [], "events": [], "operators": [],
+                "points": [],
+                "supersessions": [{"superseded": old,
+                                    "supersedes_by": ghost_new,
+                                    "evidence": "lifecycle"}],
+                "client_commit_id": "ccid2"}
+    monkeypatch.setattr(ev2, "extract_session_v2",
+                        lambda *a, **kw: _v2_out(payload=payload2))
+    _extracted, meta2 = sdk._extract_session_v2(
+        CONV, "sess_p2", "2026-08-20T00:00:00+00:00")
+    assert meta2["errors"] == [], \
+        "dangling pt_ successor is a warning, never an error"
+    assert any(ghost_new in w and "failed" in w
+               for w in meta2["warnings"]), meta2["warnings"]
+    rows = sdk._get_proj().g.query(
+        "MATCH (o:Point {id:$old}) RETURN o.status",
+        params={"old": old}).result_set
+    assert rows and rows[0][0] == "live", \
+        ("old point must stay live — a CORRECTS edge to a nonexistent "
+         f"successor would be dangling: {rows!r}")
+
+
+def test_apply_supersessions_legacy_idless_object_journaled_and_folded(sdk):
+    """#2164 review (P2-1): a legacy id-less Object (raw-Cypher-created
+    WITHOUT the canonical obj-<sha26(name)> id — every supported write path
+    mints it, raw writes can skip it) superseded by a payload record must
+    (a) flip status to 'superseded' AND (b) journal the ObjectSuperseded
+    event carrying the SYNTHESIZED canonical id + name + supersedes_by.
+
+    Pre-fix the probe row had o.id=None → _emit_event received id=None →
+    the JSONL branch early-returned and the GraphEvent payload became {}
+    — the event journaled NOWHERE (silent drop, the M2 provenance gap)
+    and the live status never flipped."""
+    from tortoise.commit_ops import apply_supersessions
+    from tortoise.sdk import _entity_name_id
+
+    proj = sdk._get_proj()
+    # successor must be visible (the payload-entities equivalent)
+    sdk.create_entity("object", "successor-B", objectKind="core:strategy")
+    # raw legacy Object — NO id property at all
+    proj.g.query("CREATE (o:Object {name:'legacy-X', status:'live'})")
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "legacy-X", "supersedes_by": "successor-B",
+          "evidence": "legacy lifecycle"}],
+        session_id="sess_legacy")
+    assert applied == 1, "legacy no-id supersession must apply"
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+        params={"n": "legacy-X"}).result_set
+    assert rows and rows[0][0] == "superseded", \
+        f"status never flipped: {rows!r}"
+    assert rows[0][1] == "successor-B", rows
+    # journaled with the synthesized canonical id (create_entity parity)
+    events = proj.g.query(
+        "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) "
+        "RETURN e.payload ORDER BY e.seq",
+    ).result_set
+    assert events, "ObjectSuperseded must reach the :GraphEvent store"
+    payload = json.loads(events[-1][0])
+    assert payload["id"] == _entity_name_id("Object", "legacy-X"), payload
+    assert payload["name"] == "legacy-X", payload
+    assert payload["supersedes_by"] == "successor-B", payload
+    assert payload["session_id"] == "sess_legacy", payload
+
+
+def test_apply_supersessions_legacy_idless_object_reaches_jsonl(tmp_path):
+    """#2164 review (P2-1, JSONL half): the synthesized-id emission must reach
+    the JSONL rebuild log (#548) — the store the reviewer's M2 provenance gap
+    is about. Pre-fix the emit passed id=None → the JSONL branch of
+    sdk._emit_event early-returned (``if point is None and id is None``) and
+    the legacy Object's supersession left NO journal line — a wipe+rebuild
+    could never restore (or even show) the fold."""
+    from tortoise.commit_ops import apply_supersessions
+    from tortoise.sdk import _entity_name_id
+
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(str(tmp_path / "tlegacy.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        proj = sdk._get_proj()
+        sdk.create_entity("object", "successor-C", objectKind="core:strategy")
+        # raw legacy Object — NO id property at all
+        proj.g.query("CREATE (o:Object {name:'legacy-Y', status:'live'})")
+        applied = apply_supersessions(
+            proj, sdk,
+            [{"superseded": "legacy-Y", "supersedes_by": "successor-C",
+              "evidence": "legacy lifecycle"}],
+            session_id="sess_legacy2")
+        assert applied == 1
+        log = (events / "events.jsonl").read_text(encoding="utf-8").splitlines()
+        superseded_lines = [ln for ln in log
+                            if '"type": "ObjectSuperseded"' in ln]
+        assert superseded_lines, ("ObjectSuperseded must be journaled to the "
+                                  "JSONL log for a legacy no-id Object")
+        ev = json.loads(superseded_lines[-1])
+        assert ev["id"] == _entity_name_id("Object", "legacy-Y"), ev
+        assert ev["name"] == "legacy-Y", ev
+        assert ev["supersedes_by"] == "successor-C", ev
+    finally:
+        sdk.close()
+
+
+def test_apply_supersessions_prefers_id_match_over_same_string_name(sdk):
+    """#2164 review (P2-2): when a supersession ref matches an Object BY ID
+    and ALSO a DIFFERENT Object BY NAME (a legacy no-id Object whose name
+    happens to equal another Object's id), the selection must deterministi-
+    cally prefer the id-match row. Pre-fix rows[0] was backend-order-depen-
+    dent — the OR probe returned both rows and FalkorDB's unordered result
+    picked either, so the fold target (and the status flip) was a coin flip."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "successor-Z", objectKind="core:strategy")
+    # canonical Object B — its id is the ref
+    sdk.create_entity("object", "approach-B", objectKind="core:strategy")
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "approach-B"}).result_set
+    oid = rows[0][0]
+    # legacy no-id Object whose NAME equals B's id → both probe clauses hit
+    proj.g.query(
+        "CREATE (o:Object {name:$n, status:'live'})", params={"n": oid})
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": oid, "supersedes_by": "successor-Z",
+          "evidence": "id-vs-name ambiguity"}],
+        session_id="sess_p22")
+    assert applied == 1, "the id-match row must win deterministically"
+    # B (matched by id) is the fold target — superseded
+    b = proj.g.query(
+        "MATCH (o:Object {id:$id}) RETURN o.status, o.supersededBy",
+        params={"id": oid}).result_set
+    assert b and b[0][0] == "superseded", f"id-match Object not folded: {b!r}"
+    assert b[0][1] == "successor-Z", b
+    # the same-string NAME match must NOT be the one folded
+    n = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status",
+        params={"n": oid}).result_set
+    assert n and n[0][0] == "live", \
+        f"name-match Object wrongly folded instead of the id match: {n!r}"
+
+
+# ── #2164 Task 7: indicator 5 (helper-routed) — the shared helper's OWN
+#    terminal rules for OUT-OF-BAND records (journal replay, hosted §6b
+#    reconcile re-runs, direct calls). Real capture can never reach these
+#    branches: S3's terminal exclusion kills record formation at the SOURCE
+#    (pinned by test_chain_pin_and_no_double_fold in
+#    tests/test_capture_session_supersession_e2e.py — re-capture is
+#    byte-unchanged). These tests pin the helper's defense-in-depth for
+#    records that arrive WITHOUT a capture: same successor → silent dedup;
+#    divergent successor → warn + keep-first (never blind-overwrite). ──────
+
+def _entity_fold_state(proj, name: str) -> tuple | None:
+    """(status, supersededBy) of one Object — None when absent."""
+    rows = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+        params={"n": name}).result_set
+    return tuple(rows[0]) if rows else None
+
+
+def _object_superseded_events(proj) -> int:
+    """ObjectSuperseded events journaled to the :GraphEvent store."""
+    rows = proj.g.query(
+        "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) RETURN count(e)",
+    ).result_set
+    return int(rows[0][0])
+
+
+def test_apply_supersessions_same_payload_idempotent(sdk):
+    """#2164 (Task 7, indicator 5 — helper-routed idempotency): calling the
+    shared helper with the SAME supersession record twice — records arriving
+    OUT-OF-BAND (journal replay, hosted §6b reconcile re-runs, direct calls)
+    — is idempotent at the helper's OWN layer. First call folds Object A
+    (status='superseded', supersededBy='successor-B', applied=1, ONE
+    ObjectSuperseded event); the SECOND call is a SILENT no-op (applied=0 —
+    the same-successor terminal branch: A's supersededBy already equals the
+    record's successor): no second fold, no second journal line, NO new
+    warning. This branch can never fire through real capture (S3 excludes
+    terminal Objects, so record formation dies at the source — see
+    test_chain_pin_and_no_double_fold in
+    tests/test_capture_session_supersession_e2e.py for the source-side
+    pin); this test pins the helper's own defense-in-depth for the
+    out-of-band path.
+
+    Absorbents (the full dedup stack, capture→commit): (1) reconcile-merge
+    delta-0 — a re-reconcile whose payload has no diff produces no
+    supersession records; (2) the S3 terminal probe — a folded Object stops
+    resolving, so record formation dies at the source; (3) the helper's
+    terminal rules — pt_ records hit the terminal probe, entity records hit
+    this same-successor silent no-op; (4) the idempotent SET fold
+    (_fold_object_superseded re-applies the same SET); (5) benign duplicate
+    journals — a replay re-emits the same event and the projection fold
+    converges. Hosted capture writes NO CommitRecord, so there is no
+    client_commit_id dedup between capture and commit (the commit-id key is
+    a commit-endpoint absorbent only); dedup between capture and re-capture
+    rides absorbents (1)-(5), never a commit-id key."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    sdk.create_entity("object", "successor-B", objectKind="core:strategy")
+    record = [{"superseded": "approach-A", "supersedes_by": "successor-B",
+               "evidence": "entity lifecycle supersedes"}]
+    warns: list[str] = []
+
+    applied = apply_supersessions(proj, sdk, record, session_id="sess_idem",
+                                  warn=warns.append)
+    assert applied == 1, "first application must fold"
+    assert warns == [], f"fold is clean — no warnings: {warns}"
+    state = _entity_fold_state(proj, "approach-A")
+    assert state == ("superseded", "successor-B"), state
+    assert _object_superseded_events(proj) == 1, "exactly one journal line"
+
+    # Re-apply the SAME record — same successor already folded → silent dedup
+    applied2 = apply_supersessions(proj, sdk, record, session_id="sess_idem",
+                                   warn=warns.append)
+    assert applied2 == 0, \
+        "same-successor re-apply must be a silent dedup no-op, not a re-fold"
+    assert warns == [], f"dedup must be silent — got a warning: {warns}"
+    assert _entity_fold_state(proj, "approach-A") == ("superseded",
+                                                       "successor-B")
+    assert _object_superseded_events(proj) == 1, \
+        "no second ObjectSuperseded journal for a re-applied record"
+
+
+def test_apply_supersessions_divergent_successor_keeps_first(sdk):
+    """#2164 (Task 7, helper-routed conflict): a supersession record whose
+    successor DIVERGES from an already-folded one (Object A already
+    superseded by B; a later out-of-band record claims A→C) is REJECTED
+    keep-first — A stays supersededBy='successor-B', the C claim is never
+    folded in (applied=0, no second journal, successor-C stays live), and
+    the rejection is a LOUD warning naming the ref, the kept successor, and
+    the rejected one. This pins the helper's deliberate divergence from
+    hosted §6b's blind clobber (the M5 PHASE-2 GAP: a §6b commit resolving
+    A→C after a capture A→B blind-overwrites supersededBy to C with NO
+    warning — DOCUMENTED and asserted in T9's parity harness, NOT fixed
+    in-PR). The helper-routed keep-first is the one consumer discipline
+    that never blind-overwrites; a capture CAN trip it — the extractor's
+    S3 search_graph calls tortoise_fts_query(entity_type='object'),
+    which does NOT exclude terminal Objects (the terminal clause is
+    point-label-only; recall's #1350 object filter runs inside
+    recall_state alone), so overlapping capture re-derives a
+    supersession against a target session 1 already folded — this
+    keep-first branch is the idempotency mechanism for that path."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "approach-A", objectKind="core:strategy")
+    sdk.create_entity("object", "successor-B", objectKind="core:strategy")
+    sdk.create_entity("object", "successor-C", objectKind="core:strategy")
+    first = [{"superseded": "approach-A", "supersedes_by": "successor-B",
+              "evidence": "lifecycle"}]
+    conflict = [{"superseded": "approach-A", "supersedes_by": "successor-C",
+                 "evidence": "lifecycle"}]
+    warns: list[str] = []
+
+    applied = apply_supersessions(proj, sdk, first, session_id="sess_keep1",
+                                  warn=warns.append)
+    assert applied == 1, "first fold must apply"
+    assert warns == [], f"first fold is clean: {warns}"
+
+    # Divergent successor → keep-first: A stays supersededBy B
+    applied2 = apply_supersessions(proj, sdk, conflict,
+                                   session_id="sess_keep2",
+                                   warn=warns.append)
+    assert applied2 == 0, \
+        "divergent successor must be rejected, never blind-folded"
+    state = _entity_fold_state(proj, "approach-A")
+    assert state == ("superseded", "successor-B"), \
+        f"keep-first violated — A's fold was overwritten: {state!r}"
+    # the warning names the conflict: the ref, the KEPT successor, the
+    # rejected one, and the keep-first rule (assert substrings, per the
+    # actual warn text in commit_ops.apply_supersessions)
+    joined = " | ".join(warns)
+    assert "approach-A" in joined, f"warning must name the ref: {joined}"
+    assert "successor-B" in joined, \
+        f"warning must name the kept successor: {joined}"
+    assert "successor-C" in joined, \
+        f"warning must name the rejected successor: {joined}"
+    assert "keep-first" in joined, f"warning must cite keep-first: {joined}"
+    # nothing folded for C: no second journal, successor-C stays live
+    assert _object_superseded_events(proj) == 1, \
+        "rejected conflict must not journal a second event"
+    c_state = _entity_fold_state(proj, "successor-C")
+    assert c_state is not None and (c_state[0] or "live") == "live", c_state
+    assert c_state[1] is None, f"successor-C must never be folded: {c_state}"
+
+
+def test_apply_supersessions_self_supersession_skipped(sdk):
+    """#2164 review (P1 — ISSUE A): a SELF-supersession record —
+    superseded == supersedes_by (the same ref string) — must be SKIPPED
+    with a warning (applied=0) and leave the Object untouched. Pre-fix the
+    entity lane applied it with applied=1: the LIVE Object folded to
+    status='superseded', supersededBy=<itself> — permanently removing it
+    from recall_state's default view — and a durable self-referential
+    ObjectSuperseded was journaled. Every sibling path guards this (the
+    replaced eval inline loop's old_id == new_id → continue;
+    supersede_point raises on old==new; the producer-side id-match
+    short-circuits before its kind filter) — this consumer-side guard is
+    the defense-in-depth sink, placed before the pt_/entity dispatch so it
+    guards BOTH lanes (the pt_ self-ref previously tripped supersede()'s
+    raise into a spurious "failed" warning)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": "plan-X", "supersedes_by": "plan-X",
+          "evidence": "self lifecycle"}],
+        session_id="sess_self", warn=warns.append)
+    assert applied == 0, "self-supersession must never apply"
+    assert any("self-supersession" in w for w in warns), warns
+    state = _entity_fold_state(proj, "plan-X")
+    assert state == ("live", None), \
+        f"self-supersession folded plan-X onto itself: {state!r}"
+    assert _object_superseded_events(proj) == 0, \
+        "no ObjectSuperseded may be journaled for a self-supersession"
+
+
+def test_apply_supersessions_pt_self_supersession_skipped(sdk):
+    """#2164 review (P1 — ISSUE A, pt_ lane): the same self-supersession
+    guard fires for point records — a pt_ ref superseding ITSELF is a
+    meaningless record, skipped with the same warning (pre-fix it fell
+    through to sdk.supersede() whose old==new guard raised, surfacing as a
+    spurious "point supersede ... failed" warning with no better signal)."""
+    from tortoise.commit_ops import apply_supersessions
+    from tortoise.commit_schema import point_content_id
+
+    proj = sdk._get_proj()
+    pid = point_content_id("self-supersession pt content")
+    sdk.create_point("statement", "self-supersession pt content", id=pid,
+                     status="live")
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": pid, "supersedes_by": pid, "evidence": "pt"}],
+        session_id="sess_self_pt", warn=warns.append)
+    assert applied == 0
+    assert any("self-supersession" in w for w in warns), warns
+    assert not any("failed" in w for w in warns), \
+        f"pt_ self-ref must not surface as a supersede() failure: {warns}"
+    rows = proj.g.query(
+        "MATCH (p:Point {id:$id}) RETURN p.status",
+        params={"id": pid}).result_set
+    assert rows and rows[0][0] == "live", \
+        "the self-referencing point must stay live"
+
+
+def test_apply_supersessions_mixed_id_name_self_alias_skipped(sdk):
+    """#2164 review (P1 advisory): the string-equality self-guard only
+    catches ref == supersedes_by on the SAME string — a MIXED id/name
+    self-reference (superseded = the Object's canonical id,
+    supersedes_by = that same Object's name) must ALSO be skipped. The
+    successor visibility probe resolves the successor's id; when it equals
+    the ref-side resolution's id, both sides are the SAME Object → folding
+    would set status='superseded', supersededBy=<its own name> and remove
+    the live Object from recall_state's default view (ISSUE A harm class).
+    Id equality is unambiguous; distinct-id duplicate names are a LEGIT
+    supersession and must NOT be skipped."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    # canonical id minted by create_entity
+    obj_id = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    assert obj_id, "create_entity must mint the canonical id"
+    warns: list[str] = []
+    # mixed alias: superseded = canonical id, supersedes_by = same Object's name
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": obj_id, "supersedes_by": "plan-X",
+          "evidence": "self lifecycle (id/name alias)"}],
+        session_id="sess_alias", warn=warns.append)
+    assert applied == 0, "id/name-aliased self-supersession must never apply"
+    assert any("self-supersession" in w for w in warns), warns
+    state = _entity_fold_state(proj, "plan-X")
+    assert state == ("live", None), \
+        f"mixed alias folded plan-X onto itself: {state!r}"
+
+
+def test_apply_supersessions_dup_name_successor_not_self(sdk):
+    """#2164 review (P1 advisory, inverse + round-2 ISSUE 4): duplicate-
+    named Objects (distinct canonical ids) do NOT make a supersession
+    ambiguous — the fold stores only the successor DISPLAY string (never a
+    node ref), so when a DISTINCT same-named successor exists, folding is
+    deterministic and correct. Target A (named plan-X) superseded by
+    "plan-X" where B (also named plan-X, live) exists → A IS superseded by
+    B-in-effect: applied=1, A folded, B untouched. Self-alias fires ONLY
+    when EVERY candidate is the target itself (no distinct successor) —
+    covered by test_apply_supersessions_mixed_id_name_self_alias_skipped.
+    Blind LIMIT 1 (pre-round-2) that picked A as its own successor would
+    have been the self-fold; the alias scan makes the distinct successor
+    visible."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    # object A named plan-X
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    # object B ALSO named plan-X — force a second, distinct-id node directly
+    # (create_entity would dedup by name; the raw write models a legacy/corrupt
+    # duplicate-name state the helper must tolerate)
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'live'})",
+        params={"id": "obj-planx-dup-b", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by duplicate-named B"}],
+        session_id="sess_dup", warn=warns.append)
+    assert applied == 1, "A IS superseded — a distinct successor exists"
+    assert not any("self-supersession" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status, "
+        "o.supersededBy").result_set
+    by_id = {r[0]: (r[1], r[2]) for r in rows}
+    assert by_id[id_a] == ("superseded", "plan-X"), \
+        f"A must fold to superseded by plan-X: {by_id}"
+    assert by_id["obj-planx-dup-b"] == ("live", None), \
+        f"B (the distinct successor) must stay live: {by_id}"
+
+
+def test_apply_supersessions_dead_dup_candidate_skipped(sdk):
+    """#2164 round-3 review: the fold-through decision needs a LIVE
+    distinct successor. A (live, named plan-X) superseded by "plan-X" where
+    the ONLY other plan-X carrier (B) is already TERMINAL (superseded) →
+    folding A would leave NO visible Object under that name (A now dead, B
+    already dead — recall_state excludes terminal Objects): the exact
+    dangling-successor harm the successor-visibility probe prevents. Must
+    warn + skip (applied=0, A stays live)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    # second plan-X carrier, already superseded (terminal)
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'superseded', "
+        "supersededBy:'plan-Y'})",
+        params={"id": "obj-planx-dead", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the dead duplicate"}],
+        session_id="sess_dead", warn=warns.append)
+    assert applied == 0, "no visible successor — fold must not apply"
+    assert any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "live", \
+        f"A must stay live — its only successor carrier is dead: {by_id}"
+    assert by_id["obj-planx-dead"] == "superseded", by_id
+
+
+def test_apply_supersessions_deprecated_carrier_skipped(sdk):
+    """#2164 round-4 review (P1-1): the visible-successor gate must use
+    recall_state's OBJECT exclusion set — a DEPRECATED successor is recall-
+    INVISIBLE (enters the FTS pool but never the state view) even though
+    'deprecated' is not in the point-terminal vocabulary set. A (live,
+    named plan-X) superseded by "plan-X" where the only other carrier (B)
+    is deprecated → no visible successor → warn + skip (applied=0)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'deprecated'})",
+        params={"id": "obj-planx-dep", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the deprecated duplicate"}],
+        session_id="sess_dep", warn=warns.append)
+    assert applied == 0, "deprecated carrier is recall-invisible — no fold"
+    assert any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "live", \
+        f"A must stay live — its only other carrier is deprecated: {by_id}"
+
+
+def test_apply_supersessions_idless_live_carrier_skipped(sdk):
+    """#2164 round-4 review (P1-2): an id-less Object is recall-INVISIBLE
+    regardless of status (retrieval keys on o.id — name query, kind scan,
+    and recall_state all exclude id-less rows). A (canonical, live, named
+    plan-X) superseded by "plan-X" where the only other carrier is a raw
+    id-less LIVE Object → no VISIBLE successor → warn + skip (applied=0),
+    not a fold onto an unseen carrier."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    # raw legacy id-less carrier — no id property, status live
+    proj.g.query(
+        "CREATE (o:Object {name:$n, kind:$k, status:'live'})",
+        params={"n": "plan-X", "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the id-less duplicate"}],
+        session_id="sess_idless", warn=warns.append)
+    assert applied == 0, "id-less carrier is recall-invisible — no fold"
+    assert any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "live", \
+        f"A must stay live — its only other carrier is id-less: {by_id}"
+
+
+def test_apply_supersessions_outdated_carrier_folds(sdk):
+    """#2164 round-4 review (P2-1, inverse): 'outdated' IS visible in
+    recall_state's default OBJECT view (it is in the point-terminal
+    vocabulary, NOT the object exclusion tuple). A (live, named plan-X)
+    superseded by "plan-X" where the only other carrier is outdated → a
+    VISIBLE successor exists → fold proceeds (applied=1)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'outdated'})",
+        params={"id": "obj-planx-old", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the outdated duplicate"}],
+        session_id="sess_old", warn=warns.append)
+    assert applied == 1, "outdated carrier IS visible — fold applies"
+    assert not any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "superseded", by_id
+    assert by_id["obj-planx-old"] == "outdated", \
+        "the outdated carrier must be untouched"
+
+
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the
 #    method directly (no env var needed) ─────────────────────────────────
 

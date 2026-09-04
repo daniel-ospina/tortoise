@@ -2061,6 +2061,16 @@ class TortoiseSDK:
         edge). The deterministic regex loop is removed as a product
         path — LLM extraction is the default and no-key fails closed.
 
+        Supersession records are REAL-BACKEND-ONLY, by construction: the v2
+        extractor forms conversation-driven supersessions only when its S3
+        search resolves against the real graph — extractor_v2 skips the search
+        entirely when the active backend is not "real" (the ``mode != "real"``
+        degraded branch: embedded/FalkorDBLite — the real graph, FalkorDB via
+        docker/redis URI or hosted API, is required), so capture over
+        embedded/FalkorDBLite produces ZERO supersession records (structurally
+        — the supersedes refs never resolve). Not a bug; do not debug it as
+        one.
+
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
         "extraction_mode", "extraction_provider", "ok", "errors",
@@ -2425,6 +2435,15 @@ class TortoiseSDK:
         graph — entities via create_entity, points via create_point with the
         content-addressed ids, events via create_event, IMPL/NAND via
         create_operator — then wires session CONTAINS + aboutObject edges.
+        Supersessions ride the payload's ``supersessions`` channel (#2164):
+        ``commit_ops.apply_supersessions`` applies each record AFTER the
+        entities/points it references exist (ordering contract) — ``pt_`` refs
+        → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
+        entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
+        full provenance) + the ``_fold_object_superseded`` status fold. Every
+        fold miss/skip/failure is surfaced through the shared meta
+        ``warnings`` channel — supersession application is best-effort and
+        never a silent drop (and never fails capture).
 
         Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
         consumes it): ``extracted`` is the same [{id, kind, text}] contract
@@ -2493,16 +2512,33 @@ class TortoiseSDK:
         proj = self._get_proj()
 
         # ── entities ──
+        entity_failures: list[str] = []
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            try:  # noqa: SIM105
+            try:
                 self.create_entity("object", name,
                                    objectKind=str(e.get("kind", "core:other")),
                                    is_episodic=False)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+            except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
+                # old `except: pass` was indicator-4 hygiene — a swallowed
+                # create_entity failure silently stranding an Object a
+                # supersession record then references. Per-item failures are
+                # surfaced as additive WARNINGS + a count line (never a
+                # silent drop) — warning-grade BY DESIGN, a DELIBERATE
+                # channel divergence from the points loop (:2581-2587),
+                # where a per-point write failure is an ERROR appended to
+                # meta errors (mode flips to 'error' and capture FAILS):
+                # lost point content is unrecoverable, while an entity
+                # write failure leaves recall-by-name intact for
+                # pre-existing Objects.
+                entity_failures.append(
+                    f"{type(exc).__name__}: entity write failed for {name}: {exc}")
+        if entity_failures:
+            warnings.extend(entity_failures)
+            warnings.append(
+                f"{len(entity_failures)} extracted entit(y/ies) failed to write")
 
         # ── points + aboutObject edges + session CONTAINS ──
         extracted: list[dict] = []
@@ -2575,6 +2611,17 @@ class TortoiseSDK:
                 proj, self, ops,
                 point_content_by_id=lambda pid: _payload_point_content_by_id(
                     payload, pid))
+        # #2164: supersessions — client-derived records (the deterministic
+        # channel for the Object status fold; §6b parity). pt_ → supersede()
+        # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
+        # entities exist (ordering contract). Warnings ride meta — never a
+        # silent drop. Best-effort — never fail capture (hosted §6b rule).
+        try:
+            from tortoise.commit_ops import apply_supersessions
+            apply_supersessions(proj, self, payload.get("supersessions") or [],
+                                session_id=session_id, warn=warnings.append)
+        except Exception as exc:  # pragma: no cover - defensive outer bound
+            _logger.warning("supersession apply failed: %s", exc, exc_info=True)
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.
