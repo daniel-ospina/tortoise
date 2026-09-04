@@ -31,9 +31,9 @@ from tortoise.schemas import (  # one vocabulary, no duplicated boundary literal
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
                                _current_scopes, _current_legacy_full_access,
-                               _transport_mode, _tool_group, _get_team_sdk,
-                               HTTP_ALLOWED, ERR_UNAUTHORIZED, ERR_EXCLUDED,
-                               SELFHOST_TEAM_ID)
+                               _current_graph_id, _transport_mode, _tool_group,
+                               _get_team_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
+                               ERR_EXCLUDED, SELFHOST_TEAM_ID)
 from tortoise.transport import ask_exposure_enabled
 
 _log = logging.getLogger(__name__)
@@ -251,6 +251,20 @@ def _enforce_mcp_tool_scope(name: str) -> None:
             f"Key lacks a graph data scope (graphs:read) for tool {name}.")
 
 
+def _reject_graph_bound_mcp_team_surface(surface: str) -> None:
+    """C5 #2114 (re-review 3): MCP tools that write TEAM-level state (the
+    DEFAULT graph's onboarding node / pack installs / session-recording
+    toggle — data that lives outside a custom graph) reject graph-bound
+    keys outright, mirroring REST's _reject_graph_bound_team_surface. A
+    per-graph key must never write the team default graph through an MCP
+    team tool (cross-graph write). Team-wide keys / OAuth / selfhost
+    (graph_id None) pass."""
+
+    if _current_graph_id.get():
+        raise AuthorizationError(
+            f"Graph-scoped keys cannot access {surface}.")
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -428,6 +442,15 @@ WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     # tortoise_pack_install MERGEs :PackManifest/:PackInstall into the
     # tenant graph (write) — re-review P2: it was missing (classified read).
     "tortoise_pack_install",
+    # C5 #2114 (re-review 3): REST/MCP parity + write-cache tools — session
+    # capture writes episodic Points (REST twin requires graphs:write); the
+    # onboarding index/demo/toggle tools write DEFAULT-graph/team state;
+    # get_source_reliability write-through refreshes the Source cache.
+    "tortoise_session_capture",
+    "tortoise_onboarding_github_index",
+    "tortoise_onboarding_session_recording",
+    "tortoise_get_source_reliability",
+    "tortoise_onboarding_github_connect",  # stores credentials + team state
 })
 
 
@@ -2640,6 +2663,9 @@ def tortoise_onboarding_demo_create() -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
+    # C5 #2114 (re-review 3): the demo seeds the team's DEFAULT graph —
+    # graph-bound keys rejected (REST twin public_demo parity).
+    _reject_graph_bound_mcp_team_surface("demo seed")
     # #329: demo graph creation creates nodes — quota-gate it
     _enforce_quota("points")
     result = _seed_demo_graph(team_id)
@@ -2707,6 +2733,9 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     pipeline checks (409 when off); ``capture_revised`` is written for
     backward-compatibility with the registered state keys (the exactly-once
     re-ask machinery it fed was removed with the gate)."""
+    # C5 #2114 (re-review 3): team-level surface — graph-bound keys rejected
+    # (REST twin set_session_recording parity).
+    _reject_graph_bound_mcp_team_surface("session recording toggle")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
@@ -2842,6 +2871,9 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     Returns {job_id, status} — poll via the REST endpoint or check
     onboarding state for github_indexed.
     """
+    # C5 #2114 (re-review 3): indexes into the DEFAULT graph — graph-bound
+    # keys rejected (REST twin index_github parity).
+    _reject_graph_bound_mcp_team_surface("github index")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}

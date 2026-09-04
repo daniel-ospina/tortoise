@@ -3899,6 +3899,9 @@ async def upload_pack_manifest(
     """
     await _check_sensitive_op_rate_limit(request, "pack_manifest")
     _reject_graph_bound_team_surface(team, "pack catalog upload")
+    # C5 #2114 (re-review P1): the upload MERGEs :PackManifest/:PackInstall
+    # into the DEFAULT graph — REST twin of tortoise_pack_install (write).
+    _require_scope(team, "graphs:write", "pack manifest upload")
     team_id = team.get("team_id")
     if not team_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -15301,6 +15304,12 @@ async def index_github(body: GitHubIndexRequest, team: dict = Depends(get_curren
     for a freshly-minted job — concurrent POSTs can never run two walks
     (duplicate statement ids, version inflation, job-status races).
     """
+    # C5 #2114 (re-review P1): indexing WRITES entities/events/sources into
+    # the team's DEFAULT graph via a background job (invisible to the
+    # endpoint-body _make_sdk inventory). Write scope required + graph-bound
+    # keys rejected (cross-graph write prevention).
+    _require_scope(team, "graphs:write", "github index")
+    _reject_graph_bound_team_surface(team, "github index")
     org = (body.org or "").strip()
     if not org:
         raise HTTPException(status_code=400, detail="org is required")
@@ -15323,6 +15332,8 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
                          team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Re-run the GitHub diff (diff-on-poll, amend 6) for the connected org.
 
+    C5 #2114 (re-review P1): reindex WRITES into the DEFAULT graph.
+    _require_scope + graph-bound rejection (see index_github).
     The ONLY route shape (T1-P2) — no query-param alternative. Reuses the
     persisted per-repo composite cursors, so a re-poll is an incremental
     diff, not a re-ingest. Declared BEFORE /v1/index/github/{job_id} so the
@@ -15334,6 +15345,10 @@ async def github_reindex(body: GitHubRepollRequest | None = None,
     is the legacy single-repo field (equivalent to ``repos=[repo]``). org is
     still read from the stored credentials, never the client.
     """
+    # C5 #2114 (re-review P1): reindex WRITES into the DEFAULT graph — write
+    # scope + graph-bound rejection (see index_github).
+    _require_scope(team, "graphs:write", "github reindex")
+    _reject_graph_bound_team_surface(team, "github reindex")
     encrypted, org = _github_credentials(team["team_id"])
     if not encrypted:
         raise HTTPException(status_code=400, detail="GitHub not connected. Run connect first.")
@@ -15655,6 +15670,8 @@ async def index_docs(body: DocsIndexRequest | None = None,
     documents-gated (derived-constant cap) and fail-closed when the ingest
     sandbox is unset.
 
+    C5 #2114 (re-review P1): the docs job WRITES into the DEFAULT graph —
+    write scope + graph-bound rejection (see index_github).
     #1845: ``repos`` is the multi-repo scope (list of {repo, branch}); the
     legacy single ``repo``/``branch`` fields are equivalent to a one-item
     scope. Empty/absent = ALL repos (org-wide, default branch). Review
@@ -15665,6 +15682,10 @@ async def index_docs(body: DocsIndexRequest | None = None,
     org, so this is non-breaking); a mismatched/absent body.org falls back
     to the stored org.
     """
+    # C5 #2114 (re-review P1): the docs job WRITES into the DEFAULT graph —
+    # write scope + graph-bound rejection.
+    _require_scope(team, "graphs:write", "docs index")
+    _reject_graph_bound_team_surface(team, "docs index")
     # Verify GitHub connected first (seam-aware read) + resolve the REAL
     # org server-side (review P2-3: the client must not pick the org — a
     # malicious org would index any accessible repo into this team's
@@ -15970,6 +15991,9 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
     # #1148 management set) — a graph-bound key must never restore over the
     # team default (cross-graph write). Team-wide keys + session auth pass.
     _reject_graph_bound_team_surface(team, "backup restore")
+    # C5 #2114 (re-review P2): restore REPLACES the live graph — a
+    # deleg-NULL team-wide graphs:read-only key must never trigger it.
+    _require_scope(team, "graphs:write", "backup restore")
     if not body.confirm:
         raise HTTPException(
             status_code=400, detail="confirm=true required — restore replaces the live graph"
