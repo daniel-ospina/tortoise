@@ -43,6 +43,9 @@ import urllib.request
 from typing import Protocol
 
 from tortoise.ingest import _PROVIDERS
+# #2185 seam: the canonical usage-sink fire helper (same contract as the
+# reader/product adapters — judge.py is tools-side; tortoise never imports it).
+from tortoise.models import _emit_usage_sink
 
 from .reader import _resolve_provider, _parse_model_spec
 
@@ -284,6 +287,10 @@ class OfficialJudgeModel:
         self.base_url = base_url.rstrip("/")
         self.api_key_env = api_key_env
         self.timeout = timeout
+        # #2185: additive usage-capture seam (no-op unless the harness binds
+        # it). NO last_* mirrors — the transport stays byte-verbatim so
+        # published LongMemEval numbers stay comparable.
+        self.usage_sink = None
 
     def build_request(self, user: str) -> dict:
         """The official kwargs — a single user message, nothing else."""
@@ -315,18 +322,28 @@ class OfficialJudgeModel:
             f"{self.base_url}/chat/completions", data=body,
             headers=self._headers())
         with urllib.request.urlopen(req, timeout=self.timeout) as r:
-            return self.parse_response(json.loads(r.read()))
+            data = json.loads(r.read())
+        # #2185 seam: fire with the response-local usage (provider None here —
+        # bound at registration by the harness).
+        _emit_usage_sink(self, data.get("usage"))
+        return self.parse_response(data)
 
 
 class LLMJudge:
     """Judge backed by an OpenAI-compatible chat model (official gpt-4o)."""
 
-    def __init__(self, model, model_id: str, *, model_spec: str | None = None):
+    def __init__(self, model, model_id: str, *, model_spec: str | None = None,
+                 provider: str | None = None):
         self._model = model
         self.model_id = model_id
         # M2 (#1523): the full <provider>:<model> spec (set by build_judge) —
         # check_judge_key resolves the expected key env var from it.
         self.model_spec = model_spec or model_id
+        # #2185 (A3): the resolved endpoint provider (set by build_judge) —
+        # mirrors LLMReader.provider; the usage collector registers the
+        # judge lane under this name so real judge spend prices against the
+        # map (OfficialJudgeModel carries no provider of its own).
+        self.provider = provider
 
     def judge(self, *, question_type: str, question: str, answer: str,
               hypothesis: str, abstention: bool) -> bool:
@@ -465,4 +482,5 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     # no system message, max_tokens=10) — see OfficialJudgeModel.
     model = OfficialJudgeModel(
         id=model_id, base_url=base_url, api_key_env=key_env)
-    return LLMJudge(model, model_id=model_id, model_spec=raw_spec)
+    return LLMJudge(model, model_id=model_id, model_spec=raw_spec,
+                    provider=_resolved_provider)

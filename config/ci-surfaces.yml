@@ -254,13 +254,18 @@ surfaces:
   - test_lint_tripwire.py
   - test_list_contexts.py
   - test_lme_m6_evidence.py
+  - test_longmem_costing.py
   - test_longmem_errors.py
   - test_longmem_preflight.py
   - test_longmem_reader_aggregation.py
   - test_longmem_reader_pinning.py
   - test_longmem_reader_prompting.py
+  - test_longmem_report_usage.py
   - test_longmem_rerank.py
   - test_longmem_runner.py
+  - test_longmem_usage.py
+  - test_longmem_usage_e2e.py
+  - test_longmem_usage_seam.py
   - test_lookup_hash.py
   - test_loopback_predicate_single_source.py
   - test_m0.py
