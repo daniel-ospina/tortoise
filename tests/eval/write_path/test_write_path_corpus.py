@@ -53,16 +53,26 @@ def test_committed_gold_validates_against_fixture(session_id: str) -> None:
     assert issues == [], f"gold {session_id} failed validation: {issues}"
 
 
-def test_committed_baseline_validates_as_first_run_pending() -> None:
+def test_committed_baseline_validates_as_published() -> None:
+    """W2-b #2098: the committed baseline is now PUBLISHED — the first-run
+    (possibly bad) number landed per the fix-wave protocol. It validates
+    clean with the full 6-metric vocabulary, judge pin, and justification.
+    (Before the first publish it validated as first-run-pending; that state
+    is exercised by the synthetic-pending tests below.)"""
     baseline = corpus.load_baseline()
     issues = schema.validate_baseline(baseline)
     assert issues == [], f"baseline failed validation: {issues}"
-    # Benchmark-first decision: no preset quality bar — targets come from
-    # first-run data, so the committed baseline carries no metrics yet.
-    assert baseline["metrics"] == {}
-    assert baseline["history"] == []
-    assert baseline["justification"] is None
-    assert baseline["judge_pin"] is None
+    # First published baseline (benchmark-first): targets set FROM first-run
+    # data — a real measured number, not a preset bar.
+    assert baseline["metrics"] != {}
+    assert set(baseline["metrics"]) == schema.METRIC_VALUES, \
+        "published baseline must snapshot the full metric vocabulary"
+    assert len(baseline["history"]) >= 1
+    assert baseline["justification"]
+    assert baseline["judge_pin"]
+    # The committed number is real and finite (never a preset quality bar).
+    for key, value in baseline["metrics"].items():
+        assert isinstance(value, (int, float)), f"{key}: {value!r} must be numeric"
 
 
 def test_generator_full_validation_is_clean() -> None:
@@ -242,6 +252,25 @@ def test_fixture_only_edit_also_breaks_fixtures_hash(tmp_path) -> None:
 # ── Baseline schema: justification-to-bless + config-mismatch ⇒ inconclusive ─
 
 
+def _synthetic_pending_baseline() -> dict:
+    """A first-run-pending baseline for the benchmark-first state tests — the
+    live committed baseline is PUBLISHED after W2-b's first baseline lands
+    (#2098), so the pending state is synthesized from the current corpus hash
+    + config rather than read from disk (which now carries the published
+    number)."""
+    live = corpus.load_baseline()
+    baseline = {
+        "schema_version": live.get("schema_version", schema.SCHEMA_VERSION),
+        "fixtures_hash": live["fixtures_hash"],
+        "config": live["config"],
+        "judge_pin": None,
+        "justification": None,
+        "metrics": {},
+        "history": [],
+    }
+    return baseline
+
+
 def _sample_published_baseline() -> dict:
     baseline = copy.deepcopy(corpus.load_baseline())
     baseline["judge_pin"] = "judge-write-path-v1"
@@ -280,7 +309,7 @@ def test_published_baseline_requires_justification() -> None:
 
 
 def test_pending_baseline_cannot_carry_justification() -> None:
-    baseline = copy.deepcopy(corpus.load_baseline())
+    baseline = _synthetic_pending_baseline()
     baseline["justification"] = "nothing has been blessed yet"
     issues = schema.validate_baseline(baseline)
     assert any("justification" in issue and "first-run-pending" in issue for issue in issues), issues
@@ -325,7 +354,7 @@ def test_compare_verdict_vocabulary() -> None:
 
 
 def test_pending_baseline_cannot_pin_judge() -> None:
-    baseline = copy.deepcopy(corpus.load_baseline())
+    baseline = _synthetic_pending_baseline()
     baseline["judge_pin"] = "judge-write-path-v1"  # nothing published yet
     issues = schema.validate_baseline(baseline)
     assert any("judge_pin" in issue and "first-run-pending" in issue for issue in issues), issues
@@ -346,9 +375,11 @@ def test_baseline_metric_values_are_typed_and_ranged() -> None:
     # Bool is not a number here.
     assert any("expected a number" in issue
                for issue in _with_metrics(lambda m: m.__setitem__("quote_fidelity", True)))
-    # Leakage above the gold-locked tolerance.
-    assert any("tolerance" in issue
-               for issue in _with_metrics(lambda m: m.__setitem__("distractor_leakage_per_run", 5)))
+    # Leakage is type/range-checked (non-negative int) but NOT tolerance-
+    # capped at record time (W2-b #2098 F5 resolution — the honest first
+    # number must be publishable; the tolerance is the compare_run standing
+    # bar). "1" (string) is still rejected.
+    assert _with_metrics(lambda m: m.__setitem__("distractor_leakage_per_run", 5)) == []
     assert any("non-negative int" in issue
                for issue in _with_metrics(lambda m: m.__setitem__("distractor_leakage_per_run", "1")))
     # In-range values stay clean.
@@ -410,7 +441,7 @@ def test_compare_against_pending_baseline_is_inconclusive() -> None:
     """Benchmark-first: the committed pending baseline has no targets, so the
     first-run compare cannot pass or regress — it is inconclusive until W2-b
     publishes the first baseline."""
-    pending = corpus.load_baseline()
+    pending = _synthetic_pending_baseline()
     verdict = schema.compare_run(
         run_metrics={},
         baseline=pending,
@@ -425,7 +456,7 @@ def test_first_publish_bless_from_pending_baseline() -> None:
     the first (expected-bad) run against the committed first-run-pending
     baseline — no committed targets exist to compare against, so the compare is
     skipped and the run's metrics become the first committed targets."""
-    pending = corpus.load_baseline()
+    pending = _synthetic_pending_baseline()
     run = {
         "fixtures_hash": pending["fixtures_hash"],
         "judge_pin": "judge-write-path-v1",
@@ -661,12 +692,45 @@ def test_bless_rejects_invalid_run_metrics() -> None:
     out_of_range["salient_unit_survival_macro"] = 1.7
     with pytest.raises(ValueError, match="run metrics are not valid"):
         schema.bless_baseline(previous, _run_with(out_of_range), justification="impossible target")
-    # First-publish path validates too.
-    pending = corpus.load_baseline()
-    leaky = _full()
-    leaky["distractor_leakage_per_run"] = 9
-    with pytest.raises(ValueError, match="run metrics are not valid"):
-        schema.bless_baseline(pending, _run_with(leaky), justification="over-tolerance leakage")
+    # First-publish path validates too. NOTE (W2-b #2098, F5 resolution): an
+    # over-tolerance leakage is now RECORDABLE — the fix-wave protocol
+    # requires the honest first (bad) number to be publishable. It is never
+    # legitimized: compare_run treats leakage > tolerance as regression on
+    # every subsequent run (see test_leakage_above_tolerance_always_regresses).
+    pending = _synthetic_pending_baseline()
+    leaky = _full(); leaky["distractor_leakage_per_run"] = 9
+    blessed = schema.bless_baseline(
+        pending, _run_with(leaky), justification="first baseline — over-tolerance leakage named as failure class"
+    )
+    assert schema.validate_baseline(blessed) == []
+    assert blessed["metrics"]["distractor_leakage_per_run"] == 9
+
+
+def test_leakage_above_tolerance_always_regresses() -> None:
+    """W2-b #2098 (F5 resolution): the gold-locked tolerance is the STANDING
+    quality bar — a run whose leakage exceeds it is a regression even when
+    the committed baseline was itself over-tolerance (a bad first number
+    records per the fix-wave protocol but never legitimizes a future run at
+    the same level; the tolerance cannot be blessed away by re-pinning)."""
+    previous = _sample_published_baseline()
+    # Commit an over-tolerance first number (the fix-wave starting point).
+    first = copy.deepcopy(previous)
+    first["metrics"] = {**previous["metrics"], "distractor_leakage_per_run": 2}
+    # A subsequent run AT the same over-tolerance level is STILL a regression
+    # (tolerance 1 is the convergence target — 2 never becomes acceptable).
+    run_at_same = {**first["metrics"], "distractor_leakage_per_run": 2}
+    assert schema.compare_run(
+        run_at_same, first,
+        resolved_config=first["config"],
+        run_fixtures_hash=first["fixtures_hash"],
+    ) == schema.VERDICT_REGRESSION
+    # A run AT tolerance (≤1) passes when the committed is worse.
+    run_at_tolerance = {**first["metrics"], "distractor_leakage_per_run": 1}
+    assert schema.compare_run(
+        run_at_tolerance, first,
+        resolved_config=first["config"],
+        run_fixtures_hash=first["fixtures_hash"],
+    ) == schema.VERDICT_PASS
 
 
 def test_bless_rejects_partial_metric_vocabulary() -> None:
@@ -689,7 +753,7 @@ def test_bless_rejects_partial_metric_vocabulary() -> None:
             previous, partial, justification="partial lane bless"
         )
     # First-publish path also rejects partial snapshots.
-    pending = corpus.load_baseline()
+    pending = _synthetic_pending_baseline()
     partial["fixtures_hash"] = pending["fixtures_hash"]
     partial["config"] = pending["config"]
     with pytest.raises(ValueError, match="missing graded dimensions"):
@@ -756,7 +820,7 @@ def test_bless_refuses_inconclusive_compare() -> None:
         "metrics": {"salient_unit_survival_macro": 0.9},
         "failure_classes": [],
     }
-    with pytest.raises(ValueError, match="inconclusive"):
+    with pytest.raises(ValueError, match="corpus drift|fixtures_hash differs"):
         schema.bless_baseline(previous, run, justification="cannot bless a mismatched corpus")
 
 
@@ -764,7 +828,7 @@ def test_first_publish_bless_rejects_corpus_drift() -> None:
     """First publish still enforces the frozen-corpus contract: a run on a
     drifted corpus (fixtures_hash or resolved-config mismatch vs the committed
     pending baseline) cannot be blessed as the first baseline."""
-    pending = corpus.load_baseline()
+    pending = _synthetic_pending_baseline()
     run = {
         "fixtures_hash": "sha256:drifted-corpus",
         "judge_pin": "judge-write-path-v1",
@@ -929,3 +993,190 @@ def test_validate_baseline_rejects_partial_metric_vocabulary() -> None:
         "provenance_accuracy": 0.86,
     }
     assert schema_mod.validate_baseline(full) == []
+
+
+def test_corpus_bless_refreshes_on_intentional_fixture_change() -> None:
+    """REVIEW-FIX (PR #2183 review finding 2): an INTENTIONAL corpus
+    regeneration (fixtures_hash change) is blessable via corpus_bless=True
+    with a justification — the ordinary path stays fail-closed on drift, but
+    a deliberate fixture/gold edit (recorded in history as corpus_change)
+    must not deadlock every subsequent bless (plan §8.2 R8 mitigation)."""
+    previous = _sample_published_baseline()
+    run = {
+        "fixtures_hash": "sha256:new-corpus-after-regeneration",
+        "judge_pin": "judge-write-path-v1",
+        "config": previous["config"],
+        "date": "2026-09-20",
+        "metrics": {
+            "salient_unit_survival_macro": 0.7,
+            "salient_unit_survival_strict": 0.6,
+            "distractor_leakage_per_run": 1,
+            "sessions_emitting": 1.0,
+            "quote_fidelity": 1.0,
+            "provenance_accuracy": 1.0,
+        },
+        "failure_classes": [],
+    }
+    # Without corpus_bless: drift is rejected (fail-closed).
+    with pytest.raises(ValueError, match="corpus_bless"):
+        schema.bless_baseline(
+            previous, dict(run), justification="drift must be rejected without corpus_bless")
+    # With corpus_bless: the new hash re-pins; no compare (different corpus);
+    # history records the corpus change.
+    blessed = schema.bless_baseline(
+        previous, dict(run), justification="deliberate corpus regeneration (fixture fix)",
+        corpus_bless=True)
+    assert blessed["fixtures_hash"] == "sha256:new-corpus-after-regeneration"
+    assert blessed["metrics"]["salient_unit_survival_macro"] == 0.7
+    assert schema.validate_baseline(blessed) == []
+    assert blessed["history"][-1].get("corpus_change") is True
+    assert "verdict" not in blessed["history"][-1], \
+        "a corpus-bless re-pins without a compare (different corpus content)"
+
+
+def test_bless_rejects_judge_pin_change_without_corpus_bless() -> None:
+    """REVIEW-FIX (PR #2183 review finding 3): a run whose judge_pin differs
+    from the committed baseline's pin is a PROTOCOL CHANGE — never silently
+    compared/regressed against a different grading protocol."""
+    previous = _sample_published_baseline()  # judge-write-path-v1
+    run = {
+        "fixtures_hash": previous["fixtures_hash"],
+        "judge_pin": "judge-write-path-v2",  # protocol bump
+        "config": previous["config"],
+        "date": "2026-09-20",
+        "metrics": dict(previous["metrics"]),
+        "failure_classes": [],
+    }
+    with pytest.raises(ValueError, match="judge_pin differs"):
+        schema.bless_baseline(previous, run, justification="bumped the judge protocol")
+
+
+def test_cross_posture_compare_is_inconclusive() -> None:
+    """REVIEW-FIX (PR #2183 findings 1+4): a run on one extractor posture is
+    NEVER compared against a baseline on the other — the posture rides inside
+    resolved_config, so the config-equality guard returns inconclusive (never
+    a silent cross-posture regression/pass)."""
+    published = _sample_published_baseline()  # llm posture (main.json)
+    assert (published["config"] or {}).get("extractor_posture") == "llm"
+    m2_config = dict(corpus.BASELINE_CONFIG)
+    m2_config["extractor_posture"] = "m2"
+    verdict = schema.compare_run(
+        published["metrics"], published,
+        resolved_config=m2_config,          # m2 run vs llm baseline
+        run_fixtures_hash=published["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_INCONCLUSIVE
+
+
+def test_m2_lane_standing_leakage_bar_does_not_fire() -> None:
+    """REVIEW-FIX (finding 1): the standing leakage bar (leakage > tolerance
+    => regression on every run) is a PRODUCT-lane (llm) bar. The deterministic
+    M2 echo lane STRUCTURALLY copies every distractor (leakage ~11 > 1) - a
+    bar on it would make the CI lane permanently un-passable (rubber). Its
+    gate is determinism/reproduction vs its own committed m2.json."""
+    baseline = _sample_published_baseline()
+    m2_config = dict(baseline["config"])
+    m2_config["extractor_posture"] = "m2"
+    m2_metrics = dict(baseline["metrics"])
+    # The m2 lane's own committed baseline records the echo's structural
+    # leakage (over product tolerance - honest artifact of the echo seam).
+    m2_metrics["distractor_leakage_per_run"] = 11
+    m2_baseline = dict(baseline)
+    m2_baseline["config"] = m2_config
+    m2_baseline["metrics"] = m2_metrics
+    # A deterministic replay AT the committed level (leakage 11) is PASS on
+    # the m2 lane: the standing product bar does not fire for m2.
+    replay = dict(m2_metrics)
+    verdict = schema.compare_run(
+        replay, m2_baseline,
+        resolved_config=m2_config,
+        run_fixtures_hash=m2_baseline["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_PASS
+    # The m2 lane still catches a leak INCREASE directionally (12 > committed
+    # 11 => regression) - determinism/reproduction is its gate.
+    verdict = schema.compare_run(
+        dict(replay, distractor_leakage_per_run=12), m2_baseline,
+        resolved_config=m2_config,
+        run_fixtures_hash=m2_baseline["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_REGRESSION
+    # The SAME replay (leakage 12) against an LLM baseline is also a
+    # regression - the product lane keeps its standing bar.
+    verdict = schema.compare_run(
+        dict(replay, distractor_leakage_per_run=12), baseline,
+        resolved_config=baseline["config"],
+        run_fixtures_hash=baseline["fixtures_hash"],
+    )
+    assert verdict == schema.VERDICT_REGRESSION
+
+
+def test_validate_baseline_rejects_wrong_posture_file() -> None:
+    """REVIEW-FIX: validate_baseline rejects a baseline whose config posture
+    is not in the vocabulary; generate_corpus additionally enforces the file
+    ↔ posture keying (main.json ⇒ llm, m2.json ⇒ m2)."""
+    published = _sample_published_baseline()
+    bad = dict(published)
+    bad_config = dict(published["config"])
+    bad_config["extractor_posture"] = "m2"
+    bad["config"] = bad_config
+    issues = schema.validate_baseline(bad)
+    assert issues == []  # schema-level: posture enum is valid; file keying is
+    # generate_corpus's job (m2 config in main.json is caught there)
+    # The committed main.json must be llm-keyed, m2.json m2-keyed.
+    main_b = schema.read_json(corpus.WRITE_PATH_DIR / "baselines" / "main.json")
+    m2_b = schema.read_json(corpus.WRITE_PATH_DIR / "baselines" / "m2.json")
+    assert main_b["config"]["extractor_posture"] == "llm"
+    assert m2_b["config"]["extractor_posture"] == "m2"
+
+
+def test_protocol_bless_repins_judge_protocol_change() -> None:
+    """REVIEW-FIX (round-3 F2): a legitimate judge-protocol bump (judge_pin
+    change on an UNCHANGED corpus) deadlocks the ordinary bless path (pin
+    change = new protocol = non-comparable) — protocol_bless=True is the
+    sanctioned re-pin path: accepts with justification, records
+    protocol_change, re-pins WITHOUT a compare."""
+    previous = _sample_published_baseline()  # judge-write-path-v1
+    run = {
+        "date": "2026-09-20T00:00:00Z",
+        "fixtures_hash": previous["fixtures_hash"],
+        "judge_pin": "judge-write-path-v2",  # protocol bump, unchanged corpus
+        "config": previous["config"],
+        "metrics": dict(previous["metrics"]),
+        "failure_classes": [],
+    }
+    # Ordinary bless: pin change is a protocol change — rejected.
+    with pytest.raises(ValueError, match="judge_pin differs"):
+        schema.bless_baseline(previous, dict(run), justification="protocol bump")
+    # protocol_bless: sanctioned re-pin, no compare, history marks it.
+    blessed = schema.bless_baseline(
+        previous, dict(run), justification="judge v2 protocol (blind-salience fix)",
+        protocol_bless=True)
+    assert blessed["judge_pin"] == "judge-write-path-v2"
+    assert schema.validate_baseline(blessed) == []
+    assert blessed["history"][-1].get("protocol_change") is True
+    assert "verdict" not in blessed["history"][-1], \
+        "a protocol re-pin has no compare (different grading protocol)"
+
+
+def test_compare_run_judge_pin_mismatch_is_inconclusive() -> None:
+    """REVIEW-FIX (round-3 F2): compare_run returns inconclusive when the run
+    was graded under a different judge pin than the committed baseline — the
+    runner gate + CI replay are protocol-honest (never a silent pass/regression
+    against a different grading protocol)."""
+    baseline = _sample_published_baseline()  # judge-write-path-v1
+    verdict = schema.compare_run(
+        dict(baseline["metrics"]), baseline,
+        resolved_config=baseline["config"],
+        run_fixtures_hash=baseline["fixtures_hash"],
+        run_judge_pin="judge-write-path-v2",
+    )
+    assert verdict == schema.VERDICT_INCONCLUSIVE
+    # Same pin ⇒ normal directional compare.
+    verdict = schema.compare_run(
+        dict(baseline["metrics"]), baseline,
+        resolved_config=baseline["config"],
+        run_fixtures_hash=baseline["fixtures_hash"],
+        run_judge_pin=baseline["judge_pin"],
+    )
+    assert verdict == schema.VERDICT_PASS

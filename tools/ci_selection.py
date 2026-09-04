@@ -112,6 +112,12 @@ SOURCE_PATTERNS = {
     # eval (#1349): the probe, LongMemEval/mini-BEIR harnesses, threshold
     # tools, benchmark infra, and the backfill script all produce gate
     # evidence — their tests live in the eval surface (config/ci-surfaces.yml).
+    # W2-b (#2098) BPRE trigger (plan §2.1) is wired at the TEST-FILE level
+    # instead of here: the write-path benchmark gate file is registered on
+    # the api (hosted capture/provenance), core (session_import fallback),
+    # ep (dream EP pass), and eval surfaces, so a PR touching any of those
+    # source paths runs the replay gate via the matched surface's files
+    # without displacing the surface's existing selection.
     "eval": ("tools/longmem_eval/", "tools/mini_beir/",
              "tools/embedder_probe.py", "tools/calibrate_thresholds.py",
              "tools/pair_label_runner.py", "benchmarks/",
