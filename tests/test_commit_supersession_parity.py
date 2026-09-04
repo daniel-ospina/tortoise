@@ -122,14 +122,6 @@ def _seed_baseline(sdk, old_pt_id: str) -> None:
     sdk.create_entity("object", OLD_OBJECT_NAME, objectKind=OBJECT_KIND)
 
 
-def _write_successors(sdk, new_pt_id: str) -> None:
-    """The new-session content the hosted write phase carries: the successor
-    point + successor entity. Written BEFORE the supersessions apply (the
-    commit ordering — a dangling successor would be invisible to recall)."""
-    sdk.create_point("statement", NEW_PT_CONTENT, id=new_pt_id, status="live")
-    sdk.create_entity("object", SUCCESSOR_OBJECT_NAME, objectKind=OBJECT_KIND)
-
-
 def _supersession_records(old_pt_id: str, new_pt_id: str) -> list[dict]:
     """The extractor-format supersession records (the extractor_v2
     ``{superseded, supersedes_by, evidence}`` shape) fed to the hosted write
