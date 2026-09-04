@@ -39,6 +39,16 @@ _current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", defaul
 # #329: resolved team quota limits (from the registry Team node), cached 60s
 # with the auth cache so MCP write tools enforce the SAME limits REST sees.
 _current_team_limits: ContextVar[dict | None] = ContextVar("_current_team_limits", default=None)
+# C5 #2114 (D-C5-4): graph scope rides the ContextVars — the resolved team's
+# C1 tenancy fields (graph_id / FULL graph namespace / flat scopes /
+# legacy_full_access), set by TeamResolutionMiddleware at resolution time so
+# _get_team_sdk() + the tool-call scope gate see the SAME scope REST sees.
+_current_graph_id: ContextVar[str | None] = ContextVar("_current_graph_id", default=None)
+_current_graph_namespace: ContextVar[str | None] = ContextVar(
+    "_current_graph_namespace", default=None)
+_current_scopes: ContextVar[list | None] = ContextVar("_current_scopes", default=None)
+_current_legacy_full_access: ContextVar[bool | None] = ContextVar(
+    "_current_legacy_full_access", default=None)
 _transport_mode: ContextVar[str | None] = ContextVar("_transport_mode", default=None)
 # Curation group for the active MCP app (#523) — set per request by the app's
 # middleware so the shared tools/list transform filters correctly even when
@@ -63,10 +73,25 @@ def _get_base_sdk() -> TortoiseSDK:
 
 # ── Team-scoped SDK (D2) ────────────────────────────────────────────────────
 def _get_team_sdk() -> TortoiseSDK:
-    """Request-scoped SDK: team namespace in HTTP mode, base SDK in stdio."""
+    """Request-scoped SDK: team namespace in HTTP mode, base SDK in stdio.
+
+    C5 #2114 (D-C5-4): a graph-bound key (graph_id + namespace ContextVars
+    set at resolution) opens ITS OWN graph via the SDK graph-name seam
+    (TortoiseSDK(graph_name=ns) — the namespace derivation would prepend
+    team_). The middleware resolution already proved key→graph ownership
+    (the same trusted resolver REST uses: graph_id/scopes only resolve from
+    the owned Graph node / graphs row) and graph-delete revokes the graph's
+    keys (C3) — a deleted graph's key fails resolution (401), so no
+    per-call re-probe (REST's _data_sdk probe is defense-in-depth for the
+    resolve→open window; MCP's resolve→open window is the same request).
+    Team-wide keys / OAuth / selfhost → the default graph (unchanged)."""
     team_id = _current_team_id.get()
     if team_id is None:
         return _get_base_sdk()
+    gid = _current_graph_id.get()
+    ns = _current_graph_namespace.get()
+    if gid and ns:
+        return TortoiseSDK(graph_name=ns)
     return TortoiseSDK(namespace=team_id)
 
 
@@ -232,25 +257,28 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                     "Expected format: Authorization: Bearer tt_<key>/tk_<key>",
                     status=401,
                 )
-            # C2 (#2111) one-level-deep guard (code-review P1, #2b): a
-            # MINTED (deleg=0) per-graph key must NOT drive MCP tools — MCP
-            # tools run on the team-scoped SDK (whole-team namespace) with
-            # no per-graph scope enforcement until C5 #2114 lands. The REST
-            # surface gates deleg=0 on management AND write paths; MCP must
-            # not be the fail-open lane where a handed-out least-privilege
-            # key gets every write tool against all team data. resolve_api_key
+            # C2 (#2111) → C5 (#2114) one-level-deep guard (code-review P1,
+            # #2b): a MINTED (deleg=0) key drives MCP tools ONLY when it
+            # carries a data scope (graphs:read/write) — C5 routes it to its
+            # OWN graph (_get_team_sdk) and the tool-call scope gate enforces
+            # read/write. A deleg=0 key WITHOUT a data scope stays rejected
+            # (a keys:manage/team:manage-only child has no graph data to
+            # exercise; escalation scopes never land on children). Pre-C5
+            # this rejected ALL deleg=0 keys blanket (dormancy). resolve_api_key
             # (Supabase) and apikey_verify (registry, extended in C2) both
-            # carry delegation_depth. tk_ keys minted with deleg=NULL (an
-            # owner-minted scoped key — C3 surface) still pass.
-            if not is_oauth and team.get("delegation_depth") == 0:
+            # carry delegation_depth + scopes. tk_ keys minted with deleg=NULL
+            # (an owner-minted scoped key — C3 surface) pass regardless.
+            if not is_oauth and team.get("delegation_depth") == 0 and not (
+                    {"graphs:read", "graphs:write"}
+                    & set(team.get("scopes") or [])):
                 # jsonrpc -32001 (ERR_UNAUTHORIZED) with HTTP 403 — mirrors
                 # the ERR_SUSPENDED precedent (403 status + data payload
                 # carrying a machine-readable code): MCP clients switching
                 # on the jsonrpc code get a distinct authz signal.
                 return _jsonrpc_error(
                     ERR_UNAUTHORIZED,
-                    "Minted keys cannot be used over MCP until per-graph "
-                    "isolation ships.",
+                    "Minted keys cannot be used over MCP without a data "
+                    "scope (graphs:read/write).",
                     {"code": "KEY_NOT_USER_MINTED"},
                     status=403,
                 )
@@ -326,6 +354,13 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             self._cache[token] = (now, team, limits)
         _current_team_id.set(team["team_id"])
         _current_team_limits.set(limits)
+        # C5 #2114 (D-C5-4): graph scope rides the resolution — the SAME C1
+        # tenancy fields REST get_current_team carries. Session/legacy/OAuth
+        # resolutions (no graph_id) leave the defaults → team-wide SDK.
+        _current_graph_id.set(team.get("graph_id"))
+        _current_graph_namespace.set(team.get("graph_namespace"))
+        _current_scopes.set(team.get("scopes"))
+        _current_legacy_full_access.set(team.get("legacy_full_access"))
         _transport_mode.set("http")
         # #308 (R4, delta 10): geo check on EVERY post-auth request —
         # cache-hit and cache-miss alike, so an IP-rotation burst cannot ride
@@ -369,6 +404,13 @@ class TransportModeMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         _transport_mode.set("http")
         _current_team_id.set(SELFHOST_TEAM_ID)
+        # C5: selfhost/static transports have no graph scope — clear any
+        # prior tenant request's ContextVars (ContextVar defaults are
+        # per-request here, but an explicit reset is cheap + future-proof).
+        _current_graph_id.set(None)
+        _current_graph_namespace.set(None)
+        _current_scopes.set(None)
+        _current_legacy_full_access.set(None)
         from tortoise.transport import _selfhost_transport
         _selfhost_transport.set(True)
         try:
