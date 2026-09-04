@@ -8499,6 +8499,16 @@ class GraphRecordingPatch(BaseModel):
 
     recording: bool | None
 
+    @field_validator("recording", mode="before")
+    @classmethod
+    def _strict_bool(cls, v):
+        # Pydantic v2 coerces 'yes'/'no'/'on' to bool — the override must be
+        # a REAL bool (or null = inherit). mode='before' sees the RAW input;
+        # reject anything that is not an actual bool. Rejections are 422s.
+        if v is not None and not isinstance(v, bool):
+            raise ValueError("recording must be true, false or null")
+        return v
+
 
 @app.patch("/v1/graphs/{graph_id}")
 async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,

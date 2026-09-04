@@ -1798,19 +1798,29 @@ class TestSessionCaptureWriteVerb:
         """P1 (review round 1): a transient failure in the post-write
         enrichment read must NOT 500 a committed capture (D4 posture) — it
         degrades to an additive warning and the verb reports what it could."""
-        # _GuardedGraph is __slots__-locked and the underlying redislite
-        # Graph handle is created fresh per SDK — patch at the HANDLE CLASS
-        # level (test-scoped); the boom is selective so unrelated queries in
-        # the same window pass through untouched.
-        from redislite.falkordb_client import Graph as _Graph
-        _orig = _Graph.query
+        # Patch the enrichment read's Graph.query at the HANDLE CLASS level
+        # on BOTH lanes (#1647 docker-lane redirect: the test-* team maps to
+        # a SERVER-backed graph — falkordb.graph.Graph — while the carve-out
+        # lane uses the embedded redislite handle; the boom must reach
+        # whichever class the lane actually executes). Selective so unrelated
+        # queries in the same window pass through untouched.
+        from redislite.falkordb_client import Graph as _EmbeddedGraph
+        _graph_classes = [_EmbeddedGraph]
+        try:
+            from falkordb.graph import Graph as _ServerGraph
+            _graph_classes.append(_ServerGraph)
+        except Exception:
+            pass
+        _orig_query = {cls: cls.query for cls in _graph_classes}
 
         def _selective_boom(self, cypher, params=None, timeout=None):
             if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
                 raise RuntimeError("transient graph failure")
-            return _orig(self, cypher, params=params, timeout=timeout)
+            return _orig_query[type(self)](self, cypher, params=params,
+                                           timeout=timeout)
 
-        monkeypatch.setattr(_Graph, "query", _selective_boom)
+        for cls in _graph_classes:
+            monkeypatch.setattr(cls, "query", _selective_boom)
         r = client.post("/v1/sessions", json={
             "conversation": self.CONVERSATION,
             "session_id": "w5-enrich-fail-session",
