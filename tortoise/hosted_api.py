@@ -2228,7 +2228,7 @@ async def _check_turnstile(request: Request, body: dict) -> None:
 
 # ── Pydantic Models ───────────────────────────────────────────────
 
-from pydantic import BaseModel, Field, field_validator, model_validator  # noqa: E402
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator  # noqa: E402
 
 
 class CreatePointRequest(BaseModel):
@@ -5836,19 +5836,25 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     )
 
     # #1927: session_recording is an OPT-OUT now (default ON, ToS-covered) —
-    # not an enforced consent gate. The flag stays readable/settable as the
-    # dashboard's quiet off-switch: a team that disabled it gets a clear 409
-    # (state-conflict: recording policy off — NOT the old 403 consent error),
-    # capture stops (no Session write, no receipt), and the per-harness
-    # last-error surfaces the message on the dashboard row.
-    state = _get_onboarding_state(team["team_id"])
-    if not state.get("session_recording"):
-        raise HTTPException(
-            status_code=409,
-            detail="Session recording is disabled for this team. Enable it "
-                   "in the dashboard (Memory sources > Agent sessions) or via "
-                   "tortoise_onboarding_session_recording to capture sessions.",
-        )
+    # not an enforced consent gate. C6 #2115 (D-C6-3): the gate resolves
+    # PER-GRAPH — the key's graph override (D-C6-1 storage) beats the team
+    # default; NULL override inherits the team default (default-ON
+    # preserved — a per-graph NULL never flips a team ON). A disabled
+    # layer gets the same clear 409 (state-conflict: recording policy off —
+    # NOT the old 403 consent error), capture stops (no Session write, no
+    # receipt), and the per-harness last-error surfaces the message.
+    recording_ok, rec_layer = _session_recording_allowed(team)
+    if not recording_ok:
+        if rec_layer == "graph":
+            detail = ("Session recording is disabled for this graph. Enable "
+                      "it via PATCH /v1/graphs/{graph_id} (recording) or "
+                      "clear the override to inherit the team setting.")
+        else:
+            detail = ("Session recording is disabled for this team. Enable it "
+                      "in the dashboard (Memory sources > Agent sessions) or "
+                      "via tortoise_onboarding_session_recording to capture "
+                      "sessions.")
+        raise HTTPException(status_code=409, detail=detail)
 
     # #822: LLM extraction is the default (and only) capture extraction —
     # the regex loop was removed as a product path. No provider key →
@@ -8480,6 +8486,94 @@ async def create_graph(body: dict, user: dict = Depends(get_current_user)):  # n
         # #308 R2 key-create evaluation (mirror create_api_key).
         await _abuse_evaluate_keys(team["id"])
         return provisioned
+
+
+class GraphRecordingPatch(BaseModel):
+    """C6 #2115 — PATCH /v1/graphs body: the session_recording override.
+
+    True/False = explicit per-graph override; null = inherit the team
+    default (#1927 default-ON preserved — a per-graph NULL never flips a
+    team ON). Strings are rejected (no truthy coercion)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    recording: bool | None
+
+
+@app.patch("/v1/graphs/{graph_id}")
+async def patch_graph_recording(graph_id: str, body: GraphRecordingPatch,
+                                team_id: str,
+                                key_ctx: dict = Depends(get_current_team_session)):  # noqa: B008
+    """C6 #2115 — set a graph's session_recording override (epic §6.3).
+
+    Auth: a key with the ``team:manage`` scope (or the legacy full-access
+    class — deleg NULL + scopes []), or an owner/admin session user (the
+    dual-auth dependency resolves BOTH faces like delete_graph). A MINTED
+    deleg=0 key never carries team:manage (C2/C3 child policy) → 403.
+
+    Body: ``{recording: true|false|null}`` — null removes the override
+    (inherit team default). The DEFAULT graph is settable too (recording is
+    per-graph, incl. graph 0 — registry kind='default' node / supabase
+    kind='default' row). Unknown graph → 404. Suspended team → 403 (the
+    shared dual-auth dependency enforces it).
+    """
+    if key_ctx.get("team_id") != team_id:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    team = await _team_node(team_id)
+    if team is None:
+        raise HTTPException(status_code=404, detail="Unknown team")
+    # Auth: key with team:manage (or legacy full access) — else the caller
+    # is a session user whose membership role must be owner/admin.
+    if key_ctx.get("key_id"):
+        scopes = key_ctx.get("scopes") or []
+        if "team:manage" not in scopes and not key_ctx.get("legacy_full_access"):
+            raise HTTPException(status_code=403,
+                                detail="Missing team:manage scope")
+    else:
+        membership = await _membership_team(
+            key_ctx.get("session_user_id") or "", team_id)
+        if membership is None or membership.get("role") not in ("owner", "admin"):
+            raise HTTPException(status_code=403,
+                                detail="Requires owner or admin role in team")
+    # Resolve the graph (mode-branch kind read like delete_graph; the
+    # 'default' literal + real gids both resolve). The default graph is NOT
+    # deletable but IS patchable (§6.3) — only unknown graphs 404.
+    sdk = _make_sdk(namespace="registry")
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    from tortoise.supabase_control import set_graph_recording as sb_set_rec
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        if graph_id == "default":
+            kind = "default"
+        else:
+            rows = cp.query(
+                "graphs", select=["kind"],
+                filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+            )
+            kind = rows[0].get("kind") if rows else None
+        if kind is None:
+            raise HTTPException(status_code=404, detail="Unknown graph")
+        written = sb_set_rec(cp, team_id, graph_id, body.recording)
+    else:
+        # Registry: probe the node (id match OR kind='default' for the
+        # literal id) so unknown graphs 404 before any write.
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind",
+            params={"tid": team_id},
+        ).result_set
+        if graph_id == "default":
+            found = any(r[1] == "default" for r in rows)
+        else:
+            found = any(r[0] == graph_id for r in rows)
+        if not found:
+            raise HTTPException(status_code=404, detail="Unknown graph")
+        written = sdk.graph_set_recording(team_id, graph_id, body.recording)
+    if not written:
+        raise HTTPException(status_code=404, detail="Unknown graph")
+    return {"graph_id": graph_id, "recording": body.recording}
 
 
 @app.delete("/v1/graphs/{graph_id}")
@@ -13200,6 +13294,81 @@ def _get_onboarding_state(team_id: str) -> dict:
     state = _onboarding_defaults()
     state.update(stored)
     return state
+
+
+def _graph_recording_override(team: dict) -> bool | None:
+    """C6 #2115 (D-C6-3): the session_recording override for the graph the
+    auth dict targets.
+
+    - graph-bound key (``graph_id`` set) → that graph's override (registry
+      Graph node recording prop / supabase graphs row). FAIL-CLOSED: a
+      vanished graph (graph_id set but no node/row) raises 403
+      GRAPH_NOT_FOUND — never demote a ghost key to the team default (the
+      C5 backups_create lesson; _data_sdk opens the same graph, so the
+      capture would fail downstream anyway).
+    - team-wide / session (``graph_id`` None) → the DEFAULT graph's
+      override (registry kind='default' node / supabase kind='default'
+      row — graph 0 is settable per §6.3).
+    - None = inherit the team default (#1927 default-ON preserved — a
+      per-graph NULL never flips a team ON).
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    team_id = team["team_id"]
+    gid = team.get("graph_id")  # None → the default graph
+    if is_supabase_enabled():
+        cp = get_control_plane()
+        if gid:
+            rows = cp.query(
+                "graphs", select=["recording"],
+                filters=[("id", "eq", gid), ("team_id", "eq", team_id)],
+            )
+            if not rows:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"})
+            return rows[0].get("recording")
+        rows = cp.query(
+            "graphs", select=["recording"],
+            filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
+        )
+        return rows[0].get("recording") if rows else None
+    sdk = _make_sdk(namespace="registry")
+    if gid:
+        rows = sdk._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.recording",
+            params={"gid": gid, "tid": team_id},
+        ).result_set
+        if not rows:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "GRAPH_NOT_FOUND",
+                        "message": "graph not found for key"})
+        return rows[0][0]
+    rows = sdk._get_registry().query(
+        "MATCH (g:Graph {team_id:$tid, kind:'default'}) RETURN g.recording",
+        params={"tid": team_id},
+    ).result_set
+    return rows[0][0] if rows else None
+
+
+def _session_recording_allowed(team: dict) -> tuple[bool, str]:
+    """C6 #2115 (D-C6-3): the EFFECTIVE session_recording for a capture.
+
+    Resolution order: the graph's override (D-C6-1 storage) → when None the
+    team default (onboarding_state.session_recording — the #1927 flag the
+    dashboard toggle + MCP tortoise_onboarding_session_recording write).
+    Returns (allowed, surface) where surface names the deciding layer for
+    the 409 message (``graph`` vs ``team``).
+    """
+    override = _graph_recording_override(team)
+    if override is not None:
+        return bool(override), "graph"
+    state = _get_onboarding_state(team["team_id"])
+    return bool(state.get("session_recording")), "team"
 
 
 def _onboarding_defaults() -> dict:
