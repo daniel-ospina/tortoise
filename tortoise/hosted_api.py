@@ -34,6 +34,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse  # JSONResponse: billing webhook (#310)
 from starlette.middleware.base import BaseHTTPMiddleware
 
+import tortoise
 from tortoise.abuse import _int_env  # #1081 signup limiter env knobs (abuse.py:57)
 from tortoise.analytics import (  # #528 server analytics (fail-safe, no-op without key)
     api_key_created,
@@ -486,7 +487,7 @@ async def _lifespan(app):
         yield
 
 
-app = FastAPI(title="Tortoise Hosted API", version="0.1.0", lifespan=_lifespan)
+app = FastAPI(title="Tortoise Hosted API", version=tortoise.__version__, lifespan=_lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1301,12 +1302,32 @@ async def health_security():
         "api_auth_enforced": auth_enforced,
     }
 
+
+@app.get("/v1/version")
+async def version_info() -> dict:
+    """Deployed build surface — clients detect an outdated server (#2208).
+
+    Public (no auth, like /health): a client or onboarding skill reads this
+    BEFORE authenticating to compare the running server against the version
+    it expects (skew detection — the #2208 failure class shipped code whose
+    server had silently drifted behind main). ``version`` is the package
+    version (tortoise.__version__, mirrors pyproject.toml); ``commit_sha`` is
+    the exact deploy commit, baked at deploy time by deploy-hosted.yml
+    (TORTOISE_GIT_SHA=${GITHUB_SHA} staged into the release env). Null when
+    no deploy pipeline set it (selfhost / local dev). Never touches the DB.
+    """
+    return {
+        "version": tortoise.__version__,
+        "commit_sha": os.environ.get("TORTOISE_GIT_SHA") or None,
+    }
+
+
 # ── Phase 1a: Core Endpoints ──────────────────────────────────────
 
 
 # ── Auth Dependency ────────────────────────────────────────────────
 
-SKIP_AUTH = {"/health", "/health/ready", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe", "/v1/session/login"}
+SKIP_AUTH = {"/health", "/health/ready", "/v1/version", "/docs", "/openapi.json", "/v1/register", "/v1/signup/email", "/webhooks/stripe", "/v1/session/login"}
 
 
 async def _invoke_override(override, request: Request) -> dict:

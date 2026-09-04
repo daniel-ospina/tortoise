@@ -312,6 +312,55 @@ class TestHealthEndpoints:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Build/version surface (#2208)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestVersionEndpoint:
+    """GET /v1/version — public version/sha surface so clients (and the
+    onboarding skill) can detect an outdated server before authenticating.
+    """
+
+    def test_version_returns_package_version(self, client):
+        import tortoise
+
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"] == tortoise.__version__
+        assert "commit_sha" in body
+        # #2208 review F5: openapi info.version must mirror the package
+        # version (was a stale hardcoded "0.1.0") — pin it so drift fails loud.
+        assert app.version == tortoise.__version__
+
+    def test_version_is_public_no_auth(self, unauth_client):
+        """Skew detection must work BEFORE auth — no Authorization header."""
+        r = unauth_client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"]
+
+    def test_version_commit_sha_reads_env(self, client, monkeypatch):
+        """commit_sha mirrors the deploy-time TORTOISE_GIT_SHA (baked by
+        deploy-hosted.yml); None when no deploy pipeline set it."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "16075c8f2ff182b44614d6a83dc4d92933ae70db")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] == "16075c8f2ff182b44614d6a83dc4d92933ae70db"
+
+        monkeypatch.delenv("TORTOISE_GIT_SHA")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
+
+    def test_version_commit_sha_blank_env_is_null(self, client, monkeypatch):
+        """An empty (not unset) TORTOISE_GIT_SHA must not leak as "" — null."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Auth Matrix
 # ═══════════════════════════════════════════════════════════════════════════════
 
