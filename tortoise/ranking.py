@@ -81,15 +81,23 @@ def _significant_tokens(text: str) -> set[str]:
 
 
 def _query_touches_conflict(query: str, counter_claims: list[str]) -> bool:
-    """Relevance signal (issue #2102 indicator 2): the query shares ≥ 1
-    significant token with the NAND-side counter-claim of the contested
-    edge.  Purely lexical — no embedding call, no per-result query."""
+    """Relevance signal (issue #2102 indicator 2): the query shares >= 2
+    significant tokens (>= W4_RELEVANCE_TOKEN_MIN_LEN alnum) with the
+    NAND-side counter-claim of the contested edge.  Purely lexical — no
+    embedding call, no per-result query.  The >= 2 threshold keeps generic
+    single-token overlap ("data", "study", "claim") from firing the gate;
+    a counter-claim is conflict-RELEVANT only when the query and the
+    contradiction share real vocabulary."""
     if not query or not counter_claims:
         return False
     query_tokens = _significant_tokens(query)
     if not query_tokens:
         return False
-    return any(query_tokens & _significant_tokens(cc) for cc in counter_claims)
+    for cc in counter_claims:
+        overlap = query_tokens & _significant_tokens(cc)
+        if len(overlap) >= 2:
+            return True
+    return False
 
 
 def resolve_contested_relevance(
@@ -120,7 +128,8 @@ def resolve_contested_relevance(
         except Exception:  # pragma: no cover — defensive
             _claim_budget = 2
         rows = projection.g.query(
-            "MATCH (n:Point) WHERE n.id IN $ids AND n.is_operator = false "
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator = false OR n.is_operator IS NULL) "
             "MATCH (c:Point)-[r:NAND]->(n) "
             "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
             "WITH n, c, r, src, ri "

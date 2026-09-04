@@ -56,8 +56,14 @@ class TestConflictRelevance:
 
     def test_query_touches_conflict_shared_token(self):
         assert _query_touches_conflict(
-            "zebra finch migration", ["flocking zebra behavior is social"]
+            "zebra finch migration", ["flocking zebra finch behavior is social"]
         ) is True
+        # A SINGLE generic overlap ("data", "study", "claim") must NOT fire —
+        # generic queries would otherwise match enormous counter-claim
+        # classes (second-model gate finding).
+        assert _query_touches_conflict(
+            "zebra migration data", ["social behavior shows otherwise"]
+        ) is False
         # Stopword-only overlap never counts.
         assert _query_touches_conflict("the and or", ["the or and"]) is False
         assert _query_touches_conflict("zebra finch", []) is False
@@ -105,7 +111,7 @@ class TestBatchResolution:
     def test_single_batch_query_for_many_contested(self):
         fake = _FakeProjection(counter_claims=[
             ("p1", "the cache rollback is the safer default"),
-            ("p2", "cache versioning adds nothing"),
+            ("p2", "cache rollback versioning adds nothing"),
             ("p3", "unrelated weather claim"),
         ])
         boosts = resolve_contested_relevance(fake, ["p1", "p2", "p3"], "cache rollback")
@@ -243,6 +249,52 @@ class TestGraphRankerBoost:
         ranker.rerank(_twin_results(), query="zebra finch social behavior")
         assert fake.nand_query_count == 1
 
+    def test_budget_cap_skips_claims_beyond_why_budget(self, monkeypatch):
+        """The resolution budget mirrors why.py's W4_MAX_CONFLICTS: a
+        relevance match living at claim position 3+ never fires the boost
+        (the canonical why-layer would not surface it either)."""
+        fake = _graph_ranker_fake([
+            ("twin_hot", "unrelated weather front claim"),
+            ("twin_hot", "another irrelevant thesis"),
+            ("twin_hot", "flocking zebra finch behavior is social"),  # 3rd
+        ])
+        ranker = GraphRanker(projection=fake)
+        monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+        ranked = ranker.rerank(_twin_results(), query="zebra finch social behavior")
+        by_id = {r["id"]: r["graph_ranking"] for r in ranked}
+        assert "w4_contested_boost" not in by_id["twin_hot"]
+        assert by_id["twin_hot"]["final_score"] == by_id["twin_calm"]["final_score"]
+
+    def test_graph_boost_cap_keeps_invariant_at_max(self, monkeypatch):
+        """The [0, 1] graph_boost invariant: a contested point near the
+        structural cap (conf 1.0 + very high connectivity => gb 0.975) has
+        the W4-b increment CLAMPED (0.975 + 0.05 -> 1.0, not 1.025) — the
+        boost becomes partially inert above the cap."""
+        class _CapFake(_FakeProjection):
+            pass
+
+        # connectivity = 1 - 1/(1+degree): degree 19 -> 0.95 -> gb =
+        # 0.5*1.0 + 0.5*0.95 = 0.975.  Unbounded the boost would take the
+        # contested twin to 1.025; the clamp holds it at 1.0.
+        fake = _CapFake(
+            point_rows=[
+                _point_row("twin_calm", 10.0, 10.0, conf=1.0, degree=19),
+                _point_row("twin_hot", 2.0, 2.0, conf=1.0, degree=19),
+            ],
+            counter_claims=[("twin_hot", "flocking zebra finch behavior is social")],
+        )
+        ranker = GraphRanker(projection=fake)
+        monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+        ranked = ranker.rerank(_twin_results(), query="zebra finch social behavior")
+        by_id = {r["id"]: r["graph_ranking"] for r in ranked}
+        # Clamped: the contested twin holds at exactly 1.0 (not 1.025).
+        assert by_id["twin_hot"]["graph_boost"] == 1.0
+        assert by_id["twin_calm"]["graph_boost"] == 0.975
+        # Partially inert: the surviving delta is 0.35 * (1.0 - 0.975),
+        # not the full 0.35 * 0.05 the delta-causality test pins at low cap.
+        assert by_id["twin_hot"]["final_score"] - by_id["twin_calm"]["final_score"] == pytest.approx(
+            0.35 * 0.025, abs=1e-4)
+
     def test_non_str_counter_claim_never_raises(self, monkeypatch):
         """Fail-open contract: raw-graph writes can leave a non-str
         content/label on a NANDer — the resolver coerces and returns boosts
@@ -377,7 +429,7 @@ def test_integration_recall_state_surface_boosts_contested_only(ranked_sdk, monk
     the contested POINT and its absence on OBJECT rows (objects aggregate
     means; they are never contested, never boosted)."""
     calm, hot, _cc = _seed_twin_conflict(
-        ranked_sdk, "flocking zebra behavior is social, not migratory")
+        ranked_sdk, "zebra finch flocking behavior is social, not migratory")
     obj = ranked_sdk.create_object("zebra finch habitat", "concept")
     proj = ranked_sdk._get_proj()
     proj.g.query(
@@ -398,7 +450,7 @@ def test_integration_recall_state_surface_boosts_contested_only(ranked_sdk, monk
 
 def test_integration_conflict_relevant_query_outranks_twin(ranked_sdk, monkeypatch):
     calm, hot, _cc = _seed_twin_conflict(
-        ranked_sdk, "flocking zebra behavior is social, not migratory")
+        ranked_sdk, "zebra finch flocking behavior is social, not migratory")
     proj = ranked_sdk._get_proj()
     # Pre-assertion: the contested twin's PERSISTED variance exceeds the
     # threshold before ordering assertions (calibrated, not aspirational).
@@ -449,6 +501,23 @@ def _run_fts_graph(sdk, flag_on: bool, monkeypatch=None):
         os.environ.pop("TORTOISE_W4_ENRICHMENT", None)
     return sdk.tortoise_fts_query(
         "zebra finch migration", limit=10, order_by="graph")
+
+
+def test_integration_w4_enrich_false_suppresses_boost_with_flag_on(ranked_sdk, monkeypatch):
+    """P1 (second-model gate): w4_enrich=False must suppress the boost even
+    with TORTOISE_W4_ENRICHMENT=1 — order and the why-layer keys must never
+    disagree (both off together).  Byte-equal to the flag-off run."""
+    _calm, hot, _cc = _seed_twin_conflict(
+        ranked_sdk, "zebra finch flocking behavior is social, not migratory")
+    off = _run_fts_graph(ranked_sdk, flag_on=False)
+    monkeypatch.setenv("TORTOISE_W4_ENRICHMENT", "1")
+    on_optout = ranked_sdk.tortoise_fts_query(
+        "zebra finch migration", limit=10, order_by="graph", w4_enrich=False)
+    assert [r["id"] for r in off] == [r["id"] for r in on_optout]
+    for r_off, r_opt in zip(off, on_optout):  # noqa: B905
+        assert r_off["graph_ranking"] == r_opt["graph_ranking"]
+    by_opt = {r["id"]: r["graph_ranking"] for r in on_optout}
+    assert "w4_contested_boost" not in by_opt[hot]
 
 
 def test_integration_golden_ordering_flag_off_equals_irrelevant_flag_on(ranked_sdk, monkeypatch):
