@@ -22,8 +22,12 @@ import { WIZARD_STEPS, WIZARD_FORK_OPTIONS, resolveBuildCatalog, orgNameError } 
 import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySourcesStatus.js'
 // #1708 D8: pure session-key predicates extracted to sessionKey.js (node --test
 // unit-tested). #2166: isManagedKey selects the durable product keys the API
-// Keys page shows; isActiveKey protects the live data-plane key from revoke.
-import { isManagedKey, isActiveKey, durableConnectKey, isSessionKey, classifyHeldKey, heldKeyClearState, nextRegenInstallState, probeClassifyStoredKey } from './sessionKey.js'
+// Keys page shows. #2246 (ADR-010): the held-key machinery (isActiveKey,
+// isSessionKey, classifyHeldKey, heldKeyClearState, nextRegenInstallState,
+// probeClassifyStoredKey) was deleted — the browser never holds an API key in
+// session mode; durableConnectKey + usableDurableRows resolve the connect
+// step's gate from the keys-table rows.
+import { isManagedKey, durableConnectKey } from './sessionKey.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
 import {
@@ -37,6 +41,10 @@ import { bannerShow, shouldRefetchOnFocus } from './identity.js'
 import { RecoveryBanner, ProfileTab, ReauthDialog } from './profile.jsx' 
 
 const API_BASE = 'https://api.premiselabs.co'
+// #2246 (ADR-010): KEY_STORAGE ('tortoise_api_key') is the legacy held-key
+// slot. Session mode never reads or writes it — at most it is PURGED (the
+// one-shot session-mount cleanup + logout wipe). Only removeItem remains in
+// main.jsx (mintTripwire.test.js pins zero getItem/setItem).
 const KEY_STORAGE = 'tortoise_api_key'
 // #1148-ux: remember the last auth method so the login card can surface it
 const LAST_AUTH_METHOD = 'tortoise_last_auth_method'
@@ -691,7 +699,13 @@ function App() {
   const [lastAuthMethod, setLastAuthMethod] = React.useState(() => {
     try { return window.getLastAuthMethod ? window.getLastAuthMethod() : (localStorage.getItem(LAST_AUTH_METHOD) || '') } catch { return '' }
   })
-  const [apiKey, setApiKey] = React.useState(() => localStorage.getItem(KEY_STORAGE) || '')
+  // #2246 (ADR-010): the claim-paste input value IS the apiKey state — the
+  // ANON (authMode 'apikey') claim screen's paste box, kept in lockstep with
+  // the ref so claimSignIn/claimEmailPassword use exactly what's on screen.
+  // Session mode never holds a key: the initializer no longer reads the
+  // localStorage slot (no residue boot), and the session mount clears the
+  // state before the chrome renders.
+  const [apiKey, setApiKey] = React.useState('')
   // #1511 (code-review r2, P2): the claim-paste input value IS the apiKey
   // state — keep the ref (read by claimSignIn/claimEmailPassword) in lockstep
   // so the credential used matches what's on screen (no pre-fill mismatch).
@@ -744,8 +758,12 @@ function claimIntentInFlight() {
   const [welcomeKey, setWelcomeKey] = React.useState('')
   // #1591: the first-data snippet (graph-missing card) — full command with
   // the user's own key (their dashboard, their key; copy-able).
+  // #2246 (ADR-010): session mode holds no apiKey — the snippet's key source
+  // is (welcomeKey || apiKey): the first-timer's in-memory shown-once reveal,
+  // or the anon/key-hold carve-out's apiKey state. Never a localStorage read.
+  const snippetKey = welcomeKey || apiKey
   const firstDataSnippet = `curl -X POST https://api.premiselabs.co/v1/points \
-  -H "Authorization: Bearer ${apiKey}" \
+  -H "Authorization: Bearer ${snippetKey}" \
   -H "Content-Type: application/json" \
   -d '{"content":"hello graph","kind":"statement"}'`
   const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
@@ -1115,7 +1133,6 @@ function claimIntentInFlight() {
   const [newGraphName, setNewGraphName] = React.useState('')
   const teamIdRef = React.useRef(null)
   const teamRefreshSeqRef = React.useRef(0) // #1906 (code-review P2): monotonic seq for the welcome-path team refreshes — a post-seed refire must win over a concurrent exit refresh (a pre-seed point_count must never clobber the post-seed count)
-  const fallbackTeamIdRef = React.useRef(null) // Round-4: team auto-selected by recoverKey 400-fallback
   const authSubRef = React.useRef(null) // Round-6: supabase onAuthStateChange subscription
   const checkoutResetTimerRef = React.useRef(null) // Round-16: popup-flow fallback reset
   const apiKeyRef = React.useRef(null) // Round-21: live apiKey for staleness checks (state is closure-stale)
@@ -1129,10 +1146,6 @@ function claimIntentInFlight() {
   // /v1/graphs resolves to a '—' card instead of an eternal shimmer (the old
   // `if (!res.ok) return` + catch{} left graphsLoaded false on any non-200).
   const [graphsStatus, setGraphsStatus] = React.useState('loading')
-  // P1/P2 (code-review): per-team data-plane key cache. Bootstrap mints are
-  // capped at 3 active per team, so cache the minted key per team_id and
-  // reuse on switch instead of re-minting (which would 429 after 3 switches).
-  const teamKeysRef = React.useRef({})
   // #714 (main): session detail view state
   const [selectedSessionId, setSelectedSessionId] = React.useState(null)
   const [sessionDetail, setSessionDetail] = React.useState(null)
@@ -1143,8 +1156,6 @@ function claimIntentInFlight() {
   const [sessionDetailError, setSessionDetailError] = React.useState(null)
   const [sessionDeletingId, setSessionDeletingId] = React.useState(null)
   const [sessionsActionError, setSessionsActionError] = React.useState(null)
-
-  const headers = apiKey ? { Authorization: `Bearer ${apiKey}` } : {}
 
   // #308 (R5/R7): suspension surfaces from the 403 detail (dict with
   // code === 'SUSPENDED' + appeal_url) — the banner renders it; the alert
@@ -1160,7 +1171,10 @@ function claimIntentInFlight() {
     // #1148 review P1-2: management calls pass the SESSION JWT when signed
     // in (the dashboard-login gate rejects key-auth on those when the flag
     // is off — a session always passes). opts.useSession forces it.
-    let authHeaders = headers
+    // #2246 (ADR-010): the key-derived default authHeaders is DELETED — the
+    // browser never holds a key, so the only Authorization source is the
+    // session JWT override below (the anon claim flows use raw fetch).
+    let authHeaders = {}
     if (opts.useSession && sessionTokenRef.current) {
       authHeaders = { Authorization: `Bearer ${sessionTokenRef.current}` }
     }
@@ -1555,11 +1569,6 @@ function claimIntentInFlight() {
   }, [team?.subscription_status])
 
   // ── Session auth: on load, try the shared cookie session ──
-  // P1 (code-review): POST /v1/session/key returns 400 "team_id required
-  // (multiple memberships)" when the user belongs to 2+ teams — and the team
-  // switcher exists exactly for those users. Mint for a concrete team_id, and
-  // on a 400 auto-select the first membership and retry instead of silently
-  // degrading to the API-key screen.
   // #1643 (review P2-1): read the onboarding state on mount so completed
   // users never see the re-entry card again (the completion marker is
   // persisted server-side). #1728 Slice 3: the same read now feeds the full
@@ -2184,11 +2193,11 @@ function claimIntentInFlight() {
 
   async function wizardComplete() {
     setWizardDone(true)
-    // #2195 (durable connect key): the done step ends the connect flow — the
-    // minted/pasted durable plaintext was shown once in the command; drop it
-    // so a later re-entry re-gates (a revoked/regenerated key never re-embeds
-    // stale). The durable key itself persists as the active apiKey (localStorage
-    // + teamKeysRef) — this only clears the wizard's shown-once state.
+    // #2195/#2246 (durable connect key): the done step ends the connect flow —
+    // the minted/pasted durable plaintext was shown once in the command; drop
+    // it so a later re-entry re-gates (a revoked/regenerated key never
+    // re-embeds stale). Nothing persists — the browser never holds the key
+    // (#2246): this clears the wizard's in-memory shown-once state.
     setWizardDurableKey('')
     setWizardDurablePaste('')
     setWizardDurableError('')
@@ -2318,9 +2327,10 @@ function claimIntentInFlight() {
   // mount / switchTeam / switchTeam 401-re-mint / revokeKey re-mint) is
   // DELETED — the dashboard never auto-mints a 24h session credential; the
   // POST /v1/session/key endpoint + the recovery purpose stay for
-  // non-dashboard consumers (recoverKey below POSTs purpose=recovery inline
-  // — selfhost keyless teams, SDK/CLI, and the contract suites are
-  // untouched). The mintTripwire.test.js static guard pins this.
+  // non-dashboard consumers (selfhost keyless teams, SDK/CLI, and the
+  // contract suites are untouched; the dashboard's own recovery-purpose
+  // POSTer, recoverKey, was UI-dead and is deleted in #2246). The
+  // mintTripwire.test.js static guard pins this.
 
   React.useEffect(() => {
     ;(async () => {
@@ -2415,6 +2425,15 @@ function claimIntentInFlight() {
           display_name: (session.user.user_metadata && session.user.user_metadata.display_name) || '',
           email: session.user.email || '',
         } : null
+        // #2246 (ADR-010): session-authed users never hold an API key. The
+        // legacy localStorage slot is residue now — never read, never probed;
+        // purge it ONCE per session mount (the issue: "at most inert residue
+        // that gets cleaned") and zero the apiKey state so no render path can
+        // act on stored material. The anon/key-login claim branch returned
+        // earlier (authMode 'apikey' at L2422) — this cleanup is session-only.
+        try { localStorage.removeItem(KEY_STORAGE) } catch { /* best-effort */ }
+        setApiKey('')
+        apiKeyRef.current = ''
         // #1567: the session is valid — render the app chrome NOW and let the
         // mint + loads hydrate in the background (the multi-second
         // "Checking your session…" card is gone for session holders). The
@@ -2430,7 +2449,19 @@ function claimIntentInFlight() {
             sessionTokenRef.current = s.access_token
             // #1177: signed-out invitee completed sign-in → accept the stashed invite.
             if (_evt === 'SIGNED_IN') acceptStashedInvite(s.access_token)
-          } else if (_evt === 'SIGNED_OUT') { sessionTokenRef.current = null; setTeams([]) }
+          } else if (_evt === 'SIGNED_OUT') {
+            // #2246 (ADR-010): the old key-auth fallback that kept a
+            // signed-out tab coherent is gone (the browser never holds a key) —
+            // a cross-tab/expired sign-out must not leave the stale-data
+            // zombie shell. Mirror logout(): null the ref FIRST (in-flight
+            // Round-9/12 guards key off it), flip authed, bounce to /auth.
+            sessionTokenRef.current = null
+            setTeams([])
+            setAuthed(false)
+            if (typeof window.clearStoredSession === 'function') window.clearStoredSession()
+            if (typeof window.bounceToAuth === 'function') window.bounceToAuth()
+            else window.location.replace('https://tortoise.premiselabs.co/auth')
+          }
         })
         authSubRef.current = authSub?.subscription || null
 
@@ -2586,22 +2617,13 @@ function claimIntentInFlight() {
               setWelcomeKey(provisioned.api_key)
               setWelcomeTeamName(provisioned.team_name)
               setWelcomeGraphName(provisioned.graph_name || '')
-              // #1906: persist the shown-once key NOW — a reload (even
-              // mid-wizard, before any dashboard exit) must keep it; the
-              // mint path would otherwise mint a DIFFERENT bootstrap key
-              // and the revealed key is gone forever (atomic reveal+null,
-              // A13 — the server nulls its only plaintext copy on reveal,
-              // so the client must persist at reveal time or the shown-once
-              // key is unrecoverable). Guard truthy: the
-              // consumed-reveal path returns api_key '' (already revealed
-              // elsewhere), and a falsy value must never land in
-              // localStorage (mint-path convention, #1830). try/catch:
-              // private-mode storage throws.
-              if (provisioned.api_key) {
-                try { localStorage.setItem(KEY_STORAGE, provisioned.api_key) } catch { /* best-effort */ }
-                setApiKey(provisioned.api_key)
-                apiKeyRef.current = provisioned.api_key
-              }
+              // #2246 (ADR-010): the shown-once key is NOT persisted to
+              // localStorage/apiKey/teamKeysRef — the browser never holds a
+              // key in session mode. welcomeKey stays in-memory for the
+              // welcome card + connect snippets this session; a reload
+              // mid-welcome loses the plaintext (ADR accepted shown-once
+              // fragility — server keeps the hash only), recoverable via the
+              // API Keys tab (+ New key, shown once).
               // #1660: prefill the seed step — the Subject from the OAuth
               // identity (name or email prefix), the Project from the team.
               {
@@ -2620,18 +2642,9 @@ function claimIntentInFlight() {
               // The provisioned team_id comes from the refreshTeam response
               // (the team row just created). No double-fire: completeLogin
               // never runs on this path.
-              refreshTeam(provisioned.api_key, undefined, teamRefreshSeqRef.current)
+              refreshTeam('', undefined, teamRefreshSeqRef.current)
                 .then((t) => {
-                  if (t && t.team_id) {
-                    // #1906 (code-review P1): record the revealed key in the
-                    // per-team cache — switchTeam/revokeKey consult
-                    // teamKeysRef; without the entry, a switch away-and-back
-                    // mints a DIFFERENT bootstrap key (replacing the
-                    // shown-once key) and revoking the active key skips the
-                    // localStorage re-mint branch (stale-key 401 on reload).
-                    if (provisioned.api_key) teamKeysRef.current[t.team_id] = provisioned.api_key
-                    loadAlerts(t.team_id)
-                  }
+                  if (t && t.team_id) loadAlerts(t.team_id)
                 })
                 .catch(() => {})
             } else {
@@ -2642,150 +2655,36 @@ function claimIntentInFlight() {
           return
         }
 
-        // #2167 (rule 5): the dashboard NEVER auto-mints a bootstrap key.
-        // The mount decides what to do with a STORED key — probe it on the
-        // key lane (the one retained key-authed browser call; rule-1
-        // exemption — Indicator 3 reads "no live key-authed *product-data*
-        // call remains") and classify 5a-f — and otherwise renders
-        // session-only on the session JWT (zero keys present is a
-        // first-class state; the mint fallback + its failure banner are
-        // gone with the mint machinery).
-        let key = null
-        const storedKey = localStorage.getItem(KEY_STORAGE)
-        // #1567 (review P1): the chrome renders NOW, so a team switch made
-        // during this fetch (the switcher is populated by the teams call
-        // above) must not be clobbered — capture the selection and skip the
-        // writes if it moved.
-        const teamAtProbe = teamIdRef.current
-        // #2167 (round-3 reviewer P2): probeDecision is hoisted so the
-        // mid-probe bail below can consult it (a probe-less mount has none).
-        let probeDecision = null
-        if (storedKey && teamsList.length) {
-          let probeStatus = 0
-          let probeBody = null
-          try {
-            const tRes = await fetch(`${API_BASE}/v1/team`, {
-              headers: { Authorization: `Bearer ${storedKey}` },
-            })
-            probeStatus = tRes.status
-            try { probeBody = await tRes.json() } catch { probeBody = null } // non-JSON body → never keep-suspended
-          } catch { probeStatus = 0 } // network failure → 5e transient
-          const decision = probeClassifyStoredKey({
-            status: probeStatus,
-            detail: probeBody,
-            teamsList,
-            selectionSnapshot: teamAtProbe,
-            selectionNow: teamIdRef.current,
-          })
-          probeDecision = decision
-          if (decision.action === 'adopt') {
-            // 5b: probe 200 + the stored key's team ∈ memberships + the
-            // selection did not move mid-probe → ADOPT. PROVISIONAL (P2,
-            // phase-7 reviewer 1): apiKey state + team pin only — NO
-            // teamKeysRef write at adopt (the slot already holds the stored
-            // key). The loadAll keys-landing classification PROMOTES the
-            // entry iff durable (row-truth clean) or drops slot material +
-            // apiKey when row-truth-bad — teamKeysRef therefore holds
-            // durable-only by construction (kills the rule-3/revert
-            // bootstrap-adopt class with no per-site durability gates).
-            key = storedKey
-            setCurrentTeamId(decision.teamId)
-            teamIdRef.current = decision.teamId // Round-9: sync — loadTeams must not clobber
-          } else if (decision.action === 'drop') {
-            // 5c (probe 401 — revoked/disabled/expired keys reject
-            // identically) / 5c2 (other 4xx): DROP the dead key material —
-            // the slot (when it holds this key), apiKey/apiKeyRef state
-            // (initialized from the slot at mount), and any per-team cache
-            // entry sharing its prefix — then render session-only. There is
-            // no mint to recover; the API Keys tab row status reveals why
-            // the key stopped working.
-            try {
-              if (localStorage.getItem(KEY_STORAGE) === storedKey) localStorage.removeItem(KEY_STORAGE)
-            } catch { /* best-effort */ }
-            const deadPrefix = String(storedKey).slice(0, 10)
-            for (const tid of Object.keys(teamKeysRef.current)) {
-              if (String(teamKeysRef.current[tid] || '').slice(0, 10) === deadPrefix) delete teamKeysRef.current[tid]
-            }
-            setApiKey('')
-            apiKeyRef.current = ''
-          } else if (decision.action === 'keep-suspended') {
-            // 5d: the KEY lane returns 403 {detail:{code:'SUSPENDED',…}} on
-            // a suspended team — the stored durable is recoverable, so it is
-            // KEPT (slot untouched). A healthy alternate membership (or a
-            // mid-probe switch) falls through to the session-only tail — the
-            // #1912 pin below lands the first HEALTHY team and completeLogin
-            // renders it, so a stored durable on a suspended team never traps
-            // a multi-membership user with a healthy team (the pre-change
-            // probe failure fell through to a mint for the first selectable
-            // team — reviewer P2, PR #2232). The suspension then surfaces via
-            // the session reads when that team is selected. The all-suspended
-            // blocking card below is a DEFENSIVE belt only: the server 403s
-            // the /v1/teams LIST itself when every membership is suspended
-            // (list_my_teams), so production dies at the teams-fetch catch
-            // (round-2 reviewer F1) — that catch is the real F8 fresh-login
-            // mechanism and renders the same appeal card.
-            const allSuspended = !teamsList.some((t) => !t.suspended_at)
-            if (allSuspended && teamIdRef.current === teamAtProbe) {
-              setSuspended(decision.detail)
-              setMountError((decision.detail && (decision.detail.message || 'Organization suspended')) || 'Organization suspended')
-              setAuthed(false)  // #1567 P0: the error card renders in !authed
-              setChecking(false)
-              return
-            }
-            // fall through — session-only (key null); slot retained for the
-            // next mount, exactly like the 5e/5f keep legs
-          }
-          // 5e (network/5xx/429/408/425 transient) + 5f (200 but the key's
-          // team is no longer a membership): keep-session-only — slot
-          // retained for the next mount, no adoption, no mint. A transient
-          // failure must never destroy a valid durable (no adopt-existing
-          // UI — unrecoverable), and a membership-gone key is reaped only
-          // by a later durable-flow overwrite (pre-existing semantics).
-        }
-        // #2167 (round-3 reviewer P2 — shape correction): a mid-probe
-        // switch/recoverKey owns the key state — bail the state-clearing tail
-        // + duplicate loads when the selection moved WHILE the probe was in
-        // flight (the chrome renders before the probe resolves, so a
-        // multi-membership user CAN click another team mid-probe; H4 already
-        // refuses adopt under a moved selection). The pre-change continuation
-        // had the same guard via mintedTeamId. Adopt is exempt: it fires only
-        // on an unmoved selection (H4 gates selectionNow === selectionSnapshot)
-        // and pins the key's team — never under a move. The dead-key material
-        // drops above already ran where warranted (their slot write is
-        // equality-guarded); the moved selection's own loadAll/completeLogin
-        // finishes untouched.
-        if ((!probeDecision || probeDecision.action !== 'adopt') && teamIdRef.current !== teamAtProbe) return
-        // #1912 (phase-7 reviewer 1 P1): the mount mint was the ONLY fresh-
-        // session team pin before completeLogin. On every no-key / drop /
-        // transient landing, pin the first HEALTHY team BEFORE completeLogin
-        // — otherwise completeLogin's team reads go out unpinned (q = '' →
-        // _session_user_team resolves memberships[0]) and a suspended FIRST
-        // membership 403s into the error card on every reload of a multi-
-        // membership user with a healthy second team (the #1912 bug class).
-        // (An all-suspended session 403s the teams fetch itself and renders
-        // the appeal card there — round-2 reviewer F1.) The 5b-adopt branch
-        // already pinned the key's team above.
-        if (!key && !teamIdRef.current && teamsList.length) {
+        // #2246 (ADR-010): session-only landing. The #2167 stored-key probe
+        // (the last key-authed browser fetch — the "rule-1 exemption") and its
+        // adopt/drop/keep-suspended machinery are DELETED: a session-authed
+        // browser never holds or acts on an API key. The KEY_STORAGE residue
+        // was already purged at session resolution above; this tail only pins
+        // the team and completes the session-only login — every overview read
+        // rides the session JWT (#1828/#2167), and keys are MANAGED (create /
+        // rotate / revoke / toggle from the API Keys table) but never held.
+        // #1912: pin the first HEALTHY team BEFORE completeLogin so its team
+        // reads go out pinned (q = '?team_id=...') — without the pin a
+        // multi-membership user whose FIRST membership is suspended would 403
+        // into the error card on every reload (the old 5b-adopt also pinned).
+        // An ALL-suspended session 403s the /v1/teams fetch itself and renders
+        // the appeal card there (round-2 reviewer F1) — the teams-fetch catch
+        // above is that mechanism; no probe belt is needed.
+        if (!teamIdRef.current && teamsList.length) {
           const firstHealthy = teamsList.find((t) => !t.suspended_at) || teamsList[0]
           if (firstHealthy) {
             setCurrentTeamId(firstHealthy.team_id)
             teamIdRef.current = firstHealthy.team_id
           }
         }
-        // Round-9: a SIGNED_OUT during the probe must not complete the login
-        // with a fresh key on the tab the user just signed out of.
+        // Round-9: a SIGNED_OUT during the mount must not complete the login
+        // on the tab the user just signed out of.
         if (!sessionTokenRef.current) { setAuthed(false); setChecking(false); setMountError('Your session ended — sign in again.'); return }
-        // #1830/#2167: only persist a REAL key — a null key (session-only
-        // landing) must never be written over a valid stored credential (a
-        // falsy value must never land in localStorage). A null key also
-        // clears the apiKey state so snippets never leak a stale/invalid
-        // key (or "Bearer null"). completeLogin(null) renders session-only —
-        // the overview reads ride the session JWT.
-        if (key) localStorage.setItem(KEY_STORAGE, key)
-        setApiKey(key || '')
-        apiKeyRef.current = key || ''
+        // completeLogin('') renders session-only — zero key state, zero slot
+        // writes (the apiKey state was cleared at session resolution; a
+        // falsy value must never land in localStorage, #1830/#2167).
         setAuthMode('session')
-        await completeLogin(key)
+        await completeLogin('')
       } catch (e) {
         // #1559/#1567 (review P0): never leave the user on the silent
         // redirect shell — authed was set EARLY, so an escaped throw (e.g.
@@ -3171,7 +3070,6 @@ function claimIntentInFlight() {
     setError('')                        // Round-4: stale error banner must not survive
     setBackupInfo(null)                 // Round-5: no cross-session backup data leak
     setBackupsStatus('loading')         // #1923: mirror the backupInfo reset
-    fallbackTeamIdRef.current = null    // Round-5: no stale team adoption across users
     teamIdRef.current = null            // Round-5: hygiene (inert, but consistent)
     setCheckoutPending(false)           // Round-6: no stuck 'Opening checkout…' for the next user
     setInviteEmail('')                  // Round-9: no half-typed invite from the previous user
@@ -3181,7 +3079,6 @@ function claimIntentInFlight() {
     // Round-7: onAuthStateChange returns {data:{subscription}} with .unsubscribe() —
     // client.auth.removeChannel doesn't exist on GoTrueClient (was a silent no-op).
     if (authSubRef.current) { authSubRef.current.unsubscribe?.(); authSubRef.current = null }
-    teamKeysRef.current = {}
     try { if (supabaseClient) await supabaseClient.auth.signOut() } catch { /* best-effort */ }
     // #1511: the key-only card is gone — after signOut the dashboard has NO
     // !authed UI. Always go to /auth (origin-aware; the app-origin gate emits
@@ -3215,44 +3112,12 @@ function claimIntentInFlight() {
       ])
       if (teamIdRef.current !== _teamAtCall) return // stale switch response — don't land B's keys under C
       setKeys(Array.isArray(k) ? k : k.keys || [])
-      // #2167 (rule 5/7): classify the held key + the KEY_STORAGE slot
-      // against the just-landed rows. This is the SOLE full-payload keys
-      // landing (every loader routes through loadAll); a landing skipped by
-      // the #1567 staleness guard re-fires on the next. Steady-state
-      // invariant (post-classification): while a session JWT is present,
-      // apiKey/apiKeyRef/teamKeysRef/localStorage never hold a bootstrap,
-      // expiring, revoked, or disabled key.
-      try {
-        const held = apiKeyRef.current
-        let slotContent = null
-        try { slotContent = localStorage.getItem(KEY_STORAGE) } catch { /* best-effort */ }
-        const cls = classifyHeldKey({ held, rows: Array.isArray(k) ? k : (k && k.keys) || [], slotContent })
-        if (cls.drop) {
-          // Drop delta: apiKey state + ref cleared SYNCHRONOUSLY (do NOT
-          // wait for the apiKeyRef-sync effect — revokeKey's tail loadAll
-          // runs in the same async turn and would re-fire on the stale
-          // ref), plus the per-team cache entry when it equals the held
-          // value. The session-valid team selection is KEPT (session-only
-          // on that team — rule 5).
-          setApiKey('')
-          apiKeyRef.current = ''
-          if (_teamAtCall && teamKeysRef.current[_teamAtCall] === held) delete teamKeysRef.current[_teamAtCall]
-        }
-        if (cls.clearSlot) {
-          // Slot-truth leg (P2, phase-7 reviewer 1): the slot is evaluated
-          // INDEPENDENTLY of the held key — row-truth-bad residue is reaped
-          // even when held is '' (rule-5e/5f corner). Never clears merely
-          // because slot ≠ held (a valid off-team durable slot survives
-          // reload-pinning, rule 3).
-          try { localStorage.removeItem(KEY_STORAGE) } catch { /* best-effort */ }
-        }
-        // Promotion (rule-5 5b deferral): a NON-drop landing where the held
-        // key is row-truth-clean durable records the deferred 5b-adopt cache
-        // entry — teamKeysRef is durable-only by construction.
-        if (!cls.drop && held && _teamAtCall && cls.reason === 'durable') {
-          teamKeysRef.current[_teamAtCall] = held
-        }
-      } catch { /* classification is best-effort — never blocks the load */ }
+      // #2246 (ADR-010): the rule-5/7 held-key classification hook is DELETED
+      // — no held key exists to classify in session mode (apiKey state is ''
+      // and the KEY_STORAGE slot was purged at session resolution). keys[]
+      // stays UNFILTERED in state (bootstrap/expiring rows included) so
+      // managedKeys (isManagedKey render filter) + durableConnectKey's
+      // rows-resolution keep working off the full payload.
       setSessions(Array.isArray(s) ? s : s.sessions || [])
     } catch (e) {
       // Round-12: a stale switch's error must not land under the newer team's header
@@ -3503,53 +3368,39 @@ function claimIntentInFlight() {
     setWizardDurableBusy(true)
     setWizardDurableError('')
     try {
-      // Round-15 (P2) team pin (createKey pattern): resolve the ACTIVE team's
-      // key explicitly so the mint lands on the onboarding org — a session
-      // JWT alone resolves the first membership, wrong team for multi-team
-      // users. api() useSession:true still sends the session JWT when the key
-      // is absent (recoverable-mint-failure case, #1830); with a bootstrap
-      // apiKey the key auth resolves the team (createKey precedent — the API
-      // Keys tab mints with the live key today).
+      // Round-15 (P2) team pin (createKey pattern): resolve the ACTIVE team
+      // explicitly so the mint lands on the onboarding org — a session JWT
+      // alone resolves the first membership, wrong team for multi-team users.
+      // #2246: mintKey rides the session JWT (rule 4) — no held key involved.
       const _teamAtCall = currentTeamId
-      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
-      const keyVal = await mintKey(activeKey, 'Setup command')
+      const keyVal = await mintKey('', 'Setup command')
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key under the new team's header.
       if (teamIdRef.current !== _teamAtCall) return
       setWizardDurableKey(keyVal)
-      // Install the durable key as the team's active data-plane key (the
-      // regenerateKey pattern) so a reload reuses it instead of re-minting —
-      // each mint counts vs max_api_keys (free tier = 2) and an orphaned
-      // durable per wizard visit would burn the cap. The 24h bootstrap key
-      // expires harmlessly (reconcile sweep revokes expired bootstraps).
-      // setApiKey keeps state + localStorage in sync (regenerateKey's guard at
-      // ~4065 depends on the invariant localStorage === apiKey state); without
-      // it a same-session regenerate of this key would skip the storage update
-      // and reload could boot a revoked key.
-      try { localStorage.setItem(KEY_STORAGE, keyVal) } catch { /* best-effort */ }
-      if (_teamAtCall) teamKeysRef.current[_teamAtCall] = keyVal
-      apiKeyRef.current = keyVal
-      setApiKey(keyVal)
+      // #2246 (ADR-010): the durable key is NOT installed (no
+      // localStorage/teamKeysRef/apiKey write — the browser never holds a
+      // key). wizardDurableKey keeps it in-memory so the connect snippet can
+      // embed it THIS session; a reload re-gates (rows-resolution shows the
+      // new durable exists → 'rows-durable' gate copy) and re-minting burns
+      // max_api_keys (free = 2) — the 402 handler routes to regenerate+paste.
       // Refresh the team keys/sessions lists (createKey precedent) so the new
       // durable row lands in keys[] — the API Keys tab shows it and future
-      // durableConnectKey lookups match it (the gate stays closed on reload).
-      await loadAll(keyVal).catch(() => {})
+      // durableConnectKey rows-resolution matches it.
+      await loadAll('').catch(() => {})
     } catch (e) {
       // #1147: a tier-cap 402 is a LIMIT, not an error — surface the upgrade /
       // regenerate path (the API Keys tab's regenerateKey does not grow the
-      // key count). Free tier max_api_keys = 2. NOTE: regenerating in the tab
-      // does NOT update the apiKey state here, so returning to this step would
-      // re-gate — the paste field below is the forward path (regenerate in the
-      // tab shows the new key once → paste it here).
+      // key count). Free tier max_api_keys = 2.
       if (e?.status === 402) {
         setWizardDurableError('You\'ve reached your plan\'s limit of API keys — regenerate one in the API Keys tab (shown once there), then paste it below.')
       } else if (e?.status === 403) {
-        // #1148: on dashboard_key_login=false (Protect) teams, KEY-authed
-        // management mints 403 — the human session could pass but mintKey's
-        // key header shadows the JWT (api() merge). The tab's create/regenerate
-        // hits the same key-auth 403, so the escape is pasting an existing
-        // durable key (from an agent config / another device) below.
-        setWizardDurableError('This Organization restricts key management from this session — paste an existing durable key below (or re-authenticate in the API Keys tab to create one).')
+        // #2246 (role-aware): the reachable mint-403 is the non-owner MEMBER
+        // case (the server keys:manage gate is role-scoped; session mints pass
+        // the dashboard_key_login flag, so the old flag wording is gone). The
+        // escape is pasting an existing durable key (from an agent config /
+        // another device) or asking an owner/admin to create one.
+        setWizardDurableError('Your role can\'t manage keys in this Organization — paste an existing durable key below (an owner or admin can create/rotate keys in the API Keys tab).')
       } else {
         setWizardDurableError(e?.message || 'Could not create a durable setup key — try again.')
       }
@@ -3620,41 +3471,22 @@ function claimIntentInFlight() {
     setDocsScope({ repos: [], branches: {} })
     setIssuesScope({ repos: [] })
     try {
-      // #2167 (rules 3+6): switchTeam NEVER mints. teamKeysRef holds
-      // durable-only by construction (the 5b-adopt is provisional — the
-      // loadAll keys-landing classification promotes durable rows only), so
-      // a cache hit IS a durable for this team → adopt IN-MEMORY
-      // (apiKey/apiKeyRef only — the KEY_STORAGE slot is NOT rewritten: the
-      // slot tracks deliberate durables, not selections). No durable held
-      // for T → session-only on T (apiKey cleared; the slot stays untouched
-      // so a valid durable for the PREVIOUS team survives for rule-3
-      // reload-pinning / switch-back).
-      const cachedDurable = teamKeysRef.current[teamId]
-      if (cachedDurable) {
-        setApiKey(cachedDurable)
-        apiKeyRef.current = cachedDurable
-        setAuthMode('session') // a held durable IS session auth — no 'sign in required' notices
-      } else if (apiKeyRef.current) {
-        // No durable for T — clear the in-memory key so team-scoped snippet
-        // surfaces never leak the previous team's durable under T's header.
-        setApiKey('')
-        apiKeyRef.current = ''
-      }
-      const key = cachedDurable || ''
+      // #2246 (ADR-010): team switches are session-only — the browser never
+      // holds a per-team durable (teamKeysRef was deleted). Every team's reads
+      // ride the session JWT; apiKey/apiKeyRef stay '' across switches so no
+      // team-scoped snippet surface leaks a previous team's key material.
       if (teamIdRef.current !== teamId) return // stale — user switched again
       try {
-        await refreshTeam(key)
+        await refreshTeam('')
       } catch (e) {
         // #2167: the 401 re-mint is DELETED. The team read is session-authed
         // (switchTeam requires a session JWT), so a failure is a session/
         // network problem — the revert catch below re-attaches the previous
-        // team. A cross-session-revoked/disabled cached durable self-heals
-        // at the loadAll keys landing (classifyHeldKey drops it) — no
-        // switch-time key surgery needed.
+        // team (session-only on it; no key material to restore).
         throw e
       }
       if (teamIdRef.current !== teamId) return
-      await Promise.all([loadAll(key), loadBackups(key)])
+      await Promise.all([loadAll(''), loadBackups('')])
       // #1893 (code-review P1): re-fetch the new team's onboarding state —
       // the stale flag set above clears only when refreshOnboarding resolves
       // (the scope hydration for the new team is blocked until then), and
@@ -3672,22 +3504,10 @@ function claimIntentInFlight() {
       // both loaders carry their own staleness guard).
     } catch (e) {
       if (teamIdRef.current === teamId) {
-        // #2167 (revert re-frame): a failed switch never mints and never
-        // blocks. Re-attach the PREVIOUS team's durable when one is really
-        // held — teamKeysRef is durable-only by construction (the 5b-adopt is
-        // provisional and the loadAll classification promotes durable rows
-        // only), so the cache is the ONLY re-attach source. The pre-switch
-        // apiKey (prevKey) is deliberately NOT a fallback: it cannot be
-        // row-truth-verified here (the previous team's rows were cleared at
-        // the switch top), and re-attaching an unverifiable key would reopen
-        // the rule-3/revert bootstrap class this change removes. The slot is
-        // never rewritten by a switch, so the revert leaves it untouched — a
-        // falsy value must never land in localStorage over a valid stored
-        // key. A failed switch in the brief adopt-before-promotion window
-        // reverts session-only; the next reload re-probes the slot.
-        const restoreKey = (prevTeamId && teamKeysRef.current[prevTeamId]) || ''
-        setApiKey(restoreKey || '')
-        apiKeyRef.current = restoreKey || ''
+        // #2167/#2246 (revert re-frame): a failed switch never mints and
+        // never blocks. Re-attach the PREVIOUS team session-only — no key
+        // material exists to restore (the browser never holds keys), and the
+        // slot is never rewritten by a switch.
         if (prevTeamId) {
           setCurrentTeamId(prevTeamId)
           teamIdRef.current = prevTeamId
@@ -3698,10 +3518,10 @@ function claimIntentInFlight() {
           // so clear the switch-stale flag and let hydration re-run for the
           // restored team (the latches/repos were reset at switch top).
           onboardingStaleRef.current = false
-          await refreshTeam(restoreKey || '').catch(() => {})
+          await refreshTeam('').catch(() => {})
           // Round-3: reload ALL key-scoped data for the reverted team —
           // otherwise keys/sessions/backups stay wiped until reload.
-          await Promise.all([loadAll(restoreKey || ''), loadBackups(restoreKey || '')]).catch(() => {})
+          await Promise.all([loadAll(''), loadBackups('')]).catch(() => {})
         }
         setError(e.message)
       }
@@ -4084,31 +3904,16 @@ function claimIntentInFlight() {
     setError('')
     setBusy(true)
     try {
-      // Round-15 (P2): resolve the ACTIVE team's key explicitly — during a
-      // mid-switch window apiKey state is still the previous team's key, and
-      // a key created with it lands on the wrong team.
-      const _apiKeyAtCall = apiKey
-      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || _apiKeyAtCall) : _apiKeyAtCall
-      const newKeyVal = await mintKey(activeKey, newKeyName.trim() || undefined)
+      // #2246 (ADR-010): mintKey rides the session JWT (rule 4) + pins
+      // ?team_id= — no held key is involved in session-mode create.
+      const newKeyVal = await mintKey('', newKeyName.trim() || undefined)
       // Identity guard BEFORE any UI write: a team switch during the POST must
       // not render this team's plaintext key card or key table under the new
       // team's header (switchTeam's setNewKey(null) already ran for the new team).
       if (teamIdRef.current !== _teamAtCall) return
-      // Round-19 (P3): the pre-mint guard must actually fire. activeKey is
-      // either cache[t] or apiKey-at-call. If this team already has a cached
-      // key, the POST must have used it. Otherwise (no cached key), the POST
-      // key must still be the current apiKey state — if apiKey moved (a
-      // switchTeam mint completed), we hit the OLD team's key: bail.
-      const cachedForTeam = _teamAtCall ? teamKeysRef.current[_teamAtCall] : null
-      // Round-21: branch 2 compares against the LIVE key (apiKeyRef) — the
-      // render-closure apiKey was always equal to _apiKeyAtCall, making the
-      // old guard dead code. Live-key comparison catches the post-sync
-      // mid-switch window (cache[B] empty, apiKey already moved to A's key
-      // from a prior switch).
-      if (cachedForTeam ? activeKey !== cachedForTeam : activeKey !== apiKeyRef.current) return
       setNewKey(newKeyVal)
       setNewKeyName('')
-      await loadAll(activeKey)
+      await loadAll('')
     } catch (e) {
       // Round-18: a stale request's error must not land under the new team
       if (teamIdRef.current === _teamAtCall) {
@@ -4127,53 +3932,46 @@ function claimIntentInFlight() {
   }
 
   async function regenerateKey(keyId) {
-    // #1147: rotate = mint the REPLACEMENT first (the old key still
+    // #1147/#2229: rotate = mint the REPLACEMENT first (the old key still
     // authorizes the request), then revoke the old — a single mint (no
-    // bootstrap-pool growth), works in both auth modes, and the replacement
-    // becomes the active key (shown once). Available on every tier:
-    // regenerating does not grow the key count.
-    // #2229: now reachable from the UI — the held durable row's Rotate
-    // button (previously zero UI callers). The old row's label carries into
-    // the replacement mint so an in-place rotate keeps the row's identity.
+    // bootstrap-pool growth), session-authed. The old row's label carries
+    // into the replacement mint so an in-place rotate keeps the row's
+    // identity. Available on every tier: regenerating does not grow the key
+    // count.
+    // #2246 (ADR-010): rotate is now available on EVERY durable row (uniform
+    // table actions) and NEVER installs the replacement into the browser — no
+    // localStorage/teamKeysRef/apiKey write. The replacement is shown once
+    // (setNewKey) for the user to configure into their agent; the old key is
+    // revoked.
     if (busy) return
-    if (!confirm('Rotate this API key? A new key is created and this one is revoked — shown once. Applications using the old key will stop working.')) return
+    const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
+    const rowName = (row0 && row0.name) || 'this API key'
+    const rowDesc = [rowName, row0 && row0.key_prefix, row0 && (row0.created_at || row0.createdAt || '')].filter(Boolean).join(' · ')
+    // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
+    // one-click rotate never silently kills an agent key the user cannot
+    // identify (rows are hash-only; names may be unset).
+    if (!confirm(`Rotate ${rowName}? A replacement key is created (shown once) and ${rowName} is revoked — applications using the old key will stop working.\n\n${rowDesc}`)) return
     setCapNotice('')
     setError('')
     setBusy(true)
     try {
       const _teamAtCall = currentTeamId
-      const activeKey = _teamAtCall ? (teamKeysRef.current[_teamAtCall] || apiKey) : apiKey
       // #2229: label carry-over — the row may leave the closure list mid-
       // flight (switch/refresh) — degrade to an unlabeled mint.
       const oldRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
-      const newKeyVal = await mintKey(activeKey, (oldRow && oldRow.name) || undefined)
-      // Round-29 (review P1): NEVER revoke without installing — if the team
-      // moved during the mint RTT, bail BEFORE the destructive leg (the old
-      // row may not belong to the now-selected team; revoking it would leave
-      // a revoked held credential + a lost replacement plaintext). The minted
+      const newKeyVal = await mintKey('', (oldRow && oldRow.name) || undefined)
+      // Round-29 (review P1): NEVER revoke without a confirmed target — if
+      // the team moved during the mint RTT, bail BEFORE the destructive leg
+      // (the old row may not belong to the now-selected team). The minted
       // replacement stays as a visible team-A durable (same accepted orphan
-      // semantics as createKey's identity guard). Mirrors revokeKey's
-      // Round-20 capture pattern.
+      // semantics as createKey's identity guard).
       if (teamIdRef.current !== _teamAtCall) return
-      // Revoke the old key — its mechanical revoke keeps skip-clear: the
-      // H2 slot-clear leg must NOT fire mid-flow. NOTE (comment accuracy):
-      // revokeKey's tail loadAll still runs the rule-5 classifyHeldKey drop
-      // on the just-revoked old key (interim clear) — the unconditional
-      // install below rewrites slot/apiKey/teamKeysRef on the same tick, so
-      // the end state is the replacement, never a revoked key.
-      await revokeKey(keyId, { skipConfirm: true, skipBootstrap: true })
+      await revokeKey(keyId, { skipConfirm: true })
       if (teamIdRef.current !== _teamAtCall) return
-      // #2167 (rule 7): install the replacement UNCONDITIONALLY (H3) —
-      // apiKey STATE included. The old install synced apiKeyRef/localStorage
-      // but never setApiKey (apiKey state held the just-revoked key until
-      // reload) and wrote the slot only conditionally.
+      // #2246: no held install — the replacement is shown once and managed
+      // from the table like any other durable.
       setNewKey(newKeyVal)
-      const install = nextRegenInstallState({ newKeyVal })
-      if (_teamAtCall) teamKeysRef.current[_teamAtCall] = install.cacheKey
-      try { localStorage.setItem(KEY_STORAGE, install.writeSlot) } catch { /* best-effort */ }
-      setApiKey(install.setApiKey)
-      apiKeyRef.current = install.setApiKey
-      await loadAll(newKeyVal)
+      await loadAll('')
     } catch (e) {
       if (teamIdRef.current === currentTeamId) {
         if (e.status === 402) {
@@ -4252,53 +4050,27 @@ function claimIntentInFlight() {
   }
 
   async function revokeKey(keyId, opts = {}) {
-    // Round-20 (P2): capture team at call — a mid-flight switch must not let
-    // this revoke's clear leg clobber the new team's active key/localStorage
-    // or land the old team's key table under the new header.
+    // Round-20 (P2): capture team at call — a mid-flight switch must not land
+    // the old team's key table under the new header.
     const _teamAtCall = currentTeamId
-    if (!opts.skipConfirm && !confirm('Revoke this API key? Applications using it will stop working.')) return
+    const row0 = (keys || []).find((k) => (k.id || k.key_id) === keyId)
+    const rowName = (row0 && row0.name) || 'this API key'
+    const rowDesc = [rowName, row0 && row0.key_prefix, row0 && (row0.created_at || row0.createdAt || '')].filter(Boolean).join(' · ')
+    // #2246 (PM-1): the confirm names the row (name · prefix · created) so a
+    // one-click trash never silently kills an agent key the user cannot
+    // identify (rows are hash-only; names may be unset).
+    if (!opts.skipConfirm && !confirm(`Revoke ${rowName}? Applications using it will stop working.\n\n${rowDesc}`)) return
     setCapNotice('')
     setError('')
     try {
-      // #2167 (rule 7): resolve the revoked row's key_prefix BEFORE the
-      // DELETE (the click site has k.id; find k.key_prefix in the keys
-      // closure) — the slot-aware clear below must not depend on the row
-      // surviving the refetch.
-      const revokedRow = (keys || []).find((k) => (k.id || k.key_id) === keyId)
-      const revokedKeyPrefix = revokedRow ? revokedRow.key_prefix : null
+      // #2246 (ADR-010): the rule-7 slot-aware clear (heldKeyClearState) is
+      // DELETED — the browser never holds key material, so a revoke has
+      // nothing to clear: plain DELETE + keys reload. (The KEY_STORAGE slot
+      // was purged at session resolution; logout wipes it.)
       await api(`/v1/team/keys/${keyId}`, { method: 'DELETE', useSession: true })
       // Round-20: bail after the DELETE — a switch already reloaded the new
-      // team's state; skip the stale clear + loadAll entirely.
+      // team's state; skip the stale loadAll entirely.
       if (teamIdRef.current !== _teamAtCall) return
-      // #2167 (rule 7): the revoked key's material must never survive — the
-      // KEY_STORAGE slot, apiKey/apiKeyRef, and the per-team cache. H2 is
-      // PREFIX-derived (row-deletion-proof: prefix matching never needs the
-      // revoked row; consistent with the repo-wide auth prefix convention).
-      // NEVER re-mints. The internal skipBootstrap option (regenerate's
-      // mechanical revoke) GATES the clear leg — regenerate mints the
-      // replacement FIRST, so its unconditional install (nextRegenInstall-
-      // State) is the sole writer there. Plain non-held revoke (the common
-      // agent-key case) matches nothing → unchanged (plain DELETE + loadAll).
-      if (!opts.skipBootstrap && revokedKeyPrefix) {
-        let slotContent = null
-        try { slotContent = localStorage.getItem(KEY_STORAGE) } catch { /* best-effort */ }
-        const clear = heldKeyClearState({
-          revokedKeyPrefix,
-          slotContent,
-          cachedAtTeam: _teamAtCall ? teamKeysRef.current[_teamAtCall] : null,
-        })
-        if (clear.clearSlot) {
-          try { localStorage.removeItem(KEY_STORAGE) } catch { /* best-effort */ }
-        }
-        if (clear.clearCachedKey && _teamAtCall) delete teamKeysRef.current[_teamAtCall]
-        if (clear.clearSlot || clear.clearCachedKey) {
-          setApiKey('')
-          // SYNCHRONOUS ref write — the tail loadAll's classification hook
-          // must not re-fire on the just-cleared key (ref-sync effect lag).
-          apiKeyRef.current = ''
-        }
-      }
-      if (teamIdRef.current !== _teamAtCall) return // Round-20: stale fallthrough
       await loadAll()
     } catch (e) {
       // Round-18/20: a stale revoke's error must not land under the new team
@@ -4306,90 +4078,16 @@ function claimIntentInFlight() {
     }
   }
 
-  // ── J-2: key recovery via E1 session mint (the #518 fix) ──
-  async function recoverKey() {
-    // Round-18 (P2): the last mutation that writes the ACTIVE key + localStorage
-    // — capture team at call time; bail before any write if the user switched.
-    if (busy) return // Round-26: in-function double-click guard (button disabled is click-path only)
-    const _teamAtCall = currentTeamId || fallbackTeamIdRef.current
-    setError('')
-    setBusy(true)
-    const tok = sessionTokenRef.current
-    if (!tok) { setError('Sign in with your Tortoise account to recover a key.'); setBusy(false); return }
-    try {
-      let res = await fetch(`${API_BASE}/v1/session/key`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-        // P1 (code-review): multi-membership users need a team_id — mint the
-        // recovery key for the currently selected team.
-        body: JSON.stringify({ purpose: 'recovery', ...(currentTeamId ? { team_id: currentTeamId } : {}) }),
-      })
-      // Round-3: 400 "team_id required" with no selected team (e.g. /v1/teams
-      // failed during bootstrap) — auto-select first membership and retry.
-      if (res.status === 400 && !currentTeamId) {
-        const teamsRes = await fetch(`${API_BASE}/v1/teams`, {
-          headers: { Authorization: `Bearer ${tok}` },
-        })
-        if (teamsRes.ok) {
-          const list = await teamsRes.json()
-          // Round-7: a logout during the teams fetch must not resurrect
-          // teams/fallbackTeamIdRef for the signed-out page.
-          if (sessionTokenRef.current !== tok) return
-          if (list.length) {
-            setTeams(list)
-            // #1912: skip suspended rows when auto-selecting — a suspended
-            // membership must not trigger the recovery mint (it 403s).
-            const firstSelectable = list.find((t) => !t.suspended_at) || list[0]
-            fallbackTeamIdRef.current = firstSelectable.team_id
-            res = await fetch(`${API_BASE}/v1/session/key`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${tok}` },
-              body: JSON.stringify({ purpose: 'recovery', team_id: firstSelectable.team_id }),
-            })
-          }
-        }
-      }
-      if (!res.ok) {
-        const b = await res.json().catch(() => ({}))
-        throw new Error(b.detail || `HTTP ${res.status}`)
-      }
-      const data = await res.json()
-      // Round-6 (P3): a logout during the in-flight recovery must not resurrect
-      // the team + key for the signed-out user.
-      if (sessionTokenRef.current !== tok) return
-      // Round-18 (P2): a team switch during the recovery must not make A's
-      // recovery key the app's active key under team B's header.
-      if (teamIdRef.current !== _teamAtCall) return
-      setNewKey(data.key)
-      // Round-4: if the 400-fallback auto-selected the first membership,
-      // persist it so graphs/members load and the key is cached (otherwise
-      // the effect never fires and every manual pick burns a fresh mint).
-      const mintedTeamId = currentTeamId || fallbackTeamIdRef.current
-      if (mintedTeamId) teamKeysRef.current[mintedTeamId] = data.key
-      if (!currentTeamId && fallbackTeamIdRef.current) {
-        setCurrentTeamId(fallbackTeamIdRef.current)
-        teamIdRef.current = fallbackTeamIdRef.current
-      }
-      // Fix A (review round 2): adopt the recovery key so the UI keeps
-      // working (the old bootstrap key may have just been rotated/revoked).
-      localStorage.setItem(KEY_STORAGE, data.key)
-      setApiKey(data.key)
-      apiKeyRef.current = data.key
-      setAuthMode('session') // Round-10: a recovery-minted key IS session auth — keep tabs consistent
-      await Promise.all([loadAll(data.key), refreshTeam(data.key)]).catch(() => {})
-    } catch (e) {
-      // Round-18: a stale recovery's error must not land under the new team
-      if (teamIdRef.current === _teamAtCall) setError(e.message)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  // #2166: the API Keys page shows durable product keys only. Auto-minted
-  // session credentials (the dashboard's own access keys — created_via
-  // 'bootstrap' or any expiring row) are never rendered as rows; keys[] stays
-  // unfiltered in state so prefix matching (classifyHeldKey / heldKeyClear-
-  // State in sessionKey.js) keeps working for the live credential.
+  // #2246 (ADR-010): the client-side key-recovery flow (recoverKey, the last
+  // POST /v1/session/key consumer) is DELETED — it was UI-dead (the "Lost your
+  // key?" affordance was removed in #1148; zero call sites) and its held-key
+  // install would violate the never-hold invariant if ever re-wired. The POST
+  // /v1/session/key endpoint + the recovery purpose remain for non-dashboard
+  // consumers (selfhost keyless teams, SDK/CLI, contract suites); dashboard
+  // users create/rotate keys from the API Keys tab (each shown once).
+  // keys[] stays unfiltered in state so managedKeys (the isManagedKey render
+  // filter below) and durableConnectKey's rows-resolution keep working off
+  // the full payload (#2246).
   const managedKeys = (keys || []).filter(isManagedKey)
 
   // #714 (main): session detail view
@@ -4692,18 +4390,23 @@ function claimIntentInFlight() {
   // When it shows, the legacy empty-state cards hide.
   const showReentryCard = !welcomeMode && !onboardingComplete &&
     team && (team.point_count ?? 0) === 0 && !wizardDone
-  // #1831 P2-1: the wizard's setup commands embed the user's key. After a
-  // recoverable mint failure (#1830) BOTH welcomeKey and apiKey can be empty
-  // — never emit `Bearer ` with an empty key; fall back to a create-a-key
+  // #1831 P2-1 / #2246: the wizard's setup commands embed the user's key —
+  // never emit `Bearer ` with an empty key; fall back to a create-a-key
   // message instead (see the wizard step-0 render below).
   // #1998 fold-in (PR #2161 finding): the embedded key must be DURABLE. The
   // 24h bootstrap session key minted at login (created_via 'bootstrap',
   // expires_at = now+24h) would kill any agent configured with it within a
-  // day — so a bootstrap/unknown apiKey is NOT embedded; the connect step
+  // day — so a bootstrap/unknown key is NEVER embedded; the connect step
   // shows the durable-key gate (mint via POST /v1/team/keys or route to the
   // API Keys tab) instead. wizardDurableKey = a durable key minted at the
   // connect step this session.
-  const durableConnect = durableConnectKey(welcomeKey, apiKey, keys)
+  // #2246 (ADR-010): session mode passes apiKey '' (no held key) —
+  // durableConnectKey resolves the gate from the keys-table ROWS
+  // (usableDurableRows): 'welcome' (first-timer reveal) or wizardDurableKey
+  // supply the embeddable plaintext; otherwise the gate copy routes to
+  // create/rotate/paste ('rows-durable' when a usable durable exists, 'none'
+  // when not).
+  const durableConnect = durableConnectKey(welcomeKey, '', keys)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
 
   if (welcomeMode && authed) {
@@ -4930,22 +4633,25 @@ function claimIntentInFlight() {
                       </div>
                       {!harnessKey ? (
                         // #1998 fold-in (PR #2161 finding): the connect step
-                        // must embed a DURABLE key — the session bootstrap key
-                        // expires in 24h and would kill an agent configured
+                        // must embed a DURABLE key — the 24h bootstrap
+                        // session credential would kill an agent configured
                         // with it. Offer to mint a durable provisioned key via
                         // POST /v1/team/keys (shown once in the command), or
                         // route to the API Keys tab to create/regenerate one.
-                        // Copy branches on WHY no durable key is embeddable
-                        // (review): 'bootstrap' = the live session key expires;
-                        // 'none'/'unknown' = no key or unverifiable rows — the
-                        // "expires" phrasing would be false there.
+                        // #2246 (ADR-010): session mode holds no key — the
+                        // gate copy resolves from the ROWS: 'rows-durable' = a
+                        // usable durable exists (its plaintext was shown once
+                        // at creation and is unrecoverable from the table —
+                        // create here or rotate there); 'none' = create one.
+                        // Role-aware: members can't mint (server 403) — paste
+                        // or ask an owner/admin.
                         <>
                           <p className="dim" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
-                            {durableConnect.source === 'bootstrap' && 'The setup command embeds a durable API key — the key in this session expires within 24 hours, which would cut off your agent. Create a durable one now (shown once), or create/regenerate one in the API Keys tab.'}
-                            {durableConnect.source === 'none' && 'The setup command embeds a durable API key — session keys expire within 24 hours, so your agent needs a durable one (created once, never shown again). Create one now, or create/regenerate one in the API Keys tab.'}
-                            {durableConnect.source === 'revoked' && 'Your current key was revoked — the setup command needs an active durable API key. Create a new one now (shown once), or create/regenerate one in the API Keys tab.'}
-                            {durableConnect.source === 'disabled' && 'Your current key is disabled — the setup command needs an enabled durable API key. Create a new one now (shown once), or re-enable / regenerate one in the API Keys tab.'}
-                            {durableConnect.source === 'unknown' && 'We couldn\'t confirm a durable API key for this session — the setup command needs one (session keys expire within 24 hours). Create a durable one now (shown once), or create/regenerate one in the API Keys tab.'}
+                            {!isOwnerAdmin
+                              ? 'Only owners and admins can create or rotate keys for this Organization — paste an existing durable key below, or ask an owner/admin for the setup command.'
+                              : (durableConnect.source === 'rows-durable'
+                                  ? 'This Organization already has durable API key(s) — each plaintext was shown once when created and the table can\'t reveal it again. Create a fresh key here (shown once), or rotate an existing key in the API Keys tab and use its replacement.'
+                                  : 'The setup command embeds an API key for this Organization. Keys are shown once when created — create a durable key now (shown once), or create/regenerate one in the API Keys tab.')}
                           </p>
                           {wizardDurableError && (
                             <p className="error" role="alert" style={{ margin: '0.6rem 0 0', fontSize: 13 }}>{wizardDurableError}</p>
@@ -4953,9 +4659,11 @@ function claimIntentInFlight() {
                           <div className="wizard-nav" style={{ marginTop: '1rem' }}>
                             <button type="button" className="ghost" onClick={() => setWizardStep(2)}>← Back</button>
                             <div className="wizard-nav-actions">
-                              <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
-                                {wizardDurableBusy ? 'Creating…' : 'Create a durable setup key'}
-                              </button>
+                              {isOwnerAdmin && (
+                                <button type="button" className="btn-primary" onClick={wizardMintDurableKey} disabled={wizardDurableBusy}>
+                                  {wizardDurableBusy ? 'Creating…' : 'Create a durable setup key'}
+                                </button>
+                              )}
                               <button type="button" className="ghost" onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setTab('keys'); finishWelcomeLoads() }}>Go to API Keys →</button>
                             </div>
                           </div>
@@ -4991,7 +4699,7 @@ function claimIntentInFlight() {
                                 // the server; shown once, cleared on use.
                                 const check = durableConnectKey('', pasted, keys)
                                 if (check.source === 'bootstrap' || check.source === 'revoked' || check.source === 'disabled') {
-                                  setWizardDurableError('That key is not durable (session keys expire within 24 hours; revoked and disabled keys never authenticate). Regenerate a durable one in the API Keys tab and paste the new key.')
+                                  setWizardDurableError('That key can\'t be used in the setup command (bootstrap keys expire within 24 hours; revoked and disabled keys never authenticate). Regenerate a durable key in the API Keys tab and paste the new one.')
                                   return
                                 }
                                 if (!/^tt_/.test(pasted)) {
@@ -5000,13 +4708,12 @@ function claimIntentInFlight() {
                                 }
                                 setWizardDurableKey(pasted)
                                 setWizardDurablePaste('')
-                                // NOTE: paste is intentionally NOT installed to
-                                // apiKey/localStorage (unlike the mint path) —
-                                // the user brought this key from elsewhere and
-                                // manages it there; making it the team's active
-                                // data-plane key would be a silent rotation.
-                                // Re-entry re-gates (paste again) — acceptable
-                                // friction, no leak.
+                                // NOTE (#2246): paste is intentionally NOT
+                                // installed anywhere (no apiKey/localStorage
+                                // write — the browser never holds a key); the
+                                // pasted plaintext lives in wizardDurableKey
+                                // for this session only and is dropped on
+                                // completion/logout/team switch.
                               }}>Use this key</button>
                           </div>
                         </>
@@ -5017,6 +4724,12 @@ function claimIntentInFlight() {
                               {HARNESS_INTRO[wizardHarness]}
                             </p>
                           )}
+                          {/* #2246: shown-once reminder above the snippet —
+                              the embedded key plaintext is not recoverable
+                              from the keys table (server keeps hashes). */}
+                          <p className="dim small" style={{ margin: '0.9rem 0 0', lineHeight: 1.6 }}>
+                            The key below is shown once — copy the command now. If you lose the key, rotate it in the API Keys tab (the replacement is shown once there too).
+                          </p>
                           <pre className="snippet" style={{ marginTop: '0.75rem' }}>
                             {UNIVERSAL_COMMAND[wizardHarness](harnessKey)}
                           </pre>
@@ -5710,15 +5423,15 @@ function claimIntentInFlight() {
           // seed), not a raw-curl dead end.
           <section className="overview empty-state graph-missing">
             <h2>Your graph is ready for its first data point</h2>
-            {/* #2167 (step 6, phase-7 reviewer 2 P1): the re-entry card's
-                "and API key are live" clause is FALSE for the post-change
-                zero-key returning population this card targets (the login
-                mint used to make it true — no "mint"/"re-key" string
-                existed to grep). Conditional copy mirroring the #1591
-                ternary below: a held key → keep the claim; else → honest
-                session-only prompt + an in-app Go to API Keys action. */}
+            {/* #2167 (step 6, phase-7 reviewer 2 P1) / #2246: the re-entry
+                card's "and API key are live" claim needs a real key in
+                hand — (snippetKey || apiKey) truthiness: the first-timer
+                who exited the welcome flow still has welcomeKey in memory
+                (its plaintext was shown once THIS session), so the "live"
+                copy + setup path is honest; a zero-key returning user gets
+                the keyless prompt + in-app Go to API Keys action. */}
             <p className="dim">
-              {apiKey
+              {snippetKey
                 ? 'Your Organization and API key are live. Finish the setup to connect your tool, learn the three skills, and seed your graph — it only takes a minute.'
                 : 'Your Organization is live — finish setup to connect your agent. Create a key on the API Keys tab, or continue setup below.'}
             </p>
@@ -5726,7 +5439,7 @@ function claimIntentInFlight() {
               <button className="btn-primary" onClick={() => { setWizardStep(0); setWelcomeMode(true) }}>
                 Continue setup →
               </button>
-              {!apiKey && (
+              {!snippetKey && (
                 <button type="button" className="ghost" onClick={() => setTab('keys')}>
                   Go to API Keys →
                 </button>
@@ -5739,11 +5452,13 @@ function claimIntentInFlight() {
           // styled copyable snippet, and a single primary action.
           <section className="overview empty-state graph-missing">
             <h2>Your graph is ready for its first data point</h2>
-            {apiKey ? (
+            {snippetKey ? (
               // #1831 P2-1: only show the copyable snippet when a real key
-              // exists — after a recoverable mint failure (#1830) apiKey is
-              // '' and the snippet would render `Bearer ` with an empty key
-              // (and the "key is live" copy would be false).
+              // exists — after a recoverable mint failure (#1830) the state
+              // is '' and the snippet would render `Bearer ` with an empty
+              // key (and the "key is live" copy would be false). #2246: the
+              // key source is snippetKey (welcomeKey || apiKey) — the
+              // first-timer's in-memory reveal, never a localStorage read.
               <>
                 <p className="dim">
                   Your Organization and API key are live — the graph is created the moment
@@ -5792,8 +5507,8 @@ function claimIntentInFlight() {
               <a className="btn-primary" href="https://tortoise.premiselabs.co/welcome" target="_blank" rel="noreferrer">
                 Connect your agent →
               </a>
-              {apiKey && (
-                <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${apiKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
+              {snippetKey && (
+                <span className="dim small">or run: <code>{`curl -X POST https://api.premiselabs.co/v1/points -H "Authorization: Bearer ${snippetKey.slice(0, 12)}…" -H "Content-Type: application/json" -d '{"content":"hello graph","kind":"statement"}'`}</code></span>
               )}
             </div>
           </section>
@@ -5980,8 +5695,15 @@ function claimIntentInFlight() {
                 <button className="ghost small" onClick={() => { navigator.clipboard.writeText(newKey); setNewKey(null) }}>Copy &amp; done</button>
               </div>
             )}
+            {/* #2246 (ADR-010): the keys table is uniform — every durable row
+                carries the same owner action set (rename / toggle / trash /
+                Rotate); no "in use by this dashboard" row, no rotate-only
+                suppression (the browser never holds a key, so no row is held).
+                .keys-table-wrap = overflow-x:auto for the 4-action cell on
+                320-375px viewports. */}
+            <div className="keys-table-wrap">
             <table>
-              <thead><tr><th>Name</th><th>Prefix</th><th>Created</th><th>Status</th><th></th></tr></thead>
+              <thead><tr><th scope="col">Name</th><th scope="col">Prefix</th><th scope="col">Created</th><th scope="col">Status</th><th scope="col"><span className="sr-only">Actions</span></th></tr></thead>
               <tbody>
                 {managedKeys.length === 0 && <tr><td colSpan="5" className="dim">No keys yet.</td></tr>}
                 {managedKeys.map((k) => (
@@ -6025,31 +5747,22 @@ function claimIntentInFlight() {
                       {k.revoked_at ? <span className="revoked">revoked</span>
                         : k.enabled === false ? <span className="dim">disabled</span>
                         : <span className="live">active</span>}
-                      {/* #2166 (review P2): the held durable key's missing actions stay
-visible — visible text, not a hover-only title. #2229: rotate IS available
-on the held row (action cell) — replace-first semantics; toggle/delete stay
-suppressed while in use. */}
-                      {!k.revoked_at && isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) && (
-                        <div className="dim small">in use by this dashboard</div>
-                      )}
                     </td>
                     <td>{!k.revoked_at && isOwnerAdmin && (
-                      isActiveKey(k, teamKeysRef.current[currentTeamId] || apiKey) ? (
-                        /* #2229: the held durable row's ONLY action is Rotate — a
-                           replacement is minted first (label carried over), then this
-                           one is revoked; the new durable becomes the held key
-                           (shown once). Delete/toggle stay suppressed while in use. */
-                        <span className="key-actions">
-                          <button
-                            className="ghost small key-rotate"
-                            disabled={busy}
-                            onClick={() => regenerateKey(k.id)}
-                            aria-label={`Rotate key ${k.key_prefix || k.id?.slice(0, 8)}`}
-                            title="Rotate key — creates a replacement and revokes this one"
-                          >Rotate</button>
-                        </span>
-                      ) : (
-                        <span className="key-actions">
+                      <span className="key-actions">
+                        {/* #2246 (uniform rows): Rotate is available on EVERY
+                            durable row (ADR-010 — no held row exists to be
+                            rotate-only). Rotate mints the replacement first
+                            (label carried over), revokes this one, and shows
+                            the replacement once — it never installs into the
+                            browser. */}
+                        <button
+                          className="ghost small key-rotate"
+                          disabled={busy}
+                          onClick={() => regenerateKey(k.id)}
+                          aria-label={`Rotate key ${k.key_prefix || k.id?.slice(0, 8)}`}
+                          title="Rotate key — creates a replacement and revokes this one"
+                        >Rotate</button>
                         {/* #1148-ux review: on/off toggle (new keys default on) */}
                         <button
                           className="key-toggle"
@@ -6060,7 +5773,9 @@ suppressed while in use. */}
                           aria-label={`Toggle key ${k.key_prefix || k.id?.slice(0, 8)}`}
                         />
                         {/* #1148-ux review: trash = delete with confirmation
-                            (revokeKey already confirm()s) */}
+                            (revokeKey already confirm()s — the dialog names the
+                            row so a one-click delete never kills an agent key
+                            the user cannot identify, #2246) */}
                         <button
                           className="ghost small key-trash"
                           onClick={() => revokeKey(k.id)}
@@ -6068,12 +5783,12 @@ suppressed while in use. */}
                           title="Delete key"
                         >🗑</button>
                       </span>
-                      )
                     )}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
+            </div>
             {/* #2000 (W4): the Overview Backups stat card relocated here —
                 the count stays reachable now that the Overview is calm
                 (exactly 3 elements, zero toggles). BackupsCard owns its own
