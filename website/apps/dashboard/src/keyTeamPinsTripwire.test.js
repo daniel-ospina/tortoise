@@ -30,6 +30,18 @@ function writeFnBody(name) {
   return mainJsx.slice(start, end)
 }
 
+test('#2230: whole-file sentinel — NO key-management write URL anywhere may drop the pin', () => {
+  // Second layer over the per-site checks below: a FUTURE fourth key-write
+  // function (revoke/rename/toggle were added after #2167's pins without
+  // pins — exactly how #2230 regressed) with an unpinned URL must fail
+  // loudly here and force a deliberate WRITE_FNS extension, not pass
+  // silently. mintKey's create URL (`/v1/team/keys${q}`, no id segment) is
+  // not matched — its own #2167 guard covers it.
+  const unpinned = mainJsx.match(/\/v1\/team\/keys\/\$\{[^}]+\}(?!\$\{q\})/g) || []
+  assert.deepEqual(unpinned, [],
+    `every key-management write URL must append the ?team_id= pin (\${q}): ${unpinned}`)
+})
+
 test('#2230: each key-management write (revoke/rename/toggle) pins ?team_id= on its URL', () => {
   for (const fn of WRITE_FNS) {
     const body = writeFnBody(fn)
