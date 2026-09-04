@@ -12379,6 +12379,42 @@ class TortoiseSDK:
         )
         return True
 
+    def graph_set_recording(self, team_id: str, graph_id: str,
+                            value: bool | None) -> bool:
+        """C6 #2115: set the session_recording override on a Graph node.
+
+        ``value`` True/False = explicit override; None = remove the override
+        (FalkorDB SET null removes the prop → inherit team default, #1927
+        default-ON preserved). Resolves the literal ``default`` id to the
+        team's kind='default' node (the default graph IS graph 0 — settable
+        per epic §6.3); real gids match directly. Returns True when the node
+        was found (override written/cleared), False on unknown graph —
+        callers map to 404."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        # The literal ``default`` id maps to the team's kind='default' node
+        # (mode-agnostic callers use either); any other id must match a real
+        # node exactly. Soft-deleted nodes (status='deleted') are NOT
+        # patchable — treat as unknown (mirror list_graphs' tombstone skip).
+        if graph_id == "default":
+            node = next((r[0] for r in rows
+                         if r[1] == "default" and r[2] != "deleted"), None)
+        elif any(r[0] == graph_id and r[2] != "deleted" for r in rows):
+            node = graph_id
+        else:
+            node = None
+        if node is None:
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.recording = $v",
+            params={"gid": node, "tid": team_id, "v": value},
+        )
+        return True
+
     def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
         """APIKey node ids bound to a graph — the delete-cascade source
         (every key dies with the graph, E2E-8). Revoked or not — the
