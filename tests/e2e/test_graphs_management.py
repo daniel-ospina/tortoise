@@ -104,7 +104,12 @@ def _wire_graphs_harness(page: Page, team_row: dict,
     """Layered API mock (keys-table style). team_row carries tier/max_graphs
     so one harness renders free (locked create) and pro/team (unlocked +
     ∞ meter) shapes. mint_bodies collects POST /v1/team/keys bodies;
-    graph_mint_bodies collects POST /v1/graphs bodies."""
+    graph_mint_bodies collects POST /v1/graphs bodies.
+
+    The fixture lists are MUTABLE state: DELETE /v1/graphs/{gid} drops the
+    row, DELETE /v1/team/keys/{id} stamps revoked_at, and a per-graph mint
+    appends a row — so the panel re-renders REAL post-mutation state (the
+    assertions are not vacuous re-renders of a static fixture)."""
     mint_bodies = mint_bodies if mint_bodies is not None else []
     graph_mint_bodies = graph_mint_bodies if graph_mint_bodies is not None else []
     key_authed = key_authed if key_authed is not None else []
@@ -116,6 +121,12 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 "created_at": "2026-09-04T00:00:00.000Z"},
         "key_plaintext": "tk_live_newgraph1234567890abcdef",
         "revealed_once": True,
+    }
+    current_graphs = list(graphs)
+    # Deep-copy the per-graph key fixtures so mutations never leak across
+    # tests in the same process (the harness list is per-page anyway).
+    current_keys: dict[str, list[dict]] = {
+        gid: [dict(r) for r in rows] for gid, rows in graph_keys.items()
     }
 
     def handle(route):
@@ -138,7 +149,7 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 # The API-Keys tab's mount read (no graph_id) returns the
                 # team rows; the per-graph panel pins ?graph_id=.
                 gid = urllib.parse.parse_qs(query).get("graph_id", [None])[0]
-                rows = graph_keys.get(gid, []) if gid else _team_key_rows(graph_keys)
+                rows = current_keys.get(gid, []) if gid else _team_key_rows(current_keys)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"keys": rows}))
                 return
@@ -146,13 +157,27 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 mint_bodies.append(route.request.post_data or "")
                 body = json.loads(route.request.post_data or "{}")
                 gid = body.get("graph_id")
+                row = {
+                    "id": f"gk_mint_{len(mint_bodies)}",
+                    "key_prefix": f"tk_mint{len(mint_bodies)}",
+                    "name": body.get("name"),
+                    "created_at": "2026-09-04T00:00:00.000Z",
+                    "revoked_at": None,
+                    "graph_id": gid,
+                    "scopes": body.get("scopes"),
+                    "delegation_depth": None,
+                }
+                if gid:
+                    current_keys.setdefault(gid, []).append(row)
+                else:
+                    current_keys.setdefault("team", []).append(row)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({
-                                  "id": f"gk_mint_{len(mint_bodies)}",
+                                  "id": row["id"],
                                   "key": f"tk_live_mint{len(mint_bodies)}abcdef0123456789",
-                                  "key_prefix": f"tk_mint{len(mint_bodies)}",
-                                  "created_at": "2026-09-04T00:00:00.000Z",
-                                  "name": body.get("name"),
+                                  "key_prefix": row["key_prefix"],
+                                  "created_at": row["created_at"],
+                                  "name": row["name"],
                                   "graph_id": gid,
                                   "scopes": body.get("scopes"),
                                   "delegation_depth": None,
@@ -160,20 +185,29 @@ def _wire_graphs_harness(page: Page, team_row: dict,
                 return
             m = re.match(r"^/v1/team/keys/([^/]+)$", path)
             if m and route.request.method == "DELETE":
+                kid = m.group(1)
+                for rows in current_keys.values():
+                    for r in rows:
+                        if r["id"] == kid:
+                            r["revoked_at"] = "2026-09-04T00:00:00.000Z"
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"revoked": True, "key_id": m.group(1),
+                              body=json.dumps({"revoked": True, "key_id": kid,
                                                "revoked_at": "2026-09-04T00:00:00.000Z"}))
                 return
             if path.endswith("/v1/graphs") and route.request.method == "GET":
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps(graphs))
+                              body=json.dumps(current_graphs))
                 return
             if path.endswith("/v1/graphs") and route.request.method == "POST":
                 graph_mint_bodies.append(route.request.post_data or "")
                 route.fulfill(status=create_status, content_type="application/json",
                               body=json.dumps(create_body))
                 return
-            if re.match(r"^/v1/graphs/[^/]+$", path) and route.request.method == "DELETE":
+            m = re.match(r"^/v1/graphs/([^/]+)$", path)
+            if m and route.request.method == "DELETE":
+                gid = urllib.parse.unquote(m.group(1))
+                current_graphs[:] = [g for g in current_graphs
+                                     if g["graph_id"] != gid]
                 route.fulfill(status=204)
                 return
             if path.endswith("/v1/sessions"):
@@ -335,10 +369,14 @@ def test_per_graph_key_panel_lists_mints_and_revokes(page: Page) -> None:
     assert mint_body["graph_id"] == "g_prod"
     assert sorted(mint_body["scopes"]) == ["graphs:read", "graphs:write"]
     page.get_by_role("button", name="I saved it").click()
-    # Revoke the first (active) panel key — confirm dialog accepts.
+    # Revoke the active ci row — confirm dialog accepts; the mutation
+    # stamps revoked_at so the refreshed panel renders it revoked/terminal.
+    ci_row = panel_rows.filter(has_text="ci").first
+    expect(ci_row.get_by_role("button", name="Revoke")).to_be_visible()
     page.once("dialog", lambda d: d.accept())
-    panel_rows.first.get_by_role("button", name="Revoke").click()
-    expect(panel).to_contain_text("revoked", timeout=15_000)
+    ci_row.get_by_role("button", name="Revoke").click()
+    expect(ci_row).to_contain_text("revoked", timeout=15_000)
+    expect(ci_row.get_by_role("button", name="Revoke")).to_have_count(0)
 
 
 def test_default_graph_has_no_delete_and_custom_delete_armed(page: Page) -> None:

@@ -3729,7 +3729,7 @@ function claimIntentInFlight() {
   // response's .key plaintext is shown ONCE in the reveal modal.
   async function mintGraphKey() {
     const gid = panelGraphId
-    if (!gid || graphBusy || !graphKeyName.trim()) return
+    if (!gid || graphBusy) return
     setGraphBusy(true)
     setGraphMsg('')
     const _teamAtCall = currentTeamId
@@ -6225,9 +6225,9 @@ function claimIntentInFlight() {
                       aria-label="New graph key label"
                       value={graphKeyName}
                       onChange={(e) => setGraphKeyName(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && graphKeyName.trim() && mintGraphKey()}
+                      onKeyDown={(e) => e.key === 'Enter' && mintGraphKey()}
                     />
-                    <button className="ghost small" onClick={mintGraphKey} disabled={graphBusy || !graphKeyName.trim()}>+ Mint key</button>
+                    <button className="ghost small" onClick={mintGraphKey} disabled={graphBusy}>+ Mint key</button>
                   </div>
                 )}
                 {graphMsg && <div className="error banner">{graphMsg}</div>}
