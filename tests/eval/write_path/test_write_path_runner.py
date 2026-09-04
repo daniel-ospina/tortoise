@@ -65,8 +65,8 @@ def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
 
 
 def test_parse_roundtrip_drift_raises(tmp_path):
-    conversation = [{"role": "user", "content": "hello"},
-                    {"role": "assistant", "content": "hi"}]
+    # #2174-lint F841: the old `conversation` fixture was unused — the drift
+    # case builds its own `drifted` transcript below.
     # Malformed render for the codex parser: content is a string, not a part
     # array — the parser still flattens strings via _text_from_parts. Force a
     # drift by rendering a turn the parser will drop (empty content).
@@ -214,7 +214,9 @@ def _published_receipt(tmp_path) -> tuple[object, object]:
         "judge_pin": JUDGE_PIN_MECHANICAL,
         "failure_classes": ["triage misses on buried-signal transcripts"],
     }
-    blessed = schema.bless_baseline(baseline, run, justification="first published baseline (bad number, per protocol)")
+    # #2174-lint F841: bless_baseline publishes (writes) the baseline — the
+    # call matters, the unused return doesn't.
+    schema.bless_baseline(baseline, run, justification="first published baseline (bad number, per protocol)")
     receipt = {
         "run_id": "w2b-first",
         "date": run["date"],
