@@ -47,7 +47,8 @@ export function usableDurableRows(keyRows) {
 // works, #2166). Returns { key, durable, source }:
 //   - welcomeKey present → durable (first-time A13 provisioned key) — UNLESS
 //     keyRows is a loaded non-empty array and the welcome plaintext's prefix
-//     row is absent/revoked/disabled: the shown-once reveal is then STALE
+//     row is absent/revoked/disabled/bootstrap/expiring: the shown-once
+//     reveal is then STALE
 //     (rotated/revoked/disabled after it was shown) and must fall through to
 //     the rows/paste resolution as if welcomeKey were absent (#2246 review)
 //   - apiKey (session-held plaintext OR a pasted candidate) matches a durable
@@ -66,10 +67,14 @@ export function usableDurableRows(keyRows) {
 // apiKey param with the pasted plaintext — revoked/disabled/bootstrap rows
 // must still reject (the escape hatch's whole point).
 export function durableConnectKey(welcomeKey, apiKey, keyRows) {
-  // #2246 (review, P1): row-truth stale check on the in-memory welcome
+  // #2246 (review, P1/P2): row-truth stale check on the in-memory welcome
   // plaintext — post-#2246 the table actions are uniform one-click (rotate /
   // revoke / disable), so a welcomeKey whose prefix row is gone/revoked/
-  // disabled must NOT win. Check only when keyRows is a LOADED non-empty
+  // disabled must NOT win. P2: a bootstrap/expiring row is dead for embedding
+  // too (symmetric with the paste tail below — a 24h session credential must
+  // never back an embed); welcome keys are provisioned (created_via
+  // 'provisioned'), so this arm is a harmless belt that keeps the predicate
+  // identical to main.jsx's row-truth effect. Check only when keyRows is a LOADED non-empty
   // array (null/[] = not loaded yet — the pre-load welcome reveal must keep
   // working; the provisioned row lands in the same loadAll response). When
   // stale, set the welcome plaintext aside and proceed as if it were absent
@@ -78,7 +83,7 @@ export function durableConnectKey(welcomeKey, apiKey, keyRows) {
   let welcome = welcomeKey
   if (welcome && Array.isArray(keyRows) && keyRows.length > 0) {
     const row = keyRows.find((k) => k && k.key_prefix && welcome.startsWith(k.key_prefix))
-    if (!row || row.revoked_at || row.enabled === false) welcome = ''
+    if (!row || row.revoked_at || row.enabled === false || row.created_via === 'bootstrap' || !!row.expires_at) welcome = ''
   }
   if (welcome) return { key: welcome, durable: true, source: 'welcome' }
   if (!apiKey) {

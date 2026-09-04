@@ -4095,6 +4095,22 @@ function claimIntentInFlight() {
       // Round-20: bail after the DELETE — a switch already reloaded the new
       // team's state; skip the stale loadAll entirely.
       if (teamIdRef.current !== _teamAtCall) return
+      // #2246 (review, P2): revoke-to-empty clears the matching in-memory
+      // plaintext BEFORE the reload. loadAll landing keys=[] must read as
+      // "not loaded" to the row-truth effect below (it gates on
+      // keys.length === 0 to preserve the pre-load welcome reveal) — so
+      // revoking the LAST/ONLY key would otherwise leave
+      // welcomeKey/wizardDurableKey alive past their row's death: the
+      // overview "live" claims and the connect step keep embedding the
+      // REVOKED key (an empty-tail the effect cannot see). The direct
+      // prefix clear closes it. Also covers regenerateKey's rotate (it
+      // revokes the old row via revokeKey skipConfirm) — the replacement
+      // is shown via setNewKey, and the welcome plaintext must not survive
+      // its own row's rotation.
+      if (row0 && row0.key_prefix) {
+        if (welcomeKey && welcomeKey.startsWith(row0.key_prefix)) setWelcomeKey('')
+        if (wizardDurableKey && wizardDurableKey.startsWith(row0.key_prefix)) setWizardDurableKey('')
+      }
       await loadAll()
     } catch (e) {
       // Round-18/20: a stale revoke's error must not land under the new team
@@ -4136,7 +4152,14 @@ function claimIntentInFlight() {
     for (const [plaintext, clear] of [[welcomeKey, setWelcomeKey], [wizardDurableKey, setWizardDurableKey]]) {
       if (!plaintext) continue
       const r = rowFor(plaintext)
-      if (!r || r.revoked_at || r.enabled === false) clear('')
+      // #2246 (review, P2): a bootstrap/expiring row is dead for embedding
+      // too — symmetric with durableConnectKey's paste tail (sessionKey.js,
+      // identical predicate): a 24h session credential (or any expiring
+      // row) must never back an embed, so a plaintext whose row later
+      // resolves to one is invalidated like any revoked/disabled row.
+      // First-timer welcome keys are provisioned (created_via
+      // 'provisioned'), so this never fires on the legit reveal.
+      if (!r || r.revoked_at || r.enabled === false || r.created_via === 'bootstrap' || !!r.expires_at) clear('')
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [keys])
@@ -4756,18 +4779,29 @@ function claimIntentInFlight() {
                                 // the server; shown once, cleared on use.
                                 const check = durableConnectKey('', pasted, keys)
                                 if (check.source === 'bootstrap' || check.source === 'revoked' || check.source === 'disabled') {
-                                  // #2246 (review): paste-error — role- and
+                                  // #2246 (review, P2): paste-error — role- and
                                   // state-branched. Members cannot rotate /
                                   // regenerate keys (rotate = mint, allowed,
                                   // + revoke old, server owner-gated), so only
-                                  // owners get the create/rotate path; both
-                                  // tails keep the state-specific reason.
+                                  // owners get the create/rotate path. The
+                                  // REMEDY must also match the SOURCE:
+                                  // bootstrap/expiring rows are FILTERED from
+                                  // the API Keys table (managedKeys =
+                                  // isManagedKey), so a rotate is impossible
+                                  // for that branch — only a fresh create
+                                  // exists there. Revoked/disabled rows are
+                                  // durable and in-table, so that branch
+                                  // keeps the create-or-rotate path.
                                   const reason = check.source === 'bootstrap'
                                     ? 'It was created for a login session, so it stops working after 24 hours'
                                     : 'Revoked and disabled keys never authenticate'
-                                  const remedy = isOwnerAdmin
-                                    ? 'Create or rotate a key in the API Keys tab and paste the new one.'
-                                    : 'Ask an owner or admin to create or rotate a key for you, then paste it here.'
+                                  const remedy = check.source === 'bootstrap'
+                                    ? (isOwnerAdmin
+                                        ? 'Create a new key in the API Keys tab and paste it here.'
+                                        : 'Ask an owner or admin to create a new key for you, then paste it here.')
+                                    : (isOwnerAdmin
+                                        ? 'Create or rotate a key in the API Keys tab and paste the new one.'
+                                        : 'Ask an owner or admin to create or rotate a key for you, then paste it here.')
                                   setWizardDurableError(`That key can't be used in the setup command. ${reason} — ${remedy}`)
                                   return
                                 }
@@ -5732,16 +5766,19 @@ function claimIntentInFlight() {
             )}
             <div className="row">
               <h2>API Keys</h2>
-              {/* #2246 (review, P1): member key creation is gated CLIENT-side
-                  as dashboard policy — the server POST /v1/team/keys has NO
-                  role gate (members CAN mint server-side), but every row
-                  action is isOwnerAdmin-gated and rotation is owner-only via
-                  the server-gated revoke leg. The dashboard treats key
-                  management as owner/admin-managed (Members tab + wizard
-                  member gate precedent), so members get a notice + the
-                  paste-into-setup escape instead of the create form. Mirrors
-                  the graphs tab's sign-in-required span layout. */}
-              {isOwnerAdmin ? (
+              {/* #2246 (review, P1/P2): member key creation is gated
+                  CLIENT-side as dashboard policy — the server POST
+                  /v1/team/keys has NO role gate (members CAN mint
+                  server-side), but every row action is isOwnerAdmin-gated
+                  and rotation is owner-only via the server-gated revoke leg.
+                  The dashboard treats key management as owner/admin-managed
+                  (Members tab + wizard member gate precedent), so members get
+                  a notice + the paste-into-setup escape instead of the create
+                  form. P2 (layout): the member notice renders as a FULL-WIDTH
+                  paragraph BELOW this .row (Members-tab precedent) — as a
+                  span inside the flex .row it wrapped badly beside the h2 on
+                  narrow viewports. */}
+              {isOwnerAdmin && (
                 <div className="inline-form">
                   <input
                     placeholder="Label (e.g. CI, staging)"
@@ -5753,10 +5790,13 @@ function claimIntentInFlight() {
                   />
                   <button onClick={createKey} disabled={busy}>+ New key</button>
                 </div>
-              ) : (
-                <span className="dim small">Only owners and admins can create or rotate keys. Paste an existing key into the setup step to connect an agent.</span>
               )}
             </div>
+            {!isOwnerAdmin && (
+              <p className="dim small" style={{ margin: '0 0 1rem' }}>
+                Only owners and admins can create or rotate keys in this dashboard. Paste an existing key into the setup step to connect an agent.
+              </p>
+            )}
             {/* #1148-ux review: "Lost your key? Generate a new one" removed — the + New key button already covers it. */}
             {capNotice && (
               <div className="cap-notice" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', margin: '0.5rem 0 1rem', padding: '0.6rem 0.85rem', border: '1px solid var(--border, #d0d7de)', borderRadius: 8, background: 'var(--bg-soft, #f6f8fa)' }}>

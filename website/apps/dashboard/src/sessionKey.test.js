@@ -139,6 +139,25 @@ test('connect: welcomeKey STALE when its row is disabled/absent (rows loaded) �
   assert.equal(absent.key, '')
   assert.equal(absent.source, 'rows-durable') // absent row + usable row → rows-durable
 })
+// #2246 review (P2): the stale-welcome predicate is symmetric with the paste
+// tail — a bootstrap/expiring row is dead for embedding too. Welcome keys are
+// provisioned (created_via 'provisioned'), so this only fires when the row a
+// welcome plaintext resolves to is a 24h/expiring access credential.
+test('connect: welcomeKey STALE when its row is bootstrap/expiring (rows loaded) → never embeds', () => {
+  const boot = durableConnectKey('tt_welcome_abcdefgh', '', [
+    { key_prefix: 'tt_welcome', created_via: 'bootstrap', expires_at: '2026-09-04T00:00:00Z', revoked_at: null, enabled: true },
+    row('tt_other_ab', { created_via: 'provisioned' }),
+  ])
+  assert.equal(boot.durable, false)
+  assert.equal(boot.key, '') // the 24h welcome plaintext must never embed
+  assert.equal(boot.source, 'rows-durable') // falls through to rows resolution
+  const exp = durableConnectKey('tt_welcome_abcdefgh', '', [
+    { key_prefix: 'tt_welcome', created_via: 'provisioned', expires_at: '2026-09-04T00:00:00Z', revoked_at: null },
+  ])
+  assert.equal(exp.durable, false)
+  assert.equal(exp.key, '')
+  assert.equal(exp.source, 'none')
+})
 test('connect: welcomeKey with rows NOT loaded (null/empty) → welcome (pre-load reveal)', () => {
   assert.equal(durableConnectKey('tt_welcome_abcdefgh', '', null).durable, true)
   assert.equal(durableConnectKey('tt_welcome_abcdefgh', '', null).source, 'welcome')

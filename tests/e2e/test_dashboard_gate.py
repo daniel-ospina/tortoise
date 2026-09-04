@@ -945,6 +945,12 @@ def test_logout_redirects_to_auth(page: Page) -> None:
     # below is the only remaining wipe — the final cookie assert then pins
     # logout's own removeItem instead of passing on the mount purge's cookie.
     page.evaluate(f"localStorage.setItem('tortoise_api_key', '{durable}')")
+    # #2246 review round-2: clear the wipe cookie the MOUNT PURGE set — the
+    # round-1 re-seed alone left that cookie in place, so the final presence
+    # assert still passed even if logout's own wipe regressed (the assert was
+    # vacuous against the earlier purge's cookie). With the cookie cleared
+    # here, the post-logout presence assert pins LOGOUT's removeItem only.
+    page.evaluate("document.cookie='tt_wipe_log=; Domain=.premiselabs.co; Path=/; Max-Age=0'")
     page.locator(".account-blob-btn").click()
     expect(page.locator(".account-menu-logout")).to_be_visible()
     page.locator(".account-menu-logout").click()

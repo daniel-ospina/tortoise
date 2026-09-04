@@ -29,6 +29,20 @@ const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main
 // template (minimal escape handling) — strings stay intact, so a code-form
 // usage (string literal included) still fails the grep while comment-only
 // mentions still pass.
+// #2246 review (R2): known evadable shapes (documented seams — this machine
+// is a quote-aware comment stripper, NOT a JS tokenizer; pinned by the unit
+// tests below):
+//   - REGEX LITERALS whose body ends in escaped slashes — `/https?:\/\//`
+//     exposes a `//` pair at the regex close, so from that pair to end-of-
+//     line is stripped as a comment (accepted limitation: guards must not
+//     rely on code whose regex literals end `\/\/`).
+//   - TEMPLATE LITERALS with NESTED backticks inside `${...}` expressions
+//     (`` `a ${`b`} // …` ``) — the machine closes at the first unescaped
+//     backtick, so a nested backtick ends the template early and the tail is
+//     re-scanned as plain code (accepted limitation).
+// main.jsx currently triggers neither shape (all five guards green); if a
+// future guard needs either, upgrade the machine deliberately against the
+// pinned tests.
 function stripComments(src) {
   let out = ''
   let i = 0
@@ -65,6 +79,38 @@ function stripComments(src) {
   return out
 }
 const mainJsxCode = stripComments(mainJsx)
+
+// #2246 review (R2): stripComments unit tests — pin the quote-aware machine's
+// behavior so a future stripper upgrade cannot silently regress what the
+// static guards above depend on (strings survive; real comments die).
+test('stripComments: (i) a URL string literal survives stripping intact', () => {
+  const s = stripComments("const base = 'https://premiselabs.co/v1/team/keys'; // host comment\nconst x = 1")
+  assert.ok(s.includes("'https://premiselabs.co/v1/team/keys'"), `URL literal must survive: ${JSON.stringify(s)}`)
+  assert.ok(!s.includes('host comment'), 'the // comment after it must be stripped')
+  assert.ok(s.includes('const x = 1'), 'code after the comment line survives')
+})
+
+test('stripComments: (ii) a // comment containing quotes/URLs is stripped', () => {
+  // A comment body may itself hold quotes + a // — the comment branch runs
+  // raw to the newline; the string branch must not have been entered.
+  const s = stripComments('const a = 1; // she said "https://x.example/a//b" and // more\nconst b = 2')
+  assert.ok(!s.includes('she said'), 'comment body with quotes/URLs must be stripped')
+  assert.ok(!s.includes('and // more'), 'a second // inside the comment is still comment text')
+  assert.ok(s.includes('const b = 2'))
+})
+
+test('stripComments: (iii) regex literals ending in escaped slashes — DOCUMENTED limitation', () => {
+  // Accepted limitation (see the stripComments doc comment): the machine is
+  // not a tokenizer, so `/https?:\/\//` exposes a `//` pair at the escaped-
+  // slash/regex-close junction and the rest of THAT line is stripped as a
+  // comment. This pins CURRENT behavior — only the same line is affected
+  // (following lines survive), and a future tokenizer upgrade must update
+  // this expectation deliberately.
+  const out = stripComments('const re = /https?:\\/\\//; // keep-me?\nconst survivor = 1\n')
+  assert.ok(!out.includes('keep-me?'), 'the regex close swallows the rest of its line (pinned limitation)')
+  assert.ok(out.includes('const survivor = 1'), 'following lines still survive the limitation')
+  assert.ok(!out.includes('; // keep-me?'), 'the closing `//;` of the regex line is consumed (pinned)')
+})
 
 test('#2167: zero mintSessionKey( call sites remain in main.jsx', () => {
   const calls = mainJsx.match(/mintSessionKey\s*\(/g) || []
