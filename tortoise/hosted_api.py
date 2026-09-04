@@ -13266,6 +13266,11 @@ def _maybe_apply_completion(team_id: str) -> bool:
             _os.write_status(proj, team_id, _os.STATUS_COMPLETE)
             try:  # created-signal invalidates the 60s MCP TTL cache (pin 18)
                 from tortoise import mcp_server as _mcp
+                # C5 #2114 (accepted residual, re-review P2): the cache pop
+                # only reaches THIS worker's in-process cache — a multi-worker
+                # deploy serves stale onboarding state from the other workers
+                # for up to the 60s TTL. Bounded + fail-open (state reads
+                # degrade to a fresh read, never a wrong authorization).
                 _mcp._onboarding_state_cache.pop(team_id, None)
             except Exception:
                 pass
@@ -13727,6 +13732,10 @@ async def onboarding_checkpoint(body: OnboardingCheckpointRequest,
       signal (#2001 exposes; #2006 emits events).
     - post-write fork-aware gate eval (monotonic; grandfathered no-op).
     """
+    # C5 #2114 (re-review P2): checkpoint writes onboarding FLOW state into
+    # the team's DEFAULT graph via _team_proj — a graph-bound key writing it
+    # would be a cross-graph write (team-level surface, like the siblings).
+    _reject_graph_bound_team_surface(team, "onboarding checkpoint")
     team_id = team["team_id"]
     # one operation per call
     present = [

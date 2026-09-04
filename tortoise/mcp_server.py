@@ -425,6 +425,9 @@ WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     "tortoise_delete_point", "tortoise_delete", "tortoise_delete_entity",
     "tortoise_set_point_baseline", "tortoise_set_source_tier",
     "tortoise_annotate_operator",
+    # tortoise_pack_install MERGEs :PackManifest/:PackInstall into the
+    # tenant graph (write) — re-review P2: it was missing (classified read).
+    "tortoise_pack_install",
 })
 
 
