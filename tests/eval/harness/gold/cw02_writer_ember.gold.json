@@ -1,0 +1,14 @@
+{
+  "continuity": {
+    "reader_planted": [
+      "three-step flow with an explicit consent step"
+    ],
+    "reader_queries": [
+      "What onboarding flow did we approve for Ember?"
+    ],
+    "writer_session": "cw02_writer_ember"
+  },
+  "schema_version": 1,
+  "session_id": "cw02_writer_ember",
+  "suite": "continuity"
+}
