@@ -152,8 +152,14 @@ def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
     return proj._probe_ok()
 
 
-def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
+def _make_sdk(*, namespace: str | None = None,
+              graph_name: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
+
+    C5 #2114 (D-C5-1/D-C5-2): ``graph_name`` (a FULL DB graph name, e.g.
+    a custom ``team_{tid}_{gid}``) passes through to the SDK's explicit
+    graph-name seam — never a namespace (which would prepend ``team_``).
+    Exactly one of namespace/graph_name is set by callers.
 
     Embedded fallback: when no URI is configured (fly.toml default), the SDK
     previously received no path and FalkorProjection raised
@@ -161,8 +167,9 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
     failed with 500. Using an on-disk redislite DB keeps onboarding functional
     until a production FalkorDB instance is provisioned (#7722).
     """
+    key = graph_name if graph_name is not None else (namespace or "")
     if os.environ.get("TORTOISE_DB_URI"):
-        return TortoiseSDK(namespace=namespace)
+        return TortoiseSDK(namespace=namespace, graph_name=graph_name)
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
     try:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -171,7 +178,6 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
         # fall back to a temp file so provisioning still works.
         import tempfile
         db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
-    key = namespace or ""
     # Fast path (lock-free steady state): reuse a healthy anchor as-is — the
     # per-request fresh SDK below attaches to its daemon (the #493/#1607
     # designed shape). The probe runs outside the lock exactly as it always
@@ -202,7 +208,8 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
                 _FALLBACK_KEEPALIVE.pop(key, None)
                 anchor = None
             if anchor is None:
-                anchor = TortoiseSDK(db_path=db_path, namespace=namespace)
+                anchor = TortoiseSDK(db_path=db_path, namespace=namespace,
+                                     graph_name=graph_name)
                 try:  # noqa: SIM105
                     anchor._get_proj()  # eager: hold the connection so the server survives
                 except Exception:
@@ -211,7 +218,8 @@ def _make_sdk(*, namespace: str | None = None) -> TortoiseSDK:
                     # anchor may connect on a later call.
                     pass
                 _FALLBACK_KEEPALIVE.setdefault(key, anchor)
-    sdk = TortoiseSDK(db_path=db_path, namespace=namespace)
+    sdk = TortoiseSDK(db_path=db_path, namespace=namespace,
+                      graph_name=graph_name)
     return sdk
 
 
@@ -1781,6 +1789,117 @@ def _reject_minted_delegated_key(team: dict, surface: str) -> None:
             detail={"error_code": "KEY_NOT_USER_MINTED",
                     "message": f"Minted keys cannot access {surface}."},
         )
+
+
+def _assert_graph_owned(team: dict, graph_id: str,
+                        graph_namespace: str) -> None:
+    """C5 #2114 (D-C5-2): the spine's ownership pre-check — a graph-bound
+    key must open ONLY its own graph, and a vanished graph must fail closed
+    (never widen onto the default). Runs BEFORE the projection binds. The
+    registry Graph node / supabase graphs row is the authority; a mismatch
+    or missing node → 403/404 (the graph the key was minted for is gone —
+    the key is dead, not demoted).
+
+    ACL-OFF proof: this check (not FalkorDB's NOPERM) is what denies
+    cross-graph at the app layer.
+    """
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    try:
+        if is_supabase_enabled():
+            rows = get_control_plane().query("graphs", select=["id"],
+                                             filters=[("id", "eq", graph_id),
+                                                      ("team_id", "eq", team["team_id"])])
+            if not rows:
+                raise HTTPException(
+                    status_code=404,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"})
+            return
+        # Registry: the Graph node must exist AND belong to the team AND
+        # carry the resolved namespace (fail-closed on any drift).
+        rows = _make_sdk(namespace="registry")._get_registry().query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "RETURN g.namespace",
+            params={"gid": graph_id, "tid": team["team_id"]},
+        ).result_set
+    except HTTPException:
+        raise
+    except Exception:
+        _logger.warning("graph ownership probe failed for %s (fail-closed)",
+                        graph_id, exc_info=True)
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_NOT_FOUND",
+                    "message": "graph not found for key"}) from None
+    if not rows or not rows[0][0]:
+        raise HTTPException(
+            status_code=404,
+            detail={"error_code": "GRAPH_NOT_FOUND",
+                    "message": "graph not found for key"})
+    if rows[0][0] != graph_namespace:
+        # The key resolved to a namespace that no longer matches the node —
+        # fail closed (never open a shifted namespace).
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_MISMATCH",
+                    "message": "graph not found for key"})
+
+
+def _data_sdk(team: dict) -> TortoiseSDK:
+    """C5 #2114 (D-C5-2): the data-plane tenancy resolver — the ONE entry
+    every team-data surface uses to open its SDK.
+
+    - graph-bound key (graph_id set): ownership pre-check THEN open the
+      resolved FULL graph name (custom team_{tid}_{gid} or a bound default)
+      via the explicit graph-name seam — cross-graph denied at the app
+      layer (ACL-OFF proof), never widened onto the team default.
+    - team-wide key / session auth (graph_id None): the DEFAULT graph via
+      the namespace path (namespace=team_id) — BYTE-IDENTICAL to today's
+      open (E2E-5 regression gate: existing team-key flows unchanged).
+      graph_namespace (t.graph_name) is NOT used here — the hosted lane
+      stores graph_name == team_{team_id}, but the selfhost legacy lane
+      (sdk.team_create team_{name}, #2023) diverges and flipping would
+      silently move those teams' data access.
+    """
+    team_id = team["team_id"]
+    gid = team.get("graph_id")
+    if gid:
+        ns = team.get("graph_namespace")
+        if not ns:
+            raise HTTPException(
+                status_code=403,
+                detail={"error_code": "GRAPH_NOT_FOUND",
+                        "message": "graph not found for key"})
+        _assert_graph_owned(team, gid, ns)
+        return _make_sdk(graph_name=ns)
+    return _make_sdk(namespace=team_id)
+
+
+def _require_scope(team: dict, scope: str, surface: str) -> None:
+    """C5 #2114 (D-C5-3): pre-filter scope enforcement (write implies read).
+
+    - legacy_full_access (deleg NULL + scopes==[] — tt_/tkm_ class) or
+      session auth (key_id None): allow — existing flows unchanged.
+    - scoped key: ``graphs:read`` for reads, ``graphs:write`` for writes.
+    - deleg=0 keys: same scope matrix (children carry ONLY mintable data
+      scopes — C3); a deleg=0 key with no data scope stays 403 here.
+
+    Never post-filter: the check is the FIRST statement of a data handler.
+    """
+    if team.get("legacy_full_access") or team.get("key_id") is None:
+        return
+    have = set(team.get("scopes") or [])
+    # Read op: graphs:read OR graphs:write (write implies read). Write op:
+    # graphs:write only (read never satisfies a write).
+    if scope in have or (scope == "graphs:read" and "graphs:write" in have):
+        return
+    raise HTTPException(
+        status_code=403,
+        detail={"error_code": "INSUFFICIENT_SCOPE",
+                "message": f"Key lacks {scope} scope for {surface}."})
 
 
 async def get_current_team_gated(request: Request) -> dict:
