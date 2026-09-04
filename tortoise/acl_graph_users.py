@@ -282,8 +282,10 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
     user exists but no stored credential), SETUSER runs ``resetpass`` first
     so the orphaned prior secret dies (``>pw`` alone APPENDS — old secrets
     stay valid). Supabase/hosted mode is create-once: further mints no-op
-    when the user exists (the hosted credential story is C5's; per-mint
-    throwaway secrets would accumulate live, never-revoked credentials).
+    when the user exists and return ``password: None`` (INTENTIONAL — the
+    hosted credential story is C5's / the platform manages DB users; callers
+    must not treat None as an error; per-mint throwaway secrets would
+    accumulate live, never-revoked credentials).
     """
     client = _admin_client()
     if client is None:
@@ -307,15 +309,21 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
                 "graph": graph_name}
     # Registry (selfhost) mode: reuse the stored password when present.
     stored = _stored_acl_password(team_id, graph_id)
-    exists = _user_exists_on(client, username)
     if stored is not None:
         password = stored
-        reset = False  # re-assert the SAME secret — no churn
+        # Re-assert the SAME secret — redis dedups identical >pw rules, so
+        # no churn and exactly one live secret.
+        reset = False
     else:
         password = os.urandom(24).hex()
-        # A fresh secret on an EXISTING user must resetpass first (the old
-        # secret is gone from storage — a crash/store-miss orphan).
-        reset = exists
+        # No stored password (fresh graph OR a crash/store-miss left the
+        # user without a mapping) → ALWAYS resetpass first: on a genuinely
+        # fresh user resetpass is a no-op (SETUSER creates it), and on a
+        # store-miss orphan it kills the undisclosed old secret. NOT gated
+        # on a GETUSER exists-read — a false-negative (transient network
+        # blip) would otherwise append a second live secret instead of
+        # rotating (review round-2 TOCTOU).
+        reset = True
     _setuser(client, username, graph_name, password, reset=reset)
     _registry_store_credential(team_id, graph_id, username, password)
     _acl_save(client)

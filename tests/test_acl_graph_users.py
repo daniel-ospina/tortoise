@@ -155,7 +155,7 @@ def test_cross_graph_noperm(acl_env):
     try:
         c = redis_py.Redis(
             host=urlparse(os.environ["TORTOISE_DB_URI"]).hostname,
-            port=urlparse(os.environ["TORTOISE_DB_URI"]).port or 6379,
+            port=urlparse(os.environ["TORTOISE_DB_URI"]).port or 16379,
             username=cred["username"], password=cred["password"],
             decode_responses=True, socket_timeout=5,
         )

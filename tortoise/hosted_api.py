@@ -7891,11 +7891,16 @@ def _provision_graph(team: dict, name: str,
         # refuses to create theater users) must roll back cleanly and surface
         # an ACTIONABLE 503, not an opaque 500 (selfhosts without requirepass
         # would otherwise see "Graph provisioning failed" with the remedy
-        # buried in a log).
-        from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
-            AclLayerError,
-        )
-        if isinstance(e, AclLayerError):
+        # buried in a log). Import guarded (mirror the hook pattern): an
+        # absent module must NEVER mask the original error or skip the
+        # generic rollback below (no-orphan invariant).
+        try:
+            from tortoise.acl_graph_users import (  # type: ignore[import-not-found]
+                AclLayerError,
+            )
+        except ImportError:
+            AclLayerError = None  # C4 not shipped — generic path below
+        if AclLayerError is not None and isinstance(e, AclLayerError):
             _rollback_graph(team["id"], graph)
             raise HTTPException(
                 status_code=503,
