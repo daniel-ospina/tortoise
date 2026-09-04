@@ -745,6 +745,126 @@ def _is_entity_id(s: str) -> bool:
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+
+def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
+                             warn=None) -> None:
+    """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
+
+    ROOT CAUSE (verified): capture wrote the extracted claims via the #131
+    draft default and wired their IMPL/NAND operator topology as draft
+    (#780 extraction operators, ``promote_source=False``); EP's BFS
+    expansion excludes draft subgraphs (``include_draft=False`` default), so
+    the ingest EP pass could never calibrate the captured claims
+    (``dream()`` total_affected 0 / coverage 0.0 / ``has_ep`` False —
+    structurally, until the claims are EP-able).
+
+    FIX — capture-scoped ONLY (create_point's global draft default, the
+    #780 draft-operator semantics of NON-capture extraction paths, EP
+    semantics, and global dream routing are all untouched):
+      1. every extracted (non-episodic) claim of THIS capture is promoted
+         draft->live (the DM-2/§4.4 status branch: draft -> live on the
+         capture write path; the episodic turn stream STAYS draft — it is
+         the turn stream, not beliefs);
+      2. the capture's operator topology (IMPL/NAND operator Points with an
+         edge to a captured claim) is promoted with its claims — a live
+         claim wired through a draft operator stays EP-inert (the #780
+         live-only selector never picks the draft operator), so claim-only
+         promotion cannot calibrate wired claims (verified empirically);
+      3. the claims are marked dirty (write-trigger, graph-persisted #1163)
+         so the bounded ingest pass below has a window to refresh (the v2
+         write path already marked via create_point; the M2 fold path does
+         not — the uniform mark here covers both lanes);
+      4. a BOUNDED ingest EP pass runs — mode="local" (write-triggered
+         refresh over the dirty roots, bounded by construction — never a
+         full-graph pass), require_calibration=False (EP topology on fresh
+         capture content), warm_start=False (from-scratch — no cached-edge
+         censoring for freshly promoted claims).
+
+    Fail-open (P1 #1529 posture): a promotion or EP hiccup never fails a
+    committed capture — every failure surfaces as an additive warning via
+    ``warn`` (never a raise after partial writes). Shared by
+    ``sdk.capture_session`` and hosted ``_capture_session_impl`` so the two
+    capture surfaces can never drift (byte-parity).
+    """
+    if not claim_ids:
+        return
+    try:
+        proj = sdk._get_proj()
+        # 1. Claims -> live (draft-only guard mirrors create_operator's
+        # promote_source clause — a terminal claim is never resurrected),
+        # then REBUILD-DURABLE via the PointPromoted event (review P1): the
+        # raw status flip alone would revert on JSONL replay (the #548 log
+        # snapshotted the draft state at PointAdded) — the projection's
+        # PointPromoted replay upserts the full live snapshot (projection/
+        # __init__.py:1074). Snapshot AFTER the SET so the event carries the
+        # live state. Capture auto-promotion is NOT reviewer-gated — the
+        # snapshot carries the point's own props (no fabricated reviewed).
+        # Candidate read FIRST (the SET below destroys the draft evidence):
+        # exact extracted ids, non-operator, draft-or-unset status.
+        cand_rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR n.status = 'draft') "
+            "RETURN n.id",
+            params={"ids": list(claim_ids)},
+        ).result_set
+        promoted_claims = [r[0] for r in cand_rows]
+        if promoted_claims:
+            proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "SET n.status = 'live'",
+                params={"ids": promoted_claims},
+            )
+            for pid in promoted_claims:
+                sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
+        # 2. Operators of the captured claims -> live (draft-only guard),
+        # then REBUILD-DURABLE via OperatorPromoted (the R16 shape —
+        # projection/__init__.py:1082 restores live on replay). Mirror
+        # promote_point's _promote_incident_operators event exactly.
+        op_rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+            "WHERE c.id IN $ids "
+            "AND (o.status IS NULL OR o.status = 'draft') "
+            "RETURN DISTINCT o.id",
+            params={"ids": list(claim_ids)},
+        ).result_set
+        promoted_ops = []
+        for (oid,) in op_rows:
+            proj.g.query(
+                "MATCH (o:Point {id:$oid}) "
+                "SET o.status = 'live'",
+                params={"oid": oid},
+            )
+            sdk._emit_event("OperatorPromoted", id=oid,
+                            point=sdk.get_point(oid))
+            promoted_ops.append(oid)
+        # 3. Write-trigger dirty-mark (claims + reverse-BFS neighbors).
+        sdk._mark_dirty(list(claim_ids))
+    except Exception as e:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "capture EP promotion failed (non-fatal) for %d claims: %s",
+            len(claim_ids), e, exc_info=True,
+        )
+        if warn is not None:
+            warn(f"capture EP promotion failed: {type(e).__name__}: {e}")
+        return
+    try:
+        # 4. BOUNDED ingest EP pass (local = dirty-root refresh; review P2:
+        # mode="local" hydrates ALL graph-persisted dirty roots #1163, so an
+        # explicit budget caps the request-time EP work — this capture's
+        # claims calibrate well within it; any overflow stays dirty for the
+        # scheduler's epoch-guarded sweep).
+        sdk.dream(mode="local", require_calibration=False,
+                  warm_start=False, budget=100)
+    except Exception as e:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "capture ingest EP pass failed (non-fatal) for %d claims: %s",
+            len(claim_ids), e, exc_info=True,
+        )
+        if warn is not None:
+            warn(f"ingest EP pass failed: {type(e).__name__}: {e}")
+
+
 def _entity_name_id(label: str, name: str) -> str:
     """Deterministic entity id from name — mirrors create_point's content-hash
     dedup so the projection's MERGE-by-name is IDEMPOTENT: the same name
@@ -2348,6 +2468,20 @@ class TortoiseSDK:
         # route was resolved (the v2 path); the M2 path has no route/provider.
         if meta.get("route"):
             resp["extraction_provider"] = meta.get("provider")
+        # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
+        # capture write path (after provenance stamp + operators wired) the
+        # extracted claims are promoted draft→live and the BOUNDED ingest EP
+        # pass calibrates them (local = write-triggered refresh over the
+        # dirty roots — never a full-graph pass). Shared with the hosted
+        # impl via _apply_capture_ingest_ep (byte-parity; hosted reflects the
+        # post-EP state in the write-verb enrichment read). Fail-open: a
+        # promotion/EP hiccup never fails a committed capture — additive
+        # warning only.
+        if extracted:
+            _apply_capture_ingest_ep(
+                self, [p["id"] for p in extracted],
+                warn=extraction_warnings.append,
+            )
         return resp
 
     def _extract_session_llm(

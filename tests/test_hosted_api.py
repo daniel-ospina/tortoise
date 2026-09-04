@@ -1730,6 +1730,77 @@ class TestSessionCaptureWriteVerb:
             assert ingested
             assert event_id  # ontology-compliant provenance kept
 
+    def test_capture_ingest_ep_user_visible_e2e5(self, client, monkeypatch):
+        """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP updates on
+        ingestion verified at the USER-VISIBLE level — after a capture the
+        write-verb response carries ``ep_updated: true`` per extracted claim
+        and the claims carry persisted EP posteriors (has_ep true); the
+        pre-ingestion uncalibrated state (has_ep false — structurally, the W2
+        strict bar was 0.0 while captured claims were draft) DIFFERS.
+
+        Phase C promotes the extracted claims AND their capture operators to
+        live on the capture path ONLY (the episodic turn stream stays draft)
+        and runs a BOUNDED ingest EP pass (local — dirty-root refresh, never
+        a full-graph pass) at the END of the capture write path, BEFORE the
+        verb's enrichment read (ep_updated = graph truth post-EP — never
+        fabricated). The m2 echo lane is used so the cue-word conversation
+        produces a WIRED claim pair (operator-less claims have no EP factors
+        and stay honestly uncalibrated)."""
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        conv = [
+            {"role": "user", "content": "The auth dead-end is the top issue "
+                                         "because it blocks every deploy."},
+            {"role": "assistant", "content": "Therefore we should ship serve "
+                                               "--http first."},
+        ]
+        r = client.post("/v1/sessions", json={
+            "conversation": conv,
+            "session_id": "w5c-e2e5-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert len(ids) >= 2, body
+        for p in body["points"]:
+            # user-visible EP-on-ingest: claims are live AND calibrated
+            assert p["status"] == "live", p
+            assert p["ep_updated"] is True, p
+        import tortoise.hosted_api as ha_mod
+        proj = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj()
+        cal = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND "
+            "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+            "RETURN count(n)",
+            params={"ids": ids},
+        ).result_set
+        assert cal[0][0] == len(ids), \
+            f"every wired claim must calibrate post-ingest ({cal[0][0]}/{len(ids)})"
+        # the episodic turn stream stays draft (turn stream, not beliefs)
+        trows = proj.g.query(
+            "MATCH (t:Point) WHERE t.is_episodic = true RETURN DISTINCT t.status"
+        ).result_set
+        assert trows and all(st == "draft" for (st,) in trows), trows
+
+    def test_capture_isolated_claim_ep_updated_stays_honest(self, client):
+        """Anti-gaming pin (W5 Phase C #2104): an OPERATOR-LESS extracted
+        claim (the deterministic v2 mock seam emits one isolated point with
+        no operators) has no EP factors — the bounded ingest pass trivially
+        stamps lastDreamedAt but can never fabricate persisted α/β, so the
+        verb's ``ep_updated`` (has_ep = the point actually carries EP
+        params) stays False. Promotion is capture-scoped: the claim is live,
+        but uncalibrated-by-construction is reported honestly."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5c-isolated-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["extracted"] >= 1
+        assert all(p["ep_updated"] is False for p in body["points"]), \
+            body["points"]
+
     def test_capture_gate_boundary_422_before_409(self, client):
         """S2 amendment (verified order): the boundary 422 (invalid harness
         — Pydantic SessionRequest validation, fires before the handler on
