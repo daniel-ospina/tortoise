@@ -202,9 +202,20 @@ def test_backup_vanished_graph_fails_closed(spine_env):
     ghost key onto the default — a cross-graph read dump). Fails closed 403
     GRAPH_NOT_FOUND (not a 500)."""
     sdk, tid, _g, tc, _def_pt = spine_env
-    token = _mint_key(sdk, tid, scopes=["graphs:read"],
-                      graph_id="g_ghost_backup")
-    r = tc.post("/backups", headers={"Authorization": f"Bearer {token}"})
+    # Pro tier with backups live (same decouple as test_hosted_api #656)
+    from tortoise import pricing as _pricing
+    import tortoise.hosted_api as ha_mod
+    try:
+        _orig_gate = _pricing.daily_backups_enabled
+        _pricing.daily_backups_enabled = lambda tier: tier == "pro"
+        _orig_key = ha_mod._backup_storage
+        ha_mod._backup_storage = lambda: type("S", (), {"put": lambda *a, **k: None})()
+        token = _mint_key(sdk, tid, scopes=["graphs:read"],
+                          graph_id="g_ghost_backup")
+        r = tc.post("/backups", headers={"Authorization": f"Bearer {token}"})
+    finally:
+        _pricing.daily_backups_enabled = _orig_gate
+        ha_mod._backup_storage = _orig_key
     assert r.status_code == 403, r.text
     detail = r.json().get("detail")
     if isinstance(detail, dict):
