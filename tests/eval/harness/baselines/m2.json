@@ -1,0 +1,22 @@
+{
+  "config": {
+    "extractor_posture": "m2",
+    "holdout_excluded": true,
+    "mode": "BPRE",
+    "reflex": "null",
+    "seed": 42,
+    "suites": [
+      "continuity",
+      "isolation",
+      "know_to_ask",
+      "push",
+      "write_back"
+    ]
+  },
+  "fixtures_hash": "sha256:ded9706426ba6b9ae541c8753ca5c6fbc22ed0555b559af2cd153fcf25ddff21",
+  "history": [],
+  "judge_pin": null,
+  "justification": null,
+  "metrics": {},
+  "schema_version": 1
+}

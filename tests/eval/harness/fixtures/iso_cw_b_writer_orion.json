@@ -1,0 +1,17 @@
+{
+  "holdout": false,
+  "seed": 17,
+  "suite": "continuity",
+  "team": "team_b",
+  "turns": [
+    {
+      "content": "Team B decision: 'Orion' integrates with Kafka for the event feed.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded.",
+      "role": "assistant"
+    }
+  ],
+  "writer": true
+}
