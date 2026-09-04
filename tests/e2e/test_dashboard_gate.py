@@ -15,7 +15,7 @@ Flows:
 1. No session/claim → instant redirect to /auth (the gate emits the absolute
    target; the intercepted request is served the auth page).
 2. Claim in flight (tt_claim_pending cookie only; ?claim=1 only; tt_claim_key
-   only) → the claim-paste screen ("Claim your team") shows.
+   only) → the claim-paste screen ("Claim your organization") shows.
 3. Stored key alone (tortoise_api_key, no claim markers) → redirect to /auth
    (the storedKey exemption is gone).
 """
@@ -145,7 +145,7 @@ def test_claim_intent_shows_claim_paste(page: Page, claim_seed: str) -> None:
     _wire_auth_intercept(page)
     page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
     page.goto(url, wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Claim your organization", timeout=20_000)
 
 
 @pytest.mark.parametrize("stale_seed", [
@@ -178,18 +178,22 @@ def test_claim_paste_has_back_to_signin_escape(page: Page) -> None:
     _wire_auth_intercept(page)
     page.add_init_script("window.__AUTH_BASE_URL = 'https://tortoise.premiselabs.co';")
     page.goto(DASHBOARD_URL, wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Claim your team", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Claim your organization", timeout=20_000)
     expect(page.locator("a[href='https://tortoise.premiselabs.co/auth']")).to_be_visible()
 
 
-def test_mint_429_recoverable_banner_not_stuck_shell(page: Page) -> None:
-    """#1559/#1830: a session-key mint 429 (the live global-IP-bucket bug) is
-    now a RECOVERABLE mint failure — the dashboard loads (null key) with the
-    agent-key banner, never the silent 'Redirecting to the sign-in page…'
-    shell (which does NOT navigate and stranded every new user after OAuth)."""
+def test_fresh_session_login_renders_session_only_with_zero_mint(page: Page) -> None:
+    """#2167 (F1/F6 home — inverts the #1830/#1559 mint-429 test): a fresh
+    session login (RETURNING user, team exists, NO stored key) issues ZERO
+    POST /v1/session/key — the mount never mints a bootstrap key. The
+    dashboard renders session-only on the JWT (Team/Keys/Sessions/Backups
+    all 200 via the shell mocks) with NO agent-key banner (the old
+    'Couldn't create an agent key' recoverable-mint leg is gone with the
+    mint machinery). A regression mint fails loudly (loud-500 tripwire)."""
     import json as _json
     import time as _time
     import urllib.parse as _up
+    mint_calls: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
@@ -201,34 +205,29 @@ def test_mint_429_recoverable_banner_not_stuck_shell(page: Page) -> None:
         url = route.request.url
         if "api.premiselabs.co" in url:
             if url.endswith("/v1/session/key"):
-                route.fulfill(status=429, content_type="application/json",
-                              headers={"Retry-After": "60"},
-                              body=_json.dumps({"detail": "Rate limit exceeded."}))
+                # loud 500 + counter — the journey must never reach it
+                mint_calls.append(url)
+                route.fulfill(status=500, content_type="application/json",
+                              body=_json.dumps({"detail": "#2167 zero-mint tripwire"}))
                 return
             if url.endswith("/v1/teams"):
-                # A RETURNING user (team exists) hits the mint path; a
-                # first-timer would go through the #1566 in-app provisioning.
                 route.fulfill(status=200, content_type="application/json",
                               body=_json.dumps([{"team_id": "team_m429", "name": "M429"}]))
                 return
             if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
-                # #1885: the shell calls this FIRST (re-fired per #1847) — a
-                # 401 catch-all shows the generic error card before the mint 429.
                 route.fulfill(status=200, content_type="application/json",
-                              body=_json.dumps({"onboarding": {}}))
+                              body=_json.dumps({"onboarding": {"onboarding_complete": True}}))
                 return
             if url.endswith("/v1/user/identity") and route.request.method == "GET":
-                # #1885: post-#1765 bootstrap also reads the identity inventory.
                 route.fulfill(status=200, content_type="application/json",
                               body=_json.dumps({"methods": [], "login_methods": 0,
                                                 "keys_tier": 0, "banner": {"show": False}}))
                 return
-            # #1885 + #1830: a recoverable mint failure proceeds with a null
-            # key — the remaining bootstrap reads must 200 so the dashboard
-            # loads (the mint-429 banner is the assertion, not an error card).
-            # (review P2-3: graphs/alerts are query-pinned ?team_id= — use the
-            # query-tolerant helper, not endswith copies.)
-            if _mock_bootstrap_200(route, url, _json):
+            # session-only render mocks (query-tolerant, #1828)
+            if _mock_bootstrap_200(route, url, _json,
+                                   team={"team_id": "team_m429", "team_name": "M429",
+                                         "tier": "free", "anon": False, "graph_ready": True,
+                                         "point_count": 0}):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
@@ -244,12 +243,11 @@ def test_mint_429_recoverable_banner_not_stuck_shell(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # #1830 recoverable-mint behavior: the dashboard loads with the agent-key
-    # banner — never the silent redirect shell, never a stuck error card.
-    # (second-model P2: the banner renders BEFORE the overview hydrates, so pin
-    # a loaded-chrome marker too — a /v1/team 5xx would otherwise pass.)
+    # The dashboard renders session-only (chrome up, no mint banner, never
+    # the silent redirect shell).
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
-    expect(page.locator("body")).to_contain_text("Wait for expiry", timeout=20_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    expect(page.locator("body")).not_to_contain_text("Couldn't create an agent key")
     expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
     expect(page.locator("body")).not_to_contain_text("HTTP 401")
 
@@ -333,6 +331,7 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # Returning visit: the key is consumed (reveal returns 'pending') → the
     # ready card, no re-reveal.
     reveal_calls["n"] = 0
+    mint_calls: list = []
     def handle_returning(route):
         url = route.request.url
         if "rpc/reveal_api_key" in url and route.request.method == "POST":
@@ -340,11 +339,12 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             route.fulfill(status=200, content_type="application/json", body=json.dumps("pending"))
             return
         if url.endswith("/v1/session/key") and route.request.method == "POST":
-            # #1885: the returning visit needs a SUCCESSFUL mint (the shared
-            # handle 401s it → the recoverable-mint banner instead of the
-            # ready card).
-            route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"key": "tt_ret_key", "team_id": "team_w"}))
+            # #2167: the returning visit NEVER mints — the mount is
+            # session-only (or adopts the stored welcome key via its probe).
+            # Loud 500 + counter so a regression mint fails the journey.
+            mint_calls.append(url)
+            route.fulfill(status=500, content_type="application/json",
+                          body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
             return
         if url.endswith("/v1/teams"):
             # #1885: returning visit — the team EXISTS now; the shared handle
@@ -353,9 +353,11 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
                           body=json.dumps([{"team_id": "team_w", "team_name": "Welcome Team",
                                             "tier": "free"}]))
             return
-        if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+        _path_ret = url.split("?", 1)[0]
+        if _path_ret.endswith("/v1/onboarding/state") and route.request.method == "GET":
             # #1885: returning visit — onboarding is COMPLETE (the shared handle
             # returns an empty onboarding dict → the setup wizard re-appears).
+            # Query-strip: the post-#1828 shell pins ?team_id= on this read.
             route.fulfill(status=200, content_type="application/json",
                           body=json.dumps({"onboarding": {"onboarding_complete": True}}))
             return
@@ -367,8 +369,9 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
     # the welcome-card reveal only fires on the provisioning path).
     expect(page.locator("body")).to_contain_text("Welcome to your Tortoise graph", timeout=20_000)
     assert reveal_calls["n"] == 0, f"no re-reveal on the returning dashboard path, got {reveal_calls['n']}"
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key on the returning visit: {mint_calls}"
     expect(page.locator("body")).not_to_contain_text("copy it now")
-    # the returning mint succeeded — no recoverable-mint banner (review P2)
+    # no mint → no recoverable-mint banner (the #2167 deletion)
     expect(page.locator("body")).not_to_contain_text("Couldn't create an agent key")
 
 
@@ -411,7 +414,7 @@ def test_welcome_mode_provision_failure_shows_error_card(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    expect(page.locator("body")).to_contain_text("Could not create your team — try again.", timeout=20_000)
+    expect(page.locator("body")).to_contain_text("Could not create your organization — try again.", timeout=20_000)
     expect(page.locator("body")).to_contain_text("Try again", timeout=10_000)
 
 
@@ -494,8 +497,10 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
                               body=json.dumps([{"team_id": "team_frag", "name": "Frag Team"}]))
                 return
             if path.endswith("/v1/session/key"):
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"key": "tt_frag_key_1234567890abcdef", "team_id": "team_frag"}))
+                # #2167: a fragment-auth first landing never mints (no stored
+                # key → the mount is session-only) — loud 500 tripwire.
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
@@ -532,60 +537,152 @@ def test_oauth_callback_fragment_lands_in_dashboard(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
 
 
-def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
-    """#1566-fix: the bootstrap session-key mint has a 3-active cap (24h keys)
-    — a user who accumulated keys across incognito windows is dead-ended with
-    'Too many active session keys — wait for expiry' until expiry. The mount
-    must fall back to the RECOVERY mint (persistent, auto-revokes at cap) so
-    the dashboard still renders."""
+def _mock_session_shell(route, url: str, json_mod, mint_calls: list | None = None) -> bool:
+    """#2167: the session-only dashboard shell reads — onboarding state,
+    identity inventory, keys/sessions/backups (query-tolerant #1828) — 200
+    empty so the chrome renders on the session JWT alone. POST /v1/session/key
+    is a loud-500 + counter zero-mint tripwire. Returns True if handled (the
+    caller's /v1/teams + /v1/team branches run first)."""
+    path = url.split("?", 1)[0]
+    if path.endswith("/v1/session/key"):
+        if mint_calls is not None:
+            mint_calls.append(url)
+        route.fulfill(status=500, content_type="application/json",
+                      body=json_mod.dumps({"detail": "#2167 zero-mint tripwire"}))
+        return True
+    if path.endswith("/v1/onboarding/state") and not url.rstrip("/").endswith("PATCH"):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps({"onboarding": {"onboarding_complete": True}}))
+        return True
+    if path.endswith("/v1/user/identity"):
+        route.fulfill(status=200, content_type="application/json",
+                      body=json_mod.dumps({"methods": [], "login_methods": 0,
+                                            "keys_tier": 0, "banner": {"show": False}}))
+        return True
+    if path.endswith("/v1/team/keys") or path.endswith("/v1/sessions") or path.endswith("/backups"):
+        route.fulfill(status=200, content_type="application/json", body=json_mod.dumps({"keys": [], "sessions": [], "backups": []}))
+        return True
+    if "/members" in path or path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+        route.fulfill(status=200, content_type="application/json", body="[]")
+        return True
+    return False
+
+
+def test_probe_401_drops_stored_key_and_renders_session_only(page: Page) -> None:
+    """#2167 F3: a stored REVOKED/EXPIRED/disabled durable (rejections are
+    identical — 401 'Invalid API key') is DROPPED at the mount probe: the
+    KEY_STORAGE slot clears, apiKey state clears, and the dashboard renders
+    session-only (never the mint fallback, never an error card)."""
     import time as _time
     import urllib.parse as _up
-    user_id = "u-cap"
+    user_id = "u-drop401"
+    dead_key = "tt_dead_abcdef0123456789"
+    mint_calls: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
-            "user": {"id": user_id, "email": "cap@premise-labs.dev"}}
+            "user": {"id": user_id, "email": "drop401@premise-labs.dev"}}
     page.context.add_cookies([{"name": "sb-tortoise-auth-token",
                                "value": _up.quote(json.dumps(sess)),
                                "domain": ".premiselabs.co", "path": "/"}])
-    # The bootstrap mint 429s (cap) — the fallback must retry as recovery.
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{dead_key}');")
+
     def handle(route):
         url = route.request.url
         if "api.premiselabs.co" in url:
-            # #1828: loadAll pins ?team_id= on overview reads — match on the
-            # query-stripped path so /v1/team/keys?team_id=… still resolves.
-            path = _up.urlsplit(url).path
-            if path.endswith("/v1/session/key"):
-                body = json.loads(route.request.post_data or "{}")
-                if body.get("purpose") == "bootstrap":
-                    route.fulfill(status=429, content_type="application/json",
-                                  body=json.dumps({"detail": "Too many active session keys — wait for expiry"}))
-                    return
-                if body.get("purpose") != "recovery":
-                    # Mirror the server's 422 for unknown purposes — the
-                    # fallback MUST retry as recovery, not anything else.
-                    route.fulfill(status=422, content_type="application/json",
-                                  body=json.dumps({"detail": "purpose must be 'bootstrap' or 'recovery'"}))
-                    return
-                route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"key": "tt_recovery_key_1234567890abcdef", "team_id": "team_cap"}))
-                return
+            path = url.split("?", 1)[0]
             if path.endswith("/v1/teams"):
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps([{"team_id": "team_cap", "name": "Cap"}]))
+                              body=json.dumps([{"team_id": "team_ok", "name": "OK", "tier": "free"}]))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                auth = (route.request.headers.get("authorization") or "")
+                if auth.startswith("Bearer tt_"):
+                    # the stored-key probe: revoked/disabled/expired reject
+                    # identically with 401 (resolve_api_key, supabase_control)
+                    route.fulfill(status=401, content_type="application/json",
+                                  body=json.dumps({"detail": "Invalid API key"}))
+                    return
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_cap", "name": "Cap", "tier": "free"}))
+                              body=json.dumps({"team_id": "team_ok", "team_name": "OK",
+                                               "tier": "free", "anon": False, "graph_ready": True,
+                                               "point_count": 1}))
                 return
-            if path.endswith("/v1/team/keys"):
-                route.fulfill(status=200, content_type="application/json", body=json.dumps({"keys": []}))
+            if _mock_session_shell(route, url, json, mint_calls):
                 return
-            if path.endswith("/v1/sessions"):
-                route.fulfill(status=200, content_type="application/json", body=json.dumps({"sessions": []}))
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    # wait for the MOUNT PROBE (the key-authed GET /v1/team → 401) so the
+    # slot-drop assert below never races the in-flight mount
+    with page.expect_response(
+            lambda r: "/v1/team" in r.url
+            and (r.request.headers.get("authorization") or "").startswith("Bearer tt_"),
+            timeout=20000):
+        page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    # the dead key material is gone: slot cleared, no key-authed leftovers
+    slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
+    assert slot is None, f"probe-401 must clear the slot, got {slot!r}"
+    # session-only render — never an error card / 'Invalid API key' banner
+    expect(page.locator("body")).not_to_contain_text("Invalid API key")
+    expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
+
+
+def test_probe_403_suspended_dict_keeps_key_and_renders_appeal(page: Page) -> None:
+    """#2167 rule 5d + F8 (probe path): a stored DURABLE on a SUSPENDED team
+    probes 403 {detail:{code:'SUSPENDED',…}} on the KEY lane (hosted_api.py
+    L1620-1623) — the recoverable durable is KEPT (slot retained) and the
+    appeal path renders. Never a mint, never a drop."""
+    import time as _time
+    import urllib.parse as _up
+    user_id = "u-susp"
+    held_key = "tt_susp_abcdef0123456789"
+    mint_calls: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "susp@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{held_key}');")
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if path.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([{"team_id": "team_susp", "name": "Suspended Co",
+                                                "suspended_at": "2026-09-01T00:00:00Z"}]))
                 return
-            if path.endswith("/backups"):
-                route.fulfill(status=200, content_type="application/json", body=json.dumps({"backups": []}))
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                auth = (route.request.headers.get("authorization") or "")
+                if auth.startswith("Bearer tt_"):
+                    # the probe (key lane): suspended team → 403 dict
+                    route.fulfill(status=403, content_type="application/json",
+                                  body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                                "message": "Suspended for review",
+                                                                "appeal_url": "https://premise-labs.dev/appeal"}}))
+                    return
+                route.fulfill(status=403, content_type="application/json",
+                              body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                            "message": "Suspended for review",
+                                                            "appeal_url": "https://premise-labs.dev/appeal"}}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
                 return
             route.fulfill(status=401, content_type="application/json", body="{}")
             return
@@ -601,18 +698,147 @@ def test_bootstrap_cap_falls_back_to_recovery_mint(page: Page) -> None:
 
     page.route("**/*", handle)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # The dashboard renders (bootstrap 429 → recovery fallback) — the cap
-    # error card must NOT show (with the old code the 429 surfaced the
-    # 'Too many active session keys' error card), and the app chrome is up.
+    # the appeal path renders (blocking error card + CTA, pre-change parity)
+    expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
+    expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    # 5d: the recoverable durable is KEPT — slot untouched
+    slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
+    assert slot == held_key, f"5d must retain the slot, got {slot!r}"
+
+
+def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
+    """#2167 rule 9 + F8 (session-read path — the ACTUAL fresh-login
+    mechanism): a suspended team + NO stored key → the mount runs session-only
+    and the session-authed team read hits _suspended_detail()'s 403 dict →
+    the appeal banner renders. (Distinct from the rule-5d probe test above.)"""
+    import time as _time
+    import urllib.parse as _up
+    user_id = "u-susp2"
+    mint_calls: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "susp2@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if path.endswith("/v1/teams"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([{"team_id": "team_susp", "name": "Suspended Co",
+                                                "suspended_at": "2026-09-01T00:00:00Z"}]))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                # session read → _suspended_detail() 403 dict (#308/#1912)
+                route.fulfill(status=403, content_type="application/json",
+                              body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                            "message": "Suspended for review",
+                                                            "appeal_url": "https://premise-labs.dev/appeal"}}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
+    expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+
+
+def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> None:
+    """#2167 #1912 P1 pin: a multi-membership user whose FIRST membership is
+    suspended but who holds a healthy SECOND team lands on the healthy team —
+    never the suspension error card (the mount pins the first healthy team
+    BEFORE completeLogin on every session-only landing; the old unpinned
+    reads resolved memberships[0] → 403 → error card on every reload)."""
+    import time as _time
+    import urllib.parse as _up
+    user_id = "u-1912"
+    mint_calls: list = []
+    sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
+            "refresh_token": "rt", "expires_in": 3600,
+            "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
+            "user": {"id": user_id, "email": "u1912@premise-labs.dev"}}
+    page.context.add_cookies([{"name": "sb-tortoise-auth-token",
+                               "value": _up.quote(json.dumps(sess)),
+                               "domain": ".premiselabs.co", "path": "/"}])
+
+    def handle(route):
+        url = route.request.url
+        if "api.premiselabs.co" in url:
+            path = url.split("?", 1)[0]
+            if path.endswith("/v1/teams"):
+                # suspended FIRST membership + healthy second (#1912)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([
+                                  {"team_id": "team_sus", "name": "Suspended Co",
+                                   "tier": "free", "suspended_at": "2026-09-01T00:00:00Z"},
+                                  {"team_id": "team_ok", "name": "Healthy Co", "tier": "free"},
+                              ]))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                tid = (qs.get("team_id") or [""] )[0]
+                if tid == "team_sus":
+                    route.fulfill(status=403, content_type="application/json",
+                                  body=json.dumps({"detail": {"code": "SUSPENDED",
+                                                                "message": "Suspended for review",
+                                                                "appeal_url": "https://premise-labs.dev/appeal"}}))
+                    return
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"team_id": tid or "team_ok", "team_name": "Healthy Co",
+                                               "tier": "free", "anon": False, "graph_ready": True,
+                                               "point_count": 1}))
+                return
+            if _mock_session_shell(route, url, json, mint_calls):
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    # the healthy second team renders — chrome up, NO suspension card
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
-    expect(page.locator("body")).not_to_contain_text("Too many active session keys", timeout=10_000)
+    expect(page.locator("body")).not_to_contain_text("Suspended for review")
+    expect(page.locator("body")).not_to_contain_text("Appeal the suspension")
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+    # the healthy team is selected (the account blob names it)
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Healthy Co", timeout=10_000)
 
 
 def test_logout_redirects_to_auth(page: Page) -> None:
     """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
     /auth — the key-only card is gone, so sign-out must land on the login
-    page, never the dead redirect shell. Requires the loop harness: a valid
-    session cookie → dashboard renders → Log out → /auth."""
+    page, never the dead redirect shell. #2167 rule 8 (F5): the logout wipe
+    is RETAINED — a probe-adopted durable held in KEY_STORAGE is cleared on
+    logout (the slot never survives a sign-out). Requires the loop harness: a
+    valid session cookie → dashboard renders → Log out → /auth."""
+    durable = "tt_loop_durable_abcdef0123456789"
     _wire_prod_domains(page)
     page.context.add_cookies([{
         "name": "sb-tortoise-auth-token",
@@ -620,9 +846,35 @@ def test_logout_redirects_to_auth(page: Page) -> None:
         "domain": ".premiselabs.co", "path": "/",
     }])
     page.add_init_script(f"window.__AUTH_BASE_URL = '{AUTH_HOST}';")
+    # #2167: the durable arrives via the localStorage-seeded mount probe
+    # (the wire's /v1/team 200s the key-authed probe → 5b adopt)
+    page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{durable}');")
+    # #2167 rule 8 (F5): the logout wipe is synchronous on the APP origin,
+    # but the /auth bounce lands on the TORTUISE origin (localStorage is
+    # per-origin — a post-navigation read would be vacuous). Patch
+    # Storage.prototype.removeItem to log the KEY_STORAGE wipe into a
+    # PARENT-DOMAIN cookie (readable from /auth after the bounce).
+    page.add_init_script("""
+      (function () {
+        const orig = Storage.prototype.removeItem;
+        Storage.prototype.removeItem = function (k) {
+          if (k === 'tortoise_api_key' && this === window.localStorage) {
+            try { document.cookie = 'tt_wipe_log=1; Domain=.premiselabs.co; Path=/; Max-Age=600'; } catch (e) {}
+          }
+          return orig.apply(this, arguments);
+        };
+      })();
+    """)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
+    # the probe adopted the stored durable (held key renders in state)
+    assert page.evaluate("localStorage.getItem('tortoise_api_key')") == durable
     page.locator(".account-blob-btn").click()
     expect(page.locator(".account-menu-logout")).to_be_visible()
     page.locator(".account-menu-logout").click()
     expect(page).to_have_url(re.compile(rf"^{re.escape(AUTH_HOST)}/auth"), timeout=20_000)
+    # rule 8: the app-origin wipe fired before the bounce (cookie set by the
+    # patched removeItem) — never "undefined"/"null" residue, never a
+    # surviving credential
+    wiped = page.evaluate("document.cookie.indexOf('tt_wipe_log=1') !== -1")
+    assert wiped, "logout must wipe KEY_STORAGE on the app origin (no tt_wipe_log cookie)"
