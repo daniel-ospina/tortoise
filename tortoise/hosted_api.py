@@ -15919,7 +15919,19 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
         # C5 #2114: a graph-bound key backs up ITS OWN graph (graph_namespace
         # is the resolved FULL name — custom team_{tid}_{gid} or the default);
         # team-wide keys/session back up the team default (today's path).
-        graph_name = team.get("graph_namespace") or team_graph_name(cp_source, team_id)
+        # FAIL-CLOSED (final-gate P1): a graph-bound key whose graph is GONE
+        # resolves graph_namespace=None — the `or` fallback would widen a
+        # ghost key onto the team DEFAULT graph (cross-graph read dump).
+        # Mirror _data_sdk: vanish → 403, never a demotion.
+        if team.get("graph_id"):
+            graph_name = team.get("graph_namespace")
+            if not graph_name:
+                raise HTTPException(
+                    status_code=403,
+                    detail={"error_code": "GRAPH_NOT_FOUND",
+                            "message": "graph not found for key"})
+        else:
+            graph_name = team_graph_name(cp_source, team_id)
         # #924 review P1: create_backup dumps proj.g — the SDK bound to
         # namespace=team_id resolves team_{team_id}, NOT the resolved graph.
         # For a team_{name} team the dump would be the EMPTY phantom graph

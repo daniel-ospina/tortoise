@@ -976,6 +976,10 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
     is the serving app: ``tortoise.hosted_api`` is only imported in the
     hosted deployment.
     """
+    # C5 #2114 (final-gate P2): packs are DEFAULT-graph team-level state —
+    # graph-bound keys rejected (REST twin upload_pack_manifest parity; a
+    # per-graph install would orphan pack state list_packs never sees).
+    _reject_graph_bound_mcp_team_surface("pack install")
     import sys as _sys
 
     from tortoise.pack_manifest_store import upsert_tenant_manifest
