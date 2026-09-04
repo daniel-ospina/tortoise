@@ -119,6 +119,13 @@ def _tradeoff_sufficient(block: dict, *, favored_id: str) -> bool:
         return False
     # The assembly sorts tradeoffs by (-ep_weight, point_id): the max-ep
     # weight alternative is tradeoffs[0] — deterministic from the context.
+    # TIE-FREEDOM (review P3, #2100): a top-two ep_weight TIE is not
+    # gradeable as "the EP-favored alternative" — the id tie-break would
+    # silently pick a favorite the evidence did not favor.  Fail-closed:
+    # a tied top-two is NOT sufficient, never silently accepted.
+    weights = [alt.get("ep_weight") for alt in tradeoffs]
+    if len(weights) >= 2 and weights[0] == weights[1]:
+        return False
     favored = tradeoffs[0].get("point_id")
     return favored == favored_id
 
@@ -139,13 +146,30 @@ def resolve_expected(gold_entry: dict, role_map_entry: dict) -> dict:
         target_id = (role_map_entry or {}).get(role)
         if target_id:
             targets.append({"kind": t.get("kind"), "target_id": target_id})
+    # The EP-favored alternative is a PLANT property: seeding always plants
+    # option_a as max-ep (the (4,1) vs (5,2) split) and the plant-time
+    # tie-freedom assert in seeding.py locks that invariant.  Resolution
+    # reads the role map's option_a (never a hardcoded graph id) and FAILS
+    # LOUD when a tradeoff-sufficiency gold exists without an option_a role
+    # — a silently-None favored id would mass-fail every sufficiency grade
+    # with no explanation (review P1b, #2100: gold may legitimately point
+    # tradeoff NAVIGATION at either alternative, but sufficiency is graded
+    # against the EP-favored one only).
+    favored_option_id = (role_map_entry or {}).get("option_a")
+    if bool(expected.get("tradeoff_sufficient")) and not favored_option_id:
+        raise ValueError(
+            f"gold {gold_entry.get('point_id')!r} expects tradeoff "
+            "sufficiency but the planted role map has NO option_a role — "
+            "the EP-favored alternative cannot be resolved (corpus/gold "
+            "inconsistency, never a silent mass failure)"
+        )
     return {
         "expected_conflict": bool(expected.get("conflict_surfacing")),
         "clean": bool(gold_entry.get("clean")),
         "family": gold_entry.get("family"),
         "expected_targets": targets,
         "expected_tradeoff": bool(expected.get("tradeoff_sufficient")),
-        "favored_option_id": (role_map_entry or {}).get("option_a"),
+        "favored_option_id": favored_option_id,
     }
 
 

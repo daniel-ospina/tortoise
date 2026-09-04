@@ -272,6 +272,23 @@ def test_decision_tradeoff_sufficient():
     assert row["nav_correct"] == 3 and row["nav_total"] == 3
 
 
+def test_decision_tied_top_two_weights_not_sufficient():
+    """Tie-freedom (review P3, #2100): when the top-two alternatives carry
+    EQUAL ep_weight, "the EP-favored alternative" is an id-tiebreak
+    artifact — the grade must FAIL CLOSED (not sufficient), never silently
+    accept tradeoffs[0] as the favorite."""
+    block = _decision_block(
+        tradeoffs=[
+            {"point_id": "pt_opt_a", "label": "alternative one",
+             "ep_weight": 0.8, "mitigation": "QA gate"},
+            {"point_id": "pt_opt_b", "label": "alternative two",
+             "ep_weight": 0.8, "mitigation": "communicate delay"},
+        ]
+    )
+    row = grading.grade_point(block, _decision_expected())
+    assert row["tradeoff_sufficient"] is False, row
+
+
 def test_decision_single_alternative_not_sufficient():
     block = _decision_block(
         tradeoffs=[

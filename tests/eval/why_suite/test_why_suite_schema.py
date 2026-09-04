@@ -117,10 +117,22 @@ def test_judge_pin_format_and_prestep():
     orig = judge.JUDGE_PROMPT_PATH.read_text(encoding="utf-8")
     try:
         judge.JUDGE_PROMPT_PATH.write_text(orig + "\n", encoding="utf-8")
-        with pytest.raises(AssertionError, match="judge prompt drifted"):
+        with pytest.raises(AssertionError, match="judge protocol drifted"):
             judge.assert_prompt_pinned()
     finally:
         judge.JUDGE_PROMPT_PATH.write_text(orig, encoding="utf-8")
+        importlib.reload(judge)
+
+    # The pre-step ALSO fails closed on a RUBRIC-CODE drift (review P1,
+    # #2100): grading.py is part of the protocol digest — a grader edit must
+    # never grade silently under an unchanged prompt.
+    orig2 = judge._GRADER_PATH.read_text(encoding="utf-8")
+    try:
+        judge._GRADER_PATH.write_text(orig2 + "\n", encoding="utf-8")
+        with pytest.raises(AssertionError, match="judge protocol drifted"):
+            judge.assert_prompt_pinned()
+    finally:
+        judge._GRADER_PATH.write_text(orig2, encoding="utf-8")
         importlib.reload(judge)
 
 

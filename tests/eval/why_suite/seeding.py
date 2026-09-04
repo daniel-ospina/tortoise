@@ -44,6 +44,32 @@ def _set_posterior(proj, pid: str, alpha: float, beta: float) -> None:
     )
 
 
+def _mean_of(proj, pid: str) -> float:
+    """The PERSISTED posterior mean of one point (graph truth)."""
+    rows = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.confidence",
+        params={"id": pid},
+    ).result_set
+    if not rows or rows[0][0] is None:
+        raise ValueError(f"posterior mean missing for {pid} — plant is incomplete")
+    return float(rows[0][0])
+
+
+def _assert_means_differ(proj, option_a: str, option_b: str, topic: str) -> None:
+    """Tie-freedom: the planted EP-favored alternative must be UNIQUE —
+    equal posterior means would make "the EP-favored option" an id-tiebreak
+    artifact (review P3, #2100).  Reads persisted confidence (the runner
+    grades the same graph truth) and raises on a tie."""
+    ma, mb = _mean_of(proj, option_a), _mean_of(proj, option_b)
+    if ma == mb:
+        raise ValueError(
+            f"decision topic {topic!r} plants EQUAL option posterior means "
+            f"({ma}) — the EP-favored alternative is not unique; adjust the "
+            "plant (e.g. 4.0/1.0 vs 5.0/2.0) so the tradeoff-sufficiency "
+            "grade is meaningful"
+        )
+
+
 def _create_point(sdk, kind: str, content: str) -> str:
     res = sdk.create_point(kind, content)
     return res["id"]
@@ -95,6 +121,12 @@ def _plant_decision_roles(sdk, proj, topic: str) -> dict[str, str]:
     _set_posterior(proj, option_b, 5.0, 2.0)  # mean ~0.714
     _set_posterior(proj, support, 12.0, 1.0)
     _set_posterior(proj, counter, 6.0, 1.0)
+    # TIE-FREEDOM plant-time assert (review P3, #2100): the EP-favored
+    # alternative only MEANS something when the planted option posteriors
+    # differ — an edit that makes them equal would silently flip "favored"
+    # to the id tie-break.  Read the PERSISTED means back (the graph-truth
+    # the runner grades under) and fail loud on a tie.
+    _assert_means_differ(proj, option_a, option_b, topic)
     return {
         "decision": decision,
         "support": support,

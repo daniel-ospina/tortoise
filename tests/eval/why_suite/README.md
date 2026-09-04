@@ -112,7 +112,28 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/eval/why_suite/test_why_suite_sche
 * **corpus drift** — manifest/gold edit without corpus-bless ⇒ the gate is
   `inconclusive` (hash mismatch); `generate_corpus.py --check` names the
   drifted file.
-* **judge drift** — a `judge_why_suite_v1.txt` edit without a re-pin fails
-  the pre-step as `judge_pin_mismatch` (protocol change = new pin + re-run).
+* **judge drift** — a `judge_why_suite_v1.txt` / `grading.py` / `schema.py`
+  edit without a re-pin fails the pre-step as `judge_pin_mismatch`
+  (protocol change = new pin + re-run).
 * **a4-not-measured** — recorded (never gating) until the calibrated When-3
   pair set lands.
+
+## Known limitations (honest scoping)
+
+* **The corpus is same-team authored on the assembly's own supported
+  surface** — every planted fixture mirrors the W4-a why-block vocabulary
+  (contested conflicts, dig-deeper pointers, sorted tradeoffs), so the
+  1.0/1.0/1.0/0.0 A11 pilot rates are *the assembly answering its authored
+  fixtures*, not a real-memory benchmark.  What this suite CAN falsify is
+  the TOTAL ABSENCE of surfacing (a regression that stops the assembly from
+  surfacing conflicts/pointers/support chains at all).  What it CANNOT
+  falsify (yet): subtler assembly regressions — pointer precedence,
+  tie-handling under real posterior variance, partial conflict surfacing,
+  and malformed-surface tolerance.  An adversarial / derived-from-real-
+  graph corpus is open work (tracked as a follow-up issue; the
+  comparison-systems rows in `docs/benchmarks/comparison-systems.md`
+  (§5 receipts) scope what a real-memory comparison would need).
+* **Protocol surface** — the judge pin folds the prompt + `grading.py` +
+  `schema.py` (rubric code and metrics semantics are code, not text).  Any
+  edit to those artifacts is a protocol change (new pin + re-run), never a
+  silent grading drift.

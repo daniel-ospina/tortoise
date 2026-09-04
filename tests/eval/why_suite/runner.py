@@ -80,23 +80,36 @@ def _env_posture() -> str:
     return "llm"
 
 
-def _open_graph(run_id: str) -> object:
+def _open_graph(run_id: str, log: list[str] | None = None) -> object:
     """ONE hermetic graph for the whole run: an embedded transient file when
     URI-less or under pytest's TEST_MODE redirect; a wiped server namespace
     under an explicit TORTOISE_DB_URI outside pytest (mirrors the W3-a
     harness cell opening).  Wipe-on-open: a crashed prior run's graph must
-    never contaminate grading."""
+    never contaminate grading.
+
+    Wipe visibility (review P3b, #2100): the wipe is recorded in the run log
+    and — under a SERVER URI, where a stale namespace would silently
+    contaminate grading — a FAILED wipe is a RunError, never a suppressed
+    skip.  The embedded transient wipe stays best-effort (a fresh temp file
+    has nothing stale to clean)."""
     from tortoise.sdk import TortoiseSDK
 
+    log = log or []
     uri = os.environ.get("TORTOISE_DB_URI", "").strip()
     ns_slug = re.sub(r"[^a-zA-Z0-9_]", "", run_id)
     namespace = f"w3b_{ns_slug}"
     if uri and os.environ.get("TORTOISE_TEST_MODE") != "1":
         sdk = TortoiseSDK(namespace=namespace)
-        import contextlib
-
-        with contextlib.suppress(Exception):
+        try:
             sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+        except Exception as exc:
+            sdk.close()
+            raise RuntimeError(
+                f"wipe of server namespace {namespace!r} FAILED ({exc}) — a "
+                "crashed prior run's graph would contaminate grading; fix "
+                "the namespace/ACL before re-running"
+            ) from exc
+        log.append(f"opened server namespace {namespace} (prior state wiped)")
         return sdk
     tmp = Path(tempfile.mkdtemp(prefix="w3b_graph_")) / f"{run_id}.db"
     sdk = TortoiseSDK(db_path=str(tmp), namespace=namespace)
@@ -104,6 +117,7 @@ def _open_graph(run_id: str) -> object:
 
     with contextlib.suppress(Exception):
         sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
+    log.append(f"opened embedded transient graph {namespace} (fresh)")
     return sdk
 
 
@@ -228,7 +242,22 @@ def grade_all_points(
         topic = entry.get("point_id")
         family = entry.get("family")
         role = GRADED_ROLE.get(family or "", "claim")
-        graded_by_topic[topic] = (roles.get(topic) or {}).get(role, topic)
+        role_map_entry = roles.get(topic) or {}
+        if not role_map_entry:
+            raise RuntimeError(
+                f"gold entry {topic!r} has NO planted role map — corpus/gold "
+                "inconsistency; the runner never grades a topic key as a "
+                "point id (review P3c, #2100: a missing role used to "
+                "silently grade the topic string as the id → an empty block "
+                "→ a false 0)"
+            )
+        if role not in role_map_entry:
+            raise RuntimeError(
+                f"gold entry {topic!r} (family {family!r}) expects planted "
+                f"role {role!r} but the role map has "
+                f"{sorted(role_map_entry)} — corpus/gold inconsistency"
+            )
+        graded_by_topic[topic] = role_map_entry[role]
     all_ids = sorted(set(graded_by_topic.values()))
     blocks = assemble_why_blocks(proj, all_ids) or {}
     log.append(
@@ -297,7 +326,11 @@ def run_benchmark(
                 if any(
                     "corpus drift" in i or "manifest verification failed" in i for i in pf["issues"]
                 )
-                else "runner_error"
+                else (
+                    "config_mismatch"
+                    if any("posture" in i or "baseline (" in i for i in pf["issues"])
+                    else "runner_error"
+                )
             ),
             detail="; ".join(pf["issues"][:8]),
             log=log,
@@ -315,7 +348,7 @@ def run_benchmark(
     runner_errors: list[str] = []
     a4_result: dict | None = None
     try:
-        sdk = _open_graph(run_id)
+        sdk = _open_graph(run_id, log=log)
         log.append(
             "seeding the shared E2E-1 planted-conflict corpus (40 points: 30 conflicted + 10 clean)"
         )
