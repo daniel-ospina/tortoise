@@ -130,7 +130,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/eval/why_suite/test_why_suite_sche
   falsify (yet): subtler assembly regressions — pointer precedence,
   tie-handling under real posterior variance, partial conflict surfacing,
   and malformed-surface tolerance.  An adversarial / derived-from-real-
-  graph corpus is open work (tracked as a follow-up issue; the
+  graph corpus is open work (issue #2275; the
   comparison-systems rows in `docs/benchmarks/comparison-systems.md`
   (§5 receipts) scope what a real-memory comparison would need).
 * **Protocol surface** — the judge pin folds the prompt + `grading.py` +
