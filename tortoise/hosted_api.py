@@ -1902,14 +1902,31 @@ def _require_scope(team: dict, scope: str, surface: str) -> None:
                 "message": f"Key lacks {scope} scope for {surface}."})
 
 
+def _reject_graph_bound_team_surface(team: dict, surface: str) -> None:
+    """C5 #2114 (D-C5-2): team-level surfaces (packs/onboarding/overview —
+    data that lives on the DEFAULT graph or the registry, not the key's
+    graph) reject graph-bound keys outright. A per-graph key must NEVER read
+    the team default graph's data through a team-level endpoint (cross-graph
+    leak). Legacy/team-wide keys + session auth (graph_id None) pass —
+    unchanged."""
+
+    if team.get("graph_id"):
+        raise HTTPException(
+            status_code=403,
+            detail={"error_code": "GRAPH_SCOPED_TEAM_SURFACE",
+                    "message": f"Graph-scoped keys cannot access {surface}."})
+
+
 async def get_current_team_gated(request: Request) -> dict:
-    """C2 (#2111): data-plane dependency for deleg=0 dormancy. Resolves the
-    key exactly like get_current_team (kept as the pure resolution seam —
-    C1's tenancy-field contract + C5's spine read graph_id/scopes off it),
-    then rejects minted (deleg=0) keys. Every raw-get_current_team data
-    endpoint (points/search/packs/sessions/context/demo/backups) must use
-    this so a handed-out least-privilege key cannot read or write team data
-    team-wide before per-graph isolation ships (C5 #2114).
+    """C2 (#2111) → C5 (#2114): data-plane dependency. Resolves the key
+    exactly like get_current_team (C1's tenancy-field contract — C5's spine
+    reads graph_id/scopes off it), then applies the C5 deleg=0 rule: a
+    MINTED key is allowed onto data surfaces ONLY when it carries a data
+    scope (graphs:read/write — routed by _data_sdk + _require_scope);
+    minted keys without data scopes stay dormant (rejected). Pre-C5 (C2/C3)
+    this rejected ALL deleg=0 keys blanket (dormancy until per-graph
+    isolation shipped). Management surfaces keep the blanket reject via
+    get_current_team_session (the #1148 management set).
 
     Override semantics mirror get_current_team_session: FastAPI overrides
     apply at DI time, so a DIRECT call to get_current_team would bypass the
@@ -1920,8 +1937,15 @@ async def get_current_team_gated(request: Request) -> dict:
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Bearer ") and not auth[7:].startswith("eyJ"):
         team = await get_current_team(request)
-        _reject_minted_delegated_key(team, "team data until per-graph "
-                                           "isolation ships (C5)")
+        if team.get("delegation_depth") == 0 and not (
+                {"graphs:read", "graphs:write"}
+                & set(team.get("scopes") or [])):
+            # C5: deleg=0 keys WITHOUT a data scope stay dormant on data
+            # surfaces (a team:manage/keys:manage-only child has no graph
+            # data to exercise; escalation scopes never land on children —
+            # C3's mint matrix + DB CHECK).
+            _reject_minted_delegated_key(
+                team, "team data (minted key has no data scope)")
         return team
     overrides = request.app.dependency_overrides
     override = overrides.get(get_current_team)
@@ -1953,13 +1977,24 @@ async def get_current_team_session(request: Request, gate_key_login: bool = True
         # C2 (#2111) deleg gate — the gated dependency IS the management
         # set (mint/revoke/restore/billing/onboarding/delete-graph): minted
         # keys are data-plane credentials held dormant until C5 binds them
-        # per-graph; they must never reach account management. (create_api_key's
-        # endpoint gate is redundant-but-harmless defense-in-depth behind this
-        # DI gate. The _session_login_exchange gate is NOT redundant —
-        # /v1/session/login is in SKIP_AUTH and resolves the body token itself,
-        # so this dependency never runs on that path; removing the exchange's
-        # inline gate would reopen P1-2.)
-        _reject_minted_delegated_key(team, "team management")
+        # per-graph; they must never reach account management. C5 (#2114)
+        # narrows the data-plane side (gate_key_login=False — the ungated
+        # flag-off callers): a minted key WITH a data scope (graphs:read/
+        # write) is allowed onto data surfaces (routed by _data_sdk +
+        # _require_scope); without one it stays dormant there too. The
+        # gate_key_login=True management set keeps the blanket reject.
+        # (create_api_key's endpoint gate is redundant-but-harmless
+        # defense-in-depth behind this DI gate. The _session_login_exchange
+        # gate is NOT redundant — /v1/session/login is in SKIP_AUTH and
+        # resolves the body token itself, so this dependency never runs on
+        # that path; removing the exchange's inline gate would reopen P1-2.)
+        if team.get("delegation_depth") == 0 and (
+                gate_key_login
+                or not ({"graphs:read", "graphs:write"}
+                        & set(team.get("scopes") or []))):
+            _reject_minted_delegated_key(
+                team, "team management" if gate_key_login
+                else "team data (minted key has no data scope)")
         if gate_key_login:
             _check_dashboard_key_login(team, request)
         return team
@@ -2914,8 +2949,9 @@ async def create_object(body: CreateObjectRequest, request: Request,
     Wraps sdk.create_object — deterministic id by name, idempotent (a repeat
     returns the canonical node). objectKind/status/… ride the props.
     """
+    _require_scope(team, "graphs:write", "create_object")
     _check_team_limit(team, "points")
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         props = {}
         if body.status:
@@ -2952,8 +2988,9 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
     audited. The onboarding seed creates the user's Subject + their Project
     as the first graph entities.
     """
+    _require_scope(team, "graphs:write", "create_subject")
     _check_team_limit(team, "points")
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         node = sdk.create_subject(body.name, subjectKind=body.subjectKind)
     except Exception:
@@ -2973,8 +3010,9 @@ async def create_subject(body: CreateSubjectRequest, request: Request,
 @app.post("/v1/points", response_model=PointResponse)
 async def create_point(body: CreatePointRequest, request: Request, team: dict = Depends(get_current_team_session_ungated)):  # noqa: B008
     """Create a Point in the team's graph."""
+    _require_scope(team, "graphs:write", "create_point")
     _check_team_limit(team, "points")
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         result = sdk.create_point(
             content=body.content,
@@ -3027,7 +3065,8 @@ async def events_poll(
     tail); malformed cursor → 400. Team scoping comes from auth + the SDK
     namespace — never client input.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "events_poll")
+    sdk = _data_sdk(team)
     type_list = [t.strip() for t in (types or "").split(",") if t.strip()]
     try:
         result = sdk.events_poll(after=after, types=type_list or None, limit=limit)
@@ -3058,7 +3097,8 @@ async def list_points(
         allowed = known_kinds()
         if kind not in allowed:
             raise HTTPException(status_code=400, detail=f"kind must be one of {sorted(allowed)}")
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "list_points")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     conditions = ["n.is_operator = false"]
     # #432 Task 2: retracted points (status='retracted') are EXCLUDED from the
@@ -3096,7 +3136,8 @@ async def list_points(
 @app.get("/v1/points/{point_id}")
 async def get_point(point_id: str, team: dict = Depends(get_current_team_gated)):  # noqa: B008
     """Get a single Point by ID."""
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "get_point")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (p:Point {id: $id}) "
@@ -3139,6 +3180,9 @@ async def dream(
     import time as _t
 
     from tortoise.quota import MAX_DREAM_FULL_PER_HOUR
+    # C5 #2114 (D-C5-3): dreaming mutates the graph (EP writes) → write
+    # scope, unconditional (not gated on mode).
+    _require_scope(team, "graphs:write", "dream")
     # I1 precedence: an explicit mode wins; else full=True ⇒ full; else the
     # SDK auto-selects. The budget counts FULL passes only (incl. override).
     effective_full = (mode == "full") if mode is not None else full
@@ -3163,7 +3207,7 @@ async def dream(
             )
         bucket.append(now_ts)
 
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     try:
         if mode is not None:
             result = sdk.dream(mode=mode, budget=budget)
@@ -3193,7 +3237,8 @@ async def dream_health(
     ts, coverage %, failure rate, operator counts, per-mode counts, stale
     backlog, alarm verdict (zero-output silent-death detection, A8),
     region_attempts (C5) and warm-start savings (C4)."""
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "dream_health")
+    sdk = _data_sdk(team)
     try:
         return sdk.dream_health_check()
     finally:
@@ -3210,7 +3255,8 @@ async def search(q: str, limit: int = Query(10, ge=1, le=100), team: dict = Depe
     works without the embedding extra; vector joins in automatically when
     embeddings are available.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "search")
+    sdk = _data_sdk(team)
     try:
         # #1676 (launch capacity): tortoise_fts_query is CPU-blocking — the
         # query encode (sdk.py model.encode, ~10-50ms for bge-small) runs
@@ -3316,7 +3362,8 @@ async def ask_question(body: AskRequest,
             status_code=429, detail=CODE_QUOTA_EXCEEDED,
             headers={"Retry-After": str(int(ask_budget_retry_after(team_id)))})
     t0 = _dt2.now(UTC)
-    sdk = _make_sdk(namespace=team_id)
+    _require_scope(team, "graphs:read", "ask_question")
+    sdk = _data_sdk(team)
     try:
         result = await run_ask_bounded(
             sdk.ask, team_id, body.question,
@@ -3380,7 +3427,8 @@ async def topic_summary(
     - contested: variance > 0.04 (destabilized posterior)
     - disputed pairs: NAND-connected where both have variance > 0.02
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "topic_summary")
+    sdk = _data_sdk(team)
     try:
         # #1676 (launch capacity): topic_summarize is CPU-blocking (EP
         # classification + neighborhood traversal) — offload to a worker
@@ -3408,6 +3456,7 @@ async def team_info(team: dict = Depends(get_current_team_session_ungated)):  # 
     bootstrap-key mint (agents keep passing their tt_ key). #1828 review
     P1: ungated — overview reads stay reachable for tt_ keys on flag-off
     teams (the #1148 gate stays scoped to the management set)."""
+    _reject_graph_bound_team_surface(team, "team overview")
     sdk = _make_sdk(namespace=team["team_id"])
     # Count Points in default graph. #1591: FAIL SOFT — a missing/broken team
     # graph (half-failed provisioning, restores) must not dead-end the
@@ -3749,6 +3798,7 @@ async def list_packs(team: dict = Depends(get_current_team_gated)):  # noqa: B00
         # per-tenant. Only SKIP_AUTH/background paths reach here (they are
         # not in SKIP_AUTH, so a normal request 401s in get_current_team).
         raise HTTPException(status_code=401, detail="Authentication required")
+    _reject_graph_bound_team_surface(team, "pack catalog")
     from tortoise.pack_state import get_tenant_packs
     sdk = _make_sdk(namespace=team_id)
     try:
@@ -3809,6 +3859,7 @@ async def upload_pack_manifest(
     tenant selector exists on any surface).
     """
     await _check_sensitive_op_rate_limit(request, "pack_manifest")
+    _reject_graph_bound_team_surface(team, "pack catalog upload")
     team_id = team.get("team_id")
     if not team_id:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -5684,6 +5735,7 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
     ``session_capture_receipt_{harness}`` (bare ``session_capture_receipt``
     for legacy no-harness hooks).
     """
+    _require_scope(team, "graphs:write", "capture_session")
     try:
         return await _capture_session_impl(body, request, team)
     except HTTPException as e:
@@ -5802,7 +5854,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # below skips extraction) and must never be 402-blocked by an as-if-fresh
     # estimate. The opt-out check above stays FIRST in the gate stack; the
     # sessions-limit gate below still counts Session nodes.
-    sdk = _make_sdk(namespace=team["team_id"])
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     session_id = body.session_id or f"session_{uuid.uuid4().hex[:12]}"
     now = datetime.now(UTC).isoformat()
@@ -5835,7 +5887,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     if not session_existed:
         est = _session_extraction_estimate(windowed)
         from tortoise.quota import count_team_usage
-        sdk_team = _make_sdk(namespace=team["team_id"])
+        sdk_team = _data_sdk(team)
         try:
             count = count_team_usage(team["team_id"], "points", sdk=sdk_team)
         except QuotaCheckError as e:
@@ -7091,7 +7143,8 @@ async def commit_session(request: Request, team: dict = Depends(get_current_team
             detail={"warnings": blocking, "code": "domain_rule_block"},
         )
 
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:write", "commit_session")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     store = CommitRecordStore(sdk)
 
@@ -7213,7 +7266,8 @@ async def list_sessions(team: dict = Depends(get_current_team_session_ungated)):
     returns an empty list, never a 500 (a 500 also strips the CORS headers
     and surfaces as a misleading 'CORS blocked' to the browser).
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "list_sessions")
+    sdk = _data_sdk(team)
     try:
         rows = sdk._get_proj().g.query(
             "MATCH (s:Session) "
@@ -7253,7 +7307,8 @@ async def get_session_detail(session_id: str, team: dict = Depends(get_current_t
     _session_user_team (?team_id= → non-member 403); keys are team-scoped.
     """
     import re
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "get_session_detail")
+    sdk = _data_sdk(team)
     try:
         proj = sdk._get_proj()
     except Exception:
@@ -7429,7 +7484,8 @@ async def delete_session(session_id: str, team: dict = Depends(get_current_team_
     failed before its reconcile) still reconciles the receipts, so a
     mid-delete outage self-heals on the retry.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:write", "delete_session")
+    sdk = _data_sdk(team)
     proj = sdk._get_proj()
     url = f"session:{session_id}"
 
@@ -12965,7 +13021,8 @@ async def session_context(team: dict = Depends(get_current_team_gated)):  # noqa
     Mirrors TortoiseSDK.session_context() so hosted users get the same
     injection payload as local users.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "session_context")
+    sdk = _data_sdk(team)
     try:
         return sdk.session_context()
     except Exception:
@@ -12985,7 +13042,8 @@ async def issue_insight(title: str, body: str | None = None,
     an unbounded parameter let callers amplify semantic-stage cost (#1196
     review c85) and out-of-range values 500'd instead of 422-ing.
     """
-    sdk = _make_sdk(namespace=team["team_id"])
+    _require_scope(team, "graphs:read", "issue_insight")
+    sdk = _data_sdk(team)
     try:
         return sdk.issue_insight(title=title, body=body, repo=repo, limit=limit)
     except Exception:
@@ -13448,6 +13506,8 @@ async def get_onboarding_state(team: dict = Depends(get_current_team_session_ung
     renders without a fresh bootstrap mint. #1828 review P1: ungated — the
     #1148 dashboard-login gate stays scoped to the management set (this is
     an overview read)."""
+    # C5 #2114: onboarding state reads the DEFAULT graph — team-level surface.
+    _reject_graph_bound_team_surface(team, "onboarding")
     return {
         "onboarding": _get_onboarding_projection(team["team_id"]),
         "email": _team_email(team["team_id"]),
@@ -13462,6 +13522,9 @@ async def patch_onboarding_state(body: OnboardingStatePatchRequest,
     #1828 review P3: same non-gated dual-auth as GET /v1/onboarding/state —
     the dashboard calls this with useSession: true (session-only users got
     401 under the old get_current_team key-only auth)."""
+    # C5 #2114: onboarding state lives on the DEFAULT graph + the registry
+    # Team node — a graph-bound key writing it would be a cross-graph write.
+    _reject_graph_bound_team_surface(team, "onboarding")
     updates = {k: v for k, v in body.model_dump().items() if v is not None}
     # #1727 (Task 11): translate underscore PATCH fields back to hyphenated
     # per-harness state keys (pydantic cannot carry hyphens; the allowlist
@@ -15741,6 +15804,9 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
+    # C5 #2114: a backup is a full-graph read (least-privilege parity with
+    # read access — the key can already read every node) → graphs:read.
+    _require_scope(team, "graphs:read", "backups_create")
     sdk = None
     registry_sdk = None
     try:
@@ -15764,7 +15830,10 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
         # registry mode is the deterministic team_{id}. Fail-closed: a
         # resolution error 503s rather than backing up a wrong/nonexistent graph.
         from tortoise.backup_sweep import team_graph_name
-        graph_name = team_graph_name(cp_source, team_id)
+        # C5 #2114: a graph-bound key backs up ITS OWN graph (graph_namespace
+        # is the resolved FULL name — custom team_{tid}_{gid} or the default);
+        # team-wide keys/session back up the team default (today's path).
+        graph_name = team.get("graph_namespace") or team_graph_name(cp_source, team_id)
         # #924 review P1: create_backup dumps proj.g — the SDK bound to
         # namespace=team_id resolves team_{team_id}, NOT the resolved graph.
         # For a team_{name} team the dump would be the EMPTY phantom graph
@@ -15832,6 +15901,10 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
     if not team_id:
         raise HTTPException(status_code=401, detail="Missing Authorization header")
     _require_backup_tier(team)
+    # C5 #2114: restore is a DESTRUCTIVE team-default-graph operation (the
+    # #1148 management set) — a graph-bound key must never restore over the
+    # team default (cross-graph write). Team-wide keys + session auth pass.
+    _reject_graph_bound_team_surface(team, "backup restore")
     if not body.confirm:
         raise HTTPException(
             status_code=400, detail="confirm=true required — restore replaces the live graph"

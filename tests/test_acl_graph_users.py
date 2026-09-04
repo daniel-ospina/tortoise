@@ -68,8 +68,12 @@ def _patch_tortoise_sdk_init(db_path):
     import tortoise.hosted_api as ha_mod
     _orig_init = ha_mod.TortoiseSDK.__init__
 
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
+        # graph_name (C5 #2114 D-C5-1 seam): forward it — swallowing the
+        # kwarg would silently open the DEFAULT team graph for a custom
+        # graph request (cross-graph test blindness).
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
     ha_mod._FALLBACK_KEEPALIVE.clear()
