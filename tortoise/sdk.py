@@ -9600,7 +9600,7 @@ class TortoiseSDK:
         # #25: optional graph-informed rerank (persisted EP confidence,
         # operator connectivity, recency). Off by default (backward compat).
         if graph_ranker is not None and results:
-            results = graph_ranker.rerank(results, entity_type="point")
+            results = graph_ranker.rerank(results, entity_type="point", query=q)
 
         return results
 
@@ -10568,7 +10568,7 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            ranked = ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            ranked = ranker.rerank(dicts, entity_type=entity_type, query=query)[:limit]
             # W4 (#2101): additive why-layer enrichment (flag-gated) — search
             # surface; recall_state's pool and the ask lane inherit it through
             # their own calls. Zero-LLM, bounded reads, fail-open (items
@@ -11564,7 +11564,7 @@ class TortoiseSDK:
 
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
-        ranked = ranker.rerank(merged, entity_type="point")
+        ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
         ranked = [
