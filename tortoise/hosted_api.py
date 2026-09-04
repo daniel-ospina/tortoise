@@ -982,7 +982,15 @@ async def _async_audit(
     # ip_address — record the REAL client IP (state.client_ip set by
     # ClientIPMiddleware), never the Fly proxy IP (request.client.host).
     ip = getattr(request.state, "client_ip", None) or (request.client.host if request.client else None)
-    ua = request.headers.get("user-agent")
+    # #2104 (#2260 follow-up): _async_audit is reached from the MCP-tool
+    # capture path with a fabricated request stand-in (hosted_api.py ~6222:
+    # types.SimpleNamespace(state=…, client=None) — NO .headers). A bare
+    # request.headers.get crashed the audit (AttributeError → non-fatal audit
+    # failure → an 'error' key in the capture response). Mirror the defensive
+    # getattr style used for state.client_ip above: header-less request-likes
+    # record user_agent=None instead of crashing.
+    ua = (request.headers.get("user-agent")
+          if getattr(request, "headers", None) is not None else None)
     await asyncio.to_thread(
         _audit_logger.append,
         team_id=team_id,
