@@ -134,14 +134,28 @@ def _teardown_cells(cells: dict[str, object]) -> None:
     cells.clear()
 
 
-def _team_anchor_map(root: Path = HARNESS_DIR) -> dict[str, list[str]]:
-    """Team → anchors authored under that team, across ALL corpus suites
-    (isolation-gold team maps, write_back planted points, continuity
-    reader_planted anchors).  The E2E-4 isolation gate probes a team's cell
-    with the OTHER team's full authored set — Mercury, Atlas AND Orion
-    (review round-1 P1 fix)."""
+def iso_sids_for(selected: list[str], root: Path, team: str) -> str | None:
+    """The first SELECTED isolation session of a team (the graded result's
+    key sid).  None when the team's isolation sessions were not selected."""
+    for sid in selected:
+        fixture = corpus.load_fixture(sid, root)
+        if fixture.get("team") == team and fixture.get("suite") == "isolation":
+            return sid
+    return None
+
+
+def _team_anchor_map(root: Path = HARNESS_DIR,
+                     session_ids: list[str] | None = None) -> dict[str, list[str]]:
+    """Team → anchors authored under that team, across the (optionally
+    restricted) session set — isolation-gold team maps, write_back planted
+    points, continuity reader_planted anchors.  The E2E-4 isolation gate
+    probes a team's cell with the OTHER team's full authored set — Mercury,
+    Atlas AND Orion (review round-1 P1 fix).  Sourced from the RUN's
+    sessions only (round-2: holdout/reserved golds never leak probes into a
+    BPRE gate run)."""
     per_team: dict[str, set[str]] = {}
-    for sid in corpus.session_ids(root):
+    sids = corpus.session_ids(root) if session_ids is None else session_ids
+    for sid in sids:
         fixture = corpus.load_fixture(sid, root)
         team = fixture.get("team")
         if not team:
@@ -208,13 +222,17 @@ def preflight(root: Path = HARNESS_DIR, *, posture: str = "llm") -> dict:
     n_holdout = len(corpus.holdout_ids(root))
     if n and (n_holdout / n) < 0.05:
         issues.append(f"holdout set too small: {n_holdout}/{n} < 5%")
-    # Both teams' isolation fixtures must be present in the gate corpus — a
-    # missing iso_a leaves the team_b→team_a leak direction ungraded
-    # (review round-1 P1: the E2E-4 gate must fail LOUD, not silently lose a
-    # direction).
-    teams = {fixture.get("team") for sid in corpus.session_ids(root)
-             for fixture in [corpus.load_fixture(sid, root)]
-             if fixture.get("team") and fixture.get("suite") == "isolation"}
+    # Both teams' isolation fixtures must be present in the GATE corpus
+    # (non-holdout — round-2 P2: a holdout-pinned team fixture must not
+    # satisfy the preflight while the BPRE run loses that leak direction;
+    # the run itself enforces every mode-corpus team grades).
+    teams = set()
+    for sid in corpus.session_ids(root):
+        if sid in corpus.holdout_ids(root):
+            continue
+        fixture = corpus.load_fixture(sid, root)
+        if fixture.get("team") and fixture.get("suite") == "isolation":
+            teams.add(fixture.get("team"))
     if len(teams) < 2:
         issues.append(
             f"isolation suite needs ≥ 2 teams in the gate corpus (found {sorted(teams)})"
@@ -509,26 +527,33 @@ def run_benchmark(
     baseline = pf["baseline"]
     fixtures_hash = pf["fixtures_hash"]
     run_mode = resolved_config.get("mode", "BPRE")
-    if session_ids:
-        selected = list(session_ids)
-    elif run_mode == "BPRE":
-        # Gate corpus = all sessions minus the pinned holdout (reserved for
-        # the W4 reflex's frozen evaluation).  The exclusion is a run-time
-        # property of mode — the corpus + hash are mode-independent.
-        selected = [s for s in corpus.session_ids(root)
-                    if s not in corpus.holdout_ids(root)]
+    # mode_corpus = the MODE-IMPLIED session set (the comparison surface a
+    # committed BPRE baseline is blessed against): BPRE excludes the pinned
+    # holdout; full includes it.  Independent of any explicit session_ids.
+    if run_mode == "BPRE":
+        mode_corpus = [s for s in corpus.session_ids(root)
+                       if s not in corpus.holdout_ids(root)]
+    else:
+        mode_corpus = corpus.session_ids(root)
+    selected = list(session_ids) if session_ids else mode_corpus
+    # holdout_excluded derives from the ACTUAL replay selection (review
+    # round-2 P1): an explicit session_ids that includes pinned holdout
+    # sessions must not bless/compare under a config claiming exclusion —
+    # the audit record never lies about which fixtures produced the numbers.
+    selected_holdout = set(selected) & set(corpus.holdout_ids(root))
+    resolved_config["holdout_excluded"] = not bool(selected_holdout)
+    if selected_holdout and run_mode == "BPRE":
+        notes.append(
+            "explicit session_ids includes pinned holdout fixtures "
+            f"({sorted(selected_holdout)}) under mode=BPRE — the run's "
+            "config records holdout_excluded=false (incomparable vs a BPRE "
+            "committed baseline: config mismatch => inconclusive)"
+        )
+    elif session_ids is None and run_mode == "BPRE":
         notes.append(
             f"BPRE mode: {len(corpus.holdout_ids(root))} holdout fixtures "
             f"excluded; gate corpus = {len(selected)} sessions"
         )
-    else:
-        selected = corpus.session_ids(root)
-    # holdout_excluded rides WITH the mode (review round-1 P2): a full-mode
-    # run includes the holdout, so its config snapshot must not claim
-    # exclusion — the audit record never lies about which fixtures produced
-    # the numbers.
-    if session_ids is None:
-        resolved_config["holdout_excluded"] = (run_mode == "BPRE")
     missing = [s for s in selected if s not in corpus.session_ids(root)]
     if missing:
         return _failed_report(
@@ -590,23 +615,29 @@ def run_benchmark(
                 total_cost += float(session_cost)
         # Isolation post-pass: grade each TEAM cell once against the WHOLE
         # cell graph (see cell_points) — the E2E-4 surface.  The violation
-        # vocabulary is the UNION of the other team's anchors across ALL
-        # corpus suites (Mercury + Atlas + Orion — review round-1 P1: a
-        # per-gold teams map samples only one anchor and misses cross-suite
-        # leaks).
-        team_anchors = _team_anchor_map(root)
+        # vocabulary is the UNION of the other team's anchors across the
+        # mode corpus's suites (Mercury + Atlas + Orion — review round-1
+        # P1).  Every mode-corpus team with isolation fixtures MUST grade —
+        # a silently-skipped direction (review round-2 P1/P2) fails the run.
+        team_anchors = _team_anchor_map(root, session_ids=mode_corpus)
+        iso_teams = sorted({
+            corpus.load_fixture(s, root).get("team")
+            for s in mode_corpus
+            if corpus.load_fixture(s, root).get("suite") == "isolation"
+        })
+        graded_teams: set[str] = set()
         for key in sorted(cells):
             if not key.startswith("team_"):
                 continue
             team = key[len("team_"):]
-            iso_sids = [
-                s for s in ordered
-                if corpus.load_fixture(s, root).get("team") == team
-                and corpus.load_fixture(s, root).get("suite") == "isolation"
-            ]
-            if not iso_sids:
+            if team not in iso_teams:
                 continue
-            sid = iso_sids[0]
+            sid = iso_sids_for(ordered, root, team)
+            if sid is None:
+                # The team's cell exists but its isolation sessions were not
+                # selected — the direction is ungraded; the runner error
+                # below catches it (no silent skip).
+                continue
             try:
                 points = cell_points(cells[key])
                 other_anchors = sorted(set(
@@ -622,16 +653,20 @@ def run_benchmark(
                 result["capture_ok"] = True
                 result["memory_point_count"] = len(points)
                 # Replace the graded sid's ungraded placeholder (grade once
-                # per cell); the cell's OTHER isolation sessions keep their
-                # rows but are marked covered-by so the receipt never shows a
-                # silently-ungraded isolation session.
+                # per cell); the SAME cell's other isolation sessions keep
+                # their rows but are marked covered-by so the receipt never
+                # shows a silently-ungraded isolation session (round-1 P2:
+                # scoped to this cell's rows — never another team's).
                 session_results = [
                     r for r in session_results if r["session_id"] != sid
                 ]
                 session_results.append(result)
                 for r in session_results:
-                    if r.get("suite") == "isolation" and r.get("isolation") is None:
+                    if (r.get("suite") == "isolation"
+                            and r.get("isolation") is None
+                            and r.get("cell") == key):
                         r["isolation"] = {"covered_by_cell": key}
+                graded_teams.add(team)
                 notes.append(
                     f"isolation {key}: own {result['isolation']['own_anchors_present']}/"
                     f"{result['isolation']['own_anchors_total']} present, "
@@ -642,25 +677,35 @@ def run_benchmark(
                 runner_errors.append(
                     f"isolation pass {key}: raised {type(exc).__name__}: {exc}"
                 )
+        ungraded_teams = sorted(set(iso_teams) - graded_teams)
+        if ungraded_teams:
+            runner_errors.append(
+                f"isolation direction ungraded for mode-corpus teams "
+                f"{ungraded_teams} (E2E-4 must fail LOUD, never silently "
+                "lose a leak direction)"
+            )
     finally:
         _teardown_cells(cells)
 
-    # Run-level suite coverage (review round-1 P1/C): the gate corpus's
-    # suites must ALL be graded by this run — a session-set that drops a
-    # suite (session_ids dodge, empty selection) would read the dropped
-    # suite's metrics at their vacuous floor.  Fail loud, never pass.
-    if not ordered:
+    # Run-level suite coverage (review rounds 1-2): the MODE-IMPLIED corpus's
+    # suites must ALL be graded by this run — absolute, regardless of an
+    # explicit session_ids (a partial selection that drops a suite would
+    # read that suite's metric at its vacuous floor; the isolation suite's
+    # raw count has no denominator to collapse, so dropping it must fail
+    # LOUD, never pass).
+    if not selected:
         runner_errors.append("no sessions selected for the run")
     graded_suites = {r.get("suite") for r in session_results if r.get("suite")}
     corpus_suites = {
-        corpus.load_fixture(s, root).get("suite") for s in ordered
+        corpus.load_fixture(s, root).get("suite") for s in mode_corpus
     }
     missing_suites = sorted(corpus_suites - graded_suites)
     if missing_suites:
         runner_errors.append(
-            f"run did not grade corpus suites {missing_suites} "
-            "(a dropped suite reads its metric at the vacuous floor — the "
-            "run must cover every gate-corpus suite)"
+            f"run did not grade mode-corpus suites {missing_suites} "
+            "(the mode-implied gate corpus must be fully graded — a dropped "
+            "suite reads its metric at the vacuous floor; partial session_ids "
+            "selections are debug-only and can never pass a committed baseline)"
         )
 
     if runner_errors:
@@ -829,6 +874,23 @@ def validate_receipt(receipt: dict) -> list[str]:
         missing = sorted(schema.METRIC_VALUES - set(metrics))
         if missing:
             issues.append(f"receipt.metrics: completed run missing metrics {missing}")
+    # Evidentiality (review round-2 P2): a COMPLETED run's receipt must
+    # carry per-session rows an auditor can tie to the aggregate metrics —
+    # empty session_results on a completed receipt is only legal with an
+    # explicit elision marker (the pre-persistence llm-lane receipt).
+    session_rows = receipt.get("session_results")
+    elided = receipt.get("session_results_elided")
+    if receipt.get("run_status") == "completed":
+        if elided is not None and not isinstance(elided, bool):
+            issues.append("receipt.session_results_elided: expected a boolean")
+        if (not isinstance(session_rows, list)
+                or (not session_rows and elided is not True)):
+            issues.append(
+                "receipt.session_results: completed run requires per-session "
+                "rows (or an explicit session_results_elided=true marker)"
+            )
+    elif not isinstance(session_rows, list):
+        issues.append("receipt.session_results: expected a list")
     if not isinstance(receipt.get("resolved_config"), dict):
         issues.append("receipt.resolved_config: expected an object")
     if isinstance(receipt.get("cost_usd"), bool) or not isinstance(

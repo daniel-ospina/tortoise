@@ -255,18 +255,34 @@ def test_isolation_gate_catches_misrouted_teams(sdk_factory):
 
 
 def test_run_dropping_a_suite_fails_loud(sdk_factory):
-    """Review round-1 P1/C: a run whose session set drops gate-corpus
-    suites reads those metrics at their vacuous FLOOR — which is now WORST
-    (minimize rates collapse to 1.0), so the run REGRESSES vs the committed
-    baseline instead of passing.  The session_ids dodge cannot turn a
-    dropped suite into a green."""
-    wb_only = [s for s in corpus.session_ids()
-               if corpus.load_fixture(s).get("suite") == "write_back"]
-    report = runner.run_benchmark(session_ids=wb_only)
+    """Review rounds 1-2: coverage is ABSOLUTE vs the mode-implied corpus —
+    a partial session_ids selection that drops any gate-corpus suite is a
+    runner error (never a compare).  Dropping the ISOLATION suite is the
+    sharpest case: its raw-count metric has no denominator to collapse, so
+    a relative check would pass it; the absolute check fails it."""
+    for suite in ("write_back", "isolation", "know_to_ask"):
+        subset = [s for s in corpus.session_ids()
+                  if corpus.load_fixture(s).get("suite") == suite]
+        report = runner.run_benchmark(session_ids=subset)
+        assert report["run_status"] == "failed", (
+            f"suite {suite} partial selection must fail loud: "
+            + "; ".join(report["log"][-2:])
+        )
+        assert report["failure_origin"] == "runner_error"
+        assert any("did not grade mode-corpus suites" in line
+                   for line in report["log"])
+
+
+def test_explicit_holdout_inclusion_is_incomparable(sdk_factory):
+    """Review round-2 P1: an explicit session_ids that includes pinned
+    holdout sessions records holdout_excluded=false in its config — the
+    run can never pass a BPRE committed baseline (config mismatch =>
+    inconclusive) and its notes disclose the contamination of the frozen
+    W4 evaluation set."""
+    all_sessions = corpus.session_ids()
+    report = runner.run_benchmark(session_ids=all_sessions)
     assert report["run_status"] == "completed"
-    # Dropped kta/false-fire/push/continuity suites sit at worst ⇒ the run
-    # cannot pass the committed baseline (kta 1.0 == committed, ff 1.0 >
-    # committed 0.0 ⇒ REGRESSION).
-    assert report["metrics"]["know_to_ask_failure_rate"] == 1.0
-    assert report["metrics"]["false_fire_rate"] == 1.0
-    assert report["verdict"] == schema.VERDICT_REGRESSION
+    assert report["resolved_config"]["holdout_excluded"] is False
+    assert report["resolved_config"]["mode"] == "BPRE"
+    assert any("includes pinned holdout" in n for n in report["notes"])
+    assert report["verdict"] == schema.VERDICT_INCONCLUSIVE

@@ -19,7 +19,8 @@
   "notes": [
     "llm product lane: real extraction over the BPRE gate corpus (15 sessions) at clean head e50ae316",
     "LLM nondeterminism disclosed: continuity_recall 0.333 on the publish run (a prior completed run measured 0.667) \u2014 the committed number is THIS run's; re-runs jitter and are compared directionally",
-    "per-session detail not persisted (the first bless CLI wrote no receipt) \u2014 reproducible by re-running the lane; aggregate metrics + baseline are the authoritative audit surface"
+    "per-session detail not persisted (the first bless CLI wrote no receipt) \u2014 reproducible by re-running the lane; aggregate metrics + baseline are the authoritative audit surface",
+    "session_results elided: the first bless CLI predated receipt-on-bless persistence; aggregate metrics + the committed baseline are the audit surface (see the baseline history entry)."
   ],
   "receipt_version": 1,
   "resolved_config": {
@@ -39,5 +40,6 @@
   "run_id": "w3h-llm-bpre-2026-09-04",
   "run_status": "completed",
   "session_results": [],
+  "session_results_elided": true,
   "verdict": "inconclusive"
 }
