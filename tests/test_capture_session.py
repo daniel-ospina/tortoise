@@ -1712,6 +1712,43 @@ def test_apply_supersessions_dup_name_successor_not_self(sdk):
         f"B (the distinct successor) must stay live: {by_id}"
 
 
+def test_apply_supersessions_dead_dup_candidate_skipped(sdk):
+    """#2164 round-3 review: the fold-through decision needs a LIVE
+    distinct successor. A (live, named plan-X) superseded by "plan-X" where
+    the ONLY other plan-X carrier (B) is already TERMINAL (superseded) →
+    folding A would leave NO visible Object under that name (A now dead, B
+    already dead — recall_state excludes terminal Objects): the exact
+    dangling-successor harm the successor-visibility probe prevents. Must
+    warn + skip (applied=0, A stays live)."""
+    from tortoise.commit_ops import apply_supersessions
+
+    proj = sdk._get_proj()
+    sdk.create_entity("object", "plan-X", objectKind="core:strategy")
+    id_a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.id",
+        params={"n": "plan-X"}).result_set[0][0]
+    # second plan-X carrier, already superseded (terminal)
+    proj.g.query(
+        "CREATE (o:Object {id:$id, name:$n, kind:$k, status:'superseded', "
+        "supersededBy:'plan-Y'})",
+        params={"id": "obj-planx-dead", "n": "plan-X",
+                "k": "core:strategy"})
+    warns: list[str] = []
+    applied = apply_supersessions(
+        proj, sdk,
+        [{"superseded": id_a, "supersedes_by": "plan-X",
+          "evidence": "A replaced by the dead duplicate"}],
+        session_id="sess_dead", warn=warns.append)
+    assert applied == 0, "no visible successor — fold must not apply"
+    assert any("no visible successor" in w for w in warns), warns
+    rows = proj.g.query(
+        "MATCH (o:Object {name:'plan-X'}) RETURN o.id, o.status").result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert by_id[id_a] == "live", \
+        f"A must stay live — its only successor carrier is dead: {by_id}"
+    assert by_id["obj-planx-dead"] == "superseded", by_id
+
+
 # ── M2 branch (behind TORTOISE_SESSION_EXTRACTOR=m2) — seam tests call the
 #    method directly (no env var needed) ─────────────────────────────────
 

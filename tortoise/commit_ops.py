@@ -203,7 +203,7 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # must NOT pick one by LIMIT 1 (the same discipline the ref-side
         # probe below applies to ITS >1-name matches).
         sb_rows = proj.g.query(
-            "MATCH (o:Object {name:$sb}) RETURN o.id, o.name",
+            "MATCH (o:Object {name:$sb}) RETURN o.id, o.name, o.status",
             params={"sb": supersedes_by},
         ).result_set
         if not sb_rows:
@@ -305,24 +305,27 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
         # scan: legacy refs resolve by name (obj_name == ref), so a
         # self-alias there requires supersedes_by == ref — already absorbed
         # by the string-equality guard above.
-        real_obj_id = obj_id  # pre-synthesis: None for legacy id-less rows
+        # real id BEFORE legacy synthesis: for a legacy id-less target this
+        # stays None (the canonical id is synthesized below for the journal —
+        # the graph node itself carries no id, and an id-branch fold on a
+        # synthesized id would MISS on replay without the name fallback). The
+        # alias scan below needs the REAL id: a synthesized id could equal a
+        # canonical successor's id only if a canonical Object with the same
+        # name coexists — impossible (the ref probe's >1-name never-guess
+        # would have skipped it earlier).
+        real_obj_id = obj_id
         # Self-alias ⇔ EVERY successor candidate is the target itself — i.e.
         # no DISTINCT successor exists under that name (a pure self-fold with
-        # nothing left visible as the successor). If the candidate set
-        # contains any other Object (duplicate names, BOTH live), the record
-        # "<target> superseded by <name>" is meaningful — B (a live
-        # same-named Object) is the successor, and the fold stores only the
-        # display name (never a node ref), so folding is deterministic and
-        # correct regardless of which duplicate the probe matched. Legacy
-        # id-less rows can never make this True: a legacy target resolves by
-        # name (obj_name == ref), so a self-alias there requires
-        # supersedes_by == ref — already absorbed by the string-equality
-        # guard above; any id-less row reaching this scan is a DISTINCT
-        # successor (different name) and correctly forces all() to False.
+        # nothing left visible as the successor). Legacy id-less rows can
+        # never make this True: a legacy target resolves by name (obj_name ==
+        # ref), so a self-alias there requires supersedes_by == ref — already
+        # absorbed by the string-equality guard above; any id-less row
+        # reaching this scan is a DISTINCT successor (different name) and
+        # correctly forces all() to False.
         all_candidates_are_target = bool(sb_rows) and all(
             sid is not None and real_obj_id is not None
             and sid == real_obj_id
-            for sid, _sname in sb_rows)
+            for sid, _sname, _sst in sb_rows)
         if all_candidates_are_target:
             warn(f"supersession record skipped (self-supersession via "
                  f"id/name aliasing): {record!r} resolves both sides to "
@@ -352,6 +355,32 @@ def apply_supersessions(proj, sdk, records, *, session_id, warn=None):
             warn(f"supersession ref {ref!r} already superseded by "
                  f"{o_sb!r} — conflict with {supersedes_by!r} skipped "
                  f"(keep-first, the fold never blind-overwrites)")
+            continue
+        # round-3 review: the fold-through decision (target is LIVE) needs a
+        # LIVE distinct successor. A duplicate-named candidate that is itself
+        # terminal (status in STALE_TERMINAL_STATUSES) is INVISIBLE to
+        # recall_state's default view — folding the live target onto its
+        # display name would leave NO visible carrier of that name (target
+        # now dead, candidate already dead) = the exact dangling-successor
+        # harm this lane exists to prevent ("a dangling successor would be
+        # INVISIBLE … warned + skipped"). Only a live (or draft) distinct
+        # candidate authorizes the fold; when every distinct candidate is
+        # terminal, the record's successor is effectively dangling → warn +
+        # skip. (Runs AFTER the terminal check above — an idempotent
+        # re-ingest of an already-folded target dedups silently even if its
+        # successor has since gone terminal: the fold already happened, no
+        # new fold is being made.)
+        from tortoise.sdk import STALE_TERMINAL_STATUSES
+        has_live_distinct = any(
+            (sid is None or sid != real_obj_id)
+            and (sst or "") not in STALE_TERMINAL_STATUSES
+            for sid, _sname, sst in sb_rows)
+        if not has_live_distinct:
+            warn(f"entity supersession {ref!r} skipped — successor "
+                 f"{supersedes_by!r} resolves only to terminal or "
+                 f"target-identical Objects (no visible successor "
+                 f"under that name — recall_state excludes terminal "
+                 f"Objects)")
             continue
         try:
             # id-style emission: id + ALL extra kwargs ride the JSONL line
