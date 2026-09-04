@@ -5,30 +5,32 @@
 //
 // Contract notes (server, verified on 0fa70742):
 // - GET /v1/graphs rows: {graph_id, name, kind: 'default'|'custom',
-//   status, key_count, recording} — the default graph is a REAL graph node
-//   row (kind 'default'); a per-graph key panel can mint/list against its
-//   graph_id exactly like a custom graph's.
+//   status, key_count, recording}. The DEFAULT graph is the team's
+//   original namespace — it has NO per-graph keys: `_ensure_graph_exists`
+//   hard-404s default-kind nodes ("there is no per-graph key for the
+//   default graph") and its keys are the TEAM-WIDE rows (graph_id NULL,
+//   managed on the API Keys tab). So the [Keys] panel applies to CUSTOM
+//   graphs only — mirror the [Delete] lock on kind==='default' rows.
 // - POST /v1/team/keys {graph_id, scopes, name?} session mint: owner-class
-//   scoped mint; per-graph keys require >=1 explicit scope (422 otherwise);
-//   the graph must exist (404). Dashboard sends the data-plane pair
-//   ['graphs:read','graphs:write'].
+//   scoped mint for an EXISTING custom graph; per-graph keys require >=1
+//   explicit scope (422 otherwise); unknown/default graph 404s. Dashboard
+//   sends the data-plane pair ['graphs:read','graphs:write'].
 // - GET /v1/team/keys?graph_id=… server-side filter (per-graph panel).
 // - DELETE /v1/graphs/{graph_id}: the default graph 403s (delete locked);
-//   tier caps: free max_graphs=1 / solo=2 / pro+team null (∞).
+//   tier caps (product/pricing.json): free=1 / solo=2 / pro+team null (∞)
+//   with the 402 tier gate on free/anon only — solo CAN create up to its
+//   409 quota, so only free/anon show the locked create.
 
 export const GRAPH_KEY_SCOPES = Object.freeze(['graphs:read', 'graphs:write'])
 
-// Tier gate (indicator 5): free/solo see the 🔒 locked create + upgrade
-// CTA. Unknown tiers keep today's behavior (create visible) — fail-open
-// matches pre-C7 rendering for anything outside the known-limited set.
-export const LIMITED_TIERS = Object.freeze(['free', 'solo'])
+// Tier gate (indicator 5): only tiers the server 402-blocks on graph
+// create (free + anon — _GRAPH_TIER_BLOCKED) show the 🔒 locked create +
+// upgrade CTA. Solo has max_graphs=2 (pricing.json) and is NOT
+// tier-blocked — its create form stays until the 409 quota gate fires.
+export const LIMITED_TIERS = Object.freeze(['free', 'anon'])
 
 export function tierCreateLocked(tier) {
   return LIMITED_TIERS.includes(tier)
-}
-
-export function tierUpgradeUrl() {
-  return 'https://tortoise.premiselabs.co/product.html#pricing'
 }
 
 // The default-graph row (kind 'default') is the only non-deletable row.
@@ -67,24 +69,17 @@ export function graphsMeter(rows, cap) {
   return { used, cap, label: `${used}/${cap} graphs used` }
 }
 
-// The graph the user is looking at in the per-graph key panel (default row
-// or the opened custom row). Falls back to the default row when present.
-export function activeGraphId(rows, selectedId) {
-  const rs = rows || []
-  if (selectedId && rs.some((g) => g.graph_id === selectedId)) return selectedId
-  const def = rs.find(isDefaultGraph)
-  return def ? def.graph_id : (rs[0] ? rs[0].graph_id : null)
-}
-
-// A row's [Keys] panel identity — keyed by graph_id so the panel state
-// survives a list refresh.
-export function graphRowKey(g) {
-  return g ? g.graph_id : null
+// The [Keys] panel applies to CUSTOM graphs only — the default graph's
+// keys are the team-wide rows (graph_id NULL) managed on the API Keys tab;
+// `_ensure_graph_exists` 404s default-kind nodes (P1-1 review fix).
+export function canManageGraphKeys(g) {
+  if (!g) return false
+  return g.kind !== 'default'
 }
 
 // Per-graph key mint body (session scoped mint). Scopes ride the body so a
 // future scope-aware UI can narrow them; today's panel always mints the
-// data-plane pair against the graph.
+// data-plane pair against an existing CUSTOM graph.
 export function graphMintBody(graphId, name) {
   const body = { scopes: [...GRAPH_KEY_SCOPES] }
   if (graphId != null) body.graph_id = graphId

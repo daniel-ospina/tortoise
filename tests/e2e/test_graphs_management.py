@@ -28,8 +28,10 @@ Harness posture (mirrors #2246 ADR-010 session-only):
 - GET /v1/team/keys without graph_id returns the API-Keys tab's rows (the
   mount loadAll read); with graph_id returns the per-graph panel rows.
 - POST /v1/team/keys + POST /v1/graphs bodies are captured for assertion.
-- The default graph is a REAL row ({graph_id, kind:'default'}) so the panel
-  can mint/list against it exactly like a custom graph's (C7 D-C7-2b).
+- The default graph row (kind 'default') NEVER offers [Keys] or [Delete]:
+  its keys are the team-wide rows managed on the API Keys tab — the server
+  has no per-graph key surface for the default graph (_ensure_graph_exists
+  404s default-kind nodes). Per-graph keys/panels apply to custom rows only.
 """
 from __future__ import annotations
 
@@ -285,8 +287,11 @@ def test_graphs_table_rows_default_first_with_actions(page: Page) -> None:
     rows = page.locator("table tbody tr")
     expect(rows.first).to_contain_text("default")
     expect(rows.first).to_contain_text("default", exact=False)  # kind column
-    # The default row: NO Delete action; custom rows have Keys + Delete.
+    # The default row: NO Delete AND NO Keys action (its keys are the
+    # team-wide rows on the API Keys tab — P1-1 review fix); custom rows
+    # have both.
     expect(rows.first.get_by_role("button", name="Delete")).to_have_count(0)
+    expect(rows.first.get_by_role("button", name="Keys")).to_have_count(0)
     custom_row = rows.filter(has_text="prod")
     expect(custom_row.get_by_role("button", name="Delete")).to_be_visible()
     expect(custom_row.get_by_role("button", name="Keys")).to_be_visible()
@@ -379,12 +384,14 @@ def test_per_graph_key_panel_lists_mints_and_revokes(page: Page) -> None:
     expect(ci_row.get_by_role("button", name="Revoke")).to_have_count(0)
 
 
-def test_default_graph_has_no_delete_and_custom_delete_armed(page: Page) -> None:
-    """Indicator 4: the default graph row never offers Delete; a custom
-    row's Delete arms an inline confirm (cancel keeps the row)."""
+def test_default_graph_has_no_actions_and_custom_delete_armed(page: Page) -> None:
+    """Indicator 4: the default graph row never offers Delete or Keys; a
+    custom row's Delete arms an inline confirm (cancel keeps the row)."""
     _open_graphs_tab(page, _team_row("team", None))
     rows = page.locator("table tbody tr")
-    expect(rows.first.filter(has_text="default").get_by_role("button", name="Delete")).to_have_count(0)
+    dflt = rows.filter(has_text="default").first
+    expect(dflt.get_by_role("button", name="Delete")).to_have_count(0)
+    expect(dflt.get_by_role("button", name="Keys")).to_have_count(0)
     custom_row = rows.filter(has_text="prod")
     custom_row.get_by_role("button", name="Delete").click()
     expect(custom_row).to_contain_text("Delete prod?")
@@ -407,3 +414,33 @@ def test_create_409_cap_error_surfaces_inline(page: Page) -> None:
     page.get_by_role("button", name="+ Create").click()
     expect(page.locator(".error.banner")).to_contain_text(
         "Graph quota reached — delete a graph or upgrade.", timeout=15_000)
+
+
+def test_member_role_sees_no_manage_actions(page: Page) -> None:
+    """P2-3 review fix: the [Delete] (and the panel [Keys] manage affordance
+    for members — the panel renders read-only) are owner/admin-gated. A
+    member sees the list but no destructive/manage buttons on custom rows."""
+    member = _team_row("team", None)
+    member["role"] = "member"
+    _open_graphs_tab(page, member)
+    custom_row = page.locator("table tbody tr").filter(has_text="prod")
+    expect(custom_row.get_by_role("button", name="Delete")).to_have_count(0)
+    # The key panel opens read-only: mint/revoke absent, list visible.
+    custom_row.get_by_role("button", name="Keys").click()
+    panel = page.locator(".graph-key-panel")
+    expect(panel).to_contain_text("Only owners and admins can manage graph keys.",
+                                  timeout=15_000)
+    expect(panel.get_by_role("button", name="+ Mint key")).to_have_count(0)
+    expect(panel.get_by_role("button", name="Revoke")).to_have_count(0)
+    expect(panel).to_contain_text("ci")  # the list still renders
+
+
+def test_solo_tier_create_stays_open_with_used_total_meter(page: Page) -> None:
+    """P1-2 review fix: solo is NOT tier-blocked (pricing.json max_graphs=2;
+    the server 402-gate is free/anon only) — the create form stays and the
+    meter reads used/total until the 409 quota gate fires."""
+    _open_graphs_tab(page, _team_row("solo", 2),
+                     graphs=[DEFAULT_ROW, CUSTOM_A])
+    expect(page.get_by_label("New graph name")).to_be_visible()
+    expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("2/2 graphs used")
+    expect(page.locator("section")).not_to_contain_text("🔒")

@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   GRAPH_KEY_SCOPES,
-  activeGraphId,
+  canManageGraphKeys,
   graphCanDelete,
   graphMintBody,
   graphsMeter,
@@ -27,11 +27,9 @@ test('graphsMeter: free (cap 1) shows used/total', () => {
   assert.deepEqual(m, { used: 1, cap: 1, label: '1/1 graphs used' })
 })
 
-test('graphsMeter: solo (cap 2) partial use', () => {
-  const m = graphsMeter([DEFAULT, CUSTOM('x')], 2)
-  assert.equal(m.label, '2/2 graphs used')
-  const m2 = graphsMeter([DEFAULT], 2)
-  assert.equal(m2.label, '1/2 graphs used')
+test('graphsMeter: solo (cap 2) partial + full use', () => {
+  assert.equal(graphsMeter([DEFAULT], 2).label, '1/2 graphs used')
+  assert.equal(graphsMeter([DEFAULT, CUSTOM('x')], 2).label, '2/2 graphs used')
 })
 
 test('graphsMeter: singular "graph"', () => {
@@ -39,13 +37,21 @@ test('graphsMeter: singular "graph"', () => {
   assert.equal(graphsMeter([DEFAULT], null).label, '1 graph · ∞ cap')
 })
 
-test('tierCreateLocked: free/solo locked, pro/team/unknown open', () => {
+test('tierCreateLocked: free/anon locked; solo/pro/team/unknown open', () => {
   assert.equal(tierCreateLocked('free'), true)
-  assert.equal(tierCreateLocked('solo'), true)
+  assert.equal(tierCreateLocked('anon'), true)
+  assert.equal(tierCreateLocked('solo'), false) // solo max_graphs=2 (pricing.json) — NOT tier-blocked
   assert.equal(tierCreateLocked('pro'), false)
   assert.equal(tierCreateLocked('team'), false)
   assert.equal(tierCreateLocked(undefined), false)
   assert.equal(tierCreateLocked(null), false)
+})
+
+test('canManageGraphKeys: custom graphs only (default keys live on API Keys)', () => {
+  assert.equal(canManageGraphKeys(DEFAULT), false)
+  assert.equal(canManageGraphKeys(CUSTOM('a')), true)
+  assert.equal(canManageGraphKeys(null), false)
+  assert.equal(canManageGraphKeys({ kind: 'custom' }), true)
 })
 
 test('graphCanDelete: default locked, custom deletable', () => {
@@ -73,14 +79,6 @@ test('sortedGraphRows: empty + null-safe', () => {
   assert.deepEqual(sortedGraphRows(undefined), [])
 })
 
-test('activeGraphId: selected custom row wins, default fallback', () => {
-  const rows = [DEFAULT, CUSTOM('a'), CUSTOM('b')]
-  assert.equal(activeGraphId(rows, 'g-b'), 'g-b')
-  assert.equal(activeGraphId(rows, null), 'default')
-  assert.equal(activeGraphId(rows, 'ghost'), 'default')
-  assert.equal(activeGraphId([], 'x'), null)
-})
-
 test('graphMintBody: graph-bound data-plane scopes', () => {
   const b = graphMintBody('g-a', 'my key')
   assert.deepEqual(b, { graph_id: 'g-a', scopes: ['graphs:read', 'graphs:write'], name: 'my key' })
@@ -92,9 +90,11 @@ test('graphMintBody: blank name omitted, scopes always explicit', () => {
   assert.ok(Array.isArray(GRAPH_KEY_SCOPES) && GRAPH_KEY_SCOPES.length === 2)
 })
 
-test('graphMintBody: no graph_id (default-row legacy shape impossible) ', () => {
-  // The panel ALWAYS passes the row's graph_id — the default graph is a
-  // real node; assert the body shape carries it through.
-  const b = graphMintBody('default', '')
-  assert.equal(b.graph_id, 'default')
+test('graphMintBody: no graph_id (team-wide legacy shape impossible from the panel) ', () => {
+  // The panel only ever mints against an EXISTING CUSTOM graph's graph_id
+  // (canManageGraphKeys gates the [Keys] action); the default graph has no
+  // per-graph key surface (server 404s default-kind nodes).
+  const b = graphMintBody('g_prod', '')
+  assert.equal(b.graph_id, 'g_prod')
+  assert.ok(b.scopes.length === 2)
 })

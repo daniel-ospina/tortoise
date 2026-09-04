@@ -29,13 +29,12 @@ import { docsIndexedLabel, formatRelativeTime, jobStatusLine } from './memorySou
 // step's gate from the keys-table rows.
 import { isManagedKey, durableConnectKey } from './sessionKey.js'
 import {
-  activeGraphId,
+  canManageGraphKeys,
   graphCanDelete,
   graphMintBody,
   graphsMeter,
   sortedGraphRows,
   tierCreateLocked,
-  tierUpgradeUrl,
 } from './graphs.js'
 // #1893: pure source-scope reconcile/serialize/job-body helpers (node --test
 // unit-tested — sourceScope.test.js).
@@ -3758,9 +3757,13 @@ function claimIntentInFlight() {
   }
 
   async function refreshPanelAndCounts(gid) {
+    // P2-4 (review): a mint/revoke refresh is panel-scoped — a slower
+    // refresh must not clobber a NEWER panel open (openGraphPanel bumps
+    // graphPanelReqRef). Guard both the team and the open-sequence.
+    const seq = graphPanelReqRef.current
     const _teamAtCall = currentTeamId
     const rows = await graphKeysFor(currentTeamId, gid).catch(() => null)
-    if (teamIdRef.current !== _teamAtCall) return
+    if (graphPanelReqRef.current !== seq || teamIdRef.current !== _teamAtCall) return
     if (rows) { setPanelKeys(rows); setPanelKeysStatus('ok') }
     loadGraphs(currentTeamId) // key_count column refresh
   }
@@ -6181,22 +6184,24 @@ function claimIntentInFlight() {
                     <td>{g.status === 'active' ? 'active' : <span className="revoked">{g.status}</span>}</td>
                     <td>{g.key_count != null ? g.key_count : '—'}</td>
                     <td>
-                      <button
-                        className="ghost small"
-                        onClick={() => openGraphPanel(g.graph_id)}
-                        aria-expanded={panelGraphId === g.graph_id}
-                        aria-label={`Manage keys for graph ${g.name}`}
-                      >
-                        {panelGraphId === g.graph_id ? 'Close' : 'Keys'}
-                      </button>
-                      {graphCanDelete(g) && confirmDeleteId === g.graph_id ? (
+                      {canManageGraphKeys(g) && (
+                        <button
+                          className="ghost small"
+                          onClick={() => openGraphPanel(g.graph_id)}
+                          aria-expanded={panelGraphId === g.graph_id}
+                          aria-label={`Manage keys for graph ${g.name}`}
+                        >
+                          {panelGraphId === g.graph_id ? 'Close' : 'Keys'}
+                        </button>
+                      )}
+                      {isOwnerAdmin && graphCanDelete(g) && confirmDeleteId === g.graph_id ? (
                         <span className="graph-del-confirm">
                           Delete {g.name}? Data and keys are removed permanently.{' '}
                           <button className="ghost small danger" disabled={graphBusy} onClick={() => deleteGraphRow(g.graph_id)}>Delete</button>{' '}
                           <button className="ghost small" disabled={graphBusy} onClick={() => setConfirmDeleteId(null)}>Cancel</button>
                         </span>
                       ) : (
-                        graphCanDelete(g) && (
+                        isOwnerAdmin && graphCanDelete(g) && (
                           <button
                             className="ghost small"
                             onClick={() => { setConfirmDeleteId(g.graph_id); setGraphMsg('') }}
