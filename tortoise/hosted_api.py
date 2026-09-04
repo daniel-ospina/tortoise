@@ -7170,19 +7170,35 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
     # (_extract_session_v2) and eval ingest_v2 — §6b's inline consumer was the
     # last divergent copy. Guards inherited: terminal keep-first (the fold
     # never blind-overwrites), self-supersession skip, >1-name never-guess,
-    # visible-successor gate, legacy id-less canonical-id synthesis. Every skip
-    # surfaces via _logger.warning (hosted attribution) — never a silent drop;
-    # per-record fail-open (warn-only — never fails the commit). The step-6
+    # visible-successor gate, legacy id-less canonical-id synthesis. Skips
+    # surface via _logger.warning (hosted attribution) — except the helper's
+    # ONE documented silent class (idempotent no-ops: terminal pt_ re-ingest
+    # and entity same-successor dedup, which warn() never fires for); per-
+    # record fail-open (warn-only — never fails the commit). Same-commit
+    # supersession chains must be emitted in fold order ([A→B, B→C]) — the
+    # visible-successor gate skips a fold whose successor this payload has
+    # already terminalized (order-sensitivity pinned in #2246). The step-6
     # entity writes above have landed the payload's net-new successors.
     # ──
     from tortoise.commit_ops import apply_supersessions
+
+    warned = 0
+
+    def _supersession_warn(msg, *args, **kwargs):
+        # warn-counting delegation: the summary log must not WARNING on the
+        # helper's documented SILENT idempotent no-ops (applied < total with
+        # zero warns = benign overlap, e.g. a re-committed same-successor
+        # dedup); WARNING is reserved for records that actually warned.
+        nonlocal warned
+        warned += 1
+        _logger.warning(msg, *args, **kwargs)
+
     applied = apply_supersessions(
         proj, sdk, payload.supersessions,
-        session_id=session_id, warn=_logger.warning,
+        session_id=session_id, warn=_supersession_warn,
     )
     if payload.supersessions:
-        log = (_logger.warning if applied < len(payload.supersessions)
-               else _logger.info)
+        log = _logger.warning if warned else _logger.info
         log("supersessions applied=%d total=%d (session=%s)",
             applied, len(payload.supersessions), session_id)
 

@@ -14,9 +14,11 @@ hosted-path coverage that replaces it:
   end-state (CORRECTS edge, point statuses, Object .status/.supersededBy).
 - ``test_hosted_commit_wires_apply_supersessions_once`` — the wiring spy:
   the write phase routes payload.supersessions through the helper EXACTLY
-  once, with typed records, session_id and warn = the hosted module logger
-  (hosted attribution). Pre-#2193 §6b's inline loop never called the helper
-  — the spy is the regression guard that pins the seam.
+  once, with typed records, session_id and a warn callable that DELEGATES
+  to the hosted module logger (hosted attribution — the call site wraps it
+  in a warn-counting closure so the summary log reserves WARNING for
+  records that actually warned). Pre-#2193 §6b's inline loop never called
+  the helper — the spy is the regression guard that pins the seam.
 
 Test env: docker lane (TORTOISE_DB_URI set — see AGENTS.md). The SDKs
 construct with their own db_path; under the test-session redirect
@@ -273,6 +275,17 @@ def test_hosted_commit_wires_apply_supersessions_once(monkeypatch, tmp_path):
         return len(list(records))
 
     monkeypatch.setattr(commit_ops, "apply_supersessions", spy)
+    # hosted-attribution probe: the call site wraps the module logger in a
+    # warn-counting closure (hosted_api._supersession_warn) so the summary
+    # log can reserve WARNING for records that actually warned. The spy must
+    # still see that closure DELEGATE to the hosted module logger — swap the
+    # logger's warning for a recorder before driving the commit.
+    recorded_warns: list[tuple] = []
+
+    def _recorder(msg, *args, **kwargs):
+        recorded_warns.append((msg, args, kwargs))
+
+    monkeypatch.setattr(hosted_api._logger, "warning", _recorder)
     old_pt_id = _pt_id(OLD_PT_CONTENT)
     new_pt_id = _pt_id(NEW_PT_CONTENT)
     sdk = TortoiseSDK(str(tmp_path / "wiring.db"))
@@ -290,5 +303,12 @@ def test_hosted_commit_wires_apply_supersessions_once(monkeypatch, tmp_path):
     assert records == list(payload.supersessions), "typed records passthrough"
     assert kwargs["session_id"] == SESSION_ID, kwargs
     # `==` NOT `is` — Logger.warning is a bound method, a fresh object per
-    # access; `is` can never pass.
-    assert kwargs["warn"] == hosted_api._logger.warning, kwargs
+    # access; `is` can never pass. The call site passes a warn-counting
+    # closure that DELEGATES to the hosted module logger — probe it routes.
+    assert kwargs["warn"] is not hosted_api._logger.warning, (
+        "call site must pass the warn-counting wrapper, not the bare logger"
+    )
+    kwargs["warn"]("__probe__")
+    assert recorded_warns and recorded_warns[-1][0] == "__probe__", (
+        "the passed warn callable must delegate to hosted_api._logger.warning"
+    )
