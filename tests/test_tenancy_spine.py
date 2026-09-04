@@ -196,6 +196,21 @@ def test_vanished_graph_fails_closed(spine_env):
     assert r.status_code in (403, 404), r.text
 
 
+def test_backup_vanished_graph_fails_closed(spine_env):
+    """Final-gate P1: a graph-bound key whose graph is GONE must NOT back up
+    the team DEFAULT graph (the old 'or team_graph_name' fallback widened a
+    ghost key onto the default — a cross-graph read dump). Fails closed 403
+    GRAPH_NOT_FOUND (not a 500)."""
+    sdk, tid, _g, tc, _def_pt = spine_env
+    token = _mint_key(sdk, tid, scopes=["graphs:read"],
+                      graph_id="g_ghost_backup")
+    r = tc.post("/backups", headers={"Authorization": f"Bearer {token}"})
+    assert r.status_code == 403, r.text
+    detail = r.json().get("detail")
+    if isinstance(detail, dict):
+        assert detail.get("error_code") == "GRAPH_NOT_FOUND", detail
+
+
 def test_team_level_surface_rejects_graph_bound(spine_env):
     """D-C5-2 team surfaces: a graph-bound key on /v1/team (overview reads
     the DEFAULT graph) is rejected outright — no default-graph leak via a

@@ -15970,6 +15970,11 @@ async def backups_create(team: dict = Depends(get_current_team_gated)):  # noqa:
             await asyncio.to_thread(prune_backups, storage, team_id)
         except Exception as e:
             _logger.warning("prune failed for team %s: %s", team_id, e)
+    except HTTPException:
+        # C5 #2114 (final-gate P1): the fail-closed GRAPH_NOT_FOUND 403 for
+        # a vanished graph-bound key must surface as 403, not be swallowed
+        # by the generic arm into a 500 (the file's established pattern).
+        raise
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"Backup rejected: {e}")  # noqa: B904
     except RuntimeError as e:
