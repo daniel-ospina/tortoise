@@ -1443,7 +1443,8 @@ def _leg_entry_dead(entry: dict, *, floors: dict[str, int] | None = None) -> boo
 
 
 def _legs_degraded(outcome: dict, question_type: str = "", *,
-                   floors: dict[str, int] | None = None) -> list[tuple[str, list]]:
+                   floors: dict[str, int] | None = None,
+                   structural_empty_by_design: bool = False) -> list[tuple[str, list]]:
     """Degraded (non-by-design) legs of an outcome, per the conservative
     leg-health predicate (#1785). Returns ``[]`` for a healthy outcome.
 
@@ -1454,6 +1455,17 @@ def _legs_degraded(outcome: dict, question_type: str = "", *,
     entries dead on a TR question). Legless outcomes (vector-arm /
     retrieval-only — no ``legs`` key) are exempt (healthy-vacuous, never a
     KeyError), consistent with the ``retrieval_only`` exemption.
+
+    ``structural_empty_by_design`` (#2105 W7): deterministic-ingest runs
+    write NO ``statement`` (``EXTRACTION_POINT_KIND``) points — the
+    structural leg (``retrieve.py``: kind-filtered scan on
+    ``EXTRACTION_POINT_KIND``, R4 #1543) is therefore EMPTY BY DESIGN on
+    every deterministic outcome: ``empty_results`` with ``count == 0`` is
+    the graph's shape, never a dead backend. The exemption is scoped to
+    the by-design empty shape ONLY — a structural ``timeout`` /
+    ``query_failed`` on a deterministic run still degrades (a real driver
+    failure must never be laundered by the mode). The FTS + vector legs
+    stay fully armed in both ingest modes.
     """
     legs = outcome.get("legs")
     if not isinstance(legs, list):
@@ -1470,6 +1482,13 @@ def _legs_degraded(outcome: dict, question_type: str = "", *,
                 degraded.append((name, entries))
             continue
         for entry in entries:
+            if (structural_empty_by_design and name == "structural"
+                    and entry.get("reason") == "empty_results"
+                    and entry.get("count", 0) == 0):
+                # deterministic graphs hold no statement points — the
+                # kind-filtered structural scan is empty BY DESIGN (the
+                # graph's shape, not a dead backend); see the docstring.
+                continue
             if _leg_entry_dead(entry, floors=floors):
                 degraded.append((name, [entry]))
     return degraded
@@ -3751,7 +3770,13 @@ def run_evaluation(
                         and leg.get("reason") == "timeout"
                         for leg in (outcome.get("legs") or []))
                     _leg_sigs = _legs_degraded(
-                        outcome, question.get("question_type", ""))
+                        outcome, question.get("question_type", ""),
+                        # #2105 W7: deterministic ingest writes no
+                        # statement points — the structural leg's empty
+                        # scan is by-design (see _legs_degraded); v2 stays
+                        # fully armed.
+                        structural_empty_by_design=(
+                            ingest_mode == "deterministic"))
                     _dead_sigs = [name for name, entries in _leg_sigs
                                   if any(e.get("reason") in ("timeout", "query_failed")
                                          or (e.get("reason") == "empty_results"

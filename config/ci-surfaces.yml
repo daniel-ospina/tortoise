@@ -424,6 +424,7 @@ surfaces:
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_signup_form_safety.py
   - test_waitlist_form.py
+  - test_w7_publish.py
   - test_welcome_url_consolidation.py
   - test_website_static.py
   sdk:
