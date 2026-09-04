@@ -374,7 +374,13 @@ button:focus-visible, select:focus-visible, a:focus-visible, input:focus-visible
 .protect-full p { font-size: 15px; }
 
 /* #1148-ux review: per-key on/off toggle + trash */
-.key-actions { display: inline-flex; align-items: center; gap: 0.5rem; }
+.key-actions { display: inline-flex; align-items: center; gap: 0.5rem; white-space: nowrap; }
+/* #2246 (ADR-010): uniform 4-action rows (rename/toggle/trash/Rotate) overflow
+   320-375px viewports — wrap the keys table in a horizontal scroller with a
+   sane minimum so rows never crush. The section's table also gets scope="col"
+   headers (a11y) for the same rewrite. */
+.keys-table-wrap { overflow-x: auto; }
+.keys-table-wrap table { min-width: 620px; }
 .key-toggle {
   position: relative; width: 34px; height: 19px; border-radius: 10px;
   border: 1px solid var(--border); background: var(--surface-hover);

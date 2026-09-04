@@ -34,6 +34,7 @@ from typing import Any
 
 from tortoise.embeddings import EMBEDDING_MODEL
 
+from .costing import PRICING_MAP_VERSION
 from .dataset_audit import is_trusted
 
 # R3 (#1542) D5: the dense-leg methodology is ALWAYS emitted — a report can
@@ -339,6 +340,22 @@ def _failure_grade(error_class: Any) -> str:
     if isinstance(error_class, str) and error_class in RECOVERABLE_EVAL_FAILURE_CLASSES:
         return "recoverable"
     return "hard"
+
+
+def _bounded_int(v: Any) -> int:
+    """int() coercion for usage-total reads that NEVER crashes: non-numeric /
+    non-finite / |v| > 1e300 values (a tampered checkpoint can carry
+    NaN/Infinity/arbitrary-precision literals) degrade to 0 instead of
+    raising ValueError/OverflowError at report assembly (round-2 code-review
+    P2 — mirrors _numeric's fail-closed posture; the sanitizer is the
+    primary choke point, this is the report-side belt)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    if abs(v) > 1e300:
+        return 0
+    if isinstance(v, float) and not math.isfinite(v):
+        return 0
+    return int(v)
 
 
 def _numeric(v: Any) -> bool:
@@ -679,6 +696,148 @@ def git_sha() -> str:
         return "unknown"
 
 
+def _pricing_verified_on() -> str:
+    """Most-recent verification date across the pricing map (the report's
+    snapshot records it so a reader knows how fresh the rates are)."""
+    from .costing import PRICING_MAP
+    dates = [str(e.get("verified_on", ""))
+             for fam in PRICING_MAP.values()
+             for e in fam.values() if e.get("verified_on")]
+    return max(dates) if dates else "unknown"
+
+
+def _usage_report_block(completed: list[dict[str, Any]],
+                        usage_overhead: dict[str, Any] | None
+                        ) -> dict[str, Any] | None:
+    """Build the conditional top-level ``usage`` block (A7 / Am 21).
+
+    Emit iff ≥1 completed outcome carries an ``llm_usage`` envelope OR
+    overhead rows exist; otherwise None (usage-free reports gain zero new
+    keys — the 258-pin byte contract). Cost is computed HERE from raw
+    envelopes (``price_usage_envelope`` never mutates the outcome's
+    ``llm_usage`` — deep-copy pinned by test). Semantics:
+
+    * per_question — evidence-bearing spend, keyed by qid (outcomes with an
+      envelope), tokens/calls/cost + priced/estimated flags;
+    * overhead — breaker-open + failed + preflight spend (the drained
+      collector envelope; never double-counted with per_question);
+    * cost — run totals + per-data-point USD over the evidence-bearing
+      WITH-usage subset (``evidence_written > 0`` and envelope present) +
+      coverage disclosure when 0 < with_usage < evidence_bearing.
+    """
+    from .costing import price_usage_envelope
+
+    per_question: dict[str, dict[str, Any]] = {}
+    pq_cost = 0.0
+    pq_all_priced = True
+    pq_any_estimated = False
+    for o in completed:
+        env = o.get("llm_usage")
+        if not isinstance(env, dict):
+            continue
+        by_stage = env.get("by_stage") or {}
+        total = env.get("total") or {}
+        if not by_stage:
+            continue
+        cost, priced, _bd = price_usage_envelope(env)
+        qid = o.get("question_id")
+        per_question[str(qid)] = {
+            "prompt_tokens": _bounded_int(total.get("prompt_tokens", 0)),
+            "completion_tokens": _bounded_int(
+                total.get("completion_tokens", 0)),
+            "calls": _bounded_int(total.get("calls", 0)),
+            "cost_usd": cost,
+            "priced": priced,
+            # stable boolean (round-2 code-review P3): the breakdown's
+            # ``estimated`` is a LIST of estimated lanes.
+            "estimated": bool(_bd.get("estimated")),
+        }
+        pq_cost += cost
+        pq_all_priced = pq_all_priced and priced
+        pq_any_estimated = (pq_any_estimated
+                            or bool(_bd.get("estimated")))
+
+    overhead: dict[str, Any] | None = None
+    oh_cost = 0.0
+    oh_priced = True
+    if (usage_overhead or {}).get("by_stage"):
+        oh_total = usage_overhead.get("total") or {}
+        cost, priced, bd = price_usage_envelope(usage_overhead)
+        oh_cost = cost
+        oh_priced = priced
+        overhead = {
+            "prompt_tokens": _bounded_int(oh_total.get("prompt_tokens", 0)),
+            "completion_tokens": _bounded_int(
+                oh_total.get("completion_tokens", 0)),
+            "calls": _bounded_int(oh_total.get("calls", 0)),
+            "cost_usd": cost,
+            "priced": priced,
+            "estimated": bool(bd.get("estimated")),
+            "lanes": bd["lanes"],
+        }
+        pq_any_estimated = pq_any_estimated or bool(bd.get("estimated"))
+
+    if not per_question and overhead is None:
+        return None
+
+    # per-data-point cost over the evidence-bearing WITH-usage subset
+    # (coverage disclosure when some evidence-bearing outcomes lack usage).
+    cov: list[dict[str, Any]] = [
+        o for o in completed
+        if int(o.get("evidence_written", 0) or 0) > 0]
+    with_usage: list[dict[str, Any]] = [
+        o for o in cov if isinstance(o.get("llm_usage"), dict)]
+    if with_usage:
+        ev_sum = sum(int(o.get("evidence_written", 0) or 0)
+                     for o in with_usage)
+        dp_cost = round(
+            sum(cost for cost, _p, _b in
+                (price_usage_envelope(o["llm_usage"]) for o in with_usage))
+            / ev_sum, 6) if ev_sum else None
+        dp_priced = all(
+            _p for _c, _p, _b in
+            (price_usage_envelope(o["llm_usage"]) for o in with_usage))
+    else:
+        dp_cost = None
+        dp_priced = True
+    coverage: dict[str, Any] = {
+        "evidence_bearing": len(cov),
+        "with_usage": len(with_usage),
+    }
+    if 0 < len(with_usage) < len(cov):
+        coverage["partial"] = True
+
+    block = {
+        "per_question": per_question,
+        "totals": {
+            "prompt_tokens": (
+                sum(pq["prompt_tokens"] for pq in per_question.values())
+                + (overhead["prompt_tokens"] if overhead else 0)),
+            "completion_tokens": (
+                sum(pq["completion_tokens"]
+                    for pq in per_question.values())
+                + (overhead["completion_tokens"] if overhead else 0)),
+            "calls": (
+                sum(pq["calls"] for pq in per_question.values())
+                + (overhead["calls"] if overhead else 0)),
+        },
+        "cost": {
+            "usd": round(pq_cost + oh_cost, 6),
+            "priced": pq_all_priced and oh_priced,
+            "estimated": pq_any_estimated,
+            "data_point_usd": dp_cost,
+            "data_point_n": len(with_usage),
+            "data_point_priced": dp_priced,
+        },
+        "coverage": coverage,
+        "priced": pq_all_priced and oh_priced,
+        "estimated": pq_any_estimated,
+    }
+    if overhead is not None:
+        block["overhead"] = overhead
+    return block
+
+
 def build_report(
     outcomes: list[dict[str, Any]],
     *,
@@ -729,6 +888,11 @@ def build_report(
     retrieval_only: bool = False,
     surface: str = "embedded",
     run_key: str | None = None,
+    # #2185 (Task 6): the drained collector overhead envelope (breaker-open +
+    # failed + preflight spend — never double-counted: per-question usage
+    # lives on the outcomes, everything else rides this envelope). None →
+    # no overhead section (byte-identical usage-free reports).
+    usage_overhead: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate per-question outcomes into the report + provenance dict.
 
@@ -1745,6 +1909,26 @@ def build_report(
             }
         }
 
+    # #2185 (A7 / Am 21): the conditional usage/cost block — present iff
+    # ≥1 completed outcome carries an llm_usage envelope OR overhead rows
+    # exist (mock/retrieval-only runs emit NOTHING — the byte-identical
+    # report contract). Cost is computed HERE at report time from raw
+    # envelopes (never mutates outcome llm_usage); per-question spend is
+    # evidence-bearing outcome usage; breaker-open + failed + preflight
+    # spend rides ``usage_overhead`` (the drained collector envelope — live
+    # moves + the A4 load fold keep it authoritative across resume).
+    usage_block = _usage_report_block(gradable, usage_overhead)
+    if usage_block is not None:
+        # M5-style: usage-free reports never record a pricing snapshot —
+        # the snapshot rides ONLY when the block emits (no new keys on
+        # mock runs).
+        pricing_snapshot = {
+            "map_version": PRICING_MAP_VERSION,
+            "git_sha": git_sha(),
+            "verified_on": _pricing_verified_on(),
+        }
+        usage_block["pricing"] = pricing_snapshot
+
     # M7 (Gate 2): a not-trusted audit serializes EVERY recall key to null —
     # the report then contains no recall numbers until the dataset is
     # re-audited (E2E-3 Precondition 2).
@@ -1867,6 +2051,8 @@ def build_report(
         "leg_mix": leg_mix,
         "pool_size": pool_size,
         "evidence": evidence,
+        # #2185: the conditional usage/cost block (A7) — see above.
+        **({"usage": usage_block} if usage_block is not None else {}),
         "methodology": {
             "reader_prompt_hash": reader_prompt_hash,
             "judge_rubric_id_hash": judge_rubric_id_hash,
@@ -2106,6 +2292,11 @@ def build_report(
                                 .get("available") else "unavailable"),
             **(r1_knobs or {}),
             **(r5_knobs or {}),
+            # #2185 (Task 6 acceptance): the pricing-map snapshot is
+            # recorded in the methodology ONLY when the usage block emits
+            # (usage-free reports gain zero new keys).
+            **({"usage_pricing": pricing_snapshot}
+               if usage_block is not None else {}),
         },
         "failures": failures or [],
         "n_failed": len(failures or []),

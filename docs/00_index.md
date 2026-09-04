@@ -20,7 +20,10 @@ ownedBy: epistemic-team
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema | `docs/registry-graph-schema.md` |
 | Retrieval latency benchmark runbook (#316) | `benchmarks/README.md` |
+| Memory-system comparison table + publication/errata discipline (epic #2080 W7) | `docs/benchmarks/comparison-systems.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
+| Auth planes — sessions vs machine credentials (ADR-010, #2246) | `docs/adr/ADR-010-auth-planes-session-agent-key.md` |
+| #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |
 | Hosted-vs-local embedding UX research (#1349) | `docs/research/2026-08-17-1349-embedder-selection/ux-research.md` |
 | E2E-8 latency re-validation scoping/research (#1656) | `docs/scoping/2026-08-24-1656-e2e8-latency-revalidation-scoping.md` |
 | Retrieval levers research (#1657) | `docs/research/2026-08-24-1657-retrieval-levers/research.md` |

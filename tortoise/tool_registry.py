@@ -187,7 +187,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "manifest in the tenant graph and activates it. Deployment- "
                     "gated: on self-host this is an actionable stub (use the "
                     "filesystem packs dir + tortoise pack CLI).",
-        annotations=_ro(),
+        annotations=_rw(),  # C5 #2114 (re-review P2): MERGEs manifests/installs — a write
         http_policy=True,
         sdk_method="upsert_tenant_manifest",  # pack_manifest_store helper
         group="admin",
