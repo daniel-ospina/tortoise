@@ -50,7 +50,7 @@ from tortoise.projection import FalkorProjection  # noqa: E402, RUF100
 # Old → new spellings (issue #2199 direction). New-token constants live in
 # tortoise/sdk.py; import them so this map can never drift from the engine's
 # equality sites.
-from tortoise.sdk import (  # noqa: E402
+from tortoise.sdk import (
     BASELINE_SOURCE_INHERITED,
     BASELINE_SOURCE_SET_BY_AUTHOR,
 )
