@@ -323,3 +323,174 @@ class TestSubprocessSmoke:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# #2179 — selfhost_api._sdk() keepalive check-then-create race
+# ─────────────────────────────────────────────────────────────────────────
+# The #1475 per-path keepalive anchor (mirror of hosted_api._FALLBACK_
+# KEEPALIVE) had the SAME unlocked check-then-create shape hosted_api did
+# before #2172: two threads calling _sdk() concurrently on a cold path both
+# see an empty dict, both open the same embedded db_path, and the
+# setdefault loser is dropped UNCLOSED (daemon socket unlinked mid-request →
+# ConnectionError / silent empty-graph reads). All-async today, but
+# TestClient/portal threads and any to_thread pool make it a REAL thread
+# race exactly as the hosted lane became. _SELFHOST_LOCK serializes the
+# miss/stale path (re-check + evict + create + insert) so exactly ONE
+# anchor per path is created. Mirrors test_hosted_api.py's #2172 probe
+# (keep in sync): a counting __init__ parks ~300ms to widen the pre-fix
+# window, then asserts 1 anchor + N fresh SDKs, no closed-aware orphan,
+# and a sentinel written via the anchor reads back through every returned
+# SDK (decoupled-server guard). Round 3 pre-seeds a PATH-DRIFTED anchor
+# (bound to seed.db, stored under the round key) so the in-lock stale
+# evict + recreate branch is exercised under contention too.
+def test_sdk_concurrent_first_calls_single_anchor(monkeypatch):
+    import threading
+    import time
+    import uuid
+
+    import tortoise.selfhost_api as sha
+    from tortoise.sdk import TortoiseSDK
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "")  # force embedded mode
+    ns = f"selfhost-race-{uuid.uuid4().hex}"
+    _orig_init = TortoiseSDK.__init__
+
+    def _make_counter(target_db: str):
+        made: list = []
+
+        def _counting_init(self, db_path=None, *, namespace=None, **kwargs):
+            if db_path == target_db:
+                made.append(self)
+                time.sleep(0.3)  # widen the pre-fix race window (docstring)
+            _orig_init(self, db_path, namespace=namespace, **kwargs)
+
+        return made, _counting_init
+
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            for _round in range(3):
+                if _round == 2:
+                    # Seed an anchor bound to a DIFFERENT path and pre-store
+                    # it under this round's key — the path-drift stale case
+                    # (_anchor_usable compares the anchor's INTERNAL path to
+                    # the requested db_path, independent of the dict key).
+                    seed_db = os.path.join(td, "seed.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", seed_db)
+                    sha._sdk()  # creates + stores a connected seed anchor
+                    stale = sha._SELFHOST_KEEPALIVE.pop(seed_db, None)
+                    assert stale is not None, "seed anchor not stored"
+                    db = os.path.join(td, f"round-{_round}.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                    sha._SELFHOST_KEEPALIVE[db] = stale  # pre-store: both threads see it
+                else:
+                    db = os.path.join(td, f"round-{_round}.db")
+                    monkeypatch.setenv("TORTOISE_DB_PATH", db)
+                    stale = None
+                constructed, counting_init = _make_counter(db)
+                monkeypatch.setattr(TortoiseSDK, "__init__", counting_init)
+                results: list = []
+                errors: list = []
+                barrier = threading.Barrier(2)
+
+                def _go(_barrier=barrier, _results=results, _errors=errors):
+                    try:
+                        _barrier.wait(timeout=10)
+                        _results.append(sha._sdk())
+                    except Exception as e:
+                        _errors.append(e)
+
+                threads = [threading.Thread(target=_go, daemon=True)
+                           for _ in range(2)]
+                for t in threads:
+                    t.start()
+                try:
+                    for t in threads:
+                        t.join(timeout=60)
+                    for t in threads:
+                        assert not t.is_alive(), (
+                            f"round {_round}: thread hung — the #2179 "
+                            f"regression would deadlock here")
+                    assert not errors, f"round {_round}: thread raised: {errors!r}"
+                    anchors = [v for k, v in sha._SELFHOST_KEEPALIVE.items()
+                               if k == db]
+                    assert anchors, (
+                        f"round {_round}: no anchor stored for {db!r}")
+                    anchor = anchors[0]
+                    assert anchor._proj is not None, "anchor not connected"
+                    assert sha._anchor_usable(anchor, db) is True
+                    # Lower bound (not equality): a legitimate env-fault
+                    # recovery (the lock winner's eager connect fails, the
+                    # loser's in-lock re-check evicts it and recreates) adds
+                    # a second, CLOSED anchor construction on correct code.
+                    assert len(constructed) >= 1 + len(results), (
+                        f"round {_round}: expected >= 1 anchor + 1 per "
+                        f"returned fresh SDK = {1 + len(results)} "
+                        f"constructions, got {len(constructed)} — an anchor "
+                        f"or fresh SDK was never built")
+                    # Fresh-per-request contract: returned SDKs are NOT the
+                    # shared anchor (a regression returning it would share
+                    # mutable session state across requests — the #493 class).
+                    assert all(s is not anchor for s in results), (
+                        f"round {_round}: a returned SDK IS the shared anchor")
+                    assert len({id(s) for s in results}) == 2, (
+                        f"round {_round}: returned SDKs are not distinct")
+                    returned = {id(s) for s in results}
+                    # Closed-aware orphan check: every construction must be
+                    # the stored anchor, a returned SDK, or a CLOSED evicted
+                    # candidate (the env-fault recovery path closes what it
+                    # evicts). Pre-fix the loser was dropped OPEN — unclosed
+                    # and unaccounted — which is exactly the leak.
+                    unclosed_orphans = [
+                        inst for inst in constructed
+                        if not getattr(inst, "_t_closed", False)
+                        and inst is not anchor
+                        and id(inst) not in returned]
+                    assert not unclosed_orphans, (
+                        f"round {_round}: {len(unclosed_orphans)} UNCLOSED "
+                        f"construction(s) neither stored nor returned — a "
+                        f"dropped-unclosed SDK (the #2179 race) leaks here")
+                    # Data-plane probe: a node written through the anchor's
+                    # graph must be readable via every returned SDK — proves
+                    # they attach to the anchor's data-bearing daemon.
+                    sentinel = f"race-{ns}-{_round}"
+                    anchor._get_proj().g.query(
+                        "CREATE (n:RaceSentinel {rk: $rk})", {"rk": sentinel})
+                    for sdk in results:
+                        seen = sdk._get_proj().g.query(
+                            "MATCH (n:RaceSentinel {rk: $rk}) RETURN count(n)",
+                            {"rk": sentinel}).result_set[0][0]
+                        assert seen == 1, (
+                            f"round {_round}: returned SDK missed the "
+                            f"anchor's write — decoupled server")
+                    if _round == 2:
+                        assert anchor is not stale, "stale anchor re-served"
+                        assert stale is not None and stale._t_closed is True, (
+                            "stale anchor evicted but never closed — the "
+                            "dropped-unclosed daemon leak #2179 prevents")
+                        assert stale._proj is None
+                finally:
+                    # Deterministic round teardown (close-then-pop, #1950):
+                    # shut every daemon we started. Under FIXED code nothing
+                    # was dropped (the orphans assert proved it).
+                    for sdk in results:
+                        try:  # noqa: SIM105
+                            sdk.close()
+                        except Exception:
+                            pass
+                    leftover = sha._SELFHOST_KEEPALIVE.pop(db, None)
+                    if leftover is not None:
+                        try:  # noqa: SIM105
+                            leftover.close()
+                        except Exception:
+                            pass
+        finally:
+            for k in list(sha._SELFHOST_KEEPALIVE):
+                leftover = sha._SELFHOST_KEEPALIVE.pop(k, None)
+                if leftover is not None:
+                    try:  # noqa: SIM105
+                        leftover.close()
+                    except Exception:
+                        pass

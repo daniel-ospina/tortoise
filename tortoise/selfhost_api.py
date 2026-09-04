@@ -14,6 +14,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import threading
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
@@ -109,27 +110,83 @@ def _resolve_embedded_db_path() -> str:
     return db_path
 
 
+# #2179: concurrent first _sdk() calls raced the keepalive check-then-create
+# (mirror of hosted_api #2172) — two threads could both see an empty
+# _SELFHOST_KEEPALIVE entry, both open the same embedded db_path, and the
+# setdefault loser was dropped UNCLOSED (its redislite daemon could die
+# mid-request → ConnectionError / silent empty-graph reads). _SELFHOST_LOCK
+# serializes the miss/stale path (re-check + evict + create + insert) so
+# exactly ONE anchor per path is ever created; a healthy-anchor hit stays
+# lock-free (the designed steady state — concurrent per-request fresh SDKs
+# attach to the anchored daemon). The selfhost lane is all-async today, but
+# TestClient/portal threads and any to_thread pool make it a REAL thread
+# race exactly as the hosted lane became (#2172). No re-entrancy/deadlock:
+# the SDK/projection stack never imports selfhost_api, and the lock is never
+# held across the per-request fresh-SDK construction below.
+_SELFHOST_LOCK = threading.Lock()
+
+
+def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:  # noqa: F821
+    """True if the anchored SDK still holds the CURRENT embedded DB.
+
+    Mirrors tortoise/hosted_api.py:_anchor_usable (keep in sync — #2179):
+    path drift (anchor bound to a PREVIOUS db_path whose daemon may still
+    answer queries — a ping alone cannot detect it) or a dead daemon with
+    the same path (crash / volume wipe — probe catches). The path comparison
+    is O(1) and runs before the graph probe so a drifted anchor is evicted
+    without a query."""
+    proj = getattr(anchor, "_proj", None)
+    if proj is None:
+        return False
+    proj_path = getattr(proj, "_path", None)
+    if proj_path is not None:
+        try:
+            same = (str(proj_path) == str(db_path)) or (
+                str(proj_path) != ":memory:"
+                and os.path.abspath(proj_path) == os.path.abspath(db_path)
+            )
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return False
+    return proj._probe_ok()
+
+
 def _sdk():
     from tortoise.sdk import TortoiseSDK
     if not os.environ.get("TORTOISE_DB_URI"):
         # Embedded mode: hold the server alive across requests (see above).
         db_path = _resolve_embedded_db_path()
+        # Fast path (lock-free steady state): reuse a healthy anchor as-is.
         anchor = _SELFHOST_KEEPALIVE.get(db_path)
-        if anchor is None:
-            anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
-            try:  # noqa: SIM105
-                anchor._get_proj()  # eager: hold the connection so the server survives
-            except Exception:
-                pass
-            _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
-        elif anchor._proj is None:
-            # Self-heal (mirrors hosted_api): anchor stored unconnected
-            # (transient failure) — retry once so keepalive is not off
-            # permanently for this path.
-            try:  # noqa: SIM105
-                anchor._get_proj()
-            except Exception:
-                pass
+        if anchor is None or not _anchor_usable(anchor, db_path):
+            # Miss or stale — serialize the evict+create+insert (#2179, the
+            # hosted_api #2172 shape): the in-lock re-check re-arbitrates
+            # against the anchor the winner stored, so a waiter never
+            # evicts/duplicates the winner's fresh anchor.
+            with _SELFHOST_LOCK:
+                anchor = _SELFHOST_KEEPALIVE.get(db_path)
+                if anchor is not None and not _anchor_usable(anchor, db_path):
+                    # Stale/dead anchor (path drift or a daemon crash, or a
+                    # stored-unconnected _proj=None from a transient failure —
+                    # the old self-heal branch evicts instead): close + drop
+                    # so the recreate below binds the CURRENT path.
+                    try:  # noqa: SIM105
+                        anchor.close()
+                    except Exception:
+                        pass
+                    _SELFHOST_KEEPALIVE.pop(db_path, None)
+                    anchor = None
+                if anchor is None:
+                    anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
+                    try:  # noqa: SIM105
+                        anchor._get_proj()  # eager: hold the connection so the server survives
+                    except Exception:
+                        # Keepalive is best-effort — a transient connect failure must not
+                        # fail this request; the request SDK connects lazily anyway and the
+                        # anchor may connect on a later call.
+                        pass
+                    _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
         # Thread the SAME resolved path into the request SDK so anchor and
         # request share one server (path mismatch would defeat keepalive).
         return TortoiseSDK(db_path=db_path, namespace="selfhost")

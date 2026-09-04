@@ -310,6 +310,19 @@ def _iter_registered_teams() -> list[dict]:
             return [{"team_id": r["id"], "name": r.get("name")} for r in rows]
         from tortoise.sdk import TortoiseSDK
 
+        # #2179: direct TortoiseSDK construction (bypasses the _registry_anchor
+        # keepalive lock) is SAFE-BY-TOPOLOGY here: this runs only on the
+        # asyncio single-loop background sweep / boot reconcile (no thread
+        # overlap — sync code here executes on the one loop), it is wrapped in
+        # try/except returning [] on any failure, and the fresh SDK is
+        # short-lived (close-on-GC after the query). Do NOT "fix" this by
+        # routing through _registry_anchor without deciding the path-divergence
+        # below first (see #2179 follow-up: bare constructions resolve via
+        # config.resolve_db_path() → ~/.tortoise/tortoise.db when
+        # TORTOISE_DB_PATH is unset, whereas _registry_anchor/_make_sdk resolve
+        # to /data/tortoise.db — routing would silently change the query
+        # target). If a to_thread/threadpool shape is ever introduced here,
+        # route through _registry_anchor() first.
         sdk = TortoiseSDK()
         rows = sdk._get_registry().query(
             "MATCH (t:Team) WHERE t.deleted_at IS NULL RETURN t.id, t.name"
@@ -13359,6 +13372,19 @@ def _graph_has_team_namespace(team_id: str) -> bool:
     graph_name = f"team_{team_id}"
     try:
         from tortoise.sdk import TortoiseSDK
+        # #2179: direct TortoiseSDK(namespace="registry") construction
+        # (bypasses _registry_anchor's keepalive lock) is SAFE-BY-TOPOLOGY
+        # here: called synchronously on the asyncio single-loop request path
+        # (no concurrent first-open on the embedded db_path — sync code runs
+        # on the one loop, and the #2172 lock's busy-flag read is
+        # GIL-atomic), it closes explicitly below, and it is wrapped in
+        # try/except returning True (graph-up-unknown) on failure. Do NOT
+        # route through _registry_anchor without first deciding the
+        # path-divergence (#2179 follow-up): this bare construction resolves
+        # via config.resolve_db_path() → ~/.tortoise/tortoise.db when
+        # TORTOISE_DB_PATH is unset, whereas _registry_anchor resolves to
+        # /data/tortoise.db — routing would silently change WHICH db is
+        # probed. In URI mode (production) both hit the same server.
         sdk = TortoiseSDK(namespace="registry")
         graphs = sdk._get_proj().db.list_graphs() or []
         sdk.close()
