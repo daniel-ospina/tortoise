@@ -174,6 +174,47 @@ def test_cross_graph_noperm(acl_env):
             raise AssertionError("KEYS unexpectedly allowed for tenant user")
         except redis_py.ResponseError as e:
             assert "NOPERM" in str(e).upper() or "permission" in str(e).lower(), e
+        # The deny-all command base also blocks the unkeyed module commands
+        # (research: GRAPH.CONFIG is unkeyed — its ONLY protection is the
+        # command deny; second-model S5 closes the untested hole).
+        for probe in (["GRAPH.CONFIG", "GET", "TIMEOUT"],
+                      ["GRAPH.DEBUG", f"team_{tid}_{gid}",
+                       "metadata"],
+                      ["GRAPH.LIST"],
+                      ["GRAPH.UDF", "SET", "x", "x"]):
+            try:
+                c.execute_command(*probe)
+                raise AssertionError(
+                    f"{probe[0]} unexpectedly allowed for tenant user")
+            except redis_py.ResponseError as e:
+                assert ("NOPERM" in str(e).upper()
+                        or "permission" in str(e).lower()), f"{probe[0]}: {e}"
+    finally:
+        acl.drop_acl_user(gid)
+
+
+def test_upsert_heals_drift_exact_state(acl_env):
+    """Second-model S2: an upsert on a user with a BROADER prior grant
+    (simulated admin drift: +@all / allkeys) resets to the EXACT hardened
+    state — no rule accumulation (SETUSER would otherwise append)."""
+    tid, gid, ns = acl_env["tid"], acl_env["gid"], acl_env["ns"]
+    client = acl._admin_client()
+    cred = acl.create_acl_user(gid, tid)
+    try:
+        username = f"tenant_{gid}"
+        # Simulate drift: widen the user out-of-band.
+        client.execute_command("ACL", "SETUSER", username, "on",
+                               "allkeys", "+@all")
+        cfg = acl.acl_user_config(gid)
+        assert "+@all" in cfg["commands"]  # drift present
+        # Upsert (same stored password) → exact state restored.
+        again = acl.create_acl_user(gid, tid)
+        assert again["password"] == cred["password"]
+        cfg = acl.acl_user_config(gid)
+        cmds = set(cfg["commands"])
+        assert "+@all" not in cmds
+        assert cfg["keys"] == [f"~{ns}"]
+        assert {"+graph.query", "+graph.ro_query", "+ping"} <= cmds
     finally:
         acl.drop_acl_user(gid)
 
@@ -359,3 +400,19 @@ def test_open_default_strict_provision_503(acl_env, monkeypatch):
         params={"tid": tid},
     ).result_set
     assert rows[0][0] == 1  # fixture graph only — provisioned graph rolled back
+
+
+def test_team_purge_drops_custom_graph_users(acl_env):
+    """Second-model S1 pin: _drop_team_acl_users enumerates the team's
+    custom graphs and drops their ACL users (team-delete purge path) — no
+    orphaned tenant users when a team is cascade-deleted."""
+    ha, tid, gid = acl_env["ha"], acl_env["tid"], acl_env["gid"]
+    acl.create_acl_user(gid, tid)
+    g2 = acl_env["sdk"]._graph_create(tid, f"g2-{uuid.uuid4().hex[:8]}",
+                                      kind="custom")
+    acl.create_acl_user(g2["graph_id"], tid)
+    assert acl.acl_user_exists(gid)
+    assert acl.acl_user_exists(g2["graph_id"])
+    ha._drop_team_acl_users(tid)
+    assert not acl.acl_user_exists(gid)
+    assert not acl.acl_user_exists(g2["graph_id"])

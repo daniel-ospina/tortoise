@@ -10649,8 +10649,48 @@ def _drop_team_graph_impl(team_id: str, graph_name: str | None = None) -> None:
             raise
 
 
+def _drop_team_acl_users(team_id: str) -> None:
+    """C4 (#2113, second-model S1): a team-delete purge must drop the ACL
+    users of EVERY custom graph the team minted (the per-graph tenant users
+    are GLOBAL FalkorDB state — leaving them orphans the live credentials
+    forever). Registry: enumerate Graph nodes by team_id (incl. the default
+    node's gid — its drop hook is a harmless no-op, the default graph has
+    no ACL user). Supabase: the graphs table holds custom rows only.
+    Best-effort per graph (a committed purge never fails on a drop)."""
+    from tortoise.supabase_control import (
+        get_control_plane,
+        is_supabase_enabled,
+    )
+    try:
+        if is_supabase_enabled():
+            rows = get_control_plane().query(
+                "graphs", select=["id"],
+                filters=[("team_id", "eq", team_id)],
+            )
+            ids = [r["id"] for r in rows]
+        else:
+            rows = _make_sdk(namespace="registry")._get_registry().query(
+                "MATCH (g:Graph {team_id:$tid}) RETURN g.id",
+                params={"tid": team_id},
+            ).result_set
+            ids = [r[0] for r in rows]
+    except Exception as e:
+        _logger.warning(
+            "team ACL-user enumeration failed for %s (best-effort): %s",
+            team_id, e)
+        return
+    for gid in ids:
+        try:  # noqa: SIM105
+            _acl_user_drop_hook(gid)
+        except Exception:
+            pass
+
+
 def _purge_registry_team(sdk, team_id: str, graph_name: str | None = None) -> None:
     """Cascade-delete a registry team + drop its graph (mirrors sdk.team_delete)."""
+    # C4 (#2113): drop the custom graphs' ACL users BEFORE the nodes go
+    # (the enumeration reads the nodes).
+    _drop_team_acl_users(team_id)
     reg = sdk._get_registry()
     reg.query(
         "MATCH (m:Membership {team_id:$tid}) DETACH DELETE m",
@@ -10741,6 +10781,9 @@ def _purge_deleted_teams() -> None:
                             row.get("graph_name"),
                         )
                     else:
+                        # C4 (#2113): drop the custom graphs' ACL users first
+                        # (the enumeration reads the rows).
+                        _drop_team_acl_users(team_id)
                         _drop_team_graph_strict(team_id, row.get("graph_name"))
                     purge_team_control_plane(cp, team_id)
                     _audit_logger.append(

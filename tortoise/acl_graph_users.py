@@ -276,16 +276,17 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
     (a real recipe/permission problem) — the strict provisioning caller
     rolls back (no graph without its ACL user).
 
-    ONE live secret per graph (code-review): registry mode reuses the
-    stored password when present (idempotent re-runs don't churn); when a
-    NEW password is needed for an EXISTING user (store-miss window — the
-    user exists but no stored credential), SETUSER runs ``resetpass`` first
-    so the orphaned prior secret dies (``>pw`` alone APPENDS — old secrets
-    stay valid). Supabase/hosted mode is create-once: further mints no-op
-    when the user exists and return ``password: None`` (INTENTIONAL — the
-    hosted credential story is C5's / the platform manages DB users; callers
-    must not treat None as an error; per-mint throwaway secrets would
-    accumulate live, never-revoked credentials).
+    ONE live secret per graph + exact command/key state (second-model
+    S2/S3): _setuser issues a FULL ``reset`` before rebuilding, so every
+    upsert heals drift AND leaves exactly one password (re-asserting the
+    same stored secret is churn-free). Registry mode reuses the stored
+    password when present; a fresh one is generated otherwise (the reset
+    kills any orphaned prior secret — no ``>``-append accumulation).
+    Supabase/hosted mode is create-once: further mints no-op when the user
+    exists and return ``password: None`` (INTENTIONAL — the hosted
+    credential story is C5's / the platform manages DB users; callers must
+    not treat None as an error; per-mint throwaway secrets would accumulate
+    live, never-revoked credentials).
     """
     client = _admin_client()
     if client is None:
@@ -303,49 +304,52 @@ def create_acl_user(graph_id: str, team_id: str) -> dict | None:
             return {"username": username, "password": None,
                     "graph": graph_name}
         password = os.urandom(24).hex()
-        _setuser(client, username, graph_name, password, reset=False)
+        if not _setuser(client, username, graph_name, password):
+            return None  # layer down mid-op — fail-soft
         _acl_save(client)
         return {"username": username, "password": password,
                 "graph": graph_name}
-    # Registry (selfhost) mode: reuse the stored password when present.
+    # Registry (selfhost) mode: reuse the stored password when present (the
+    # full-reset upsert keeps ONE live secret either way — no exists-read
+    # TOCTOU, no append churn).
     stored = _stored_acl_password(team_id, graph_id)
-    if stored is not None:
-        password = stored
-        # Re-assert the SAME secret — redis dedups identical >pw rules, so
-        # no churn and exactly one live secret.
-        reset = False
-    else:
-        password = os.urandom(24).hex()
-        # No stored password (fresh graph OR a crash/store-miss left the
-        # user without a mapping) → ALWAYS resetpass first: on a genuinely
-        # fresh user resetpass is a no-op (SETUSER creates it), and on a
-        # store-miss orphan it kills the undisclosed old secret. NOT gated
-        # on a GETUSER exists-read — a false-negative (transient network
-        # blip) would otherwise append a second live secret instead of
-        # rotating (review round-2 TOCTOU).
-        reset = True
-    _setuser(client, username, graph_name, password, reset=reset)
+    password = stored if stored is not None else os.urandom(24).hex()
+    if not _setuser(client, username, graph_name, password):
+        return None  # layer down mid-op — fail-soft
     _registry_store_credential(team_id, graph_id, username, password)
     _acl_save(client)
     return {"username": username, "password": password, "graph": graph_name}
 
 
-def _setuser(client, username: str, graph_name: str, password: str,
-             *, reset: bool) -> None:
-    """Issue ACL SETUSER with the hardened recipe. reset=True prepends
-    resetpass so only the NEW password stays valid (no ``>``-append of a
-    second live secret). Raises AclLayerError on a server-reachable
-    failure."""
-    cmd = ["ACL", "SETUSER", username, "on"]
-    if reset:
-        cmd.append("resetpass")
-    cmd += [f">{password}", f"~{graph_name}", *_GRAPH_COMMANDS]
+def _setuser(client, username: str, graph_name: str, password: str) -> bool:
+    """Issue ACL SETUSER as a FULL RESET to the exact hardened state
+    (second-model S2/S3): ``reset`` clears every prior rule (passwords,
+    keys, commands, channels, on/off) so an existing user with a broader
+    grant (manual admin fix, old recipe, drift) is HEALED — SETUSER would
+    otherwise ACCUMULATE ``~``/``+`` rules and ``+@all``/allkeys would
+    silently persist. ``reset`` also guarantees ONE live secret
+    unconditionally: re-asserting the same stored password is churn-free
+    (same single secret).
+
+    Returns True on success. Raises AclLayerError on a server-side
+    ResponseError (a real recipe/permission failure — the strict caller
+    rolls back). Connection/timeout failures log + return False
+    (layer-down mid-op is fail-soft — never a SPOF, D3)."""
+    cmd = ["ACL", "SETUSER", username, "reset", "on", f">{password}",
+           f"~{graph_name}", *_GRAPH_COMMANDS]
+    import redis as redis_py
     try:
         client.execute_command(*cmd)
-    except Exception as e:
+    except redis_py.ResponseError as e:
         raise AclLayerError(
             f"ACL SETUSER failed for graph {graph_name} (user={username}): "
             f"{e}") from e
+    except Exception as e:
+        logger.warning(
+            "ACL SETUSER connection failure for %s (fail-soft, layer down "
+            "mid-op): %s", username, e)
+        return False
+    return True
 
 
 def drop_acl_user(graph_id: str) -> None:
