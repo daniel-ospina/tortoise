@@ -3014,7 +3014,11 @@ def test_session_capture_tool_registered_and_invokeable(tmp_path, monkeypatch):
             conversation=_CONV, harness="claude", session_id="s-mcp-1727")
         st = _ha._get_onboarding_state("team-1727-mcp")
     assert result.get("session_id") == "s-mcp-1727", result
-    assert "error" not in result, result
+    # #2247: the memory_write_v1 envelope ALWAYS carries the protocol-owned
+    # error key (null on success — build_write_verb pins it, test_write_verb
+    # asserts verb["error"] is None); the pre-verb key-absence assert is
+    # stale and reds every capture on main since #2247 merged.
+    assert result.get("error") is None, result
     assert result.get("turns") == len(_CONV)
     assert st.get("session_capture_receipt_claude"), \
         "MCP capture must set the per-harness receipt"
@@ -3031,7 +3035,8 @@ def test_session_capture_tool_fresh_team_captures(tmp_path, monkeypatch):
         st = _ha._get_onboarding_state("team-1727-mcp")
     assert st.get("session_recording") is True, "read-time default must be ON"
     assert result.get("session_id") == "s-mcp-1927-default", result
-    assert "error" not in result, result
+    # #2247: write-verb envelope carries error=None on success (see above).
+    assert result.get("error") is None, result
     assert result.get("turns") == len(_CONV)
     assert st.get("session_capture_receipt_claude"), \
         "MCP capture must set the per-harness receipt"
