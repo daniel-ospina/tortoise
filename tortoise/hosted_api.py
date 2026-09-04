@@ -5358,36 +5358,36 @@ async def toggle_api_key_enabled(
     from tortoise.supabase_control import user_memberships as _sb_user_memberships
     if is_supabase_enabled():
         cp = get_control_plane()
+        # #2230: honor the ?team_id= pin (session mode) exactly like the
+        # DELETE handler's session lane (get_current_team_session →
+        # _session_user_team) — the dashboard's key table is scoped to the
+        # SELECTED team, so a multi-membership caller acting in team B's
+        # context must never mutate team A's key (pre-#2230 the pin was
+        # silently ignored: a wrong-team key_id succeeded whenever the user
+        # owned both teams). Membership-check the pinned team FIRST, before
+        # any key lookup (mirrors _session_user_team — same 403 as the
+        # mint/list pins, and no cross-team key-existence oracle: a
+        # non-member pin 403s whether or not the key_id exists, identical
+        # to DELETE's DI-time gate). A truthy pin then fails closed on a
+        # key that is not in the pinned team with the SAME 403 DELETE
+        # raises on team mismatch. No pin (or blank ?team_id= — the
+        # dashboard never sends one, and pre-#2230 the endpoint ignored the
+        # query entirely) → the key's intrinsic team governs, fully
+        # backwards compatible. Registry lane below is untouched (selfhost
+        # keys are team-scoped by the key itself).
+        pinned = request.query_params.get("team_id")
+        if pinned and pinned not in {m["team_id"]
+                                     for m in _sb_user_memberships(
+                                         cp, user["user_id"])}:
+            raise HTTPException(status_code=403,
+                                detail="No membership in team")
         row = api_key_by_id(cp, key_id)
         if row is None:
             raise HTTPException(status_code=404, detail="API key not found")
         team_id = row.get("team_id")
-        # #2230: honor the ?team_id= pin (session mode) exactly like the
-        # DELETE handler's session resolution — the dashboard's key table is
-        # scoped to the SELECTED team, so a multi-membership caller acting in
-        # team B's context must never mutate team A's key (pre-#2230 the pin
-        # was silently ignored: a wrong-team key_id succeeded whenever the
-        # user owned both teams). Membership-check the pinned team first
-        # (mirrors _session_user_team — same 403 as the mint/list pins, no
-        # existence oracle), then fail closed on a key that is not in the
-        # pinned team with the SAME 403 DELETE raises on team mismatch. No
-        # pin → the key's intrinsic team governs (fully backwards
-        # compatible). Registry lane below is untouched (selfhost keys are
-        # team-scoped by the key itself).
-        pinned = request.query_params.get("team_id")
-        # Truthy check (mirrors _session_user_team's falsy fallback): an
-        # empty/blank ?team_id= is "no pin" — the key's intrinsic team
-        # governs, byte-compatible with the DELETE/mint lanes. A real pin
-        # fails closed exactly like DELETE's session team-mismatch.
-        if pinned:
-            if pinned not in {m["team_id"]
-                              for m in _sb_user_memberships(cp,
-                                                            user["user_id"])}:
-                raise HTTPException(status_code=403,
-                                    detail="No membership in team")
-            if pinned != team_id:
-                raise HTTPException(status_code=403,
-                                    detail="Not your API key")
+        if pinned and pinned != team_id:
+            raise HTTPException(status_code=403,
+                                detail="Not your API key")
         await _require_owner_admin(user["user_id"], team_id)
         if row.get("revoked_at") is not None:
             raise HTTPException(status_code=409, detail="Cannot modify a revoked key")

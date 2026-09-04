@@ -17,21 +17,43 @@ import { dirname, join } from 'node:path'
 
 const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
 
-test('#2230: every key-management DELETE/PATCH URL is ?team_id=-pinned (ends with the ${q} pin)', () => {
-  // A key-write URL is `/v1/team/keys/${<id>}`; the pin variable is `q`
-  // (rule-4 convention, same as mintKey's create-side pin). Any occurrence
-  // NOT immediately followed by `${q}` is an unpinned write.
-  const unpinned = mainJsx.match(/\/v1\/team\/keys\/\$\{[^}]+\}(?!\$\{q\})/g) || []
-  assert.deepEqual(unpinned, [],
-    `key-management DELETE/PATCH URLs must append the ?team_id= pin (\${q}): ${unpinned}`)
+// The three #2230 key-management WRITE functions. Their bodies are sliced so
+// each site's URL + q construction are checked TOGETHER — a global count
+// cannot catch one site regressing while others stay pinned.
+const WRITE_FNS = ['toggleKeyEnabled', 'renameKey', 'revokeKey']
+
+function writeFnBody(name) {
+  const start = mainJsx.indexOf(`async function ${name}(`)
+  assert.notEqual(start, -1, `could not locate async function ${name} in main.jsx`)
+  const next = mainJsx.indexOf('\n  async function ', start + 1)
+  const end = next === -1 ? mainJsx.length : next
+  return mainJsx.slice(start, end)
+}
+
+test('#2230: each key-management write (revoke/rename/toggle) pins ?team_id= on its URL', () => {
+  for (const fn of WRITE_FNS) {
+    const body = writeFnBody(fn)
+    // The key-write api() URL is `/v1/team/keys/${<id>}` and must be
+    // IMMEDIATELY followed by the pin variable `${q}` — any occurrence not
+    // suffixed with `${q}` is an unpinned write (rule-4 convention, same as
+    // mintKey's create-side pin).
+    const unpinned = body.match(/\/v1\/team\/keys\/\$\{[^}]+\}(?!\$\{q\})/g) || []
+    assert.deepEqual(unpinned, [],
+      `${fn}: key-management URL must append the ?team_id= pin (\${q}): ${unpinned}`)
+    const pinned = body.match(/\/v1\/team\/keys\/\$\{[^}]+\}\$\{q\}/g) || []
+    assert.equal(pinned.length, 1,
+      `${fn}: expected exactly one pinned key-write URL, got ${pinned.length}`)
+  }
 })
 
 test('#2230: the pin is session-conditional in every key-write caller (key mode stays unpinned)', () => {
-  // The rule-4 q is `(sessionTokenRef.current && <selected team>) ? '?team_id=…' : ''` —
-  // grep the three pinned call sites and require each to live beside a
-  // sessionTokenRef.current-gated q construction (defense in depth: a
-  // hardcoded ?team_id= would break the key-auth/claim surface).
-  const qBuilds = mainJsx.match(/sessionTokenRef\.current && \w+\) \? `\?team_id=/g) || []
-  assert.ok(qBuilds.length >= 3,
-    `expected >= 3 session-gated ?team_id= pin constructions (revoke/rename/toggle), got ${qBuilds.length}`)
+  // The rule-4 q is `(sessionTokenRef.current && <selected team>) ? '?team_id=…' : ''`.
+  // Each write function must build its OWN session-gated q beside its URL — a
+  // hardcoded/unconditional ?team_id= would break the key-auth/claim surface.
+  for (const fn of WRITE_FNS) {
+    const body = writeFnBody(fn)
+    assert.match(body, /const q = \(sessionTokenRef\.current && \w+\) \? `\?team_id=/,
+      `${fn}: must construct the pin as (sessionTokenRef.current && <team>) ? \`?team_id=…\` : '' — ` +
+      'a hardcoded ?team_id= would break the key-auth/claim surface')
+  }
 })

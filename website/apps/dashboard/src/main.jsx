@@ -4203,8 +4203,9 @@ function claimIntentInFlight() {
       // the server PATCH honors ?team_id= membership-checked (fail-closed on
       // a key outside the pinned team), so a multi-membership user on a
       // non-first team toggles the key their table shows, never the default
-      // membership's (mirrors #2167 rule-4 create-side pin). Key-mode (no
-      // session JWT) stays unpinned — the key header authenticates there.
+      // membership's (mirrors #2167 rule-4 create-side pin). The endpoint is
+      // session-only (#1148 — a raw key 401s here), so the session-gated
+      // pin covers the only reachable auth surface.
       const q = (sessionTokenRef.current && currentTeamId) ? `?team_id=${encodeURIComponent(currentTeamId)}` : ''
       const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',

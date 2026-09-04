@@ -654,6 +654,12 @@ class TestKeyManagementTeamPins:
                          json={"name": "bravo-ci"})
         assert r.status_code == 200, r.text
         assert r.json()["name"] == "bravo-ci"
+        # Persistence, not just the response echo (the handler builds the
+        # response name from the request — a silently dropped _sb_set_name
+        # write would otherwise false-pass).
+        row = fake.query("api_keys", select=["name"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row.get("name") == "bravo-ci"
 
     def test_patch_toggle_non_first_team_key_pinned_200(self, client, fake, monkeypatch):
         """#2230 target flow: enable/disable (PATCH {enabled}) with
@@ -711,6 +717,20 @@ class TestKeyManagementTeamPins:
                          json={"name": "x"})
         assert r.status_code == 403, r.text
         assert "No membership in team" in str(r.json())
+
+    def test_patch_non_member_pin_unknown_key_403_no_oracle(self, client, fake, monkeypatch):
+        """#2230 (code-review P2): the membership gate precedes the key
+        lookup — a non-member pin 403s even when the key_id exists NOWHERE
+        (no cross-team key-existence oracle). Pre-fix the api_key_by_id 404
+        fired first, so a guessed key_id on an unclaimed team answered 404
+        vs 403 — the exact divergence DELETE's DI-time gate never had."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        _, teamC = _provision_anon(client, fake)  # third team, NOT claimed
+        r = client.patch(f"/v1/team/keys/{uuid.uuid4()}?team_id={teamC}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"name": "x"})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "No membership in team"
 
     def test_patch_no_pin_still_works_backwards_compatible(self, client, fake, monkeypatch):
         """The pin is additive: a PINLESS multi-membership PATCH keeps today's
