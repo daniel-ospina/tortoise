@@ -1815,6 +1815,9 @@ class TestSessionCaptureWriteVerb:
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["protocol_version"] == "memory_write_v1"
+        # facts={} -> every extracted point is skipped -> the verb is
+        # PARTIAL, never an unqualified ok over unverifiable points.
+        assert body["status"] == "partial"
         assert any("enrichment read failed" in w for w in body["warnings"])
 
 

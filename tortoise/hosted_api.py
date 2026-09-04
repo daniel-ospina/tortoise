@@ -5948,6 +5948,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # the W2 benchmark grades provenance_accuracy over these
                 # fields; a write without them is the PROVENANCE_MISSING
                 # rejection (write_verb.assert_provenance).
+                # NAMESPACE NOTE (review round-2, deferred): mining.py:518
+                # (_temporal_wire) also SETs n.source_session with MINING
+                # values — a mining post-pass over capture-derived points
+                # can overwrite this stamp.  Reconcile (rename/coalesce)
+                # before W2 provenance_accuracy reads source_session;
+                # tracked on #2104.
                 # P2-1 (review): FalkorDB SET null DELETES the property — a
                 # no-harness capture (T1-P3: harness optional) must still
                 # carry a provenance field, so None normalizes to "unknown"
@@ -6258,6 +6264,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         STATUS_PARTIAL,
         build_write_verb,
     )
+    skipped = 0
     if extracted:
         try:
             # P1 (review round 1): the enrichment read runs AFTER the writes
@@ -6270,7 +6277,6 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
                 params={"ids": [p["id"] for p in extracted]},
             ).result_set
-            found = {r[0] for r in rows}
             facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
                      for r in rows}
         except Exception:
@@ -6279,16 +6285,21 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "write-verb enrichment read failed (non-fatal)")
             extraction_warnings.append(
                 "write-verb enrichment read failed (non-fatal)")
-            found, facts = set(), {}
+            facts = {}
+        skipped = 0
         for p in extracted:
-            # Facts are reported ONLY for ids the graph actually returned —
-            # a swept/deleted point (W6 delete race) or a failed M2 write
-            # must never be fabricated as live/new (anti-gaming, P2-2).
+            # Facts are applied ONLY for ids the graph actually returned —
+            # a swept/deleted point (W6 delete race) or a failed M2 write is
+            # NEVER fabricated as live/new (anti-gaming, P2-2).  The raw
+            # extractor dict still rides resp["points"] un-enriched (its own
+            # draft/kind claims — honest as extractor output), the additive
+            # warning says so, and the verb downgrades to partial.
             pid = p.get("id")
-            if pid not in found or pid not in facts:
+            if pid not in facts:
+                skipped += 1
                 extraction_warnings.append(
                     f"point {pid} missing from graph post-write — "
-                    "not reported in the write verb")
+                    "reported un-enriched in the write verb")
                 continue
             kind, status, has_ep = facts[pid]
             # Graph truth wins over the extractor's claimed kind (P2-2).
@@ -6300,7 +6311,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             p["ep_updated"] = has_ep
             p["dedup"] = DEDUP_NEW
     verb_status = STATUS_OK
-    if extraction_errors:
+    if extraction_errors or skipped:
+        # skipped: at least one extracted point could not be verified
+        # post-write — the verb is partial, never an unqualified ok.
         verb_status = STATUS_PARTIAL
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
