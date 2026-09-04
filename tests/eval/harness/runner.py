@@ -527,6 +527,17 @@ def run_benchmark(
     baseline = pf["baseline"]
     fixtures_hash = pf["fixtures_hash"]
     run_mode = resolved_config.get("mode", "BPRE")
+    if run_mode not in ("BPRE", "full"):
+        # Fail-closed posture (round-3 P2): an unknown mode string must not
+        # silently take the full-corpus branch (a typo'd 'bpre' would grade
+        # the frozen W4 holdout).
+        return _failed_report(
+            run_id, date, commit, corpus.compute_fixtures_hash(root),
+            resolved_config,
+            origin="runner_error",
+            detail=f"unknown mode {run_mode!r} (expected 'BPRE' or 'full')",
+            log=log,
+        )
     # mode_corpus = the MODE-IMPLIED session set (the comparison surface a
     # committed BPRE baseline is blessed against): BPRE excludes the pinned
     # holdout; full includes it.  Independent of any explicit session_ids.
@@ -535,7 +546,12 @@ def run_benchmark(
                        if s not in corpus.holdout_ids(root)]
     else:
         mode_corpus = corpus.session_ids(root)
-    selected = list(session_ids) if session_ids else mode_corpus
+    if session_ids is not None:
+        selected = list(session_ids)
+        partial = set(selected) != set(mode_corpus)
+    else:
+        selected = mode_corpus
+        partial = False
     # holdout_excluded derives from the ACTUAL replay selection (review
     # round-2 P1): an explicit session_ids that includes pinned holdout
     # sessions must not bless/compare under a config claiming exclusion —
@@ -559,6 +575,14 @@ def run_benchmark(
         return _failed_report(
             run_id, date, commit, fixtures_hash, resolved_config,
             origin="runner_error", detail=f"unknown sessions: {missing}", log=log,
+        )
+    if partial:
+        notes.append(
+            "PARTIAL selection: explicit session_ids differs from the "
+            f"mode-implied corpus ({len(selected)} of {len(mode_corpus)} "
+            "sessions) — debug-only; the run is forced INCONCLUSIVE (never "
+            "passes a committed baseline; a session-level excision would "
+            "otherwise duck a one-fixture regression — round-3 P1)"
         )
 
     cells: dict[str, object] = {}
@@ -750,6 +774,17 @@ def run_benchmark(
             failure_origin = "judge_pin_mismatch"
         elif not (baseline.get("metrics") or {}):
             failure_origin = None  # first-run-pending
+    # Round-3 P1: a PARTIAL selection (explicit session_ids ≠ the
+    # mode-implied corpus) can never PASS a committed baseline — a
+    # within-suite session excision would otherwise duck a one-fixture
+    # regression with a byte-identical config.
+    if partial and verdict == schema.VERDICT_PASS:
+        verdict = schema.VERDICT_INCONCLUSIVE
+        failure_origin = "config_mismatch"  # selection ≠ blessed corpus
+        notes.append(
+            "partial-selection run forced INCONCLUSIVE (config_mismatch): "
+            "the selection does not reproduce the mode-implied gate corpus"
+        )
     if not cost_tracked:
         notes.append(
             "cost not tracked: the capture seam reported no llm_cost_usd — "

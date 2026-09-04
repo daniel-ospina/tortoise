@@ -286,3 +286,39 @@ def test_explicit_holdout_inclusion_is_incomparable(sdk_factory):
     assert report["resolved_config"]["mode"] == "BPRE"
     assert any("includes pinned holdout" in n for n in report["notes"])
     assert report["verdict"] == schema.VERDICT_INCONCLUSIVE
+
+
+def test_within_suite_session_excision_cannot_pass(sdk_factory):
+    """Review round-3 P1: excising ONE session while keeping every suite
+    (and both isolation teams) yields a config byte-identical to the
+    committed baseline — the run MUST still be forced INCONCLUSIVE (a
+    one-fixture regression would otherwise be duckable)."""
+    # Drop wb01 only: all suites + both teams remain represented.
+    excised = [s for s in corpus.session_ids()
+               if s not in corpus.holdout_ids() and s != "wb01_meeting_notes"]
+    assert len(excised) == len(corpus.session_ids()) - len(corpus.holdout_ids()) - 1
+    report = runner.run_benchmark(session_ids=excised)
+    assert report["run_status"] == "completed"
+    assert any("PARTIAL selection" in n for n in report["notes"])
+    assert any("forced INCONCLUSIVE" in n for n in report["notes"])
+    assert report["verdict"] == schema.VERDICT_INCONCLUSIVE
+    assert report["failure_origin"] == "config_mismatch"
+
+
+def test_empty_session_selection_is_an_error(sdk_factory):
+    """Review round-3 P2: session_ids=[] must NOT silently fall through to
+    a full-corpus green (falsy trap) — an explicit empty selection is a
+    runner error."""
+    report = runner.run_benchmark(session_ids=[])
+    assert report["run_status"] == "failed"
+    assert report["failure_origin"] == "runner_error"
+    assert any("no sessions selected" in line for line in report["log"])
+
+
+def test_unknown_mode_fails_closed(sdk_factory):
+    """Review round-3 P2: an unknown mode string must not silently take the
+    full-corpus branch (a typo'd 'bpre' would grade the frozen holdout)."""
+    report = runner.run_benchmark(config={"mode": "bpre"})
+    assert report["run_status"] == "failed"
+    assert report["failure_origin"] == "runner_error"
+    assert any("unknown mode" in line for line in report["log"])
