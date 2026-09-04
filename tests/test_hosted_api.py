@@ -1643,6 +1643,141 @@ class TestSessionCapture:
         assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
 
 
+class TestSessionCaptureWriteVerb:
+    """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
+    verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
+    per-point status/ep_updated/dedup enriched in place (D8 additive); the
+    provenance stamp carries source_session/source_harness/ingested_at
+    (S1); and the gate order pins the S2 amendment (boundary 422 precedes
+    the recording-off 409)."""
+
+    CONVERSATION = [  # noqa: RUF012
+        {"role": "user", "content": "W5 write-verb provenance contract test."},
+    ]
+
+    def test_capture_response_speaks_write_verb(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-verb-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        assert body["status"] in ("ok", "partial")
+        assert body["error"] is None
+        prov = body["provenance"]
+        assert prov["source_session"] == "w5-verb-session"
+        assert prov["source_harness"] == "codex"
+        assert prov["ingested_at"]
+        # Legacy surface intact (D8) + per-point verb facts enriched.
+        assert body["extracted"] == len(body["points"])
+        for p in body["points"]:
+            assert "ep_updated" in p and "dedup" in p and "status" in p
+            assert p.get("point_id") == p.get("id")  # frozen-verb schema alias
+
+    def test_capture_no_harness_normalizes_provenance_unknown(self, client):
+        """P2-1 (review): a no-harness capture (T1-P3: harness optional) must
+        still carry a complete provenance — source_harness normalizes to
+        "unknown" in the stamp AND the envelope (FalkorDB SET null would
+        DELETE the property, leaving provenance incomplete)."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-noharness-session",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["provenance"]["source_harness"] == "unknown"
+        import tortoise.hosted_api as ha_mod
+        ids = [p["id"] for p in body["points"]]
+        if ids:
+            rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.source_harness",
+                params={"ids": ids},
+            ).result_set
+            for row in rows:
+                assert row[0] == "unknown"
+
+    def test_capture_points_stamped_with_provenance(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-provenance-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert ids, "mock extraction produced no points"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+            "n.source_session, n.source_harness, n.ingested_at, n.eventId",
+            params={"ids": ids},
+        ).result_set
+        by_id = {r[0]: r for r in rows}
+        for pid in ids:
+            assert pid in by_id, f"{pid} missing from graph"
+            _id, src_sess, src_har, ingested, event_id = by_id[pid]
+            assert src_sess == "w5-provenance-session"
+            assert src_har == "pi"
+            assert ingested
+            assert event_id  # ontology-compliant provenance kept
+
+    def test_capture_gate_boundary_422_before_409(self, client):
+        """S2 amendment (verified order): the boundary 422 (invalid harness
+        — Pydantic SessionRequest validation, fires before the handler on
+        REST) precedes the recording-off 409.  Recording off must never mask
+        a malformed payload."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "harness": "not-a-real-harness",  # boundary failure
+        })
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "harness" in r.text.lower()
+
+    def test_capture_gate_409_when_recording_off(self, client):
+        """Recording off + VALID payload -> 409 (state-conflict), no Session
+        write, no receipt."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-recording-off-session",
+        })
+        assert r.status_code == 409, r.text
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": "w5-recording-off-session"},
+        ).result_set
+        assert rows[0][0] == 0  # no Session write when recording off
+
+    def test_capture_replay_zero_new_nodes_verb_ok(self, client):
+        """Idempotency: re-POST of the same session_id (recording on) writes
+        0 new nodes — extraction is skipped, the verb still speaks ok."""
+        for _ in range(2):
+            r = client.post("/v1/sessions", json={
+                "conversation": self.CONVERSATION,
+                "session_id": "w5-replay-session",
+            })
+            assert r.status_code == 200, r.text
+        first = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-replay-session",
+        }).json()
+        assert first["protocol_version"] == "memory_write_v1"
+        # A replay extracts nothing new: the verb reports the (empty)
+        # point set honestly.
+        assert first["extracted"] == 0
+
+
 class TestSessionList:
     """GET /v1/sessions — list captured sessions."""
 

@@ -2744,12 +2744,14 @@ def tortoise_session_capture(conversation: list[dict],
                              session_id: str | None = None) -> dict:
     """File an agent session into the graph (T3 workflows prompt surface).
 
-    Server-enforced gates (identical to POST /v1/sessions): the team's
-    ``session_recording`` opt-out flag is checked FIRST (409 when disabled),
-    then the provider 503 / quota 402 / empty-422 gates. Returns the capture
-    result on success, or an honest error dict on failure (the per-harness
-    last-error state key is recorded on non-2xx, cleared on 2xx — same
-    receipt semantics as the REST path).
+    Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
+    #2093 S2): boundary 422 (invalid harness/shape — SessionRequest
+    construction below) -> 409 (recording off) -> 503 (no provider) -> 400
+    (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
+    capture result (a memory_write_v1 envelope, #2104) on success, or an
+    honest error dict on failure (the per-harness last-error state key is
+    recorded on non-2xx, cleared on 2xx — same receipt semantics as the
+    REST path).
     """
     from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits  # noqa: I001
     team_id = _current_team_id.get()
