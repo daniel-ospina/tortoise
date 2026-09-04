@@ -2527,6 +2527,16 @@ function claimIntentInFlight() {
             // teams' — fail CLOSED to the error card rather than flipping an
             // existing user into a surprise provisioning (key rotation).
             if (teamsSuspendDetail) {
+              // #2167 round-3 (P3): the adjacent 200 branch re-checks the
+              // session token (Round-12) — a SIGNED_OUT racing the 403 must
+              // not land the blocking suspension card on an ended-session
+              // tab; fall through to the tail's end-session handling instead.
+              if (sessionTokenRef.current !== session.access_token) {
+                setAuthed(false)
+                setMountError('Your session ended — sign in again.')
+                setChecking(false)
+                return
+              }
               setAuthed(false)
               setMountError(teamsSuspendDetail.message || 'Organization suspended')
               setSuspended(teamsSuspendDetail)
@@ -2637,6 +2647,9 @@ function claimIntentInFlight() {
         // above) must not be clobbered — capture the selection and skip the
         // writes if it moved.
         const teamAtProbe = teamIdRef.current
+        // #2167 (round-3 reviewer P2): probeDecision is hoisted so the
+        // mid-probe bail below can consult it (a probe-less mount has none).
+        let probeDecision = null
         if (storedKey && teamsList.length) {
           let probeStatus = 0
           let probeBody = null
@@ -2654,6 +2667,7 @@ function claimIntentInFlight() {
             selectionSnapshot: teamAtProbe,
             selectionNow: teamIdRef.current,
           })
+          probeDecision = decision
           if (decision.action === 'adopt') {
             // 5b: probe 200 + the stored key's team ∈ memberships + the
             // selection did not move mid-probe → ADOPT. PROVISIONAL (P2,
@@ -2718,17 +2732,19 @@ function claimIntentInFlight() {
           // UI — unrecoverable), and a membership-gone key is reaped only
           // by a later durable-flow overwrite (pre-existing semantics).
         }
-        // #2167 (round-2 reviewer P3): a mid-probe switch/recoverKey owns
-        // the key state — bail the state-clearing tail + duplicate loads.
-        // The pre-change continuation had the same guard via mintedTeamId;
-        // without it, a probe resolving AFTER the user moved to another team
-        // (or installed a deliberate durable via recoverKey) would clobber
-        // that team's apiKey state with ''/null and fire a duplicate
-        // completeLogin. The dead-key material drops above already ran where
-        // warranted (and their slot write is equality-guarded); the moved
-        // selection's own loadAll/completeLogin finishes untouched. The slot
-        // itself is never rewritten here, so nothing leaks across mounts.
-        if (teamAtProbe !== null && teamIdRef.current !== teamAtProbe) return
+        // #2167 (round-3 reviewer P2 — shape correction): a mid-probe
+        // switch/recoverKey owns the key state — bail the state-clearing tail
+        // + duplicate loads when the selection moved WHILE the probe was in
+        // flight (the chrome renders before the probe resolves, so a
+        // multi-membership user CAN click another team mid-probe; H4 already
+        // refuses adopt under a moved selection). The pre-change continuation
+        // had the same guard via mintedTeamId. Adopt is exempt: it fires only
+        // on an unmoved selection (H4 gates selectionNow === selectionSnapshot)
+        // and pins the key's team — never under a move. The dead-key material
+        // drops above already ran where warranted (their slot write is
+        // equality-guarded); the moved selection's own loadAll/completeLogin
+        // finishes untouched.
+        if ((!probeDecision || probeDecision.action !== 'adopt') && teamIdRef.current !== teamAtProbe) return
         // #1912 (phase-7 reviewer 1 P1): the mount mint was the ONLY fresh-
         // session team pin before completeLogin. On every no-key / drop /
         // transient landing, pin the first HEALTHY team BEFORE completeLogin
