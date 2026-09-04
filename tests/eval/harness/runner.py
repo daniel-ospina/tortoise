@@ -742,7 +742,7 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
             break  # deterministic failure — retrying won't help
         print(
             f"run attempt {attempt} hit a capture flake (LLM extraction); "
-            "retrying the whole hermetic run (attempt {attempt + 1}/3)",
+            f"retrying the whole hermetic run (attempt {attempt + 1}/3)",
             file=sys.stderr,
         )
     if report["run_status"] != "completed":
@@ -768,6 +768,18 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
         print(f"bless rejected: {exc}")
         return 3
     _write_json(baseline_path, blessed)
+    # Persist the validated receipt NEXT TO the bless (the publish artifact
+    # pins the run that PRODUCED the blessed numbers — never a later,
+    # jitter-different replay).
+    receipt = build_receipt(report, justification=justification)
+    receipt_issues = validate_receipt(receipt)
+    if receipt_issues:
+        print("RECEIPT ISSUES: " + "; ".join(receipt_issues))
+        return 3
+    receipts_dir = corpus.RECEIPTS_DIR
+    receipts_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = receipts_dir / f"w3h-{report['run_id']}.json"
+    _write_json(receipt_path, receipt)
     print(
         f"blessed {baseline_path.name}: "
         + json.dumps({
@@ -775,6 +787,7 @@ def _bless_main(root: Path, posture: str, justification: str, run_id: str | None
             for k, v in report["metrics"].items()
         })
     )
+    print(f"receipt: {receipt_path}")
     return 0
 
 

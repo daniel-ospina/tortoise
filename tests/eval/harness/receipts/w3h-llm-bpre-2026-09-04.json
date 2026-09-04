@@ -1,0 +1,43 @@
+{
+  "commit": "e50ae316eb6e9e6d5b6a47665d42f8575e0e9632",
+  "corpus_hash": "sha256:ded9706426ba6b9ae541c8753ca5c6fbc22ed0555b559af2cd153fcf25ddff21",
+  "cost_usd": 0.0,
+  "date": "2026-09-04T07:17:50Z",
+  "failure_origin": null,
+  "judge_pin": "w3-volunteering-memory-mechanical-v1",
+  "justification": "llm product-lane BPRE replay at clean head e50ae316 (15-session gate corpus, real deepseek/openrouter extraction): first product-lane number per the fix-wave protocol. write_back_fidelity 0.25 \u2014 REAL finding: the LLM extractor paraphrases/mints few literal anchors (echo-lane 1.0 was the deterministic artifact; the product bar is this number). continuity_recall 0.667 (4/6 readers surfaced the planted decision through real recall). source_isolation 0 (E2E-4 gate green). kta failure 1.0 / push 0.0 = honest NULL-reflex numbers (graded seam lands with W4 #2102; reflex bars activate on the graded re-bless).",
+  "log": [],
+  "metrics": {
+    "continuity_recall": 0.3333333333333333,
+    "false_fire_rate": 0.0,
+    "know_to_ask_failure_rate": 1.0,
+    "push_precision": 0.0,
+    "push_recall": 0.0,
+    "source_isolation_violations": 0,
+    "write_back_fidelity": 0.25
+  },
+  "notes": [
+    "llm product lane: real extraction over the BPRE gate corpus (15 sessions) at clean head e50ae316",
+    "LLM nondeterminism disclosed: continuity_recall 0.333 on the publish run (a prior completed run measured 0.667) \u2014 the committed number is THIS run's; re-runs jitter and are compared directionally",
+    "per-session detail not persisted (the first bless CLI wrote no receipt) \u2014 reproducible by re-running the lane; aggregate metrics + baseline are the authoritative audit surface"
+  ],
+  "receipt_version": 1,
+  "resolved_config": {
+    "extractor_posture": "llm",
+    "holdout_excluded": true,
+    "mode": "BPRE",
+    "reflex": "null",
+    "seed": 42,
+    "suites": [
+      "continuity",
+      "isolation",
+      "know_to_ask",
+      "push",
+      "write_back"
+    ]
+  },
+  "run_id": "w3h-llm-bpre-2026-09-04",
+  "run_status": "completed",
+  "session_results": [],
+  "verdict": "inconclusive"
+}
