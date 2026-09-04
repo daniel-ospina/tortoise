@@ -20,6 +20,7 @@ ownedBy: epistemic-team
 | Ontology | `docs/ONTOLOGY.md` |
 | Registry graph schema | `docs/registry-graph-schema.md` |
 | Retrieval latency benchmark runbook (#316) | `benchmarks/README.md` |
+| Memory-system comparison table + publication/errata discipline (epic #2080 W7) | `docs/benchmarks/comparison-systems.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
 | Auth planes — sessions vs machine credentials (ADR-010, #2246) | `docs/adr/ADR-010-auth-planes-session-agent-key.md` |
 | #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |
