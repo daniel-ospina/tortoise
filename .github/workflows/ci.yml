@@ -190,6 +190,7 @@ jobs:
               # convention; deploy-pages rebuilds from src at deploy).
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
+                  isfile("tests/e2e/test_graphs_management.py"),
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
                   startswith("website/apps/dashboard/src/"),
@@ -762,7 +763,7 @@ jobs:
       - name: Run keys-table mixed-fixture e2e (#2166/#2178)
         run: >
           RUN_DASHBOARD_E2E=1
-          python -m pytest tests/e2e/test_keys_table_mixed.py
+          python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
