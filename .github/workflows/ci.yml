@@ -509,19 +509,32 @@ jobs:
       # legal-e2e job) instead of the LIVE page — the strict-validity gates,
       # the provision-401 clear→/auth path and the waitForSession validity
       # check land in this PR and only exist in the deployed page AFTER merge.
+      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
+      # clock starts — a fresh runner's npx fetch was eating most of the 120s
+      # boot budget (empty /tmp/wrangler.log = cold npx install never finished).
+      - name: Pre-warm wrangler toolchain
+        run: |
+          npx --yes wrangler@4 --version
+          npx --yes wrangler@4 pages dev --help >/dev/null
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
-          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
-            --compatibility-date=2024-09-23 \
-            > /tmp/wrangler.log 2>&1 &
-          echo $! > /tmp/wrangler.pid
-          for i in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-              echo "wrangler dev ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
+          for attempt in 1 2; do
+            npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 \
+              > /tmp/wrangler.log 2>&1 &
+            echo $! > /tmp/wrangler.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+                echo "wrangler dev ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8788' 2>/dev/null || true
+            sleep 3
           done
           echo "::error::wrangler dev server failed to start"
           tail -50 /tmp/wrangler.log || true
@@ -564,6 +577,15 @@ jobs:
       # tortoise/__init__) + the e2e test extras (playwright, pytest-playwright).
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
+      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
+      # clock starts — a fresh runner's npx fetch was eating most of the 120s
+      # boot budget (empty /tmp/wrangler.log = cold npx install never finished;
+      # #2211 hit this 4x in a row 2026-09-04). --version is fast; the
+      # readiness loop below retries twice at 240s each.
+      - name: Pre-warm wrangler toolchain
+        run: |
+          npx --yes wrangler@4 --version
+          npx --yes wrangler@4 pages dev --help >/dev/null
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
@@ -571,18 +593,24 @@ jobs:
           # bundled workerd lags a day behind (max date < today) → dev server
           # fails to start. Any stable date ≤ workerd's max works; the
           # middleware uses only stable APIs (next()/ASSETS.fetch).
-          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
-            --compatibility-date=2024-09-23 \
-            > /tmp/wrangler.log 2>&1 &
-          echo $! > /tmp/wrangler.pid
-          # Wait for the dev server to accept connections (first start also
-          # downloads workerd + bundles website/functions/_middleware.ts).
-          for i in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-              echo "wrangler dev ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
+          for attempt in 1 2; do
+            npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 \
+              > /tmp/wrangler.log 2>&1 &
+            echo $! > /tmp/wrangler.pid
+            # Wait for the dev server to accept connections (first start also
+            # downloads workerd + bundles website/functions/_middleware.ts).
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+                echo "wrangler dev ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8788' 2>/dev/null || true
+            sleep 3
           done
           echo "::error::wrangler dev server failed to start"
           tail -50 /tmp/wrangler.log || true
