@@ -79,8 +79,9 @@ def test_index_github_local_extracts_points(markdown_repo, embedded_db_path, mon
     extract_from_document API is used (no ModuleNotFoundError for
     tortoise.extraction_pipeline).
     """
-    # Isolate the idempotency hash file (~/.tortoise) and the EventLog
-    # (gettempdir) under tmp_path — never leak /tmp dirs between runs.
+    # Isolate the idempotency hash file (~/.tortoise) under tmp_path — never
+    # leak into the real home. (tempdir is NOT patched — see
+    # _isolated_index_env: a global tempdir redirect breaks embedded boots.)
     _isolated_index_env(monkeypatch, tmp_path)
 
     # --db is a file path → embedded directly; no Docker connection attempted
@@ -196,23 +197,33 @@ always have a runnable fallback.
 
 
 def _isolated_index_env(monkeypatch, tmp_path):
-    """Isolate the indexer's two system-temp side effects per test.
+    """Isolate the indexer's Path.home side effect per test.
 
-    (1) Path.home — the idempotency hash file lives at ~/.tortoise; (2)
-    tempfile.gettempdir — the EventLog lands at /tmp/tortoise-index-<repo>.
-    Both move under pytest's auto-cleaned tmp_path so index tests neither leak
-    /tmp dirs nor share the same EventLog when they reuse a repo name (#2201
-    review: cross-test isolation).
+    The idempotency hash file lives at ~/.tortoise — move it under pytest's
+    auto-cleaned tmp_path so index tests never touch the real home.
+    tempfile.gettempdir is deliberately NOT patched: the DB connect is
+    deferred — inside _cmd_index_github, FalkorProjection(path=...) boots
+    embedded FalkorDBLite (redislite), which creates its runtime artifacts
+    via tempfile.gettempdir() AT CONNECT TIME. A process-global tempdir
+    redirect therefore breaks every embedded DB test (the patched dir does
+    not exist / redislite cannot run with a redirected system tempdir). The
+    EventLog (/tmp/tortoise-index-<repo>.jsonl) is written but never read
+    by any test, so it needs no isolation; tests that reuse a repo leaf
+    name pass distinct leaves to _dangling_symlink_repo instead.
     """
     fake_home = tmp_path / "fake-home"
     monkeypatch.setattr(Path, "home", lambda: fake_home)
-    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path / "logs"))
 
 
-def _dangling_symlink_repo(tmp_path):
+def _dangling_symlink_repo(tmp_path, leaf: str = "dangling-repo"):
     """Minimal repo: one indexable doc + a dangling symlink named like the
-    #2201 repro (data/ONTOLOGY.md -> a missing file in another dev's home)."""
-    repo = tmp_path / "dangling-repo"
+    #2201 repro (data/ONTOLOGY.md -> a missing file in another dev's home).
+
+    `leaf` names the repo dir under tmp_path — DB-backed tests pass distinct
+    leaves so their shared /tmp/tortoise-index-<leaf>.jsonl EventLog files
+    never collide across tests (#2201 review).
+    """
+    repo = tmp_path / leaf
     repo.mkdir()
     (repo / "architecture.md").write_text(_INDEXABLE_DOC)
     (repo / "data").mkdir()
@@ -268,7 +279,7 @@ def test_index_github_excludes_non_content_dirs(embedded_db_path, monkeypatch,
     path file, discoverable but unreadable → skipped at read) remain."""
     _isolated_index_env(monkeypatch, tmp_path)
 
-    repo = _dangling_symlink_repo(tmp_path)
+    repo = _dangling_symlink_repo(tmp_path, leaf="dangling-repo-junk")
     for junk_dir in (".venv", "venv", ".git", "node_modules", "__pycache__"):
         d = repo / junk_dir
         d.mkdir(exist_ok=True)
@@ -286,6 +297,71 @@ def test_index_github_excludes_non_content_dirs(embedded_db_path, monkeypatch,
     assert "Done: 1 indexed, 0 skipped, 1 unreadable, 0 errors" in out, out
 
 
+def test_index_github_all_unreadable_returns_failure(embedded_db_path, monkeypatch,
+                                                     capsys, tmp_path):
+    """#2201/#32/#39: a repo whose .md files are ALL unreadable (only the
+    dangling symlink, no readable docs) must NOT false-green — the run
+    reports "Done: 0 indexed, ... N unreadable" and exits 1, so `tortoise
+    onboard` never proceeds to "Onboarding complete." over an empty graph."""
+    _isolated_index_env(monkeypatch, tmp_path)
+
+    repo = _dangling_symlink_repo(tmp_path, leaf="dangling-repo-all-unreadable")
+    # Only the dangling symlink remains — no readable .md to index.
+    (repo / "architecture.md").unlink()
+
+    args = Args(url=str(repo), db=embedded_db_path)
+    exit_code = _cmd_index_github(args)
+
+    assert exit_code == 1, (
+        f"all-unreadable run must exit 1 (visible failure), got {exit_code}")
+    captured = capsys.readouterr()
+    out = captured.out
+    assert "Done: 0 indexed, 0 skipped, 1 unreadable, 0 errors" in out, out
+    assert "Traceback" not in captured.err, captured.err
+
+
+def test_index_github_idempotent_with_unreadable(embedded_db_path, monkeypatch,
+                                                 capsys, tmp_path):
+    """#2201/#32 re-review P1: a repo that has an unreadable file (the #2201
+    dangling-symlink class) must stay rc 0 on an idempotent RE-run — run 2
+    indexes 0 (readable docs are skipped as already-indexed) with unreadable
+    >= 1, which is a SUCCESS (identical content returned rc 0 on run 1), not
+    the all-unreadable failure case (where skipped == 0)."""
+    _isolated_index_env(monkeypatch, tmp_path)
+
+    repo = _dangling_symlink_repo(tmp_path, leaf="dangling-repo-idempotent")
+    args = Args(url=str(repo), db=embedded_db_path)
+
+    exit_code1 = _cmd_index_github(args)
+    assert exit_code1 == 0, f"first run must exit 0, got {exit_code1}"
+    out1 = capsys.readouterr().out
+    assert "Done: 1 indexed, 0 skipped, 1 unreadable, 0 errors" in out1, out1
+
+    exit_code2 = _cmd_index_github(args)
+    assert exit_code2 == 0, (
+        f"idempotent re-run with an unreadable file must exit 0, got {exit_code2}")
+    out2 = capsys.readouterr().out
+    assert "Done: 0 indexed, 1 skipped, 1 unreadable, 0 errors" in out2, out2
+
+
+def test_markdown_files_ignores_ancestor_dir_names(tmp_path):
+    """#2201 review: exclusion matches in-repo path COMPONENTS only — a repo
+    living under an ancestor directory literally named venv/ must keep its
+    files (f.parts includes checkout-path ancestors); an in-repo .venv/
+    still excludes."""
+    repo = tmp_path / "venv" / "repo"
+    repo.mkdir(parents=True)
+    (repo / "a.md").write_text("# a\n")
+    junk = repo / ".venv"
+    junk.mkdir()
+    (junk / "junk.md").write_text("# junk\n")
+
+    found = _markdown_files(repo)
+    rels = sorted(p.relative_to(repo).as_posix() for p in found)
+
+    assert rels == ["a.md"], rels
+
+
 def test_markdown_files_shared_discovery_excludes_non_content(tmp_path):
     """#2201: the shared discovery helper used by init/onboard counts AND the
     indexer walk drops non-content dirs by exact component name — junk dirs
@@ -293,7 +369,7 @@ def test_markdown_files_shared_discovery_excludes_non_content(tmp_path):
     content names (docs/venv-setup/, node_modules_notes.md) are KEPT (no
     substring matching) and a dangling *.md symlink stays discoverable,
     matching the walk."""
-    repo = _dangling_symlink_repo(tmp_path)
+    repo = _dangling_symlink_repo(tmp_path, leaf="dangling-repo-discovery")
     for junk_dir in (".venv", "venv", ".git", "node_modules", "__pycache__"):
         d = repo / junk_dir
         d.mkdir(exist_ok=True)
