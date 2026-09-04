@@ -56,16 +56,17 @@ The registry graph is a dedicated FalkorDB namespace (`registry`) storing contro
 
 ```
 (:Graph {
-  id: string,        // ULID (g_<hex>); the DEFAULT graph's id = the team's
-                     // derived default (registry: kind='default' node;
-                     // supabase: the literal 'default' — no graphs row,
-                     // derived from teams.graph_name)
+  id: string,        // g_<16 hex> (random hex — NOT a ULID); the DEFAULT
+                     // graph's id is the DERIVED default (registry:
+                     // kind='default' node; supabase: the literal 'default'
+                     // — no graphs row, derived from teams.graph_name)
   team_id: string,   // references Team.id
   name: string,      // display name (default graph: "default")
   kind: string,      // "default" | "custom"
-  namespace: string, // FalkorDB tenant namespace (team_<name> for the
-                     // default; team_<name>_g<hex> for customs — the graph
-                     // SWITCHER/contexts ride this)
+  namespace: string, // FalkorDB tenant namespace (the DEFAULT graph's ns
+                     // IS the team namespace team_<name>; customs =
+                     // team_<team_id>_<gid> — the graph SWITCHER/contexts
+                     // ride this)
   status: string,    // "active" | "deleted" (tombstone; list filters)
   recording: boolean?,  // C6 #2115 session_recording override — true/false
                      // = per-graph override; NULL = inherit the team default
@@ -97,8 +98,9 @@ Default-graph semantics (the no-migration contract):
                            // key exists for the default graph — graph-bound
                            // mints 404 on kind='default' nodes)
   scopes: string[],        // C1: FLAT allowlist ["graphs:read",
-                           // "graphs:write", "team:manage"]; [] = legacy
-                           // full-access class (see auth-architecture.md §6)
+                           // "graphs:write"] (escalation, owner-only:
+                           // graphs:create/delete, keys:manage, team:manage);
+                           // [] = legacy full-access class (auth-architecture §6)
   delegation_depth: integer?, // 0 = minted (deleg=0, cannot mint);
                            // NULL = owner-minted
   created_by_key_id: string?, // mint lineage (which key minted this one)

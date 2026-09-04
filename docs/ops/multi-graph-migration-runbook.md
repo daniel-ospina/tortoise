@@ -15,7 +15,7 @@ backfilled:
 | Mode | Default graph source | Notes |
 |---|---|---|
 | Supabase | `teams.graph_name` (derived id literal `'default'`; NO `graphs` row) | `graph_metadata`/`default_graph_id` derive it |
-| Registry | a `kind='default'` Graph node whose namespace IS the team namespace | created at team provisioning (C2) |
+| Registry | a `kind='default'` Graph node whose namespace IS the team namespace | created at team provisioning (pre-existing, #518 — predates the epic) |
 
 Consequences (E2E-5 exit gate):
 - **No data move** — tenant points/sessions never touch the registry
@@ -91,7 +91,8 @@ Local: `npm --prefix supabase/tests/pglite run validate`.
 ## 5. Operational notes
 
 - **No staging hold:** graph creates for pro/team are unlimited — the
-  409 quota gate only fires at a finite cap (free/solo) and the per-team
+  409 quota gate fires only at solo's finite cap (free/anon are 402
+  tier-blocked BEFORE the quota gate — `_GRAPH_TIER_BLOCKED`); the per-team
   lock serializes count-then-insert (E2E-11 no oversubscription).
 - **Deletes cascade keys:** `DELETE /v1/graphs/{id}` tombstones the graph
   and revokes its keys (idempotent; a client retry converges). The default

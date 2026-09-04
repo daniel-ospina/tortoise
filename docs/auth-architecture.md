@@ -240,7 +240,7 @@ rotation, no forced migration (E2E-5).
 | Column | Meaning |
 |---|---|
 | `graph_id` | NULL = **team-wide key** → resolves to the team's DEFAULT graph (the pre-epic behavior — legacy keys untouched); set = bound to ONE custom graph |
-| `scopes` | FLAT allowlist array from `{graphs:read, graphs:write, team:manage}` (plus the escalation set `graphs:create/delete`, `keys:manage` for owner mints) |
+| `scopes` | FLAT allowlist array from `{graphs:read, graphs:write}` — the escalation set (`graphs:create/delete`, `keys:manage`, `team:manage`) is owner-mint-only |
 | `delegation_depth` | NULL = owner-minted; 0 = minted by another key (can never hold escalation scopes — DB CHECK + resolution) |
 | `created_by_key_id` | mint lineage (a delegated key cannot mint) |
 
@@ -261,8 +261,9 @@ it (`Per-graph keys require at least one scope.`).
   reject graph-bound keys (`_reject_graph_bound_*`) because they act on the
   DEFAULT graph.
 - **Delegation is one level:** a `deleg=0` child key is minted with
-  `graphs:read` by default and `keys:manage` children cannot mint further
-  keys — the DB CHECK `chk_minted_key_no_escalation` is the invariant.
+  `graphs:read` by default; children can never hold `keys:manage`, so they
+  cannot mint further keys — the DB CHECK `chk_minted_key_no_escalation`
+  is the invariant.
 - **C5/C6 data-plane gates:** per-graph context/sessions/capture ride the
   key's graph context (fail-closed 403 `GRAPH_NOT_FOUND` on vanished
   graph-bound keys); the session_recording per-graph override (`PATCH
