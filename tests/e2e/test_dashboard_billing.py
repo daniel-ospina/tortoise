@@ -200,26 +200,24 @@ def _wire_welcome_flow(page: Page) -> None:
     page.route("**/*", handle)
 
 
-def test_welcome_plan_step_after_reveal_and_start_free(page: Page) -> None:
-    """A first-timer (no teams) is provisioned in-app, the key is revealed,
-    and the non-blocking plan step shows — free default + paid Upgrade CTAs.
-    'Start free' proceeds to the dashboard at /."""
+def test_welcome_reveal_shows_orientation_then_dashboard_exit(page: Page) -> None:
+    """A first-timer (no teams) is provisioned in-app and the key is
+    revealed — then the W1 (#1997) wizard ORIENTATION step interposes (the
+    old non-blocking plan step was archived with LEGACY_WIZARD_ARCHIVED; the
+    plans grid now lives on the Billing tab, covered by the billing-tab tests
+    above). The always-visible header exit opens the dashboard at /."""
     _wire_welcome_flow(page)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # Provisioning → reveal → plan step.
+    # Provisioning → reveal.
     expect(page.locator("body")).to_contain_text("Your Tortoise is ready!", timeout=25_000)
-    expect(page.locator("body")).to_contain_text("Choose your plan", timeout=15_000)
-    # Free card is the default + Start free is the primary escape.
-    free_card = page.locator(".plan-card", has_text="Free").first
-    expect(free_card).to_contain_text("Default")
-    expect(free_card.locator("button", has_text="Start free")).to_be_visible()
-    # Paid Upgrade → checkout with the tier price id (contract).
-    pro_card = page.locator(".plan-card", has_text="Pro")
-    with page.expect_request(lambda r: r.url.endswith("/v1/billing/checkout")) as req_info:
-        pro_card.locator("button", has_text="Upgrade").click()
-    body = json.loads(req_info.value.post_data or "{}")
-    assert body.get("price_id") == PRO_PRICE_ID, body
-    # Start free → dashboard shell at / (the API Keys tab).
-    free_card.locator("button", has_text="Start free").click()
+    # W1 interposes the orientation step (wizardFlow.js WIZARD_STEPS[0] —
+    # title 'Orientation' + the intro list; 'Choose how you'll use it' is the
+    # orientation-unique item).
+    expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
+    expect(page.locator("body")).to_contain_text("Choose how you'll use it", timeout=5_000)
+    # Escape hatch: the header 'Open my dashboard →' (enabled once
+    # provisioning finished) → dashboard shell at /. Scoped to the header —
+    # the done-step wizard carries a same-named button.
+    page.locator("header").get_by_role("button", name="Open my dashboard →").click()
     expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/$"), timeout=15_000)
     expect(page.locator("body")).to_contain_text("API Keys", timeout=15_000)
