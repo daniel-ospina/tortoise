@@ -84,6 +84,32 @@ class TestCliContext:
         assert "Use FalkorDB as primary graph store" in out
         assert "file new decisions with tortoise_create_point" in out
 
+    def test_digest_omits_rule_noise_from_recent_points(self, db_env, capsys):
+        """#2207: the session-start digest (session-start.sh → `tortoise
+        context`) lists genuine recent decisions/claims only — markdown rule
+        lines ('---', '*Gate: filed as child issue…') and list/config fragments
+        never surface as 'recent decisions'."""
+        db_env.create_point(kind="decision", content="We decided to adopt BSL 1.1 for the engine")
+        db_env.create_point(kind="statement", content="---")
+        db_env.create_point(kind="statement", content="*Gate: filed as child issue via "
+                             "`issue-creation` — number recorded in the epic plan doc "
+                             "(Stage 4).")
+        db_env.create_point(kind="statement", content="| Trigger | Must invoke |")
+        db_env.create_point(kind="statement", content="model: gpt-5")
+
+        rc = _run_context()
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Genuine decision present, token intact.
+        assert "We decided to adopt BSL 1.1 for the engine" in out
+        # Rule/config noise absent from the digest body.
+        assert "Gate:" not in out
+        assert "| Trigger" not in out
+        assert "model: gpt-5" not in out
+        # '---' separators never appear as digest lines (only '-' bullets).
+        assert "\n---\n" not in out
+        print("PASS test_digest_omits_rule_noise_from_recent_points")
+
     def test_empty_prints_to_stdout_not_stderr(self, db_env, capsys):
         """Empty notice goes to stdout (so it's injected, not swallowed)."""
         _run_context()
