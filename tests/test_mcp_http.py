@@ -793,6 +793,45 @@ class TestOnboardingToolGating:
             mcp_server._onboarding_state_cache.clear()
 
 
+# ── #2210: advertised == served ─────────────────────────────────
+# First-run trial observation: the FastMCPAdapter logged "7 registry entries
+# have no handler — skipped" (the six onboarding tools + tortoise_session_capture
+# were defined AFTER the mid-module register_all call) while the HTTP tool list
+# still advertised them. register_all now runs at module bottom, after every
+# tool def — every registry-advertised tool must be registered and servable.
+
+class TestAdvertisedToolsAllServed:
+    def test_registry_tools_all_registered(self):
+        """#2210: no registry entry is silently skipped at registration —
+        the module-bottom register_all resolves a handler for every registry
+        entry (its 'no handler — skipped' warning must never fire). Uses the
+        RAW provider listing (bypasses the HTTP _HTTPToolFilter transform,
+        which intentionally hides HTTP-excluded/ask-gated tools)."""
+        import asyncio
+
+        from tortoise import mcp_server
+        from tortoise.tool_registry import TOOL_REGISTRY
+
+        raw = asyncio.run(mcp_server.mcp._list_tools())
+        registered = {t.name for t in raw}
+        unregistered = {e.name for e in TOOL_REGISTRY} - registered
+        assert not unregistered, (
+            f"registry entries never registered: {sorted(unregistered)}")
+
+    def test_session_capture_served_over_http(self, mcp_client):
+        """#2210 wire contract: tortoise_session_capture is registry-
+        advertised (HTTP_ALLOWED) — it must be REGISTERED and therefore
+        listed over the default HTTP surface (it was previously defined
+        after the mid-module register_all and never served at all: absent
+        from tools/list, 404-ish on call)."""
+        tc, _ = mcp_client
+        r = tc.post("/mcp", json={"jsonrpc": "2.0", "method": "tools/list", "id": 1})
+        assert r.status_code == 200, r.text
+        names = {t["name"] for t in _parse_sse_json(r)["result"]["tools"]}
+        assert "tortoise_session_capture" in names, (
+            "advertised tool missing from the HTTP listing")
+
+
 # ── Graph name injection ────────────────────────────────────────────────────
 
 class TestGraphName:
