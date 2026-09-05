@@ -1348,7 +1348,8 @@ class TortoiseSDK:
         db_path: Optional path to FalkorDBLite database file (None = use TORTOISE_DB_URI env var).
         namespace: Optional namespace for graph-name isolation.
         event_log_path: Optional path to JSONL event log. When set, SDK write
-            paths append events so rebuild_all can restore SDK-created points (#548).
+            paths append events so rebuild_all can restore SDK-created points
+            (#548), Events (#2061), and Objects (#2194).
             If None, no events are emitted (backward-compatible).
 
     Precedence: an explicitly-provided db_path wins over the TORTOISE_DB_URI
@@ -13971,7 +13972,9 @@ class TortoiseSDK:
                        is_episodic: bool | None = None) -> dict:
         """Generic entity creation. Applies to graph via projection
         (FalkorDB); SDK-created Events additionally journal EventRecorded
-        via ``_emit_event`` (#2061).
+        via ``_emit_event`` (#2061); SDK-created Objects journal
+        ``ObjectRegistered`` on first canonical registration (probe-gated,
+        #2194 — a canonical re-mention never double-journals).
 
         ``_skip_sanitize=True`` (epic #900 T3, create_source's sanctioned
         source_path route): the caller has already extracted the server-

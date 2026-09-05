@@ -360,6 +360,8 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
 > **Responsibility fields (authoredBy / ownedBy / managedBy) are EDGES, not node properties** — see §3.5-3.6. `_upsert_object` does not store them as properties; they exist as graph edges to Subject nodes.
 
+> **Object registration durability (#2194)** — SDK-created Objects (`create_entity("object")`, the capture/entity write path) journal an `ObjectRegistered` event on FIRST canonical registration (probe-gated on the deterministic `obj-<sha26(name)>` id — a canonical re-mention never double-journals), so capture-created Objects and their `ObjectSuperseded` folds survive `rebuild_all` (the JSONL event stream is the rebuild source of truth). EventAPI `add_object` remains a separate unconditional producer. **Reserved-name narrowing**: `point`/`payload` props passed to an SDK Object create are dropped (unconditional, both lanes — Event-precedent parity, #2061); they are `_emit_event`-reserved kwargs and must never reach the journal mirror or live node.
+
 ### §4.4 Document (subclass of Object)
 
 > **Document is an Object** (`objectKind: document`) — a core subclass (§6). Inherits all Object fields; additions below. Graph label is `:Document` (matching `_upsert_document`'s `MERGE (d:Document {id:$id})`); the subclass relationship to Object is expressed via `objectKind: document`, not via a second graph label. Do not create a separate `:Object` label for Documents. `documentKind` is the subclass-of-Document vocabulary (BIBO-aligned).
