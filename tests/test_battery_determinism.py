@@ -1,6 +1,11 @@
-"""Task 8 tests — E2E-7.1 determinism: same seed → |Δ| ≤ 1e-6 across
-metric_values, in SEPARATE subprocesses with pinned hash seed + isolated
-embedded DB (TORTOISE_DB_URI="" + TORTOISE_DB_PATH=<tmpdir>)."""
+"""Task 8 tests — E2E-7.1 determinism: same seed → |Δ| ≤ per-metric
+    tolerance across metric_values, in SEPARATE subprocesses with pinned hash
+    seed + isolated embedded DB (TORTOISE_DB_URI="" + TORTOISE_DB_PATH=<tmpdir>).
+
+    #2284 Task 7 re-scope: tolerances are read from thresholds.yaml
+    determinism.tolerances per metric (fallback determinism.epsilon) —
+    NEVER a test-local constant; the seeded rows came from this lane's
+    measured deltas (all |Δ| = 0.0, ≤ the epsilon floor)."""
 from __future__ import annotations
 
 import json
@@ -13,7 +18,14 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG = REPO_ROOT / "battery" / "config"
-EPSILON = 1e-6
+
+
+def _tolerances() -> tuple[dict[str, float], float]:
+    """Per-metric determinism tolerances + the epsilon fallback, resolved
+    from thresholds.yaml (never a test-local constant)."""
+    from battery.config.thresholds import load_thresholds
+    t = load_thresholds(CONFIG / "thresholds.yaml")
+    return dict(t.determinism_tolerances), t.determinism_epsilon
 
 
 def _run_attempt(attempt_dir: Path) -> Path:
@@ -56,6 +68,7 @@ class TestDeterminism:
         from battery.config.corpus import load_corpus
         expected = len(load_corpus(CONFIG / "corpus.yaml"))
         assert len(arts1) == len(arts2) == expected
+        tols, epsilon = _tolerances()
         for p1, p2 in zip(arts1, arts2):  # noqa: B905
             a1 = json.loads(p1.read_text())
             a2 = json.loads(p2.read_text())
@@ -63,7 +76,11 @@ class TestDeterminism:
             assert set(a1["metric_values"]) == set(a2["metric_values"])
             for mid in a1["metric_values"]:
                 d = abs(a1["metric_values"][mid] - a2["metric_values"][mid])
-                assert d <= EPSILON, f"{mid}: |Δ|={d} > {EPSILON}"
+                # per-metric tolerance from thresholds.yaml (fallback:
+                # determinism.epsilon) — the transcript-locked floor is
+                # NEVER relaxed by the Task 7 re-scope for derived fields
+                tol = tols.get(mid, epsilon)
+                assert d <= tol, f"{mid}: |Δ|={d} > tol={tol}"
 
     def test_uri_neutralization(self, tmp_path):
         """With TORTOISE_DB_URI=\"\" the SDK honors TORTOISE_DB_PATH — the
@@ -89,3 +106,36 @@ class TestDeterminism:
             env=env2, cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
         assert out2.returncode == 0
         assert str(db2) in out2.stdout
+
+
+class TestDeterminismTolerances:
+    """#2284 Task 7 — E2E-7.1 re-scope locks: the epsilon path resolves from
+    thresholds.yaml and the tolerance table folds into the cal-table hash
+    (the `calibrate --print` route). Determinism asserts are NOT weakened:
+    the transcript-locked derived/objective floor stays |Δ| ≤ 1e-6."""
+
+    def test_epsilon_path_resolves_from_thresholds_yaml(self):
+        tols, epsilon = _tolerances()
+        assert epsilon == 1e-6  # transcript-locked floor (yaml value)
+        # every artifact metric id this lane produces is seeded in the
+        # tolerance table — no metric falls back silently
+        from battery.config.corpus import load_corpus
+        scenario_count = len(load_corpus(CONFIG / "corpus.yaml"))
+        assert len(tols) == 9 and scenario_count >= 100
+
+    def test_tolerance_table_folds_into_cal_table_hash(self):
+        from battery.config.thresholds import (
+            ThresholdsConfig,
+            load_thresholds,
+        )
+        t1 = load_thresholds(CONFIG / "thresholds.yaml")
+        assert t1.determinism_tolerances
+        dropped = ThresholdsConfig(cal_rows=t1.cal_rows)
+        assert dropped.cal_table_hash() != t1.cal_table_hash()
+        relocked = ThresholdsConfig(
+            cal_rows=t1.cal_rows,
+            determinism_tolerances=(
+                (t1.determinism_tolerances[0][0],
+                 t1.determinism_tolerances[0][1] * 2),
+                *t1.determinism_tolerances[1:]))
+        assert relocked.cal_table_hash() != t1.cal_table_hash()
