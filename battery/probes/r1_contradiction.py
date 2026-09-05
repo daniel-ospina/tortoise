@@ -11,7 +11,6 @@ from typing import Any
 
 from battery.probes.base import ProbeResult
 
-
 #: Schema-v1.1 emitter-registry contract (issue #2284): the trace semantic
 #: keys this probe reads. Declarative only — behavior unchanged until the
 #: probe re-points reads onto the registry-emitted log (Task 9).

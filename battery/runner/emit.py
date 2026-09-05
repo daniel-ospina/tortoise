@@ -5,6 +5,7 @@ emitter-less consumed field forces report_status=incomplete — the log is
 eval-metadata only; product graph ops are GraphEvent references (Amend 1).
 """
 from __future__ import annotations
+
 from typing import Any, Literal
 
 EmitterKind = Literal["tool_event", "state_event", "envelope",
