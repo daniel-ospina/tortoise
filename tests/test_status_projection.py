@@ -156,13 +156,11 @@ class TestProjectionFold:
         journals real events and replays them.)
 
         Rebuild-only shape note (M1): the fold target must EXIST at replay, so
-        ObjectRegistered is journaled FIRST. That is an EventAPI-style
-        journaled producer (ObjectRegistered IS journaled there). SDK
-        capture-created Objects are NOT journaled as ObjectRegistered
-        (pre-existing — sdk.py _create_entity journals EventRecorded for
-        Events only) — capture folds stay live-graph-only until the separate
-        OD2 journaling issue lands; this test journals ObjectRegistered
-        directly to make the replay coherent.
+        ObjectRegistered must be journaled BEFORE ObjectSuperseded. #2194
+        closed the capture journaling gap: create_entity auto-journals the
+        ObjectRegistered on first canonical registration (probe-gated,
+        sdk.py _create_entity) — the replay's fold target comes from the real
+        production line, exactly as a capture session journals it.
         """
         events = tmp_path / "events"
         events.mkdir()
@@ -171,19 +169,15 @@ class TestProjectionFold:
         try:
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy")
-            # Legacy §6b emit discipline (pre-#2193 — the shared helper now
-            # performs the same graph resolution): resolve the canonical id
-            # before emitting — mirror that here.
+            # Resolve the canonical id for the fold emission (the shared
+            # apply_supersessions discipline: id-style, name carried too).
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.id",
                 params={"n": "strategy-A"}).result_set
             oid = rows[0][0]
-            # Journal the fold-target registration FIRST — rebuild replays in
-            # journal order, so the Object must exist when ObjectSuperseded
-            # folds (a MATCH with no rows is a silent no-op).
-            sdk._emit_event("ObjectRegistered", id=oid, name="strategy-A",
-                            objectKind="core:strategy")
-            # C2 kwargs shape: extra kwargs ride the JSONL envelope
+            # The registration is AUTO-journaled by create_entity (#2194) —
+            # no manual ObjectRegistered needed; only the fold is emitted
+            # here. C2 kwargs shape: extra kwargs ride the JSONL envelope
             # (event.update(extra)) so supersededBy survives the replay.
             sdk._emit_event("ObjectSuperseded", id=oid, name="strategy-A",
                             supersedes_by="strategy-B")
@@ -224,25 +218,34 @@ class TestProjectionFold:
         sdk = TortoiseSDK(str(tmp_path / "t2164f.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
-            rows = sdk._get_proj().g.query(
-                "MATCH (o:Object {name:$n}) RETURN o.id",
-                params={"n": "strategy-A"}).result_set
-            oid = rows[0][0] if rows else None
-            if not oid:
-                sdk.create_entity("object", "strategy-A",
-                                  objectKind="core:strategy")
-                rows = sdk._get_proj().g.query(
-                    "MATCH (o:Object {name:$n}) RETURN o.id",
-                    params={"n": "strategy-A"}).result_set
-                oid = rows[0][0]
+            # #2194 restructure: a live create_entity auto-journals its
+            # registration FIRST (probe-gated) — a create-first preamble
+            # would yield [OR, OS] and unpin the two-sweep regression. The
+            # adversarial [OS, OR] order comes from the connector/journaled-
+            # producer lane (a fold emitted for a name not yet registered in
+            # THIS log). Emit the fold first with the SYNTHESIZED canonical
+            # id (no live node exists yet — the id-branch fold must match the
+            # node the later auto-registration recreates), then create_entity
+            # auto-journals the registration AFTER the fold.
+            from tortoise.sdk import _entity_name_id  # noqa: I001
+            oid = _entity_name_id("Object", "strategy-A")
             # FOLD FIRST — the adversarial journal order (a later journaled
             # producer re-creates the Object AFTER the supersession event).
             sdk._emit_event("ObjectSuperseded", id=oid, name="strategy-A",
                             supersedes_by="strategy-B")
-            # registration AFTER the fold event — the two-sweep rebuild must
+            # registration AFTER the fold event — via the REAL auto-journal
+            # (probe misses on the fresh graph) — the two-sweep rebuild must
             # fold this (chronological replay would no-op + resurrect live)
-            sdk._emit_event("ObjectRegistered", id=oid, name="strategy-A",
-                            objectKind="core:strategy")
+            sdk.create_entity("object", "strategy-A",
+                              objectKind="core:strategy")
+            # the journal order is genuinely [OS, OR]
+            from tortoise.log import EventLog
+            jtypes = [ev.get("type") for ev in
+                      EventLog(str(events / "events.jsonl")).read_all()
+                      if ev.get("type") in ("ObjectRegistered",
+                                            "ObjectSuperseded")]
+            assert jtypes.index("ObjectSuperseded") < jtypes.index(
+                "ObjectRegistered"), jtypes
             sdk._get_proj().rebuild_all(str(events))
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
@@ -274,11 +277,11 @@ class TestProjectionFold:
                 "MATCH (o:Object {name:$n}) RETURN o.id",
                 params={"n": "strategy-C"}).result_set
             oid = rows[0][0]
-            sdk._emit_event("ObjectRegistered", id=oid, name="strategy-C",
-                            objectKind="core:strategy")
-            # Verbatim legacy §6b emission shape (pre-#2193): positional
-            # payload (GraphEvent store) + id kwarg (JSONL). The JSONL line
-            # carries type+id only.
+            # The registration is AUTO-journaled by create_entity (#2194) —
+            # no manual ObjectRegistered needed; only the legacy fold shape
+            # below is manual. Verbatim legacy §6b emission shape
+            # (pre-#2193): positional payload (GraphEvent store) + id kwarg
+            # (JSONL). The JSONL line carries type+id only.
             sdk._emit_event(
                 "ObjectSuperseded",
                 {"id": oid, "name": "strategy-C",
@@ -323,11 +326,15 @@ class TestProjectionFold:
             proj = sdk._get_proj()
             name = "legacy-R"
             successor = "successor-S"
-            # successor must be visible (payload-entities equivalent)
+            # successor must be visible (payload-entities equivalent). Its
+            # create auto-journals an ObjectRegistered (#2194) — harmless.
             sdk.create_entity("object", successor, objectKind="core:strategy")
             # the legacy registration line — journaled in the pre-canonical
             # era's id shape (github-style, NOT _entity_name_id), so the
-            # replayed node exists but carries no canonical id. The node
+            # replayed node exists but carries no canonical id. KEPT MANUAL:
+            # create_entity would mint the SYNTHESIZED canonical id, which is
+            # exactly the id the fold emits — this test's point is a
+            # registration id that DIFFERS from the synthesized one. The node
             # must exist at replay for the fold to have a target.
             legacy_reg_id = f"github-issue-{name}-7"
             sdk._emit_event("ObjectRegistered", id=legacy_reg_id, name=name,
