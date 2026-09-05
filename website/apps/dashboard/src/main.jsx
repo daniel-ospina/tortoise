@@ -3252,7 +3252,8 @@ function claimIntentInFlight() {
     // #1877: create-team dialog submit — validation mirrors POST /v1/teams
     // (≤64 chars, [a-zA-Z0-9_-], spaces rejected); 402 → gated-on-click
     // upgrade UX (the dialog explains "upgrade a team, then create" — the
-    // new team doesn't exist until the gate passes).    const name = createTeamName.trim()
+    // new team doesn't exist until the gate passes).
+    const name = createTeamName.trim()
     if (!name) { setCreateTeamError('Organization name required'); return }
     if (name.length > 64 || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(name)) {
       setCreateTeamError('Invalid team name — letters, numbers, dash, underscore only')
