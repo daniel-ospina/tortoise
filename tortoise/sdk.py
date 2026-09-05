@@ -3299,16 +3299,6 @@ class TortoiseSDK:
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
         # #329: id mutation + server-managed fields rejected
         props = _sanitize_props(props, reject_id=True)
-        # W5 Phase F (#2104, review r4): eventId is the provenance identity of
-        # a Point (server-stamped from the capture Event) — a tenant rewriting
-        # it via update_point would re-point stamped points at another Event
-        # (provenance spoofing / broken per-capture set-identity). Reject on
-        # the update surface (create is unaffected: eventId-in-props is inert
-        # there; the projection merge key is always the server id).
-        if "eventId" in props:
-            raise ValueError(
-                "'eventId' is server-managed (provenance identity) and "
-                "cannot be set via props.")
         # R2 (#1541) D3: search_keys is stored flat (see _flatten_search_keys_prop).
         _flatten_search_keys_prop(props)
         # #1904 (bug-hunt 2026-08-28 P1-3): a content edit MUST recompute
@@ -14098,13 +14088,16 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
-        # W5 Phase F (#2104, review r4): eventId is the Event node's identity
-        # (the projection MERGEs on it; capture Events carry the DETERMINISTIC
-        # ev_<sha256(session_id)> id) — a tenant renaming it via the update
-        # surface would desync the live node from its EventRecorded journal
-        # entry (rebuild re-MERGEs a duplicate at the old id) and break Phase F's
-        # one-Event-per-eventId convergence premise. Reject on the update
-        # surface; no sanctioned internal re-keying path exists.
+        # W5 Phase F (#2104, review r4): on the ENTITY-update surface, eventId
+        # is the Event node's identity (the projection MERGEs on it; capture
+        # Events carry the DETERMINISTIC ev_<sha256(session_id)> id) — a tenant
+        # renaming it via update_entity would desync the live node from its
+        # EventRecorded journal entry (rebuild re-MERGEs a duplicate at the old
+        # id) and break Phase F's one-Event-per-eventId convergence premise. No
+        # sanctioned internal re-keying path exists. (Point eventId is a
+        # WRITABLE provenance property with an established authoring path via
+        # create_point/update_point — #1417 semantics — and is unaffected;
+        # Points route to update_point through update(id).)
         if "eventId" in props:
             raise ValueError(
                 "'eventId' is server-managed (Event identity) and cannot be "

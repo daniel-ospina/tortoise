@@ -3647,20 +3647,21 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         ev2 = sdk.create_event("x", "meeting", is_episodic=False)
         assert ev2.get("id"), ev2
         assert ev2.get("id") != eid, "no _server_id must not reuse a prior id"
-        # eventId is server-managed on the UPDATE surface too (an Event rename
-        # desyncs the live node from its EventRecorded journal entry; a Point
-        # re-stamp spoofs provenance).
+        # eventId is server-managed on the ENTITY-update surface (an Event
+        # rename desyncs the live node from its EventRecorded journal entry).
+        # Point eventId is a WRITABLE provenance property (create_point /
+        # update_point authoring path, #1417) — only Event identity is guarded.
         try:
             sdk.update_entity(ev2.get("id"), eventId="ev_renamed")
             raise AssertionError("update_entity eventId must be rejected")
         except ValueError as ex:
             assert "server-managed" in str(ex), ex
+        # ...while update_point still allows provenance property authoring.
         pt = sdk.create_point("statement", "a point")
-        try:
-            sdk.update_point(pt["id"], eventId="ev_other")
-            raise AssertionError("update_point eventId must be rejected")
-        except ValueError as ex:
-            assert "server-managed" in str(ex), ex
+        upd = sdk.update_point(pt["id"], eventId="ev_authorable")
+        assert sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) RETURN p.eventId",
+            params={"i": pt["id"]}).result_set[0][0] == "ev_authorable", upd
     finally:
         sdk.close()
 
