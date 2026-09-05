@@ -10691,8 +10691,11 @@ class TortoiseSDK:
 
     # ── Issue Insight (#1196) ────────────────────────────────────
     # Review c70: the semantic stage must not report unrelated hits as
-    # "relates to this issue". Gate: EP-confirmed claims (confidence_mean
-    # >= 0.5) count, and so do hits sharing >= 2 tokens with the query text
+    # "relates to this issue". Gate: EP-confirmed claims count — measured
+    # (has_ep: persisted posterior OR prior/evidence α/β) AND belief
+    # confidence_mean >= 0.5 (post-#2206 confidence_mean is the belief mean;
+    # the unmeasured neutral 0.5 is NOT a 'we already decided this' signal)
+    # — and so do hits sharing >= 2 tokens with the query text
     # (a single-token TF-IDF coincidence — e.g. one shared word like
     # "unrelated" — is a false positive, not prior knowledge). Works across
     # both retrieval modes: FTS/RRF (EP-annotated) and TF-IDF fallback
@@ -10709,7 +10712,7 @@ class TortoiseSDK:
         BEFORE filing. Two stages:
           * Semantic (always): hybrid search on title+body for cross-session
             decisions / EP-tagged claims ('we already decided this'). Hits must
-            clear a relevance gate (EP confidence >= 0.5, or >= 2 shared tokens
+            clear a relevance gate (measured belief >= 0.5, or >= 2 shared tokens
             with the query) — otherwise the stage reports no matches instead of
             counting false positives.
           * Repo (when repo= given): structural count of indexed GitHub
@@ -10824,13 +10827,16 @@ class TortoiseSDK:
         """#1196 review c70 — semantic-stage relevance gate.
 
         A hit counts as "relates to this issue" when it is EP-confirmed
-        (confidence_mean >= 0.5 — the 'we already decided this' signal) OR it
-        shares >= 2 tokens with the query text. The token floor protects the
+        (has_ep AND confidence_mean >= 0.5 — the 'we already decided this'
+        signal) OR it shares >= 2 tokens with the query text. has_ep is
+        required post-#2206 because an unmeasured point reads the neutral
+        Beta(1,1) mean 0.5 — a bare >= 0.5 floor would count every
+        never-measured hit as "confirmed". The token floor protects the
         TF-IDF fallback path (ep=None) from single-token coincidences and
         keeps unmeasured FTS hits out unless they show real lexical overlap.
         """
         ep = hit.get("ep")
-        if ep is not None and ep.get("confidence_mean") is not None \
+        if ep is not None and ep.get("has_ep") and ep.get("confidence_mean") is not None \
                 and ep["confidence_mean"] >= self._ISSUE_INSIGHT_MIN_EP_CONFIDENCE:
             return True
         q_tokens = set(self._ISSUE_INSIGHT_TOKEN_RE.findall(query_text.lower()))
@@ -10967,9 +10973,14 @@ class TortoiseSDK:
         #1348. Resolution is the product's
         (tortoise/retrieval.py::resolve_pool_size).
 
-        Point results annotated with EP breakdown (confidence_mean + evidence + contention).
-        Non-Point entities skip EP annotation.
-        min_confidence defaults to 0.0 (no filter).
+        Point results annotated with EP breakdown. confidence_mean is THE
+        point's confidence (issue #2206 contract): the belief mean α/(α+β) of
+        the persisted posterior when EP has run, else the persisted prior
+        mean, else the neutral Beta(1,1) mean 0.5 — identical to
+        get_confidence/recall for the same point. contention/evidence stay
+        the structural edge-ratio family (a different quantity). Non-Point
+        entities skip EP annotation. min_confidence filters on
+        confidence_mean (belief); defaults to 0.0 (no filter).
 
         relationship_filter: 'predicate:target_id' — only return points connected to
             target_id via an operator with label=predicate (e.g., 'addresses:customerSegment-1').
@@ -11631,9 +11642,12 @@ class TortoiseSDK:
                 ranked = w4_enrich_items(proj, ranked)
             return ranked
         if order_by == "confidence":
-            # #25: sort by the PERSISTED EP confidence (n.confidence, written
-            # by compute_confidence), not the structural impl/(impl+nand) proxy
-            # from annotate_ep_batch (which is edge-ratio, not belief).
+            # #25/#2206: sort by the PERSISTED EP confidence (n.confidence,
+            # written by compute_confidence). Post-#2206 this is the SAME
+            # belief mean α/(α+β) that ep.confidence_mean carries
+            # (annotate_ep_batch reads the same coalesce of
+            # posterior_alpha/ep_alpha); n.confidence is read directly here so
+            # the sort never depends on the result-window annotation pass.
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             signals = ranker._fetch_signals([r.id for r in results], entity_type)
