@@ -172,9 +172,16 @@ def _wire_welcome_flow(page: Page) -> None:
             return
         if url.startswith(API_HOST):
             if url.endswith("/v1/teams"):
-                # First-timer: NO teams → the mount provisions in-app.
+                # First-timer: NO teams → the welcome card + wizard render
+                # (no auto-provision at mount — #2323 Option B).
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([]))
+                return
+            if url.endswith("/v1/onboarding/state") and route.request.method == "GET":
+                # #1885: the shell calls this FIRST — a 401 catch-all would
+                # show the generic error card before the wizard renders.
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {}}))
                 return
             if url.endswith("/v1/team") or url.endswith("/v1/team/"):
                 route.fulfill(status=200, content_type="application/json",
@@ -201,23 +208,34 @@ def _wire_welcome_flow(page: Page) -> None:
 
 
 def test_welcome_reveal_shows_orientation_then_dashboard_exit(page: Page) -> None:
-    """A first-timer (no teams) is provisioned in-app and the key is
-    revealed — then the W1 (#1997) wizard ORIENTATION step interposes (the
-    old non-blocking plan step was archived with LEGACY_WIZARD_ARCHIVED; the
-    plans grid now lives on the Billing tab, covered by the billing-tab tests
-    above). The always-visible header exit opens the dashboard at /."""
+    """A first-timer (no teams) is NOT auto-provisioned at mount (#2323
+    Option B) — the W1 (#1997) wizard ORIENTATION renders first, then the
+    org-create step provisions in-app with the typed name (tenant-provision
+    201). The welcome heading flips to the provisioned org and the header
+    'Open my dashboard →' exit (enabled once an org exists) opens the
+    dashboard at /."""
     _wire_welcome_flow(page)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
-    # Provisioning → reveal.
-    expect(page.locator("body")).to_contain_text("Your Tortoise is ready!", timeout=25_000)
+    # Teamless first-timer: welcome card + orientation (no key yet, no
+    # auto-provision at mount).
+    expect(page.locator("body")).to_contain_text("Welcome to Tortoise", timeout=25_000)
     # W1 interposes the orientation step (wizardFlow.js WIZARD_STEPS[0] —
     # title 'Orientation' + the intro list; 'Choose how you'll use it' is the
     # orientation-unique item).
     expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
     expect(page.locator("body")).to_contain_text("Choose how you'll use it", timeout=5_000)
-    # Escape hatch: the header 'Open my dashboard →' (enabled once
-    # provisioning finished) → dashboard shell at /. Scoped to the header —
-    # the done-step wizard carries a same-named button.
+    # Org-create step: type the org name → the SUBMIT provisions
+    # (tenant-provision with the typed name; 201 carries the plaintext).
+    page.get_by_role("button", name="Continue →").click()
+    expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    page.get_by_label("Organization name").fill("acme")
+    page.get_by_role("button", name="Create Organization").click()
+    # Provisioned: the welcome heading flips to the org — the header exit is
+    # enabled once an org exists.
+    expect(page.locator("body")).to_contain_text("Welcome Team is set up", timeout=20_000)
+    # Escape hatch: the header 'Open my dashboard →' (enabled once the org
+    # exists) → dashboard shell at /. Scoped to the header — the done-step
+    # wizard carries a same-named button.
     page.locator("header").get_by_role("button", name="Open my dashboard →").click()
     expect(page).to_have_url(re.compile(r"^https://app\.premiselabs\.co/$"), timeout=15_000)
     expect(page.locator("body")).to_contain_text("API Keys", timeout=15_000)
