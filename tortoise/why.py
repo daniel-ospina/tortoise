@@ -644,13 +644,16 @@ def project_item(item: dict, block: dict) -> dict:
                 continue
             out[k] = v
     # §3.1.4 "top-level ep is canonical": the flag-ON enriched item's ep
-    # must be the CANONICAL posterior mean α/(α+β) — not annotate_ep_batch's
-    # edge-ratio proxy impl/(impl+nand). variance/contested/has_ep already
-    # agree (both derive from the persisted posterior); only confidence_mean
-    # diverges. Applied AFTER the contested rebuild (which re-copies from
-    # item). Copy-then-override — never mutate the caller's dict (out is a
-    # shallow copy, ep would alias item["ep"]). Cross-surface consistency:
-    # ask/analyze/search report the same belief number for the same point.
+    # must be the CANONICAL posterior mean α/(α+β) over the persisted
+    # posterior_alpha/ep_alpha coalesce. Post-#2206 annotate_ep_batch
+    # computes the identical number (same coalesce + 4dp rounding), so this
+    # override is a defensive no-op when both reads agree — retained so an
+    # item whose ep came from a legacy/edge-ratio source still projects the
+    # canonical belief. Applied AFTER the contested rebuild (which re-copies
+    # from item). Copy-then-override — never mutate the caller's dict (out
+    # is a shallow copy, ep would alias item["ep"]). Cross-surface
+    # consistency: ask/analyze/search report the same belief number for the
+    # same point.
     item_ep = item.get("ep")
     block_ep = (block or {}).get("ep")
     if isinstance(item_ep, dict) and isinstance(block_ep, dict) \

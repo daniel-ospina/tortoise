@@ -104,3 +104,69 @@ class TestSessionContext:
         # No operator points should leak in
         for p in result["recent_points"]:
             assert not p.get("is_operator")
+
+    # ── #2207: digest noise filter ────────────────────────────────────
+    # The session-start digest must surface genuine decision/claim points —
+    # markdown rule lines ('---', '*Gate: filed as child issue…'), list/table
+    # fragments and 'Label: value' config residue are filtered out.
+
+    def test_digest_excludes_markdown_rule_noise(self, sdk):
+        """#2207: markdown HR/bullet-rule/table/heading fragments and config
+        label lines never appear in recent_points as 'recent decisions'."""
+        sdk.create_point("decision", "We decided to adopt BSL 1.1 for the engine")
+        for content in (
+            "---",
+            "*Gate: filed as child issue via `issue-creation` — number "
+            "recorded in the epic plan doc (Stage 4).",
+            "| Trigger | Must invoke | Consequence |",
+            "## Git Workflow",
+            "model: gpt-5",
+            "* HARD RULE: Skill Compliance",
+        ):
+            sdk.create_point("statement", content)
+
+        result = sdk.session_context()
+        contents = [p.get("content", "") for p in result["recent_points"]]
+        assert any("BSL 1.1" in c for c in contents), contents
+        for noise in ("Gate:", "| Trigger", "## Git", "model: gpt-5",
+                      "HARD RULE"):
+            assert not any(noise in c for c in contents), contents
+        # Bare '---' must not appear as a line (structural separator)
+        assert not any(c.strip() == "---" for c in contents), contents
+        print("PASS test_digest_excludes_markdown_rule_noise")
+
+    def test_digest_keeps_genuine_points_of_any_kind(self, sdk):
+        """#2207: filtering is noise-targeted — genuine prose points and
+        decisions (any length/kind) still surface."""
+        sdk.create_point("decision", "Use FalkorDB as primary graph store")
+        sdk.create_point("observation", "Alpha in production")
+        sdk.create_point("statement", "we decided X")
+        sdk.create_point("statement", "something happened")
+
+        result = sdk.session_context()
+        contents = [p.get("content", "") for p in result["recent_points"]]
+        for expected in ("Use FalkorDB as primary graph store",
+                         "Alpha in production", "we decided X",
+                         "something happened"):
+            assert any(expected in c for c in contents), contents
+        print("PASS test_digest_keeps_genuine_points_of_any_kind")
+
+    def test_digest_filter_shared_pure_function(self, sdk):
+        """#2207: the noise definition is a pure function over content so
+        local digest, hosted /v1/context and the CLI share one rule set."""
+        from tortoise.sdk import _is_digest_noise
+        for noise in (None, "", "---", "***", "...", "* ",
+                      "*Gate: filed as child issue via `issue-creation`.",
+                      "| Trigger | Must invoke |", "## Header", "> quote",
+                      "```python\nx=1\n```", "model: gpt-5",
+                      "TORTOISE_DB_URI: docker://:x@localhost:6379/t",
+                      "* HARD RULE: Skill Compliance", "1. **Model:** pick X"):
+            assert _is_digest_noise(noise) is True, noise
+        for clean in ("Use FalkorDB as primary graph store",
+                      "We decided to adopt BSL 1.1 for the engine",
+                      "Alpha in production", "we decided X",
+                      "claim A", "decision X",
+                      "We chose BSL 1.1 because it converts to MPL-2.0 later.",
+                      "1. We decided to adopt BFS because it is simpler to operate."):
+            assert _is_digest_noise(clean) is False, clean
+        print("PASS test_digest_filter_shared_pure_function")
