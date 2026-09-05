@@ -1,8 +1,9 @@
 // keyTeamPinsTripwire.test.js — #2230 static tripwire (CI-run via
 // dashboard-js-tests). The #2167 rule-4 carve-out is closed: every
 // session-mode key-management WRITE (revokeKey DELETE + toggleKeyEnabled /
-// renameKey PATCH) must append the `?team_id=` pin (variable `q`) built from
-// the selected team — the server resolves the session team to memberships[0]
+// renameKey PATCH on the API Keys tab, revokePanelKey DELETE on the Graphs
+// panel) must append the `?team_id=` pin (variable `q`) built from the
+// selected team — the server resolves the session team to memberships[0]
 // without it, so a multi-membership user whose selected team ≠ first
 // membership could not revoke/rename/toggle their non-first team's keys.
 // A future edit that drops `${q}` from one of these URLs regresses #2230 the
@@ -34,14 +35,16 @@ function writeFnBody(name) {
 test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps its ?team_id= pin', () => {
   // Second layer over the per-site checks below: a FUTURE key-management
   // write (revoke/rename/toggle were added after #2167's pins without pins —
-  // exactly how #2230 regressed) or a new mint/list path with an unpinned
-  // URL must fail loudly here and force a deliberate WRITE_FNS extension,
-  // not pass silently. Rule: every backtick template-literal URL that
-  // references /v1/team/keys must END in `${q}` — either the bare form
-  // `/v1/team/keys${q}` (mintKey's POST create at L937 + loadAll's GET list
-  // at L3213; wizardMintDurableKey delegates to mintKey, so it is covered
-  // transitively) or the id-scoped `/v1/team/keys/${id}${q}` (the three
-  // writes). Comments mentioning the endpoint (no backtick) are exempt.
+  // exactly how #2230 regressed; revokePanelKey joined via #2274's per-graph
+  // panel and is covered because it is IN WRITE_FNS) or a new mint/list path
+  // with an unpinned URL must fail loudly here and force a deliberate
+  // WRITE_FNS extension, not pass silently. Rule: every backtick
+  // template-literal URL that references /v1/team/keys must END in `${q}` —
+  // either the bare form `/v1/team/keys${q}` (mintKey's POST create at L966 +
+  // loadAll's GET list at L3159, plus #2274's per-graph mint/load in the
+  // Graphs panel; wizardMintDurableKey delegates to mintKey, so it is
+  // covered transitively) or the id-scoped `/v1/team/keys/${id}${q}` (the
+  // four writes). Comments mentioning the endpoint (no backtick) are exempt.
   // Boundary (accepted limitation): only template-literal URLs are scanned —
   // a hypothetical string-concatenated (`'/v1/team/keys' + q`), absolute
   // (`${API_BASE}/v1/team/keys…`), or variable-built URL would evade this
@@ -50,15 +53,15 @@ test('#2230: whole-file sentinel — every /v1/team/keys URL in main.jsx keeps i
   const keyUrls = [...mainJsx.matchAll(/`(\/v1\/team\/keys[^`]*)`/g)]
     .map((m) => m[1])
     .filter((u) => u.startsWith('/v1/team/keys'))
-  assert.ok(keyUrls.length >= 5,
-    `expected the 5 known key URLs (2 mint/list + 3 writes), got ${keyUrls.length}: ${keyUrls}`)
+  assert.ok(keyUrls.length >= 8,
+    `expected the 8 known key URLs (4 mint/list + 4 writes), got ${keyUrls.length}: ${keyUrls}`)
   for (const u of keyUrls) {
     assert.match(u, /^\/v1\/team\/keys(?:\/\$\{[^}]+\})?\$\{q\}$/,
       `unpinned key-management URL (missing the \${q} pin): ${u}`)
   }
 })
 
-test('#2230: each key-management write (revoke/rename/toggle) pins ?team_id= on its URL', () => {
+test('#2230: each key-management write (revoke/rename/toggle/panel-revoke) pins ?team_id= on its URL', () => {
   for (const fn of WRITE_FNS) {
     const body = writeFnBody(fn)
     // The key-write api() URL is `/v1/team/keys/${<id>}` and must be

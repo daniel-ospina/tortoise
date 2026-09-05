@@ -5656,16 +5656,27 @@ async def toggle_api_key_enabled(
         # context must never mutate team A's key (pre-#2230 the pin was
         # silently ignored: a wrong-team key_id succeeded whenever the user
         # owned both teams). Membership-check the pinned team FIRST, before
-        # any key lookup (mirrors _session_user_team — same 403 as the
-        # mint/list pins, and no cross-team key-existence oracle: a
-        # non-member pin 403s whether or not the key_id exists, identical
-        # to DELETE's DI-time gate). A truthy pin then fails closed on a
-        # key that is not in the pinned team with the SAME 403 DELETE
-        # raises on team mismatch. No pin (or blank ?team_id= — the
-        # dashboard never sends one, and pre-#2230 the endpoint ignored the
-        # query entirely) → the key's intrinsic team governs, fully
-        # backwards compatible. Registry lane below is untouched (selfhost
-        # keys are team-scoped by the key itself).
+        # any key lookup (mirrors _session_user_team — the same 403 "No
+        # membership in team" the mint/list pins raise, and no cross-team
+        # key-existence oracle: a non-member pin 403s whether or not the
+        # key_id exists, same fail-closed shape as DELETE's session
+        # dependency). One ordering note vs DELETE: this handler resolves
+        # the USER via get_current_user and checks membership inline HERE,
+        # while DELETE's get_current_team_session dependency runs its
+        # suspended/disabled checks first — the pin 403s match; the
+        # suspended-team 403 may precede them on DELETE only. A truthy pin
+        # then fails closed on a key that is not in the pinned team with
+        # the SAME 403 DELETE raises on team mismatch. No pin (or blank
+        # ?team_id= — the dashboard never sends one, and pre-#2230 the
+        # endpoint ignored the query entirely) → the key's intrinsic team
+        # governs, fully backwards compatible. Deliberate divergence from
+        # DELETE's pinless default: session-lane DELETE without a pin
+        # resolves memberships[0] and 403s when the key lives in another
+        # team; this PATCH without a pin acts on the key's intrinsic team
+        # (200). Each keeps its pre-#2230 legacy default — the browser
+        # always pins, so the divergence is unreachable from the dashboard.
+        # Registry lane below is untouched (selfhost keys are team-scoped
+        # by the key itself).
         pinned = request.query_params.get("team_id")
         if pinned and pinned not in {m["team_id"]
                                      for m in _sb_user_memberships(

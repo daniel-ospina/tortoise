@@ -3799,7 +3799,10 @@ function claimIntentInFlight() {
       if (teamIdRef.current !== _teamAtCall) return
       await refreshPanelAndCounts(panelGraphId, seq)
     } catch (e) {
-      if (teamIdRef.current === _teamAtCall) setGraphMsg('Could not revoke key — try again.')
+      if (teamIdRef.current === _teamAtCall) {
+        const detail = e && e.detail ? e.detail : (e && e.message)
+        setGraphMsg(detail || 'Could not revoke key — try again.')
+      }
     }
   }
 
@@ -4232,6 +4235,9 @@ function claimIntentInFlight() {
     setCapNotice('')
     setError('')
     const next = !currentEnabled
+    // Round-20: capture the team at call — a mid-flight switch must not land
+    // the response/error under the new team's header (mirrors renameKey).
+    const _teamAtCall = currentTeamId
     setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: next } : k))
     try {
       // #2230: session-mode key-management PATCH pins the SELECTED team —
@@ -4241,17 +4247,19 @@ function claimIntentInFlight() {
       // membership's (mirrors #2167 rule-4 create-side pin). The endpoint is
       // session-only (#1148 — a raw key 401s here), so the session-gated
       // pin covers the only reachable auth surface.
-      const q = (sessionTokenRef.current && currentTeamId) ? `?team_id=${encodeURIComponent(currentTeamId)}` : ''
+      const q = (sessionTokenRef.current && _teamAtCall) ? `?team_id=${encodeURIComponent(_teamAtCall)}` : ''
       const updated = await api(`/v1/team/keys/${keyId}${q}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         useSession: true,  // #1148: management → session JWT when signed in
         body: JSON.stringify({ enabled: next }),
       })
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — don't touch the new team's state
       if (updated && (updated.id || updated.key_id)) {
         setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: updated.enabled !== false } : k))
       }
     } catch (e) {
+      if (teamIdRef.current !== _teamAtCall) return // stale switch — error belongs to the old team
       setKeys((prev) => prev.map((k) => k.id === keyId ? { ...k, enabled: currentEnabled } : k))
       setError((e && e.message) || `Couldn't toggle the key — try again.`)
     }
