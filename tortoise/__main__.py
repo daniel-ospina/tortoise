@@ -3951,51 +3951,107 @@ def _cmd_doctor(args):
     # can never diverge, #720 conf 78). URI → from_uri projection, plain
     # path → embedded projection via _projection_for.
     if target is not None:
-        try:
-            from tortoise.sdk import TortoiseSDK
-            sdk = TortoiseSDK()
-            sdk._proj = _projection_for(target)
+        # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
+        # a never-initialized machine (e.g. `tortoise init` never ran). Probe-
+        # skipping is what makes doctor side-effect-free here: pre-#2204,
+        # starting the embedded server on a missing data dir printed a raw
+        # "*** FATAL CONFIG FILE ERROR" (redislite writes `dir <db-parent>`
+        # into its config); since the choke-point makedirs fix (#2204, in
+        # tortoise/__init__.py) that failure mode became a SILENT dir+DB
+        # creation — which is exactly the side effect the guard must prevent
+        # on a machine the user has not set up.
+        #
+        # "Initialized" = the DB FILE exists (`tortoise init` creates both
+        # the data dir and the file): a leftover dir with no DB file is still
+        # never-initialized, and probing it would silently spawn the server
+        # and mint a fresh tortoise.db as a side effect of a diagnostic
+        # (#720 review round 4 — doctor must not create state on a target it
+        # only inspects).
+        #
+        # Verdict split (review #2204): a missing DEFAULT target is the
+        # expected fresh-machine first-run state (⚠️, rc 0 — "doctor passes
+        # pre-init"), while a missing EXPLICITLY CONFIGURED target
+        # (TORTOISE_DB_URI / TORTOISE_DB_PATH / --db / --path resolved
+        # somewhere other than the canonical default) keeps the pre-#2204
+        # loud failure (❌, rc 1) — a typo'd/renamed path must never read as
+        # a healthy first-run, it reads as a config error with the target
+        # named.
+        _initialized = True
+        if not is_db_uri(target) and target != ":memory:":
             try:
-                status = sdk.status()
-                points = status.get("counts", {}).get("Point", 0)
-                total = status.get("total_entities", 0)
-                if points > 0:
-                    results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
-                else:
-                    results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
-                # #280 check 4: session-indexing health runs HERE, while the
-                # projection is still open — #720's finally-close would kill
-                # the embedded server before the session check could connect.
-                try:
-                    _chk4 = sdk.session_index_health()
-                    _fc = _chk4["file_count"]
-                    if _fc == 0:
-                        results.append(("Session indexing", "⚠️",
-                                        "corpus empty — nothing indexed (expected for new setups)"))
+                _p = Path(target).expanduser()
+                if not _p.is_file():
+                    _initialized = False
+                    if not _p.parent.is_dir():
+                        _missing = f"missing data dir {_p.parent}"
                     else:
-                        _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
-                        _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
-                                f"sessionId(s) surfaced (merge/remove copies)"
-                                if _chk4.get("duplicates") else "")
-                        if _delta == 0:
-                            results.append(("Session indexing", "✅",
-                                            f"{_fc} corpus files all indexed "
-                                            f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                        _missing = (f"data dir {_p.parent} exists but no "
+                                    f"Tortoise DB file — `tortoise init` never "
+                                    f"completed")
+                else:
+                    _missing = None
+            except Exception:
+                # unparseable path — let the real probe below surface it
+                _initialized = True
+                _missing = None
+        if not _initialized:
+            from tortoise.config import DEFAULT_DB_PATH, _abs
+            _is_default_target = target == _abs(DEFAULT_DB_PATH)
+            _icon = "⚠️" if _is_default_target else "❌"
+            _detail = (
+                f"not set up yet — no Tortoise DB at {target}"
+                + (f" ({_missing})" if _missing else "")
+                + ". Run `tortoise init` to create it, or point "
+                "doctor at your setup with TORTOISE_DB_URI / "
+                "TORTOISE_DB_PATH / --db."
+            )
+            results.append(("Graph: health", _icon, _detail))
+        else:
+            try:
+                from tortoise.sdk import TortoiseSDK
+                sdk = TortoiseSDK()
+                sdk._proj = _projection_for(target)
+                try:
+                    status = sdk.status()
+                    points = status.get("counts", {}).get("Point", 0)
+                    total = status.get("total_entities", 0)
+                    if points > 0:
+                        results.append(("Graph: health", "✅", f"{points} Points, {total} entities"))
+                    else:
+                        results.append(("Graph: health", "⚠️", "0 Points — graph is empty (expected for new setups)"))
+                    # #280 check 4: session-indexing health runs HERE, while the
+                    # projection is still open — #720's finally-close would kill
+                    # the embedded server before the session check could connect.
+                    try:
+                        _chk4 = sdk.session_index_health()
+                        _fc = _chk4["file_count"]
+                        if _fc == 0:
+                            results.append(("Session indexing", "⚠️",
+                                            "corpus empty — nothing indexed (expected for new setups)"))
                         else:
-                            results.append(("Session indexing", "❌",
-                                            f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
-                                            f"(run `tortoise index sessions`){_dup}"))
-                except Exception as _e:
-                    results.append(("Session indexing", "⚠️",
-                                    f"check unavailable: {str(_e)[:60]}"))
+                            _delta = len(_chk4["unindexed"]) + len(_chk4["stale"])
+                            _dup = (f" — {len(_chk4.get('duplicates', []))} duplicate "
+                                    f"sessionId(s) surfaced (merge/remove copies)"
+                                    if _chk4.get("duplicates") else "")
+                            if _delta == 0:
+                                results.append(("Session indexing", "✅",
+                                                f"{_fc} corpus files all indexed "
+                                                f"({_chk4['indexed_events']} AgentSession Events total){_dup}"))
+                            else:
+                                results.append(("Session indexing", "❌",
+                                                f"{_fc} files vs {_chk4['indexed_events']} Events — {_delta} unindexed/stale "
+                                                f"(run `tortoise index sessions`){_dup}"))
+                    except Exception as _e:
+                        results.append(("Session indexing", "⚠️",
+                                        f"check unavailable: {str(_e)[:60]}"))
 
-            finally:
-                # conf 52: close the projection in BOTH branches — the URI
-                # branch's from_uri projection must not leak.
-                if sdk._proj:
-                    sdk._proj.close()
-        except Exception as e:
-            results.append(("Graph: health", "❌", str(e)[:60]))
+                finally:
+                    # conf 52: close the projection in BOTH branches — the URI
+                    # branch's from_uri projection must not leak.
+                    if sdk._proj:
+                        sdk._proj.close()
+            except Exception as e:
+                results.append(("Graph: health", "❌", str(e)[:60]))
 
     # 5. MCP server
     mcp_running = False
