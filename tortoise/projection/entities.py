@@ -350,6 +350,7 @@ class _EntityHandlers:
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END "
             "ON MATCH SET o.id=coalesce($id, o.id), "
             "            o.objectKind=coalesce($ok, o.objectKind), "
+            "            o.createdAt=coalesce(o.createdAt, $ca), "
             "            o.title=coalesce($title, o.title), "
             "            o.embedding=CASE WHEN $embedding IS NOT NULL THEN vecf32($embedding) ELSE o.embedding END",
             params={"id": oid, "name": name,
@@ -357,6 +358,18 @@ class _EntityHandlers:
                     "st": ev.get("status"),  # #1350: status ON CREATE only —
                     # ON MATCH never touches it (the clobber guard: a
                     # re-mention cannot reset superseded→live).
+                    # #2194: ON MATCH createdAt ADOPTS only when absent
+                    # (coalesce(o.createdAt, $ca) — existing value wins, so a
+                    # canonical re-mention's fresh $ca is a no-op; the clause
+                    # exists for the stub-adoption path, where the SDK
+                    # journals a synthesized createdAt that must land on the
+                    # adopted live node so live == journal == replay — the
+                    # #2164-P4 drift class). Shared with the EventAPI lane:
+                    # api.add_object always sends a fresh createdAt →
+                    # canonical re-mentions keep their existing value
+                    # (idempotent); a createdAt-less stub adopted by an
+                    # EventAPI mention now gets stamped (previously stayed
+                    # absent) — benign, more consistent.
                     "ca": ev.get("createdAt"), "now": _now_iso(),
                     "title": title,
                     "embedding": embedding},
