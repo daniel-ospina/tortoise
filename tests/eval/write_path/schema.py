@@ -72,6 +72,20 @@ DEPTH_BUCKET_VALUES = frozenset({"early", "middle", "late"})
 LANE_VALUES = frozenset({"verbatim", "facts", "dream"})
 MODE_VALUES = frozenset({"BPRE", "full"})
 
+# Extractor posture (REVIEW-FIX, PR #2183 review findings 1+4): the product
+# lane ("llm" — the real v2 extractor behind a provider key, publishable
+# numbers, leakage tolerance ≤1/run enforced as the standing quality bar) vs
+# the deterministic CI lane ("m2" — TORTOISE_SESSION_EXTRACTOR=m2 echo seam,
+# byte-reproducible, gates on determinism/reproduction). Posture is part of
+# the resolved-config comparability surface: an m2 run vs an llm baseline
+# (or vice versa) is a CONFIG MISMATCH ⇒ inconclusive — never a silent
+# cross-posture regression/pass (finding 4). The m2 echo lane structurally
+# copies every distractor (leakage 11 vs tolerance 1), so the standing
+# leakage bar is a PRODUCT-lane bar: it fires for posture "llm" only
+# (finding 1 — the mock lane must never be compared against the real-LLM
+# baseline as if identical).
+POSTURE_VALUES = frozenset({"llm", "m2"})
+
 # Canonical graded-metric vocabulary (plan §4.3.3) with compare direction.
 # maximize: run < committed baseline ⇒ regression.  minimize: run > committed
 # baseline ⇒ regression (leakage is lower-better).
@@ -569,11 +583,13 @@ def _validate_metric_values(metrics: dict, where: str, issues: list[str]) -> Non
         if key == "distractor_leakage_per_run":
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 issues.append(f"{where}.{key}: expected a non-negative int, got {value!r}")
-            elif value > DISTRACTOR_LEAKAGE_TOLERANCE:
-                issues.append(
-                    f"{where}.{key}: {value} exceeds the gold-locked tolerance "
-                    f"{DISTRACTOR_LEAKAGE_TOLERANCE} (research-recommended ≤1/run)"
-                )
+            # NOTE (W2-b #2098, F5 resolution): an OVER-tolerance measurement
+            # is RECORDABLE — the fix-wave protocol requires the honest first
+            # (possibly bad) number to be publishable so a write-path defect
+            # can be named and fixed. The tolerance is enforced as the STANDING
+            # quality bar in compare_run (leakage > tolerance ⇒ regression on
+            # every subsequent run — never blessed away), not as a
+            # record-time hard cap that deadlocks the first publish.
         elif isinstance(value, bool) or not isinstance(value, (int, float)):
             issues.append(f"{where}.{key}: expected a number, got {value!r}")
         elif not (0.0 <= float(value) <= 1.0):
@@ -585,7 +601,7 @@ def _validate_history_entry(entry: dict, index: int, issues: list[str]) -> None:
     where = f"baseline.history[{index}]"
     _reject_unknown_keys(
         entry,
-        frozenset({"date", "values", "failure_classes", "justification", "verdict"}),
+        frozenset({"date", "values", "failure_classes", "justification", "verdict", "corpus_change", "protocol_change"}),
         where,
         issues,
     )
@@ -652,12 +668,17 @@ def validate_baseline(baseline: dict) -> list[str]:
         where = "baseline.config"
         _require_mapping(config, where, issues)
         if isinstance(config, dict):
-            _reject_unknown_keys(config, frozenset({"lanes", "mode", "harness", "seed"}), where, issues)
+            _reject_unknown_keys(config, frozenset({"lanes", "mode", "harness", "seed", "extractor_posture"}), where, issues)
             lanes = config.get("lanes")
             if not isinstance(lanes, list) or not lanes or not set(lanes) <= LANE_VALUES:
                 issues.append(f"{where}.lanes: expected a non-empty subset of {sorted(LANE_VALUES)}")
             _expect_enum(config, "mode", MODE_VALUES, where, issues)
             _expect_enum(config, "harness", HARNESS_VALUES | {"all"}, where, issues)
+            # REVIEW-FIX (PR #2183 findings 1+4): a committed baseline must
+            # name its extractor posture — numbers from the product (llm) lane
+            # and the deterministic (m2) echo lane are NOT comparable, and the
+            # standing leakage bar is a product-lane bar.
+            _expect_enum(config, "extractor_posture", POSTURE_VALUES, where, issues)
             if config.get("seed") is not None:
                 seed = config["seed"]
                 if not isinstance(seed, int) or isinstance(seed, bool):
@@ -723,7 +744,7 @@ def validate_baseline(baseline: dict) -> list[str]:
     return issues
 
 
-def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run_fixtures_hash: str) -> str:
+def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run_fixtures_hash: str, run_judge_pin: str | None = None) -> str:
     """The --compare verdict for a run against the committed baseline.
 
     Verdict vocabulary (plan §4.3.3): ``pass`` | ``regression`` | ``inconclusive``.
@@ -732,6 +753,16 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run
       ``inconclusive`` — a gold-only edit invalidates baselines; a mismatch
       must never rubber-stamp a pass (E2E-2 negative).
     * resolved-config mismatch ⇒ ``inconclusive`` — never a rubber-stamp.
+      This INCLUDES extractor-posture mismatch (REVIEW-FIX, PR #2183 finding
+      4): an ``m2`` echo-lane run vs an ``llm`` product-lane baseline (or
+      vice versa) compares DIFFERENT extractors — numbers are only comparable
+      within a posture. The posture rides inside resolved_config, so the
+      ordinary config-equality check rejects cross-posture compares.
+    * judge-pin mismatch (REVIEW-FIX finding 3/F2 round 3): a run graded
+      under a DIFFERENT judge prompt than the committed baseline is a
+      PROTOCOL CHANGE — ``inconclusive``, never a silent pass/regression
+      against a different grading protocol. Requires the caller to pass
+      ``run_judge_pin``; without it (no pin available) the check is skipped.
     * first-run-pending baseline (empty metrics = no committed targets) ⇒
       ``inconclusive`` — targets are set FROM first-run data (benchmark-first
       decision), so there is nothing to regress against yet.
@@ -742,6 +773,10 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run
     if run_fixtures_hash != baseline.get("fixtures_hash"):
         return VERDICT_INCONCLUSIVE
     if resolved_config != baseline.get("config"):
+        return VERDICT_INCONCLUSIVE
+    committed_pin = baseline.get("judge_pin")
+    if run_judge_pin is not None and committed_pin \
+            and run_judge_pin != committed_pin:
         return VERDICT_INCONCLUSIVE
     committed_metrics = baseline.get("metrics") or {}
     if not committed_metrics:
@@ -757,10 +792,29 @@ def compare_run(run_metrics: dict, baseline: dict, *, resolved_config: dict, run
             worse = run_value < committed_value
         if worse:
             return VERDICT_REGRESSION
+    # Standing quality bar (W2-b #2098, F5 resolution): distractor leakage
+    # above the gold-locked tolerance is a REGRESSION on every run — even
+    # when the committed baseline was itself over-tolerance (a bad first
+    # number records per the fix-wave protocol but never legitimizes a
+    # future run at the same level; the tolerance is the convergence target
+    # and can never be blessed away by re-pinning the committed value).
+    #
+    # REVIEW-FIX (PR #2183 finding 1): the standing bar is a PRODUCT-lane
+    # (posture "llm") quality bar — the real extractor must not leak
+    # true-but-routine distractors. The deterministic M2 echo lane
+    # STRUCTURALLY leaks every distractor (it copies the whole session),
+    # so barring it makes the CI lane permanently un-passable (rubber). The
+    # m2 lane's gate is determinism/reproduction vs its own committed
+    # m2.json, NOT the leakage quality target.
+    if resolved_config.get("extractor_posture") == "llm" \
+            and run_metrics.get("distractor_leakage_per_run", 0) \
+            > DISTRACTOR_LEAKAGE_TOLERANCE:
+        return VERDICT_REGRESSION
     return VERDICT_PASS
 
 
-def bless_baseline(previous: dict, run: dict, *, justification: str) -> dict:
+def bless_baseline(previous: dict, run: dict, *, justification: str,
+                   corpus_bless: bool = False, protocol_bless: bool = False) -> dict:
     """Produce the next committed baseline from a run result.
 
     Blessing ALWAYS requires a non-empty ``justification`` string — every
@@ -769,20 +823,40 @@ def bless_baseline(previous: dict, run: dict, *, justification: str) -> dict:
     regression without one raises ValueError (the CI-gate discipline; the
     schema-level ``validate_baseline`` enforces the same rule on the result).
 
-    Two cases:
-    * **first publish** — ``previous`` is the first-run-pending baseline
-      (empty ``metrics`` = no committed targets, benchmark-first decision):
-      nothing can be compared against, so the compare is skipped; the run's
-      metrics become the first committed targets (expected-bad number per the
-      fix-wave protocol).
-    * **subsequent bless** — ``previous`` has committed targets: a compare
-      verdict of ``inconclusive`` (config or fixtures_hash mismatch) raises;
-      a ``regression`` requires the justification to bless; a ``pass``
-      records the improvement.  Every history entry records its ``verdict``
-      (pass | regression) so the fix-wave trail is unambiguous.
+    ``corpus_bless`` — REVIEW-FIX (PR #2183 review finding 2): an INTENTIONAL
+    corpus regeneration (fixtures_hash change, e.g. a deliberate fixture/gold
+    edit) cannot be blessed through the ordinary path (which rejects hash
+    drift to keep the frozen-corpus contract fail-closed). corpus_bless=True
+    accepts a fixtures_hash change ONLY with a justification, records the
+    corpus change in history (``corpus_change`` marker), and re-pins the
+    baseline to the new hash + config. Without it, every bless after a
+    legitimate regeneration deadlocks (plan §8.2 R8 mitigation: "corpus-bless
+    mode for intentional fixture changes").
 
-    A published baseline also requires a non-null ``run["judge_pin"]``
-    (numbers are only publishable against a pinned judge prompt).
+    ``protocol_bless`` — REVIEW-FIX (PR #2183 round-3 finding F2): a
+    legitimate judge-protocol bump (judge_pin change on an UNCHANGED corpus)
+    has no open bless path through the ordinary guards (which treat a pin
+    change as a new, non-comparable protocol). protocol_bless=True is the
+    sanctioned re-pin path: accepts the pin change with a justification,
+    records ``protocol_change`` in history, and re-pins WITHOUT a compare
+    (a different grading protocol has no comparability with the old — the
+    new numbers are a fresh protocol baseline, not an improvement/regression
+    on the old one).
+
+    Two ordinary cases (no corpus change):
+    * **first publish** — ``previous`` is the first-run-pending baseline
+      (empty ``metrics``): the run's metrics become the first committed
+      targets (expected-bad number per the fix-wave protocol).
+    * **subsequent bless** — compare verdict ``inconclusive`` (config or
+      fixtures_hash mismatch) raises; ``regression`` requires justification;
+      ``pass`` records the improvement. Every history entry records its
+      ``verdict``.
+
+    Judge-pin comparability (REVIEW-FIX finding 3): a run whose judge_pin
+    differs from the previous baseline's pin is a PROTOCOL CHANGE — compared
+    as inconclusive (never silently regressed/passed against a different
+    grading protocol) unless ``protocol_bless`` re-pins (round-3 F2 — the
+    sanctioned re-pin path).
     """
     if not isinstance(justification, str) or not justification.strip():
         raise ValueError("blessing a baseline requires a non-empty justification string")
@@ -799,38 +873,74 @@ def bless_baseline(previous: dict, run: dict, *, justification: str) -> dict:
             "cannot bless: run metrics are not valid published values — "
             + "; ".join(run_metric_issues)
         )
+    previous_pin = previous.get("judge_pin")
     previous_metrics = previous.get("metrics") or {}
     first_publish = not previous_metrics
+    hash_changed = bool(previous.get("fixtures_hash")) and \
+        run["fixtures_hash"] != previous.get("fixtures_hash")
+    pin_changed = bool(previous_pin) and judge_pin != previous_pin
+    if hash_changed and not corpus_bless:
+        raise ValueError(
+            "cannot bless: run fixtures_hash differs from the committed "
+            "baseline (corpus drift). For an INTENTIONAL fixture/gold "
+            "regeneration use corpus_bless=True with a justification "
+            "recording the corpus change; for accidental drift, restore the "
+            "frozen corpus before publishing."
+        )
+    if pin_changed and not protocol_bless:
+        raise ValueError(
+            "cannot bless: run judge_pin differs from the committed baseline's "
+            f"pin ({previous_pin!r} vs {judge_pin!r}) — a judge-protocol change "
+            "is a new protocol, not a comparable run (re-run under the pinned "
+            "judge, or use protocol_bless=True with a justification to "
+            "deliberately re-pin to the new protocol)"
+        )
     if first_publish:
         # No committed targets to compare against — but the pending baseline
         # pins the frozen-corpus contract: a first publish on a drifted corpus
         # (hash or resolved-config mismatch) must not silently re-pin the
-        # baseline to the wrong corpus (E2E-2 negative discipline).
-        if run["fixtures_hash"] != previous.get("fixtures_hash"):
+        # baseline to the wrong corpus (E2E-2 negative discipline). A
+        # corpus_bless on the pending baseline re-pins the new corpus
+        # deliberately (the pending baseline has no numbers to protect) — but
+        # ONLY when the corpus actually changed (REVIEW-FIX round-3 F4: the
+        # flag alone must not bypass the guards on an unchanged corpus).
+        hash_and_bless = hash_changed and corpus_bless
+        if run["fixtures_hash"] != previous.get("fixtures_hash") \
+                and not hash_and_bless:
             raise ValueError(
                 "cannot bless first publish: run fixtures_hash does not match the "
                 "committed pending baseline (corpus drift) — regenerate/verify the "
                 "frozen corpus before publishing"
             )
-        if run["config"] != previous.get("config"):
+        if run["config"] != previous.get("config") and not hash_and_bless:
             raise ValueError(
                 "cannot bless first publish: run config does not match the committed "
                 "baseline config snapshot (config mismatch ⇒ inconclusive, never a "
                 "rubber-stamp)"
             )
         verdict = None  # first number — nothing regresses against it yet
+    elif (hash_changed and corpus_bless) or (pin_changed and protocol_bless):
+        # REVIEW-FIX (corpus-bless / round-3 F2 protocol-bless): an
+        # INTENTIONAL corpus regeneration and/or judge-protocol re-pin has no
+        # comparability with the old (different corpus content / different
+        # grading protocol) — NO compare: the run's numbers re-pin. Each
+        # sanctioned change records its history marker below (both markers
+        # when both changed — a corpus regeneration PLUS a judge bump).
+        verdict = None
     else:
         verdict = compare_run(
             run["metrics"],
             previous,
             resolved_config=run["config"],
             run_fixtures_hash=run["fixtures_hash"],
+            run_judge_pin=judge_pin,
         )
         if verdict == VERDICT_INCONCLUSIVE:
             raise ValueError(
                 f"cannot bless: compare verdict is {VERDICT_INCONCLUSIVE} "
-                f"(config or fixtures_hash mismatch) — re-run on the frozen corpus "
-                f"with the resolved config before blessing"
+                f"(config, fixtures_hash, or judge_pin mismatch) — re-run on the "
+                f"frozen corpus with the resolved config + pinned judge before "
+                f"blessing"
             )
     # REVIEW-FIX (F3, code-review gate): a published baseline must carry the
     # FULL graded-metric vocabulary — a partial bless (a lane that failed to
@@ -855,6 +965,10 @@ def bless_baseline(previous: dict, run: dict, *, justification: str) -> dict:
         "failure_classes": run.get("failure_classes", []),
         "justification": justification,
     }
+    if hash_changed and corpus_bless:
+        history_entry["corpus_change"] = True
+    if pin_changed and protocol_bless:
+        history_entry["protocol_change"] = True
     if verdict is not None:
         history_entry["verdict"] = verdict
     return {

@@ -1,0 +1,31 @@
+{
+  "holdout": false,
+  "seed": 1,
+  "suite": "know_to_ask",
+  "turns": [
+    {
+      "content": "Morning! Hope your weekend was good.",
+      "role": "user"
+    },
+    {
+      "content": "Thanks \u2014 it was restful. What can I help with?",
+      "role": "assistant"
+    },
+    {
+      "content": "What did Alice say about the Widget Co deal?",
+      "role": "user"
+    },
+    {
+      "content": "Alice flagged the Widget Co pricing as too aggressive.",
+      "role": "assistant"
+    },
+    {
+      "content": "Thanks, that helps a lot.",
+      "role": "user"
+    },
+    {
+      "content": "And remind me \u2014 what was Alice's view on the Widget Co terms?",
+      "role": "user"
+    }
+  ]
+}

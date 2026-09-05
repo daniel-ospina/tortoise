@@ -698,3 +698,64 @@ target for the strong lane. Dollar blast radius at 60/min grows from
 - Runbook (b) known-answer smoke re-run on the routing change (expect
   `provider: deepseek-direct | route: deepseek-direct` unchanged — pinned by
   `test_reader_pool_deepseek_spec_deepseek_primary` in the meantime).
+
+---
+
+## #2280 — reasoning-budget collapse → silent fake abstention; FIXED + spot-check 0.90 (2026-09-04)
+
+> The (d) gate's residual failure class is ROOT-CAUSED and FIXED. The A9
+> "no reasoning-budget collapse" risk (pending keys at #2069 record time) is
+> now MEASURED: **qwen3.8-max DOES collapse at the reader call shape**
+> (max_tokens 500 → content empty, `finish_reason="length"`, completion 500
+> — the whole budget consumed THINKING on hard questions) and the product
+> lane silently converted the empty output into a FAKE abstention
+> (`NO_EVIDENCE_TEXT`), breaking the "abstains only on genuine absence"
+> promise. Root-cause probe evidence: same evidence with headroom answers
+> correctly ($185 bike total; reunion synthesis; "10 days ago").
+
+### Fix (product lane, `tortoise/sdk.py` + `tortoise/reader.py`)
+
+- `_ask_reader_complete` (bounded escalation, at most 2 calls): empty output
+  + `finish_reason="length"` → ONE retry at an escalated budget
+  (`TORTOISE_ASK_ESCALATION_TOKENS`, default `DEFAULT_READER_ESCALATION_MAX_TOKENS`
+  = 2000); empty + any other finish → ONE same-budget retry (transient);
+  still empty → `AskReaderUnavailable` (502 `reader_unavailable`) — **an
+  empty model output is NEVER an abstention** (the two-phase prompt abstains
+  in WRITING).
+- `_LockedReader.complete` now forwards a per-call `max_tokens` override.
+- The blank→`NO_EVIDENCE_TEXT` substitution is retired on the product path
+  (retained as a defensive invariant only).
+- Tests: hosted blank-reply pin flipped 200-abstention → 502 fail-loud; 5 new
+  sdk tests (escalate-and-answer, double-collapse fail-loud, stop-finish
+  same-budget retry recover + fail-loud, max_tokens forwarding).
+
+### Harness (#2280 leg): retrieval measured separately from reading
+
+The spot-check now prints a **ctx gold-session recall** readout (every gold
+`answer_session_ids` session present in the evidence the reader saw) —
+field practice (LongMemEval ships `answer_session_ids`; mem0
+`memory-benchmarks` search-then-judge + `--predict-only` recall; gbrain
+`recall_all@5`). A retrieval regression can no longer be masked as a reading
+miss (or vice versa).
+
+### Product-lane spot-check re-run (2026-09-04, qwen3.8-max + semantic gpt-4o judge)
+
+**19/21 (0.90) — PASS (target ≥ 0.8).** The 4 pre-fix misses were 4 FAKE
+abstentions (material at pool ranks 2-9, reader returned nothing); all 4
+escalation events fired in the log and every question now ATTEMPTS an answer:
+
+| question | before | after (escalation) |
+|---|---|---|
+| gpt4_d84a3211 ($185) | fake abstain | **✓ "$185"** |
+| d6233ab6 (reunion) | fake abstain | **✓ correct** |
+| 830ce83f (Rachel) | fake abstain | ✗ commits "Chicago" (gold: the suburbs) — recency class |
+| 0a995998 (count) | fake abstain | ✗ "2 items" (gold: 3) — multi-session count class |
+
+**ctx gold-session recall: 21/21 (1.00)** — retrieval/assembly is NOT the
+binding constraint on this composition; the 2 residual misses are READER
+capability on the hard classes (recency among multiple moves; multi-session
+counts). Candidate follow-ups (NOT blocked): a "latest state wins" recency
+clause for the generic baseline (or the KU fragment firing — #2009
+detector), and enumeration guidance for multi-session counts. Both are
+prompt-calibration work with regression risk — tracked separately, not
+silently closed.

@@ -29,6 +29,25 @@ def _pid(content: str) -> str:
     return f"pt_{content_hash(content)[:62]}"
 
 def _embed_for(blob: str) -> dict:
+    # #2164: entity-level supersession scenario — session 2's embed emits
+    # gym-plan-B with a ``supersedes`` ref to gym-plan-A (the extractor
+    # resolves the ref against the S3 search results and records an
+    # ENTITY supersession; the ingest write path must fold it into
+    # Object.status). Check gym-plan-B FIRST: the session-2 blob carries
+    # both plan tokens.
+    if "gym-plan-B" in blob:
+        return {
+            "entities": [{"name": "gym-plan-B", "kind": "core:place",
+                          "lifecycle": "created",
+                          "supersedes": "gym-plan-A"}],
+            "events": [], "operators": [], "points": [],
+        }
+    if "gym-plan-A" in blob:
+        return {
+            "entities": [{"name": "gym-plan-A", "kind": "core:place",
+                          "lifecycle": "created", "supersedes": None}],
+            "events": [], "operators": [], "points": [],
+        }
     if "6pm" in blob and "5pm" not in blob:
         return {
             "entities": [{"name": "gym", "kind": "core:place",
@@ -57,6 +76,10 @@ def _embed_for(blob: str) -> dict:
 
 
 def _story_for(transcript: str) -> str:
+    if "gym-plan-B" in transcript:
+        return "User switched from gym-plan-A to gym-plan-B."
+    if "gym-plan-A" in transcript:
+        return "User follows gym-plan-A for strength training."
     if "6pm" in transcript and "5pm" not in transcript:
         return "User goes to the gym at 6pm."
     if "moved" in transcript:
@@ -68,6 +91,10 @@ def _model():
     def respond(system: str, user: str) -> str:
         if "STORY SUMMARIZER" in system:
             return _story_for(user)
+        if "ENTITY RESOLUTION" in system:
+            # D3 phase-2 fallback: never guess an alias — the plan names are
+            # distinct entities (gym-plan-A superseded, gym-plan-B new).
+            return json.dumps({"resolutions": []})
         if "GAP REVIEWER" in system:
             return json.dumps({"entities": [], "events": [], "points": [],
                                "operators": [], "retractions": [],
@@ -85,8 +112,10 @@ def _model():
 
 
 def _fake_search(sdk, embed_list, story, **kw):
-    """Simulate a real backend: S3 returns live statement points (terminal
-    excluded — #1391 contract)."""
+    """Simulate a real backend: S3 returns live statement points + live
+    Objects (terminal excluded — #1391 contract; eval Object rows ride the
+    ``entities`` key as {id, name, kind} — the search_graph row shape the
+    extractor's entity resolution + supersede-ref resolver consume)."""
     proj = sdk._get_proj()
     rows = proj.g.query(
         "MATCH (p:Point {pointKind:'statement'}) "
@@ -95,8 +124,16 @@ def _fake_search(sdk, embed_list, story, **kw):
         params={"terminal": ["retracted", "superseded", "archived",
                              "outdated"]},
     ).result_set
+    orows = proj.g.query(
+        "MATCH (o:Object) "
+        "WHERE (o.status IS NULL OR NOT (o.status IN $terminal)) "
+        "RETURN o.id, o.name, o.objectKind LIMIT 25",
+        params={"terminal": ["retracted", "superseded", "archived"]},
+    ).result_set
     return {"mode": "real", "degraded": False, "reason": None,
-            "entities": [], "events": [],
+            "entities": [{"id": r[0], "name": r[1], "kind": r[2]}
+                          for r in orows],
+            "events": [],
             "points": [{"id": r[0], "content": r[1], "kind": "statement"}
                        for r in rows],
             "queries_run": 1}
@@ -112,6 +149,29 @@ def _question() -> dict:
               "has_answer": True},
              {"role": "assistant", "content": "ok", "has_answer": False}],
             [{"role": "user", "content": "I moved my gym session to 5pm",
+              "has_answer": True}],
+        ],
+    }
+
+
+def _question_entity_supersede() -> dict:
+    """#2164: two-session fixture where session 0 creates Object gym-plan-A
+    and session 1 supersedes it with gym-plan-B (an ENTITY-level
+    supersession — the eval mirror of the pt_ chain fixture above). No
+    points ride either session so no pt_ record can form: the ONLY
+    supersession record is the entity one the extractor derives from the
+    session-1 embed's ``supersedes`` ref + the S3-resolved gym-plan-A."""
+    return {
+        "question_id": "q2",
+        "haystack_session_ids": ["s0", "s1"],
+        "haystack_dates": ["2026-06-18", "2026-06-20"],
+        "haystack_sessions": [
+            [{"role": "user",
+              "content": "I follow gym-plan-A for strength training",
+              "has_answer": True},
+             {"role": "assistant", "content": "ok", "has_answer": False}],
+            [{"role": "user",
+              "content": "I replaced gym-plan-A with gym-plan-B",
               "has_answer": True}],
         ],
     }
@@ -186,3 +246,41 @@ def test_ingest_valid_from_from_haystack_dates(sdk_factory, monkeypatch):
     vf, wh = rows[0]
     assert vf == "2026-06-14"
     assert wh == "2026-06-14"
+
+
+def test_ingest_applies_entity_supersession(sdk_factory, monkeypatch):
+    """#2164: eval ingest must fold ENTITY-level supersession records too.
+    Pre-fix the inline supersession loop was pt_-only — an entity record
+    (`superseded` = an Object id, no pt_ prefix) fell through the
+    both-pt_ gate and was SILENTLY continue-dropped: gym-plan-A stayed
+    live and no ObjectSuperseded fold happened. Now the ingest mirrors
+    the shared apply_supersessions helper (capture parity): gym-plan-A
+    must land status='superseded' supersededBy='gym-plan-B', gym-plan-B
+    stays live, and the fold counts under the new additive
+    ``objects_superseded`` stats key (never the pt_ record counter)."""
+    monkeypatch.setattr("tortoise.extractor_v2.search_graph", _fake_search)
+    sdk = sdk_factory()
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    stats = ingest_haystack_v2(sdk, _question_entity_supersede(),
+                               model=_model())
+    # the extractor derived ONE entity supersession record (session 1's
+    # gym-plan-B supersedes gym-plan-A); no pt_ record exists here
+    assert stats["supersessions"] == 1
+    assert stats["supersessions_written"] == 0
+    assert stats["objects_superseded"] == 1
+
+    proj = sdk._get_proj()
+    a = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy",
+        params={"n": "gym-plan-A"}).result_set
+    assert a, "gym-plan-A Object missing from the graph"
+    status, sb = a[0]
+    assert status == "superseded", f"gym-plan-A never folded: {a!r}"
+    assert sb == "gym-plan-B", f"wrong successor: {a!r}"
+
+    b = proj.g.query(
+        "MATCH (o:Object {name:$n}) RETURN coalesce(o.status, '')",
+        params={"n": "gym-plan-B"}).result_set
+    assert b and b[0][0] == "live", \
+        f"successor gym-plan-B must stay live: {b!r}"

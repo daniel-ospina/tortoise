@@ -7,7 +7,6 @@ and the eval loop are later milestones.
 GAP-15 / #7003: Conversation mining pipeline (mining.py) now wired.
 
 
-__version__ = "0.2.0"  # mirrors pyproject.toml; programmatic access for SDK clients
 Import-time loud-fail guard (issue #176, plan Task 8):
   `tortoise.FalkorDB` SUBCLASSES `redislite.falkordb_client.FalkorDB` and
   raises RuntimeError on relative paths. BEST-EFFORT: only code importing
@@ -23,6 +22,11 @@ Import-time loud-fail guard (issue #176, plan Task 8):
   code importing `tortoise.FalkorDB` or importing redislite after tortoise.
 """
 from __future__ import annotations
+
+#: mirrors pyproject.toml (single source of truth); programmatic access for SDK clients.
+#: #2208: moved OUT of the module docstring — 5a2b4eb4 added it inside the docstring
+#: (lines 1-24), so `tortoise.__version__` was doc text, never an executable attr.
+__version__ = "0.2.0"
 
 import os
 
