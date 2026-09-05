@@ -1671,6 +1671,20 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
 
 def main():
     _transport_mode.set("stdio")
+    # #2203: the stdio server must terminate its embedded redis-server child
+    # when the parent is killed — SIGTERM from the harness/session teardown,
+    # SIGHUP on terminal/session death, SIGINT when the process started with
+    # it ignored (non-tty stdin). The guard's handler closes every live
+    # embedded server INLINE (registry of guarded FalkorDB clients) and then
+    # re-raises the signal, so the server dies with the parent on any of
+    # those kills — no dependence on atexit or on unwinding the event loop.
+    # (Client disconnect = stdin EOF → mcp.run returns → the explicit close
+    # after it below.) Idempotent.
+    from tortoise.embedded_lifecycle import (
+        close_embedded_clients,
+        install_embedded_signal_cleanup,
+    )
+    install_embedded_signal_cleanup()
     # #2204: announce dev mode (no auth) at the actual serve start, NOT at
     # module import — incidental importers (hosted_api, doctor, tests) must
     # stay quiet. Stdio is the only path that cannot carry auth headers, so
@@ -1706,7 +1720,15 @@ def main():
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
 
         print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
-    mcp.run(transport="stdio")
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        # #2203: deterministic teardown when the stdio session ends (client
+        # disconnect / stdin EOF / abnormal session end) — close every
+        # embedded server this process opened NOW instead of relying on
+        # atexit ordering; a no-op when nothing was opened (docker-URI
+        # mode), idempotent (already-closed clients skip).
+        close_embedded_clients()
 
 
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
