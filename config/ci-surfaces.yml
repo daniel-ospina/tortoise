@@ -306,6 +306,7 @@ surfaces:
   - test_navigation.py
   - test_no_tests_imports_in_production.py
   - test_notify.py
+  - test_object_registered_journal.py   # #2194 ObjectRegistered journaling (docker lane)
   - test_open_kinds.py
   - test_operator_source_search.py
   - test_operator_source_unit.py
