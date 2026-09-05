@@ -18,9 +18,10 @@ aboutObjects:
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
-> **Status (2026-09-06):** Tasks 1–6 COMPLETE (commits 70ead0b7 → ef52b0b0 on
-> `feat/2313-per-graph-backups`; VGATE-passed per task). Task 7 (docker-lane
-> E2E) best-effort in progress; Task 8 (PR + review gates) pending.
+> **Status (2026-09-06):** Tasks 1–7 COMPLETE (commits 70ead0b7 → 6c529037 on
+> `feat/2313-per-graph-backups`; VGATE-passed per task; final full-diff VGATE
+> passed — embedded 219 + docker 215 across the affected suites). Task 8
+> (PR + review gates) in progress.
 # #2313 Implementation Plan — Per-Graph Backup Coverage
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
