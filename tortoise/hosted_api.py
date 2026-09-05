@@ -513,21 +513,30 @@ async def _lifespan(app):
                     from tortoise.event_store import purge_expired, purge_overflow
                     days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
                     cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
-                    # Probe-before-purge (#2251 review P2): enumerate the
-                    # server-wide existing graphs ONCE and skip teams whose
-                    # team_{tid} graph was never minted (orphan registry
-                    # rows) — a purge query against an absent graph would
-                    # materialize an empty one. None → probe failed → skip
-                    # this cycle (best-effort — the per-team purges below
-                    # hit the same graph store, so they would fail anyway;
-                    # the per-team SDK lazy hook still covers purges).
-                    existing = _registry_existing_graphs()
-                    if existing is None:
-                        _logger.warning("event retention sweep skipped: registry graph probe failed")
-                        return
+                    # Probe-before-purge is registry-mode only (#2251 review
+                    # P2): a purge query against an ABSENT team_{tid} graph
+                    # (orphan registry row from a partial provision) would
+                    # materialize an empty one. Skip the probe in Supabase
+                    # mode — the registry namespace must NEVER be
+                    # constructed there (#669; the flip-gate pins the
+                    # webhook path zero-touch), and that sweep predates
+                    # #2251 so it keeps its pre-existing unconditional
+                    # per-team purge. Registry mode: enumerate the
+                    # server-wide existing graphs ONCE; None → probe failed
+                    # → skip this cycle (best-effort — the per-team purges
+                    # below hit the same graph store, so they would fail
+                    # anyway; the per-team SDK lazy hook still covers
+                    # purges).
+                    from tortoise.supabase_control import is_supabase_enabled
+                    existing = None  # None = no gate (Supabase mode)
+                    if not is_supabase_enabled():
+                        existing = _registry_existing_graphs()
+                        if existing is None:
+                            _logger.warning("event retention sweep skipped: registry graph probe failed")
+                            return
                     # Sweep every registered team's graph (registry Team nodes).
                     for team in _iter_registered_teams():
-                        if f"team_{team['team_id']}" not in existing:
+                        if existing is not None and f"team_{team['team_id']}" not in existing:
                             continue
                         try:
                             sdk = _make_sdk(namespace=team["team_id"])
