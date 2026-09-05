@@ -18,6 +18,18 @@ aboutObjects:
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
+> **Residuals (review-gate round 1):**
+> - Custom-graph self-service/graph-bound RESTORE surface deferred → #2339
+>   (archives restorable via the pipeline + drill scratch; /backups/restore
+>   stays default-surface).
+> - Internal DR operators (drill/re-baseline/ACL reconcile) keep the
+>   pre-existing FalkorDB-registry control-plane binding — supabase-lane
+>   operation deferred → #2340.
+> - Legacy C5-era flat CUSTOM on-demand dumps: watcher freshness excludes
+>   them (manifest graph_name vs the default's per-graph state name); GET
+>   /backups reverse-buckets them by the graphs seam (Q6). Pre-#2313 flat
+>   DEFAULT dumps keep the drain + default bucket semantics.
+>
 > **Status (2026-09-06):** Tasks 1–7 COMPLETE (commits 70ead0b7 → 6c529037 on
 > `feat/2313-per-graph-backups`; VGATE-passed per task; final full-diff VGATE
 > passed — embedded 219 + docker 215 across the affected suites). Task 8

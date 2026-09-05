@@ -553,6 +553,11 @@ def _backup_graph(
         "node_count": node_count,
         "counts": {"nodes": node_count, "edges": manifest.get("edge_count")},
         "label_counts": label_counts,
+        # graph_name names the dumped FalkorDB graph — the watcher uses the
+        # DEFAULT graph's state graph_name to disambiguate legacy flat
+        # manifests (custom-era on-demand dumps must not gate team freshness).
+        "graph_name": graph_name,
+        "graph_id": graph_id,
         "updated_at": now.isoformat(),
     }
     # ── Persist per-graph state (counts feed the transition guard next run).
@@ -629,18 +634,25 @@ def _sweep_team(
         if gr.get("status") == "backed_up":
             any_backed_up = True
 
-    # Legacy flat-pool drain: pre-#2313 team-level artifacts (and any straggler
-    # from pre-T5 on-demand endpoints) are pruned team-wide under the same
-    # retention policy. Nested per-graph keys are never touched here.
-    try:
-        prune_backups(
-            storage, team_id,
-            keep_daily=config.retention_daily,
-            keep_weekly=config.retention_weekly,
-            keep_hourly=config.retention_hourly,
-        )
-    except Exception as e:
-        logger.warning("legacy team-level prune failed for %s: %s", team_id, e)
+    # Legacy flat-pool drain: pre-#2313 team-level artifacts (and any
+    # straggler from pre-T5 on-demand endpoints) are pruned team-wide under
+    # the same retention policy. Nested per-graph keys are never touched
+    # here. The drain runs ONLY when the DEFAULT graph backed up this pass —
+    # the pre-#2313 prune that managed the flat pool ran exactly on a
+    # successful default dump. A default stuck in data-loss/error keeps its
+    # last-known-good flat archives for restore/forensics instead of the
+    # drain time-eroding the recovery source.
+    if graph_results.get("default", {}).get("status") == "backed_up":
+        try:
+            prune_backups(
+                storage, team_id,
+                keep_daily=config.retention_daily,
+                keep_weekly=config.retention_weekly,
+                keep_hourly=config.retention_hourly,
+            )
+        except Exception as e:
+            logger.warning("legacy team-level prune failed for %s: %s",
+                           team_id, e)
 
     default = graph_results.get("default", {})
     team_res = dict(default)

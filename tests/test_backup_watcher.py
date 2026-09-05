@@ -430,3 +430,67 @@ def test_watcher_degraded_never_fabrication_for_new_custom_graph():
     assert s3["per_graph"]["team_a:g_new"] == "never"
     assert any("NEVER_BACKED_UP" in t and "team_a:g_new" in t
                for t in ch.telegram)
+
+
+def _seed_default_state_with_name(storage, team, name):
+    storage.upload(
+        f"ops/teams/{team}/graphs/default/state.json",
+        json.dumps({"node_count": 1, "graph_name": name,
+                    "updated_at": FIXED.isoformat()}).encode(),
+    )
+
+
+def test_watcher_shrink_does_not_resolve_on_unconfirmed_surface():
+    """FIX-C regression: a failed control-plane read (provider None) must
+    never resolve real custom-graph incidents — the mirror of NEVER requiring
+    a confirmed listing (a CP blip at sweep time is when customs age)."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    _seed_graph_archive(storage, "team_a", "g_x", 200)  # stale
+    _seed_graph_state(storage, "team_a", "g_x")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_x"])
+    w.poll()
+    assert any("STALE — team_a:g_x" in t for t in list(ch.issues.values()))
+
+    # CP blip → provider returns None (unconfirmed). Issue must SURVIVE.
+    w._graphs_for = lambda t: None  # noqa: SLF001
+    w.poll()
+    assert any("STALE — team_a:g_x" in t for t in list(ch.issues.values())), \
+        "an unconfirmed surface must not resolve real incidents"
+
+    # Genuine deletion → provider returns [] (confirmed empty) → resolved.
+    w._graphs_for = lambda t: []  # noqa: SLF001
+    w.poll()
+    assert not any("STALE — team_a:g_x" in t for t in list(ch.issues.values()))
+
+
+def test_watcher_legacy_custom_flat_does_not_gate_team_freshness():
+    """FIX-F regression: a pre-#2313 C5-era flat on-demand dump of a CUSTOM
+    graph (flat key, custom namespace as graph_name) is NOT the default — it
+    must not keep team freshness green while the default is stale."""
+    storage = MemoryStorage()
+    # default per-graph state names the default graph
+    _seed_default_state_with_name(storage, "team_a", "team_team_a")
+    # stale DEFAULT flat dump
+    _seed_archive(storage, "team_a", 200)
+    # FRESH pre-#2313 custom-era flat dump (custom namespace as graph_name)
+    ts = _ts(0.2)
+    key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
+    backup_id = f"team_a/{key}"
+    m = {"backup_id": backup_id, "team_id": "team_a",
+         "graph_name": "team_team_a_g_custom",  # a custom namespace
+         "created_at": ts.isoformat(), "node_count": 1, "edge_count": 0,
+         "sha256": "0" * 64}
+    storage.upload(f"backups/{backup_id}/manifest.json",
+                   json.dumps(m).encode())
+    storage.upload(f"backups/{backup_id}/dump.enc", b"x")
+    from tortoise.backup_watcher import _newest_backup_ts
+    newest = _newest_backup_ts(storage, "team_a")
+    # the DEFAULT's stale flat dump (200h old = 12000 min) governs — the
+    # fresh custom-era flat (0.2h) must NOT mask it
+    assert newest is not None
+    age_min = (FIXED - newest).total_seconds() / 60.0
+    assert age_min > 10000, f"custom-era flat masked default staleness ({age_min})"
+    assert age_min > 5000

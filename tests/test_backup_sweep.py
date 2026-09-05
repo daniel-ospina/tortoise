@@ -22,7 +22,7 @@ from tortoise.backup_sweep import (
     run_backup_sweep,
     team_graph_name,
 )
-from tortoise.hosted_backup import MemoryStorage
+from tortoise.hosted_backup import MemoryStorage, list_backups
 from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.projection import FalkorProjection
 
@@ -1309,3 +1309,120 @@ def test_resolve_active_graph_supabase_fake():
         resolve_active_graph(cp, "team_s", "g_del")  # tombstoned
     with pytest.raises(ValueError):
         resolve_active_graph(cp, "team_s", "g_missing")
+
+
+# ── FIX-D / gap tests: drain gating, read_graph_state fallback, custom drift ──
+
+
+def test_read_graph_state_default_falls_back_to_legacy_team_state(shared_proj):
+    """The per-graph read for the DEFAULT graph falls back to the legacy
+    team-level file when no per-graph file exists yet (migration bridge for
+    the transition-guard baseline); custom graphs have no fallback."""
+    from tortoise.backup_sweep import _write_json, read_graph_state
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        store = MemoryStorage()
+        _write_json(store, "ops/teams/team_x/state.json",
+                    {"node_count": 7, "label_counts": {"Point": 7}})
+        assert read_graph_state(store, "team_x", "default")["node_count"] == 7
+        # a per-graph file, once present, wins over the legacy file
+        _write_json(store, "ops/teams/team_x/graphs/default/state.json",
+                    {"node_count": 9})
+        assert read_graph_state(store, "team_x", "default")["node_count"] == 9
+        # custom graphs never read the legacy team file
+        assert read_graph_state(store, "team_x", "g_c1") == {}
+
+
+@pytest.mark.skipif(_DOCKER_LANE, reason="custom namespaces leak on docker lane (T7 E2E covers)")
+def test_sweep_custom_graph_data_loss_transition_fires_per_graph(shared_proj):
+    """A custom graph's >50% drop across runs fires DATA_LOSS_CANDIDATE with
+    the graph_id and does NOT update its per-graph state (guard baseline)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_dl', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_dl"))
+        team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
+        ns = f"team_team_dl_g_c1"
+        g = proj.db.select_graph(ns)
+        for i in range(5):
+            g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
+                    params={"id": f"pt-{i}", "c": "c"})
+        reg.query(
+            "CREATE (g:Graph {id:'g_c1', team_id:'team_dl', kind:'custom', "
+            "namespace:$ns, status:'active'})",
+            params={"ns": ns},
+        )
+        store = MemoryStorage()
+        r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        assert r1["results"]["team_dl"]["graphs"]["g_c1"]["status"] == "backed_up"
+        st1 = read_graph_state(store, "team_dl", "g_c1")
+        assert st1["node_count"] == 5
+
+        # wipe >50% of the custom graph (5 → 2) — steady default unaffected
+        g.query("MATCH (p:Point) WHERE p.id IN ['pt-0','pt-1','pt-2'] DELETE p")
+        r2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config())
+        res = r2["results"]["team_dl"]
+        assert res["graphs"]["default"]["status"] == "backed_up"
+        assert res["graphs"]["g_c1"]["status"] == "data_loss_candidate"
+        dl = [i for i in r2["incidents"]
+              if i["kind"] == "DATA_LOSS_CANDIDATE" and i.get("graph_id") == "g_c1"]
+        assert len(dl) == 1 and dl[0]["detail"]["previous"] == 5
+        # guard baseline preserved (state not advanced to 2)
+        assert read_graph_state(store, "team_dl", "g_c1")["node_count"] == 5
+        # no data-loss archive stands
+        assert len(list_backups(store, "team_dl", graph_id="g_c1")) == 1
+
+
+def test_sweep_legacy_drain_skipped_when_default_fails(shared_proj):
+    """FIX-D regression: the legacy flat-pool drain runs ONLY when the default
+    graph backed up — a default in data-loss keeps its last-good flat archives
+    (pre-#2313 the prune ran only on a successful default dump)."""
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_keep', tier:'pro'})")
+        team_g = proj.db.select_graph(_team_graph("team_keep"))
+        for i in range(2):
+            team_g.query(
+                "CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
+                params={"id": f"pt-{i}"})
+        store = MemoryStorage()
+        # run 1: default backs up (baseline state written)
+        r1 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config(retention_weekly=0))
+        assert r1["results"]["team_keep"]["graphs"]["default"]["status"] == "backed_up"
+        # seed an OLD legacy flat artifact AFTER run 1 (run 1's successful
+        # drain would otherwise legitimately prune it): only run 2's drain —
+        # which must NOT run on a failing default — would erode it
+        from datetime import timedelta
+        old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+            "%Y%m%dT%H%M%S") + "000Z_00000000"
+        legacy_id = f"team_keep/{old_ts}"
+        store.upload(f"backups/{legacy_id}/dump.enc", b"old")
+        store.upload(f"backups/{legacy_id}/manifest.json", json.dumps({
+            "backup_id": legacy_id, "team_id": "team_keep",
+            "graph_name": _team_graph("team_keep"),
+            "created_at": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+            "node_count": 2, "edge_count": 0, "sha256": "x",
+            "format": "tortoise-dump-v1",
+        }).encode())
+        # run 2: default is EMPTIED → data_loss_candidate → drain must NOT run
+        team_g.query("MATCH (p:Point) DELETE p")
+        r2 = run_backup_sweep(db=proj.db, registry=reg, storage=store,
+                              config=_config(retention_weekly=0))
+        assert r2["results"]["team_keep"]["graphs"]["default"]["status"] == "data_loss_candidate"
+        # the legacy flat artifact SURVIVES run 2 (no drain on failure)
+        flat = [k for k in store.list("backups/team_keep/")
+                if k.endswith("manifest.json") and len(k.split("/")) == 4]
+        assert len(flat) == 1, "drain must not erode last-good archives on failure"

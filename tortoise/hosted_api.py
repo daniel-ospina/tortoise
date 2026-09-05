@@ -492,7 +492,7 @@ async def _lifespan(app):
                 # an empty list (no custom-graph incidents that poll — the
                 # staleness guards keep the DEFAULT coverage intact, which is
                 # the never-silent core).
-                def _graph_provider(team_id: str) -> list[str]:
+                def _graph_provider(team_id: str) -> list[str] | None:
                     try:
                         if is_supabase_enabled():
                             rows = team_source.query(
@@ -511,10 +511,13 @@ async def _lifespan(app):
                         ).result_set
                         return [str(r[0]) for r in rows if r and r[0]]
                     except Exception as exc:
+                        # None = UNCONFIRMED surface (vs [] = genuine empty):
+                        # the watcher must never resolve custom-graph
+                        # incidents off a failed control-plane read.
                         _logger.warning(
                             "watcher custom-graph enumeration failed for %s: %s",
                             team_id, exc)
-                        return []
+                        return None
 
                 watcher = BackupWatcher(
                     _backup_storage(), _alert_store_from(cfg),
@@ -16512,14 +16515,18 @@ def _require_backup_tier(team: dict) -> None:
         )
 
 
-def _manifest_graph(manifest: dict) -> dict:
+def _manifest_graph(manifest: dict, override_gid: str | None = None) -> dict:
     """#2313: derive the graph identity of a backup manifest for listing.
 
     Per-graph manifests carry ``graph_id``; legacy flat manifests (pre-#2313
-    team-level artifacts) bucket to the DEFAULT graph (Q6 owner decision).
-    Additive enrichment only — consumers ignore unknown fields.
+    team-level artifacts) bucket to the DEFAULT graph by key shape (Q6 owner
+    decision) unless an override resolves them — see ``backups_list``'s
+    reverse lookup (a legacy flat manifest whose ``graph_name`` names a
+    custom namespace is a pre-#2313 C5-era on-demand custom dump and lists
+    under that custom graph). Additive enrichment only — consumers ignore
+    unknown fields.
     """
-    graph = manifest.get("graph_id")
+    graph = override_gid or manifest.get("graph_id")
     if graph is None:
         parts = str(manifest.get("backup_id", "")).split("/")
         graph = parts[1] if len(parts) == 3 else "default"
@@ -16527,6 +16534,40 @@ def _manifest_graph(manifest: dict) -> dict:
     out["graph_id"] = graph
     out["kind"] = "default" if graph == "default" else "custom"
     return out
+
+
+def _legacy_graph_overrides(cp_source, team_id: str,
+                            manifests: list[dict]) -> dict[str, str]:
+    """Q6 reverse lookup: legacy FLAT manifests (2-segment backup_id) carry
+    the graph they dumped in ``graph_name`` — resolve that to an ACTIVE graph
+    id via the graphs seam so pre-#2313 C5-era on-demand dumps of CUSTOM
+    graphs list under their graph instead of mislabeling as the default.
+    Returns {backup_id: graph_id}. Fail-soft: any seam error → empty map
+    (the default bucket in ``_manifest_graph`` is the fallback).
+    """
+    legacy = [m for m in manifests
+              if m.get("graph_id") is None
+              and len(str(m.get("backup_id", "")).split("/")) == 2]
+    if not legacy:
+        return {}
+    try:
+        from tortoise.backup_sweep import _sweep_graph_list
+        rows = _sweep_graph_list(cp_source, team_id)
+    except Exception as e:
+        _logger.warning("legacy graph reverse lookup failed for %s: %s",
+                        team_id, e)
+        return {}
+    return _legacy_bucket_map(rows, legacy)
+
+
+def _legacy_bucket_map(rows: list[dict], legacy: list[dict]) -> dict[str, str]:
+    """Pure Q6 mapping: active-graph rows (namespace → graph_id) → legacy flat
+    manifests whose ``graph_name`` names one of them. Pure for unit testing."""
+    ns_to_gid = {str(r.get("namespace") or ""): r["graph_id"]
+                 for r in rows if not r.get("_invalid")}
+    return {m["backup_id"]: ns_to_gid[str(m.get("graph_name") or "")]
+            for m in legacy
+            if str(m.get("graph_name") or "") in ns_to_gid}
 
 
 def _incident_subject(inc: dict) -> str:
@@ -16561,9 +16602,31 @@ async def backups_list(team: dict = Depends(get_current_team_session_ungated)): 
     try:
         listed = await asyncio.to_thread(
             list_backups, _backup_storage(), team_id)
-        # #2313: additive per-graph identity on every entry (legacy flat
-        # artifacts read-bucket to the default graph).
-        return {"backups": [_manifest_graph(m) for m in listed]}
+        # #2313: additive per-graph identity on every entry. Legacy flat
+        # artifacts read-bucket to the default graph by key shape, with a
+        # Q6 reverse lookup first: a flat manifest whose graph_name names a
+        # custom namespace (pre-#2313 C5-era on-demand custom dumps) lists
+        # under that custom graph. Fail-soft — the default bucket stands on
+        # any control-plane error.
+        overrides: dict[str, str] = {}
+        if any(m.get("graph_id") is None for m in listed):
+            from tortoise.supabase_control import (
+                get_control_plane,
+                is_supabase_enabled,
+            )
+            try:
+                cp = (get_control_plane() if is_supabase_enabled()
+                      else _registry_sdk()._get_registry())
+            except Exception as e:
+                _logger.warning("backups list cp unavailable: %s", e)
+                cp = None
+            if cp is not None:
+                overrides = await asyncio.to_thread(
+                    _legacy_graph_overrides, cp, team_id, listed)
+        return {"backups": [
+            _manifest_graph(m, override_gid=overrides.get(m.get("backup_id")))
+            for m in listed
+        ]}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=f"List rejected: {e}")  # noqa: B904
     except RuntimeError as e:

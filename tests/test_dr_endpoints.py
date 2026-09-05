@@ -630,3 +630,48 @@ class TestDrAclReconcile:
         r = client.post(
             "/v1/internal/backups/acl-reconcile", headers=INTERNAL_HEADERS)
         assert r.status_code == 503
+
+
+class TestBackupsSurfaceUnits:
+    """#2313 listing/incident surface units (no client needed)."""
+
+    def test_manifest_graph_buckets_by_key_shape_and_override(self):
+        _m = ha_mod._manifest_graph
+        # per-graph manifest carries its graph_id
+        out = _m({"backup_id": "team_x/g_c1/20260101T000000Z_x", "graph_id": "g_c1"})
+        assert out["graph_id"] == "g_c1" and out["kind"] == "custom"
+        # nested default segment → default
+        out = _m({"backup_id": "team_x/default/20260101T000000Z_x"})
+        assert out["graph_id"] == "default" and out["kind"] == "default"
+        # legacy flat → default by key shape (Q6 fallback)
+        out = _m({"backup_id": "team_x/20260101T000000Z_x"})
+        assert out["graph_id"] == "default"
+        # override wins (Q6 reverse lookup found a custom graph)
+        out = _m({"backup_id": "team_x/20260101T000000Z_x"}, override_gid="g_c1")
+        assert out["graph_id"] == "g_c1" and out["kind"] == "custom"
+
+    def test_legacy_graph_overrides_reverse_lookup(self):
+        rows = [
+            {"graph_id": "g_c1", "kind": "custom",
+             "namespace": "team_team_x_g_c1", "graph_name": "team_team_x_g_c1"},
+        ]
+        # the caller pre-filters to legacy (2-segment backup_id, no graph_id)
+        over = ha_mod._legacy_bucket_map(rows, [
+            # legacy flat whose graph_name names the custom namespace
+            {"backup_id": "team_x/20260101T000000Z_x",
+             "graph_name": "team_team_x_g_c1"},
+            # legacy flat naming the default (teams.graph_name) → no override
+            {"backup_id": "team_x/20260102T000000Z_x",
+             "graph_name": "team_team_x"},
+        ])
+        assert over == {"team_x/20260101T000000Z_x": "g_c1"}
+
+    def test_incident_subject_mapping(self):
+        _sub = ha_mod._incident_subject
+        assert _sub({"kind": "STALE", "team_id": "team_x"}) == "team_x"
+        # custom-graph incidents carry graph_id → "{team}:{gid}"
+        assert _sub({"team_id": "team_x", "graph_id": "g_c1"}) == "team_x:g_c1"
+        # default-graph incidents stay team-level (back-compat alert keys)
+        assert _sub({"team_id": "team_x", "graph_id": "default"}) == "team_x"
+        # team-level kinds have no graph_id
+        assert _sub({"kind": "NO_ELIGIBLE_TEAMS", "team_id": ""}) == ""
