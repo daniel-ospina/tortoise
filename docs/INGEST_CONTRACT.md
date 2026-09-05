@@ -476,6 +476,17 @@ the MCP tool is tracked as a follow-up so the system-wide default matches the in
   only via promotion — today via `tortoise_update_point(status="live")`
   (the interim route; guarded draft→live), and via the dedicated promote
   tools when they ship.
+
+  **Capture-surface exception (W5 Phase C, #2104):** the session-capture
+  write path (`POST /v1/sessions` + `sdk.capture_session`) auto-promotes
+  ITS extracted claim points and their capture operators draft→live as part
+  of the EP-on-ingest contract (the ingested session is memory, not a
+  pending-review draft — §2.5 measured-good; E2E-5). Scope is strictly the
+  capture write path: `create_point`'s global draft default, the gated
+  `ingest` surface, and non-capture extraction (the #780 draft-operator
+  shape) are untouched. Promotion is rebuild-durable (PointPromoted /
+  OperatorPromoted events, #548 replay parity) and NOT reviewer-gated — the
+  auto-promoted snapshot never fabricates a `reviewed` flag.
   **Interim-route caveat (Track A — no zombie-operator resolution):** the
   interim route promotes a single point; it does NOT resolve draft operator
   nodes whose endpoints are now all live (the "zombie operator" — a draft

@@ -30,9 +30,10 @@ from tortoise.schemas import (  # one vocabulary, no duplicated boundary literal
 )
 from tortoise import monitoring
 from tortoise.mcp_auth import (_current_team_id, _current_team_limits,
-                               _transport_mode, _tool_group, _get_team_sdk,
-                               HTTP_ALLOWED, ERR_UNAUTHORIZED, ERR_EXCLUDED,
-                               SELFHOST_TEAM_ID)
+                               _current_scopes, _current_legacy_full_access,
+                               _current_graph_id, _transport_mode, _tool_group,
+                               _get_team_sdk, HTTP_ALLOWED, ERR_UNAUTHORIZED,
+                               ERR_EXCLUDED, SELFHOST_TEAM_ID)
 from tortoise.transport import ask_exposure_enabled
 
 _log = logging.getLogger(__name__)
@@ -219,6 +220,51 @@ async def _flush_mcp_telemetry() -> None:
 _original_call_tool = mcp.call_tool
 
 
+def _enforce_mcp_tool_scope(name: str) -> None:
+    """C5 #2114 (D-C5-3, MCP half): pre-filter scope gate at the tool-call
+    boundary — the single dispatch point every tenant tool call crosses.
+
+    - legacy full-access keys (scopes None OR legacy_full_access) and OAuth/
+      session resolutions (scopes None) pass — existing flows unchanged.
+    - a SCOPED key is enforced: tools in WRITE_TOOL_NAMES need
+      graphs:write; everything else (read tools) needs graphs:read (write
+      implies read — graphs:write satisfies reads).
+    - deleg=0 children without a data scope never reach here (the
+      middleware rejects them at resolution); deleg=0 children WITH a data
+      scope are routed to their own graph by _get_team_sdk and enforced
+      here like any scoped key.
+
+    Raises AuthorizationError (mapped to an authz error result + classified
+    auth_error by _classify_mcp_call_error) — same failure family as the
+    middleware's KEY_NOT_USER_MINTED / SUSPENDED signals."""
+
+    scopes = _current_scopes.get()
+    if scopes is None or _current_legacy_full_access.get():
+        return
+    have = set(scopes)
+    if name in WRITE_TOOL_NAMES:
+        if "graphs:write" not in have:
+            raise AuthorizationError(
+                f"Key lacks graphs:write scope for tool {name}.")
+    elif "graphs:read" not in have and "graphs:write" not in have:
+        raise AuthorizationError(
+            f"Key lacks a graph data scope (graphs:read) for tool {name}.")
+
+
+def _reject_graph_bound_mcp_team_surface(surface: str) -> None:
+    """C5 #2114 (re-review 3): MCP tools that write TEAM-level state (the
+    DEFAULT graph's onboarding node / pack installs / session-recording
+    toggle — data that lives outside a custom graph) reject graph-bound
+    keys outright, mirroring REST's _reject_graph_bound_team_surface. A
+    per-graph key must never write the team default graph through an MCP
+    team tool (cross-graph write). Team-wide keys / OAuth / selfhost
+    (graph_id None) pass."""
+
+    if _current_graph_id.get():
+        raise AuthorizationError(
+            f"Graph-scoped keys cannot access {surface}.")
+
+
 async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None, *,
                              version=None, run_middleware: bool = True,
                              task_meta=None):
@@ -234,6 +280,7 @@ async def _wrapped_call_tool(name: str, arguments: dict[str, Any] | None = None,
         return await _original_call_tool(name, arguments, version=version,
                                          run_middleware=False, task_meta=task_meta)
     team_id = _current_team_id.get() or ""
+    _enforce_mcp_tool_scope(name)
     maybe_record_mcp_read(name, team_id, _current_team_limits.get())
     status, error_kind = "ok", None
     t0 = _time.perf_counter()
@@ -384,6 +431,30 @@ WRITE_TOOL_NAMES: frozenset[str] = _QUOTA_GATED | frozenset({
     "tortoise_onboarding_demo_create",  # seeds the 4-layer demo graph,
     "tortoise_mine_conversations", "tortoise_approve_merge",
     "tortoise_promote_point",
+    # C5 #2114 (code-review P1): the destructive/mutating _rw() tools a
+    # graphs:read-only key must NEVER invoke — a read-only key deleting
+    # points/entities or mutating operators/sources is a write-scope
+    # bypass. Membership asserted by test_every_node_creating_tool_* +
+    # test_no_write_tool_counted_as_read (extended in C5).
+    "tortoise_delete_point", "tortoise_delete", "tortoise_delete_entity",
+    "tortoise_set_point_baseline", "tortoise_set_source_tier",
+    "tortoise_annotate_operator",
+    # tortoise_pack_install MERGEs :PackManifest/:PackInstall into the
+    # tenant graph (write) — re-review P2: it was missing (classified read).
+    "tortoise_pack_install",
+    # C5 #2114 (re-review 3): REST/MCP parity + write-cache tools — session
+    # capture writes episodic Points (REST twin requires graphs:write); the
+    # onboarding index/demo/toggle tools write DEFAULT-graph/team state;
+    # get_source_reliability write-through refreshes the Source cache.
+    "tortoise_session_capture",
+    "tortoise_onboarding_github_index",
+    "tortoise_onboarding_session_recording",
+    "tortoise_get_source_reliability",
+    "tortoise_onboarding_github_connect",  # stores credentials + team state
+    # main-side #2156 landed during the C5 rebase — onboarding_seed writes
+    # the two anchor Subjects into the DEFAULT graph (derived write-set test
+    # caught it at the rebased head).
+    "tortoise_onboarding_seed",
 })
 
 
@@ -909,6 +980,10 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
     is the serving app: ``tortoise.hosted_api`` is only imported in the
     hosted deployment.
     """
+    # C5 #2114 (final-gate P2): packs are DEFAULT-graph team-level state —
+    # graph-bound keys rejected (REST twin upload_pack_manifest parity; a
+    # per-graph install would orphan pack state list_packs never sees).
+    _reject_graph_bound_mcp_team_surface("pack install")
     import sys as _sys
 
     from tortoise.pack_manifest_store import upsert_tenant_manifest
@@ -2533,6 +2608,7 @@ _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
     "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
     "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+    "tortoise_onboarding_seed",  # #1999 (W3)
 })
 
 # 60s per-team TTL cache for the tools/list gate — the onboarding-state read
@@ -2592,6 +2668,9 @@ def tortoise_onboarding_demo_create() -> dict:
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
+    # C5 #2114 (re-review 3): the demo seeds the team's DEFAULT graph —
+    # graph-bound keys rejected (REST twin public_demo parity).
+    _reject_graph_bound_mcp_team_surface("demo seed")
     # #329: demo graph creation creates nodes — quota-gate it
     _enforce_quota("points")
     result = _seed_demo_graph(team_id)
@@ -2609,6 +2688,48 @@ def tortoise_onboarding_state() -> dict:
     return _onboarding_state()
 
 
+def tortoise_onboarding_seed(org_name: str | None = None,
+                             person_name: str | None = None) -> dict:
+    """File the two onboarding anchor Subjects for this team (#1999, W3):
+    Organization (Subject/organization) + User (Subject/naturalPerson)
+    linked memberOf — interactive, ontology-precise.
+
+    Interactive (WF-2): call WITHOUT names to discover gaps (the person
+    display name is email-derived and needs user confirmation — never
+    invented) or collisions (a same-name Subject that is not this org/user —
+    disambiguation required, never a silent merge); call WITH the
+    user-confirmed names to file. Returns status:
+    'needs_confirmation' (gaps[] — ask the user), 'collision'
+    (collisions[] — ask for a disambiguated name), or 'seeded'
+    (two Subjects + memberOf + org_subject_id + first-points-filed).
+    Compact orgs seed-lite (org-anchor Subject only, no person ask)."""
+    # C5 #2114: the anchors file into the team DEFAULT graph — graph-bound
+    # keys rejected (REST twin onboarding seed parity).
+    _reject_graph_bound_mcp_team_surface("onboarding seed")
+    team_id = _current_team_id.get()
+    if team_id is None:
+        return {"error": "No team context (HTTP mode required)"}
+    from tortoise.hosted_api import (
+        HTTPException as _HTTPException,
+    )
+    from tortoise.hosted_api import (
+        _run_onboarding_seed,
+        _team_email,
+    )
+    try:
+        return _run_onboarding_seed(
+            team_id, org_name=org_name, person_name=person_name,
+            person_email=_team_email(team_id))
+    except _HTTPException as exc:
+        # 503 graph-down (fail-loud FLOW write) etc. — surfaced honestly,
+        # never a silent skip (agent retries when the graph is back).
+        return {"error": str(exc.detail),
+                "status": getattr(exc, "status_code", 500)}
+    except Exception as exc:  # pragma: no cover - defensive
+        return {"error": f"seed failed: {exc}"}
+
+
+@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     """Toggle automatic session recording for this team (Q3 / dashboard
     Memory sources sessions toggle).
@@ -2618,6 +2739,9 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     pipeline checks (409 when off); ``capture_revised`` is written for
     backward-compatibility with the registered state keys (the exactly-once
     re-ask machinery it fed was removed with the gate)."""
+    # C5 #2114 (re-review 3): team-level surface — graph-bound keys rejected
+    # (REST twin set_session_recording parity).
+    _reject_graph_bound_mcp_team_surface("session recording toggle")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}
@@ -2697,14 +2821,24 @@ def tortoise_session_capture(conversation: list[dict],
                              session_id: str | None = None) -> dict:
     """File an agent session into the graph (T3 workflows prompt surface).
 
-    Server-enforced gates (identical to POST /v1/sessions): the team's
-    ``session_recording`` opt-out flag is checked FIRST (409 when disabled),
-    then the provider 503 / quota 402 / empty-422 gates. Returns the capture
-    result on success, or an honest error dict on failure (the per-harness
-    last-error state key is recorded on non-2xx, cleared on 2xx — same
-    receipt semantics as the REST path).
+    Server-enforced gates (identical to POST /v1/sessions — VERIFIED order,
+    #2093 S2): boundary 422 (invalid harness/shape — SessionRequest
+    construction below) -> 409 (recording off) -> 503 (no provider) -> 400
+    (turn cap) -> 422 (empty/blank transcript) -> 402 (quota). Returns the
+    capture result (a memory_write_v1 envelope, #2104) on success, or an
+    honest error dict on failure (the per-harness last-error state key is
+    recorded on non-2xx, cleared on 2xx — same receipt semantics as the
+    REST path).
     """
-    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits  # noqa: I001
+    from tortoise.mcp_auth import (  # noqa: I001
+        SELFHOST_TEAM_ID,
+        _current_team_id,
+        _current_team_limits,
+        _current_graph_id,
+        _current_graph_namespace,
+        _current_scopes,
+        _current_legacy_full_access,
+    )
     team_id = _current_team_id.get()
     if not team_id or team_id == SELFHOST_TEAM_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
@@ -2722,6 +2856,17 @@ def tortoise_session_capture(conversation: list[dict],
     limits = _current_team_limits.get() or {}
     team = {"team_id": team_id, "tier": limits.get("tier", "free"),
             "key_id": None}
+    # C6 #2115 (D-C6-4): a graph-bound key's capture must land in ITS graph
+    # — carry the resolution ContextVars into the impl's team dict so
+    # _data_sdk routes there (and the per-graph recording gate reads the
+    # key's override). Session/OAuth/team-wide resolutions have empty
+    # context → no graph fields → default graph (unchanged).
+    _gid = _current_graph_id.get()
+    if _gid:
+        team["graph_id"] = _gid
+        team["graph_namespace"] = _current_graph_namespace.get()
+        team["scopes"] = _current_scopes.get() or []
+        team["legacy_full_access"] = bool(_current_legacy_full_access.get())
     if limits.get("max_points") is not None:
         team["max_points"] = int(limits["max_points"])
     try:
@@ -2748,6 +2893,9 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     Returns {job_id, status} — poll via the REST endpoint or check
     onboarding state for github_indexed.
     """
+    # C5 #2114 (re-review 3): indexes into the DEFAULT graph — graph-bound
+    # keys rejected (REST twin index_github parity).
+    _reject_graph_bound_mcp_team_surface("github index")
     team_id = _current_team_id.get()
     if team_id is None:
         return {"error": "No team context (HTTP mode required)"}

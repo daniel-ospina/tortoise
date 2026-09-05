@@ -301,6 +301,18 @@ def build_reader_user_message(evidence: str, question: str) -> str:
 #: call shape, no JSON mode; see ``build_reader_model``).
 DEFAULT_READER_MAX_TOKENS = 500
 
+#: Output-budget ESCALATION cap for the ask lane (#2280). A reasoning model
+#: (qwen3.8-max via OpenRouter, etc.) can spend the whole 500-token output
+#: budget THINKING on a hard question and emit NOTHING (content empty,
+#: finish_reason="length" — the reasoning-budget collapse class; the
+#: DeepSeekDirect variant is disabled by turning thinking off, #1790, but
+#: some models refuse that knob). The ask lane retries ONCE at this larger
+#: budget when the first call collapses — an empty model output is NEVER a
+#: legitimate abstention (the two-phase prompt abstains in writing), so a
+#: collapsed call must not be read as "no evidence" (the pre-#2280 bug
+#: silently fabricated abstentions on answerable questions).
+DEFAULT_READER_ESCALATION_MAX_TOKENS = 2000
+
 #: M2 pre-flight ping prompt (moved from tools/longmem_eval/preflight.py —
 #: the product owns it now; the eval preflight imports it from here).
 PROBE_SYSTEM = (

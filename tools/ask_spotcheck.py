@@ -8,6 +8,17 @@ RoutingModel transport delta vs the eval's OpenAICompatModel) over:
     (temporal / preference / KU / MSR / abstention (_abs) /
     single-session-assistant samples — the plan's composition).
 
+Usage notes (#2280):
+  * Run with a STRONG, non-collapsing reader — the ask lane escalates its
+    output budget once when a reasoning model collapses to empty output
+    (``TORTOISE_ASK_ESCALATION_TOKENS``, default 2000), but a capable
+    model is the point of the measurement: ``TORTOISE_ASK_MODEL=qwen/
+    qwen3.8-max`` (family-prefixed, #2069).
+  * The run also prints a ctx gold-session recall readout (retrieval
+    measured SEPARATELY from reading — every gold session present in the
+    evidence the reader saw), so a retrieval regression is never masked
+    as a reading miss.
+
 Grading (issue #2071 owner decision 2026-08-31 — full semantic): EVERY
 question is graded by the benchmark-standard semantic judge
 (``build_judge()`` → the official gpt-4o anscheck judge — the same judge
@@ -167,6 +178,49 @@ def _require_judge_key() -> str:
         "fallback to the old word-overlap bar.")
 
 
+def _turn_present(evidence_norm: str, content) -> bool:
+    """True when a distinctive window of a turn's verbatim content appears
+    in the normalized evidence string (the reader's assembled context). The
+    first ~200 chars are probed (a long turn truncated by the 32 KiB byte
+    cap still matches via its head); a <20-char probe is too weak to count.
+    """
+    c = _normalize(content)
+    if not c:
+        return False
+    probe = c[:200]
+    return len(probe) >= 20 and probe in evidence_norm
+
+
+def _gold_sessions_covered(evidence: str, question: dict) -> bool | None:
+    """Gold-session coverage of the READER's context (retrieval+assembly
+    recall readout — the #2280 harness leg, field practice: LongMemEval
+    ships ``answer_session_ids``; mem0/gbrain measure retrieval separately
+    from reading).
+
+    True  → EVERY gold session has >=1 turn present in the evidence the
+            reader saw (a reading miss is never a retrieval miss).
+    False → at least one gold session is entirely outside the assembled
+            context (retrieval/assembly starved the reader).
+    None  → the question carries no gold ids (legacy fixture).
+    """
+    hay_ids = question.get("haystack_session_ids") or []
+    gold_ids = question.get("answer_session_ids") or []
+    sessions = question.get("haystack_sessions") or []
+    if not gold_ids or not hay_ids:
+        return None
+    pos = {sid: i for i, sid in enumerate(hay_ids)}
+    evidence_norm = _normalize(evidence)
+    for gid in gold_ids:
+        i = pos.get(gid)
+        if i is None or i >= len(sessions):
+            return False  # conservative: unknown gold mapping = uncovered
+        turns = sessions[i] or []
+        if not any(_turn_present(evidence_norm, t.get("content"))
+                   for t in turns):
+            return False
+    return True
+
+
 def _grade(question: dict, result: dict, judge=None) -> tuple[bool, str, str]:
     """Semantic grading (issue #2071 owner decision 2026-08-31).
 
@@ -246,12 +300,35 @@ def main(argv: list[str] | None = None) -> int:
         try:
             _seed_memory(sdk, q)
             qdate = _to_iso_date(q.get("question_date") or "")
-            result = sdk.ask(q["question"], question_date=qdate)
+            try:
+                result = sdk.ask(q["question"], question_date=qdate)
+            except Exception as e:  # noqa: BLE001, RUF100 — a per-question
+                # reader/retrieval malfunction (#2280: the empty-output
+                # fail-loud path raises AskReaderUnavailable) is a MISS for
+                # THIS question, never a whole-run abort — record it and
+                # keep aggregating the remaining questions.
+                rec = {"question_id": q.get("question_id") or "",
+                       "ok": False, "abstained": True,
+                       "qtype_detected": None,
+                       "judge": "unavailable", "judge_model": "",
+                       "note": f"ask unavailable: {type(e).__name__}",
+                       "ctx_recall": None}
+                results.append(rec)
+                print(f"[{i+1}/{len(spotcheck)}] "
+                      f"{q['question_id'][:34]:34s} ok=False "
+                      f"abstained=unavailable ctx=None — "
+                      f"ask unavailable: {type(e).__name__}: {e}")
+                continue
             rec = _record(q, result, judge)
+            # #2280 harness leg: gold-session coverage of the reader's
+            # context (retrieval measured separately from reading).
+            rec["ctx_recall"] = _gold_sessions_covered(
+                result.get("evidence") or "", q)
             results.append(rec)
             print(f"[{i+1}/{len(spotcheck)}] {q['question_id'][:34]:34s} "
                   f"ok={rec['ok']} abstained={rec['abstained']} "
                   f"detected={rec['qtype_detected']} "
+                  f"ctx={rec['ctx_recall']} "
                   f"judge={rec['judge']}/{rec['judge_model']} — {rec['note']}")
         finally:
             sdk.close()
@@ -260,6 +337,14 @@ def main(argv: list[str] | None = None) -> int:
           f"(aggregate {n_ok / len(results):.2f}, target >= 0.8; "
           f"graded by the semantic judge ({judge.model_id}) — issue #2071; "
           f"judge key: {key_env})")
+    with_gold = [r for r in results if r.get("ctx_recall") is not None]
+    if with_gold:
+        hit = sum(1 for r in with_gold if r["ctx_recall"])
+        misses = [r["question_id"] for r in with_gold
+                  if not r["ctx_recall"]]
+        print(f"ctx gold-session recall: {hit}/{len(with_gold)} "
+              f"({hit / len(with_gold):.2f}) — gold sessions outside the "
+              f"reader's context: {misses or 'none'} (#2280)")
     return 0 if (len(results) and n_ok / len(results) >= 0.8) else 1
 
 

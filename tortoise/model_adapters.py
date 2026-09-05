@@ -48,6 +48,10 @@ from urllib import error as urllib_error
 
 import requests
 
+# #2185 seam: the canonical usage-sink fire helper (models.py is dependency-
+# free of model_adapters — this one-way import cannot cycle).
+from tortoise.models import _emit_usage_sink
+
 
 class OpenRouterModel:
     """Adapter for the OpenRouter API — supports any model on the platform.
@@ -86,6 +90,9 @@ class OpenRouterModel:
         # M3 (#1524, GATE-2): the per-call finish reason — "length" = the
         # generation hit the cap (truncation detected, not silently lost).
         self.last_finish_reason: str | None = None
+        # #2185: additive usage-capture seam (no-op unless the harness sets
+        # it — the eval collector binds a sink at registration).
+        self.usage_sink = None
 
     def close(self) -> None:
         """Interrupt any in-flight request (pilot #1549: called by the
@@ -149,6 +156,9 @@ class OpenRouterModel:
         self.last_prompt_tokens = usage.get('prompt_tokens', 0)
         self.last_completion_tokens = usage.get('completion_tokens', 0)
         self.last_cost = data.get('usage', {}).get('total_tokens', 0)  # will be overridden
+        # #2185 seam: fire with the response-local usage (provider from the
+        # class attr; no-op when no sink is bound).
+        _emit_usage_sink(self, usage)
 
         content = data['choices'][0]['message']['content']
         self.last_finish_reason = data["choices"][0].get("finish_reason")
@@ -249,6 +259,9 @@ class DeepSeekDirectModel(OpenRouterModel):
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
         self.last_finish_reason = data["choices"][0].get("finish_reason")
+        # #2185 seam (DeepSeekDirectModel has its OWN complete body — the fire
+        # must live here too, not just on the OpenRouterModel path).
+        _emit_usage_sink(self, usage)
         return data["choices"][0]["message"]["content"]
 
 

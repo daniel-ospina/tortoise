@@ -1,0 +1,24 @@
+{
+  "holdout": false,
+  "seed": 11,
+  "suite": "isolation",
+  "team": "team_a",
+  "turns": [
+    {
+      "content": "For Team A: the 'Mercury' project ships its alpha next Tuesday. The Mercury budget is approved at $40k.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded under Team A.",
+      "role": "assistant"
+    },
+    {
+      "content": "Also: Diego owns the Mercury launch checklist.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded.",
+      "role": "assistant"
+    }
+  ]
+}
