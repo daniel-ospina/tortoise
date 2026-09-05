@@ -54,6 +54,14 @@ and continue offline (CI smoke stays runnable without the extra).
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` | provider keys (existing repo pattern, `tortoise.ingest._PROVIDERS`) | required for non-mock runs |
 | `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned — #1525) |
 | `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
+
+> **Judge via OpenRouter (no OpenAI key needed).** The official judge is
+> OpenAI's `gpt-4o-2024-08-06` — the model id is what makes it official
+> (external comparability), and the SAME model is served by other
+> configured providers. With only `OPENROUTER_API_KEY` set, run the sealed
+> benchmark with:
+> `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
+> (provider resolution order: openrouter → deepseek → openai → gemini).
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
 | `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — rank-interleaved (C1 #1745: points + chunks in true RRF order, the R1 points-first tiering deliberately reversed) bounded by the item cap | `8000` |
