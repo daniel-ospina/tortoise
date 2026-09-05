@@ -654,6 +654,31 @@ def _sweep_team(
     return team_res
 
 
+def resolve_active_graph(source, team_id: str, graph_id: str) -> dict[str, Any]:
+    """Resolve a restore/re-baseline target graph to its ACTIVE sweep row.
+
+    #2313 Task 5 tombstone guard: a restore target must be an ACTIVE graph
+    of the team. The sweep list (``_sweep_graph_list``) contains ONLY active
+    graphs — deleted (tombstoned/quarantined, #2304) and unknown graphs are
+    absent, so resolution failure refuses the op with a clear error instead of
+    swapping an archive into a quarantined or unregistered namespace. The
+    default graph is always present (synthesized; never deletable).
+
+    Returns the row (graph_id/kind/namespace/graph_name). Raises ValueError
+    for deleted/unknown graphs (never RuntimeError — a MISSING graph is a
+    client error, not a control-plane failure).
+    """
+    for row in _sweep_graph_list(source, team_id):
+        if row.get("_invalid"):
+            continue
+        if row["graph_id"] == graph_id:
+            return row
+    raise ValueError(
+        f"graph {graph_id!r} is not an active graph of team {team_id} "
+        "-- restore/re-baseline refused (deleted or unknown)"
+    )
+
+
 def run_backup_sweep(
     *,
     db,

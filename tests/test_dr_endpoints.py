@@ -292,6 +292,128 @@ class TestDrDrill:
         assert r2.status_code == 429
 
 
+class TestDrRebaselinePerGraph:
+    """#2313 Task 5: re-baseline resolves the ACTIVE-graph seam (per-graph
+    state; tombstone guard)."""
+
+    def _seed_custom(self, team_id="team_x", gid="g_c1", ns="team_team_x_g_c1"):
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        reg = sdk._get_registry()
+        reg.query(
+            "CREATE (g:Graph {id:$gid, team_id:$tid, kind:'custom', "
+            "namespace:$ns, status:'active'})",
+            params={"gid": gid, "tid": team_id, "ns": ns},
+        )
+        g = sdk._get_proj().db.select_graph(ns)
+        g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
+
+    def test_rebaseline_default_writes_per_graph_and_mirror(self, client, dr_env, mem_storage):
+        _seed_team("team_x", nodes=3)
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x"},
+        )
+        assert r.status_code == 200
+        assert r.json()["graph_id"] == "default"
+        # per-graph state written AND the legacy team mirror
+        assert json.loads(mem_storage.download(
+            "ops/teams/team_x/graphs/default/state.json"))["node_count"] == 3
+        assert json.loads(mem_storage.download(
+            "ops/teams/team_x/state.json"))["node_count"] == 3
+
+    def test_rebaseline_custom_graph_writes_only_per_graph(self, client, dr_env, mem_storage):
+        _seed_team("team_x", nodes=2)
+        self._seed_custom()
+        mem_storage.upload(
+            "ops/teams/team_x/state.json",
+            json.dumps({"node_count": 99}).encode(),
+        )
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x", "graph_id": "g_c1"},
+        )
+        assert r.status_code == 200
+        assert r.json()["node_count"] == 1
+        state = json.loads(mem_storage.download(
+            "ops/teams/team_x/graphs/g_c1/state.json"))
+        assert state["node_count"] == 1
+        # team mirror untouched for custom re-baseline
+        assert json.loads(mem_storage.download(
+            "ops/teams/team_x/state.json"))["node_count"] == 99
+
+    def test_rebaseline_refuses_tombstoned_graph(self, client, dr_env, mem_storage):
+        _seed_team("team_x", nodes=2)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        sdk._get_registry().query(
+            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_dead', status:'deleted'})")
+        r = client.post(
+            "/v1/internal/backups/re-baseline", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x", "graph_id": "g_dead"},
+        )
+        assert r.status_code == 400
+        assert "not an active graph" in r.json()["detail"]
+
+
+class TestDrDrillPerGraph:
+    """#2313 Task 5: drill resolves the archive's graph through the active
+    seam; tombstoned/custom archives refused or restored to scratch."""
+
+    def _sweep_and_pick(self, client, mem_storage, graph_segment):
+        client.post("/v1/internal/backups/sweep", headers=INTERNAL_HEADERS)
+        keys = [k for k in mem_storage.list(f"backups/team_x/{graph_segment}/")
+                if k.endswith("manifest.json")]
+        assert len(keys) == 1
+        return keys[0].replace("/manifest.json", "/dump.enc")
+
+    def test_drill_custom_graph_restores_to_scratch(self, client, dr_env, mem_storage):
+        _seed_team("team_x", nodes=2)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        reg = sdk._get_registry()
+        reg.query(
+            "CREATE (g:Graph {id:'g_c1', team_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_c1', status:'active'})")
+        g = sdk._get_proj().db.select_graph("team_team_x_g_c1")
+        g.query("CREATE (p:Point {id:'c-0', content:'c', pointKind:'claim'})")
+        key = self._sweep_and_pick(client, mem_storage, "g_c1")
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x", "backup_key": key},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "drill_ok"
+        assert r.json()["target_graph"].startswith("_drill_")
+
+    def test_drill_refuses_tombstoned_after_backup(self, client, dr_env, mem_storage):
+        """Back the custom graph up while ACTIVE, then tombstone it (a graph
+        deleted AFTER its last backup) — the drill's resolution must refuse:
+        quarantined archives are never a drill/restore source (#2304)."""
+        _seed_team("team_x", nodes=1)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        reg = sdk._get_registry()
+        reg.query(
+            "CREATE (g:Graph {id:'g_x', team_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_x', status:'active'})")
+        g = sdk._get_proj().db.select_graph("team_team_x_g_x")
+        g.query("CREATE (p:Point {id:'x-0', content:'x', pointKind:'claim'})")
+        key = self._sweep_and_pick(client, mem_storage, "g_x")
+        reg.query(
+            "MATCH (g:Graph {id:'g_x'}) SET g.status = 'deleted'")
+        ha_mod._LAST_DRILL_AT = 0.0
+        r = client.post(
+            "/v1/internal/backups/drill", headers=INTERNAL_HEADERS,
+            json={"team_id": "team_x", "backup_key": key},
+        )
+        assert r.status_code == 409, r.text
+        assert "not an active graph" in r.json()["detail"]
+
+
+
 class TestRegistrySdkRetry:
     """#1579: _registry_sdk() retries ONCE on a transient embedded-DB CONNECT
     failure (redis ConnectionError / OSError-family under parallel temp-DB
@@ -467,3 +589,44 @@ class TestReconcile:
         body = r.json()
         assert body["reprovisioned"] == 0
         assert isinstance(body["notes"], list)
+
+
+class TestDrAclReconcile:
+    """#2313 folded delta: post-restore per-graph ACL rebuild — the endpoint
+    replays create_acl_user (idempotent upsert) for every ACTIVE custom graph
+    of every eligible team; fail-soft on ACL-layer absence."""
+
+    def test_acl_reconcile_covers_custom_graphs_and_is_fail_soft(self, client, dr_env, mem_storage, monkeypatch):
+        _seed_team("team_x", nodes=1)
+        sdk = TortoiseSDK(namespace="registry")
+        _SEED_SDKS.append(sdk)
+        reg = sdk._get_registry()
+        # eligible for hosted backup (acl reconcile enumerates eligible teams)
+        reg.query("MATCH (t:Team {id:'team_x'}) SET t.backup_enabled = true")
+        reg.query(
+            "CREATE (g:Graph {id:'g_a', team_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_a', status:'active'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_dead', team_id:'team_x', kind:'custom', "
+            "namespace:'team_team_x_g_dead', status:'deleted'})")
+        calls: list = []
+        monkeypatch.setattr(
+            "tortoise.acl_graph_users.create_acl_user",
+            lambda graph_id, team_id: calls.append((graph_id, team_id)) or {"username": "u"},
+        )
+        r = client.post(
+            "/v1/internal/backups/acl-reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["status"] == "reconciled"
+        team_res = body["results"]["team_x"]
+        assert team_res["custom_graphs_ok"] == 1
+        assert team_res["default_skipped"] == 1
+        # the ACTIVE custom graph is rebuilt; the tombstone is never touched
+        assert ("g_a", "team_x") in calls
+        assert ("g_dead", "team_x") not in calls
+
+    def test_acl_reconcile_requires_config(self, client, mem_storage):
+        r = client.post(
+            "/v1/internal/backups/acl-reconcile", headers=INTERNAL_HEADERS)
+        assert r.status_code == 503

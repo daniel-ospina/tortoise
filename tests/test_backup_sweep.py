@@ -13,6 +13,7 @@ from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
     OPS_STATE_KEY,
     _check_per_label_drift,
+    resolve_active_graph,
     enumerate_eligible_teams,
     enumerate_teams,
     read_graph_state,
@@ -1236,3 +1237,75 @@ def test_sweep_drains_legacy_flat_pool_leaves_nested(shared_proj):
         # nested default artifact from THIS run survives
         assert len([k for k in store.list("backups/team_drain/default/")
                     if k.endswith("manifest.json")]) == 1
+
+
+# ── #2313 Task 5: restore-target resolution (tombstone guard) ──────────────
+# resolve_active_graph reads ONLY the control plane (registry Graph nodes or
+# the teams/graphs fakes) — never the data plane — so these run on BOTH lanes
+# without namespaces ever being selected or journaled.
+
+
+def test_resolve_active_graph_registry_lane(shared_proj):
+    from tortoise.backup_sweep import resolve_active_graph
+    with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
+        if shared_proj is None:
+            return
+        wipe(shared_proj)
+        proj = shared_proj
+        reg = proj.db.select_graph(_REGISTRY_GRAPH)
+        reg.query("CREATE (t:Team {id:'team_rg', tier:'pro'})")
+        reg.query("CREATE (t:Team {id:'team_rg2', tier:'pro'})")
+        # active custom + tombstoned custom + another team's graph
+        reg.query(
+            "CREATE (g:Graph {id:'g_live', team_id:'team_rg', kind:'custom', "
+            "namespace:'ns_live', status:'active'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_dead', team_id:'team_rg', kind:'custom', "
+            "namespace:'ns_dead', status:'deleted'})")
+        reg.query(
+            "CREATE (g:Graph {id:'g_other', team_id:'team_rg2', kind:'custom', "
+            "namespace:'ns_other', status:'active'})")
+        # active custom resolves to its namespace (the dump/select name)
+        row = resolve_active_graph(reg, "team_rg", "g_live")
+        assert row["graph_id"] == "g_live" and row["graph_name"] == "ns_live"
+        assert row["kind"] == "custom"
+        # default is always present (synthesized from the seam)
+        row = resolve_active_graph(reg, "team_rg", "default")
+        assert row["graph_id"] == "default"
+        assert row["graph_name"] == _team_graph("team_rg")
+        # tombstoned → refused
+        with pytest.raises(ValueError):
+            resolve_active_graph(reg, "team_rg", "g_dead")
+        # another team's graph → refused (tenant isolation at resolution)
+        with pytest.raises(ValueError):
+            resolve_active_graph(reg, "team_rg", "g_other")
+        # unknown → refused
+        with pytest.raises(ValueError):
+            resolve_active_graph(reg, "team_rg", "g_never")
+
+
+def test_resolve_active_graph_supabase_fake():
+    from tests.test_backup_graph_enum import _FakeGraphsTable
+    from tortoise.backup_sweep import resolve_active_graph
+    from tortoise.hosted_backup import _is_supabase_source
+
+    cp = _FakeGraphsTable(
+        {"id": "team_s", "graph_name": "team_myapp"},
+        [
+            {"id": "g_a", "team_id": "team_s", "name": "a", "kind": "custom",
+             "namespace": "team_s_g_a", "status": "active", "created_at": "1"},
+            {"id": "g_del", "team_id": "team_s", "name": "del", "kind": "custom",
+             "namespace": "team_s_g_del", "status": "deleted", "created_at": "2"},
+            {"id": "g_def", "team_id": "team_s", "name": "default", "kind": "default",
+             "namespace": "team_myapp", "status": "active", "created_at": "0"},
+        ],
+    )
+    assert _is_supabase_source(cp)
+    row = resolve_active_graph(cp, "team_s", "default")
+    assert row["graph_name"] == "team_myapp"  # teams.graph_name, not team_{id}
+    row = resolve_active_graph(cp, "team_s", "g_a")
+    assert row["graph_name"] == "team_s_g_a"
+    with pytest.raises(ValueError):
+        resolve_active_graph(cp, "team_s", "g_del")  # tombstoned
+    with pytest.raises(ValueError):
+        resolve_active_graph(cp, "team_s", "g_missing")
