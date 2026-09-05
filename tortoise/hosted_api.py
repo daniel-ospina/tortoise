@@ -73,6 +73,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
+    _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
 )
@@ -5479,7 +5480,12 @@ async def revoke_api_key(key_id: str, request: Request, team: dict = Depends(get
     api_keys.revoked_at via the seam — api_keys.revoked_at is the
     authoritative revocation source (P1-2), so a revoked key 401s on both
     REST and MCP. The registry path (per #7873, on _get_registry()) stays
-    for selfhost."""
+    for selfhost.
+    #2230: a ?team_id= pin is honored by the SESSION lane automatically —
+    get_current_team_session → _session_user_team resolves the pinned
+    (membership-checked) team, so revoke targets the SELECTED team for
+    multi-membership callers; the key-auth/registry lanes resolve the team
+    from the key itself and ignore the query (byte-compatible by design)."""
     from tortoise.supabase_control import (
         api_key_by_id,
         get_control_plane,
@@ -5619,7 +5625,14 @@ async def toggle_api_key_enabled(
     """#1148: enable/disable an API key (per-key toggle) and/or rename it
     (20260825000001, optional user-facing label). Disabled keys stop
     authenticating (resolve_api_key rejects enabled=false) but stay listed —
-    re-enable anytime. Session-authed + owner/admin-only. Team-scoped."""
+    re-enable anytime. Session-authed + owner/admin-only. Team-scoped.
+
+    #2230: the supabase lane honors a ?team_id= pin in session mode — the
+    key must belong to the pinned (membership-checked) team or the call
+    fails closed with 403 "Not your API key", exactly like DELETE's team
+    mismatch. No pin → the key's intrinsic team governs (backwards
+    compatible). The registry/selfhost lane below is deliberately
+    unchanged (keys are team-scoped by the key there)."""
     from tortoise.supabase_control import (
         api_key_by_id,
         get_control_plane,
@@ -5634,12 +5647,50 @@ async def toggle_api_key_enabled(
     from tortoise.supabase_control import (
         set_api_key_scopes as _sb_set_scopes,
     )
+    from tortoise.supabase_control import user_memberships as _sb_user_memberships
     if is_supabase_enabled():
         cp = get_control_plane()
+        # #2230: honor the ?team_id= pin (session mode) exactly like the
+        # DELETE handler's session lane (get_current_team_session →
+        # _session_user_team) — the dashboard's key table is scoped to the
+        # SELECTED team, so a multi-membership caller acting in team B's
+        # context must never mutate team A's key (pre-#2230 the pin was
+        # silently ignored: a wrong-team key_id succeeded whenever the user
+        # owned both teams). Membership-check the pinned team FIRST, before
+        # any key lookup (mirrors _session_user_team — the same 403 "No
+        # membership in team" the mint/list pins raise, and no cross-team
+        # key-existence oracle: a non-member pin 403s whether or not the
+        # key_id exists, same fail-closed shape as DELETE's session
+        # dependency). One ordering note vs DELETE: this handler resolves
+        # the USER via get_current_user and checks membership inline HERE,
+        # while DELETE's get_current_team_session dependency runs its
+        # suspended/disabled checks first — the pin 403s match; the
+        # suspended-team 403 may precede them on DELETE only. A truthy pin
+        # then fails closed on a key that is not in the pinned team with
+        # the SAME 403 DELETE raises on team mismatch. No pin (or blank
+        # ?team_id= — the dashboard never sends one, and pre-#2230 the
+        # endpoint ignored the query entirely) → the key's intrinsic team
+        # governs, fully backwards compatible. Deliberate divergence from
+        # DELETE's pinless default: session-lane DELETE without a pin
+        # resolves memberships[0] and 403s when the key lives in another
+        # team; this PATCH without a pin acts on the key's intrinsic team
+        # (200). Each keeps its pre-#2230 legacy default — the browser
+        # always pins, so the divergence is unreachable from the dashboard.
+        # Registry lane below is untouched (selfhost keys are team-scoped
+        # by the key itself).
+        pinned = request.query_params.get("team_id")
+        if pinned and pinned not in {m["team_id"]
+                                     for m in _sb_user_memberships(
+                                         cp, user["user_id"])}:
+            raise HTTPException(status_code=403,
+                                detail="No membership in team")
         row = api_key_by_id(cp, key_id)
         if row is None:
             raise HTTPException(status_code=404, detail="API key not found")
         team_id = row.get("team_id")
+        if pinned and pinned != team_id:
+            raise HTTPException(status_code=403,
+                                detail="Not your API key")
         await _require_owner_admin(user["user_id"], team_id)
         if row.get("revoked_at") is not None:
             raise HTTPException(status_code=409, detail="Cannot modify a revoked key")
@@ -5915,6 +5966,23 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         raise
 
 
+# W5 Phase F (#2104, review r3/r4): the sweep's Event delete carries the same
+# session-absence guard as the Point/Source deletes — a live Session (a
+# concurrent same-session re-capture owns the shared deterministic eventId)
+# makes the delete a no-op. Guard shape: aggregated present-count (the
+# ``OPTIONAL MATCH ... WITH s WHERE s IS NULL`` shape does NOT filter on
+# FalkorDB — docker AND embedded fold the NULL predicate into the optional
+# match and keep the row; verified by execution, review r4). Module-level so
+# the real-graph regression test executes the EXACT production Cypher (no
+# drift) on both lanes.
+_SWEEP_EVENT_DELETE_CYPHER = (
+    "OPTIONAL MATCH (s:Session {id:$sid}) "
+    "WITH count(s) AS present "
+    "WHERE present = 0 "
+    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e"
+)
+
+
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 team: dict) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
@@ -6019,8 +6087,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
     # correctly (the second POST sees the Session and replays, 0 new nodes).
-    # Follow-up: a deterministic Event id (derived from session_id) would
-    # make even the concurrent race idempotent. Do NOT reimplement here.
+    # W5 Phase F (#2104): the concurrent race is now idempotent too — the
+    # sessionCaptured Event mint below uses a DETERMINISTIC id derived from
+    # session_id (_session_capture_event_id), so both writers MERGE onto
+    # ONE Event node instead of minting two.
     session_existed = bool(proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN count(s)",
         params={"sid": session_id},
@@ -6254,14 +6324,27 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # provenance via the points' eventId.
     # #1727 Slice 2 (T2-P2c): the sessionCaptured Event mint + typed Source
     # materialization run ONLY on a genuine capture — a re-POST of an
-    # existing session_id skips them (the Event id is a fresh ULID per
-    # create_event, so running it would mint a new node — violating the
-    # "0 new nodes" idempotency contract).
+    # existing session_id is a pure NO-OP replay. W5 Phase F (#2104): the
+    # skip is NOT because a mint would duplicate the Event (the deterministic
+    # ``_session_capture_event_id(session_id)`` id — ev_<sha256("sessionCaptured:"
+    # +session_id)[:62]> — converges on the SAME node) — it is
+    # because re-running the mint would MUTATE the first capture's Event
+    # (the projection's ON MATCH SET refreshes startedAt/endedAt) and append
+    # a duplicate EventRecorded journal entry; a replay must never touch the
+    # first capture's Event or Source (SDK mirror byte-parity).
+    # W5 Phase F (#2104): when the mint DOES run, the Event id is the
+    # DETERMINISTIC ``_session_capture_event_id(session_id)``
+    # (ev_<sha256("sessionCaptured:"+session_id)[:62]>, NOT a fresh ULID) so
+    # two concurrent fresh-session POSTs of the same session_id — the #1727
+    # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
+    # node (the Event projection MERGEs on eventId; the second concurrent
+    # writer's create is an idempotent no-op).
     if not session_existed:
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
                 "sessionCaptured",
+                _server_id=_session_capture_event_id(session_id),
                 startedAt=now,
                 endedAt=now,
                 sessionId=session_id,
@@ -6457,24 +6540,47 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # Session (C's re-capture owns the shared {sid}_t{i} id-space) makes
             # the query a no-op and the re-capture re-absorbs the turns; only a
             # truly absent Session lets the orphans through.
+            # W5 Phase F (#2104, review r4): the guard is an AGGREGATED present
+            # count (``WHERE present = 0``), NOT the ``OPTIONAL MATCH ... WITH s
+            # WHERE s IS NULL`` shape — FalkorDB (docker AND embedded) folds a
+            # NULL-predicate WHERE into the OPTIONAL MATCH failure and KEEPS the
+            # row, so the old shape never filtered (verified by execution: the
+            # delete ran with a live Session present).
             with suppress(Exception):
                 proj.g.query(
-                    "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
-                    "WHERE s IS NULL "
+                    "OPTIONAL MATCH (s:Session {id:$sid}) "
+                    "WITH count(s) AS present "
+                    "WHERE present = 0 "
                     "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p",
                     params={"sid": session_id, "ids": point_ids},
                 )
         if minted_event and event_id:
-            # no session guard needed — a minted eventId is a per-capture ULID
+            # W5 Phase F (#2104, review r3): the session guard is REQUIRED —
+            # the minted eventId is now DETERMINISTIC
+            # (_session_capture_event_id(session_id) =
+            # ev_<sha256("sessionCaptured:"+session_id)[:62]>) and shared by
+            # every capture of the same session. Under the delete-during-
+            # capture race a concurrent same-session re-capture (which
+            # re-MERGEs a fresh Session and mints the SAME eventId) must NOT
+            # have its Event deleted by this sweep — the re-capture's
+            # extracted Points would
+            # dangle with no live Event for their eventId provenance and the
+            # EventRecorded journal entry would point at a deleted node (the
+            # per-capture ULID premise the old comment relied on is gone).
+            # Guard shape: aggregated present-count (see the Point delete
+            # above — the NULL-predicate WHERE shape does not filter on
+            # FalkorDB). Shared with tests via _SWEEP_EVENT_DELETE_CYPHER
+            # (real-graph pin, both lanes).
             with suppress(Exception):
                 proj.g.query(
-                    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e",
-                    params={"eid": event_id},
+                    _SWEEP_EVENT_DELETE_CYPHER,
+                    params={"sid": session_id, "eid": event_id},
                 )
         with suppress(Exception):
             proj.g.query(
-                "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
-                "WHERE s IS NULL "
+                "OPTIONAL MATCH (s:Session {id:$sid}) "
+                "WITH count(s) AS present "
+                "WHERE present = 0 "
                 "MATCH (src:Source {url:$url}) DETACH DELETE src",
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
