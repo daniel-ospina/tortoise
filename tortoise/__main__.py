@@ -4965,7 +4965,12 @@ def _cmd_serve_http(args) -> int:
     wrapper = FastAPI(lifespan=_local_lifespan)
     wrapper.mount("/mcp", app)
     print(f"Tortoise MCP (streamable-http) → http://{args.bind}:{args.port}/mcp")
-    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info")
+    # #2203: bound the graceful drain so a `kill`/docker-stop SIGKILL at ~10s
+    # cannot preempt the interpreter-exit atexit teardown that closes an
+    # embedded redis-server child (long-lived MCP SSE streams would otherwise
+    # hold an unbounded drain open).
+    uvicorn.run(wrapper, host=args.bind, port=args.port, log_level="info",
+                timeout_graceful_shutdown=5)
     return 0
 
 
@@ -5364,6 +5369,14 @@ def main(argv: list[str] | None = None) -> int:
         p.print_usage()
         print(f"error: {e}", file=sys.stderr)
         return 2
+    # #2203: terminating signals (SIGTERM/SIGHUP, plus SIGINT when the
+    # process started with it ignored — non-tty stdin) must close the CLI's
+    # embedded redis-server children before the parent dies (killed
+    # daemon/stdio server, `index github` Ctrl-C/kill). The guard's handler
+    # closes every live embedded server then re-raises the signal.
+    # Idempotent; a no-op for commands that never open an embedded server.
+    from tortoise.embedded_lifecycle import install_embedded_signal_cleanup
+    install_embedded_signal_cleanup()
     if args.cmd == "rebuild":
         _cmd_rebuild(args)
         return 0
