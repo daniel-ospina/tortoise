@@ -689,10 +689,10 @@ version: "0.1.0"
 tier: free
 ontology:
   extends: core
-  objectKinds: [epic, issue, code]
-  subclassOf: {epic: Project, issue: WorkItem}
+  objectKinds: [epic, issue, code, bug, incident]
+  subclassOf: {epic: Project, issue: WorkItem, bug: Problem, incident: Problem}
   equivalentTo: {issue: [pm:task]}
-  pointKinds: [requirement, bug]
+  pointKinds: [requirement, technicalDebt, risk]
   documentKinds: [architectureDoc, apiSpec]
   kindDefs:                     # extractor prompt material (v3, epic #909)
     epic:
@@ -819,7 +819,7 @@ recursive over the composition DAG with fixpoint iteration (reusing EP convergen
 A drop in any child lowers the parent, but the mean is compensating — *"unless
 another child rises"*. v1: composition channels only; signed channels (e.g.
 `competesWith`) deferred — note `mechanism: NAND` remains an EPISTEMIC operator
-between Points (§4 operator table), not an object-relation sign.
+between Points (§3.1 operator table), not an object-relation sign.
 
 Objects remain nouns — no object-level operators. The projection only walks
 structural edges at read time; the epistemic layer (Points) is unchanged and is
