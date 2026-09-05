@@ -17,9 +17,10 @@ Tasks 3 AND 4 import from here — this is the SINGLE home of the predicate.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from . import schema
 from .corpus_loader import normalize

@@ -1,17 +1,21 @@
 # tests/test_battery_schema_v11.py
 """Schema v1.1 event log + emitter registry (issue #2284, Task 1)."""
 from __future__ import annotations
+
 import pytest
 import yaml
+
 from battery.runner import emit
-from battery.runner.emit import EmitterKind, validate_emitter_coverage
+from battery.runner.emit import validate_emitter_coverage
+
 
 def _mini_scenarios(tmp_path) -> list:
     """Tiny authored no-gold corpus via the RUN-path loader (mirrors
     tests/test_battery_run.py::_config_dir — hand-constructing Scenario is
     forbidden: ctor shape is lock-heavy and Task 2 extends it)."""
     from battery.config.corpus import load_corpus
-    cfg = tmp_path / "cfg"; cfg.mkdir()
+    cfg = tmp_path / "cfg"
+    cfg.mkdir()
     corpus = {"scenarios": [{"id": "ct-mini", "tier": "probe",
         "family": "contradiction", "task_type": "contradiction",
         "attack_type": "ct", "split": "train", "k": 3,
@@ -35,8 +39,7 @@ def test_schema_version_is_v11(tmp_path):
 def _probe_consumed_fields() -> set[str]:
     """Union of CONSUMED_FIELDS declared at the top of each probe module
     (r1..r5) — the registry must cover the REAL consumer surface."""
-    from battery.probes import r1_contradiction, r2_coverage,\
-            r3_calibration, r4_defeat, r5_update
+    from battery.probes import r1_contradiction, r2_coverage, r3_calibration, r4_defeat, r5_update
     out: set[str] = set()
     for mod in (r1_contradiction, r2_coverage, r3_calibration,
                 r4_defeat, r5_update):
@@ -70,7 +73,7 @@ def test_kind_must_match_registry_field():
             "at": 5, "field": "flip_flopped", "payload": {}})  # wrong kind
     # kind-conflict log (wrong-kind emission of a registered field) is an
     # integrity violation: coverage validation raises, never silently passes
-    log = emit.FIXTURE_FULL_LOG + [
+    log = [*emit.FIXTURE_FULL_LOG,
         {"type": "derived", "event": "flip_flop", "at": 9,
          "field": "stated_confidence", "payload": {"value": 0.2}}]
     with pytest.raises(ValueError):

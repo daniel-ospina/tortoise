@@ -25,9 +25,13 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from battery.config import schema  # noqa: E402
-from battery.config import build_corpus, corpus_loader as cl, validate  # noqa: E402
-from battery.config.control_diff import (  # noqa: E402
+from battery.config import (
+    build_corpus,
+    schema,
+    validate,
+)
+from battery.config import corpus_loader as cl
+from battery.config.control_diff import (
     NEG_A_DELTA_SLOTS,
     surface_diff,
 )
@@ -96,7 +100,7 @@ def test_bct_twins_present_and_shaped(sealed) -> None:
 # ---------------------------------------------------------------------------
 
 def test_controls_bijection_per_set(sealed) -> None:
-    corpus, _, by_id = sealed
+    corpus, _, _ = sealed
     # planted ct population = contradiction scenarios WITH a planted pair
     planted_ct = sorted(
         sc["id"] for sc in corpus.scenarios
