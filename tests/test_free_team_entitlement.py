@@ -259,6 +259,59 @@ class TestCreateTeamEntitlement:
         assert r2.status_code == 409
         assert "already created" in r2.json()["detail"]
 
+    def test_onboarding_free_capped_first_call_402(self, team_client_factory):
+        """#2323: the person-level #1877 entitlement now binds the onboarding
+        lane — a free user who already holds an org (>=1 active free
+        membership) cannot mint a second org through POST /v1/onboarding/team.
+        Reaches the count-402 parity of POST /v1/teams (lane-uniform)."""
+        from tortoise.hosted_api import get_current_team_session
+        tc, fake = team_client_factory
+        _seed_team(fake, "team-free-a")
+        _seed_membership(fake, "team-free-a")
+        app.dependency_overrides[get_current_team_session] = lambda: dict(
+            FREE_TEAM, team_id="team-parent-001", tier="free",
+            session_user_id=_USER1)
+        r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
+        assert r.status_code == 402, r.text
+        assert "paid plan" in r.json()["detail"]
+        # no mint: the lane never ran — the free-membership count is unchanged
+        assert _count_free(_USER1) == 1
+
+    def test_onboarding_paid_through_200(self, team_client_factory):
+        """#2323: a subscriber's memberships are NOT free slots — the paid
+        org-B door survives (the former 'sanctioned second team for Q5'
+        path, now entitlement-gated like POST /v1/teams)."""
+        from tortoise.hosted_api import get_current_team_session
+        tc, fake = team_client_factory
+        _seed_team(fake, "team-paid", tier="pro", subscription_status="active")
+        _seed_membership(fake, "team-paid")
+        app.dependency_overrides[get_current_team_session] = lambda: dict(
+            FREE_TEAM, team_id="team-parent-001", tier="free",
+            session_user_id=_USER1)
+        r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
+        assert r.status_code == 200, r.text
+
+    def test_onboarding_marker_409_before_count_402(self, team_client_factory):
+        """#2323: order pinned marker-409 (anti-re-entry) → count-402 — a
+        free user whose one-shot marker is armed gets 409, never 402."""
+        from tortoise.hosted_api import (
+            _update_onboarding_state,
+            get_current_team_session,
+        )
+        tc, fake = team_client_factory
+        _seed_team(fake, "team-free-a")
+        _seed_membership(fake, "team-free-a")
+        dep = dict(FREE_TEAM, team_id="team-parent-001", tier="free",
+                   session_user_id=_USER1)
+        # arm the marker directly (as the lane does post-mint) — the parent
+        # row must exist for the onboarding_state write to land.
+        _seed_team(fake, "team-parent-001")
+        _update_onboarding_state("team-parent-001", team_created=True)
+        app.dependency_overrides[get_current_team_session] = lambda: dict(dep)
+        r = tc.post("/v1/onboarding/team", json={"name": "subteam"})
+        assert r.status_code == 409
+        assert "already created" in r.json()["detail"]
+
 
 # ── Registry lane (selfhost) ────────────────────────────────────────────────
 

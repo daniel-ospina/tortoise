@@ -47,6 +47,8 @@ interface HookPayload {
   user_id?: string;
   email?: string;
   display_name?: string;
+  // #2323 (Option B): wizard-typed org name for name-first provisioning.
+  team_name?: string;
 }
 
 // Caller identity established by authentication (hook signature or JWT).
@@ -268,7 +270,8 @@ Deno.serve(async (req: Request) => {
       (userField === undefined || userField.email === undefined || isStr(userField.email)) &&
       (parsedObj.user_id === undefined || isStr(parsedObj.user_id)) &&
       (parsedObj.email === undefined || isStr(parsedObj.email)) &&
-      (parsedObj.display_name === undefined || isStr(parsedObj.display_name));
+      (parsedObj.display_name === undefined || isStr(parsedObj.display_name)) &&
+      (parsedObj.team_name === undefined || isStr(parsedObj.team_name));
     if (!bodyOk) {
       return json({ error: "invalid JSON body" }, 400, corsOrigin);
     }
@@ -318,8 +321,21 @@ Deno.serve(async (req: Request) => {
       return json({ error: "invalid user_id format" }, 400, corsOrigin);
     }
 
-    // Generate team name from provider display name, fallback to email prefix
-    const rawName = display_name || email.split("@")[0];
+    // Generate team name from the wizard-typed name (#2323 Option B: name-first
+    // provisioning — the org-create step is the provisioning door, so a fresh
+    // user never sees a display-name phantom org), falling back to provider
+    // display name / email prefix when the caller is an older client that sends
+    // no team_name.
+    // The override is validated here with the same regex POST
+    // /v1/onboarding/team enforces; an invalid/absent override falls back
+    // (never 500s) so a stale caller cannot regress.
+    const bodyTeamName =
+      typeof body.team_name === "string" ? body.team_name.trim() : "";
+    const TEAM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
+    const rawName =
+      (bodyTeamName && TEAM_NAME_RE.test(bodyTeamName))
+        ? bodyTeamName
+        : (display_name || email.split("@")[0]);
     const teamName = rawName
       .toLowerCase()
       .replace(/[^a-zA-Z0-9_-]/g, "-")

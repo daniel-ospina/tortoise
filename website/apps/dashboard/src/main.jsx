@@ -778,6 +778,12 @@ function claimIntentInFlight() {
   const [welcomeTeamName, setWelcomeTeamName] = React.useState('')
   const [welcomeGraphName, setWelcomeGraphName] = React.useState('')
   const [welcomeProvisionError, setWelcomeProvisionError] = React.useState('')
+  // #2323 (Option B): name-first first-run — the org is provisioned on the
+  // org-create step submit (never at mount). welcomeTeamReady marks the
+  // just-created org on the first-run path; sessionRef keeps the mount
+  // session so the step-1 submit can provision.
+  const [welcomeTeamReady, setWelcomeTeamReady] = React.useState(false)
+  const sessionRef = React.useRef(null)
   // #1643/#1692: the getting-started wizard (post-key steps: harness →
   // integrations → skills → seed → done). For first-timers it follows the
   // key reveal; for returning empty-graph users it re-opens at step 0
@@ -1659,23 +1665,25 @@ function claimIntentInFlight() {
       }
       setOnboardingLoading(false)
     } catch (e) {
-      // #1847: first-timer mount race — this mount effect fires BEFORE the
-      // mount gate runs provisionInApp (which creates the team), so the GET
-      // 403s 'No team membership' and the MemorySources panel would render
-      // its error card until reload. Swallow ONLY that exact no-team 403,
-      // discriminated by ref (Round-11: status-based checks read e.status /
-      // refs, not message content): teamIdRef is provably null at swallow
-      // time for the first-timer pre-provision case (provisionInApp never
-      // sets it; the currentTeamId effect only fires post-provision), and
-      // being a ref it has no stale-closure trap (the mount effect closes
-      // over the first-render [], so teamsList.length would wrongly swallow
-      // cross-team 403s for returning users). Suspended teams return a dict
-      // detail → e.suspended is set, and a successful /v1/teams with a
-      // still-403 onboarding leaves teamIdRef set — both fall through to the
-      // normal error state (honest, retryable card) below: keeping the
-      // loading state leaves the panel in its initial state;
-      // finishWelcomeLoads() re-fires this after provisioning and is the
-      // authoritative load.
+      // #1847/#2323 (Option B): first-timer org-create race — the mount-time
+      // refreshOnboarding() fires BEFORE the org exists (a teamless first-
+      // timer is no longer provisioned at mount; the org-create step submit
+      // provisions via tenant-provision), so the GET 403s 'No team
+      // membership' and the MemorySources panel would render its error card
+      // until reload. Swallow ONLY that exact no-team 403, discriminated by
+      // ref (Round-11: status-based checks read e.status / refs, not message
+      // content): teamIdRef is provably null at swallow time for the
+      // first-timer pre-org-create case (provisionInApp never sets it; the
+      // currentTeamId effect only fires post-provision), and being a ref it
+      // has no stale-closure trap (the mount effect closes over the
+      // first-render [], so teamsList.length would wrongly swallow cross-team
+      // 403s for returning users). Suspended teams return a dict detail →
+      // e.suspended is set, and a successful /v1/teams with a still-403
+      // onboarding leaves teamIdRef set — both fall through to the normal
+      // error state (honest, retryable card) below: keeping the loading
+      // state leaves the panel in its initial state;
+      // finishWelcomeLoads() re-fires this after org-create + provisioning
+      // and is the authoritative load.
       if (e && e.status === 403 && !e.suspended && !teamIdRef.current) return
       setOnboardingLoading(false)  // best-effort — the surface renders its error state
     }
@@ -1698,7 +1706,6 @@ function claimIntentInFlight() {
   const [wizardOrgName, setWizardOrgName] = React.useState('')
   const [wizardOrgError, setWizardOrgError] = React.useState('')
   const [wizardOrgBusy, setWizardOrgBusy] = React.useState(false)
-  const [wizardOrgUpgrade, setWizardOrgUpgrade] = React.useState(false)
   const [wizardForkBusy, setWizardForkBusy] = React.useState(false)
   const [wizardForkError, setWizardForkError] = React.useState('')
   const [wizardForkChosen, setWizardForkChosen] = React.useState('')  // 'self' | 'build' | '' (set once per org)
@@ -2215,12 +2222,12 @@ function claimIntentInFlight() {
     // Pass the current refresh seq: if a seed refire bumps it mid-flight,
     // this pre-seed response is dropped (it must not clobber the count).
     refreshTeam('', undefined, teamRefreshSeqRef.current).catch(() => {})
-    // #1847: re-fire the onboarding-state load NOW that the team exists —
-    // the mount-time refreshOnboarding() fired BEFORE provisioning (mount
-    // gate → provisionInApp) and 403'd 'No team membership' for first-timers,
-    // leaving the Overview MemorySources panel on its error card until
-    // reload. The team now exists → this fetch succeeds → the toggles render
-    // on the first view.
+    // #1847/#2323 (Option B): re-fire the onboarding-state load NOW that the
+    // team exists — the mount-time refreshOnboarding() fired BEFORE the
+    // org-create submit provisioned the team (name-first, tenant-provision)
+    // and 403'd 'No team membership' for first-timers, leaving the Overview
+    // MemorySources panel on its error card until reload. The team now
+    // exists → this fetch succeeds → the toggles render on the first view.
     await refreshOnboarding().catch(() => {})
   }
 
@@ -2240,10 +2247,11 @@ function claimIntentInFlight() {
     // onboarding_complete). The wire follows the node.
     window.history.replaceState({}, '', '/')
     setWelcomeMode(false)
-    // #1842 P1-1: the first-timer flow (provisionInApp → welcome wizard →
-    // wizardComplete) never ran loadTeams/loadBackups — those fired only in
-    // completeLogin/switchTeam (returning users). currentTeamId stayed null →
-    // the currentTeamId effect never fired loadMembers/loadGraphs → Graphs/
+    // #1842 P1-1: the first-timer flow (org-create provision → welcome
+    // wizard → wizardComplete) never ran loadTeams/loadBackups — those fired
+    // only in completeLogin/switchTeam (returning users). currentTeamId
+    // stayed null → the currentTeamId effect never fired loadMembers/
+    // loadGraphs → Graphs/
     // Users/Backups shimmered forever after "Open my dashboard →".
     await finishWelcomeLoads()
   }
@@ -2253,7 +2261,7 @@ function claimIntentInFlight() {
   // membership row + the key are created here. The raw tt_ key NEVER leaves
   // the app origin (#1082) — it is revealed here exactly once (atomic
   // reveal+null, A13) and shown in the welcome card.
-  async function provisionInApp(session) {
+  async function provisionInApp(session, teamName = '') {
     setWelcomeProvisioning(true)
     setWelcomeProvisionError('')
     // #1082 double-provision guard (fail-closed, mirrors welcome.html's
@@ -2283,6 +2291,10 @@ function claimIntentInFlight() {
           user_id: userId,
           email: (session.user && session.user.email) || '',
           ...(meta.display_name ? { display_name: meta.display_name } : {}),
+          // #2323 (Option B): name-first — the wizard-typed org name. The
+          // edge fn validates it (same regex as the server) and falls back to
+          // display-name derivation when absent (older callers).
+          ...(teamName ? { team_name: teamName } : {}),
         }),
       })
       // Attempt 1 + exactly ONE retry (a second mint = a second team).
@@ -2630,59 +2642,27 @@ function claimIntentInFlight() {
           }
         }
 
-        // #1566: a first-timer (valid session, NO teams) is provisioned
-        // IN-APP — the team + membership + key are created here (the
-        // tenant-provision edge function authorizes the app origin now) and
-        // the key is revealed in the welcome card. Skip the bootstrap mint
-        // (it 403s 'No team membership' for teamless users).
+        // #2323 (Option B): a first-timer (valid session, NO teams) is NOT
+        // provisioned at mount — a display-name phantom org would exist
+        // before the user names anything (the two-org confusion this fix
+        // removes). The wizard's org-create step IS the provisioning door:
+        // its submit calls tenant-provision with the typed name (deterministic
+        // team_id), and the welcome key + demo seed land on that one org.
         if (!teamsList.length) {
           if (sessionTokenRef.current === session.access_token) {
             // The welcome card must render: leave the checking state + mark
             // authed (the normal completeLogin path never runs for first-timers).
+            sessionRef.current = session
             setChecking(false)
             setAuthed(true)
             setWelcomeMode(true)
-            const provisioned = await provisionInApp(session)
-            if (provisioned && provisioned.routedAway) {
-              // claim in flight / claimable anon team — the claim flow owns it
-              setWelcomeProvisioning(false)
-            } else if (provisioned) {
-              setWelcomeKey(provisioned.api_key)
-              setWelcomeTeamName(provisioned.team_name)
-              setWelcomeGraphName(provisioned.graph_name || '')
-              // #2246 (ADR-010): the shown-once key is NOT persisted to
-              // localStorage/apiKey/teamKeysRef — the browser never holds a
-              // key in session mode. welcomeKey stays in-memory for the
-              // welcome card + connect snippets this session; a reload
-              // mid-welcome loses the plaintext (ADR accepted shown-once
-              // fragility — server keeps the hash only), recoverable via the
-              // API Keys tab (+ New key, shown once).
-              // #1660: prefill the seed step — the Subject from the OAuth
-              // identity (name or email prefix), the Project from the team.
-              {
-                const m = (session.user && session.user.user_metadata) || {}
-                setWizardSubject(m.display_name || (session.user && session.user.email ? session.user.email.split('@')[0] : '') || 'me')
-                setWizardProject(provisioned.team_name || 'my-project')
-              }
-              setWelcomeProvisioning(false)
-              // #1623: the welcome plan step needs the team row
-              // (checkout_price_ids for per-tier Upgrade CTAs) — the welcome
-              // card never fetched /v1/team before. Best-effort: a failure
-              // falls back to the "See pricing" link on the plan cards.
-              // #1860 (P3-2): first-timers never called loadAlerts (only
-              // completeLogin did, and the provisioned branch returns before
-              // it) — the security-alerts section stayed empty until reload.
-              // The provisioned team_id comes from the refreshTeam response
-              // (the team row just created). No double-fire: completeLogin
-              // never runs on this path.
-              refreshTeam('', undefined, teamRefreshSeqRef.current)
-                .then((t) => {
-                  if (t && t.team_id) loadAlerts(t.team_id)
-                })
-                .catch(() => {})
-            } else {
-              setWelcomeProvisionError('Could not create your organization — try again.')
-              setWelcomeProvisioning(false)
+            setWelcomeProvisioning(false)
+            // #1660: prefill the archived seed step's Subject from the OAuth
+            // identity now (no team exists to read); the Project resolves
+            // once the org is created.
+            {
+              const m = (session.user && session.user.user_metadata) || {}
+              setWizardSubject(m.display_name || (session.user && session.user.email ? session.user.email.split('@')[0] : '') || 'me')
             }
           }
           return
@@ -3283,39 +3263,60 @@ function claimIntentInFlight() {
     }
   }
 
-  // #1997 (W1): org-create step handler — POST /v1/onboarding/team (Q5
-  // wizard lane, one-shot team_created). Name REQUIRED with editable prefill
-  // (DE2E-3); 402 → inline upgrade surface (never silent; W9 owns
-  // enforcement); 409 (already created) → advance.
+  // #2323 (Option B): org-create step handler — the FIRST-org door. For a
+  // teamless first-timer the submit PROVISIONS the org name-first via
+  // tenant-provision (deterministic team_id, welcome key + demo seed land on
+  // that one org — POST /v1/onboarding/team is no longer called for first
+  // orgs; it stays as the entitlement-gated second-org lane). Accounts that
+  // already hold an org never mint here (the step renders read-only). Name
+  // REQUIRED (DE2E-3); claim-guard errors route to the claim card.
   async function handleWizardCreateOrg() {
     const name = wizardOrgName.trim()
     const nameErr = orgNameError(name)
     if (nameErr) { setWizardOrgError(nameErr); return }
+    // An account that already holds an org never mints via this step — a
+    // stray submit on the read-only path just advances.
+    if (Array.isArray(teams) && teams.length > 0) { setWizardStep(2); return }
     setWizardOrgBusy(true)
     setWizardOrgError('')
-    setWizardOrgUpgrade(false)
-    try {
-      const res = await api('/v1/onboarding/team', {
-        method: 'POST', useSession: true,
-        body: JSON.stringify({ name }),
-      })
-      setWizardOrgName('')
-      await loadTeams()
-      if (res?.team_id) switchTeam(res.team_id)
-      setWizardStep(2)
-    } catch (e) {
-      if (e?.status === 402) {
-        setWizardOrgError(e.message || 'Upgrade to create another organization')
-        setWizardOrgUpgrade(true)
-      } else if (e?.status === 409) {
-        // already created — advance (one-shot team_created guard)
-        setWizardStep(2)
-      } else {
-        setWizardOrgError(e?.message || 'Could not create the organization')
-      }
-    } finally {
+    const session = sessionRef.current
+    if (!session || !session.access_token) {
+      setWizardOrgError('Your session ended — reload to sign in again.')
       setWizardOrgBusy(false)
+      return
     }
+    const provisioned = await provisionInApp(session, name)
+    if (!provisioned) {
+      setWelcomeProvisioning(false)
+      setWizardOrgError(welcomeProvisionError || 'Could not create your organization — try again.')
+      setWizardOrgBusy(false)
+      return
+    }
+    if (provisioned && provisioned.routedAway) {
+      // claim in flight / claimable anon team — the claim card owns the flow
+      setWelcomeProvisioning(false)
+      setWizardOrgBusy(false)
+      return
+    }
+    // Success: the ONE org exists, named by the user. welcomeKey is the
+    // provisioned durable plaintext — shown once at the connect step (#2325),
+    // never on this card. In-memory only (ADR-010); a mid-wizard reload
+    // loses it and the connect step re-gates via the rows.
+    setWizardOrgName('')
+    setWelcomeKey(provisioned.api_key || '')
+    setWelcomeTeamName(provisioned.team_name || name)
+    setWelcomeGraphName(provisioned.graph_name || '')
+    setWelcomeTeamReady(true)
+    setWelcomeProvisioning(false)
+    setWizardOrgBusy(false)
+    // Pin the new org so fork/connect checkpoints + key mint target it, and
+    // fetch alerts for the team row (parity with the pre-#2323 provisioned
+    // branch, #1860).
+    await loadTeams().catch(() => {})
+    refreshTeam('', undefined, teamRefreshSeqRef.current)
+      .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
+      .catch(() => {})
+    setWizardStep(2)
   }
 
   // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
@@ -3424,9 +3425,16 @@ function claimIntentInFlight() {
       // #2246: mintKey rides the session JWT (rule 4) — no held key involved.
       const _teamAtCall = currentTeamId
       const keyVal = await mintKey('', 'Setup command')
-      // Identity guard BEFORE any UI write: a team switch during the POST must
-      // not render this team's plaintext key under the new team's header.
-      if (teamIdRef.current !== _teamAtCall) return
+      // #2326: a team switch during the POST must NOT silently swallow the
+      // mint — surface it so the user isn't left believing connect produced
+      // a usable key. The key was created on the PREVIOUS org (mintKey pinned
+      // ?team_id= at call time); refresh the list so it shows there when the
+      // user switches back, and re-gate this step.
+      if (teamIdRef.current !== _teamAtCall) {
+        await loadAll('').catch(() => {})
+        setWizardDurableError('The organization changed while the key was being created — the key was created on the previous organization. Switch back to it in the account menu to use it, or create another key here.')
+        return
+      }
       setWizardDurableKey(keyVal)
       // #2246 (ADR-010): the durable key is NOT installed (no
       // localStorage/teamKeysRef/apiKey write — the browser never holds a
@@ -4729,6 +4737,10 @@ function claimIntentInFlight() {
   // when not).
   const durableConnect = durableConnectKey(welcomeKey, '', keys)
   const harnessKey = wizardDurableKey || durableConnect.key || ''
+  // #2323 (Option B): name-first first-run — an org exists once the wizard
+  // provisioned it (welcomeTeamReady) or the account already held one
+  // (re-entry / invite-held paths). Drives the welcome exit gate + heading.
+  const welcomeHasOrg = welcomeTeamReady || (Array.isArray(teams) && teams.length > 0)
 
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
@@ -4747,7 +4759,7 @@ function claimIntentInFlight() {
               claim my team) own the recovery. */}
           <button
             className="ghost small"
-            disabled={welcomeProvisioning || welcomeProvisionError}
+            disabled={welcomeProvisioning || welcomeProvisionError || !welcomeHasOrg}
             onClick={() => { window.history.replaceState({}, '', '/'); setWelcomeMode(false); setWizardDurableKey(''); setWizardDurablePaste(''); setWizardDurableError(''); finishWelcomeLoads() }}
           >
             Open my dashboard →
@@ -4782,31 +4794,15 @@ function claimIntentInFlight() {
             ) : (
               <>
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
-                  {welcomeKey ? 'Your Tortoise is ready!' : 'Welcome to Tortoise'}
+                  {welcomeHasOrg
+                    ? (welcomeTeamName ? `${welcomeTeamName} is set up` : 'Your organization is set up')
+                    : 'Welcome to Tortoise'}
                 </h1>
-                {welcomeKey ? (
-                  <>
-                    <p className="dim" style={{ marginBottom: '1rem' }}>
-                      This is the only time this API key is shown — copy it now. The raw key
-                      never leaves this page ({welcomeTeamName ? `organization: ${welcomeTeamName}` : ''}).
-                    </p>
-                    <div style={{ display: 'flex', gap: '0.5rem', marginBottom: '1.25rem' }}>
-                      <code style={{ flex: 1, padding: '0.6rem 0.8rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, overflowWrap: 'anywhere', fontSize: 13 }}>
-                        {welcomeKey}
-                      </code>
-                      <button
-                        className="btn-primary"
-                        onClick={() => { try { navigator.clipboard.writeText(welcomeKey) } catch { /* clipboard blocked */ } }}
-                      >
-                        Copy
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <p className="dim" style={{ marginBottom: '1.25rem' }}>
-                    Your Organization is set up. You can create and manage your API keys in the dashboard anytime.
-                  </p>
-                )}
+                <p className="dim" style={{ marginBottom: '1.25rem' }}>
+                  {welcomeHasOrg
+                    ? 'Your Organization is set up. Choose how you\'ll use it and connect your agent — your API key is shown once at the connect step.'
+                    : 'Set up your Organization in the steps below — it\'s created when you name it, and your API key is shown once at the connect step.'}
+                </p>
                 {/* #1997 (W1): the 5 HUMAN steps (epic plan P1) — orientation
                     → org-create/join → fork card → connect-consent → done.
                     All other steps (install/seed/decide) are agent-side or
@@ -4841,38 +4837,57 @@ function claimIntentInFlight() {
 
                   {wizardStep === 1 && (
                     <div className="org-create">
-                      <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', marginBottom: '0.9rem' }}>
-                        <span className="dim small">Organization name</span>
-                        <input
-                          value={wizardOrgName || (welcomeTeamName || (team && team.team_name) || '')}
-                          onChange={(e) => setWizardOrgName(e.target.value)}
-                          placeholder="e.g. acme"
-                          aria-label="Organization name"
-                          autoFocus
-                          style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
-                        />
-                      </label>
-                      {wizardOrgError && (
-                        <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
-                      )}
-                      {wizardOrgUpgrade && (
-                        <div className="upgrade-surface" style={{ marginBottom: '0.9rem', padding: '0.6rem 0.8rem', border: '1px solid var(--border,#1e293b)', borderRadius: 8 }}>
-                          <p className="dim small" style={{ margin: 0 }}>
-                            Free plan: one Organization per account. Upgrade to create another — or accept an invitation to join one.
+                      {welcomeHasOrg ? (
+                        // #2323 (Option B): the account already has an org —
+                        // this step is a READ-ONLY summary, never a second
+                        // mint (re-entry / invite-held paths). The wizard
+                        // advances to the fork card.
+                        <>
+                          <p className="dim" style={{ marginBottom: '0.9rem' }}>
+                            You're set up in <strong>{welcomeTeamName || (team && team.team_name) || (Array.isArray(teams) && teams[0] ? teams[0].team_name : '') || 'your organization'}</strong>. Next, choose how you'll use Tortoise.
                           </p>
-                          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
-                            <button type="button" className="ghost small" onClick={() => setTab('billing')}>View plans →</button>
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              <button type="button" className="btn-primary" onClick={() => setWizardStep(2)}>Continue →</button>
+                            </div>
                           </div>
-                        </div>
+                        </>
+                      ) : (
+                        // #2323 (Option B): the first-run provisioning door —
+                        // the typed name creates the ONE org (tenant-provision,
+                        // deterministic team_id). #2324: value is state-only —
+                        // no prefill fallback chain that resurrects text on
+                        // delete, and no phantom org name to fight.
+                        <>
+                          <label className="small" style={{ display: 'flex', flexDirection: 'column', gap: '0.3rem', marginBottom: '0.6rem' }}>
+                            <span className="dim small">Organization name</span>
+                            <input
+                              value={wizardOrgName}
+                              onChange={(e) => setWizardOrgName(e.target.value)}
+                              placeholder="e.g. acme"
+                              aria-label="Organization name"
+                              autoFocus
+                              maxLength={64}
+                              style={{ padding: '0.5rem 0.7rem', background: 'var(--surface,#0d1a2d)', border: '1px solid var(--border,#1e293b)', borderRadius: 8, fontSize: 14 }}
+                            />
+                          </label>
+                          <p className="dim small" style={{ margin: '0 0 0.9rem', lineHeight: 1.5 }}>
+                            This creates your organization — one per account on the free plan. Your API key is created here and shown once at the connect step.
+                          </p>
+                          {wizardOrgError && (
+                            <p className="error" role="alert" style={{ marginBottom: '0.9rem' }}>{wizardOrgError}</p>
+                          )}
+                          <div className="wizard-nav">
+                            <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
+                            <div className="wizard-nav-actions">
+                              <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
+                                {wizardOrgBusy ? 'Creating…' : 'Create Organization'}
+                              </button>
+                            </div>
+                          </div>
+                        </>
                       )}
-                      <div className="wizard-nav">
-                        <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>
-                        <div className="wizard-nav-actions">
-                          <button type="button" className="btn-primary" onClick={handleWizardCreateOrg} disabled={wizardOrgBusy}>
-                            {wizardOrgBusy ? 'Creating…' : 'Create Organization'}
-                          </button>
-                        </div>
-                      </div>
                       {pendingInvites && pendingInvites.length > 0 && (
                         <div className="pending-invites" style={{ marginTop: '1.25rem', paddingTop: '1rem', borderTop: '1px solid var(--border,#1e293b)' }}>
                           <p className="dim small" style={{ margin: '0 0 0.5rem' }}>Or accept an invitation to join an existing organization:</p>
