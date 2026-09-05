@@ -92,16 +92,21 @@ def _inventory(login_methods: int = 1, linking: bool = True) -> dict:
 
 def _wire(page: Page, *, inv: dict | None = None,
           commit_calls: list = None, inv_factory=None,  # noqa: RUF013
-          teams: list | None = None, team_reads: list | None = None) -> None:
+          teams: list | None = None, team_reads: list | None = None,
+          mint_calls: list | None = None,
+          keys_rows: dict | None = None, created_keys: list | None = None) -> None:
     """Intercept api.premiselabs.co — mock the identity endpoints + the
-    shell's /v1/teams + /v1/session/key (the mount bootstrap needs them;
-    review P1). ``inv_factory`` (callable) lets a test flip the inventory
-    response AFTER a mutation (e.g. post-commit refetch shows banner gone).
-    ``teams`` (list of team dicts) drives the team-scoped responses; when
-    more than one team is supplied, /v1/session/key mints per-request team_id
-    (body) and /v1/team returns the matching team (#1874 two-team regression).
-    ``team_reads`` (list) records every /v1/team team_id the app requested —
-    pin the post-switch read so a dropped ?team_id= pin cannot false-pass."""
+    shell's /v1/teams (the mount NEVER mints a bootstrap key since #2167 —
+    POST /v1/session/key is a loud-500 zero-mint tripwire). ``inv_factory``
+    (callable) lets a test flip the inventory response AFTER a mutation (e.g.
+    post-commit refetch shows banner gone). ``teams`` (list of team dicts)
+    drives the team-scoped responses; /v1/team returns the matching team by
+    ?team_id= (#1874 two-team regression). ``team_reads`` (list) records every
+    /v1/team team_id the app requested — pin the post-switch read so a
+    dropped ?team_id= pin cannot false-pass. ``mint_calls`` (list) records any
+    POST /v1/session/key (loud-500). ``keys_rows`` (dict team_id → key rows)
+    + ``created_keys`` (list) add the durable-keys surface for #2167 F9
+    (mintKey POST /v1/team/keys?team_id= + GET per team)."""
 
     if teams is None:
         # NOTE: the shell reads t.team_name (main.jsx:452) — `name` renders empty.
@@ -180,17 +185,39 @@ def _wire(page: Page, *, inv: dict | None = None,
                           body=json.dumps({**t, "anon": False}))
             return
         if path.endswith("/v1/session/key") and method == "POST":
-            body = json.loads(route.request.post_data or "{}")
-            tid = (body.get("team_id") or "team_e2e")
-            t = team_for(tid)
-            if t is None:
-                # fail-loud (test-review c2): unknown team_id → 400, never
-                # index None inside the handler
-                route.fulfill(status=400, content_type="application/json", body="{}")
+            # #2167 zero-mint tripwire: the dashboard never mints a bootstrap
+            # key (mount/switch/revoke callers deleted) — loud 500 + counter.
+            if mint_calls is not None:
+                mint_calls.append(url)
+            route.fulfill(status=500, content_type="application/json",
+                          body=json.dumps({"detail": "#2167 zero-mint tripwire"}))
+            return
+        if path.endswith("/v1/team/keys"):
+            qs2 = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            ktid = (qs2.get("team_id") or ["team_e2e"])[0]
+            if method == "POST":
+                # #2167 F9: mintKey's session-mode create pins ?team_id=
+                # (rule 4) and returns the plaintext; the row joins the
+                # team's GET list so loadAll renders it.
+                if created_keys is not None:
+                    created_keys.append({"url": url, "body": route.request.post_data or ""})
+                plain = "tt_created_abcdef0123456789"
+                row = {"id": "key_created_1", "key_prefix": plain[:10],
+                       "created_at": "2026-09-04T00:00:00Z", "last_used_at": None,
+                       "revoked_at": None, "enabled": True, "name": None,
+                       "created_via": "provisioned", "expires_at": None}
+                if keys_rows is not None:
+                    keys_rows.setdefault(ktid, []).append(row)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"key": plain, "key_prefix": plain[:10]}))
                 return
+            rows = (keys_rows or {}).get(ktid, [])
             route.fulfill(status=200, content_type="application/json",
-                          body=json.dumps({"key": f"tt_minted_{t['team_id']}",
-                                           "team_id": t["team_id"]}))
+                          body=json.dumps({"keys": rows}))
+            return
+        if path.endswith("/v1/sessions") or path.endswith("/backups"):
+            route.fulfill(status=200, content_type="application/json",
+                          body=json.dumps({"sessions": [], "backups": []}))
             return
         if "/v1/teams/" in path and path.endswith("/members") and method == "GET":
             # members tab: one owner row (the seeded user)
@@ -611,3 +638,78 @@ def test_pending_invites_in_menu(page: Page):
     menu.get_by_role("button", name="Decline").click()
     expect(menu.get_by_text("Invites")).to_have_count(0)
     expect(menu.get_by_text("Bravo")).to_have_count(0)
+
+
+_TWO_TEAMS = [
+    {"team_id": "team_a", "team_name": "Alpha", "tier": "free", "role": "owner"},
+    {"team_id": "team_b", "team_name": "Bravo", "tier": "free", "role": "owner"},
+]
+
+
+def _switch_to(page: Page, team_name: str) -> None:
+    """#1874-style team switch through the account menu."""
+    _open_account_menu(page)
+    page.locator(".account-menu").get_by_role("button", name=team_name).click()
+
+
+def test_durable_create_on_selected_team_lands_on_selected_team(page: Page) -> None:
+    """#2167 F9: a durable key created while the selected team ≠ first
+    membership lands on the SELECTED team — mintKey's session-mode POST
+    /v1/team/keys pins ?team_id=<selected> (rule 4; server honors it
+    membership-checked). Zero POST /v1/session/key (the old mount/switch
+    bootstrap-mint callers are deleted)."""
+    _seed(page)
+    mint_calls: list = []
+    created_keys: list = []
+    keys_rows: dict = {"team_a": [], "team_b": []}
+    team_reads: list = []
+    _wire(page, inv=_inventory(login_methods=1), teams=_TWO_TEAMS,
+          mint_calls=mint_calls, created_keys=created_keys,
+          keys_rows=keys_rows, team_reads=team_reads)
+    page.goto(DASHBOARD_URL)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
+    # select Bravo (≠ first membership Alpha) — session-only (zero keys)
+    _switch_to(page, "Bravo")
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Bravo", timeout=15_000)
+    # open the API Keys tab and create a durable key
+    page.locator('[data-tab="keys"]').click()
+    expect(page.get_by_role("button", name="+ New key")).to_be_visible(timeout=10_000)
+    page.get_by_role("button", name="+ New key").click()
+    # the POST carried ?team_id=team_b (rule 4) and the shown-once plaintext
+    # card renders
+    assert created_keys, "createKey POST must fire"
+    post_url = created_keys[-1]["url"]
+    assert "team_id=team_b" in post_url, f"mintKey must pin the SELECTED team: {post_url}"
+    expect(page.locator(".new-key .key-value")).to_contain_text("tt_created_abcdef0123456789", timeout=10_000)
+    # the keys table row appears under the selected team (loadAll refetch)
+    expect(page.locator("tbody tr", has_text="tt_created")).to_have_count(1, timeout=10_000)
+    assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
+
+
+def test_session_only_team_selection_does_not_survive_reload(page: Page) -> None:
+    """#2167 F6b: a session-only team selection does NOT survive reload — the
+    mount re-pins to the slot key's team (a valid durable present) else the
+    first selectable membership (rule 3 reload consequence, accepted: no
+    persisted last-selected-team). With zero keys the reload lands Alpha
+    (first membership) even though Bravo was selected pre-reload."""
+    _seed(page)
+    team_reads: list = []
+    _wire(page, inv=_inventory(login_methods=1), teams=_TWO_TEAMS, team_reads=team_reads)
+    page.goto(DASHBOARD_URL)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
+    # session-only switch to Bravo
+    _switch_to(page, "Bravo")
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Bravo", timeout=15_000)
+    assert "team_b" in team_reads, f"post-switch reads must pin team_b: {team_reads}"
+    # reload: the session-only selection is NOT persisted — the mount lands
+    # the first selectable membership (Alpha)
+    reads_before_reload = len(team_reads)
+    with page.expect_response(lambda r: "/v1/team" in r.url and "team_id=team_a" in r.url,
+                              timeout=20000):
+        page.reload(wait_until="domcontentloaded", timeout=30_000)
+    expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Alpha", timeout=20_000)
+    # the reload added a NEW post-reload read pinned to team_a (a plain
+    # membership check on the pre-reload reads — which already contain team_a
+    # from the mount — could false-pass)
+    new_reads = team_reads[reads_before_reload:]
+    assert "team_a" in new_reads, f"reload must re-read the first selectable team: {team_reads}"

@@ -753,6 +753,47 @@ class TestIntrospection:
         missing = {method_to_tool[m] for m in wrapped_methods} - ms.WRITE_TOOL_NAMES
         assert not missing, f"write tools missing from WRITE_TOOL_NAMES: {missing}"
 
+    def test_destructive_mutating_tools_never_read_classified(self):
+        """C5 #2114 (code-review P1): the NON-wrapped destructive/mutating
+        tools carry _rw() annotations but bypass _quota_gated — they must
+        still be classified as writes (WRITE_TOOL_NAMES) so the MCP scope
+        gate (graphs:write required) + read-velocity metering treat them as
+        writes. A graphs:read-only key invoking any of these would otherwise
+        be a write-scope bypass (deleting points/entities, mutating
+        operators/sources)."""
+        import tortoise.mcp_server as ms
+        destructive = {
+            "tortoise_delete_point",      # DESTRUCTIVE — cannot be undone
+            "tortoise_delete",            # destructive
+            "tortoise_delete_entity",     # destructive
+            "tortoise_set_point_baseline",  # mutates claims
+            "tortoise_set_source_tier",   # mutates source metadata
+            "tortoise_annotate_operator",  # mutates operator state
+        }
+        missing = destructive - ms.WRITE_TOOL_NAMES
+        assert not missing, (
+            f"destructive/mutating tools missing from WRITE_TOOL_NAMES "
+            f"(a graphs:read-only MCP key could invoke them): {missing}")
+
+    def test_rw_annotated_http_tools_never_read_classified(self):
+        """C5 #2114 (re-review 3 hardening): DERIVE the write set from the
+        registry — every HTTP-allowed tool whose annotation is NOT read-only
+        (readOnlyHint=False: _rw/_idem — writes/mutations) must be in
+        WRITE_TOOL_NAMES, so a graphs:read-only MCP key can never invoke a
+        write-classified tool. Future-proof: a new _rw() HTTP tool missing
+        from WRITE_TOOL_NAMES fails HERE, not in a review round."""
+        import tortoise.mcp_server as ms
+        from tortoise.tool_registry import TOOL_REGISTRY
+        writers = {
+            d.name for d in TOOL_REGISTRY
+            if d.http_policy and d.annotations is not None
+            and d.annotations.readOnlyHint is False
+        }
+        missing = writers - ms.WRITE_TOOL_NAMES
+        assert not missing, (
+            f"_rw()-annotated HTTP tools missing from WRITE_TOOL_NAMES "
+            f"(a graphs:read-only MCP key could invoke them): {missing}")
+
     def test_mcp_read_hook_classification(self, monkeypatch):
         """maybe_record_mcp_read: writes skipped, reads counted, selfhost and
         no-team skipped, kill-switch respected."""

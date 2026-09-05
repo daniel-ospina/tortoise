@@ -138,7 +138,7 @@ jobs:
                   workflow_id: 'python-ci.yml',
                   event: 'push',           // filters out pull_request + schedule runs
                   head_sha: sha,
-                  per_page: 100,  # #1474 review P3: a SHA with >10 reruns must still see the newest run
+                  per_page: 100,  // #1474 review P3: a SHA with >10 reruns must still see the newest run
                 });
                 const candidates = (runs.data && runs.data.workflow_runs) || [];
                 if (candidates.length === 0) {

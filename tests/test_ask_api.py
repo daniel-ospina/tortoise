@@ -192,9 +192,10 @@ def test_ask_returns_answer(client, monkeypatch):
 
 
 def test_empty_pool_abstained_200(client, monkeypatch):
-    """P2-10: empty pool → 200 abstained with NO_EVIDENCE_TEXT + evidence,
-    exactly one LLM call."""
-    from tortoise.reader import NO_EVIDENCE_TEXT
+    """P2-10: empty pool → 200 abstained with the model's WRITTEN
+    abstention + evidence, exactly one LLM call (#2280: an abstention is a
+    written decision — empty output is no longer substituted as "no
+    evidence", it fails loud as 502)."""
     fake = _FakeReaderFactory(reply="I do not know.").install(monkeypatch)
     r = client.post("/v1/ask", json={"question": "nothing about this at all"})
     assert r.status_code == 200
@@ -203,22 +204,26 @@ def test_empty_pool_abstained_200(client, monkeypatch):
     assert body["answer"] == "I do not know."  # the recorded abstention
     assert body["evidence"] is not None
     assert fake["n"] == 1
-    assert NO_EVIDENCE_TEXT  # canonical text is the blank-output substitution
 
 
-def test_empty_pool_blank_reply_substitutes_no_evidence(client, monkeypatch):
-    """P2: hosted empty-pool with a BLANK reply → 200 abstained with the
-    canonical NO_EVIDENCE_TEXT substitution (exactly one LLM call) — the
-    blank path is only otherwise exercised at unit/local-lane level."""
+def test_empty_pool_blank_reply_fails_loud_502(client, monkeypatch):
+    """#2280: a BLANK reader reply is a malfunction, never an abstention.
+
+    Pre-fix, an empty model output was substituted with the canonical
+    ``NO_EVIDENCE_TEXT`` abstention (200) — silently fabricating a "no
+    evidence" answer on a collapsed/empty reader call. The two-phase
+    prompt abstains in WRITING; an empty output is either a
+    reasoning-budget collapse (``finish_reason="length"``) or a reader
+    malfunction. The ask lane now retries once and fails LOUD as
+    ``reader_unavailable`` (502) — the hosted surface never reads an
+    empty output as an abstention."""
     from tortoise.reader import NO_EVIDENCE_TEXT
     fake = _FakeReaderFactory(reply="").install(monkeypatch)
     r = client.post("/v1/ask", json={"question": "nothing about this at all"})
-    assert r.status_code == 200
-    body = r.json()
-    assert body["abstained"] is True
-    assert body["answer"] == NO_EVIDENCE_TEXT
-    assert body["evidence"] is not None
-    assert fake["n"] == 1
+    assert r.status_code == 502
+    assert r.json() == {"error": {"code": "reader_unavailable"}}
+    assert fake["n"] == 2  # one same-budget retry, then fail-loud
+    assert NO_EVIDENCE_TEXT  # constant retained (defensive invariant only)
 
 
 # ── Input boundary (the pinned code set) ───────────────────────────────────

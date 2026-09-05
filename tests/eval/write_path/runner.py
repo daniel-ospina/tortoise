@@ -65,13 +65,14 @@ codes; a CI wiring must map 2 explicitly, never treat it as pass).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Module root helpers — this file doubles as the CLI entry
@@ -400,7 +401,7 @@ def grade_session(
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
 def run_benchmark(
@@ -537,7 +538,7 @@ def run_benchmark(
                     cost_tracked = False
                 else:
                     total_cost += float(session_cost)
-            except Exception as exc:  # noqa: BLE001 — the run report carries it
+            except Exception as exc:
                 runner_errors.append(f"{session_id}: capture raised {type(exc).__name__}: {exc}")
                 capture = {}
             snapshot = snapshot_session(sdk, session_id)
@@ -579,7 +580,7 @@ def run_benchmark(
                     refreshed["capture_ok"] = result["capture_ok"]
                     fresh.append(refreshed)
                 session_results = fresh
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 runner_errors.append(f"dream EP pass raised {type(exc).__name__}: {exc}")
     finally:
         if owned_sdk:
@@ -733,7 +734,7 @@ def _git_head_short() -> str:
         )
         if out.returncode == 0:
             return out.stdout.strip() or "unknown"
-    except Exception:  # noqa: BLE001
+    except Exception:
         pass
     return "unknown"
 
@@ -766,15 +767,11 @@ def _close_and_wipe(sdk) -> None:
     name is still namespace-scoped + session-journaled under pytest, so the
     session sweep is the backstop).
     """
-    try:
+    with contextlib.suppress(Exception):  # #2174-lint SIM105
         proj = sdk._get_proj()
         proj.g.query("MATCH (n) DETACH DELETE n")
-    except Exception:  # noqa: BLE001
-        pass
-    try:
+    with contextlib.suppress(Exception):  # #2174-lint SIM105
         sdk.close()
-    except Exception:  # noqa: BLE001
-        pass
 
 
 # ── Receipt build + validation (§6.6) ───────────────────────────────────────
@@ -1066,7 +1063,7 @@ def _main(argv: list[str] | None = None) -> int:
         receipt = json.loads(args.receipt.read_text(encoding="utf-8"))
         issues = validate_receipt(receipt)
         if issues:
-            print("invalid:" + "\n  ".join([""] + issues))
+            print("invalid:" + "\n  ".join(["", *issues]))  # #2174-lint RUF005
             return EXIT_RUNNER_ERROR
         print("valid")
         return EXIT_OK

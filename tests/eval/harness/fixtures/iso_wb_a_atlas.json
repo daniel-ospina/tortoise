@@ -1,0 +1,16 @@
+{
+  "holdout": false,
+  "seed": 13,
+  "suite": "write_back",
+  "team": "team_a",
+  "turns": [
+    {
+      "content": "Team A note: the 'Atlas' migration is green in staging.",
+      "role": "user"
+    },
+    {
+      "content": "Recorded.",
+      "role": "assistant"
+    }
+  ]
+}
