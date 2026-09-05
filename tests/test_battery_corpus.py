@@ -39,7 +39,7 @@ def test_enum_schema() -> None:
     assert schema.ATTACK_TYPES == ("poisoned", "sybil", "echo_chamber", "flapping", "anchoring")
     assert schema.SPLITS == ("train", "wave-1", "wave-2", "wave-3", "held_out")
     assert schema.CONTRADICTION_K == 5
-    assert sum(schema.PACK_COUNTS.values()) == 134
+    assert sum(schema.PACK_COUNTS.values()) == 140  # v1.1: +6 bct-* twins
     assert schema.ATTACK_DISTRIBUTION == {t: 2 for t in schema.ATTACK_TYPES}  # noqa: SIM300
     assert len(schema.FAMILY_REP_NAMES) == 6
     assert schema.HELD_OUT_FAMILY == "compliance-assessment"
@@ -54,8 +54,8 @@ def test_pack_splits_arithmetic() -> None:
     for splits in schema.PACK_SPLITS.values():
         for split, n in splits.items():
             totals[split] = totals.get(split, 0) + n
-    assert totals == {"train": 65, "wave-1": 16, "wave-2": 23, "wave-3": 17, "held_out": 13}
-    assert sum(totals.values()) == 134
+    assert totals == {"train": 71, "wave-1": 16, "wave-2": 23, "wave-3": 17, "held_out": 13}
+    assert sum(totals.values()) == 140
 
 
 def test_gold_store_gitignored() -> None:
@@ -657,7 +657,7 @@ def sealed_corpus(tmp_path):
 def test_pack_counts(sealed_corpus) -> None:
     corpus, _, _ = sealed_corpus
     assert corpus.manifest["pack_counts"] == schema.PACK_COUNTS
-    assert sum(corpus.manifest["pack_counts"].values()) == 134
+    assert sum(corpus.manifest["pack_counts"].values()) == 140  # v1.1: +6 bct-*
 
 
 def test_pack_splits(sealed_corpus) -> None:
@@ -672,8 +672,10 @@ def test_pack_splits(sealed_corpus) -> None:
 def test_k_pin(sealed_corpus) -> None:
     corpus, _, _ = sealed_corpus
     for sc in corpus.scenarios:
+        # bct-* benign twins carry NO planted pair (control_set exemption) —
+        # only planted scenarios (ct-*, xs-*) pin k.
         if sc["task_type"] in ("contradiction", "cross_session_contradiction"):
-            for pair in sc["planted_contradictions"]:
+            for pair in sc.get("planted_contradictions") or []:
                 assert pair["k"] == 5, sc["id"]
 
 
@@ -683,10 +685,11 @@ def test_claim_placement(sealed_corpus) -> None:
         if sc["task_type"] != "contradiction":
             continue
         turns = sc["prompt"]["turns"]
+        # benign bct twins keep the ct twin's 5-turn skeleton (no planted pair)
         assert len(turns) >= 5, sc["id"]
         pre = " ".join(str(t["content"]) for t in turns[:4])
         inject = str(turns[4]["content"])
-        for pair in sc["planted_contradictions"]:
+        for pair in sc.get("planted_contradictions") or []:
             assert cl.contains_phrase(pre, pair["claim"]), (sc["id"], pair["claim"])
             assert cl.contains_phrase(inject, pair["counter_claim"]), (sc["id"], pair["counter_claim"])
             assert not cl.contains_phrase(pre, pair["counter_claim"]), sc["id"]
@@ -738,7 +741,7 @@ def test_sealing_no_gold_in_corpus_json(sealed_corpus) -> None:
     text = json.dumps(corpus.manifest) + json.dumps(corpus.scenarios)  # noqa: F841
     for sc in corpus.scenarios:
         if sc["task_type"] == "contradiction":
-            for pair in sc["planted_contradictions"]:  # noqa: B007
+            for pair in sc.get("planted_contradictions") or []:  # noqa: B007
                 # gold plaintext values must never appear anywhere in corpus.json
                 pass  # gold content is in the gitignored store only; checked below
 
@@ -765,7 +768,7 @@ def test_gold_sha256_matches_store(sealed_corpus) -> None:
 def test_splits_partition(sealed_corpus) -> None:
     corpus, _, _ = sealed_corpus
     splits = [sc["split"] for sc in corpus.scenarios]
-    assert len(splits) == 134  # every scenario in exactly one split (one field)
+    assert len(splits) == 140  # v1.1: every scenario in exactly one split (one field)
     assert set(splits) == set(schema.SPLITS)
     assert any(s == "held_out" for s in splits)
     waves = {s for s in splits if s.startswith("wave-")}
@@ -781,14 +784,29 @@ def test_splits_partition(sealed_corpus) -> None:
 
 
 def test_controls_bijection(sealed_corpus) -> None:
+    """matched_control_for bijection per control set (#2284 T3): decision
+    controls are 1:1 over the PLANTED ct population (the d-* ct-domain
+    excludes benign bct ids — bct scenarios are controls, never targets);
+    bct benign controls are exactly-once over {ct-001..ct-006}; a planted ct
+    is referenced at most twice across all sets."""
     corpus, _, _ = sealed_corpus
-    ct_ids = sorted(sc["id"] for sc in corpus.scenarios
-                    if sc["task_type"] == "contradiction")
-    controls = sorted(sc["matched_control_for"] for sc in corpus.scenarios
-                      if sc.get("matched_control_for"))
-    assert len(controls) == 15
-    assert len(set(controls)) == 15
-    assert controls == ct_ids
+    planted_ct = sorted(sc["id"] for sc in corpus.scenarios
+                        if sc["task_type"] == "contradiction"
+                        and sc.get("planted_contradictions"))
+    decision = sorted(sc["matched_control_for"] for sc in corpus.scenarios
+                      if sc["task_type"] == "decision" and sc.get("matched_control_for"))
+    assert len(planted_ct) == 15
+    assert decision == planted_ct  # exactly-once; bct ids never inflate the domain
+    bct = sorted(sc["matched_control_for"] for sc in corpus.scenarios
+                 if sc.get("control_set") == "bct")
+    assert bct == [f"ct-{n:03d}" for n in range(1, 7)]  # 6 twins, each seed once
+    owners: dict[str, int] = {}
+    for sc in corpus.scenarios:
+        mcf = sc.get("matched_control_for")
+        if mcf:
+            owners[str(mcf)] = owners.get(str(mcf), 0) + 1
+    assert len(owners) == 15
+    assert all(n <= 2 for n in owners.values())  # decision control + optional bct twin
 
 
 def test_zero_context_render(sealed_corpus) -> None:
@@ -832,7 +850,7 @@ def test_attack_not_rendered(sealed_corpus) -> None:
 
 def test_corpus_filter(sealed_corpus) -> None:
     corpus, _, _ = sealed_corpus
-    assert len(corpus.filter(task_type="contradiction")) == 15
+    assert len(corpus.filter(task_type="contradiction")) == 21  # v1.1: 15 ct + 6 bct
     assert len(corpus.filter(split="held_out")) == 13
     assert len(corpus.filter(task_type="adversarial", split="held_out")) == 4
     assert corpus.filter(family="NOPE") == []
