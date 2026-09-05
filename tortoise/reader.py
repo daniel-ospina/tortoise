@@ -545,7 +545,12 @@ class LLMReader:
         user = build_reader_user_message(context, question)
         raw = self._model.complete(
             system=system_prompt_for(question_type), user=user)
-        return raw.strip()
+        # None-guard: a provider response with empty content (refusal / empty
+        # generation) must surface as the empty string, not crash the caller
+        # (the product ask() guards with ``(raw or "").strip()`` — mirror it
+        # here so the eval's direct LLMReader path never AttributeErrors on
+        # ``None.strip()``; observed live 2026-09-02 on qwen via OpenRouter).
+        return (raw or "").strip()
 
     def ping(self, probe: str) -> str:
         """Minimal transport-health probe (M2 #1523 pre-flight).
@@ -556,4 +561,4 @@ class LLMReader:
         maps them via the P2 taxonomy.
         """
         raw = self._model.complete(system=PROBE_SYSTEM, user=probe)
-        return raw.strip()
+        return (raw or "").strip()
