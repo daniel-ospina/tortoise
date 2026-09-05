@@ -633,3 +633,186 @@ def test_two_team_session_only_backups_pin_selected_team(page: Page) -> None:
     page.locator('[data-tab="keys"]').click()
     expect(page.locator("body")).to_contain_text("Backups", timeout=15_000)
     assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
+
+
+def _managed_row(kid: str, prefix: str, name: str | None) -> dict:
+    """Durable (provisioned) key row shape the keys table renders (mirrors
+    the mixed fixture rows: created_via='provisioned', no expires_at → the
+    row is manageable: toggle/rename/trash all render for owner role)."""
+    return {"id": kid, "key_prefix": prefix, "created_at": "2026-09-04T00:00:00Z",
+            "last_used_at": None, "revoked_at": None, "enabled": True,
+            "name": name, "created_via": "provisioned", "expires_at": None}
+
+
+def test_two_team_key_writes_pin_selected_team(page: Page) -> None:
+    """#2230 F10 (CI home — the #2167 step-10 two-team harness): revoke/
+    rename/toggle while the SELECTED team ≠ first membership must pin
+    ?team_id=<selected> on DELETE/PATCH /v1/team/keys/{id} (the rule-4
+    carve-out: #2167 pinned create/list; revoke/rename/toggle sent no pin,
+    so the session server — memberships[0] resolution — 403'd revoking the
+    non-first team's key and a PATCH pin was silently ignored server-side).
+
+    Each team's mock rows are distinct and writes resolve ONLY under the
+    pinned team (a dropped/wrong pin → 404, fail-loud — the URL assertions
+    below cannot false-pass). Zero POST /v1/session/key throughout."""
+    import re as _re
+    team_a = {"team_id": "team_a", "team_name": "Alpha", "tier": "free",
+              "role": "owner", "anon": False}
+    team_b = {"team_id": "team_b", "team_name": "Bravo", "tier": "free",
+              "role": "owner", "anon": False}
+    keys_rows: dict = {
+        "team_a": [_managed_row("key_a1", "tt_alpha01", "alpha-ci")],
+        "team_b": [_managed_row("key_b1", "tt_bravo01", None)],
+    }
+    key_writes: list = []
+    mint_calls: list = []
+
+    def handle(route):
+        url = route.request.url
+        if url.startswith(API_HOST):
+            path = urllib.parse.urlsplit(url).path
+            method = route.request.method
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            tid = (qs.get("team_id") or ["team_a"])[0]
+            if path.endswith("/v1/session/key") and method == "POST":
+                mint_calls.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — #2167 zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/teams") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([team_a, team_b]))
+                return
+            if path.endswith("/v1/onboarding/state") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+                return
+            if path.endswith("/v1/user/identity") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                                "banner": {"show": False}}))
+                return
+            if path.endswith("/v1/team/keys") and method in ("GET", "POST"):
+                if method == "POST":
+                    route.fulfill(status=500, content_type="application/json",
+                                  body=json.dumps({"detail": "no mint in this test"}))
+                    return
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": keys_rows.get(tid, [])}))
+                return
+            if _re.match(r"^/v1/team/keys/[^/]+$", path) and method in ("PATCH", "DELETE"):
+                # #2230: key writes resolve ONLY under the pinned team — a
+                # dropped/wrong ?team_id= 404s (fail-loud: the test's URL
+                # assertions cannot false-pass). The row mutates the team's
+                # list so the post-revoke loadAll refetch is truthful.
+                kid = path.rsplit("/", 1)[1]
+                key_writes.append({"method": method, "url": url})
+                team_rows = keys_rows.get(tid, [])
+                row = next((x for x in team_rows if x["id"] == kid), None)
+                if row is None:
+                    route.fulfill(status=404, content_type="application/json",
+                                  body=json.dumps({"detail": "API key not found"}))
+                    return
+                if method == "PATCH":
+                    body = json.loads(route.request.post_data or "{}")
+                    if "enabled" in body:
+                        row["enabled"] = body.get("enabled")
+                    if "name" in body:
+                        row["name"] = body.get("name")
+                    route.fulfill(status=200, content_type="application/json",
+                                  body=json.dumps(
+                                      {"key_id": kid,
+                                       **{k: v for k, v in body.items()
+                                          if v is not None}}))
+                    return
+                team_rows.remove(row)
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"revoked": True, "key_id": kid}))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                t = team_b if tid == "team_b" else team_a
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(t))
+                return
+            if path.endswith("/v1/graphs") or path.endswith("/v1/team/alerts"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.context.add_cookies([{
+        "name": "sb-tortoise-auth-token",
+        "value": urllib.parse.quote(json.dumps(_session_json("u-key-writes"))),
+        "domain": ".premiselabs.co", "path": "/",
+    }])
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    # Select Bravo (≠ first membership Alpha) — session-only (zero keys held)
+    page.get_by_role("button", name=_re.compile(r"Account menu")).click()
+    with page.expect_response(lambda r: "/v1/team/keys" in r.url and "team_id=team_b" in r.url,
+                              timeout=15000):
+        page.locator(".account-menu").get_by_role("button", name="Bravo").click()
+    expect(page.locator("body")).to_contain_text("Bravo", timeout=15_000)
+    page.locator('[data-tab="keys"]').click()
+    # Bravo's row is the ONLY row (per-team truth — Alpha's key never renders)
+    expect(page.locator("tbody tr")).to_have_count(1, timeout=15_000)
+    brow = page.locator("tbody tr", has_text="tt_bravo01")
+    expect(brow.locator(".key-toggle")).to_have_attribute("aria-checked", "true")
+    expect(brow.locator(".key-rename")).to_be_visible()
+    expect(brow.locator(".key-trash")).to_be_visible()
+
+    # ── rename (PATCH {name}) — must pin ?team_id=team_b ──
+    with page.expect_response(lambda r: r.request.method == "PATCH"
+                              and "/v1/team/keys/" in r.url
+                              and "team_id=team_b" in r.url,
+                              timeout=15000):
+        brow.locator(".key-rename").click()
+        brow.locator(".key-name-input").fill("bravo-prod")
+        brow.locator(".key-name-input").press("Enter")
+    expect(brow).to_contain_text("bravo-prod", timeout=10_000)
+
+    # ── toggle off (PATCH {enabled:false}) — must pin ?team_id=team_b ──
+    with page.expect_response(lambda r: r.request.method == "PATCH"
+                              and "/v1/team/keys/" in r.url
+                              and "team_id=team_b" in r.url,
+                              timeout=15000):
+        brow.locator(".key-toggle").click()
+    expect(brow.locator(".key-toggle")).to_have_attribute("aria-checked", "false", timeout=10_000)
+    expect(brow).to_contain_text("disabled", timeout=10_000)
+
+    # ── revoke (DELETE) — must pin ?team_id=team_b; confirm accepted ──
+    page.once("dialog", lambda d: d.accept())
+    with page.expect_response(lambda r: r.request.method == "DELETE"
+                              and "/v1/team/keys/" in r.url
+                              and "team_id=team_b" in r.url,
+                              timeout=15000):
+        brow.locator(".key-trash").click()
+    # the revoked row is gone from Bravo's table (loadAll refetch)
+    expect(page.locator("tbody tr", has_text="tt_bravo01")).to_have_count(0, timeout=10_000)
+
+    # Every write pinned the SELECTED team (rename + toggle + revoke = 3)
+    assert len(key_writes) == 3, f"expected 3 key writes, got {key_writes}"
+    for w in key_writes:
+        assert "team_id=team_b" in w["url"], f"key {w['method']} must pin team_b: {w['url']}"
+    assert keys_rows["team_b"] == [], "Bravo's key must be revoked (removed from the team rows)"
+    assert keys_rows["team_a"] == [_managed_row("key_a1", "tt_alpha01", "alpha-ci")], \
+        "Alpha's rows must be untouched by writes pinned to Bravo"
+    assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
