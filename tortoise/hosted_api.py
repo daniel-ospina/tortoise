@@ -10034,11 +10034,13 @@ def _arm_invitee_member_progress(team_id: str, user_id: str) -> None:
 
 async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
                                        path: str, code: str) -> dict:
-    """Registry-lane mismatch-override accept (W7 v2) — runs ONLY after the
-    OTP proof has been verified and consumed (single-use) by the caller. The
-    CURRENT account joins the invited team under the invited role; the invite
-    records accepted_via / accepted_mismatch / fused_from_email / OTP proof —
-    never silent. Mirrors the legacy token-accept check ordering (capacity /
+    """Registry-lane mismatch-override accept (W7 v2) — OTP-gated: the
+    executor re-verifies the submitted code (defense-in-depth, non-consuming)
+    and consumes it atomically at the conditional single-use commit below —
+    never before. The CURRENT account joins the invited team under the
+    invited role; the invite records accepted_via / accepted_mismatch /
+    fused_from_email / OTP proof — never silent. Mirrors the legacy
+    token-accept check ordering (capacity /
     free-cap / suspension pre-checks stay NON-consuming 402s)."""
     reg = sdk._get_registry()
     team_id = invite["team_id"]
@@ -10371,12 +10373,23 @@ async def resend_invite(invitation_id: str, team_id: str, request: Request,
     token = str(_uuid_r.uuid4())
     token_hash = hash_api_key(token)
     new_exp = (datetime.now(UTC) + _td_r(days=7)).isoformat()
-    reg.query(
-        "MATCH (i:Invitation {id:$id}) SET i.token_hash = $th, "
-        "i.expires_at = $exp, i.otp_hash = null, i.otp_expires_at = null, "
-        "i.otp_attempts = 0, i.otp_verified_at = null, i.otp_verified_by = null",
+    # Conditional rotate: the write's OWN matched-row count is the claim — a
+    # concurrent accept (read-then-write window above) commits first → this
+    # conditional SET matches 0 rows → 409, never an emailed dead link
+    # (mirrors the accept lanes' authoritative single-write posture).
+    rotated = reg.query(
+        "MATCH (i:Invitation {id:$id}) "
+        "WHERE i.accepted_at IS NULL "
+        "AND (i.status IS NULL OR i.status = 'pending') "
+        "SET i.token_hash = $th, i.expires_at = $exp, "
+        "i.otp_hash = null, i.otp_expires_at = null, "
+        "i.otp_attempts = 0, i.otp_verified_at = null, "
+        "i.otp_verified_by = null RETURN count(i)",
         params={"id": invitation_id, "th": token_hash, "exp": new_exp},
-    )
+    ).result_set
+    if not rotated or not rotated[0][0]:
+        raise HTTPException(status_code=409,
+                            detail="Invitation already accepted — cannot resend")
     _team_row = reg.query(
         "MATCH (t:Team {id:$id}) RETURN properties(t)", params={"id": team_id},
     ).result_set

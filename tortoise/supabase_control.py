@@ -1087,7 +1087,8 @@ def invitation_accept(cp, token: str, user_id: str,
     W7 v2 (#2003, invite fusion): ``mismatch_override`` ∈ {'fuse',
     'accept-mismatch'} turns the email-mismatch 403 into a mismatch-override
     accept — ONLY after the OTP proof-of-control has been verified on the
-    invitation (``otp_verified_at`` set by ``invitation_otp_verify``; a
+    invitation (``otp_verified_at`` recorded at the accept commit — verify
+    is non-consuming and inline; a
     mismatch override without it is still a 403 — invite-hijack closed on
     BOTH override paths). The accept then proceeds under the CURRENT account
     and records the mismatch (accepted_via / accepted_mismatch /
@@ -3094,9 +3095,15 @@ def invitation_resend(cp, invitation_id: str, team_id: str,
             "Invite token expired — create a new invite instead", status=400)
     token = str(uuid.uuid4())
     new_expires = (datetime.now(UTC) + timedelta(days=7)).isoformat()
-    cp.query(
+    # Conditional rotate: the PATCH's OWN matched-row count is the claim — a
+    # concurrent accept (read-then-write window above) flips the row first →
+    # this PATCH matches 0 rows → raise, never return a token that was never
+    # written (the admin would email a dead link). Mirrors the accept
+    # lanes' authoritative single-write posture (P2-1 family).
+    rotated = cp.query(
         "invitations",
         method="PATCH",
+        select=["id"],
         filters=[("id", "eq", invitation_id), ("status", "eq", "pending")],
         json_body={
             "lookup_hash": _lookup_hash(token),
@@ -3111,6 +3118,9 @@ def invitation_resend(cp, invitation_id: str, team_id: str,
             "otp_verified_by": None,
         },
     )
+    if not rotated:
+        raise InvitationError(
+            "Invitation already accepted — cannot resend", status=409)
     return {"token": token, "email": inv.get("email"),
             "role": inv.get("role"), "expires_at": new_expires}
 

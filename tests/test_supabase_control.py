@@ -2838,6 +2838,45 @@ class _InterleaveLoserFake(FakeControlPlane):
                              order=order, limit=limit)
 
 
+class _ResendRaceFake(FakeControlPlane):
+    """Deterministic resend-vs-accept race (W7 review P3): an invitee
+    accepts between the admin resend's token-read and its rotate PATCH. On
+    the rotate PATCH (invitations PATCH carrying lookup_hash + pending
+    filter), a winner's accept commits FIRST (status flip) so the resend's
+    own conditional rotate matches 0 rows → it must 409 instead of
+    returning a fresh token that was never written (a dead email link).
+    Pre-fix the rotate PATCH ignored its matched-row count → the admin got
+    a phantom token."""
+
+    def __init__(self, tables: dict, *, winner_uid: str):
+        super().__init__(tables)
+        self.winner_uid = winner_uid
+        self.armed = True
+
+    def query(self, table: str, *, select=None, filters=None,
+              method: str = "GET", json_body=None, order=None,
+              limit=None):
+        is_rotate = (table == "invitations" and method == "PATCH"
+                     and (json_body or {}).get("lookup_hash") is not None
+                     and filters
+                     and any(f[0] == "status" and f[1] == "eq"
+                            and f[2] == "pending" for f in filters))
+        if is_rotate and self.armed:
+            self.armed = False
+            from datetime import UTC
+            from datetime import datetime as _dt
+            now = _dt.now(UTC).isoformat()
+            for f in (filters or []):
+                if f[0] == "id" and f[1] == "eq":
+                    row = next(r for r in self.tables["invitations"]
+                               if r.get("id") == f[2])
+                    row.update({"status": "accepted",
+                                "accepted_at": now})
+        return super().query(table, select=select, filters=filters,
+                             method=method, json_body=json_body,
+                             order=order, limit=limit)
+
+
 class TestConcurrentAcceptSingleUseSupabase:
     """P2-1 concurrency regression (supabase lane): a concurrent loser of
     the single-use token/OTP claim must raise BEFORE minting a membership
@@ -2966,3 +3005,22 @@ class TestConcurrentAcceptSingleUseSupabase:
         }])
         return invitation_mint(fake, "team-1", "bob@example.com",
                                "member", _U3)
+
+    def test_resend_concurrent_accept_never_phantom_token(self):
+        """W7 review P3: an invitee accepts between the admin resend's
+        token-read and its rotate PATCH → the rotate matches 0 rows → the
+        resend 409s and NEVER returns a token that wasn't written (no dead
+        email link). Pre-fix the rotate PATCH ignored its matched-row count
+        → phantom token."""
+        base = FakeControlPlane({"api_keys": [], "team_memberships": [],
+                                 "invitations": [], "teams": []})
+        fake = _ResendRaceFake(base.tables, winner_uid=_U2)
+        inv = self._seed(fake)
+        with pytest.raises(InvitationError) as ei:
+            invitation_resend(fake, inv["id"], "team-race-sb",
+                              actor_user_id=_U3)
+        assert ei.value.status == 409
+        # no phantom token written: the rotate never landed
+        row = fake.tables["invitations"][0]
+        assert row.get("status") == "accepted"  # winner's commit stands
+        assert row.get("accepted_at") is not None
