@@ -275,6 +275,16 @@ cannot reach the graph (never decide against a dead connection):
    - `evidence` points for findings that bear on the choice.
    Use stable ids (returned ids or your own) — the graph is edge-based and
    the ranking reads the wiring.
+
+   **Calibration is automatic (#2199) — no promote/calibrate chores.**
+   Decision parts are HUMAN-authored judgment, so they are born LIVE with an
+   explicit, provenance-recorded starting belief: omit `credibility` and the
+   system applies its standard starting belief (medium = Beta(3,1), mean
+   0.75, provenance `system-default` — visible per point in
+   `tortoise_calibrate_summary`). Pass `credibility="high"` (ladder: gold /
+   high / medium / low / unverified) when you have a real belief — it is
+   recorded as `set-by-author`. The documented flow below ranks on the FIRST
+   attempt with zero undocumented calls (0 CalibrationError).
 3. **Confirm with the user before wiring:** list the criteria (for value)
    and the options (for completeness).
 4. **Wire criteria → options** with `tortoise_create_operator`:
@@ -286,6 +296,14 @@ cannot reach the graph (never decide against a dead connection):
    less, express it on the OPERATOR with `tortoise_mitigate_operator`
    (strength 0.10–0.50), never NAND the option for a bad fit. Annotate bias /
    precision with `tortoise_annotate_operator` when useful.
+
+   **Mitigation semantics (single-sourced, #2199):** `strength` means how
+   much the reason reduces the edge — 0 = fully neutralized, 1 = fully
+   intact. It is NOT how true the reason is and is NOT fused into the
+   mitigation's belief: the mitigation POINT itself is calibrated like any
+   other decision part (omit `credibility` → system starting belief medium;
+   pass it → set-by-author). `strength` is currently ADVISORY metadata — EP
+   does not read it yet — so it is auditable, not a weight.
 6. **Options can IMPL/NAND each other** — two go well together (IMPL), three
    are mutually exclusive (NAND).
 7. **Rank + sanity-check.** Run `tortoise_compute_confidence` (anchors = the
