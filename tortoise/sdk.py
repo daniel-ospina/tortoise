@@ -14023,7 +14023,8 @@ class TortoiseSDK:
             # live/replay persistence. The pop is UNCONDITIONAL (both lanes,
             # like the Event branch): a journal-gated pop would make live
             # persistence depend on journal config — the same divergence
-            # class this fights. (Tenant-visible narrowing; T4.6 docs.)
+            # class this fights. (Tenant-visible narrowing — see docs/
+            # ONTOLOGY.md §4.3 Object-registration note.)
             event.pop("point", None)
             event.pop("payload", None)
         # (#2194) Journal ObjectRegistered on FIRST canonical registration
