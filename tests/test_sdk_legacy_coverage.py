@@ -223,7 +223,7 @@ class TestBaselineCalibration:
         try:
             point = fresh.get_point(pid)
             assert point["baseline_set"] is True
-            assert point["baseline_source"] == "explicit"
+            assert point["baseline_source"] == "set-by-author"
             assert point["ep_alpha"] == 5.0
             assert point["ep_beta"] == 2.0
         finally:
