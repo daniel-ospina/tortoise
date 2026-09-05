@@ -13,6 +13,12 @@ from typing import Any, Callable  # noqa: F401, UP035
 from battery.probes.base import ProbeResult
 
 
+#: Schema-v1.1 emitter-registry contract (issue #2284): the trace semantic
+#: keys this probe reads. Declarative only — behavior unchanged until the
+#: probe re-points reads onto the registry-emitted log (Task 9).
+CONSUMED_FIELDS: tuple[str, ...] = ("coverage_subscore", "decide_cycles")
+
+
 class R2CoverageProbe:
     """Adversarial-coverage scoring (judge-gated subscore + mechanism gate)."""
 

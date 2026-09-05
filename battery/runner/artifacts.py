@@ -1,4 +1,4 @@
-"""Artifact writers — run_artifact.json v1.0 + summary.json v1.0 (S7).
+"""Artifact writers — run_artifact.json v1.1 + summary.json v1.1 (S7).
 
 Schemas pinned in the plan (Task 6 Schema note); every write is
 schema-validated by the schema tests. Timestamps are recorded but never
@@ -14,13 +14,13 @@ from typing import Any
 
 from battery.enums import ModelCallOutcome
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "1.1"
 
 _ARTIFACT_KEYS = (
     "schema_version", "run_id", "seed", "arm", "scenario_id", "tier", "model",
     "determinism", "episode_trace", "metric_values", "model_call_outcomes",
     "ep_outcome", "isolation_breach", "excluded", "setup", "timestamps",
-    "provenance",
+    "provenance", "event_log",
 )
 _SUMMARY_KEYS = ("schema_version", "arms", "run", "timestamps")
 
@@ -36,8 +36,9 @@ def build_run_artifact(
     setup_info: dict[str, Any], provenance: dict[str, Any],
     python_hash_seed: str, isolation_breach: bool = False,
     model: dict[str, Any] | None = None,
+    event_log: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Assemble a schema-v1.0 run artifact (all top-level keys present)."""
+    """Assemble a schema-v1.1 run artifact (all top-level keys present)."""
     now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     return {
         "schema_version": SCHEMA_VERSION,
@@ -59,6 +60,7 @@ def build_run_artifact(
         "setup": setup_info,
         "timestamps": {"written_utc": now},
         "provenance": provenance,
+        "event_log": event_log or [],
     }
 
 
