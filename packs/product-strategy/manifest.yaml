@@ -1,6 +1,6 @@
 namespace: product-strategy
 name: Product Strategy
-version: 0.2.0
+version: 0.3.0
 tier: free
 description: Product strategy concepts — products, features, customers, competitors,
   markets
@@ -15,10 +15,12 @@ ontology:
   - market
   - requirement
   - architecture
+  - customerProblem
   subclassOf:
     feature: WorkItem
     requirement: WorkItem
     architecture: Document
+    customerProblem: Problem
   equivalentTo:
     requirement:
     - dev:requirement
@@ -48,6 +50,7 @@ ontology:
       nearMisses:
       - product
       - requirement
+      - customerProblem
     customer:
       description: An organization or person who buys or uses the product
       nearMisses:
@@ -66,6 +69,18 @@ ontology:
       - customerSegment
     competitor:
       description: An organization offering a product that competes with ours
+    customerProblem:
+      description: An unmet customer need — the problem a feature addresses (problem
+        family)
+      synonyms:
+      - pain point
+      - problem
+      - need
+      nearMisses:
+      - feature
+      - requirement
+      - useCase
+      - jobToBeDone
     useCase:
       description: A concrete scenario in which a user achieves a goal using the product
       synonyms:
@@ -160,6 +175,16 @@ ontology:
     fromKind: product-strategy:requirement
     toKind: product-strategy:architecture
     extractable: true
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: product-strategy:feature
+    toKind: product-strategy:customerProblem
+  - predicate: manifests
+    mechanism: IMPL
+    semantics: supports
+    fromKind: dev:incident
+    toKind: product-strategy:customerProblem
   hierarchies:
   - path: Product → Feature
     type: hasPart

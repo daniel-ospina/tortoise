@@ -60,8 +60,9 @@ def compile_value_brief(packs_dir: Path | str | None = None,
                 "nearMisses": spec.get("nearMisses", []),
             }
     # T12 (#1272): the core objectKind set is aligned to ONTOLOGY §5 Object
-    # Kind Vocabulary (16 kinds incl. the commitment-state family) — the
-    # prior brief (concept/standard/document/tool/workflow/WorkItem/other)
+    # Kind Vocabulary (17 kinds — Problem added by the #2238 problem-family
+    # salvage landing, 2026-09-05) — the prior brief
+    # (concept/standard/document/tool/workflow/WorkItem/other)
     # missed project/tag/user/skill/agent/agreement + strategy/plan/goal/
     # target and added concept (not in §5). `concept` is mapped to core:other.
     granularity = {}
@@ -122,6 +123,8 @@ def compile_value_brief(packs_dir: Path | str | None = None,
     core = {
         "core:Project": "A project",
         "core:WorkItem": "A unit of work",
+        "core:Problem": "A deviation between actual and desired state — "
+                        "problem-family parent (2026-08-31)",
         "core:document": "A document artifact",
         "core:tag": "A tag",
         "core:user": "A user",
