@@ -222,6 +222,67 @@ def team_graph_name(source, team_id: str) -> str:
     return f"team_{team_id}"
 
 
+def enumerate_team_graphs(source, team_id: str) -> list[dict[str, Any]]:
+    """Per-team ACTIVE graph list — the per-graph sweep seam (#2313).
+
+    Returns registry-shaped rows ``[{graph_id, kind, namespace}]``
+    default-first (the DEFAULT graph always first, then customs by id) so
+    the per-graph sweep loop can dump each active graph. Supabase mode
+    delegates to the shared ``graph_metadata`` seam (derives the default
+    from ``teams.graph_name`` + reads active kind='custom' rows) — one
+    definition, no drift. Registry mode reads the Graph nodes in the
+    registry graph and filters ``status == 'deleted'`` in-process (the
+    registry lane returns tombstones; callers filter — same contract as
+    GET /v1/graphs, hosted_api.py). The registry default node (random gid,
+    kind='default') is normalized to the literal ``"default"`` so object
+    keys are stable across lanes (Q4 owner decision).
+
+    Fail-closed: a query failure raises RuntimeError — the sweep never
+    guesses a graph list (same contract as ``enumerate_teams``).
+    """
+    if _is_supabase_source(source):
+        try:
+            from .supabase_control import graph_metadata
+
+            rows = graph_metadata(source, team_id)
+        except Exception as e:
+            raise RuntimeError(
+                f"team-graph enumeration failed for {team_id}: {e}") from e
+        out = [
+            {"graph_id": r["graph_id"], "kind": r["kind"],
+             "namespace": r["namespace"]}
+            for r in rows
+        ]
+        # graph_metadata is default-first + active-only already; keep a
+        # deterministic order regardless of seam version.
+        out.sort(key=lambda g: (0 if g["kind"] == "default" else 1,
+                                g["graph_id"]))
+        return out
+    try:
+        rows = source.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN properties(g)",
+            params={"tid": team_id},
+        ).result_set
+    except Exception as e:
+        raise RuntimeError(
+            f"team-graph enumeration failed for {team_id}: {e}") from e
+    out = []
+    for (props,) in rows:
+        if (props.get("status") or "active") == "deleted":
+            continue  # tombstones are never swept (#2304 quarantine)
+        kind = props.get("kind") or "custom"
+        out.append({
+            # default-first key normalization (Q4): the registry default
+            # node's random gid maps to the stable literal "default".
+            "graph_id": "default" if kind == "default" else props.get("id"),
+            "kind": kind,
+            "namespace": props.get("namespace"),
+        })
+    out.sort(key=lambda g: (0 if g["kind"] == "default" else 1,
+                            str(g["graph_id"] or "")))
+    return out
+
+
 def _read_json(storage, key: str) -> dict[str, Any]:
     try:
         parsed = json.loads(storage.download(key))
