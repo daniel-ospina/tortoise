@@ -522,12 +522,16 @@ def test_create_team_success(page: Page):
     expect(menu.get_by_role("button", name="+ Create new team")).to_be_visible()
     expect(menu.get_by_text("Switch team")).to_have_count(0)  # single-team: no switch label
     menu.get_by_role("button", name="+ Create new team").click(force=True)  # menu closes + dialog opens → unmounts
-    expect(page.get_by_role("dialog", name="Create a new team")).to_be_visible()
+    # W1 (#1997 team→Organization rename): the create dialog renders as
+    # 'Create a new organization' with an 'Organization name' input
+    # (main.jsx #1877 modal — aria-label + input aria-label). The account-
+    # menu entry keeps the legacy '+ Create new team' label.
+    expect(page.get_by_role("dialog", name="Create a new organization")).to_be_visible()
     # validation mirrors the API (spaces rejected) — inline error, no POST
-    page.get_by_label("Team name").fill("bad name")
+    page.get_by_label("Organization name").fill("bad name")
     page.locator(".modal .btn-primary").click(force=True)
     expect(page.locator(".modal")).to_contain_text("Invalid team name", timeout=10000)
-    page.get_by_label("Team name").fill("newteam")
+    page.get_by_label("Organization name").fill("newteam")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render detaches the name-changed button
     # the dashboard switches to the new team (the blob shows its name)
     expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("newteam", timeout=15000)
@@ -560,10 +564,13 @@ def test_create_team_free_capped_gate(page: Page):
     page.goto(DASHBOARD_URL)
     _open_account_menu(page)
     page.locator(".account-menu").get_by_role("button", name="+ Create new team").click(force=True)  # menu closes → unmounts
-    page.get_by_label("Team name").fill("blocked")
+    page.get_by_label("Organization name").fill("blocked")
     page.locator(".modal .btn-primary").click(force=True)  # busy-state re-render
-    dialog = page.get_by_role("dialog", name="Create a new team")
-    expect(dialog).to_contain_text("upgrade an existing team", timeout=15000)
+    dialog = page.get_by_role("dialog", name="Create a new organization")
+    # W1 (#1997): the 402 upgrade branch renders the fixed free-cap copy
+    # (main.jsx) — asserted case-exact as rendered (to_contain_text strings
+    # are case-sensitive).
+    expect(dialog).to_contain_text("The free plan includes one organization. Upgrade an existing organization to create more", timeout=15000)
     expect(dialog.get_by_role("button", name="Upgrade")).to_be_visible()
     dialog.get_by_role("button", name="Upgrade").click()
     expect(page.get_by_role("heading", name="Billing")).to_be_visible()
