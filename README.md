@@ -67,7 +67,9 @@ New to Tortoise? Choose a path:
   ```
 
   Embedded (no Docker) is the EVAL-ONLY fallback: `tortoise init` creates
-  `~/.tortoise/tortoise.db` and your agent connects over **stdio** (quickstart
+  `~/.tortoise/tortoise.db` (a bare init prints a one-line "embedded engine
+  active — eval-only fallback" notice first) and your agent connects over
+  **stdio** (quickstart
   §5) — FalkorDBLite is SINGLE-WRITER / EVAL-ONLY, one agent evaluating
   Tortoise, never a team deployment. Want the daemon's HTTP surface on
   embedded anyway? `uv run python -m tortoise.selfhost` serves
