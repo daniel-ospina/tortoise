@@ -4,9 +4,10 @@ Epic #2080 W5 Phase G (#2104). The product-lane (LLM-extractor) re-run that
 would re-measure `tests/eval/write_path/baselines/main.json` could NOT be
 completed today: four consecutive sealed runs ended `inconclusive`
 (`run_status: failed`, `failure_origin: runner_error`) because the OpenRouter
-LLM extractor produced an EMPTY capture for exactly one session per run
-(a different session each time — wp02, then wp03, then wp01/wp02/wp03/wp04,
-then wp01). Run receipts are preserved in this directory:
+LLM extractor produced an EMPTY capture for one or more sessions per run (the
+runner voids the whole run when any session fails to emit; the lost session(s)
+differed every run — wp02, then wp03, then four of five, then wp01). Run
+receipts are preserved in this directory:
 
 | Receipt | Sessions emitting | Notes |
 |---|---|---|
