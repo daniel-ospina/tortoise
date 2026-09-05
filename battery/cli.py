@@ -384,7 +384,16 @@ def _load_report_inputs(args) -> tuple[dict, dict | None]:
     """Report inputs from the LATEST attempt dir: (run_artifacts
     family -> arm -> value|None) + the run-level status context. A family
     whose cells are all insufficient_n contributes a None value (reported
-    as an insufficient_n cell — never a measured value, never vacuous)."""
+    as an insufficient_n cell — never a measured value, never vacuous).
+
+    Family-level value semantics (PR #2341 review round 2, P2): a family
+    payload carries its PRIMARY cal metric by construction — R1's
+    population split adds a SECOND cell (false-positive-rate, benign bct
+    verdicts) that must never be averaged into the family's surfaced-rate
+    headline. A payload with TWO measured metrics is refused loudly (the
+    metric-aware family-value selection lands with the Task-9 judge/
+    executor leg that makes bct verdicts measurable) — never a silent
+    mean-of-means conflating surfaced-rate with FP rate."""
     base, is_attempt = _attempt_base(args)
     matrix: dict[str, dict[str, float | None]] = {}
     measured_cells = 0
@@ -398,6 +407,13 @@ def _load_report_inputs(args) -> tuple[dict, dict | None]:
                 means.append(sum(float(v) for v in vals) / len(vals))
             else:
                 insufficient_cells += 1
+        if len(means) > 1:
+            raise ValueError(
+                f"family {payload.get('family')!r} payload carries "
+                f"{len(means)} measured metrics {list(payload['values'])} — "
+                "the family-level report value is single-metric; metric-aware "
+                "family-value selection lands with the Task-9 judge/executor "
+                "leg (never a silent mean-of-means)")
         if means:
             measured_cells += len(means)
         matrix.setdefault(payload["family"], {})[arm] = (
@@ -408,8 +424,14 @@ def _load_report_inputs(args) -> tuple[dict, dict | None]:
         return matrix, None
     arts = _run_artifacts(base)
     summary = json.loads((base / "summary.json").read_text(encoding="utf-8"))
-    run_mode = ("real" if any(a.get("run_mode") == "real" for a in arts)
-                else "mock")
+    # Run-level mode prefers the mode the runner RESOLVED at write time
+    # (summary.run.run_mode — PR #2341 review round 2, P2): artifact
+    # inference alone mislabels a summary-only all-arm-fail REAL run (zero
+    # episode artifacts → mock). Legacy summaries without the key fall back
+    # to artifact inference.
+    run_mode = summary.get("run", {}).get("run_mode") or (
+        "real" if any(a.get("run_mode") == "real" for a in arts)
+        else "mock")
     ctx = {
         "run_mode": run_mode,
         "exit_code": int(summary.get("run", {}).get("exit_code", 0)),

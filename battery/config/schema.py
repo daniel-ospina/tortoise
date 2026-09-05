@@ -131,3 +131,12 @@ CORPUS_VERSION = "1.1"  # v1.1: bct-* benign FP surface twins (#2284 T3)
 # Injection-turn pin for contradiction packs (R1 k=5; L4 cross-session k = the
 # session index of the ¬A plant).
 CONTRADICTION_K = 5
+
+#: FP-surface control-set marker (bct-* benign twins, #2284 T3) — the ONLY
+#: valid value for a contradiction scenario's ``control_set`` field. Single
+#: source of truth: every predicate (validate exemption, population sweep)
+#: keys on this constant, never a literal string — a typo (BCT/"bct "/
+#: benign) must fail validation instead of silently disabling the
+#: planted-contradiction bindings (PR #2341 review round 2, P2).
+CONTROL_SET_BCT = "bct"
+CONTROL_SET_VALUES: tuple[str, ...] = (CONTROL_SET_BCT,)

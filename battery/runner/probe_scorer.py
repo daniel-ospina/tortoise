@@ -25,6 +25,18 @@ probe leg:
 Mock runs are never scored as real: a probe scorer on a mock episode always
 records the sentinel (mock event logs are empty and never claimed real) and
 its expected set is empty — mock never false-flags ``incomplete_emitter_gap``.
+
+R1 population split (PR #2341 review round 2, P2): contradiction-family
+episodes split at the scorer seam by planted-pair presence — a scenario that
+plants a ¬A pair (ct-*, ``contradiction_pairs`` non-empty) is the surfaced-rate
+population; a contradiction-family scenario with NO planted pair (bct-* benign
+FP surface twins) is an FP-CONTROL episode, routed to a distinct record that
+is scored on the log-derived control verdict (``false_positive``) only. A
+control episode is NEVER scored on the surfaced rule (no planted ¬A turn →
+k=0 → an FP at a later turn would read as a surfaced-rate true negative, and
+bct 0.0s in the surfaced-rate pool cap a flawless run at 15/21 < the 0.90
+[cal] row). Control-verdict emission is executor-owned (Task 9): an absent
+verdict is the no-data sentinel (``insufficient_n``), never a fabricated pass.
 """
 from __future__ import annotations
 
@@ -94,6 +106,38 @@ def probe_domain(family: str) -> frozenset[str]:
     """Scenario-family domain for a probe family (exact-label fallback for
     unknown probes — an unregistered probe only scores its own label)."""
     return _FAMILY_DOMAINS.get(family, frozenset({family}))
+
+
+def episode_population(scenario) -> str:
+    """Population a contradiction-domain episode belongs to (R1 seam):
+    ``"planted"`` when the scenario plants a ¬A pair (contradiction_pairs
+    non-empty — the surfaced-rate population); ``"control"`` for a
+    contradiction-family scenario with NO planted pair (a bct-* benign FP
+    surface twin / hermetic benign surrogate — never surfaced-scored).
+    Non-contradiction scenarios are ``"planted"`` (the only cell their
+    family measures). Preferring the planted-pairs discriminator means the
+    run-path Scenario surface needs no control_set field."""
+    if getattr(scenario, "contradiction_pairs", ()):
+        return "planted"
+    if getattr(scenario, "task_type", "") == "contradiction":
+        return "control"
+    return "planted"
+
+
+def _control_verdict(log: list[dict]) -> bool | None:
+    """The episode's FP-control verdict from the schema-v1.1 log: the
+    derived ``false_positive`` entry (control_verdict subtype) carries an
+    explicit payload value — True (the arm wrongly flagged the benign
+    surface) or False (it correctly stayed quiet). None when no verdict
+    entry with an explicit value exists: verdict emission is executor-owned
+    (Task 9) — an absent verdict is the no-data sentinel, never a
+    fabricated 0.0 pass."""
+    for entry in log:
+        if entry.get("field") == "false_positive":
+            payload = entry.get("payload") or {}
+            if "value" in payload:
+                return bool(payload["value"])
+    return None
 
 
 @dataclass(frozen=True)
@@ -203,8 +247,26 @@ class ProbeScorer:
         self._thresholds = thresholds
         self.family = getattr(probe, "probe_id", None) or type(probe).__name__
         self.is_probe = True
+        #: FP-control population capability (R1's bct benign twins): a probe
+        #: that declares support scores control episodes on its control
+        #: verdict under a DISTINCT metric — never on the primary surfaced
+        #: rule (control episodes have no planted ¬A turn to surface).
+        self.supports_control = bool(getattr(
+            probe, "supports_control_population", False))
+        self._control_metric = getattr(probe, "control_cal_metric", None)
         self._records: list[ProbeRecord] = []
         self._last: ProbeRecord | None = None
+
+    # -- population helpers ------------------------------------------------
+    def _metric_for(self, scenario) -> str:
+        """The family-report metric an episode's record belongs to: control
+        episodes (benign no-planted-pair contradiction surfaces) record
+        under the probe's FP-control metric when it supports the control
+        population; everything else records the primary cal metric."""
+        if (self.supports_control and self._control_metric
+                and episode_population(scenario) == "control"):
+            return self._control_metric
+        return self.probe.cal_metric
 
     # -- scorer-seam API ---------------------------------------------------
     def expected_coverage(self, scenario, *, run_mode: str = "real") -> set[str]:
@@ -223,8 +285,10 @@ class ProbeScorer:
             # derive or measure — the sentinel record feeds the
             # all-insufficient_n family cell (mock never false-flags a gap).
             # Excluded (terminal-failure) episodes likewise never produce
-            # measured cells from a truncated trace.
-            self._record(None, episode)
+            # measured cells from a truncated trace. The sentinel's metric
+            # is population-aware so a controls-only run surfaces the
+            # FP-control cell, never a phantom surfaced-rate cell.
+            self._record(None, episode, metric=self._metric_for(scenario))
             return ScorerResult(metrics=())
         # Eligibility gate: a probe scores ONLY its own family's episodes.
         # Foreign-family episodes are skipped entirely (no record, no
@@ -239,7 +303,7 @@ class ProbeScorer:
         uncovered = validate_emitter_coverage(
             episode.event_log, expected=phase1_expected(expected))
         if uncovered:
-            self._record(None, episode)
+            self._record(None, episode, metric=self._metric_for(scenario))
             return ScorerResult(metrics=())
         # Derive emission: append expected derived/gold entries the derive
         # pass owns (mutates the episode log -> the artifact assembler's
@@ -254,7 +318,32 @@ class ProbeScorer:
         uncovered = validate_emitter_coverage(episode.event_log,
                                               expected=expected)
         if uncovered:
-            self._record(None, episode)
+            self._record(None, episode, metric=self._metric_for(scenario))
+            return ScorerResult(metrics=())
+        # Population split (R1 review P2): a CONTROL episode (benign bct —
+        # no planted pair) is scored on the log-derived FP verdict ONLY,
+        # never on the surfaced rule (k=0 would score an FP at a later turn
+        # as a surfaced-rate true negative and bct 0.0s would dilute the
+        # planted surfaced-rate denominator).
+        if episode_population(scenario) == "control":
+            if not (self.supports_control and self._control_metric
+                    and hasattr(self.probe, "score_control")):
+                # In-domain control episode for a probe without the control
+                # capability: nothing honest to measure — sentinel on the
+                # primary metric (unreachable for today's R1 domain).
+                self._record(None, episode)
+                return ScorerResult(metrics=())
+            verdict = _control_verdict(episode.event_log)
+            if verdict is None:
+                # Control-verdict emission is executor-owned (Task 9): an
+                # absent verdict is the no-data sentinel (insufficient_n),
+                # never a fabricated 0.0 / surfaced-rate value.
+                self._record(None, episode, metric=self._control_metric)
+                return ScorerResult(metrics=())
+            trace = trace_from_log(episode, scenario, episode.event_log)
+            result = self.probe.score_control(trace, threshold=0.0)
+            self._record(result.value, episode, measured=True,
+                         metric=self._control_metric)
             return ScorerResult(metrics=())
         trace = trace_from_log(episode, scenario, episode.event_log)
         gold = scenario.golds()[0] if scenario.golds() else None
@@ -270,9 +359,9 @@ class ProbeScorer:
                                      default=0.0)
 
     def _record(self, value: float | None, episode,
-                measured: bool = False) -> None:
+                measured: bool = False, metric: str | None = None) -> None:
         rec = ProbeRecord(family=self.family, arm=episode.arm,
-                          metric=self.probe.cal_metric, value=value,
+                          metric=metric or self.probe.cal_metric, value=value,
                           measured=measured, valid=episode.valid)
         self._records.append(rec)
         self._last = rec
@@ -282,8 +371,13 @@ class ProbeScorer:
 
     def family_report(self) -> dict | None:
         """Per-family JSON payload (pinned Task-5 schema: family, n, values:
-        {metric: [v...]}, cells: {metric: measured|insufficient_n}).
-        None when no episode was scored (the family was never attempted)."""
+        {metric: [v...]}, cells: {metric: measured|insufficient_n}). R1 may
+        carry TWO cells (population split, PR #2341 review P2): the primary
+        cal metric aggregates PLANTED episodes only; the FP-control metric
+        (false-positive-rate) aggregates benign bct episodes that carried a
+        control verdict (Task-9 executor-owned — absent verdicts keep the
+        cell at insufficient_n). None when no episode was scored (the
+        family was never attempted)."""
         if not self._records:
             return None
         arms = {r.arm for r in self._records}
@@ -293,16 +387,21 @@ class ProbeScorer:
                 f"this slice (records span {sorted(arms)}) — multi-arm probe "
                 f"runs land with the Task 9 executor")
         arm = next(iter(arms))
-        metric = self._records[0].metric
-        measured = [r.value for r in self._records
-                    if r.measured and r.valid]
+        # Per-metric grouping (record order) — a measured bct verdict never
+        # pollutes the planted surfaced-rate cell and vice versa.
+        metrics = list(dict.fromkeys(r.metric for r in self._records))
+        values: dict[str, list[float]] = {
+            m: [float(r.value) for r in self._records
+                if r.metric == m and r.measured and r.valid]
+            for m in metrics}
+        cells = {m: ("measured" if values[m] else "insufficient_n")
+                 for m in metrics}
         return {
             "family": self.family,
             "arm": arm,
-            "n": len(measured),
-            "values": {metric: [float(v) for v in measured]},
-            "cells": {metric: ("measured" if measured
-                               else "insufficient_n")},
+            "n": sum(len(v) for v in values.values()),
+            "values": values,
+            "cells": cells,
         }
 
 

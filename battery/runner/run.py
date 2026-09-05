@@ -8,6 +8,15 @@ batcher when --batch-setup) → episode → score → artifact → summary.
 
 Exit code computed AFTER all episode artifacts + summary are written (exit
 4 never precedes the summary write — contrast exit 5, no artifacts).
+
+run_mode honesty (PR #2341 review round 2, P2): the mock|real discriminator
+derives from the EXECUTOR actually used, never from arms.yaml adapter
+presence. Until the real emitting executor is wired (Task 9) the stock
+episode-log seam is a no-op, so hermetic/fixed-model runs are labeled mock;
+real mode requires an explicit ``config.executor == "real"`` request AND an
+active real executor seam (the pre-flight gate refuses the request without
+one). The resolved run-level mode is recorded in summary.json (run.run_mode)
+so the CLI report never re-infers it from artifact presence.
 """
 from __future__ import annotations
 
@@ -46,6 +55,7 @@ from battery.runner.artifacts import (
     write_run_artifact,
     write_summary,
 )
+from battery.runner.emit import MANDATORY
 from battery.runner.episode import EpisodeResult, EpisodeTracker, TurnRecord  # noqa: F401
 from battery.runner.scorers import (
     HARNESS_METRIC_IDS,
@@ -73,7 +83,7 @@ class RunConfig:
                  seed: int = 0, tier: Tier | None = None, arms: list[str] | None = None,
                  mock: bool = False, batch_setup: bool = False,  # noqa: F811
                  scorer_specs: list[str] | None = None, max_episodes: int | None = None,
-                 db_path: str | None = None):
+                 db_path: str | None = None, executor: str = "mock"):
         self.config_dir = Path(config_dir) if config_dir else DEFAULT_CONFIG_DIR
         self.out_dir = Path(out_dir) if out_dir else DEFAULT_OUT_DIR
         self.seed = seed
@@ -82,9 +92,32 @@ class RunConfig:
         self.batch_setup = batch_setup
         self.max_episodes = max_episodes
         self.db_path = db_path
+        #: Executor-mode flag (mock|real, PR #2341 review round 2, P2).
+        #: mock (default) = the seeded mock trajectory + no-op emission seam
+        #: (hermetic/fixed-model runs are labeled mock). real = an explicit
+        #: real-executor request — run_battery refuses it unless the real
+        #: emission seam is active (the real emitting executor is Task 9).
+        self.executor = executor
         # --mock sets arms=[mock]; --arms takes precedence when both given.
         self.arms = list(arms) if arms else (["mock"] if mock else ["mock"])  # noqa: RUF034
         self.scorer_specs = scorer_specs or ["harness"]
+
+
+def arm_run_mode(config: RunConfig, arm) -> str:
+    """mock|real discriminator (PR #2341 review round 2, P2): the mode
+    derives from the EXECUTOR actually used, never from arms.yaml adapter
+    presence alone. mock when the adapter is the MockArm (model_id
+    mock-agent) OR the real executor seam is not active — until Task 9 the
+    seeded mock trajectory + no-op emission seam are the ONLY executor, so
+    hermetic/fixed-model runs (model_id="fixed" adapters) are labeled mock;
+    real only when config.executor explicitly requested real mode (the
+    pre-flight gate in run_battery refuses that request without an active
+    real emission seam)."""
+    if getattr(arm, "model_id", "") == "mock-agent":
+        return "mock"
+    if config.executor != "real":
+        return "mock"
+    return "real"
 
 
 def _resolve_arm(arm_id: str, arm_config: ArmConfig, *, mock: bool) -> ArmAdapter:
@@ -199,6 +232,28 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         raise ConfigError(
             f"probe-scorer runs are single-arm in phase 1 (multi-arm probe "
             f"runs land with the Task 9 executor); got arms={list(config.arms)}")
+
+    # ── real-executor pre-flight (PR #2341 review round 2, P2) ───────────
+    #    run_mode derives from the EXECUTOR actually used, never from
+    #    arms.yaml presence: until the real emitting executor is wired
+    #    (Task 9), the stock episode-log seam is a no-op — a real label
+    #    over a mock executor + empty event log would pass the phase-2
+    #    emitter gate by construction. Requesting real mode without an
+    #    active real emission seam fails closed BEFORE the attempt dir (no
+    #    orphaned artifacts). Hermetic tests activate the seam by stubbing
+    #    run._episode_log; the mock lane (the default) never needs it.
+    if config.executor not in ("mock", "real"):
+        raise ConfigError(f"unknown executor mode {config.executor!r} "
+                          "(mock|real)")
+    if (config.executor == "real" and not config.mock
+            and any(a != "mock" for a in config.arms)
+            and _episode_log is _DEFAULT_EPISODE_LOG):
+        raise ConfigError(
+            "real executor requested but no real emitting executor seam is "
+            "active: the stock episode-log seam is a no-op (the real "
+            "emitting executor is Task-9 owned). Real mode without an "
+            "active real executor fails closed — run the mock lane "
+            "(default) or wire the executor seam.")
     provenance = {
         "git_sha": _git_sha(),
         "config_files": [p.name for p in (config.config_dir).glob("*.yaml")],
@@ -222,12 +277,15 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         if arm_config is None:
             raise ConfigError(f"unknown arm {arm_id!r} (not in arms.yaml)")
         arm = _resolve_arm(arm_id, arm_config, mock=config.mock or arm_id == "mock")
-        # run_mode mock|real discriminator: the MockArm adapter (model_id
-        # mock-agent) is mock under ANY arm slot — mock is never scored as
-        # real and real is never conflated with mock (artifact model
-        # provider == "mock-agent" => run_mode mock).
-        run_mode = ("mock" if getattr(arm, "model_id", "") == "mock-agent"
-                    else "real")
+        # run_mode mock|real discriminator (PR #2341 review P2 honesty): the
+        # mode derives from the EXECUTOR actually used — mock when the
+        # MockArm adapter (model_id mock-agent) serves the slot OR the real
+        # executor seam is not active (until Task 9 the seeded mock
+        # trajectory + no-op emission seam are the only executor, so
+        # hermetic/fixed-model runs are labeled mock); real only when
+        # config.executor explicitly requested real mode (the pre-flight
+        # gate refused that request without an active seam).
+        run_mode = arm_run_mode(config, arm)
         model = {"provider": "mock-agent" if run_mode == "mock" else "real",
                  "model_id": arm.model_id,
                  "temperature": float(getattr(arm, "temperature", 0.0))}
@@ -235,12 +293,14 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         try:
             arm.setup_scenarios(scenarios)
         except ArmUnavailable:
-            arms_out.append(_arm_summary_block(arm_id, arm_present=False))
+            arms_out.append(_arm_summary_block(
+                arm_id, arm_present=False, run_mode=run_mode))
             any_arm_failed = True
             continue
         except Exception as e:  # noqa: BLE001, RUF100
-            arms_out.append(_arm_summary_block(arm_id, arm_present=False,
-                                               reason=f"init: {e!r}"))
+            arms_out.append(_arm_summary_block(
+                arm_id, arm_present=False, run_mode=run_mode,
+                reason=f"init: {e!r}"))
             any_arm_failed = True
             continue
 
@@ -266,6 +326,14 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             # scorer seam (default HarnessScorer -> empty expected => gap
             # empty, mock/real neutral).
             expected = _expected_coverage(scorer, scenario, run_mode)
+            if run_mode == "real":
+                # Emitter gate NON-VACUOUS for real episodes regardless of
+                # scorer (PR #2341 review P2): in real mode the MANDATORY
+                # schema-v1.1 envelope/state set is ALWAYS expected — even
+                # for the HarnessScorer — so a real-labeled artifact with an
+                # empty event log records a non-empty emitter_gap
+                # (incomplete_emitter_gap), never clean coverage.
+                expected = set(expected) | set(MANDATORY)
             result = scorer.score(episode, scenario)
             metric_values = {mv.metric_id: mv.value for mv in result.metrics}
             episode.metric_values = metric_values
@@ -320,7 +388,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
 
         agg = aggregate(arm_episodes, HARNESS_METRIC_IDS)
         arms_out.append(_arm_summary_block(
-            arm_id, arm_present=True,
+            arm_id, arm_present=True, run_mode=run_mode,
             scenarios=len(scenarios), valid_episodes=agg.valid_episodes,
             excluded=agg.excluded_count, excluded_ids=list(agg.excluded_episode_ids),
             excluded_reason=agg.excluded_reason, artifacts=arm_artifacts))
@@ -337,10 +405,16 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         write_family_files(attempt_dir, family_payloads)
     write_recall_file(attempt_dir, {"episodes": recall_rows})
 
-    # summary.json written LAST (the completion marker).
+    # summary.json written LAST (the completion marker). The run-level
+    # run_mode is recorded here (mock iff every arm resolved mock) so the
+    # CLI report prefers the summary's resolved mode over re-inferring it
+    # from artifact presence (a summary-only all-arm-fail real run has ZERO
+    # artifacts — artifact inference would mislabel it mock).
+    run_level_mode = ("real" if any(a.get("run_mode") == "real"
+                                    for a in arms_out) else "mock")
     summary = build_summary(
         arms=arms_out, exit_code=int(exit_code), run_ids=all_run_ids,
-        artifacts=all_artifacts, seed=config.seed,
+        artifacts=all_artifacts, seed=config.seed, run_mode=run_level_mode,
         timestamps={"written_utc": datetime.now(timezone.utc).isoformat()})  # noqa: UP017
     validate_summary_keys(summary)
     write_summary(attempt_dir, summary)
@@ -406,6 +480,14 @@ def _episode_log(scenario, *, episode_seed: int, arm_id: str,
     never claimed real); the real executor (Task 9) emits here; hermetic
     tests stub this seam to drive the two-phase emitter gate."""
     return []
+
+
+#: Stock (no-op) emission-seam identity. The real emitting executor is
+#: Task-9 owned; run_battery's real-executor pre-flight refuses a real-mode
+#: request while the module still carries this stock seam (identity
+#: compare — hermetic tests stub run._episode_log to activate the seam and
+#: drive the two-phase emitter gate).
+_DEFAULT_EPISODE_LOG = _episode_log
 
 
 def _verify_corpus_freshness(config_dir: Path) -> None:
@@ -516,10 +598,12 @@ def _arm_summary_block(arm_id: str, *, arm_present: bool, scenarios: int = 0,
                        excluded_ids: list[str] | None = None,
                        excluded_reason: str = "none",
                        artifacts: list[str] | None = None,
+                       run_mode: str = "mock",
                        reason: str | None = None) -> dict[str, Any]:
     return {
         "arm_id": arm_id,
         "arm_present": arm_present,
+        "run_mode": run_mode,
         "scenarios": scenarios,
         "valid_episodes": valid_episodes,
         "excluded": {"count": excluded, "episode_ids": excluded_ids or [],
