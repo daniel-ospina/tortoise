@@ -175,7 +175,6 @@ def test_tilde_unresolvable_user_rejected_as_relative():
 def test_memory_branch_forwards_original_args():
     """#2204 review (round 2): ':memory:' must bypass the expansion/makedirs
     branch entirely and forward the ORIGINAL args (no dir creation)."""
-    import os  # noqa: I001
     from tortoise import FalkorDB
     db = FalkorDB(":memory:")
     db.close()
