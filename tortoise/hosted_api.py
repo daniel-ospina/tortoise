@@ -67,6 +67,9 @@ from tortoise.quota import (
 from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     TortoiseSDK,
+    _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
+    _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
+    _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
@@ -152,6 +155,43 @@ def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
     return proj._probe_ok()
 
 
+def _resolve_embedded_db_path() -> str:
+    """Resolve the server-process embedded DB path (env → /data default → tempdir).
+
+    Single source of the inline policy `_make_sdk`/`_registry_anchor` used to
+    duplicate (hosted #2251): TORTOISE_DB_PATH when set to a path whose
+    dirname exists or can be created (returned verbatim — deliberately NOT
+    abs-ified/expanded, unlike config.resolve_db_path), else /data/tortoise.db
+    (the fly.io volume default), with tempfile.gettempdir()/tortoise.db as
+    the fallback whenever makedirs(dirname(candidate)) raises OSError — the
+    /data default when the volume is unwritable (test env / bare daemon run /
+    dirname-is-a-file), OR the env value when its dirname is empty
+    (empty-string env or a bare filename like "tortoise.db": dirname("") /
+    dirname("x.db") is "" → makedirs("") raises FileNotFoundError, an OSError)
+    or otherwise uncreatable.
+
+    Callers MUST dispatch on TORTOISE_DB_URI *before* calling (URI mode never
+    resolves an embedded path). Mirror of selfhost_api._resolve_embedded_db_path
+    (same-name convention; the daemon modules never cross-import — future
+    consolidation target).
+
+    ⛔ Anti-bare-construction warning (#2251): a bare ``TortoiseSDK()`` (no
+    db_path) resolves config.resolve_db_path() → ~/.tortoise/tortoise.db (the
+    CLI/dev default) when TORTOISE_DB_PATH is unset — a DIFFERENT file than
+    this server policy. Hosted request/sweep paths must construct via
+    _make_sdk/_registry_anchor, never bare.
+    """
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        # /data volume not writable (test env, or volume not mounted yet) —
+        # fall back to a temp file so embedded provisioning still works.
+        import tempfile
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    return db_path
+
+
 def _make_sdk(*, namespace: str | None = None,
               graph_name: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
@@ -170,14 +210,12 @@ def _make_sdk(*, namespace: str | None = None,
     key = graph_name if graph_name is not None else (namespace or "")
     if os.environ.get("TORTOISE_DB_URI"):
         return TortoiseSDK(namespace=namespace, graph_name=graph_name)
-    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
-    try:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    except OSError:
-        # /data volume not writable (test env, or volume not mounted yet) —
-        # fall back to a temp file so provisioning still works.
-        import tempfile
-        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    # The anchor AND the per-request SDK must agree on this path or the anchor
+    # pins a stray server while requests close-on-GC the real one (the #1475
+    # regression silently persists). _resolve_embedded_db_path is the single
+    # policy owner (#2251: bare TortoiseSDK() constructions resolve a DIFFERENT
+    # ~/.tortoise path — never bare-construct on hosted paths).
+    db_path = _resolve_embedded_db_path()
     # Fast path (lock-free steady state): reuse a healthy anchor as-is — the
     # per-request fresh SDK below attaches to its daemon (the #493/#1607
     # designed shape). The probe runs outside the lock exactly as it always
@@ -237,12 +275,7 @@ def _registry_anchor() -> TortoiseSDK:
     cached handle."""
     if os.environ.get("TORTOISE_DB_URI"):
         return TortoiseSDK(namespace="registry")
-    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
-    try:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    except OSError:
-        import tempfile
-        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    db_path = _resolve_embedded_db_path()
     anchor = _FALLBACK_KEEPALIVE.get("registry")
     if anchor is None or not _anchor_usable(anchor, db_path):
         # Miss or stale — serialize the evict+create+insert (#2172, same
@@ -291,10 +324,12 @@ mcp_http_app = create_http_app(
 def _iter_registered_teams() -> list[dict]:
     """List registered teams from the control plane (best-effort).
 
-    Used by the event-retention sweep (#432 Task 7) and boot reconcile.
+    Used by the event-retention sweep (#432 Task 7) — the boot pass and the
+    hourly interval in _lifespan (this is its only production caller).
     Supabase mode (post-#669 flip): enumerates from Supabase teams via the
     seam — the registry is DELETED and querying it would auto-recreate the
-    empty graph. Registry mode: the Team nodes, as before.
+    empty graph. Registry mode: the Team nodes from the
+    registry_control_plane graph via _make_sdk(namespace="registry").
     Returns [] on any failure — the sweep is best-effort.
     """
     try:
@@ -308,14 +343,27 @@ def _iter_registered_teams() -> list[dict]:
                 filters=[("deleted_at", "is", None)],
             )
             return [{"team_id": r["id"], "name": r.get("name")} for r in rows]
-        from tortoise.sdk import TortoiseSDK
 
-        sdk = TortoiseSDK()
+        # #2251 (was #2179 follow-up): the old bare TortoiseSDK() read the
+        # ns-less control_plane graph on resolve_db_path()'s ~/.tortoise DB
+        # while every registry writer targets registry_control_plane on the
+        # anchored /data-or-tempdir store — the registry-mode sweep was
+        # always-empty (mode-independent) AND path-divergent (embedded).
+        # _make_sdk(namespace="registry") fixes BOTH halves via the seam
+        # writers/_registry_sdk share: it derives registry_control_plane and
+        # resolves the anchored path. The fresh handle per call is fine for a
+        # boot+hourly best-effort sweep; the "registry" keepalive anchor mints
+        # lazily on the first embedded call and holds the daemon between
+        # sweeps. Supabase mode returns above (never construct the registry —
+        # #669). If a to_thread/threadpool shape is ever introduced here,
+        # route through _registry_anchor() first.
+        sdk = _make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
             "MATCH (t:Team) WHERE t.deleted_at IS NULL RETURN t.id, t.name"
         ).result_set
-        # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
-        # the default/shared graph.
+        # P2 (Qwen): skip rows with falsy team_id — a falsy id would otherwise
+        # produce an invalid namespace downstream (never sweep the
+        # default/shared graph).
         return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
                 for r in rows if r and r[0]]
     except Exception:
@@ -465,8 +513,31 @@ async def _lifespan(app):
                     from tortoise.event_store import purge_expired, purge_overflow
                     days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
                     cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+                    # Probe-before-purge is registry-mode only (#2251 review
+                    # P2): a purge query against an ABSENT team_{tid} graph
+                    # (orphan registry row from a partial provision) would
+                    # materialize an empty one. Skip the probe in Supabase
+                    # mode — the registry namespace must NEVER be
+                    # constructed there (#669; the flip-gate pins the
+                    # webhook path zero-touch), and that sweep predates
+                    # #2251 so it keeps its pre-existing unconditional
+                    # per-team purge. Registry mode: enumerate the
+                    # server-wide existing graphs ONCE; None → probe failed
+                    # → skip this cycle (best-effort — the per-team purges
+                    # below hit the same graph store, so they would fail
+                    # anyway; the per-team SDK lazy hook still covers
+                    # purges).
+                    from tortoise.supabase_control import is_supabase_enabled
+                    existing = None  # None = no gate (Supabase mode)
+                    if not is_supabase_enabled():
+                        existing = _registry_existing_graphs()
+                        if existing is None:
+                            _logger.warning("event retention sweep skipped: registry graph probe failed")
+                            return
                     # Sweep every registered team's graph (registry Team nodes).
                     for team in _iter_registered_teams():
+                        if existing is not None and f"team_{team['team_id']}" not in existing:
+                            continue
                         try:
                             sdk = _make_sdk(namespace=team["team_id"])
                             proj = sdk._get_proj()
@@ -477,14 +548,14 @@ async def _lifespan(app):
                 except Exception as exc:
                     _logger.warning("event retention sweep failed: %s", exc)
 
-            _sweep_events()  # boot sweep
+            await asyncio.to_thread(_sweep_events)  # boot sweep (#310, off the loop — same shape as the #302 purge below)
             await asyncio.to_thread(_purge_deleted_teams)  # boot purge (#302)
             interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
 
             async def _event_retention_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
-                    _sweep_events()
+                    await asyncio.to_thread(_sweep_events)
                     # #302: hard-delete past grace (sync DB work off the loop)
                     await asyncio.to_thread(_purge_deleted_teams)
 
@@ -5774,6 +5845,36 @@ class SessionRequest(BaseModel):
         return v
 
 
+# ── POST /v1/context request model (#2103 — phase-1 delivery contract) ─────
+# Contract fields mirror §3.2.1: window (1..1000 turns, ≤ 15 KB), session_id?
+# prior_context?, min_confidence?=0.7, max_pointers?=3 (cap 5), why?=true.
+# Schema-level bounds (role/content type, pointer/confidence ranges) 422 at
+# the model boundary; the 15 KB / 1000-turn window caps + cross-field rules are
+# enforced by tortoise.volunteer.validate_request in the handler (the same
+# function the SDK calls first — SDK and HTTP agree on the same boundaries).
+
+
+class VolunteerTurnRequest(BaseModel):
+    role: str = Field(...)
+    content: str = Field(..., max_length=20000)
+
+    @field_validator("role")
+    @classmethod
+    def _valid_role(cls, v: str) -> str:
+        if v not in ("user", "assistant", "system"):
+            raise ValueError("role must be user|assistant|system")
+        return v
+
+
+class VolunteerContextRequest(BaseModel):
+    window: list[VolunteerTurnRequest] = Field(...)
+    session_id: str | None = Field(None, max_length=256)
+    prior_context: str | None = Field(None, max_length=20000)
+    min_confidence: float = Field(0.7, ge=0.0, le=1.0)
+    max_pointers: int = Field(3, ge=1, le=5)
+    why: bool = True
+
+
 # ── Session extraction (LLM-default — issue #822) ──────────────────────────
 
 def _llm_provider_keys() -> tuple[str, ...]:
@@ -6226,11 +6327,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # (the Session-merge conditional can't apply: the stamp is
                 # one shared SET for all points).
                 source_harness = body.harness or "unknown"
+                # W5 Phase D (#2104): the stamp gates over the MINTED ids —
+                # a dedup-folded entry (content_hash_hit/rephrase_linked)
+                # resolved to an existing node whose provenance belongs to
+                # its original ingest; re-stamping would clobber the first
+                # session's single-eventId provenance (mirror byte-parity).
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "SET n.eventId=$eid, n.source_session=$sid, "
                     "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": [p["id"] for p in extracted],
+                    params={"ids": _capture_minted_ids(extracted),
                             "eid": event_id, "sid": session_id,
                             "harness": source_harness, "ing": now},
                 )
@@ -6514,23 +6620,51 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         effective_mode = "replayed"
     else:
         effective_mode = "llm"
+    # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
+    # capture write path (after promotion + provenance stamp + operators are
+    # wired, and BEFORE the verb enrichment read below) the extracted claims
+    # are promoted draft→live and the BOUNDED ingest EP pass calibrates them
+    # (local = write-triggered refresh over the dirty roots — never a
+    # full-graph pass). Shared with the SDK mirror via
+    # sdk._apply_capture_ingest_ep (byte-parity). A replay (session_existed)
+    # extracts nothing — the helper no-ops on an empty claim set. Fail-open:
+    # a promotion/EP hiccup never 500s a committed capture — additive
+    # warning only; the enrichment read below then reports the TRUE post-EP
+    # graph state (never fabricated ep_updated — anti-gaming).  W5 Phase D
+    # (#2104): the pass gates over ``sdk._capture_ep_target_ids``
+    # (byte-parity with the mirror) — minted ids calibrate; folded entries
+    # resolved to nodes already calibrated at their original ingest are
+    # never re-calibrated (no EP churn on re-ingest); a folded canonical
+    # still draft/uncalibrated from a fail-open first ingest gets its
+    # FIRST calibration here.
+    ep_ids = _capture_ep_target_ids(extracted, proj)
+    if ep_ids:
+        _apply_capture_ingest_ep(
+            sdk, ep_ids,
+            warn=extraction_warnings.append,
+        )
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
     # verb (memory_write_v1) — protocol_version REQUIRED, provenance
     # REQUIRED, per-point status/ep_updated/dedup, additive over the legacy
     # keys (D8).  ``resp["points"]`` (the raw extracted list, load-bearing
     # for legacy consumers) is ENRICHED in place — each point gains
-    # status/ep_updated/dedup keys read from the graph AFTER the write, so
-    # the verb reports only what is true (anti-gaming): ep_updated = the
-    # point actually carries persisted EP alpha/beta (Phase C turns this on
-    # with the ingest EP pass); dedup = "new" only for points this request
-    # minted (REPHRASE/content-hash classification lands in Phase D).
+    # status/ep_updated/dedup keys read from the graph AFTER the write (and
+    # after the Phase C ingest EP pass), so the verb reports only what is
+    # true (anti-gaming): ep_updated = the point actually carries persisted
+    # EP alpha/beta (Phase C turns this on with the ingest EP pass); dedup
+    # = the seam's Phase D verdict preserved for graph-present ids — "new"
+    # for points this request minted, content_hash_hit / rephrase_linked
+    # for claims the seam actually resolved to an existing node (never
+    # fabricated).
     from tortoise.write_verb import (
         DEDUP_NEW,
         STATUS_OK,
         STATUS_PARTIAL,
         build_write_verb,
+        surfaced_marker,
     )
     skipped = 0
+    facts: dict = {}
     if extracted:
         try:
             # P1 (review round 1): the enrichment read runs AFTER the writes
@@ -6566,6 +6700,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 extraction_warnings.append(
                     f"point {pid} missing from graph post-write — "
                     "reported un-enriched in the write verb")
+                # W5 Phase D (#2104): an entry whose node is NOT in the
+                # graph makes NO dedup claim — pop the seam verdict so the
+                # un-enriched entry cannot ride a fabricated
+                # content_hash_hit/rephrase_linked (anti-gaming).
+                p.pop("dedup", None)
                 continue
             kind, status, has_ep = facts[pid]
             # Graph truth wins over the extractor's claimed kind (P2-2).
@@ -6575,14 +6714,34 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             p.setdefault("point_id", p.get("id"))
             p["status"] = status
             p["ep_updated"] = has_ep
-            p["dedup"] = DEDUP_NEW
+            # W5 Phase D (#2104): dedup classification is graph-truthful —
+            # the seam's verdict (content_hash_hit / rephrase_linked) is
+            # kept ONLY for ids the graph actually holds (the canonical the
+            # claim resolved to exists); a seam-minted point (or an entry
+            # whose dedup state could not be determined) stays ``new``.
+            # Never fabricated: the enrichment never invents a hit for a
+            # point it did not see resolved.
+            p["dedup"] = p.get("dedup", DEDUP_NEW)
     verb_status = STATUS_OK
     if extraction_errors or skipped:
         # skipped: at least one extracted point could not be verified
         # post-write — the verb is partial, never an unqualified ok.
         verb_status = STATUS_PARTIAL
+    # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
+    # receipt — ``surfaced`` uses the §3.2.2 marker vocabulary (one entry
+    # per memory item THIS capture added; N = len = the disclosure count,
+    # the same "N = len(surfaced)" rule the volunteer/recall marker uses,
+    # #2103). Graph-truth only (anti-gaming): an entry appears ONLY for an
+    # id the post-write enrichment read verified in the graph (``facts``)
+    # AND whose seam verdict is ``new`` (a content_hash_hit/rephrase_linked
+    # fold added no item — the canonical pre-existed). A replay
+    # (session_existed → extraction skipped) or an enrichment-read failure
+    # yields []: nothing was added, never a fabricated count. UI rendering
+    # of the marker is #1976's — this is the engine data exposure only.
+    surfaced = surfaced_marker(extracted, verified_ids=set(facts))
     resp = {"session_id": session_id, "turns": len(body.conversation),
             "extracted": len(extracted), "points": extracted,
+            "surfaced": surfaced,
             "extraction_mode": effective_mode,
             "errors": extraction_errors, "warnings": extraction_warnings,
             # #2002 (W6): first_capture=true exactly once per org — the
@@ -7097,60 +7256,51 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         )
 
     # ── 6b. Supersessions — client-derived records (the deterministic channel
-    # for the Object status fold, #1350). Point-level records (E5 #1537 —
-    # ``pt_<sha>`` refs, dispatched by prefix) materialize the EXISTING
-    # canonical ``sdk.supersede()``: CORRECTS + outdated + edge transfer.
-    # Entity-level records keep the ObjectSuperseded fold unchanged. Resolve
-    # each superseded ref by id (fallback name) and emit an ObjectSuperseded
-    # event for the projection to fold into Object.status. Unresolved refs
-    # warn and are skipped (fail-open — mirrors the extractor's never-guess
-    # discipline); a supersession write must never fail the commit. ──
-    for sr in payload.supersessions:
-        ref = (sr.superseded or "").strip()
-        if ref.startswith("pt_"):   # point-level supersession → CORRECTS via supersede()
-            rows = proj.g.query(
-                "MATCH (p:Point) WHERE p.id = $ref RETURN p.id, p.status LIMIT 1",
-                params={"ref": ref}).result_set
-            if not rows:
-                _logger.warning("point supersession ref %r not found — "
-                                "skipped (fail-open)", ref)
-                continue
-            if (rows[0][1] or "") in ("superseded", "retracted", "archived"):
-                # already terminal — idempotent no-op (supersede_point would
-                # raise ValueError; a re-commit/overlap must not fail)
-                continue
-            try:
-                sdk.supersede(ref, sr.supersedes_by)   # EXISTING canonical unified tool
-            except Exception as e:
-                _logger.warning("point supersede %r → %r failed: %s",
-                                ref, sr.supersedes_by, e)
-            continue
-        rows = proj.g.query(
-            "MATCH (o:Object) WHERE o.id = $ref OR o.name = $ref "
-            "RETURN o.id, o.name LIMIT 1",
-            params={"ref": sr.superseded}).result_set
-        if not rows:
-            _logger.warning("supersession ref %r not found in the graph — "
-                            "skipped (fail-open)", sr.superseded)
-            continue
-        obj_id, obj_name = rows[0]
-        try:
-            sdk._emit_event(
-                "ObjectSuperseded",
-                {"id": obj_id, "name": obj_name,
-                 "supersedes_by": sr.supersedes_by,
-                 "evidence": sr.evidence or ""},
-                id=obj_id,
-            )
-            # #1350: apply the fold at live-write time (the event is the
-            # journal for rebuild replay; the projection-owned fold is what
-            # flips the status now — mirrors supersede_point's pattern).
-            sdk._get_proj()._fold_object_superseded({
-                "id": obj_id, "name": obj_name,
-                "supersedes_by": sr.supersedes_by})
-        except Exception as e:
-            _logger.warning("ObjectSuperseded emit failed for %r: %s",
-                            obj_name, e)
+    # for the Object status fold, #1350), applied via the SHARED
+    # apply_supersessions helper (#2164/#2193): pt_<sha> refs → the canonical
+    # supersede() CORRECTS (terminal-probed, idempotent); entity records →
+    # id-style ObjectSuperseded journal (full provenance incl. session_id) +
+    # count-verified fold. ONE consumer-side discipline with capture
+    # (_extract_session_v2) and eval ingest_v2 — §6b's inline consumer was the
+    # last divergent copy. Guards inherited: terminal keep-first (the fold
+    # never blind-overwrites), self-supersession skip, >1-name never-guess,
+    # visible-successor gate, legacy id-less canonical-id synthesis. Skips
+    # surface via _logger.warning (hosted attribution) — except the helper's
+    # documented SILENT class (no warn()): entity same-successor dedup
+    # (idempotent no-op) and terminal pt_ absorbs REGARDLESS of the claimed
+    # successor (no divergence probe — the #2164 P3 asymmetry; divergent
+    # pt_ re-claims are out-of-band-only, S3 point search excludes terminal
+    # priors, #1391). The summary log therefore INFOs zero-warn applies even
+    # when applied<total — a WARNING means a record actually warned. Per-
+    # record fail-open (warn-only — never fails the commit). Same-commit
+    # supersession chains must be emitted in fold order ([A→B, B→C]) — the
+    # visible-successor gate skips a fold whose successor this payload has
+    # already terminalized (order-sensitivity pinned in #2249). The step-6
+    # entity writes above have landed the payload's net-new successors.
+    # ──
+    from tortoise.commit_ops import apply_supersessions
+
+    warned = 0
+
+    def _supersession_warn(msg, *args, **kwargs):
+        # warn-counting delegation: the summary log must not WARNING on the
+        # helper's documented SILENT class (entity same-successor dedup and
+        # terminal pt_ absorbs never call warn()) — applied < total with
+        # zero warns is a silent no-op/absorb, not an operator signal;
+        # WARNING is reserved for records that actually warned (real skips:
+        # dangling/self/never-guess/keep-first conflicts, emit failures).
+        nonlocal warned
+        warned += 1
+        _logger.warning(msg, *args, **kwargs)
+
+    applied = apply_supersessions(
+        proj, sdk, payload.supersessions,
+        session_id=session_id, warn=_supersession_warn,
+    )
+    if payload.supersessions:
+        log = _logger.warning if warned else _logger.info
+        log("supersessions applied=%d total=%d (session=%s)",
+            applied, len(payload.supersessions), session_id)
 
     for pr in reconcile.points:
         pid = pr.point.id if pr.action != "supersede" else pr.supersede_id
@@ -13249,6 +13399,127 @@ async def session_context(team: dict = Depends(get_current_team_gated)):  # noqa
         raise HTTPException(status_code=500, detail="Context unavailable")  # noqa: B904
 
 
+@app.post("/v1/context")
+async def volunteer_context(
+    body: VolunteerContextRequest,
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
+):
+    """Phase-1 volunteering-memory delivery (issue #2103, S9 → E2E-9).
+
+    ONE code path with SDK ``TortoiseSDK.volunteer_context()`` — the shared
+    canonical pipeline (tortoise/volunteer.py); this wrapper adds only
+    auth/tenancy/metering/offload. NOT the existing GET /v1/context
+    (session-start digest, ``session_context()`` above — different method +
+    semantics; the route confusion is a named failure mode).
+
+    Contract (plan §3.2/§6.2/§6.8):
+      * Auth fail-CLOSED: 401 missing/invalid key (auth dependency); 403
+        revoked/cross-graph/scoped-key-without-read (get_current_team_gated +
+        _data_sdk tenancy resolution). Never serves cross-team context.
+      * 422 on out-of-contract windows/budgets (model boundary + the shared
+        validate_request — the SDK validates first with the same rules).
+      * Fail-open content: any retrieval/assembly error or SLO breach → 200
+        with the empty block + degraded_reason (timeout | assembly_error |
+        breaker_open) — the read path is zero-LLM and never 503s.
+      * 429 rate limit → client backoff (RateLimitMiddleware per-key bucket,
+        Retry-After) — retries safe by construction (deterministic read-only;
+        re-POST the same session_id adds 0 graph nodes).
+    """
+    import time as _time
+
+    from tortoise.volunteer import (
+        DEGRADED_ASSEMBLY,
+        DEGRADED_TIMEOUT,
+        SLO_MS,
+        VolunteerValidationError,
+        degraded_response,
+    )
+
+    _require_scope(team, "graphs:read", "volunteer_context")
+    # Request validation FIRST (before any SDK/graph work — 422 on
+    # out-of-contract windows; same rules the SDK applies before any call).
+    window = [t.model_dump() for t in body.window]
+    try:
+        from tortoise.volunteer import validate_request
+        validate_request(
+            window, session_id=body.session_id,
+            prior_context=body.prior_context,
+            min_confidence=body.min_confidence,
+            max_pointers=body.max_pointers, why=body.why,
+        )
+    except VolunteerValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+
+    # Metering: the per-key read rate limit is enforced by the shared
+    # RateLimitMiddleware (429 + Retry-After) — reads are not charged.
+    t0 = _time.monotonic()
+    sdk = _data_sdk(team)
+    # SLO breach semantics (contract §3.2.3 / epic E2E-9 latency spec): the
+    # HARD wall-clock p95 SLO lives in the dedicated perf lane; the blocking
+    # CI assertions are the mechanism ones. The completion-breach degrade
+    # (elapsed > SLO → degraded "timeout") is armed by
+    # TORTOISE_VOLUNTEER_ENFORCE_SLO=1 (perf lane / induced-timeout tests),
+    # so a slow CI machine can never randomly empty a healthy request; the
+    # HARD ceiling (8 × SLO) below degrades ANY pathological read (never 503,
+    # never a hung caller) with the same fail-open shape.
+    enforce_slo = os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO", "").strip() \
+        .lower() in ("1", "true", "yes", "on")
+    completed = False
+    try:
+        # #1676 offload: the canonical pipeline is CPU/DB-blocking (hybrid
+        # search + why-block assembly) — never on the event loop.
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                sdk.volunteer_context,
+                window,
+                body.session_id, body.prior_context,
+                body.min_confidence, body.max_pointers, body.why,
+            ),
+            timeout=SLO_MS * 8 / 1000.0,
+        )
+        completed = True
+    except TimeoutError:
+        # Hard ceiling breached → fail-open degraded timeout (never 503). The
+        # worker thread may still be running (wait_for cancels the await, not
+        # the thread) — leave the SDK open for it (read-only work; the per-
+        # request keepalive machinery reuses/evicts it), never close under it.
+        logging.getLogger("tortoise.api").warning(
+            "volunteer_context hard ceiling breached → degraded timeout")
+        return degraded_response(DEGRADED_TIMEOUT)
+    except VolunteerValidationError as e:
+        # SDK-side validation parity (same rules — should not fire after the
+        # handler check; kept for the SDK-first contract).
+        sdk.close()
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+    except Exception:
+        # Fail-open content: a retrieval/assembly server error is NEVER a 503
+        # on this read path — degrade to the empty block (never break the
+        # caller's turn; the caller logs quietly). The worker thread has
+        # finished (it raised) — close the SDK like the success path.
+        logging.getLogger("tortoise.api").exception(
+            "volunteer_context degraded (assembly_error)")
+        sdk.close()
+        return degraded_response(DEGRADED_ASSEMBLY)
+    finally:
+        if completed:
+            sdk.close()
+
+    elapsed_ms = (_time.monotonic() - t0) * 1000.0
+    if (result.get("degraded_reason") is None and enforce_slo
+            and elapsed_ms > SLO_MS):
+        logging.getLogger("tortoise.api").warning(
+            "volunteer_context SLO breach: %.0f ms > %d ms → degraded timeout",
+            elapsed_ms, SLO_MS)
+        return degraded_response(DEGRADED_TIMEOUT)
+    return result
+
+
 @app.get("/v1/issue-insight")
 async def issue_insight(title: str, body: str | None = None,
                         repo: str | None = None, limit: int = Query(2, ge=1, le=20),
@@ -13627,20 +13898,60 @@ _ACCEPT_AND_DROP = True  # W1 (#1997) landed — PATCH onboarding_complete is dr
 
 
 def _graph_has_team_namespace(team_id: str) -> bool:
-    """Existence check WITHOUT constructing the projection (constructing it
-    materializes an absent graph — a read-path write, banned by pin 4).
-    Uses the registry SDK's live connection to list graphs."""
+    """Existence check WITHOUT constructing the TEAM projection (constructing
+    team_{tid} would materialize an absent team graph — a read-path write,
+    banned by pin 4). Probes the server-wide graph list via the registry
+    seam's projection (list_graphs never mints team_{tid})."""
     graph_name = f"team_{team_id}"
     try:
-        from tortoise.sdk import TortoiseSDK
-        sdk = TortoiseSDK(namespace="registry")
-        graphs = sdk._get_proj().db.list_graphs() or []
-        sdk.close()
+        # #2251 (was #2179 follow-up): the old bare TortoiseSDK(namespace=
+        # "registry") resolved config.resolve_db_path() → ~/.tortoise/tortoise.db
+        # when TORTOISE_DB_PATH was unset while the anchored writers use
+        # /data-or-tempdir — the existence verdict probed the WRONG (likely
+        # empty) db. _make_sdk(namespace="registry") is byte-identical to the
+        # bare construction in URI mode (returns a fresh TortoiseSDK before
+        # any anchor logic — no keepalive, no _get_registry, so the deleted
+        # registry_control_plane is never auto-recreated in Supabase mode) and
+        # resolves the ANCHORED path in embedded mode (the db writers use).
+        # The fresh handle is closed explicitly below (its close only drops
+        # the connection — the keepalive anchor holds the daemon, #493/#1607).
+        # The construction sits INSIDE this try so a cross-process
+        # EmbeddedStoreBusyError keeps the never-raise fail-open contract.
+        sdk = _make_sdk(namespace="registry")
+        try:
+            graphs = sdk._get_proj().db.list_graphs() or []
+        finally:
+            sdk.close()
         return graph_name in graphs
     except Exception:
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
+
+
+def _registry_existing_graphs() -> set[str] | None:
+    """Server-wide existing graph names via the registry seam (best-effort).
+
+    list_graphs() is a read that never mints a graph (pin-4) and never
+    auto-recreates the deleted registry_control_plane in Supabase mode
+    (#669) — same safe shape _graph_has_team_namespace already uses on
+    the onboarding hot path. Used as a probe-before-purge gate by the
+    retention sweep (#2251 review P2): purging an ABSENT team_{tid} graph
+    (orphan registry row from a partial provision between the Team-node
+    create and the graph mint) would silently materialize an empty graph,
+    flipping the onboarding existence verdict for teams whose graph never
+    existed. None = probe failed → caller skips the sweep this cycle
+    (best-effort; the per-team SDK lazy hook still purges per-team graphs).
+    """
+    try:
+        sdk = _make_sdk(namespace="registry")
+        try:
+            graphs = sdk._get_proj().db.list_graphs() or []
+        finally:
+            sdk.close()
+        return set(graphs)
+    except Exception:
+        return None
 
 
 def _graph_available(team_id: str) -> bool:

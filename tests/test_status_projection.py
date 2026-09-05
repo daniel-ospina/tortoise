@@ -171,8 +171,9 @@ class TestProjectionFold:
         try:
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy")
-            # hosted_api §6b resolves the canonical id from the graph before
-            # emitting — mirror that here.
+            # Legacy §6b emit discipline (pre-#2193 — the shared helper now
+            # performs the same graph resolution): resolve the canonical id
+            # before emitting — mirror that here.
             rows = sdk._get_proj().g.query(
                 "MATCH (o:Object {name:$n}) RETURN o.id",
                 params={"n": "strategy-A"}).result_set
@@ -255,12 +256,13 @@ class TestProjectionFold:
             sdk.close()
 
     def test_rebuild_all_legacy_6b_id_only_shape_supersedes(self, tmp_path):
-        """#2164 legacy §6b id-only shape: hosted_api §6b currently passes the
-        payload dict POSITIONALLY to _emit_event (GraphEvent-store only) with
-        just id= as the JSONL kwarg — name/supersedes_by never reach the
-        journal, so a rebuild replay folds with supersededBy='' (the
-        documented interim until producers move to the C2 kwargs shape). The
-        status flip must still survive rebuild_all."""
+        """LEGACY-FORMAT replay compatibility (#2164/#2193): historical
+        id-only ObjectSuperseded lines produced pre-#2193 (hosted §6b passed
+        the payload dict POSITIONALLY to _emit_event — GraphEvent-store only
+        — with just id= as the JSONL kwarg; name/supersedes_by never reached
+        the journal) replay UNCHANGED: the fold flips status but restores
+        supersededBy=''. The hosted producer moved to the id-style kwargs
+        shape in #2193; old lines must keep replaying."""
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t2164b.db"),
@@ -274,8 +276,9 @@ class TestProjectionFold:
             oid = rows[0][0]
             sdk._emit_event("ObjectRegistered", id=oid, name="strategy-C",
                             objectKind="core:strategy")
-            # Verbatim §6b emission shape: positional payload (GraphEvent
-            # store) + id kwarg (JSONL). The JSONL line carries type+id only.
+            # Verbatim legacy §6b emission shape (pre-#2193): positional
+            # payload (GraphEvent store) + id kwarg (JSONL). The JSONL line
+            # carries type+id only.
             sdk._emit_event(
                 "ObjectSuperseded",
                 {"id": oid, "name": "strategy-C",

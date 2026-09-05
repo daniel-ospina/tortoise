@@ -13,13 +13,15 @@ ownedBy: epistemic-team
 | --- | --- |
 | Ask answer surface (`POST /v1/ask` / SDK `ask()` / MCP `tortoise_ask`, #1987) | `docs/product/answer-surface.md` |
 | Ask pre-ship gate runbook + #2069 routing/cost record (#1987/#2069) | `docs/runbook/1987-ask-abstention-check.md` |
-| Auth architecture — standard patterns vs Tortoise (#1498/#1506) | `docs/auth-architecture.md` |
+| Auth architecture — standard patterns vs Tortoise (#1498/#1506); key-permission model + #2082 boundary (§6, epic #2083) | `docs/auth-architecture.md` |
 | Backup/DR runbook | `docs/ops/registry-backup-dr.md` |
 | CI timing measurement artifact (#1477) | `docs/ci-timing.md` |
 | Post-flip verification runbook (#669) | `docs/ops/669-post-flip-verification.md` |
 | Ontology | `docs/ONTOLOGY.md` |
-| Registry graph schema | `docs/registry-graph-schema.md` |
+| Registry graph schema (incl. Graph entity + scoped APIKey + quota — epic #2083) | `docs/registry-graph-schema.md` |
+| Multi-graph migration runbook — no-forced-migration path + rollback drill (epic #2083, C8 #2117) | `docs/ops/multi-graph-migration-runbook.md` |
 | Retrieval latency benchmark runbook (#316) | `benchmarks/README.md` |
+| Memory-system comparison table + publication/errata discipline (epic #2080 W7) | `docs/benchmarks/comparison-systems.md` |
 | Embedder selection decision record (ADR-009, #1349) | `docs/adr/ADR-009-embedder-selection.md` |
 | Auth planes — sessions vs machine credentials (ADR-010, #2246) | `docs/adr/ADR-010-auth-planes-session-agent-key.md` |
 | #2246 dashboard session-only scope + verified plan (ADR-010) | `docs/scoping/2026-09-04-2246-dashboard-session-only.md` |

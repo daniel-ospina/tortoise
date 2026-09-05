@@ -17,10 +17,11 @@ import { dirname, join } from 'node:path'
 
 const mainJsx = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'main.jsx'), 'utf8')
 
-// The three #2230 key-management WRITE functions. Their bodies are sliced so
-// each site's URL + q construction are checked TOGETHER — a global count
-// cannot catch one site regressing while others stay pinned.
-const WRITE_FNS = ['toggleKeyEnabled', 'renameKey', 'revokeKey']
+// The key-management WRITE functions (API Keys tab: toggleKeyEnabled /
+// renameKey / revokeKey; Graphs panel: revokePanelKey). Their bodies are
+// sliced so each site's URL + q construction are checked TOGETHER — a
+// global count cannot catch one site regressing while others stay pinned.
+const WRITE_FNS = ['toggleKeyEnabled', 'renameKey', 'revokeKey', 'revokePanelKey']
 
 function writeFnBody(name) {
   const start = mainJsx.indexOf(`async function ${name}(`)

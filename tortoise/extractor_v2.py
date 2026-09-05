@@ -4189,21 +4189,34 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
     without this, a rate-limit/5xx would silently return None and the caller
-    would record a phantom empty chunk)."""
+    would record a phantom empty chunk).
+
+    #2185: the body runs inside a ``contextvars.copy_context()`` snapshot —
+    contextvars do NOT propagate to new threads in CPython (repo precedent
+    quota.py:739), and the eval harness attributes usage rows by a
+    question-key ContextVar set in the caller thread. The snapshot is taken
+    in THIS thread before ``Thread.start()`` so ``model.complete()`` (and any
+    usage sink it fires) sees the caller's context.
+    """
+    import contextvars
     import threading
     box: dict = {}
+    _ctx = contextvars.copy_context()
+
+    def _body():
+        kwargs = _cap_kwargs(model, max_tokens, stats)
+        box["resp"] = model.complete(system=system, user=user, **kwargs)
+        # F4 (#1780): capture the finish reason in the SAME thread as
+        # the call (happens-before via the join below). Reading
+        # ``model.last_finish_reason`` later from the caller thread is a
+        # cross-thread race under ``--workers > 1``: another thread's
+        # complete() can overwrite the shared attribute between the
+        # return and the read.
+        box["finish_reason"] = getattr(model, "last_finish_reason", None)
 
     def _run():
         try:
-            kwargs = _cap_kwargs(model, max_tokens, stats)
-            box["resp"] = model.complete(system=system, user=user, **kwargs)
-            # F4 (#1780): capture the finish reason in the SAME thread as
-            # the call (happens-before via the join below). Reading
-            # ``model.last_finish_reason`` later from the caller thread is a
-            # cross-thread race under ``--workers > 1``: another thread's
-            # complete() can overwrite the shared attribute between the
-            # return and the read.
-            box["finish_reason"] = getattr(model, "last_finish_reason", None)
+            _ctx.run(_body)
         except BaseException as e:  # noqa: BLE001, RUF100
             box["exc"] = e
 

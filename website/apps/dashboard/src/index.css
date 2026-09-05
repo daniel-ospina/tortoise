@@ -722,3 +722,32 @@ input::placeholder, textarea::placeholder {
 .settings-home .card { max-width: 560px; }
 .captured-sessions { margin-top: 6px; }
 .captured-session:last-child { border-bottom: none !important; }
+
+/* ── #2116 (C7): dashboard Graphs tab — meter, key panel, delete, reveal ── */
+.graph-del-confirm { color: var(--text-dim, #94a3b8); font-size: 12px; margin-left: 6px; }
+.graph-del-confirm .danger { color: var(--red, #f87171); border-color: var(--red, #f87171); }
+tr.graph-delete-arm td { background: rgba(248, 113, 113, 0.06); }
+.row-dim td { opacity: 0.55; }
+.graph-key-panel {
+  margin-top: 10px;
+  border: 1px solid var(--border, #1e293b);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--bg-soft, #0d1a2d);
+}
+.graph-key-panel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  margin-bottom: 8px;
+}
+.graph-key-panel table { margin-top: 6px; }
+.graph-key-panel .inline-form { margin: 6px 0; }
+.badge {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--border, #1e293b);
+  color: var(--text-dim, #94a3b8);
+  font-size: 11px;
+  vertical-align: 1px;
+}
