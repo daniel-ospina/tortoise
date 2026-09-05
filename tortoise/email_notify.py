@@ -307,6 +307,91 @@ def send_invite_email(team_name: str, invitee_email: str, role: str,
     task.add_done_callback(_pending_email_tasks.discard)
 
 
+# ── OTP proof-of-control email (W7 #2003, invite fusion) ────────────────────
+# The mismatch-override accept paths (fuse / accept-with-mismatch) require
+# proof-of-control of the INVITEE email: a 6-digit code is emailed to the
+# invite address and verified before either override executes. The code is
+# NEVER returned by the API — the mailbox is the only channel (the invite
+# email itself is the same posture). Best-effort + budget-guarded like the
+# invite email; monkeypatched wholesale in tests (see
+# tests/test_invite_fusion_http.py).
+
+
+def _otp_html(team_name: str, code: str) -> str:
+    tn = html.escape(team_name)
+    return f"""\
+<div style="background:#060b14;padding:32px 16px;font-family:Helvetica,Arial,sans-serif;">
+  <div style="max-width:480px;margin:0 auto;background:#0d1a2d;border:1px solid #1e293b;border-radius:12px;padding:28px;">
+    <h2 style="color:#e2e8f0;margin:0 0 8px;">Verify your email for {tn}</h2>
+    <p style="color:#94a3b8;font-size:14px;margin:0 0 20px;">Enter this code to confirm you control the invited email address. It expires in 10 minutes and can only be used once.</p>
+    <div style="background:#0d1a2d;border:1px solid #1e293b;border-radius:8px;padding:20px;text-align:center;font-size:28px;letter-spacing:8px;color:#06b6d4;font-weight:700;">{code}</div>
+    <p style="color:#64748b;font-size:12px;margin:24px 0 0;">If you weren't expecting this, you can ignore it.</p>
+  </div>
+</div>"""
+
+
+def _otp_text(team_name: str, code: str) -> str:
+    return (
+        f"Your verification code for {team_name} is: {code}\n\n"
+        "It expires in 10 minutes and can only be used once."
+    )
+
+
+async def _send_otp_attempt(invitee_email: str, team_name: str, code: str,
+                            on_sent) -> None:
+    """One attempt + one 0.5s retry on transient-only. Never raises."""
+    subject = f"Your {team_name} verification code"
+    for attempt in (0, 1):
+        try:
+            result = await _send_resend(
+                invitee_email, subject,
+                _otp_html(team_name, code),
+                _otp_text(team_name, code),
+            )
+            message_id = (result or {}).get("id")
+            try:
+                if callable(on_sent):
+                    on_sent(message_id)
+            except Exception:  # noqa: BLE001, RUF100
+                logger.warning("email notify: on_sent callback failed for OTP to %s", invitee_email)
+            logger.info("email notify: OTP email accepted by provider (%s, msg %s)",
+                        invitee_email, message_id)
+            return
+        except Exception as e:  # noqa: BLE001, RUF100
+            last_err = e
+            if attempt == 0 and _is_transient(e):
+                await asyncio.sleep(0.5)
+                continue
+            break
+    logger.warning("email notify: OTP email failed for %s (%s)",
+                   invitee_email, redact_safe(last_err))
+    _refund_send()  # #1138: provider rejected/failed the POST — free the slot
+
+
+def send_otp_email(team_name: str, invitee_email: str, code: str,
+                   on_sent=None) -> None:
+    """Schedule the OTP proof-of-control email best-effort (async). NEVER
+    raises. Mirrors send_invite_email's budget reserve/refund posture."""
+    api_key = _env("RESEND_API_KEY")
+    if _skip_channel("resend", api_key):
+        return
+
+    exceeded, reason = _budget_exceeded()
+    if exceeded:
+        logger.warning(
+            "email notify: OTP email for %s SKIPPED — send budget exhausted (%s)",
+            invitee_email, reason,
+        )
+        return
+    _reserve_send()
+
+    task = asyncio.create_task(
+        _send_otp_attempt(invitee_email, team_name, code, on_sent)
+    )
+    _pending_email_tasks.add(task)
+    task.add_done_callback(_pending_email_tasks.discard)
+
+
 async def drain_pending_sends(timeout: float = 2.0) -> None:
     """Await in-flight best-effort sends (shutdown). Never raises."""
     if not _pending_email_tasks:
