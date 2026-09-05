@@ -7,6 +7,12 @@
 # tool-surface). Values below are checked-in FLASH-CLASS PLACEHOLDERS —
 # sibling #2292 re-locks each arm's measured pin before any real-run parity;
 # until then the parity protocol leg stays placeholder + #1144-gated.
+#
+# expected_tokens_per_episode (#2284 Task 7): token-budget numbers annotated
+# measured_after_exposure — the 800 tok/ep guess stays until exposure part 1
+# (Task 8, TBD(EXPOSURE)) measures per-family tokens and sibling #2292
+# re-locks; values are PROVISIONAL until then (no mid-run budget machinery
+# reads them yet — Task 8 owns the accumulator).
 arms:
   - arm_id: mock
     adapter: battery.arms.mock
@@ -19,41 +25,41 @@ arms:
     adapter: battery.arms.a0_plain
     config: {}
     price_per_1k_usd: 0.5
-    expected_tokens_per_episode: 500
+    expected_tokens_per_episode: 500  # measured_after_exposure (800 tok/ep guess)
     model_pin: flash-class-placeholder
     temperature: 0.0
   - arm_id: a1
     adapter: battery.arms.a1_longctx
     config: {}
     price_per_1k_usd: 0.5
-    expected_tokens_per_episode: 600
+    expected_tokens_per_episode: 600  # measured_after_exposure (800 tok/ep guess)
     model_pin: flash-class-placeholder
     temperature: 0.0
   - arm_id: a2
     adapter: battery.arms.a2_mem0
     config: {}
     price_per_1k_usd: 1.0
-    expected_tokens_per_episode: 700
+    expected_tokens_per_episode: 700  # measured_after_exposure (800 tok/ep guess)
     model_pin: flash-class-placeholder
     temperature: 0.0
   - arm_id: a2b
     adapter: battery.arms.a2b_zep
     config: {}
     price_per_1k_usd: 1.0
-    expected_tokens_per_episode: 700
+    expected_tokens_per_episode: 700  # measured_after_exposure (800 tok/ep guess)
     model_pin: flash-class-placeholder
     temperature: 0.0
   - arm_id: a3
     adapter: battery.arms.a3_rag
     config: {}
     price_per_1k_usd: 0.5
-    expected_tokens_per_episode: 400
+    expected_tokens_per_episode: 400  # measured_after_exposure (800 tok/ep guess)
     model_pin: flash-class-placeholder
     temperature: 0.0
   - arm_id: a4
     adapter: battery.arms.a4_tortoise
     config: {}
     price_per_1k_usd: 0.5
-    expected_tokens_per_episode: 800
+    expected_tokens_per_episode: 800  # measured_after_exposure (800 tok/ep guess)
     model_pin: flash-class-placeholder
     temperature: 0.0

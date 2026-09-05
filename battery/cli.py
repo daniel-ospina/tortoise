@@ -306,7 +306,9 @@ def _cmd_calibrate(args: argparse.Namespace) -> ExitCode:
         print("use `battery calibrate --print` to print [cal] deltas "
               "(print-only; re-lock is a reviewable table change).")
         return ExitCode.OK
-    print(f"cal table hash: {cal_table_hash(thresholds.cal_rows)}")
+    print("cal table hash: "
+          + cal_table_hash(thresholds.cal_rows,
+                           thresholds.determinism_tolerances))
     for line in print_deltas(thresholds.cal_rows, _load_cal_measured(args)):
         print(line)
     print("PRINT ONLY — re-lock is a reviewable table change (never auto).")
