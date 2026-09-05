@@ -178,6 +178,8 @@ surfaces:
   - test_backup.py
   - test_backup_config.py
   - test_backup_e2e.py
+  - test_backup_graph_enum.py
+  - test_backup_multigraph_e2e.py
   - test_backup_sweep.py
   - test_backup_watcher.py
   - test_bfs_audit.py

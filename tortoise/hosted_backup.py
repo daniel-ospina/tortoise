@@ -469,6 +469,13 @@ def _validate_team_id(team_id: str) -> None:
         raise ValueError(f"Invalid team_id {team_id!r} — must be [A-Za-z0-9_-]")
 
 
+def _validate_graph_id(graph_id: str) -> None:
+    """#2313: graph ids flow into object keys (the graph key segment) —
+    reject path-injection with the same charset as team ids."""
+    if not re.match(r"^[A-Za-z0-9_-]{1,64}$", graph_id):
+        raise ValueError(f"Invalid graph_id {graph_id!r} — must be [A-Za-z0-9_-]")
+
+
 # ── #669 backup seam (plan Task 5, P1-3) ────────────────────────────────────
 # The backup pipeline talks to the control plane through ONE seam (an adapter
 # exposing ``query()``): pre-#669 the FalkorDB registry graph handle (Cypher
@@ -495,6 +502,36 @@ def _is_supabase_source(source) -> bool:
     except Exception:  # noqa: BLE001, RUF100
         return False
     return first.name == "table"
+
+
+def _compose_backup_id(team_id: str, backup_id_ts: str,
+                        graph_id: str | None = None) -> str:
+    """#2313: the UNPREFIXED composite backup id stored in manifests.
+
+    Legacy shape (graph_id None — team-era callers, pre-#2313 artifacts):
+    ``{team_id}/{ts}_{rnd}`` — byte-identical to the historical manifest
+    contract. Per-graph shape: ``{team_id}/{graph_id}/{ts}_{rnd}``. Object
+    keys are ``backups/`` + this id (every consumer prefixes it itself).
+    """
+    seg = f"{graph_id}/" if graph_id is not None else ""
+    return f"{team_id}/{seg}{backup_id_ts}"
+
+
+def _parse_backup_key(key: str) -> tuple[str, str | None, str]:
+    """#2313: parse a backup object key into (team_id, graph_id, id_ts).
+
+    Accepts both shapes: ``backups/{team}/{ts}_{rnd}/{file}`` (legacy,
+    graph_id None) and ``backups/{team}/{graph}/{ts}_{rnd}/{file}``
+    (per-graph). ``id_ts`` is the ``{ts}_{rnd}`` token — feed it to
+    ``_compose_backup_id`` to rebuild the manifest ``backup_id``. Raises
+    ValueError on a malformed key.
+    """
+    parts = key.split("/")
+    if len(parts) == 4 and parts[0] == "backups":
+        return parts[1], None, parts[2]
+    if len(parts) == 5 and parts[0] == "backups":
+        return parts[1], parts[2], parts[3]
+    raise ValueError(f"malformed backup key {key!r}")
 
 
 def _stamp_backup_latest(source, team_id: str, ts: str) -> None:
@@ -544,15 +581,22 @@ def create_backup(
     *,
     team_id: str,
     graph_name: str | None = None,
+    graph_id: str | None = None,
     key: bytes | None = None,
 ) -> dict:
     """Dump → encrypt → upload a team graph backup; stamp registry metadata.
 
     ``proj``: FalkorProjection bound to the team graph.
     ``registry``: Graph handle of the control_plane registry (Team node lives there).
+    ``graph_id`` (#2313): when set, the artifact is keyed under the graph
+    segment (``backups/{team}/{graph}/{ts}/…``) and the manifest records it;
+    None keeps the legacy team-level key shape byte-for-byte (pre-#2313
+    callers and artifacts unchanged).
     Returns the plaintext manifest (also stored in R2 for listing).
     """
     _validate_team_id(team_id)
+    if graph_id is not None:
+        _validate_graph_id(graph_id)
     graph_name = graph_name or getattr(getattr(proj, "g", None), "name", f"team_{team_id}")
     dump = dump_graph(proj.g, graph_name=graph_name)
     payload = json.dumps(dump).encode("utf-8")
@@ -560,9 +604,10 @@ def create_backup(
     ts = datetime.now(timezone.utc)  # noqa: UP017
     # Millisecond + random suffix — two backups for the same team within one
     # millisecond must not collide on the same object key (silent overwrite).
-    backup_id = (
-        f"{team_id}/{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
+    backup_id_ts = (
+        f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
     )
+    backup_id = _compose_backup_id(team_id, backup_id_ts, graph_id=graph_id)
     manifest = {
         "backup_id": backup_id,
         "team_id": team_id,
@@ -573,6 +618,8 @@ def create_backup(
         "sha256": hashlib.sha256(blob).hexdigest(),
         "format": DUMP_FORMAT,
     }
+    if graph_id is not None:
+        manifest["graph_id"] = graph_id
     storage.upload(f"backups/{backup_id}/dump.enc", blob)
     try:
         storage.upload(
@@ -596,11 +643,22 @@ def create_backup(
     return manifest
 
 
-def list_backups(storage: BackupStorage, team_id: str) -> list[dict]:
-    """Return manifests for a team's backups, newest first."""
+def list_backups(storage: BackupStorage, team_id: str,
+                 graph_id: str | None = None) -> list[dict]:
+    """Return manifests for a team's backups, newest first.
+
+    ``graph_id`` (#2313): when set, lists only that graph's backups (the
+    graph key-segment prefix). When None, lists the whole team pool — both
+    legacy flat artifacts and per-graph nested ones (manifest-based listing
+    carries graph_name/graph_id, so team-wide consumers keep working).
+    """
     _validate_team_id(team_id)
+    if graph_id is not None:
+        _validate_graph_id(graph_id)
+    prefix = f"backups/{team_id}/{graph_id}/" if graph_id is not None \
+        else f"backups/{team_id}/"
     out: list[dict] = []
-    for key in storage.list(f"backups/{team_id}/"):
+    for key in storage.list(prefix):
         if key.endswith("/manifest.json"):
             try:
                 out.append(json.loads(storage.download(key)))
@@ -936,6 +994,7 @@ def prune_backups(
     keep_weekly: int = 4,
     *,
     keep_hourly: int = 0,
+    graph_id: str | None = None,
 ) -> list[str]:
     """Delete old backups: keep ``keep_daily`` newest, plus ``keep_weekly`` weekly
     anchors (one per ISO week) beyond the daily window. Returns deleted backup_ids.
@@ -953,27 +1012,42 @@ def prune_backups(
     Delete-path trust: objects are keyed by the STORAGE KEY they were found
     under, never by a manifest's self-declared ``backup_id`` — a forged or
     stale manifest cannot trigger deletion of another (newer) backup's objects.
+
+    ``graph_id`` (#2313): when set, retention is computed over ONLY that
+    graph's pool (``backups/{team}/{graph}/`` — independent per-graph
+    retention, Option A). When None, the legacy team-wide pool is pruned
+    (pre-#2313 flat artifacts); per-graph nested keys are NEVER deleted by a
+    team-wide prune (their retention is owned by the per-graph prune). This
+    split keeps the pre-#2313 contract byte-identical for existing callers.
     """
     _validate_team_id(team_id)
+    if graph_id is not None:
+        _validate_graph_id(graph_id)
     now = datetime.now(timezone.utc)  # noqa: UP017
     deleted: list[str] = []
     kept_weekly: set[tuple[int, int]] = set()
     kept_hour_buckets: set[tuple[int, int, int, int]] = set()
     hourly_mode = keep_hourly > 0
 
+    prefix = f"backups/{team_id}/{graph_id}/" if graph_id is not None \
+        else f"backups/{team_id}/"
     # Newest first by the key-derived backup_id (from the listing prefix).
     manifest_keys = sorted(
-        (k for k in storage.list(f"backups/{team_id}/") if k.endswith("/manifest.json")),
+        (k for k in storage.list(prefix) if k.endswith("/manifest.json")),
         key=lambda k: k,
         reverse=True,
     )
     for key in manifest_keys:
-        parts = key.split("/")
-        if len(parts) != 4:
+        try:
+            _team, _graph, ts = _parse_backup_key(key)
+        except ValueError:
             logger.warning("skipping malformed manifest key %s", key)
             continue
-        _team, ts = parts[1], parts[2]
-        backup_id = f"{_team}/{ts}"
+        if graph_id is not None and _graph != graph_id:
+            continue  # team-prefix listing under a graph filter — not ours
+        if graph_id is None and _graph is not None:
+            continue  # per-graph nested keys belong to the per-graph prune
+        backup_id = _compose_backup_id(_team, ts, graph_id=_graph)
         try:
             parsed = json.loads(storage.download(key))
             manifest = parsed if isinstance(parsed, dict) else {}
