@@ -115,11 +115,20 @@ class _LockedReader:
         self._lock = threading.Lock()
         self._inflight = 0
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
         with self._lock:
             self._inflight += 1
             try:
-                out = self._model.complete(system=system, user=user)
+                # #2280: forward a per-call max_tokens override (RoutingModel
+                # / adapters already support it) — the ask lane uses it for
+                # bounded budget ESCALATION when the first call collapses
+                # empty (reasoning-budget collapse on reasoning models).
+                if max_tokens is None:
+                    out = self._model.complete(system=system, user=user)
+                else:
+                    out = self._model.complete(system=system, user=user,
+                                               max_tokens=max_tokens)
                 # same-frame capture — atomic with the call under the lock
                 self.last_prompt_tokens = getattr(
                     self._model, "last_prompt_tokens", 0)
@@ -167,6 +176,78 @@ class _LockedReader:
     @property
     def last_route(self):
         return getattr(self._model, "last_route", None)
+
+
+def _ask_reader_complete(model, *, system: str, user: str) -> tuple[str, int]:
+    """ONE ask-lane reader call with bounded output-budget escalation
+    (#2280).
+
+    Reasoning-capable models (e.g. qwen3.8-max via OpenRouter) can spend
+    the whole reader output budget (``DEFAULT_READER_MAX_TOKENS``=500)
+    THINKING on hard questions and emit NOTHING — ``content`` empty/None
+    with ``finish_reason="length"`` (the reasoning-budget collapse class;
+    the DeepSeekDirect variant is fixed by disabling thinking, #1790, but
+    qwen refuses that knob). An empty model output is NEVER a legitimate
+    abstention — the two-phase prompt abstains in WRITING — so the product
+    must not read a collapsed call as "no evidence" (the pre-#2280 behavior
+    silently fabricated abstentions on answerable questions).
+
+    Policy (bounded, cost-controlled; at most TWO calls):
+      * non-empty output → returned (exactly one call, the common path);
+      * empty + ``finish_reason == "length"`` (budget exhausted before any
+        content) → ONE retry at an escalated budget
+        (``TORTOISE_ASK_ESCALATION_TOKENS``, default
+        ``DEFAULT_READER_ESCALATION_MAX_TOKENS``);
+      * empty + any other finish reason → ONE retry at the SAME budget
+        (transient empty/provider variance);
+      * still empty after the retry → ``AskReaderUnavailable``
+        (fail-loud) — NEVER abstained/``NO_EVIDENCE_TEXT``.
+
+    Returns ``(raw, completion_tokens_total)`` — the total is the SUM of
+    billed completion tokens across the (≤2) calls, so the collapsed first
+    call's tokens are never dropped from metering/cost estimates (the
+    per-call ``last_completion_tokens`` capture on ``_LockedReader`` only
+    reflects the LAST call).
+    """
+    from tortoise.exceptions import AskReaderUnavailable
+    from tortoise.reader import DEFAULT_READER_ESCALATION_MAX_TOKENS
+    from tortoise.retrieval import ask_env_int
+
+    def _billed() -> int:
+        return int(getattr(model, "last_completion_tokens", 0) or 0)
+
+    total = 0
+    raw = model.complete(system=system, user=user)
+    total += _billed()
+    if raw is not None and str(raw).strip():
+        return raw, total
+    finish_reason = getattr(model, "last_finish_reason", None)
+    if finish_reason == "length":
+        # Budget exhausted before any content — escalate ONCE.
+        esc = ask_env_int(
+            "TORTOISE_ASK_ESCALATION_TOKENS",
+            DEFAULT_READER_ESCALATION_MAX_TOKENS, lo=512, hi=8192)
+        raw = model.complete(system=system, user=user, max_tokens=esc)
+        total += _billed()
+        if raw is not None and str(raw).strip():
+            _logger.warning(
+                "ask reader: empty output at budget cap, escalated to "
+                "max_tokens=%s and answered (finish_reason=%r)", esc,
+                finish_reason)
+            return raw, total
+        raise AskReaderUnavailable(
+            "reader returned empty output after budget escalation "
+            f"(finish_reason={finish_reason!r}) — not an abstention")
+    # Non-length empty output — retry ONCE at the same budget (transient),
+    # then fail loud. Never a silent abstention.
+    raw = model.complete(system=system, user=user)
+    total += _billed()
+    if raw is not None and str(raw).strip():
+        return raw, total
+    raise AskReaderUnavailable(
+        "reader returned empty output "
+        f"(finish_reason={finish_reason!r}) — not an abstention")
+
 
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
@@ -745,6 +826,172 @@ def _is_entity_id(s: str) -> bool:
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+
+def _capture_minted_ids(extracted: list[dict]) -> list[str]:
+    """Ids of the points THIS capture actually minted (W5 Phase D #2104).
+
+    A dedup-folded entry (``dedup=content_hash_hit``/``rephrase_linked``)
+    resolved to an EXISTING node whose provenance + EP calibration belong to
+    its original ingest — re-stamping/re-calibrating on every re-ingest
+    would clobber the first session's single-``eventId`` provenance and
+    churn the canonical's EP.  The provenance stamp and the ingest EP pass
+    must therefore gate over the MINTED subset, never raw ``extracted``.
+    Shared by the hosted impl (byte-parity).
+    """
+    from tortoise.write_verb import DEDUP_NEW
+    return [p["id"] for p in extracted
+            if p.get("dedup", DEDUP_NEW) == DEDUP_NEW and p.get("id")]
+
+
+def _capture_ep_target_ids(extracted: list[dict], proj) -> list[str]:
+    """Ids the ingest EP pass must calibrate for one capture (Phase D).
+
+    Normally the MINTED ids (every minted claim is promoted + calibrated by
+    its own ingest pass).  A FOLDED-ONLY ingest (every claim resolved to an
+    existing node) still needs a FIRST-TIME calibration when the canonical
+    never got one — its own ingest's EP pass failed fail-open and left it
+    draft/uncalibrated — otherwise the point stays uncalibrated forever
+    (a folded re-ingest would never re-run the pass).  A canonical that is
+    live + calibrated is NEVER re-calibrated (no EP churn on re-ingest).
+    Shared by the hosted impl (byte-parity).
+    """
+    from tortoise.write_verb import DEDUP_NEW
+    minted = _capture_minted_ids(extracted)
+    if minted:
+        return minted
+    folded = [p["id"] for p in extracted
+              if p.get("id") and p.get("dedup", DEDUP_NEW) != DEDUP_NEW]
+    if not folded:
+        return []
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids AND "
+        "(coalesce(n.status, '') = 'draft' OR "
+        "(n.posterior_alpha IS NULL AND n.ep_alpha IS NULL)) "
+        "RETURN n.id",
+        params={"ids": folded},
+    ).result_set
+    return [r[0] for r in rows]
+
+
+def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
+                             warn=None) -> None:
+    """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
+
+    ROOT CAUSE (verified): capture wrote the extracted claims via the #131
+    draft default and wired their IMPL/NAND operator topology as draft
+    (#780 extraction operators, ``promote_source=False``); EP's BFS
+    expansion excludes draft subgraphs (``include_draft=False`` default), so
+    the ingest EP pass could never calibrate the captured claims
+    (``dream()`` total_affected 0 / coverage 0.0 / ``has_ep`` False —
+    structurally, until the claims are EP-able).
+
+    FIX — capture-scoped ONLY (create_point's global draft default, the
+    #780 draft-operator semantics of NON-capture extraction paths, EP
+    semantics, and global dream routing are all untouched):
+      1. every extracted (non-episodic) claim of THIS capture is promoted
+         draft->live (the DM-2/§4.4 status branch: draft -> live on the
+         capture write path; the episodic turn stream STAYS draft — it is
+         the turn stream, not beliefs);
+      2. the capture's operator topology (IMPL/NAND operator Points with an
+         edge to a captured claim) is promoted with its claims — a live
+         claim wired through a draft operator stays EP-inert (the #780
+         live-only selector never picks the draft operator), so claim-only
+         promotion cannot calibrate wired claims (verified empirically);
+      3. the claims are marked dirty (write-trigger, graph-persisted #1163)
+         so the bounded ingest pass below has a window to refresh (the v2
+         write path already marked via create_point; the M2 fold path does
+         not — the uniform mark here covers both lanes);
+      4. a BOUNDED ingest EP pass runs — mode="local" (write-triggered
+         refresh over the dirty roots, bounded by construction — never a
+         full-graph pass), require_calibration=False (EP topology on fresh
+         capture content), warm_start=False (from-scratch — no cached-edge
+         censoring for freshly promoted claims).
+
+    Fail-open (P1 #1529 posture): a promotion or EP hiccup never fails a
+    committed capture — every failure surfaces as an additive warning via
+    ``warn`` (never a raise after partial writes). Shared by
+    ``sdk.capture_session`` and hosted ``_capture_session_impl`` so the two
+    capture surfaces can never drift (byte-parity).
+    """
+    if not claim_ids:
+        return
+    try:
+        proj = sdk._get_proj()
+        # 1. Claims -> live (draft-only guard mirrors create_operator's
+        # promote_source clause — a terminal claim is never resurrected),
+        # then REBUILD-DURABLE via the PointPromoted event (review P1): the
+        # raw status flip alone would revert on JSONL replay (the #548 log
+        # snapshotted the draft state at PointAdded) — the projection's
+        # PointPromoted replay upserts the full live snapshot (projection/
+        # __init__.py:1074). Snapshot AFTER the SET so the event carries the
+        # live state. Capture auto-promotion is NOT reviewer-gated — the
+        # snapshot carries the point's own props (no fabricated reviewed).
+        # Candidate read FIRST (the SET below destroys the draft evidence):
+        # exact extracted ids, non-operator, draft-or-unset status.
+        cand_rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR n.status = 'draft') "
+            "RETURN n.id",
+            params={"ids": list(claim_ids)},
+        ).result_set
+        promoted_claims = [r[0] for r in cand_rows]
+        if promoted_claims:
+            proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "SET n.status = 'live'",
+                params={"ids": promoted_claims},
+            )
+            for pid in promoted_claims:
+                sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
+        # 2. Operators of the captured claims -> live (draft-only guard),
+        # then REBUILD-DURABLE via OperatorPromoted (the R16 shape —
+        # projection/__init__.py:1082 restores live on replay). Mirror
+        # promote_point's _promote_incident_operators event exactly.
+        op_rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+            "WHERE c.id IN $ids "
+            "AND (o.status IS NULL OR o.status = 'draft') "
+            "RETURN DISTINCT o.id",
+            params={"ids": list(claim_ids)},
+        ).result_set
+        promoted_ops = []
+        for (oid,) in op_rows:
+            proj.g.query(
+                "MATCH (o:Point {id:$oid}) "
+                "SET o.status = 'live'",
+                params={"oid": oid},
+            )
+            sdk._emit_event("OperatorPromoted", id=oid,
+                            point=sdk.get_point(oid))
+            promoted_ops.append(oid)
+        # 3. Write-trigger dirty-mark (claims + reverse-BFS neighbors).
+        sdk._mark_dirty(list(claim_ids))
+    except Exception as e:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "capture EP promotion failed (non-fatal) for %d claims: %s",
+            len(claim_ids), e, exc_info=True,
+        )
+        if warn is not None:
+            warn(f"capture EP promotion failed: {type(e).__name__}: {e}")
+        return
+    try:
+        # 4. BOUNDED ingest EP pass (local = dirty-root refresh; review P2:
+        # mode="local" hydrates ALL graph-persisted dirty roots #1163, so an
+        # explicit budget caps the request-time EP work — this capture's
+        # claims calibrate well within it; any overflow stays dirty for the
+        # scheduler's epoch-guarded sweep).
+        sdk.dream(mode="local", require_calibration=False,
+                  warm_start=False, budget=100)
+    except Exception as e:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "capture ingest EP pass failed (non-fatal) for %d claims: %s",
+            len(claim_ids), e, exc_info=True,
+        )
+        if warn is not None:
+            warn(f"ingest EP pass failed: {type(e).__name__}: {e}")
+
+
 def _entity_name_id(label: str, name: str) -> str:
     """Deterministic entity id from name — mirrors create_point's content-hash
     dedup so the projection's MERGE-by-name is IDEMPOTENT: the same name
@@ -1149,7 +1396,8 @@ class TortoiseSDK:
     """
 
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
-                 event_log_path: str | None = None):
+                 event_log_path: str | None = None,
+                 graph_name: str | None = None):
         import os, re  # noqa: E401, I001
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
@@ -1184,6 +1432,22 @@ class TortoiseSDK:
                     "Use alphanumeric, hyphens, underscores; max 64 chars."
                 )
         self._namespace = namespace
+        # C5 #2114 (D-C5-1): explicit FULL graph-name override — the data-plane
+        # tenancy seam. Custom graphs (team_{tid}_{gid}) cannot be expressed
+        # through ``namespace`` (the _get_proj derivation would prepend
+        # ``team_`` → ``team_team_{tid}_{gid}``). When set, _get_proj binds the
+        # projection to ``graph_name`` VERBATIM (default-graph callers never
+        # pass it — they keep the namespace derivation, byte-identical).
+        # Charset mirrors the namespace rule (+128 len for team_{tid}_{gid});
+        # mutually exclusive with ``namespace`` by construction (the spine
+        # passes exactly one).
+        if graph_name is not None and not re.match(
+                r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$', graph_name):
+            raise ValueError(
+                f"Invalid graph_name {graph_name!r}. "
+                "Use alphanumeric, hyphens, underscores; max 128 chars."
+            )
+        self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
@@ -1300,6 +1564,11 @@ class TortoiseSDK:
             if self._namespace == "registry":
                 # Control-plane SDK: shared registry main graph.
                 graph_name = "registry_tortoise"
+            elif self._graph_name is not None:
+                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+                # team_{tid}_{gid} graph). Never a namespace derivation — the
+                # name is used verbatim.
+                graph_name = self._graph_name
             elif self._namespace:
                 if self._namespace.startswith(("test_", "tortoise_test")):
                     # Test namespace: isolate on a test-prefixed graph so the
@@ -2100,6 +2369,16 @@ class TortoiseSDK:
         edge). The deterministic regex loop is removed as a product
         path — LLM extraction is the default and no-key fails closed.
 
+        Supersession records are REAL-BACKEND-ONLY, by construction: the v2
+        extractor forms conversation-driven supersessions only when its S3
+        search resolves against the real graph — extractor_v2 skips the search
+        entirely when the active backend is not "real" (the ``mode != "real"``
+        degraded branch: embedded/FalkorDBLite — the real graph, FalkorDB via
+        docker/redis URI or hosted API, is required), so capture over
+        embedded/FalkorDBLite produces ZERO supersession records (structurally
+        — the supersedes refs never resolve). Not a bug; do not debug it as
+        one.
+
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
         "extraction_mode", "extraction_provider", "ok", "errors",
@@ -2271,10 +2550,23 @@ class TortoiseSDK:
             )
             event_id = event.get("id") or event.get("eventId")
             if event_id:
+                # W5 (#2104, S1): the SDK mirror stamps the full write
+                # provenance alongside the ontology-compliant eventId —
+                # byte-parity with hosted_api's capture stamp (the W2
+                # benchmark grades provenance_accuracy over these fields).
+                # W5 Phase D (#2104): the stamp gates over the MINTED ids —
+                # a dedup-folded entry (content_hash_hit/rephrase_linked)
+                # resolved to an existing node whose provenance belongs to
+                # its original ingest; re-stamping would clobber the first
+                # session's single-eventId provenance.
+                source_harness = harness or "unknown"
                 proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
-                    params={"ids": [p["id"] for p in extracted],
-                            "eid": event_id},
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "SET n.eventId=$eid, n.source_session=$sid, "
+                    "    n.source_harness=$harness, n.ingested_at=$ing",
+                    params={"ids": _capture_minted_ids(extracted),
+                            "eid": event_id, "sid": session_id,
+                            "harness": source_harness, "ing": now},
                 )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
@@ -2347,6 +2639,58 @@ class TortoiseSDK:
         # route was resolved (the v2 path); the M2 path has no route/provider.
         if meta.get("route"):
             resp["extraction_provider"] = meta.get("provider")
+        # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
+        # capture write path (after provenance stamp + operators wired) the
+        # extracted claims are promoted draft→live and the BOUNDED ingest EP
+        # pass calibrates them (local = write-triggered refresh over the
+        # dirty roots — never a full-graph pass). Shared with the hosted
+        # impl via _apply_capture_ingest_ep (byte-parity; hosted reflects the
+        # post-EP state in the write-verb enrichment read). Fail-open: a
+        # promotion/EP hiccup never fails a committed capture — additive
+        # warning only.  W5 Phase D (#2104): the pass gates over
+        # ``_capture_ep_target_ids`` (minted ids — folded entries resolved
+        # to nodes already calibrated at their original ingest are never
+        # re-calibrated; a folded canonical still draft/uncalibrated from a
+        # fail-open first ingest gets its FIRST calibration here).
+        if extracted:
+            ep_ids = _capture_ep_target_ids(extracted, proj)
+            if ep_ids:
+                _apply_capture_ingest_ep(
+                    self, ep_ids,
+                    warn=extraction_warnings.append,
+                )
+        # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
+        # receipt — byte-parity with hosted_api._capture_session_impl (the
+        # shared-surface rule): ``surfaced`` uses the §3.2.2 marker
+        # vocabulary (one entry per memory item THIS capture added; N = len
+        # = the disclosure count). Graph-truth only (anti-gaming): an entry
+        # appears ONLY for an id this post-write verification read returned
+        # AND whose seam verdict is ``new`` (content_hash_hit /
+        # rephrase_linked folds added no item — the canonical pre-existed
+        # with its original provenance). A failed verification read yields []
+        # plus an additive warning — never a fabricated marker count.
+        verified_ids: set[str] = set()
+        if extracted:
+            try:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+                    params={"ids": [p["id"] for p in extracted]},
+                ).result_set
+                verified_ids = {r[0] for r in rows}
+            except Exception:  # noqa: BLE001, RUF100 — fail-open, mirror
+                # hosted's enrichment-read posture (additive warning, never
+                # raise over a committed capture).
+                _logger.warning(
+                    "capture_session: surfaced disclosure verification read "
+                    "failed (non-fatal) for session %s", session_id,
+                    exc_info=True,
+                )
+                extraction_warnings.append(
+                    "surfaced disclosure verification read failed — "
+                    "marker omitted")
+        from tortoise.write_verb import surfaced_marker
+        resp["surfaced"] = surfaced_marker(
+            extracted, verified_ids=verified_ids)
         return resp
 
     def _extract_session_llm(
@@ -2417,15 +2761,76 @@ class TortoiseSDK:
 
         extracted: list[dict] = []
         proj = self._get_proj()
+        warnings: list[str] = []
         try:
             statements, _operators = split(fold(log.read_all()))
+            # W5 Phase D (#2104, indicator 4): in-capture dedup — a claim
+            # the extractor minted MORE THAN ONCE in this capture (the M2
+            # mock echo repeats a sentence verbatim; a real M2 extractor can
+            # restate the same claim) must land as ONE point.  Fold order is
+            # the resolution order: each statement resolves against claims
+            # already accepted by THIS capture (never cross-session — a
+            # collapsed cross-session node would orphan/clobber the
+            # single-eventId per-session provenance; see dedup_classify.py).
+            # Verdicts are graph-truthful: the resolution actually compared
+            # the content — ``dedup=content_hash_hit`` (byte-identical) or
+            # ``dedup=rephrase_linked`` (the committed token-overlap
+            # paraphrase band — zero LLM, zero embeddings: the m2 lane runs
+            # keyless).
+            from tortoise.dedup_classify import (
+                DEDUP_CONTENT_HASH_HIT,
+                DEDUP_NEW,
+                DEDUP_REPHRASE_LINKED,
+                exact_hit_id,
+                rephrase_hit,
+            )
+            canonical_by_hash: dict[str, str] = {}
+            canonical_contents: list[tuple[str, str]] = []
             for p in statements:
                 pid = p["id"]
-                proj.g.query(
-                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
-                    "MERGE (s)-[:CONTAINS]->(p)",
-                    params={"sid": session_id, "pid": pid},
-                )
+                content = str(p.get("content") or "")
+                dedup = DEDUP_NEW
+                resolved = (exact_hit_id(canonical_by_hash, content)
+                            if content else None)
+                if resolved is None and content:
+                    rh = rephrase_hit(canonical_contents, content)
+                    if rh is not None:
+                        resolved, _overlap = rh
+                        dedup = DEDUP_REPHRASE_LINKED
+                elif resolved is not None:
+                    dedup = DEDUP_CONTENT_HASH_HIT
+                if resolved is not None and resolved != pid:
+                    # Fold ONLY when the duplicate node carries no operator
+                    # wiring — a cue-gated consecutive-utterance edge is a
+                    # real relation of THIS occurrence and folding would
+                    # orphan it.  (CONTAINS is wired below for accepted
+                    # claims only; the dup node has no session edges yet.)
+                    engaged = proj.g.query(
+                        "MATCH (n:Point {id:$id})-[:INPUT|IMPL|NAND]-"
+                        "(o:Point) WHERE o.is_operator = true "
+                        "RETURN count(o)",
+                        params={"id": pid},
+                    ).result_set[0][0]
+                    if engaged:
+                        # Honest residual, never a fabricated fold: the
+                        # duplicate stays a distinct point and says so.
+                        dedup = DEDUP_NEW
+                        warnings.append(
+                            f"repeated claim '{content[:60]}' kept distinct — "
+                            "operator-wired duplicate not deduped")
+                    else:
+                        proj.g.query(
+                            "MATCH (n:Point {id:$id}) DETACH DELETE n",
+                            params={"id": pid})
+                        pid = resolved
+                if dedup == DEDUP_NEW:
+                    canonical_by_hash[_content_hash(content)] = pid
+                    canonical_contents.append((pid, content))
+                    proj.g.query(
+                        "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                        "MERGE (s)-[:CONTAINS]->(p)",
+                        params={"sid": session_id, "pid": pid},
+                    )
                 props = {k: v for k, v in p.items()
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
                 extracted.append({
@@ -2433,12 +2838,12 @@ class TortoiseSDK:
                     "kind": p.get("pointKind") or "statement",
                     "text": p.get("content", "")[:200],
                     "props": props,
+                    "dedup": dedup,
                 })
         except Exception as e:
             errors.append(f"{type(e).__name__}: {e}")
 
-        warnings: list[str] = []
-        if not errors and not extracted:
+        if not errors and not extracted and not warnings:
             # P1 #1529 (D6): completed-but-empty output is an additive
             # warning (nothing extractable ≠ failure), never a silent 0.
             warnings.append("LLM extraction produced no points")
@@ -2464,6 +2869,15 @@ class TortoiseSDK:
         graph — entities via create_entity, points via create_point with the
         content-addressed ids, events via create_event, IMPL/NAND via
         create_operator — then wires session CONTAINS + aboutObject edges.
+        Supersessions ride the payload's ``supersessions`` channel (#2164):
+        ``commit_ops.apply_supersessions`` applies each record AFTER the
+        entities/points it references exist (ordering contract) — ``pt_`` refs
+        → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
+        entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
+        full provenance) + the ``_fold_object_superseded`` status fold. Every
+        fold miss/skip/failure is surfaced through the shared meta
+        ``warnings`` channel — supersession application is best-effort and
+        never a silent drop (and never fails capture).
 
         Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
         consumes it): ``extracted`` is the same [{id, kind, text}] contract
@@ -2532,20 +2946,59 @@ class TortoiseSDK:
         proj = self._get_proj()
 
         # ── entities ──
+        entity_failures: list[str] = []
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            try:  # noqa: SIM105
+            try:
                 self.create_entity("object", name,
                                    objectKind=str(e.get("kind", "core:other")),
                                    is_episodic=False)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+            except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
+                # old `except: pass` was indicator-4 hygiene — a swallowed
+                # create_entity failure silently stranding an Object a
+                # supersession record then references. Per-item failures are
+                # surfaced as additive WARNINGS + a count line (never a
+                # silent drop) — warning-grade BY DESIGN, a DELIBERATE
+                # channel divergence from the points loop (:2581-2587),
+                # where a per-point write failure is an ERROR appended to
+                # meta errors (mode flips to 'error' and capture FAILS):
+                # lost point content is unrecoverable, while an entity
+                # write failure leaves recall-by-name intact for
+                # pre-existing Objects.
+                entity_failures.append(
+                    f"{type(exc).__name__}: entity write failed for {name}: {exc}")
+        if entity_failures:
+            warnings.extend(entity_failures)
+            warnings.append(
+                f"{len(entity_failures)} extracted entit(y/ies) failed to write")
 
         # ── points + aboutObject edges + session CONTAINS ──
         extracted: list[dict] = []
         skipped = 0
+        # W5 Phase D (#2104, indicator 4): per-point dedup classification on
+        # the v2 seam.  Payload point ids are deterministic ``pt_<sha>``
+        # keys; the seam honors the #1727 content-addressed idempotency
+        # contract (create_point dedup=True — a same-id write can NEVER
+        # double-CREATE a node pair) and classifies each claim against
+        # canonicals already accepted by THIS capture (in-capture fold) and
+        # against an existing node holding the same content under any id
+        # (content-hash resolution with create_point's own semantics — a
+        # re-ingest resolves to the existing node: ``content_hash_hit``, 0
+        # new points, no prop churn on the canonical).  Folded entries are
+        # NOT re-stamped/re-calibrated (they carry their original session's
+        # provenance; the stamp/EP gates run over
+        # ``_capture_minted_ids``/``_capture_ep_target_ids``).  Paraphrase
+        # classification on the v2 lane stays in the extractor's
+        # consolidation fold (not surfaced cross-session — deferred) — the
+        # seam never guesses beyond byte-identical content.
+        from tortoise.dedup_classify import (
+            DEDUP_CONTENT_HASH_HIT,
+            DEDUP_NEW,
+            exact_hit_id,
+        )
+        canonical_by_hash: dict[str, str] = {}
         for pt in payload.get("points", []) or []:
             pid = str(pt.get("id", "")).strip()
             content = str(pt.get("content", "")).strip()
@@ -2553,21 +3006,67 @@ class TortoiseSDK:
                 skipped += 1
                 continue
             try:
-                self.create_point(
-                    str(pt.get("pointKind", "statement")), content,
-                    id=pid, session_id=session_id, is_episodic=False,
-                    status="draft",
-                    # #1350: link the extracted point to the session Source
-                    # (mirrors the M2 EventAPI provenance; create_point wires
-                    # the extractedFrom edge).
-                    extractedFrom=f"session:{session_id}",
-                )
-                for name in (pt.get("about_entities") or []):
-                    if isinstance(name, str) and name.strip():
-                        proj.g.query(
-                            "MATCH (p:Point {id:$pid}), (o:Object {name:$n}) "
-                            "MERGE (p)-[:aboutObject]->(o)",
-                            params={"pid": pid, "n": name.strip()})
+                # 1) in-capture fold: same content minted earlier this seam
+                #    run (extractor payload assembly normally folds these;
+                #    the seam is the backstop).
+                resolved = exact_hit_id(canonical_by_hash, content)
+                dedup = DEDUP_CONTENT_HASH_HIT if resolved else DEDUP_NEW
+                if resolved is None:
+                    # 2) graph-level content-hash resolution — the SAME
+                    #    semantics create_point(dedup=True) would apply
+                    #    (content_hash + pointKind + non-operator, with the
+                    #    A10 hash-less content fallback), run BEFORE the
+                    #    create so a re-ingest resolves to the EXISTING node
+                    #    under WHATEVER id it carries (pt_<sha> from an
+                    #    earlier capture OR an older ULID/m2 node).  On a hit
+                    #    nothing is created and nothing is re-written — the
+                    #    canonical's props/provenance stay untouched
+                    #    (first-writer).  Never report a phantom id: the
+                    #    response id is the id the graph actually holds.
+                    kind = str(pt.get("pointKind", "statement"))
+                    hit = proj.g.query(
+                        "MATCH (n:Point {content_hash:$ch}) "
+                        "WHERE n.is_operator = false "
+                        "AND n.pointKind = $kind "
+                        "RETURN n.id",
+                        params={"ch": _content_hash(content), "kind": kind},
+                    ).result_set
+                    if not hit:
+                        # A10 fallback: a hash-less same-kind node with the
+                        # exact content (create_point's own fallback).
+                        hit = proj.g.query(
+                            "MATCH (n:Point) "
+                            "WHERE n.is_operator = false "
+                            "AND n.pointKind = $kind "
+                            "AND n.content_hash IS NULL "
+                            "AND n.content = $content "
+                            "RETURN n.id",
+                            params={"kind": kind, "content": content},
+                        ).result_set
+                    if hit:
+                        resolved = hit[0][0]
+                        dedup = DEDUP_CONTENT_HASH_HIT
+                if resolved is None:
+                    resolved = pid
+                    self.create_point(
+                        kind, content,
+                        id=pid, dedup=True, session_id=session_id,
+                        is_episodic=False, status="draft",
+                        # #1350: link the extracted point to the session
+                        # Source (mirrors the M2 EventAPI provenance;
+                        # create_point wires the extractedFrom edge).
+                        extractedFrom=f"session:{session_id}",
+                    )
+                pid = resolved
+                if dedup == DEDUP_NEW:
+                    canonical_by_hash[_content_hash(content)] = pid
+                    for name in (pt.get("about_entities") or []):
+                        if isinstance(name, str) and name.strip():
+                            proj.g.query(
+                                "MATCH (p:Point {id:$pid}), "
+                                "(o:Object {name:$n}) "
+                                "MERGE (p)-[:aboutObject]->(o)",
+                                params={"pid": pid, "n": name.strip()})
                 proj.g.query(
                     "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
                     "MERGE (s)-[:CONTAINS]->(p)",
@@ -2580,7 +3079,7 @@ class TortoiseSDK:
                          if k in _CAPTURE_PASSTHROUGH_PROPS}
                 extracted.append({
                     "id": pid, "kind": "statement", "text": content[:200],
-                    "props": props})
+                    "props": props, "dedup": dedup})
             except Exception as e:  # noqa: BLE001, RUF100 — P1 #1529: counted
                 # (was a silent `except: pass`) — a per-point write failure
                 # surfaces with its class name + id, never an invisible
@@ -2590,6 +3089,68 @@ class TortoiseSDK:
                     f"{type(e).__name__}: point write failed for {pid}: {e}")
         if skipped:
             warnings.append(f"{skipped} extracted point(s) failed to write")
+
+        # W5 Phase D (#2104): surface the extractor's consolidation noops —
+        # claims the S3/FTS fold resolved to an EXISTING node were
+        # previously DROPPED from the response silently.  They now ride the
+        # response as classified folded entries + a session CONTAINS link
+        # (the claim is part of this session's memory; no duplicate point
+        # was minted).  Canonical provenance is never re-stamped (folded
+        # entries are excluded from the minted-only stamp/EP gates).
+        #
+        # Phase D scope gate (review fix, PR round): surfaced ONLY when the
+        # fold is the sanctioned content-addressed re-ingest — reason
+        # ``identical`` AND the canonical is a capture-minted ``pt_`` node
+        # carrying an ``eventId`` (its provenance is real, its session
+        # memory membership is unambiguous).  Anything else — paraphrase
+        # folds (cross-session REPHRASE-linked dedup is deferred) and
+        # priors without capture provenance (mined/commit/m2 nodes) — stays
+        # extractor-side with an additive warning: never a fabricated
+        # verdict, never a phantom id, never an unprovenanced memory join.
+        noops = out.get("noops") or []
+        if noops:
+            nop_ids = [str(n.get("point_id") or "") for n in noops
+                       if n.get("point_id")]
+            canonical_rows: dict[str, tuple[str, str]] = {}
+            if nop_ids:
+                try:
+                    rows = proj.g.query(
+                        "MATCH (n:Point) WHERE n.id IN $ids "
+                        "RETURN n.id, n.content, n.eventId",
+                        params={"ids": nop_ids},
+                    ).result_set
+                    canonical_rows = {
+                        r[0]: ((r[1] or ""), r[2]) for r in rows}
+                except Exception as e:  # noqa: BLE001, RUF100 — additive
+                    warnings.append(
+                        f"{type(e).__name__}: noop content read failed")
+            skipped_noops = 0
+            for nop in noops:
+                nid = str(nop.get("point_id") or "")
+                if not nid:
+                    continue
+                reason = str(nop.get("reason") or "")
+                row = canonical_rows.get(nid)
+                if (reason != "identical" or not nid.startswith("pt_")
+                        or row is None or not row[1]):
+                    # Deleted prior (W6 race), paraphrase fold, or a prior
+                    # without capture provenance — never surfaced.
+                    skipped_noops += 1
+                    continue
+                content_txt, _event_id = row
+                proj.g.query(
+                    "MATCH (s:Session {id:$sid}), (p:Point {id:$pid}) "
+                    "MERGE (s)-[:CONTAINS]->(p)",
+                    params={"sid": session_id, "pid": nid})
+                extracted.append({
+                    "id": nid, "kind": "statement",
+                    "text": content_txt[:200], "props": {},
+                    "dedup": DEDUP_CONTENT_HASH_HIT})
+            if skipped_noops:
+                warnings.append(
+                    f"{skipped_noops} consolidation fold(s) not surfaced "
+                    "(non-capture canonical / paraphrase fold / missing "
+                    "node — deferred surface)")
 
         # ── events ──
         for ev in payload.get("events", []) or []:
@@ -2614,6 +3175,17 @@ class TortoiseSDK:
                 proj, self, ops,
                 point_content_by_id=lambda pid: _payload_point_content_by_id(
                     payload, pid))
+        # #2164: supersessions — client-derived records (the deterministic
+        # channel for the Object status fold; §6b parity). pt_ → supersede()
+        # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
+        # entities exist (ordering contract). Warnings ride meta — never a
+        # silent drop. Best-effort — never fail capture (hosted §6b rule).
+        try:
+            from tortoise.commit_ops import apply_supersessions
+            apply_supersessions(proj, self, payload.get("supersessions") or [],
+                                session_id=session_id, warn=warnings.append)
+        except Exception as exc:  # pragma: no cover - defensive outer bound
+            _logger.warning("supersession apply failed: %s", exc, exc_info=True)
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.
@@ -9639,7 +10211,7 @@ class TortoiseSDK:
         # #25: optional graph-informed rerank (persisted EP confidence,
         # operator connectivity, recency). Off by default (backward compat).
         if graph_ranker is not None and results:
-            results = graph_ranker.rerank(results, entity_type="point")
+            results = graph_ranker.rerank(results, entity_type="point", query=q)
 
         return results
 
@@ -10618,7 +11190,13 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            ranked = ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            # W4-b (#2102): thread the query for the contested-relevance boost
+            # ONLY when the caller opted into W4 enrichment — w4_enrich=False
+            # suppresses the why-layer keys AND the boost together (order and
+            # keys must never disagree).
+            ranked = ranker.rerank(
+                dicts, entity_type=entity_type,
+                query=(query if w4_enrich else None))[:limit]
             # W4 (#2101): additive why-layer enrichment (flag-gated) — search
             # surface; recall_state's pool and the ask lane inherit it through
             # their own calls. Zero-LLM, bounded reads, fail-open (items
@@ -10825,8 +11403,15 @@ class TortoiseSDK:
         estimate cap AND 32 KiB byte cap, whole-hit drop) →
         ``detect_question_type`` (or caller override) →
         ONE reader call via ``build_reader_model()`` (never an
-        LLM-skip pre-gate — exactly one model call incl. empty context) →
-        ``_looks_abstained`` (blank → ``NO_EVIDENCE_TEXT``) → best-effort
+        LLM-skip pre-gate — exactly one model call incl. empty context;
+        #2280: an EMPTY model output escalates ONCE to a larger output
+        budget when the first call collapsed thinking-only
+        (``finish_reason="length"``), then fails loud as
+        ``AskReaderUnavailable`` — an empty output is never read as
+        an abstention) →
+        ``_looks_abstained`` (abstained is ALWAYS the model's written
+        decision; the blank→``NO_EVIDENCE_TEXT`` substitution is a
+        retired defensive invariant) → best-effort
         ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
         None → no-op).
 
@@ -11013,9 +11598,12 @@ class TortoiseSDK:
             raise AskReaderUnavailable(
                 f"reader unavailable (build): {type(e).__name__}") from e
         try:
-            raw = model.complete(
+            raw, reader_out_tokens = _ask_reader_complete(
+                model,
                 system=system_prompt_for(qtype),
                 user=build_reader_user_message(evidence, question))
+        except AskReaderUnavailable:
+            raise  # #2280: empty-output failure — never an abstention
         except Exception as e:  # noqa: BLE001, RUF100
             raise AskReaderUnavailable(
                 f"reader unavailable: {type(e).__name__}") from e
@@ -11025,6 +11613,12 @@ class TortoiseSDK:
                 decr()
         answer = (raw or "").strip()
         abstained = _looks_abstained(answer)
+        # #2280: an empty output can no longer reach here — the escalation
+        # helper either returns non-empty text or raises AskReaderUnavailable.
+        # ``abstained`` is therefore ALWAYS the model's written abstention
+        # decision, never a blank-output substitution. (The substitution is
+        # retained as a defensive invariant for a future caller that skips
+        # the helper — it must never fire on the product path.)
         if abstained and not answer:
             answer = NO_EVIDENCE_TEXT
 
@@ -11037,8 +11631,7 @@ class TortoiseSDK:
                 from tortoise.metering import record_ask_usage
                 input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
                                 + estimate_tokens_ask(evidence))
-                out_tokens = getattr(model, "last_completion_tokens", 0) \
-                    or 500
+                out_tokens = reader_out_tokens or 500
                 record_ask_usage(
                     team_id,
                     tokens_in=input_tokens, tokens_out=out_tokens,
@@ -11085,7 +11678,7 @@ class TortoiseSDK:
             cost_estimate = estimate_ask_cost_usd(
                 estimate_tokens_ask(system_prompt_for(qtype))
                 + estimate_tokens_ask(evidence),
-                getattr(model, "last_completion_tokens", 0) or 500,
+                reader_out_tokens or 500,
                 rates=select_ask_meter_rates(
                     getattr(model, "model", None) or ""))
         except Exception:  # noqa: BLE001, RUF100
@@ -11614,7 +12207,7 @@ class TortoiseSDK:
 
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
-        ranked = ranker.rerank(merged, entity_type="point")
+        ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
         ranked = [
@@ -11670,6 +12263,53 @@ class TortoiseSDK:
         except Exception as e:  # noqa: BLE001, RUF100 — fail-open
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
         return out
+
+    # ── Phase-1 volunteering-memory delivery (#2103) ─────────────────────
+    # Issue #2103 (epic #2080, S9): ONE canonical pipeline (tortoise/volunteer.py
+    # — window parse → candidate extraction → resolve → confidence gate →
+    # re-mention suppression → pointer budget → why-block assembly) shared by
+    # this SDK method AND POST /v1/context (hosted + self-host) — never two
+    # pipelines. The HTTP wrapper adds auth/tenancy/metering/offload only.
+    # Response mirrors the §3.2.2 contract: {pointers, why, surfaced, block,
+    # degraded_reason}.
+
+    def volunteer_context(
+        self,
+        window: list[dict],
+        session_id: str | None = None,
+        prior_context: str | None = None,
+        min_confidence: float = 0.7,
+        max_pointers: int = 3,
+        why: bool = True,
+    ) -> dict:
+        """Volunteer memory context for a turn window (issue #2103 §6.3).
+
+        ONE code path with POST /v1/context (the shared canonical pipeline in
+        tortoise/volunteer.py). In-process, fully stateless per call
+        (``session_id``/``prior_context`` are continuity inputs only — zero
+        graph writes).
+
+        - Raises ValueError (VolunteerValidationError) on invalid window /
+          budgets BEFORE any graph work (SDK validates first — issue §6.3).
+        - Fail-open: any retrieval/assembly error returns the degraded shape
+          (empty block + degraded_reason) — never breaks the caller's turn.
+        - Zero LLM on the read path — no provider key required.
+        """
+        from .volunteer import (  # local import: avoid module cycle
+            run_volunteer_pipeline,
+            validate_request,
+        )
+        # SDK validates FIRST — before any graph/network work (issue §6.3).
+        validate_request(
+            window, session_id=session_id, prior_context=prior_context,
+            min_confidence=min_confidence, max_pointers=max_pointers, why=why,
+        )
+        proj = self._get_proj()
+        return run_volunteer_pipeline(
+            proj, window, session_id=session_id, prior_context=prior_context,
+            min_confidence=min_confidence, max_pointers=max_pointers, why=why,
+            _search_fn=self.tortoise_fts_query,
+        )
 
     def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:
         """NANDing points (id/content) for contested targets.
@@ -12346,6 +12986,42 @@ class TortoiseSDK:
         )
         return True
 
+    def graph_set_recording(self, team_id: str, graph_id: str,
+                            value: bool | None) -> bool:
+        """C6 #2115: set the session_recording override on a Graph node.
+
+        ``value`` True/False = explicit override; None = remove the override
+        (FalkorDB SET null removes the prop → inherit team default, #1927
+        default-ON preserved). Resolves the literal ``default`` id to the
+        team's kind='default' node (the default graph IS graph 0 — settable
+        per epic §6.3); real gids match directly. Returns True when the node
+        was found (override written/cleared), False on unknown graph —
+        callers map to 404."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        # The literal ``default`` id maps to the team's kind='default' node
+        # (mode-agnostic callers use either); any other id must match a real
+        # node exactly. Soft-deleted nodes (status='deleted') are NOT
+        # patchable — treat as unknown (mirror list_graphs' tombstone skip).
+        if graph_id == "default":
+            node = next((r[0] for r in rows
+                         if r[1] == "default" and r[2] != "deleted"), None)
+        elif any(r[0] == graph_id and r[2] != "deleted" for r in rows):
+            node = graph_id
+        else:
+            node = None
+        if node is None:
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.recording = $v",
+            params={"gid": node, "tid": team_id, "v": value},
+        )
+        return True
+
     def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
         """APIKey node ids bound to a graph — the delete-cascade source
         (every key dies with the graph, E2E-8). Revoked or not — the
@@ -12827,9 +13503,18 @@ class TortoiseSDK:
         ]
         if matches:
             m = matches[0]
+            delegation_depth = m.get("delegation_depth")
+            scopes = m.get("scopes") or []
+            # C5 #2114 (parity): REST's registry-lane resolution derives the
+            # D2 owner class (deleg NULL + scopes [] → legacy_full_access)
+            # at hosted_api.py:1560 — apikey_verify is the MCP registry lane
+            # and MUST carry the same field or the C5 scope gate 403s every
+            # tt_/legacy owner key on the selfhost MCP surface.
             return {"team_id": m["team_id"], "key_id": m["id"],
-                    "delegation_depth": m.get("delegation_depth"),
-                    "scopes": m.get("scopes") or []}
+                    "delegation_depth": delegation_depth,
+                    "scopes": scopes,
+                    "legacy_full_access": (delegation_depth is None)
+                    and (scopes == [])}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────

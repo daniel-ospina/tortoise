@@ -1,0 +1,23 @@
+{
+  "holdout": false,
+  "seed": 6,
+  "suite": "write_back",
+  "turns": [
+    {
+      "content": "The Lumen refactor keeps the module boundary we agreed \u2014 no shared mutable state across services.",
+      "role": "user"
+    },
+    {
+      "content": "Recording that as the confirmed boundary decision.",
+      "role": "assistant"
+    },
+    {
+      "content": "Test strategy is contract tests for the public seams, not end-to-end for everything.",
+      "role": "user"
+    },
+    {
+      "content": "Noted \u2014 contract-first test strategy recorded.",
+      "role": "assistant"
+    }
+  ]
+}

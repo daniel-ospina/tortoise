@@ -713,7 +713,7 @@ def commit_client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_team] = lambda: {
-            "team_id": "test-team-405", "key_id": "k", "tier": "free",
+            "team_id": "test-team-405", "key_id": "k", "legacy_full_access": True, "tier": "free",
             "max_users": 1, "max_graphs": 1, "max_points": 10000,
             "max_api_keys": 2, "max_sessions": 1000}
         # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —

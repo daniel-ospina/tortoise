@@ -25,6 +25,7 @@ DE2E suite legs owned by this slice:
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 
@@ -52,6 +53,9 @@ TEST_TEAM_ID = "team-001"  # epic #1647 (T7): a TEAM id, not a test namespace �
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
+    # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
+    # data-plane gates otherwise (mirrors the #2241 migration pattern).
+    "legacy_full_access": True,
     "tier": "free",
     # get_current_team always resolves the full limits dict — test stubs must
     # match, or fail-closed quota enforcement 500s instead of passing (#310).
@@ -237,6 +241,61 @@ def _inject_session_state(session_id: str, *, value_nodes_created: int = 0,
         q += ", s.is_episodic=$ep"
         params["ep"] = is_episodic
     _team_sdk()._get_proj().g.query(q, params=params)
+
+
+# ── #2193 Test6bEntitySupersessionGuards fixtures — the entity supersession
+# lane driven through POST /v1/sessions/commit (seeding + fold commits) ─────
+
+def _seed_objects(client, session_id: str, names: list[str]) -> None:
+    """Prior-commit seeding of LIVE Objects by name — the superseded side
+    must pre-exist the supersession commit (the commit under test only
+    carries the supersession records). The names ride payload.entities
+    (create_entity mints the canonical obj-<sha26(name)> ids); one net-new
+    point keeps the payload non-empty. Must 200 — a failed seed would
+    invalidate the guard under test."""
+    raw = _raw_payload(1, session_id=session_id, points=[
+        {"id": f"pt_{content_hash('seed:' + session_id)}",
+         "content": f"seed point {session_id}",
+         "pointKind": "decision", "reason": "NEW", "confidence": 0.9,
+         "c_cal": 0.8, "about_entities": [], "source_ref": "session.md",
+         "quote": "", "status": "live"},
+    ], entities=[
+        {"name": n, "kind": "Project", "passes_frequency_gate": True}
+        for n in names
+    ])
+    r = _commit(client, raw)
+    assert r.status_code == 200, r.text
+
+
+def _supersede_commit(client, session_id: str, ref: str, sby: str, *,
+                      evidence: str, entities: list[str] | None = None):
+    """A commit whose ONLY supersession work is one entity record (ref →
+    sby). The successor rides payload.entities when given (the step-6 entity
+    write lands it on the graph before the §6b fold) — pass [] when the
+    successor must stay OUT of the payload (dangling or already-terminal
+    successors)."""
+    raw = _raw_payload(1, session_id=session_id, points=[
+        {"id": f"pt_{content_hash('supersede:' + session_id)}",
+         "content": f"supersede point {session_id}",
+         "pointKind": "decision", "reason": "NEW", "confidence": 0.9,
+         "c_cal": 0.8, "about_entities": [], "source_ref": "session.md",
+         "quote": "", "status": "live"},
+    ], entities=[
+        {"name": n, "kind": "Project", "passes_frequency_gate": True}
+        for n in (entities or [])
+    ], supersessions=[
+        {"superseded": ref, "supersedes_by": sby, "evidence": evidence},
+    ])
+    return _commit(client, raw)
+
+
+def _object_row(name: str):
+    """Graph read of every Object carrier named *name* — (status,
+    supersededBy, id) per row. Returns ALL carriers (the duplicate-name
+    guard asserts on both)."""
+    return _team_sdk()._get_proj().g.query(
+        "MATCH (o:Object {name:$n}) RETURN o.status, o.supersededBy, o.id",
+        params={"n": name}).result_set
 
 
 # ── DE2E-2 — four-node chain + discoverability + entities + operators ──────
@@ -883,6 +942,195 @@ class TestE5PointSupersessions:
         r = _commit(client, raw)
         assert r.status_code == 200, r.text
         assert r.json()["duplicate"] is False
+
+
+class Test6bEntitySupersessionGuards:
+    """#2193 — the hosted §6b entity-supersession GUARD SET pinned through
+    POST /v1/sessions/commit (assert graph outcomes + the ObjectSuperseded
+    GraphEvent journal — NEVER response["warnings"], which is Layer-1 only
+    and carries no §6b/helper warn signal):
+
+    (a) happy-path anchor — a live target folds onto a live successor;
+    (b) keep-first — a terminal target's supersededBy never blind-overwrites;
+    (c) dedup — same-successor re-record with DIFFERENT evidence is NOT an L1
+        replay (evidence rides the supersession canonical, so the ccid
+        changes) and must journal exactly ONE ObjectSuperseded event;
+    (d) never-guess — duplicate-name carriers (incl. a raw id-less legacy
+        write) fold NEITHER;
+    (e) self-alias (canonical id → own name) stays live;
+    (f) dangling successor → target stays live;
+    (g) the GraphEvent payload is the id-style shape incl. session_id;
+    (h) existing-terminal successor → fold skipped, target stays live.
+
+    Pre-#2193 the §6b inline consumer was BLIND: (b)-(h) fail against it
+    (RED at base — the Task-2.4 commit evidence) and flip green only after
+    the shared apply_supersessions migration (Task 4).
+    """
+
+    def test_happy_path_entity_fold(self, client):
+        """(a) anchor — seed a live target; the fold commit supersedes it
+        onto a live successor (rides payload.entities): target → superseded
+        with supersededBy = the successor name; successor stays live."""
+        _seed_objects(client, "g6a-seed", ["a-old"])
+        r = _supersede_commit(client, "g6a-fold", "a-old", "a-new",
+                              evidence="entity lifecycle supersedes",
+                              entities=["a-new"])
+        assert r.status_code == 200, r.text
+        old = _object_row("a-old")
+        assert old, old
+        assert old[0][0] == "superseded", old
+        assert old[0][1] == "a-new", old
+        new = _object_row("a-new")
+        assert new and new[0][0] == "live", new
+
+    def test_divergent_successor_keep_first(self, client):
+        """(b) keep-first — after A→B folded, a record A→C must NOT clobber:
+        supersededBy STAYS B (the fold never blind-overwrites a terminal
+        target); C (written by the second commit's step 6) stays live."""
+        _seed_objects(client, "g6b-seed", ["b-old"])
+        r1 = _supersede_commit(client, "g6b-c1", "b-old", "b-succ-1",
+                               evidence="first successor wins",
+                               entities=["b-succ-1"])
+        assert r1.status_code == 200, r1.text
+        r2 = _supersede_commit(client, "g6b-c2", "b-old", "b-succ-2",
+                               evidence="divergent successor",
+                               entities=["b-succ-2"])
+        assert r2.status_code == 200, r2.text
+        old = _object_row("b-old")
+        assert old and old[0][0] == "superseded", old
+        assert old[0][1] == "b-succ-1", \
+            "terminal target must keep its FIRST successor (keep-first)"
+        succ2 = _object_row("b-succ-2")
+        assert succ2 and succ2[0][0] == "live", succ2
+
+    def test_same_successor_rededup_single_journal(self, client):
+        """(c) dedup — A→B twice with DIFFERENT evidence is NOT an L1 replay
+        (evidence is part of the supersession canonical → distinct ccids), so
+        the second fold commit really re-runs the consumer: it must dedup
+        (same-successor idempotent no-op) and journal exactly ONE
+        ObjectSuperseded GraphEvent."""
+        _seed_objects(client, "g6c-seed", ["c-old"])
+        r1 = _supersede_commit(client, "g6c-c1", "c-old", "c-new",
+                               evidence="session-1 evidence",
+                               entities=["c-new"])
+        assert r1.status_code == 200, r1.text
+        r2 = _supersede_commit(client, "g6c-c2", "c-old", "c-new",
+                               evidence="session-2 evidence (re-derived)",
+                               entities=["c-new"])
+        assert r2.status_code == 200, r2.text
+        assert r2.json()["duplicate"] is False, \
+            "different evidence must NOT replay at L1 (the ccid differs)"
+        g = _team_sdk()._get_proj().g
+        n = g.query(
+            "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) RETURN count(e)",
+        ).result_set[0][0]
+        assert n == 1, f"exactly ONE fold journal expected, got {n}"
+        old = _object_row("c-old")
+        assert old and old[0][0] == "superseded" and old[0][1] == "c-new", \
+            old
+
+    def test_duplicate_name_never_guess(self, client):
+        """(d) never-guess — TWO carriers share the ref name: the canonical
+        obj-<sha> carrier from a prior commit PLUS a raw id-less legacy write
+        (CREATE {name, status:'live'} — create_entity/commits would MERGE by
+        name and collapse the dup, making this vacuous). A name ref is
+        ambiguous → NEITHER carrier folds (both stay live)."""
+        _seed_objects(client, "g6d-seed", ["d-old", "d-new"])
+        _team_sdk()._get_proj().g.query(
+            "CREATE (o:Object {name:$n, status:'live'})",
+            params={"n": "d-old"})
+        assert len(_object_row("d-old")) == 2, \
+            "canonical + raw carriers must both be present"
+        r = _supersede_commit(client, "g6d-fold", "d-old", "d-new",
+                              evidence="ambiguous name ref",
+                              entities=[])
+        assert r.status_code == 200, r.text
+        rows = _object_row("d-old")
+        assert len(rows) == 2, rows
+        assert [row[0] for row in rows] == ["live", "live"], \
+            f"duplicate-name ref must fold NEITHER carrier: {rows!r}"
+
+    def test_self_supersession_id_name_alias_stays_live(self, client):
+        """(e) self-alias — superseded = the canonical id, supersedes_by =
+        the SAME Object's own name: every successor candidate IS the target
+        (id/name alias) → skip; the Object stays live (a self-fold would
+        erase it from recall's default view)."""
+        _seed_objects(client, "g6e-seed", ["e-old"])
+        oid = _object_row("e-old")[0][2]
+        assert oid and oid.startswith("obj-"), oid
+        r = _supersede_commit(client, "g6e-fold", oid, "e-old",
+                              evidence="self-reference via id/name alias",
+                              entities=[])
+        assert r.status_code == 200, r.text
+        old = _object_row("e-old")
+        assert old and old[0][0] == "live", \
+            f"self-supersession must NOT fold the target: {old!r}"
+
+    def test_dangling_successor_skipped(self, client):
+        """(f) dangling successor — the claimed successor was never written
+        (not in the payload, not in the graph): folding would leave NO
+        visible successor for recall → the target stays live (skip)."""
+        _seed_objects(client, "g6f-seed", ["f-old"])
+        r = _supersede_commit(client, "g6f-fold", "f-old", "f-missing",
+                              evidence="dangling successor",
+                              entities=[])
+        assert r.status_code == 200, r.text
+        old = _object_row("f-old")
+        assert old and old[0][0] == "live", \
+            f"dangling successor must NOT fold the target: {old!r}"
+
+    def test_entity_fold_journals_session_id_in_graph_event(self, client):
+        """(g) C2 journaling — the ObjectSuperseded GraphEvent payload is the
+        id-style shape {id, name, supersedes_by, session_id, evidence} (full
+        provenance); session_id == the committing session. Pre-#2193 §6b
+        emitted a positional payload WITHOUT session_id (the phase-2 C2 gap)
+        — this fails at base on the KEYSET (4 keys, no session_id), not a
+        KeyError."""
+        _seed_objects(client, "g6g-seed", ["g-old"])
+        sess = "g6g-commit"
+        r = _supersede_commit(client, sess, "g-old", "g-new",
+                              evidence="fold evidence string",
+                              entities=["g-new"])
+        assert r.status_code == 200, r.text
+        g = _team_sdk()._get_proj().g
+        events = g.query(
+            "MATCH (e:GraphEvent {type:'ObjectSuperseded'}) "
+            "RETURN e.payload ORDER BY e.seq",
+        ).result_set
+        assert len(events) == 1, events
+        payload = json.loads(events[0][0])
+        assert set(payload) == {"id", "name", "supersedes_by",
+                                "session_id", "evidence"}, \
+            f"id-style payload keyset expected (5 keys incl. session_id), " \
+            f"got {sorted(payload)}"
+        assert payload["session_id"] == sess, payload
+        assert payload["name"] == "g-old", payload
+        assert payload["supersedes_by"] == "g-new", payload
+        assert payload["evidence"] == "fold evidence string", payload
+        oid = _object_row("g-old")[0][2]
+        assert payload["id"] == oid, payload
+
+    def test_existing_terminal_successor_skips_fold(self, client):
+        """(h) visible-successor gate — after B→C folded (B terminal), a
+        record A→B must NOT fold A: the only successor candidate under that
+        name is terminal (recall-excluded) → no visible successor exists →
+        A STAYS LIVE (B stays terminal, C stays live)."""
+        _seed_objects(client, "g6h-seed", ["h-a", "h-b", "h-c"])
+        r1 = _supersede_commit(client, "g6h-c1", "h-b", "h-c",
+                               evidence="fold b onto c",
+                               entities=["h-c"])
+        assert r1.status_code == 200, r1.text
+        r2 = _supersede_commit(client, "g6h-c2", "h-a", "h-b",
+                               evidence="record a onto terminal b",
+                               entities=[])
+        assert r2.status_code == 200, r2.text
+        a = _object_row("h-a")
+        assert a and a[0][0] == "live", \
+            f"fold onto a terminal successor must be SKIPPED: {a!r}"
+        b = _object_row("h-b")
+        assert b and b[0][0] == "superseded" and b[0][1] == "h-c", b
+        c = _object_row("h-c")
+        assert c and c[0][0] == "live", c
 
 
 class TestBudgetDE2E7:

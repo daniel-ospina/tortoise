@@ -64,3 +64,4 @@ battery-out/
 # files are gitignored; the directory convention (.gitkeep) is committed.
 data/kind_index/*
 !data/kind_index/.gitkeep
+.venv

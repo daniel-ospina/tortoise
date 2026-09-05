@@ -1,0 +1,14 @@
+{
+  "continuity": {
+    "reader_planted": [
+      "uses the internal queue, not Kafka"
+    ],
+    "reader_queries": [
+      "What queue does Orion use?"
+    ],
+    "writer_session": "iso_cw_a_writer_orion"
+  },
+  "schema_version": 1,
+  "session_id": "iso_cw_a_writer_orion",
+  "suite": "continuity"
+}

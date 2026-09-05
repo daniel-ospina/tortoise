@@ -1,0 +1,23 @@
+{
+  "holdout": false,
+  "seed": 4,
+  "suite": "push",
+  "turns": [
+    {
+      "content": "I'm about to talk to the Ember design team. What did we decide about the onboarding flow?",
+      "role": "user"
+    },
+    {
+      "content": "Let me check the design notes.",
+      "role": "assistant"
+    },
+    {
+      "content": "Specifically the three-step flow and the consent copy.",
+      "role": "user"
+    },
+    {
+      "content": "On it.",
+      "role": "assistant"
+    }
+  ]
+}

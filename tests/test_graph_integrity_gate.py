@@ -959,6 +959,33 @@ def test_legs_degraded_below_floor_is_observable():
     assert any(name == "fts" for name, _ in _legs_degraded(out, "single-session-user"))
 
 
+def test_legs_degraded_structural_empty_by_design_deterministic_ingest():
+    # #2105 W7: deterministic ingest writes no statement
+    # (EXTRACTION_POINT_KIND) points — the structural leg's kind-filtered
+    # scan is EMPTY BY DESIGN on every deterministic outcome (empty_results
+    # / count 0 = the graph's shape, never a dead backend). The exemption
+    # must not launder a real driver failure: a structural timeout stays
+    # degraded in deterministic mode too, and v2-mode empty scans stay armed.
+    det_out = {"legs": [
+        {"leg": "fts", "reason": "ok", "count": 25},
+        {"leg": "vector", "reason": "ok", "count": 240},
+        {"leg": "structural", "reason": "empty_results", "count": 0},
+    ]}
+    assert _legs_degraded(
+        det_out, "single-session-user",
+        structural_empty_by_design=True) == []
+    # a structural TIMEOUT is a real driver failure — still degraded
+    det_timeout = {"legs": [
+        {"leg": "structural", "reason": "timeout", "count": 0}]}
+    assert any(name == "structural" for name, _ in _legs_degraded(
+        det_timeout, "single-session-user",
+        structural_empty_by_design=True))
+    # without the exemption (v2/extraction graphs — statement points
+    # exist), an empty structural scan is a genuine signal
+    assert any(name == "structural" for name, _ in _legs_degraded(
+        det_out, "single-session-user"))
+
+
 def test_gate_red_union():
     out = {"gate_reasons": ["graph_truncated"],
            "post_retrieval_reasons": []}

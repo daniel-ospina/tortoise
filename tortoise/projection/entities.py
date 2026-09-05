@@ -367,7 +367,7 @@ class _EntityHandlers:
             ev, self._OBJECT_HANDLED,
         )
 
-    def _fold_object_superseded(self, ev: dict) -> None:
+    def _fold_object_superseded(self, ev: dict) -> int:
         """#1350: fold an ObjectSuperseded event into Object.status.
 
         Projection-owned cache of the event stream (§11 'derived values may
@@ -375,25 +375,70 @@ class _EntityHandlers:
         the successor name + timestamp. Idempotent (a replayed/duplicate
         event re-applies the same SET); a chain A→B→C leaves A superseded by
         B and B superseded by C (each event folds its own target).
+
+        #2164 (Task 2): returns the MATCHED-ROW count (additive fold-miss
+        signal) — 1 = the target Object was found and folded, 0 = no Object
+        matched (missing Object / stale id) or no id+name was supplied. The
+        SET…RETURN form yields a row only when the MATCH bound a node, so
+        the return value makes a fold-miss distinguishable from a successful
+        fold without a separate existence pre-query.
+
+        #2164 review (ISSUE B): when the event carries a truthy id whose
+        id-branch MATCH misses (the node carries no such id — e.g. a legacy
+        id-less Object folded by name at live-write time but journaled with a
+        synthesized canonical id), the fold FALLS BACK to the name branch
+        below (only when a name is present — never for id-only/legacy §6b
+        shapes, which still no-op on an id miss).
         """
         oid = ev.get("id")
         name = ev.get("name")
         if not oid and not name:
-            return
+            return 0
         supersedes_by = str(ev.get("supersedes_by") or "")[:200]
-        now = _now_iso()
+        # #2164 final-review P4: prefer the journaled event's ORIGINAL ts —
+        # rebuild pass-1b replays the raw journaled event (sdk._emit_event
+        # stamps ts on the JSONL line) — without this a JSONL wipe+rebuild
+        # drifted supersededAt to rebuild time. Live callers (apply_super-
+        # sessions' fold_ev carries no ts) fall back to now.
+        superseded_at = ev.get("ts") or _now_iso()
         if oid:
-            self.g.query(
+            result = self.g.query(
                 "MATCH (o:Object {id:$id}) "
                 "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$now",
-                params={"id": oid, "sb": supersedes_by, "now": now})
+                "    o.supersededAt=$sa "
+                "RETURN o.id LIMIT 1",
+                params={"id": oid, "sb": supersedes_by, "sa": superseded_at})
+            if not result.result_set and name:
+                # #2164 review (P2, ISSUE B): the id branch matched NOTHING
+                # — the event's id is not the key the node carries. For a
+                # legacy id-less Object (raw-created before canonical
+                # obj-<sha26(name)> minting; its journal registration
+                # predates canonical ids) apply_supersessions emits the
+                # SYNTHESIZED canonical id (sdk._entity_name_id) while the
+                # node itself has NO id property (or a pre-canonical
+                # registration id) — a JSONL wipe+rebuild replay selected
+                # the id branch (oid truthy) and silently no-op'd (0 rows),
+                # reverting the Object to status='live'. Fall back to the
+                # name branch — the same name-keyed fold the live path uses
+                # (fold_ev with no id). A name uniquely identifies one
+                # Object (MERGE-by-name), so a same-name fold after an
+                # id-miss is unambiguous; an absent name still no-ops.
+                result = self.g.query(
+                    "MATCH (o:Object {name:$name}) "
+                    "SET o.status='superseded', o.supersededBy=$sb, "
+                    "    o.supersededAt=$sa "
+                    "RETURN o.id LIMIT 1",
+                    params={"name": name, "sb": supersedes_by,
+                            "sa": superseded_at})
         else:
-            self.g.query(
+            result = self.g.query(
                 "MATCH (o:Object {name:$name}) "
                 "SET o.status='superseded', o.supersededBy=$sb, "
-                "    o.supersededAt=$now",
-                params={"name": name, "sb": supersedes_by, "now": now})
+                "    o.supersededAt=$sa "
+                "RETURN o.id LIMIT 1",
+                params={"name": name, "sb": supersedes_by,
+                        "sa": superseded_at})
+        return len(result.result_set)
 
     def _upsert_document(self, ev: dict) -> None:
         """MERGE Document node."""
@@ -644,14 +689,25 @@ class _EntityHandlers:
         # #1725: `github.issue.reopened` folds back to in_progress — a reopen
         # is a lifecycle Event whose ONLY projection is Object.status (the
         # indexer's decision table: lifecycle never mutates statement points).
+        # M3-P1 guard (#2164): the fold MATCHes only non-superseded Objects —
+        # a dual-tracked Object (connector work item conversationally
+        # superseded via the capture fold) must NOT be silently resurrected
+        # into recall_state's default view by a later connector lifecycle
+        # event. Aligns with the #1350 clobber doctrine (a re-mention cannot
+        # reset superseded→live). Live Objects (status IS NULL or <>'superseded')
+        # still fold normally.
         if _obj_name and _wk in ("pm:cardCreated", "github.issue.open",
                                  "github.issue.reopened"):
             self.g.query(
-                "MATCH (o:Object {name:$n}) SET o.status='in_progress'",
+                "MATCH (o:Object {name:$n}) "
+                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "SET o.status='in_progress'",
                 params={"n": _obj_name})
         elif _obj_name and _wk in ("pm:cardCompleted", "github.issue.closed"):
             self.g.query(
-                "MATCH (o:Object {name:$n}) SET o.status='completed'",
+                "MATCH (o:Object {name:$n}) "
+                "WHERE (o.status IS NULL OR o.status <> 'superseded') "
+                "SET o.status='completed'",
                 params={"n": _obj_name})
         # Event -[:uses]-> Object (input entities, #122; #125 structured dicts)
         uses = inner.get("uses")

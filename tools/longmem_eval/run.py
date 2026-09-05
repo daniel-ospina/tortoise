@@ -70,6 +70,7 @@ from tortoise.shared_state.concurrency import flock_exclusive
 from ..embedder_probe import DEFAULT_MODEL_ID, PROBE_MODELS, inject_model
 from . import dataset as ds
 from . import encode_cache
+from . import usage as lme_usage
 from .dataset_audit import audit_dataset
 from .errors import (
     INGEST_QUESTION_RETRIES,
@@ -786,7 +787,8 @@ def _retry_failed_gate_ok(entry: dict) -> bool:
 
 
 def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
-                   stage: str, attempts: int, prior: dict | None = None) -> dict:
+                   stage: str, attempts: int, prior: dict | None = None,
+                   usage: dict | None = None) -> dict:
     """Build a persisted failure entry (Task 1 Step 4 schema). The handler
     must UNWRAP the sentinel BEFORE calling this — ``error``/``error_class``/
     ``retryable`` are derived from the INNER exception, never the sentinel.
@@ -804,7 +806,7 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
     err = repr(exc)
     if len(err) > ERROR_REPR_CAP:
         err = err[:ERROR_REPR_CAP] + "…<truncated>"
-    return {
+    entry = {
         "question_id": qid,
         "question_type": question_type,
         "error": err,
@@ -814,11 +816,19 @@ def _failure_entry(qid: str, question_type: str, exc: BaseException, *,
         "failed_at_utc": _utc_now().isoformat(),
         "in_progress": None,
     }
+    # #2185: the qid's CUMULATIVE usage envelope rides the failure entry as
+    # the kill-9-safe replica — present ONLY when an LLM was actually
+    # called (the A4 load fold reads it; mock/failed-early runs stay
+    # byte-unchanged).
+    if usage is not None:
+        entry["usage"] = usage
+    return entry
 
 
 def _build_failure_entry(qid: str, question_type: str, exc: BaseException,
                          stage: str, r2_attempted: int,
-                         resume_reattempt: bool, prior: dict | None) -> dict:
+                         resume_reattempt: bool, prior: dict | None,
+                         *, usage_env: dict | None = None) -> dict:
     """The run-loop failure-entry builder (module-level — B023-clean so the
     per-question loop can pass it via ``functools.partial``). Counter
     semantics (P1-6): the in-run R2 increments the persisted counter (an
@@ -831,7 +841,8 @@ def _build_failure_entry(qid: str, question_type: str, exc: BaseException,
                 if not resume_reattempt
                 else (int((prior or {}).get("attempts", 0) or 0) + 1))
     return _failure_entry(qid, question_type, exc, stage=stage,
-                          attempts=attempts, prior=prior)
+                          attempts=attempts, prior=prior,
+                          usage=usage_env)
 
 
 def _claim_reattempt(checkpoint: str | None, qid: str, cap: int, *,
@@ -1432,7 +1443,8 @@ def _leg_entry_dead(entry: dict, *, floors: dict[str, int] | None = None) -> boo
 
 
 def _legs_degraded(outcome: dict, question_type: str = "", *,
-                   floors: dict[str, int] | None = None) -> list[tuple[str, list]]:
+                   floors: dict[str, int] | None = None,
+                   structural_empty_by_design: bool = False) -> list[tuple[str, list]]:
     """Degraded (non-by-design) legs of an outcome, per the conservative
     leg-health predicate (#1785). Returns ``[]`` for a healthy outcome.
 
@@ -1443,6 +1455,17 @@ def _legs_degraded(outcome: dict, question_type: str = "", *,
     entries dead on a TR question). Legless outcomes (vector-arm /
     retrieval-only — no ``legs`` key) are exempt (healthy-vacuous, never a
     KeyError), consistent with the ``retrieval_only`` exemption.
+
+    ``structural_empty_by_design`` (#2105 W7): deterministic-ingest runs
+    write NO ``statement`` (``EXTRACTION_POINT_KIND``) points — the
+    structural leg (``retrieve.py``: kind-filtered scan on
+    ``EXTRACTION_POINT_KIND``, R4 #1543) is therefore EMPTY BY DESIGN on
+    every deterministic outcome: ``empty_results`` with ``count == 0`` is
+    the graph's shape, never a dead backend. The exemption is scoped to
+    the by-design empty shape ONLY — a structural ``timeout`` /
+    ``query_failed`` on a deterministic run still degrades (a real driver
+    failure must never be laundered by the mode). The FTS + vector legs
+    stay fully armed in both ingest modes.
     """
     legs = outcome.get("legs")
     if not isinstance(legs, list):
@@ -1459,6 +1482,13 @@ def _legs_degraded(outcome: dict, question_type: str = "", *,
                 degraded.append((name, entries))
             continue
         for entry in entries:
+            if (structural_empty_by_design and name == "structural"
+                    and entry.get("reason") == "empty_results"
+                    and entry.get("count", 0) == 0):
+                # deterministic graphs hold no statement points — the
+                # kind-filtered structural scan is empty BY DESIGN (the
+                # graph's shape, not a dead backend); see the docstring.
+                continue
             if _leg_entry_dead(entry, floors=floors):
                 degraded.append((name, [entry]))
     return degraded
@@ -1723,7 +1753,8 @@ def _load_checkpoint(path: str | None,
                      expected_fingerprint: dict | None = None,
                      *, run_key: str | None = None,
                      retriever: str = "hybrid",
-                     retry_failed: bool = False
+                     retry_failed: bool = False,
+                     fold_usage: bool = False
                      ) -> tuple[dict[str, dict], list[dict]]:
     """Load (completed-by-qid, failures) from the checkpoint state file.
 
@@ -1958,7 +1989,34 @@ def _load_checkpoint(path: str | None,
                     print(f"[longmem_eval] WARNING: --retry-failed skips "
                           f"{f.get('question_id')!r}: {reason}",
                           file=sys.stderr)
+    # #2185 (A4): the kill-9 read-back. The collector starts EMPTY in a
+    # fresh process — fold the checkpoint's ``usage_overhead`` snapshot and
+    # then reconcile every record that carries a usage replica (failure
+    # entries + breaker-open outcomes) so the resumed report's overhead
+    # section shows the FULL historical spend. Shortfall-only per bucket
+    # (never the overlap) — idempotent on resume.
+    if fold_usage:
+        _fold_checkpoint_usage(data, outcomes, failures)
     return outcomes, failures
+
+
+def _fold_checkpoint_usage(data: dict, outcomes: dict[str, dict],
+                           failures: list[dict]) -> None:
+    """A4 kill-9-window read-back for #2185 — see _load_checkpoint."""
+    collector = lme_usage.get_collector()
+    payload = data.get("usage_overhead")
+    if isinstance(payload, dict) and payload:
+        collector.merge_overhead_payload(payload)
+    for o in outcomes.values():
+        if not o.get("breaker_open"):
+            continue
+        rep = o.get("usage")
+        if isinstance(rep, dict) and isinstance(rep.get("by_stage"), dict):
+            collector.fold_replica(o["question_id"], rep["by_stage"])
+    for f in failures:
+        rep = f.get("usage")
+        if isinstance(rep, dict) and isinstance(rep.get("by_stage"), dict):
+            collector.fold_replica(f["question_id"], rep["by_stage"])
 
 
 def _validate_failures_schema(failures_raw: Any, *, checkpoint: Path) -> list[dict]:
@@ -2085,7 +2143,8 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
                      prompt: str | None = None,
                      remove_failures: list[str] | None = None,
                      degraded_aborted: dict | None = None,
-                     checkpoint_abort: dict | None = None) -> None:
+                     checkpoint_abort: dict | None = None,
+                     usage_overhead: dict | None = None) -> None:
     """Atomically persist partial results after each question (resume).
 
     M7 (#1527, D7/D8): writes the code fingerprint; the write happens under
@@ -2117,7 +2176,8 @@ def _save_checkpoint(path: str | None, outcomes: list[dict],
             run_key=run_key, surface=surface, retriever=retriever,
             model=model, prompt=prompt,
             degraded_aborted=degraded_aborted,
-            checkpoint_abort=checkpoint_abort)
+            checkpoint_abort=checkpoint_abort,
+            usage_overhead=usage_overhead)
 
 
 def _write_checkpoint_locked(
@@ -2126,7 +2186,8 @@ def _write_checkpoint_locked(
         surface: str | None = None, retriever: str | None = None,
         model: str | None = None, prompt: str | None = None,
         degraded_aborted: dict | None = None,
-        checkpoint_abort: dict | None = None) -> None:
+        checkpoint_abort: dict | None = None,
+        usage_overhead: dict | None = None) -> None:
     """Inline atomic checkpoint write (tmp + ``os.replace``) for callers
     ALREADY holding the checkpoint flock (P2-1 flock-reentrancy pin: never
     call ``_save_checkpoint`` from inside a held flock — the nested
@@ -2151,6 +2212,12 @@ def _write_checkpoint_locked(
         payload["degraded_aborted"] = degraded_aborted
     if checkpoint_abort is not None:
         payload["checkpoint_abort"] = checkpoint_abort
+    # #2185: the collector's overhead snapshot (keyless/preflight rows +
+    # moved failed/breaker qids) rides the checkpoint — present only when
+    # non-empty (pre-change and mock checkpoints stay byte-identical). The
+    # keyless sentinel is spelled ``__preflight__`` here (load normalizes).
+    if usage_overhead:
+        payload["usage_overhead"] = usage_overhead
     _write_json_atomic(p, payload)
 
 
@@ -2532,7 +2599,8 @@ def _save_checkpoint_safe(path: str | None, outcomes: list[dict],
                           prompt: str | None = None,
                           remove_failures: list[str] | None = None,
                           degraded_aborted: dict | None = None,
-                          checkpoint_abort: dict | None = None) -> None:
+                          checkpoint_abort: dict | None = None,
+                          usage_overhead: dict | None = None) -> None:
     """_save_checkpoint with retry-N-with-backoff; on exhaustion raises
     CheckpointPersistError (never a bare traceback; the run-level marker
     is recorded on the checkpoint so a resume refuses it — Task 2)."""
@@ -2544,7 +2612,8 @@ def _save_checkpoint_safe(path: str | None, outcomes: list[dict],
                 surface=surface, retriever=retriever, model=model,
                 prompt=prompt, remove_failures=remove_failures,
                 degraded_aborted=degraded_aborted,
-                checkpoint_abort=checkpoint_abort)
+                checkpoint_abort=checkpoint_abort,
+                usage_overhead=usage_overhead)
             return
         except Exception as e:  # noqa: BLE001, RUF100
             attempt += 1
@@ -3163,7 +3232,13 @@ def run_evaluation(
     done, prior_failures = _load_checkpoint(checkpoint, fingerprint,
                                             run_key=run_key,
                                             retriever=retriever,
-                                            retry_failed=retry_failed)
+                                            retry_failed=retry_failed,
+                                            # #2185 (A4): fold the
+                                            # checkpoint's usage payload +
+                                            # kill-9 replicas into the
+                                            # collector (empty in a fresh
+                                            # process) before the loop runs.
+                                            fold_usage=True)
     outcomes: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = list(prior_failures)
     # #1785 (Task 1 Step 2): FRESH vs RESUME — the ratio denominator is only
@@ -3270,6 +3345,12 @@ def run_evaluation(
                 resume_reattempt = True
                 print(f"  [resume] {qid} re-attempting transient failure "
                       f"(--retry-failed)", file=sys.stderr)
+            # #2185: bind the question key so every sink row fired below
+            # (reader/judge calls + the extractor daemon threads via
+            # copy_context) buckets under THIS qid. Set AFTER the resume
+            # early-returns — a skipped qid never fires an LLM call here and
+            # must not accumulate rows.
+            lme_usage.set_question_key(qid)
             while True:
                 try:
                     namespace = (question_graph_namespace(
@@ -3656,6 +3737,19 @@ def run_evaluation(
                         "ingest_retries": ingest_stats.get("ingest_retries", 0),
                         "whole_question_retries": r2_attempted,
                     }
+                    # #2185: drain the qid's CUMULATIVE usage envelope — the
+                    # outcome carries ``llm_usage`` ONLY when an LLM was
+                    # actually called this run (mock/retrieval-only outcomes
+                    # stay byte-identical, 16-key set).
+                    _usage_env = lme_usage.get_collector().drain_question(qid)
+                    if _usage_env is not None:
+                        outcome["llm_usage"] = _usage_env
+                    # round-2 code-review P2: unbind the question key once
+                    # the qid's drains complete — a later MAIN-THREAD straggler
+                    # call (end-of-run checks) must land under __no_key__
+                    # overhead, never on the last question's evidence bucket.
+                    # (Daemon late-fires keep their copy_context snapshot.)
+                    lme_usage.clear_question_key()
                     with _lock:
                         outcomes.append(outcome)
                         done[qid] = outcome
@@ -3676,7 +3770,13 @@ def run_evaluation(
                         and leg.get("reason") == "timeout"
                         for leg in (outcome.get("legs") or []))
                     _leg_sigs = _legs_degraded(
-                        outcome, question.get("question_type", ""))
+                        outcome, question.get("question_type", ""),
+                        # #2105 W7: deterministic ingest writes no
+                        # statement points — the structural leg's empty
+                        # scan is by-design (see _legs_degraded); v2 stays
+                        # fully armed.
+                        structural_empty_by_design=(
+                            ingest_mode == "deterministic"))
                     _dead_sigs = [name for name, entries in _leg_sigs
                                   if any(e.get("reason") in ("timeout", "query_failed")
                                          or (e.get("reason") == "empty_results"
@@ -3731,6 +3831,15 @@ def run_evaluation(
                         }
                         outcomes.append(dropped_outcome)
                         done[qid] = dropped_outcome
+                        # #2185: breaker-open spend is OVERHEAD (Am 20/24) —
+                        # drained into the collector's overhead store; the
+                        # returned envelope rides the dropped outcome as a
+                        # kill-9-safe replica (the load-time A4 fold
+                        # reconstructs it for a resumed report).
+                        _usage_env = lme_usage.get_collector().drain_to_overhead(qid)
+                        if _usage_env is not None:
+                            dropped_outcome["usage"] = _usage_env
+                        lme_usage.clear_question_key()
                         if resume_reattempt:
                             # #1786 (review P2): a --retry-failed re-attempt
                             # that ends breaker-open must NOT leave the
@@ -3827,6 +3936,15 @@ def run_evaluation(
                         tier_exc = inner
                         entry_stage = _stage
 
+                    # #2185: drain the qid's CUMULATIVE usage (rows
+                    # accumulate across the whole-question retry ``continue``s
+                    # and are drained ONCE at the terminal failure) into the
+                    # overhead store. The returned envelope rides the failure
+                    # entry as the kill-9-safe replica — the A4 load fold
+                    # reconstructs the spend when the checkpoint save lost it.
+                    _usage_env = lme_usage.get_collector().drain_to_overhead(qid)
+                    lme_usage.clear_question_key()
+
                     with _lock:
                         # Counter semantics (P1-6): the in-run R2 DOES
                         # increment the persisted counter (R2-exhausted
@@ -3841,7 +3959,7 @@ def run_evaluation(
                             partial(_build_failure_entry, qid,
                                     question.get("question_type", ""),
                                     tier_exc, entry_stage, r2_attempted,
-                                    resume_reattempt),
+                                    resume_reattempt, usage_env=_usage_env),
                             fingerprint=fingerprint, run_key=run_key,
                             surface=surface, retriever=retriever,
                             model=model, prompt=query_prompt)
@@ -3869,7 +3987,12 @@ def run_evaluation(
                 checkpoint, list(done.values()), failures, fingerprint,
                 run_key=run_key, surface=surface, retriever=retriever,
                 model=model, prompt=query_prompt,
-                remove_failures=_save_remove_failures)
+                remove_failures=_save_remove_failures,
+                # #2185: the collector's overhead snapshot (keyless rows +
+                # moved failed/breaker qids) rides every per-question save —
+                # killed mid-run, a resume reconstructs the exact spend.
+                usage_overhead=lme_usage.get_collector().overhead_payload(
+                    checkpoint_form=True))
 
     # ── dispatch: sequential (workers=1) or a thread pool ──
     # #1785: the run's own live marker is written per-question namespace at
@@ -3926,12 +4049,30 @@ def run_evaluation(
                     work_dir, question_graph_namespace(
                         model, query_prompt, question["question_id"]))
 
+    # #2185 (Task 6): end-of-run overhead drain — spend that was NOT
+    # drained onto an outcome (residual late daemon sink fires after their
+    # question's drain, keyless/preflight rows, breaker-open + failed
+    # question moves) is swept into the overhead envelope handed to the
+    # report builder. Never double-counted: per-question usage lives on the
+    # outcomes; failure-entry / breaker-outcome replicas are NOT re-summed
+    # here (the A4 load fold reconstructed them into the collector at
+    # resume; on a fresh run the runtime move already parked them there).
+    usage_overhead: dict | None = None
+    try:
+        lme_usage.get_collector().sweep_to_overhead()
+        usage_overhead = lme_usage.get_collector().drain_overhead()
+    except Exception:
+        usage_overhead = None
+
     return outcomes, outcomes_to_report(
         outcomes,
         # #1349 vector arm: retriever/model/query_prompt/mode/run_key.
         retriever=retriever, model=model, query_prompt=query_prompt,
         retrieval_only=retrieval_only, surface=surface, run_key=run_key,
         revalidate=revalidate,
+        # #2185 (Task 6): the drained overhead envelope (None on
+        # usage-free runs keeps the report byte-identical).
+        usage_overhead=usage_overhead,
         reader_model=(reader.model_id if reader is not None
                       else "n/a (retrieval-only)"),
         reader_model_spec=getattr(reader, "model_spec", "") if reader else "",
@@ -4025,6 +4166,15 @@ _BUILD_REPORT_REVALIDATE_OK: frozenset[str] = frozenset(
     if getattr(build_report, "__code__", None) is not None else ())
 
 
+#: #2185 (Task 6): build_report's ``usage_overhead`` param presence — same
+#: guard rationale as _BUILD_REPORT_REVALIDATE_OK (the #2185 run.py/report.py
+#: edits land in one PR, but the guard keeps either merge order green if the
+#: parallel file drifts).
+_BUILD_REPORT_USAGE_OK: frozenset[str] = frozenset(
+    getattr(build_report, "__code__", None).co_varnames
+    if getattr(build_report, "__code__", None) is not None else ())
+
+
 def outcomes_to_report(
     outcomes: list[dict[str, Any]],
     *,
@@ -4075,6 +4225,10 @@ def outcomes_to_report(
     python_version: str = "",
     workers: int = 1,
     dataset_fingerprint: str = "unknown",
+    # #2185 (Task 6): the drained collector overhead envelope — forwarded to
+    # build_report's conditional usage block (breaker-open + failed +
+    # preflight spend; None on mock/usage-free runs → no new report keys).
+    usage_overhead: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Aggregate outcomes (programmatic entry used by tests too).
 
@@ -4156,6 +4310,13 @@ def outcomes_to_report(
                   **({"rerank_pass": o["rerank_pass"],
                       "rerank_latency_ms": o.get("rerank_latency_ms", 0.0)}
                      if o.get("rerank_pass") is not None else {}),
+                  # #2185 (Task 6): the per-question LLM usage envelope is
+                  # projected ONLY when the outcome carries it (conditional
+                  # rerank_pass pattern — mock/pre-seam outcomes NEVER gain
+                  # a null llm_usage key; the published report stays
+                  # byte-compatible with pre-#2185 consumers).
+                  **({"llm_usage": o["llm_usage"]}
+                     if o.get("llm_usage") is not None else {}),
                   # #1747 (round-17 code review): breaker_open outcomes are
                   # published with the SAME no-error-signal shape the grader
                   # consumed — the runner's raw dropped outcome (run.py
@@ -4237,6 +4398,11 @@ def outcomes_to_report(
         # file adds ``revalidate: bool = False``).
         **({"revalidate": revalidate}
            if "revalidate" in _BUILD_REPORT_REVALIDATE_OK else {}),
+        # #2185 (Task 6): the drained collector overhead envelope feeds the
+        # conditional usage block (same-PR param — direct forward; None on
+        # usage-free runs keeps the mock report byte-identical).
+        **({"usage_overhead": usage_overhead}
+           if "usage_overhead" in _BUILD_REPORT_USAGE_OK else {}),
     )
 
 
@@ -5096,6 +5262,23 @@ def _run_main(parser: argparse.ArgumentParser, args,
              _sw_pinned_id) = _session_worker_spec_tuning(args.extractor_model)
         extractor_model = _build_cli_extractor_model(
             spec=args.extractor_model, session_workers=args.session_workers)
+
+    # #2185 (A2): bind the run-level usage collector BEFORE preflight — the
+    # reader/judge/extractor sinks record from here on; every preflight ping
+    # lands as keyless overhead (never evidence). ``reset()`` guards an
+    # in-process double run (Am 19). attach() no-ops on mocks (no
+    # complete()-bearing member) so --mock runs emit ZERO usage rows — the
+    # byte-identical-report contract.
+    _collector = lme_usage.get_collector()
+    _collector.reset()
+    if reader is not None:
+        _collector.attach(getattr(reader, "_model", None), stage="reader",
+                          provider=getattr(reader, "provider", None))
+    if judge is not None:
+        _collector.attach(getattr(judge, "_model", None), stage="judge",
+                          provider=getattr(judge, "provider", None))
+    if extractor_model is not None:
+        _collector.attach(extractor_model, stage="ingest", provider=None)
 
     # M7 #1739 / review #1742 (resource lifecycle): the run-level
     # extractor_model (built above) is closed on EVERY exit path via the
