@@ -299,6 +299,109 @@ async def dream(full: bool = False, mode: str | None = None,
         raise HTTPException(status_code=500, detail="Internal error")  # noqa: B904
 
 
+# ── POST /v1/context — phase-1 volunteering-memory delivery (#2103, D1) ─
+# SELF-HOST parity: the SAME canonical pipeline the SDK method and the hosted
+# endpoint call (TortoiseSDK.volunteer_context → tortoise/volunteer.py) served
+# by the self-host container's own REST router. Single-tenant: the selfhost
+# namespace graph, static/none auth_mode via the shared _require_key
+# dependency. Request/response shape §3.2 — byte-contract-identical to hosted.
+
+
+class _VolunteerTurn(BaseModel):
+    role: str = Field(...)
+    content: str = Field(..., max_length=20000)
+
+    @field_validator("role")
+    @classmethod
+    def _valid_role(cls, v: str) -> str:
+        if v not in ("user", "assistant", "system"):
+            raise ValueError("role must be user|assistant|system")
+        return v
+
+
+class VolunteerContextRequest(BaseModel):
+    window: list[_VolunteerTurn] = Field(...)
+    session_id: str | None = Field(None, max_length=256)
+    prior_context: str | None = Field(None, max_length=20000)
+    min_confidence: float = Field(0.7, ge=0.0, le=1.0)
+    max_pointers: int = Field(3, ge=1, le=5)
+    why: bool = True
+
+
+@router.post("/context", dependencies=[Depends(_require_key)])
+async def volunteer_context(body: VolunteerContextRequest):
+    """Volunteer memory context for a turn window (self-host leg of #2103).
+
+    One code path with SDK ``volunteer_context()`` (shared canonical
+    pipeline) — the container serves the same contract as hosted. 422 on
+    out-of-contract windows; fail-open content: retrieval/assembly errors
+    degrade to the empty block + degraded_reason (never 503 on the read
+    path — zero-LLM). The pipeline is CPU/DB-blocking, so it runs off the
+    event loop (#1676) under a HARD ceiling (8 × SLO) — a pathological read
+    degrades to ``timeout`` instead of stalling every other request on the
+    daemon (SLO/parity with the hosted wrapper). NOT the session-start
+    digest of any GET.
+    """
+    import asyncio as _asyncio
+
+    from tortoise.volunteer import (
+        SLO_MS,
+        VolunteerValidationError,
+        degraded_response,
+        validate_request,
+    )
+
+    window = [t.model_dump() for t in body.window]
+    try:
+        validate_request(
+            window, session_id=body.session_id,
+            prior_context=body.prior_context,
+            min_confidence=body.min_confidence,
+            max_pointers=body.max_pointers, why=body.why,
+        )
+    except VolunteerValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+    sdk = _sdk()
+    completed = False
+    try:
+        result = await _asyncio.wait_for(
+            _asyncio.to_thread(
+                sdk.volunteer_context,
+                window, body.session_id, body.prior_context,
+                body.min_confidence, body.max_pointers, body.why,
+            ),
+            timeout=SLO_MS * 8 / 1000.0,
+        )
+        completed = True
+    except TimeoutError:
+        # Hard ceiling breached → fail-open degraded timeout (never 503, and
+        # never a hung caller). The worker thread may still be running
+        # (wait_for cancels the await, not the thread) — leave the SDK open
+        # for it (read-only work), never close under it.
+        _logger.warning("selfhost volunteer_context ceiling breached → timeout")
+        return degraded_response("timeout")
+    except VolunteerValidationError as e:
+        # SDK-side validation parity (same rules — should not fire after the
+        # handler check; kept for the SDK-first contract).
+        sdk.close()
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+    except Exception:
+        # Fail-open content: never 503 on the zero-LLM read path.
+        _logger.exception("selfhost volunteer_context degraded")
+        sdk.close()
+        return degraded_response("assembly_error")
+    finally:
+        if completed:
+            sdk.close()
+    return result
+
+
 @router.post("/ask", dependencies=[Depends(_require_key)])
 async def ask_question(body: AskRequest):
     """Self-host answer surface — REST parity with hosted /v1/ask (#1987

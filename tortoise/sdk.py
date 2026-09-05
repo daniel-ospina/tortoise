@@ -11838,6 +11838,53 @@ class TortoiseSDK:
             _logger.warning("W4 enrichment failed (recall_state): %s", e)
         return out
 
+    # ── Phase-1 volunteering-memory delivery (#2103) ─────────────────────
+    # Issue #2103 (epic #2080, S9): ONE canonical pipeline (tortoise/volunteer.py
+    # — window parse → candidate extraction → resolve → confidence gate →
+    # re-mention suppression → pointer budget → why-block assembly) shared by
+    # this SDK method AND POST /v1/context (hosted + self-host) — never two
+    # pipelines. The HTTP wrapper adds auth/tenancy/metering/offload only.
+    # Response mirrors the §3.2.2 contract: {pointers, why, surfaced, block,
+    # degraded_reason}.
+
+    def volunteer_context(
+        self,
+        window: list[dict],
+        session_id: str | None = None,
+        prior_context: str | None = None,
+        min_confidence: float = 0.7,
+        max_pointers: int = 3,
+        why: bool = True,
+    ) -> dict:
+        """Volunteer memory context for a turn window (issue #2103 §6.3).
+
+        ONE code path with POST /v1/context (the shared canonical pipeline in
+        tortoise/volunteer.py). In-process, fully stateless per call
+        (``session_id``/``prior_context`` are continuity inputs only — zero
+        graph writes).
+
+        - Raises ValueError (VolunteerValidationError) on invalid window /
+          budgets BEFORE any graph work (SDK validates first — issue §6.3).
+        - Fail-open: any retrieval/assembly error returns the degraded shape
+          (empty block + degraded_reason) — never breaks the caller's turn.
+        - Zero LLM on the read path — no provider key required.
+        """
+        from .volunteer import (  # local import: avoid module cycle
+            run_volunteer_pipeline,
+            validate_request,
+        )
+        # SDK validates FIRST — before any graph/network work (issue §6.3).
+        validate_request(
+            window, session_id=session_id, prior_context=prior_context,
+            min_confidence=min_confidence, max_pointers=max_pointers, why=why,
+        )
+        proj = self._get_proj()
+        return run_volunteer_pipeline(
+            proj, window, session_id=session_id, prior_context=prior_context,
+            min_confidence=min_confidence, max_pointers=max_pointers, why=why,
+            _search_fn=self.tortoise_fts_query,
+        )
+
     def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:
         """NANDing points (id/content) for contested targets.
 

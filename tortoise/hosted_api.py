@@ -5736,6 +5736,36 @@ class SessionRequest(BaseModel):
         return v
 
 
+# ── POST /v1/context request model (#2103 — phase-1 delivery contract) ─────
+# Contract fields mirror §3.2.1: window (1..1000 turns, ≤ 15 KB), session_id?
+# prior_context?, min_confidence?=0.7, max_pointers?=3 (cap 5), why?=true.
+# Schema-level bounds (role/content type, pointer/confidence ranges) 422 at
+# the model boundary; the 15 KB / 1000-turn window caps + cross-field rules are
+# enforced by tortoise.volunteer.validate_request in the handler (the same
+# function the SDK calls first — SDK and HTTP agree on the same boundaries).
+
+
+class VolunteerTurnRequest(BaseModel):
+    role: str = Field(...)
+    content: str = Field(..., max_length=20000)
+
+    @field_validator("role")
+    @classmethod
+    def _valid_role(cls, v: str) -> str:
+        if v not in ("user", "assistant", "system"):
+            raise ValueError("role must be user|assistant|system")
+        return v
+
+
+class VolunteerContextRequest(BaseModel):
+    window: list[VolunteerTurnRequest] = Field(...)
+    session_id: str | None = Field(None, max_length=256)
+    prior_context: str | None = Field(None, max_length=20000)
+    min_confidence: float = Field(0.7, ge=0.0, le=1.0)
+    max_pointers: int = Field(3, ge=1, le=5)
+    why: bool = True
+
+
 # ── Session extraction (LLM-default — issue #822) ──────────────────────────
 
 def _llm_provider_keys() -> tuple[str, ...]:
@@ -13226,6 +13256,127 @@ async def session_context(team: dict = Depends(get_current_team_gated)):  # noqa
         # #750.5: never leak internals to the client — log, return generic.
         logging.getLogger("tortoise.api").exception("session_context failed")
         raise HTTPException(status_code=500, detail="Context unavailable")  # noqa: B904
+
+
+@app.post("/v1/context")
+async def volunteer_context(
+    body: VolunteerContextRequest,
+    team: dict = Depends(get_current_team_gated),  # noqa: B008
+):
+    """Phase-1 volunteering-memory delivery (issue #2103, S9 → E2E-9).
+
+    ONE code path with SDK ``TortoiseSDK.volunteer_context()`` — the shared
+    canonical pipeline (tortoise/volunteer.py); this wrapper adds only
+    auth/tenancy/metering/offload. NOT the existing GET /v1/context
+    (session-start digest, ``session_context()`` above — different method +
+    semantics; the route confusion is a named failure mode).
+
+    Contract (plan §3.2/§6.2/§6.8):
+      * Auth fail-CLOSED: 401 missing/invalid key (auth dependency); 403
+        revoked/cross-graph/scoped-key-without-read (get_current_team_gated +
+        _data_sdk tenancy resolution). Never serves cross-team context.
+      * 422 on out-of-contract windows/budgets (model boundary + the shared
+        validate_request — the SDK validates first with the same rules).
+      * Fail-open content: any retrieval/assembly error or SLO breach → 200
+        with the empty block + degraded_reason (timeout | assembly_error |
+        breaker_open) — the read path is zero-LLM and never 503s.
+      * 429 rate limit → client backoff (RateLimitMiddleware per-key bucket,
+        Retry-After) — retries safe by construction (deterministic read-only;
+        re-POST the same session_id adds 0 graph nodes).
+    """
+    import time as _time
+
+    from tortoise.volunteer import (
+        DEGRADED_ASSEMBLY,
+        DEGRADED_TIMEOUT,
+        SLO_MS,
+        VolunteerValidationError,
+        degraded_response,
+    )
+
+    _require_scope(team, "graphs:read", "volunteer_context")
+    # Request validation FIRST (before any SDK/graph work — 422 on
+    # out-of-contract windows; same rules the SDK applies before any call).
+    window = [t.model_dump() for t in body.window]
+    try:
+        from tortoise.volunteer import validate_request
+        validate_request(
+            window, session_id=body.session_id,
+            prior_context=body.prior_context,
+            min_confidence=body.min_confidence,
+            max_pointers=body.max_pointers, why=body.why,
+        )
+    except VolunteerValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+
+    # Metering: the per-key read rate limit is enforced by the shared
+    # RateLimitMiddleware (429 + Retry-After) — reads are not charged.
+    t0 = _time.monotonic()
+    sdk = _data_sdk(team)
+    # SLO breach semantics (contract §3.2.3 / epic E2E-9 latency spec): the
+    # HARD wall-clock p95 SLO lives in the dedicated perf lane; the blocking
+    # CI assertions are the mechanism ones. The completion-breach degrade
+    # (elapsed > SLO → degraded "timeout") is armed by
+    # TORTOISE_VOLUNTEER_ENFORCE_SLO=1 (perf lane / induced-timeout tests),
+    # so a slow CI machine can never randomly empty a healthy request; the
+    # HARD ceiling (8 × SLO) below degrades ANY pathological read (never 503,
+    # never a hung caller) with the same fail-open shape.
+    enforce_slo = os.environ.get("TORTOISE_VOLUNTEER_ENFORCE_SLO", "").strip() \
+        .lower() in ("1", "true", "yes", "on")
+    completed = False
+    try:
+        # #1676 offload: the canonical pipeline is CPU/DB-blocking (hybrid
+        # search + why-block assembly) — never on the event loop.
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                sdk.volunteer_context,
+                window,
+                body.session_id, body.prior_context,
+                body.min_confidence, body.max_pointers, body.why,
+            ),
+            timeout=SLO_MS * 8 / 1000.0,
+        )
+        completed = True
+    except TimeoutError:
+        # Hard ceiling breached → fail-open degraded timeout (never 503). The
+        # worker thread may still be running (wait_for cancels the await, not
+        # the thread) — leave the SDK open for it (read-only work; the per-
+        # request keepalive machinery reuses/evicts it), never close under it.
+        logging.getLogger("tortoise.api").warning(
+            "volunteer_context hard ceiling breached → degraded timeout")
+        return degraded_response(DEGRADED_TIMEOUT)
+    except VolunteerValidationError as e:
+        # SDK-side validation parity (same rules — should not fire after the
+        # handler check; kept for the SDK-first contract).
+        sdk.close()
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+    except Exception:
+        # Fail-open content: a retrieval/assembly server error is NEVER a 503
+        # on this read path — degrade to the empty block (never break the
+        # caller's turn; the caller logs quietly). The worker thread has
+        # finished (it raised) — close the SDK like the success path.
+        logging.getLogger("tortoise.api").exception(
+            "volunteer_context degraded (assembly_error)")
+        sdk.close()
+        return degraded_response(DEGRADED_ASSEMBLY)
+    finally:
+        if completed:
+            sdk.close()
+
+    elapsed_ms = (_time.monotonic() - t0) * 1000.0
+    if (result.get("degraded_reason") is None and enforce_slo
+            and elapsed_ms > SLO_MS):
+        logging.getLogger("tortoise.api").warning(
+            "volunteer_context SLO breach: %.0f ms > %d ms → degraded timeout",
+            elapsed_ms, SLO_MS)
+        return degraded_response(DEGRADED_TIMEOUT)
+    return result
 
 
 @app.get("/v1/issue-insight")
