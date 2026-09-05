@@ -80,7 +80,7 @@
 **Files:**
 - Modify: `tortoise/sdk.py:13969-14073` (`_create_entity`)
 - Modify: `tortoise/projection/entities.py:316-367` (`_upsert_object` ON MATCH — createdAt adoption clause)
-- Test: `tests/test_object_registered_journal.py` (adds tests 10-12 post-T2)
+- Test: `tests/test_object_registered_journal.py` (adds tests 10-13 post-T2)
 
 **Step 2.1** — Code change (single region; keep the Event block shape and its #2061 comment; re-anchor START via `grep -n "def _create_entity"`, TAIL via `grep -n "# #452: Subject/Object MERGE by name"`):
 
@@ -149,7 +149,7 @@ if label == "Object" and _journal_object_registration:
     )
 ```
 
-**Step 2.2** — Add tests 10-12 to the new file (post-implementation pins — they only become meaningful once journaling exists, so they land here):
+**Step 2.2** — Add tests 10-13 to the new file (post-implementation pins — they only become meaningful once journaling exists, so they land here):
 10. `test_probe_failure_fails_open_to_journal` — monkeypatch `proj.g.query` with a `side_effect` that raises ONLY when the query string contains the probe's distinctive fragment (`"id:$cid, name:$name"`) and otherwise delegates to the original (an unconditional raise would break `apply`'s MERGE + `_persist_extra_props` + the #452 re-fetch → the create fails for the wrong reason) → create an Object → assert (a) the create still succeeds (no probe exception escapes), (b) a warning is logged, (c) the ObjectRegistered line IS journaled (durable bias), (d) a subsequent `rebuild_all` restores the node. Pins the try/except — a regression to fail-closed (silent skip) would re-open the node-loss bug with no test catching it.
 11. `test_log_append_failure_warns_and_keeps_live` — monkeypatch `EventLog.append` to raise (no test anywhere exercises this branch for any event type today — grep `"failed to append"` matches only sdk.py) → create an Object → assert the create succeeds, caplog shows the append warning, the node is live; and (the accepted consequence) a subsequent `rebuild_all` omits it (the #2296 backstop covers the loss). A regression turning the warn into a hard raise would crash every Object create mid-capture — this pins the best-effort contract.
 12. `test_registration_without_fold_line_restores_live_on_rebuild` — create A+B (auto-registrations journaled), then `apply_supersessions` with the fold line's append failing (monkeypatch) → live A is superseded but the journal holds only the two registrations → `rebuild_all` → A restored LIVE (journal-consistent), no phantom fold, NO fold-miss warning (the warning only fires for folds present in the journal). Pins the fold-side append-failure signature — a future "fix" that warns or resurrects would trip this.
@@ -226,7 +226,7 @@ uv run pytest tests/test_entity_stage.py tests/test_semantic_extractor.py tests/
 |---|---|---|
 | 1. `_create_entity` emits ObjectRegistered when it creates an Object | Exactly one line per fresh create; probe skip on canonical re-mention; no-op when `event_log_path` unset | T1 tests 2/3/7 |
 | 2. Capture Object + fold survive rebuild_all (status='superseded' + supersededBy restored) | Round-trip via real `apply_supersessions` lane; supersededAt == journaled fold ts | T1 test 1 |
-| 3. Replay byte-identity (id/name/object_kind/status; no drift) | FULL replayed property set == live snapshot on the FRESH-create path (test 2's methodology — the stub path carries documented title/status asymmetries: Failure Modes); createdAt == journaled (fresh + stub-adoption createdAt); no envelope pollution; reserved-name drop parity (journaled + journal-less) | T1 tests 2/5/6/7 + guards 9/11 |
+| 3. Replay byte-identity (id/name/object_kind/status; no drift) | FULL replayed property set == live snapshot on the FRESH-create path (test 2's methodology — the stub path carries documented title/status asymmetries: Failure Modes); createdAt == journaled (fresh + stub-adoption createdAt); no envelope pollution; reserved-name drop parity (journaled + journal-less) | T1 tests 2/5/6/7 + guard 9; append-failure durability pinned by T2 tests 11/12 (not byte-identity legs) |
 | 4. Existing rebuild tests green (incl. #2164's fold test) | 19-test baseline green post-T3 migration | T3.6 / T5.1 |
 
 **Step 5.4** — commit-workflow skill (mandatory gate before merge: pre-flight typecheck/tests, PR, code-review + test-review gates, merge). Commit any residual: `git add -A && git commit -m "chore(#2194): verification pass"` if needed before the PR.
