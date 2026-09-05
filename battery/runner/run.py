@@ -189,6 +189,16 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     _verify_corpus_freshness(config.config_dir)
 
     scorer = _build_scorer(config, thresholds)
+    # ── multi-arm probe pre-flight (Task 5): probe aggregation is
+    #    single-arm in phase 1 (family_report raises ConfigError when
+    #    records span arms) — refuse BEFORE attempt-dir creation so a
+    #    multi-arm probe run never leaves an orphaned attempt dir (no
+    #    run-end crash after artifacts, before summary.json). Multi-arm
+    #    probe runs land with the Task 9 executor. ──────────────────────
+    if getattr(scorer, "has_probe", False) and len(config.arms) > 1:
+        raise ConfigError(
+            f"probe-scorer runs are single-arm in phase 1 (multi-arm probe "
+            f"runs land with the Task 9 executor); got arms={list(config.arms)}")
     provenance = {
         "git_sha": _git_sha(),
         "config_files": [p.name for p in (config.config_dir).glob("*.yaml")],
@@ -465,6 +475,8 @@ def _verify_corpus_freshness(config_dir: Path) -> None:
 class _CompositeScorer:
     def __init__(self, scorers: list[Scorer]):
         self._scorers = scorers
+        self.has_probe = any(getattr(s, "is_probe", False)
+                             for s in scorers)
 
     def expected_coverage(self, scenario, *, run_mode: str = "mock") -> set:
         """Union over member scorers (harness members contribute empty)."""

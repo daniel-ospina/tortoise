@@ -58,6 +58,9 @@ REPORT_STATUSES = (
 #: Writer file names (glob contract for the CLI readers).
 FAMILY_FILE_PREFIX = "family_"
 RECALL_FILE = "recall.json"
+#: Live-writer family-file schema (v1.1 — family/cells shape; legacy
+#: root-level v1.0 files lack the stamp and the cells map).
+FAMILY_FILE_SCHEMA = "1.1"
 SUMMARY_FILE = "summary.json"
 
 
@@ -152,7 +155,17 @@ def compose_run_status(*, run_mode: str, exit_code: int,
     if over_budget:
         return REPORT_STATUS_REAL_OVER_BUDGET
     if measured_cells == 0:
-        return REPORT_STATUS_REAL_NO_EPISODES
+        # No-episodes is reserved for runs that ATTEMPTED episodes but
+        # measured none: all-excluded / all-insufficient / cap-stopped /
+        # ARM_FAILED (exit_code != 0). A real run with no family payloads,
+        # no exclusions and a healthy exit code is a real HARNESS run (no
+        # probe scorer wired — nothing attempted a family) — it falls
+        # through to the base missing-family rule
+        # (incomplete_missing_metrics), never mislabeled no-episodes.
+        if (exit_code != 0 or insufficient_cells > 0
+                or excluded_episodes > 0):
+            return REPORT_STATUS_REAL_NO_EPISODES
+        return None
     if insufficient_cells > 0 or excluded_episodes > 0:
         return REPORT_STATUS_REAL_PARTIAL
     return None
@@ -198,14 +211,17 @@ def write_family_files(attempt_dir: str | Path,
                        payloads: list[dict[str, Any]]) -> list[Path]:
     """One JSON per scored family (pinned Task-5 schema: family, n, values:
     {metric: [v...]}, cells: {metric: measured|insufficient_n} + the arm
-    that produced it). Written atomically into the attempt dir."""
+    that produced it). Stamped with schema_version (v1.1 live-writer shape)
+    so a legacy root-level family file is never silently misread as a
+    current no-data cell. Written atomically into the attempt dir."""
     written: list[Path] = []
     for payload in payloads:
         family = payload.get("family")
         if not family:
             raise ValueError(f"family payload missing 'family': {payload}")
+        stamped = {**payload, "schema_version": FAMILY_FILE_SCHEMA}
         path = Path(attempt_dir) / f"{FAMILY_FILE_PREFIX}{family}.json"
-        _atomic_write(path, payload)
+        _atomic_write(path, stamped)
         written.append(path)
     return written
 
@@ -219,12 +235,19 @@ def write_recall_file(attempt_dir: str | Path, recall: dict[str, Any]) -> Path:
 
 def read_family_file(path: str | Path) -> dict[str, Any] | None:
     """Read one family_<F>.json; None when the file is corrupt/partial (a
-    torn write or manual tamper is NEVER readable as a measured cell)."""
+    torn write or manual tamper is NEVER readable as a measured cell). A
+    versioned file whose schema_version does not match the live-writer
+    schema is refused (a future-shape family file is never misread as the
+    current no-data shape); unversioned legacy files (root-level v1.0
+    fallback) remain readable."""
     try:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(data, dict) or "family" not in data or "cells" not in data:
+        return None
+    if ("schema_version" in data
+            and data["schema_version"] != FAMILY_FILE_SCHEMA):
         return None
     return data
 

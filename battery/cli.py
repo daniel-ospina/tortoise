@@ -186,6 +186,14 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
     arm_cfg = arms[arm_id]
     model = {"model_id": arm_cfg.model_pin,
              "temperature": arm_cfg.temperature}
+    # Placeholder pins (arms.yaml sentinel until sibling B registers the
+    # measured model) never claim a VERIFIED protocol: the derived hash
+    # proves the methodology surface but the model identity is a stand-in —
+    # a placeholder "matched" would certify a protocol no real model was
+    # measured under. protocol_unknown stays True so the #1144 re-record is
+    # still forced, and sibling B swapping the placeholder for the real pin
+    # still trips the unchanged-check (hash drift is visible).
+    placeholder_pinned = arm_cfg.model_pin == "flash-class-placeholder"
     protocol = protocol_hash(seed=args.seed, model=model,
                              event_schema=SCHEMA_VERSION,
                              tool_surface=TOOL_SURFACE_IDS)
@@ -199,15 +207,23 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                              reader_prompt, judge_rubric, baseline,
                              accuracy=0.5, samples=0, protocol=protocol)
             cells.append(res)
-            state = f"protocol_unknown={res.protocol_unknown}" if \
-                res.protocol_unknown else "protocol verified"
+            unknown = bool(res.protocol_unknown or placeholder_pinned)
+            state = f"protocol_unknown={unknown}" if unknown \
+                else "protocol verified"
             print(f"{benchmark}: v{version} methodology_matched="
                   f"{res.methodology_matched} ({state})")
-            if res.protocol_unknown:
-                print(f"{benchmark}: WARNING baseline has no protocol_hash — "
-                      f"protocol leg UNVERIFIED; a #1144 re-record is "
-                      f"required to compare protocol "
-                      f"{res.protocol_hash or '(none)'}")
+            if unknown:
+                if placeholder_pinned:
+                    print(f"{benchmark}: WARNING arm {arm_id!r} pins "
+                          f"flash-class-placeholder — protocol leg "
+                          f"UNVERIFIED (no real model measured under this "
+                          f"identity); sibling B's measured pin re-record "
+                          f"is required before protocol can be claimed")
+                else:
+                    print(f"{benchmark}: WARNING baseline has no protocol_hash — "
+                          f"protocol leg UNVERIFIED; a #1144 re-record is "
+                          f"required to compare protocol "
+                          f"{res.protocol_hash or '(none)'}")
         except (VersionMismatchError, BaselineMissingError) as e:
             print(f"{benchmark}: {e}")
         # any other exception propagates (exit 1) — never swallowed
@@ -226,7 +242,10 @@ def _cmd_parity(args: argparse.Namespace) -> ExitCode:
                 "arm": arm_id,
                 "seed": args.seed,
                 "protocol_hash": protocol,
-                "protocol_unknown": cells[0].protocol_unknown,
+                # protocol_unknown covers BOTH legacy 2-tuple baselines and
+                # placeholder-pinned arms (no real measured model).
+                "protocol_unknown": bool(
+                    cells[0].protocol_unknown or placeholder_pinned),
                 "benchmarks": {
                     c.benchmark: {
                         "version": c.version,

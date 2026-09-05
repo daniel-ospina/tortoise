@@ -98,6 +98,12 @@ class TestProtocolHash:
         assert TOOL_SURFACE_IDS == (
             "create_point", "create_operator", "file_nand",
             "register_conflict", "mitigate", "supersede")
+        # single-source lock (#2284 review P2): the parity-pinned tuple must
+        # stay EXACTLY the schema-v1.1 tool_event verb registry — two
+        # drifting copies would make a tool-surface change invisible to the
+        # protocol hash unless BOTH move together.
+        from battery.runner.emit import _SUBTYPE_OK
+        assert set(TOOL_SURFACE_IDS) == set(_SUBTYPE_OK["tool_event"])
 
 
 # ── methodology_hashes: 3-tuple fixed order ──────────────────────────────
@@ -251,7 +257,10 @@ class TestCliParityProtocol:
         assert code is ExitCode.OK
         rec = json.loads((out / "parity_record.json").read_text())
         assert rec["arm"] == "a4"  # pinned arm (default; --arms overrides)
-        assert rec["protocol_unknown"] is False
+        # Placeholder pin => protocol leg UNVERIFIED (no real model measured
+        # under flash-class-placeholder) — never a certified protocol.
+        assert rec["protocol_unknown"] is True
+        # methodology (reader-prompt + rubric 2-tuple) still compared
         assert all(b["methodology_matched"]
                    for b in rec["benchmarks"].values())
         # recompute the protocol from the fixture config independently
@@ -277,6 +286,6 @@ class TestCliParityProtocol:
         code = main(["parity", "--config", str(cfg), "--out", str(out)])
         assert code is ExitCode.OK
         rec = json.loads((out / "parity_record.json").read_text())
-        assert rec["protocol_unknown"] is False  # compared…
+        assert rec["protocol_unknown"] is False  # real measured pins
         assert all(b["methodology_matched"] is False
                    for b in rec["benchmarks"].values())  # …and it drifted
