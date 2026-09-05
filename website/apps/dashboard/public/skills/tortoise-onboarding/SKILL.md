@@ -1,13 +1,13 @@
 ---
 name: tortoise-onboarding
-description: "Install and connect Tortoise for your agent — self-adjudicate your harness (Claude Code / Cursor / Codex / Pi = self-install; Claude Desktop / Claude Web = teach-human), write the MCP config, verify with tortoise_health, checkpoint harness-connected, and reach the decide protocol without any local skill file. Successor to AGENT_ONBOARDING.md (archived)."
+description: "Install and connect Tortoise for your agent — self-adjudicate your harness (Claude Code / Cursor / Codex / Pi = self-install; Claude Desktop / Claude Web = teach-human), write the MCP config, verify with tortoise_health, checkpoint harness-connected, and reach the decide protocol without any local skill file. Self-hosted: Docker-first install (Compose daemon + FalkorDB sidecar); embedded is the eval-only fallback. Successor to AGENT_ONBOARDING.md (archived)."
 domain: capability
 type: Workflow
 status: live
-tags: [tortoise, onboarding, mcp, harness, install, connect, onboarding-state, decide]
-summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects, verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
+tags: [tortoise, onboarding, mcp, harness, install, self-hosted, connect, onboarding-state, decide]
+summary: "The ONE live Tortoise onboarding script — reads onboarding state, self-adjudicates the harness, installs/connects (self-hosted: Docker-first, Compose + FalkorDB; embedded = eval-only fallback), verifies via tortoise_health, checkpoints harness-connected, and runs the generic MCP-tool decide protocol."
 created: 2026-09-02
-updated: 2026-09-02
+updated: 2026-09-04
 allowed-tools: read write bash
 ---
 
@@ -17,7 +17,8 @@ allowed-tools: read write bash
 
 Successor to the archived `AGENT_ONBOARDING.md` question flow. Instead of a
 paste-the-prompt Q&A, onboarding is now: **read state → pick your harness →
-connect → verify → checkpoint → (later) seed + decide**. The dashboard wizard
+install/connect (self-hosted: Docker Compose first — §3a) → verify →
+checkpoint → (later) seed + decide**. The dashboard wizard
 hands you ONE universal command; this skill is what your agent follows after
 you run or paste it.
 
@@ -46,9 +47,11 @@ resume where the flow left off — onboarding is stateful and idempotent:
   $TORTOISE_API_KEY"` (same projection). If the org is grandfathered (node
   absent) the FLOW keys serve defaults — treat them as read-only.
 - **Self-hosted:** there is no hosted onboarding REST surface — skip the
-  state read and checkpoint steps below; complete the install + verify, and
-  let W12's self-hosted init own the node (`fork='self'` default, no fork
-  card).
+  state read and checkpoint steps. Install the SUPPORTED path first —
+  Docker Compose daemon + FalkorDB sidecar (section 3a) — then connect +
+  verify. Embedded without Docker is the EVAL-ONLY fallback (section 3a),
+  never a durable setup. W12's self-hosted init owns the onboarding node
+  (`fork='self'` default, no fork card).
 
 Branch on what you find:
 
@@ -78,7 +81,54 @@ If you are unsure which row applies (e.g. a wrapper/terminal agent), assume
 the config-writing class — you can verify after writing (section 3, failure
 mode → teach-human fallback).
 
-## 3. Connect — one command per harness
+## 3. Install + connect — Docker-first for self-hosted, hosted below
+
+> **Self-hosted? Start at §3a** — the supported install is Docker Compose
+> (daemon + FalkorDB sidecar); embedded without Docker is the EVAL-ONLY
+> fallback, never a setup you present as durable. **Hosted? Skip to §3b**
+> (the dashboard universal command + per-harness rows).
+
+### 3a. Self-hosted install: Docker Compose + FalkorDB first (the supported path)
+
+The supported self-hosted path is **Docker Compose with the real FalkorDB
+server**: `docker-compose.yml` ships the daemon + a FalkorDB sidecar
+(AOF on, named volume, healthcheck) with `TORTOISE_DB_URI` wired. Run it
+from the repo root:
+
+```bash
+git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
+docker compose up -d          # daemon on http://localhost:8000 (MCP at /mcp)
+```
+
+- **One transport:** the daemon speaks MCP over **HTTP** at
+  `http://localhost:8000/mcp` — never stdio for the Docker path.
+- **Key setup:** set a strong `TORTOISE_API_KEY` in `docker-compose.yml`
+  before exposing the daemon beyond localhost; the connect rows below send
+  it as a Bearer header.
+- Full walkthrough + variants: `docs/quickstart-selfhosted.md` — Option A
+  (compose, recommended), Option B (bare container), Option C (embedded,
+  eval only).
+
+**Self-hosted connect delta — the §3b harness rows apply with two
+substitutions:**
+
+1. MCP url → `http://localhost:8000/mcp` (the local daemon, not
+   `https://api.premiselabs.co/mcp/`);
+2. `Authorization: Bearer $TORTOISE_API_KEY` → the daemon's key from
+   `docker-compose.yml` (optional while the daemon stays loopback-bound).
+
+**No Docker? Embedded is the EVAL-ONLY fallback — gated, never silent:**
+with `TORTOISE_DB_URI` unset and no explicit embedded choice, `tortoise
+init` / `tortoise onboard` land on embedded FalkorDBLite
+(`~/.tortoise/tortoise.db`, auto-created) and print a loud notice —
+embedded is SINGLE-WRITER / EVAL ONLY (concurrent writers lose data), for
+one agent evaluating Tortoise, not a team deployment (quickstart Option C).
+(An explicitly chosen embedded path — `TORTOISE_DB_PATH` or `--path`,
+quickstart Option C — carries the eval-only label on init's success line
+instead of the default-fallback notice: the user chose it.) A no-Docker run
+must never be reported as a durable setup.
+
+### 3b. Hosted connect — one command per harness
 
 The universal setup command is ONE copy block that works for any of the six
 harnesses: for the four config-writing harnesses it is a shell/config-write
@@ -86,7 +136,9 @@ recipe your agent executes; for Claude Desktop/Claude Web it is the manual
 teach-human path. Follow your harness row. Keep the API key OUT of any file
 that could be committed (project-scoped configs reference `$TORTOISE_API_KEY`
 or `${TORTOISE_API_KEY}`); Desktop/Web configs stay literal-with-privacy-note
-(private user-machine / cloud-held — no commit surface).
+(private user-machine / cloud-held — no commit surface). The rows below are
+the HOSTED connect — self-hosted agents apply the §3a delta to the same
+rows.
 
 ### Claude Code (self-install)
 
@@ -188,8 +240,11 @@ Guide the human through:
 
 **Failure modes:** config write invalid → teach-human fallback (above);
 connection verify fails → retry with diagnostic + honest error (never a
-silent skip); state read unavailable (self-hosted) → skip checkpoint (W12
-owns the self-hosted node).
+silent skip); self-hosted daemon unreachable → the compose stack is not up
+(or TORTOISE_DB_URI points at a dead sidecar) — run `docker compose up -d`
+(section 3a) and re-verify, never silently "fix" it by pointing at
+embedded; state read unavailable (self-hosted) → skip checkpoint (W12 owns
+the self-hosted node).
 
 ## 5. Next steps (do NOT do them in this session unless asked)
 
@@ -282,7 +337,9 @@ Contract notes:
   the `how-to-use-tortoise` skill — edge semantics, supersession, provenance.
 - **Research-finding ingestion:** the `tortoise-file-finding` skill
   (ingest → check related claims → surface connections).
-- **Self-hosted:** see `docs/quickstart-selfhosted.md`; the self-hosted
+- **Self-hosted:** `docs/quickstart-selfhosted.md` — Docker Compose +
+  FalkorDB is the supported path (Option A/B); embedded (Option C) is the
+  EVAL-ONLY fallback the CLI/onboard wizard gates loudly. The self-hosted
   onboarding slice (W12) inits the OnboardingState node at SDK/API init with
   `fork='self'` and never surfaces the fork card.
 
