@@ -44,15 +44,56 @@ from battery.runner.scorers import ScorerResult
 #: passes run at scoring time — they are never phase-1 expected.
 _PRE_DERIVATION_KINDS = frozenset({"tool_event", "state_event", "envelope"})
 
-#: family/task_type -> scenario-conditional expected fields (Task-1 SINGLE
-#: RULE — gap only when the scorer seam put them in `expected` for THIS
-#: episode). CONDITIONAL behavioral fields never sit here (absence = 0.0).
-_FAMILY_CONDITIONAL: dict[str, frozenset[str]] = {
-    # R3/R4/R5 calibration + R2 decision families read gold-store truth.
-    "calibration": frozenset({"outcome_correct", "confidences", "outcomes"}),
-    "decision": frozenset({"outcome_correct", "confidences", "outcomes"}),
-    "decision_drift": frozenset({"outcome_correct", "confidences", "outcomes"}),
+#: probe family -> scenario-family domain the probe may score. A probe
+#: measures (and gaps) ONLY its own family's episodes; foreign-family
+#: episodes are skipped entirely (no record — a foreign-family sentinel
+#: must never pollute a family cell, and a foreign-family expected set
+#: must never emit-gap an artifact the probe did not measure). Hermetic
+#: fixtures label contradiction scenarios by task_type ("contradiction")
+#: while the real corpus labels them "R1" — both are in-domain.
+_FAMILY_DOMAINS: dict[str, frozenset[str]] = {
+    "R1": frozenset({"R1", "contradiction"}),
+    "R2": frozenset({"R2"}),
+    "R3": frozenset({"R3"}),
+    "R4": frozenset({"R4"}),
+    "R5": frozenset({"R5"}),
 }
+
+#: probe family -> expected truth fields that family's probe actually
+#: CONSUMES in score() and that are not CONDITIONAL behavioral fields
+#: (Task-1 SINGLE RULE: gap only when the scorer seam put a field in
+#: `expected` for THIS episode). This is the inverse of the old
+#: task_type-keyed map: R2 and R4 are BOTH task_type=decision yet need
+#: different truth terms, R3 spans calibration + loopy_contested, and
+#: task_type alone could never express that. Fields no probe consumes
+#: (outcome_correct, over_reacted, flip_flopped, false_positive) are
+#: never expected — nothing downstream reads them, so requiring them
+#: would gap episodes no probe measures (the old decision ->
+#: {outcome_correct, confidences, outcomes} phantom always-gapped R2).
+_FAMILY_TRUTH_FIELDS: dict[str, frozenset[str]] = {
+    # R1 surfaced-rate reads CONDITIONAL tool_event/state fields only
+    # (absence = measured non-occurrence, never a gap).
+    "R1": frozenset(),
+    # R2 coverage_subscore = judge_annotation (Task-9 judge leg; sibling B
+    # rubric) — derive cannot emit it in phase 1, so a real R2 episode is
+    # an honest insufficient/emitter-gap until the judge leg lands.
+    "R2": frozenset({"coverage_subscore"}),
+    # R3 brier reads per-decision confidences/outcomes (gold-store truth
+    # the Task-9 derive leg reads from decision-point golds into the log).
+    "R3": frozenset({"confidences", "outcomes"}),
+    # R4 defeat-precision reads real_defeat_conditions — gold-store truth
+    # derivable NOW from the scenario's structured (list-typed) gold.
+    "R4": frozenset({"real_defeat_conditions"}),
+    # R5 correct-direction reads the derived update verdict (Task-9
+    # derived leg compares stated update vs the sealed retraction gold).
+    "R5": frozenset({"update_correct_direction"}),
+}
+
+
+def probe_domain(family: str) -> frozenset[str]:
+    """Scenario-family domain for a probe family (exact-label fallback for
+    unknown probes — an unregistered probe only scores its own label)."""
+    return _FAMILY_DOMAINS.get(family, frozenset({family}))
 
 
 @dataclass(frozen=True)
@@ -68,17 +109,27 @@ class ProbeRecord:
                                  # contribute measured cells
 
 
-def expected_coverage_for(scenario, *, run_mode: str = "real") -> set[str]:
+def expected_coverage_for(scenario, *, run_mode: str = "real",
+                          family: str | None = None) -> set[str]:
     """Per-episode expected set (MANDATORY x scenario/family-conditional per
     the Task-1 expectation rule — no arms.yaml capability term). Mock runs
     are neutral (empty expected -> gap empty). injection_turn is expected
-    only when the scenario actually plants a ¬A k-turn (never bct twins)."""
+    only when the scenario actually plants a ¬A k-turn (never bct twins).
+
+    ``family`` threads the SCORED probe family through the seam (Task 5
+    acceptance): the episode's expected set is computed for the family that
+    will measure it, not from the scenario's raw task_type (which cannot
+    separate R2 from R4 — both decision — or R3's loopy_contested slice).
+    Out-of-domain scenarios get MANDATORY-only coverage (a real episode's
+    schema-v1.1 mandatory envelope/state fields are gated regardless of
+    which probe measures it) with NO family truth terms."""
     if run_mode != "real":
         return set()
     expected = set(MANDATORY)
     if getattr(scenario, "contradiction_pairs", ()):
         expected |= {"injection_turn"}
-    expected |= set(_FAMILY_CONDITIONAL.get(getattr(scenario, "task_type", ""), ()))
+    if family is not None and scenario.family in probe_domain(family):
+        expected |= set(_FAMILY_TRUTH_FIELDS.get(family, ()))
     return expected
 
 
@@ -115,21 +166,29 @@ def trace_from_log(episode, scenario, log: list[dict]) -> dict[str, Any]:
 
 def derive_append(log: list[dict], scenario, expected: set[str]) -> None:
     """Derive emission pass (probe-scorer-owned leg; the judge leg is Task
-    9's): append the expected derived/gold_store entries whose values the
-    derive pass can produce. Gold-store text fields read the sealed golds;
-    derived scalars (envelope-stance deltas, control verdicts, judge
-    subscores) land with the Task 9 executor/judge legs — until then their
-    absence against `expected` is an honest phase-2 emitter_gap, never a
-    silent pass."""
-    golds = scenario.golds()
+    9's): append the expected gold_store entries whose values the derive
+    pass can produce — the scenario's STRUCTURED gold (list-typed expected,
+    e.g. R4's real defeat conditions), never a str-coerced repr. Gold text
+    that carries no structure (calibration/retraction statements) is not
+    derive-emittable; derived/judge kinds (coverage_subscore, confidences,
+    outcomes, update_correct_direction, control verdicts) land with the
+    Task 9 executor/judge legs — until then their absence against
+    `expected` is an honest gap (the post-derive re-check in score() turns
+    it into the no-data sentinel BEFORE the probe runs), never a silent
+    pass and never a probe-side default measured as if real."""
     at = len(log)
+    structured = getattr(scenario, "structured_gold", None)
     for field in sorted(expected):
         kind = FIELD_EMITTERS[field]
-        if kind == "gold_store" and field == "real_defeat_conditions" and golds:
+        # Only list-typed structured gold is derive-emittable: a gold_store
+        # field with a scalar/text gold needs Task-9 semantics (the derive
+        # pass must never fabricate a typed list from a str repr).
+        if (kind == "gold_store" and field == "real_defeat_conditions"
+                and isinstance(structured, list) and structured):
             log.append({"type": "gold_store", "event": "expected", "at": at,
-                        "field": field, "payload": {"value": golds[0]}})
+                        "field": field, "payload": {"value": list(structured)}})
             at += 1
-        # derived/judge kinds: derive semantics are executor-owned (Task 9)
+        # other gold_store/derived/judge kinds: executor-owned (Task 9)
 
 
 class ProbeScorer:
@@ -143,19 +202,22 @@ class ProbeScorer:
         self.probe = probe
         self._thresholds = thresholds
         self.family = getattr(probe, "probe_id", None) or type(probe).__name__
+        self.is_probe = True
         self._records: list[ProbeRecord] = []
         self._last: ProbeRecord | None = None
 
     # -- scorer-seam API ---------------------------------------------------
     def expected_coverage(self, scenario, *, run_mode: str = "real") -> set[str]:
         """The per-episode expected set the runner computes BEFORE scoring
-        (scoring precedes artifact construction)."""
-        return expected_coverage_for(scenario, run_mode=run_mode)
+        (scoring precedes artifact construction). The scored family is
+        threaded through the seam (Task 5 acceptance) so the runner's
+        expected set matches what this probe will actually require."""
+        return expected_coverage_for(scenario, run_mode=run_mode,
+                                     family=self.family)
 
     def score(self, episode, scenario,
               rubric_id: str | None = None) -> ScorerResult:
         run_mode = getattr(episode, "run_mode", "mock")
-        expected = expected_coverage_for(scenario, run_mode=run_mode)
         if run_mode != "real" or not episode.valid:
             # Mock is never scored as real: no real log exists, nothing to
             # derive or measure — the sentinel record feeds the
@@ -164,6 +226,15 @@ class ProbeScorer:
             # measured cells from a truncated trace.
             self._record(None, episode)
             return ScorerResult(metrics=())
+        # Eligibility gate: a probe scores ONLY its own family's episodes.
+        # Foreign-family episodes are skipped entirely (no record, no
+        # sentinel, no expected terms) — a probe never measures (or gaps)
+        # an episode its family does not own, and a mixed tier-1 slice
+        # cannot contaminate a family cell with foreign-family sentinels.
+        if scenario.family not in probe_domain(self.family):
+            return ScorerResult(metrics=())
+        expected = expected_coverage_for(scenario, run_mode="real",
+                                         family=self.family)
         # Phase 1: pre-scoring gate over the pre-derivation log.
         uncovered = validate_emitter_coverage(
             episode.event_log, expected=phase1_expected(expected))
@@ -174,6 +245,17 @@ class ProbeScorer:
         # pass owns (mutates the episode log -> the artifact assembler's
         # phase-2 validation sees the POST-derivation log).
         derive_append(episode.event_log, scenario, expected)
+        # Post-derive re-check over the FULL expected set (review gate):
+        # if derive could not emit an expected truth field (e.g. R2/R3/R5
+        # fields whose semantics land with the Task-9 judge/executor legs),
+        # the no-data sentinel fires BEFORE the probe runs — a probe never
+        # produces a measured value from a log where its consumed truth is
+        # absent (no fabricated 0.0 / 1.0 brier from probe-side defaults).
+        uncovered = validate_emitter_coverage(episode.event_log,
+                                              expected=expected)
+        if uncovered:
+            self._record(None, episode)
+            return ScorerResult(metrics=())
         trace = trace_from_log(episode, scenario, episode.event_log)
         gold = scenario.golds()[0] if scenario.golds() else None
         threshold = self._threshold(episode)

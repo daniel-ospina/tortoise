@@ -16,6 +16,8 @@ from pathlib import Path
 
 import pytest
 
+from battery.config.thresholds import DEFAULT_EPSILON
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CONFIG = REPO_ROOT / "battery" / "config"
 
@@ -115,13 +117,31 @@ class TestDeterminismTolerances:
     the transcript-locked derived/objective floor stays |Δ| ≤ 1e-6."""
 
     def test_epsilon_path_resolves_from_thresholds_yaml(self):
+        # #2284 review P2: resolve the floor + row count from the AUTHORED
+        # yaml, not test-local constants — a #2292 metric addition extends
+        # thresholds.yaml, never this assertion.
+        import yaml as _yaml
+        authored = _yaml.safe_load(
+            (CONFIG / "thresholds.yaml").read_text(encoding="utf-8"))
+        det = authored.get("determinism") or {}
         tols, epsilon = _tolerances()
-        assert epsilon == 1e-6  # transcript-locked floor (yaml value)
+        # resolution lock: resolved epsilon == the authored yaml floor
+        # (yaml holds '1e-6' as text — PyYAML never resolves bare 1e-6;
+        # the loader floats it)
+        assert epsilon == float(det.get("epsilon", DEFAULT_EPSILON))
+        # table lock: every authored tolerance row resolves — no silent
+        # drop and no phantom row; per-metric rows seeded from the
+        # transcript-locked 1e-6 floor (comment in thresholds.yaml).
+        authored_rows = det.get("tolerances") or {}
+        assert len(tols) == len(authored_rows)
+        assert set(tols) == set(authored_rows)
+        # transcript lock: the epsilon floor itself stays 1e-6
+        assert epsilon == 1e-6
         # every artifact metric id this lane produces is seeded in the
         # tolerance table — no metric falls back silently
         from battery.config.corpus import load_corpus
         scenario_count = len(load_corpus(CONFIG / "corpus.yaml"))
-        assert len(tols) == 9 and scenario_count >= 100
+        assert scenario_count >= 100
 
     def test_tolerance_table_folds_into_cal_table_hash(self):
         from battery.config.thresholds import (

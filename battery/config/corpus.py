@@ -101,6 +101,12 @@ class Scenario:
     drift: dict[str, Any] = field(default_factory=dict)
     graph_script: dict[str, Any] = field(default_factory=dict)
     retraction: dict[str, Any] = field(default_factory=dict)
+    #: Structured (non-str) gold expected value preserved from the authored
+    #: YAML — list/dict golds (R4's real defeat conditions) must NOT be
+    #: str-coerced away: the derive pass reads the typed list into the log
+    #: (the str repr would make a probe iterate characters). Scorer-side
+    #: accessor only — never rendered agent-side, never in to_render_dict.
+    structured_gold: Any = None
 
     #: Sealed gold text — the ONLY scoring-side access surface. The episode
     #: context handed to arms/agents never contains gold text.
@@ -260,11 +266,19 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
         drift = _coerce_dict(raw.get("drift"), sid, "drift")
         graph_script = _coerce_dict(raw.get("graph_script"), sid, "graph_script")
         retraction = _coerce_dict(raw.get("retraction"), sid, "retraction")
-        # Inline gold (production schema) — scorer-side only.
+        # Inline gold (production schema) — scorer-side only. The str
+        # projection stays the text accessor (golds()); structured gold
+        # (list/dict expected — R4 defeat conditions) is preserved typed
+        # for the derive pass (#2284 review P1: str-coercing a list gold
+        # made derive emit a repr string the probe would iterate char-wise).
         inline_gold = ""
+        structured_gold = None
         gold_raw = raw.get("gold")
         if isinstance(gold_raw, dict) and gold_raw.get("expected"):
-            inline_gold = str(gold_raw["expected"])
+            expected_raw = gold_raw["expected"]
+            inline_gold = str(expected_raw)
+            if isinstance(expected_raw, (list, dict, tuple)):
+                structured_gold = expected_raw
         elif gold_raw is not None:
             raise ConfigError(f"scenario {sid}: gold must be {{expected: ...}}")
         k = raw.get("k")
@@ -320,6 +334,7 @@ def _coerce_scenario(raw: dict[str, Any], gold_base: Path) -> Scenario:
         attack_type=attack_type, split=split, prompt_pack=prompt_pack,
         gold_ref=gold_ref, k=k, contradiction_pairs=pairs,
         evidence_scripts=scripts, inline_gold=inline_gold,
+        structured_gold=structured_gold,
         question=question, session_scripts=session_scripts,
         evidence_tiers=evidence_tiers, drift=drift,
         graph_script=graph_script, retraction=retraction,

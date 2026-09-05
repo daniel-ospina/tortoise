@@ -22,6 +22,7 @@ import pytest  # noqa: F401
 import yaml
 
 from battery.cli import main
+from battery.config import Scenario  # noqa: F401  (type hint below)
 from battery.config.corpus import load_corpus as load_corpus_yaml
 from battery.config.thresholds import ThresholdsConfig
 from battery.enums import ExitCode
@@ -436,3 +437,135 @@ def tamper_seal(cfg: Path) -> Path:
     sc["gold_sha256"] = "0" * 64
     (d / "corpus.json").write_text(json.dumps(corpus), encoding="utf-8")
     return d
+
+
+# ---------------------------------------------------------------------------
+# family-threaded scorer seam (#2284 review P1 locks)
+# ---------------------------------------------------------------------------
+
+def _mini_scenario(tmp_path, *, family="R4", task_type="decision",
+                   gold=None, sid="d-test") -> Scenario:
+    """Load one mini scenario through the corpus loader (typed gold
+    preserved: structured_gold carries the authored list, never a str repr)."""
+    from battery.config.corpus import load_corpus
+    cfg = tmp_path / "cfg"
+    cfg.mkdir(exist_ok=True)
+    path = cfg / "mini.yaml"
+    path.write_text(yaml.safe_dump({"scenarios": [{
+        "id": sid, "tier": "probe", "family": family,
+        "task_type": task_type, "split": "train",
+        "prompt": {"system": "sys", "question": "q",
+                   "turns": [{"role": "user", "content": "q"}]},
+        "gold": {"expected": gold or ["defeat cond A", "defeat cond B"]},
+    }]}), encoding="utf-8")
+    return load_corpus(path)[0]
+
+
+def _real_episode(scenario_id: str, log: list[dict]) -> EpisodeResult:
+    ep = EpisodeResult(scenario_id=scenario_id, seed=1, arm="a0",
+                       turns=1, re_derivations=0, event_log=log,
+                       run_mode="real")
+    return ep
+
+
+def _mandatory_log() -> list[dict]:
+    """POST-... MANDATORY-only event log entries (envelope/state) — what a
+    phase-1 real executor seam can emit before the derive pass."""
+    by_field: dict[str, dict] = {}
+    for e in emit.FIXTURE_FULL_LOG:
+        f = e.get("field")
+        if f in MANDATORY:
+            by_field[f] = dict(e)
+    # stated_defeat_conditions: R4 declares two defeat conditions
+    for e in by_field.values():
+        if e.get("field") == "stated_defeat_conditions":
+            e["payload"] = {"value": ["defeat cond A", "cond B"]}
+    return sorted(by_field.values(), key=lambda e: e.get("at", 0))
+
+
+class TestFamilyThreadedScorerSeam:
+    """#2284 review P1: the scored family threads through the scorer seam —
+    expected is keyed on probe family ∩ scenario family (R2 and R4 are both
+    task_type=decision yet need different truth terms), R4's list-typed
+    gold derives into the log (never a str repr a probe would iterate
+    char-wise), the post-derive re-check turns un-emittable expected fields
+    into the no-data sentinel BEFORE the probe runs, and a probe never
+    scores a foreign-family episode."""
+
+    def test_expected_keyed_on_probe_family_not_task_type(self, tmp_path):
+        from battery.runner.probe_scorer import expected_coverage_for
+        sc = _mini_scenario(tmp_path)  # family R4, task_type decision
+        r4 = expected_coverage_for(sc, family="R4")
+        assert "real_defeat_conditions" in r4        # R4 consumes gold truth
+        assert "coverage_subscore" not in r4         # …not the R2 judge term
+        # R2 over an R4-family scenario is a FOREIGN-family probe: expected
+        # is MANDATORY only — family threading, not task_type conflation.
+        r2_foreign = expected_coverage_for(sc, family="R2")
+        assert "coverage_subscore" not in r2_foreign
+        # R2 over its OWN family expects the judge term it consumes.
+        r2_sc = _mini_scenario(tmp_path, family="R2", sid="d-r2")
+        r2 = expected_coverage_for(r2_sc, family="R2")
+        assert "coverage_subscore" in r2
+        assert "real_defeat_conditions" not in r2
+        # foreign-family probe expects MANDATORY only (no R4 truth terms)
+        cal = _mini_scenario(tmp_path, family="R3", task_type="calibration",
+                             gold="the deployment succeeds", sid="cal-t")
+        assert "real_defeat_conditions" not in \
+            expected_coverage_for(cal, family="R4")
+
+    def test_r4_structured_gold_derives_typed_list(self, tmp_path):
+        from battery.runner.probe_scorer import derive_append
+        sc = _mini_scenario(tmp_path)
+        assert sc.structured_gold == ["defeat cond A", "defeat cond B"]
+        log = _mandatory_log()
+        derive_append(log, sc, {"real_defeat_conditions"})
+        entry = next(e for e in log if e["field"] == "real_defeat_conditions")
+        assert isinstance(entry["payload"]["value"], list)
+        assert entry["payload"]["value"] == ["defeat cond A", "defeat cond B"]
+        # never a str repr (the pre-fix bug: str(golds[0]) char-iterated)
+        assert not isinstance(entry["payload"]["value"], str)
+
+    def test_r4_real_episode_measures_with_derived_gold(self, tmp_path):
+        from battery.config.thresholds import ThresholdsConfig
+        from battery.probes.r4_defeat import R4DefeatProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        sc = _mini_scenario(tmp_path)
+        thr = ThresholdsConfig(cal_rows=(("defeat-precision", "a0", 0.5),))
+        scorer = ProbeScorer(probe=R4DefeatProbe(), thresholds=thr)
+        ep = _real_episode(sc.id, _mandatory_log())
+        assert ep.valid
+        scorer.score(ep, sc)
+        rec = scorer.last_record()
+        assert rec is not None and rec.measured
+        assert rec.value == 0.5  # 1 of 2 stated conditions real
+        assert scorer.family_report()["cells"]["defeat-precision"] == "measured"
+
+    def test_unemittable_truth_sentinels_before_probe(self, tmp_path):
+        """R2 consumes coverage_subscore (judge leg, Task 9) — the derive
+        pass cannot emit it in phase 1, so a real R2 episode sentinels
+        (insufficient_n) instead of measuring a fabricated 0.0 default."""
+        from battery.runner.probe_scorer import ProbeScorer
+        from battery.probes.r2_coverage import R2CoverageProbe
+        sc = _mini_scenario(tmp_path, family="R2", sid="d-r2")
+        scorer = ProbeScorer(probe=R2CoverageProbe(), thresholds=())
+        ep = _real_episode(sc.id, _mandatory_log())
+        scorer.score(ep, sc)
+        rec = scorer.last_record()
+        assert rec is not None and not rec.measured
+        assert rec.value is None          # no-data sentinel, never 0.0
+        assert scorer.family_report()["cells"]["coverage-subscore"] == \
+            "insufficient_n"
+
+    def test_foreign_family_episode_never_scored(self, tmp_path):
+        """A probe never measures (or gaps) an episode outside its family
+        domain: no record, no sentinel — foreign-family episodes cannot
+        contaminate a family cell."""
+        from battery.runner.probe_scorer import ProbeScorer
+        from battery.probes.r4_defeat import R4DefeatProbe
+        ct = _mini_scenario(tmp_path, family="contradiction",
+                            task_type="contradiction", gold="flip", sid="ct-t")
+        scorer = ProbeScorer(probe=R4DefeatProbe(), thresholds=())
+        ep = _real_episode(ct.id, _mandatory_log())
+        scorer.score(ep, ct)
+        assert scorer.last_record() is None
+        assert scorer.family_report() is None  # never attempted R4
