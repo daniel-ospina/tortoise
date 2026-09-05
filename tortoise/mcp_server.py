@@ -759,12 +759,24 @@ def _parse(v: Any) -> Any:
 
 def tortoise_create_point(kind: str, content: str,
                           authoredBy: str | None = None,
+                          credibility: str | int | float | None = None,
                           props: Any = None,
                           dedup: bool = True) -> dict:
     """Create a Point node (statement, decision, vision, hypothesis, etc.).
 
     dedup=True (default): idempotent — returns existing Point if content matches.
     dedup=False: force-create even if content is identical.
+
+    Decision parts (#2199) — pointKind option/criterion/evidence/decision
+    created WITHOUT an explicit status land LIVE with an explicit starting
+    belief, so the documented decide flow ranks on the first attempt (no
+    promote/calibrate chores): omit ``credibility`` for the system starting
+    belief 'medium' (provenance 'system-default', visible in
+    tortoise_calibrate_summary), or pass your own via the plain-language
+    ladder — gold / high / medium / low / unverified (also T0-T4 or numeric
+    0-4) — stamped 'set-by-author'. Pass an explicit status=... via props to
+    keep full manual control (capture/extraction paths use status='draft').
+    Unknown ladder words are rejected (never a silent Beta(1,1) fallback).
 
     → See /skill:tortoise-graph-reasoning for pointKind guidance:
       evidence is a role (not a kind), use Source for provenance.
@@ -776,6 +788,8 @@ def tortoise_create_point(kind: str, content: str,
     merged = dict(props or {})
     if authoredBy:
         merged["authoredBy"] = authoredBy
+    if credibility is not None:
+        merged["credibility"] = credibility
     # #329 tag batch cap + value validation
     from tortoise.quota import MAX_TAGS_PER_POINT
     tags = merged.get("tags") or []
@@ -925,8 +939,11 @@ def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
 
 
 def tortoise_summarize_structure() -> dict:
-    """Count points per Gate (by pointKind). Returns {gateN_*, total}.
-    Alias → overview(section='structure') (epic #888 W3)."""
+    """Structure summary — points on the graph across ALL point kinds (#2205).
+    Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}.
+    total counts every non-operator kind (statements, observations, decisions,
+    ...), not just the product-strategy gates; operators is reported
+    separately. Alias → overview(section='structure') (epic #888 W3)."""
     return _safe(_get_team_sdk().summarize_structure)
 
 
@@ -1526,14 +1543,28 @@ def tortoise_get_operator(id: str) -> dict:
     return point
 
 
-def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5) -> dict:
+def tortoise_mitigate_operator(id: str, reason: str, strength: float = 0.5,
+                               credibility: str | int | float | None = None) -> dict:
     """Create a mitigation Point that modulates an operator's edge strength.
+
+    MITIGATION STRENGTH SEMANTICS (single-sourced — issue #2199 knock-on
+    decision 3): ``strength`` means how much this reason reduces the edge —
+    0 = fully neutralized, 1 = fully intact (default 0.5). It is NOT a
+    statement of how true the reason is and is NOT fused into the mitigation
+    point's prior. Strength is currently ADVISORY metadata (EP does not read
+    mitigation_strength yet); the decide tooling clamps to [0.10, 0.50] for
+    relevance edges.
 
     reason: Why the edge is weaker than it appears.
     strength: 0-1 — 0=fully neutralized, 1=fully intact (default 0.5).
+    credibility: optional starting belief for the mitigation reason itself
+      (plain-language ladder gold/high/medium/low/unverified, T0-T4, or
+      numeric 0-4) — stamped 'set-by-author'. Omit for the #2199 system
+      starting belief ('medium', provenance 'system-default') so the
+      mitigation is a calibrated live evidence point (no CalibrationError).
     Idempotent — second call updates existing mitigation.
     """
-    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength)
+    return _safe(_quota_gated(_get_team_sdk().mitigate_operator, "points", abuse_weight=1), id, reason, strength, credibility)
 
 
 def tortoise_file_decision(options: Any, evidence: Any,
