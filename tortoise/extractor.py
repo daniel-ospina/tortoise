@@ -55,7 +55,13 @@ def _has_cue(text: str, single_re: re.Pattern, phrases: tuple[str, ...]) -> bool
     return bool(single_re.search(text)) or any(p in text for p in phrases)
 
 _SPEAKER = re.compile(r"^\s*([A-Z][\w .'-]{0,40}):\s*(.*)$")
-_SENT = re.compile(r"[^.?!]+[.?!]?")
+# #2207: a period INSIDE a version/identifier token (digit.digit — 'BSL 1.1',
+# 'v2.5.1', 'MPL-2.0') is NOT a sentence boundary. The content class admits
+# digit-flanked periods so '…BSL 1.1…' survives as ONE sentence; the optional
+# terminator refuses to end a sentence on a period followed by a digit (a
+# trailing '1.' inside '1.1' must stay inside the token). Real boundaries
+# after a decimal still split ('That costs 3.5. Next…' → two sentences).
+_SENT = re.compile(r"(?:[^.!?]|(?<=\d)\.(?=\d))+(?:[.!?](?!\d))?")
 
 
 class Extractor(Protocol):

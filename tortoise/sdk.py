@@ -1427,6 +1427,45 @@ def _decorate_fallback_hits(results: list[dict], graph) -> list[dict]:
     return results
 
 
+# ── Session-context digest noise filter (#2207) ─────────────────────────
+# The session-start digest (`tortoise context` → TortoiseSDK.session_context(),
+# mirrored by hosted /v1/context) must surface GENUINE decision/claim points.
+# Rule/config noise and markdown fragments that reach the graph via
+# document/transcript extraction — HR separators ('---'), label-led rule
+# bullets ('*Gate: filed as child issue…'), heading/table/quote/fence lines,
+# bare 'Label: value' config residue — are filtered out at digest time
+# (display-layer defense only; the extractor itself is unchanged).
+_DIGEST_STRUCTURE_RE = re.compile(r"^(?:[-*=~_`|#>]{2,}|\.{2,}|[-*+]\s*)$")
+_DIGEST_MD_LEAD_RE = re.compile(r"^(?:#{1,6}\s|>{1,}|`{3,}|~{3,}|\|)")
+# Label-led rule/config lines: an optional list/number marker and optional
+# emphasis, then a label ending in ':' before the value — '*Gate: filed as
+# child issue…', '- model: gpt-5', '* HARD RULE: Skill Compliance',
+# 'TORTOISE_DB_URI: docker://…'. All-caps continuations keep multi-word rule
+# labels ('HARD RULE', 'DO NOT EDIT') together; prose claims starting
+# mid-sentence are never label-led.
+_DIGEST_LABEL_RE = re.compile(
+    r"^(?:[-*+]\s+|\d+[.)]\s+)?(?:[*_]{1,2})?"
+    r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:\s+[A-Z][A-Z0-9_.-]*)*"
+    r"\s*:(?:[*_]{1,2})?\s+\S"
+)
+
+
+def _is_digest_noise(content) -> bool:
+    """True when a Point's content is rule/config noise rather than a
+    digest-worthy decision/claim (#2207). Pure function over content so the
+    local digest, hosted /v1/context and the CLI share one definition."""
+    if not isinstance(content, str):
+        return True
+    t = content.strip()
+    if not t:
+        return True
+    if _DIGEST_STRUCTURE_RE.fullmatch(t):
+        return True
+    if _DIGEST_MD_LEAD_RE.match(t):
+        return True
+    return bool(_DIGEST_LABEL_RE.match(t))
+
+
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
 
@@ -10605,7 +10644,13 @@ class TortoiseSDK:
 
     def session_context(self) -> dict:
         """Return 'what happened last session' — diary entries, Points, Events, confidence changes.
-        Returns structured dict with explicit 'no_prior_sessions' when graph is empty."""
+        Returns structured dict with explicit 'no_prior_sessions' when graph is empty.
+
+        #2207: recent_points / confidence_changes are digest surfaces — rule/config
+        noise and markdown fragments ('---', '*Gate: filed as child issue…', table
+        rows, 'Label: value' lines) are excluded so the session-start digest lists
+        actual decisions/claims only.
+        """
         proj = self._get_proj()
         diary_entries = [r[0] for r in proj.g.query(
             "MATCH (n:Point {pointKind:'diary'}) "
@@ -10630,6 +10675,11 @@ class TortoiseSDK:
                 "ORDER BY n.updatedAt DESC LIMIT 20"
             ).result_set
         ]
+        # #2207: rule/config noise must not reach the digest as 'recent decisions'.
+        recent_points = [p for p in recent_points
+                         if not _is_digest_noise(p.get("content"))]
+        confidence_changes = [c for c in confidence_changes
+                              if not _is_digest_noise(c.get("content"))]
         no_prior = not diary_entries and not recent_points and not recent_events
         return {
             "no_prior_sessions": no_prior,
