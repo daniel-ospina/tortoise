@@ -746,6 +746,28 @@ def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def _session_capture_event_id(session_id: str) -> str:
+    """Deterministic sessionCaptured Event id (W5 Phase F #2104).
+
+    Content-addressed from the session_id (``ev_<sha256 hex>`` — the same
+    ``ev_`` prefix family as the derived-commit decision/issue event ids),
+    so two concurrent FRESH-session captures of ONE session_id converge on
+    a SINGLE Event node: the Event projection MERGEs on ``eventId``
+    (``_upsert_event`` plain path), so the second concurrent writer's mint
+    is an idempotent no-op — never a duplicate node and never a
+    duplicate-key error. This closes the #1727 TOCTOU residue (two
+    concurrent POSTs both observing ``session_existed=False`` and minting
+    two fresh-ULID Events): sequential retries already converged via the
+    session_existed replay skip (0 new nodes); the deterministic id makes
+    the CONCURRENT race idempotent too. Shared by the hosted impl
+    (byte-parity). Distinct session_ids hash to distinct ids (the
+    session_id is the idempotency key — one Event per session).
+    """
+    digest = hashlib.sha256(
+        f"sessionCaptured:{session_id}".encode()).hexdigest()[:62]
+    return f"ev_{digest}"
+
+
 def _capture_minted_ids(extracted: list[dict]) -> list[str]:
     """Ids of the points THIS capture actually minted (W5 Phase D #2104).
 
@@ -2338,6 +2360,19 @@ class TortoiseSDK:
         if harness:
             _merge_sets.append("s.harness=$harness")
             _merge_params["harness"] = harness
+        # W5 Phase F (#2104, indicator 8 — SDK mirror replay parity): probe
+        # session_existed BEFORE the Session MERGE, mirroring the hosted
+        # #1727 replay skip — a re-capture of an EXISTING session_id skips
+        # extraction (the M2 lane mints non-deterministic time-ULID claim
+        # ids; a naive re-extract would mint DUPLICATE claims) + skips the
+        # sessionCaptured Event mint + provenance stamp (the deterministic
+        # event id below makes the CONCURRENT fresh race converge too). The
+        # Session MERGE + turn loop stay unconditional (idempotent no-ops —
+        # 0 new nodes).
+        session_existed = bool(proj.g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": session_id},
+        ).result_set[0][0])
         proj.g.query(
             f"MERGE (s:Session {{id:$sid}}) SET {', '.join(_merge_sets)}",
             params=_merge_params,
@@ -2404,7 +2439,19 @@ class TortoiseSDK:
         # structured contract — the M2 branch's meta now carries
         # errors/warnings/mode (no fabricated empty meta) so the assembly is
         # branch-independent and fails closed on either extractor.
-        if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+        # W5 Phase F (#2104): the #1727 replay skip — a re-capture of an
+        # existing session_id is a NO-OP replay (extraction_mode "replayed",
+        # 0 new non-episodic nodes), byte-parity with hosted_api's replay
+        # branch (meta mode "replayed" + the additive warning).
+        if session_existed:
+            extracted = []
+            meta = {
+                "provider": None, "route": None, "failover_used": False,
+                "errors": [], "warnings": [
+                    "session already captured (same session_id) — no new "
+                    "extraction"], "mode": "replayed",
+            }
+        elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
             extracted, meta = self._extract_session_llm(
                 windowed, session_id, now)
         else:
@@ -2423,8 +2470,18 @@ class TortoiseSDK:
         # content (B3's event slot).
         event_id: str | None = None
         try:
+            # W5 Phase F (#2104): the Event mint uses the DETERMINISTIC id
+            # derived from session_id — two concurrent fresh-session captures
+            # of the same session_id (per-thread SDKs / two POSTs) MERGE onto
+            # ONE Event node instead of minting two fresh-ULID Events (the
+            # #1727 TOCTOU residue). The Event projection MERGEs on eventId
+            # so the second concurrent writer's create is an idempotent no-op
+            # — a REPLAY of an existing session_id re-mints the SAME Event
+            # (0 new nodes; the extraction was skipped above by the #1727
+            # session_existed gate, so nothing re-stamps).
             event = self.create_event(
                 f"session_{session_id}", "sessionCaptured",
+                id=_session_capture_event_id(session_id),
                 startedAt=now, endedAt=now, sessionId=session_id,
                 is_episodic=True,
             )
@@ -2471,7 +2528,6 @@ class TortoiseSDK:
             )
             extraction_warnings.append(
                 f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
-
         # #1352: the extraction projection auto-created a document-typed Source
         # stub at `session:{id}` (default sourceKind in _link_source) — the
         # ontology v3.6 §4.6 session source kind is agentSession. Materialize
@@ -2501,6 +2557,11 @@ class TortoiseSDK:
             effective_mode = "empty"
         elif not ok:
             effective_mode = "error"
+        elif meta.get("mode") == "replayed":
+            # W5 Phase F (#2104): SDK mirror replay parity — a re-capture of
+            # an existing session_id reports extraction_mode "replayed"
+            # (hosted byte-parity; 0 new non-episodic nodes).
+            effective_mode = "replayed"
         elif meta.get("route"):
             effective_mode = f"llm:{meta['route']}"
         else:
@@ -14058,7 +14119,20 @@ class TortoiseSDK:
                 raise ValueError(
                     "create_entity(type='event') requires eventKind")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
-            eid = self.ulid()
+            # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
+            # (server-side channel — the sessionCaptured capture mints pass
+            # ``_session_capture_event_id(session_id)`` so two concurrent
+            # fresh-session captures converge on ONE Event node) wins over
+            # the fresh ULID. The Event projection MERGEs on ``eventId``
+            # (``_upsert_event`` plain path), so a repeated id is an
+            # idempotent no-op — never a duplicate node, never a
+            # duplicate-key error. Mirrors create_point's explicit-id pop
+            # (#52 / operator path); tenant surfaces reject 'id' at the MCP
+            # boundary and via ``_sanitize_props(reject_id=True)`` on every
+            # other entity kind.
+            eid = props.pop("id", None)
+            if not isinstance(eid, str) or not eid:
+                eid = self.ulid()
             about_subject = props.pop("aboutSubject", None)
             about_object = props.pop("aboutObject", None)
             about_point = props.pop("aboutPoint", None)

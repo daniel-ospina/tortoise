@@ -73,6 +73,7 @@ from tortoise.sdk import (
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
+    _session_capture_event_id,  # W5 Phase F (#2104): deterministic sessionCaptured Event id
     _session_extraction_estimate,  # #1532 D4: v2-aware pre-write quota estimate
     _session_llm_transcript,  # P1 #1529: the shared empty/blank conversation gate
 )
@@ -5964,8 +5965,10 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # FRESH session_id can both observe session_existed=False and mint a
     # sessionCaptured Event (narrow race) — sequential retries converge
     # correctly (the second POST sees the Session and replays, 0 new nodes).
-    # Follow-up: a deterministic Event id (derived from session_id) would
-    # make even the concurrent race idempotent. Do NOT reimplement here.
+    # W5 Phase F (#2104): the concurrent race is now idempotent too — the
+    # sessionCaptured Event mint below uses a DETERMINISTIC id derived from
+    # session_id (_session_capture_event_id), so both writers MERGE onto
+    # ONE Event node instead of minting two.
     session_existed = bool(proj.g.query(
         "MATCH (s:Session {id:$sid}) RETURN count(s)",
         params={"sid": session_id},
@@ -6199,14 +6202,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # provenance via the points' eventId.
     # #1727 Slice 2 (T2-P2c): the sessionCaptured Event mint + typed Source
     # materialization run ONLY on a genuine capture — a re-POST of an
-    # existing session_id skips them (the Event id is a fresh ULID per
-    # create_event, so running it would mint a new node — violating the
-    # "0 new nodes" idempotency contract).
+    # existing session_id skips them (violating the "0 new nodes"
+    # idempotency contract would otherwise mint a second Event per replay).
+    # W5 Phase F (#2104): when the mint DOES run, the Event id is the
+    # DETERMINISTIC ``ev_<sha256(session_id)>`` (NOT a fresh ULID) so two
+    # concurrent fresh-session POSTs of the same session_id — the #1727
+    # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
+    # node (the Event projection MERGEs on eventId; the second concurrent
+    # writer's create is an idempotent no-op).
     if not session_existed:
         try:
             event = sdk.create_event(
                 f"session_{session_id}",
                 "sessionCaptured",
+                id=_session_capture_event_id(session_id),
                 startedAt=now,
                 endedAt=now,
                 sessionId=session_id,

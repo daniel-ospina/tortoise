@@ -435,7 +435,13 @@ def test_capture_session_event_recorded_write_lands(sdk):
     ).result_set
     assert len(rows) == 1
     event_id, node_id, started_at, ended_at = rows[0]
-    assert re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", event_id), "create_event mints a ULID eventId"
+    # W5 Phase F (#2104): the sessionCaptured Event id is now DETERMINISTIC
+    # (ev_<sha256(session_id)> — derived from the capture's idempotency key)
+    # so two concurrent fresh-session captures converge on ONE Event node.
+    # The old per-capture ULID made the #1727 TOCTOU mint two Events.
+    assert event_id.startswith("ev_") and len(event_id) > 40, event_id
+    assert not re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", event_id), \
+        "the deterministic Event id replaces the per-capture ULID (Phase F)"
     assert node_id == event_id, "Event node id mirrors the EventRecorded eventId"
     assert started_at and ended_at, "timestamps populated from the capture write"
 
@@ -2425,17 +2431,18 @@ def test_capture_session_two_warnings_sources_no_clobber(sdk, monkeypatch):
 
 
 def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatch):
-    """E3 (#1529 note): (a) turn-point source_turn_id survives re-capture
-    (MERGE SET list excludes it — turn-stream idempotency only; extraction
-    points/Event fresh per capture BY DESIGN); (b) eventId stamping touches
-    only extracted points; (c) per-capture provenance: each capture's points
-    carry that capture's fresh Event eventId.
+    """E3 (#1529 note) + W5 Phase F (#2104): (a) turn-point source_turn_id
+    survives re-capture (MERGE SET list excludes it); (b) eventId stamping
+    touches only extracted points; (c) provenance identity per CAPTURE.
 
-    Runs the M2 branch (fresh ULIDs per capture): the v2 branch's content-
-    addressed ids are deterministic across captures, so a re-capture RE-stamps
-    the same point nodes to the new Event — per-capture set-identity
-    provenance is an M2 property (v2's re-stamp is intended content-addressed
-    semantics, locked separately by the re-capture turn tests)."""
+    W5 Phase F (#2104, SDK mirror replay parity): a re-capture of the SAME
+    session_id is now the #1727 REPLAY (extraction_mode "replayed") — it
+    re-MERGEs the Session + turn Points (0 new) and SKIPS extraction + mint,
+    so it does NOT mint a second Event or duplicate claims. The M2 mock's
+    time-ULID claim ids made a naive re-extract mint DUPLICATES (the leak
+    the replay skip closes). Per-capture provenance is therefore asserted
+    across two DIFFERENT sessions: each genuine capture's points share that
+    capture's deterministic eventId, and the two sessions' eventIds differ."""
     monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     res1 = sdk.capture_session(CONV)
     sid = res1["session_id"]
@@ -2445,24 +2452,33 @@ def test_capture_session_recapture_never_clobbers_source_turn_id(sdk, monkeypatc
         "MATCH (p:Point {id:$id}) SET p.source_turn_id='turn-42'",
         params={"id": turn_id})
     res2 = sdk.capture_session(CONV, session_id=sid)  # re-capture same session
+    assert res2["extraction_mode"] == "replayed", res2
+    assert res2["points"] == [], "replay must not re-extract (0 new claims)"
     rows = proj.g.query(
         "MATCH (p:Point {id:$id}) RETURN p.source_turn_id, p.eventId",
         params={"id": turn_id}).result_set
     assert rows and rows[0][0] == "turn-42", "re-capture must not clobber source_turn_id"
     assert rows[0][1] is None, "turn points carry no eventId (extracted only)"
+    # Replay skipped the mint: ONE sessionCaptured Event for this session
+    # (the deterministic id from the FIRST capture).
     evs = proj.g.query(
         "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
     ).result_set
-    assert len(evs) == 2, "one fresh Event per capture (intended)"
-    eids = {ev[0] for ev in evs}
-    stamps = set()
-    for res in (res1, res2):
+    assert len(evs) == 1, f"replay must not mint a second Event: {evs}"
+    # Per-capture provenance across DIFFERENT sessions: capture session B,
+    # assert its claims share B's eventId and it differs from A's.
+    res3 = sdk.capture_session(CONV)  # fresh session B
+    evs_b = proj.g.query(
+        "MATCH (e:Event {eventKind:'sessionCaptured'}) RETURN e.eventId"
+    ).result_set
+    assert len(evs_b) == 2, "a second genuine capture mints its own Event"
+    assert {ev[0] for ev in evs_b} != {ev[0] for ev in evs}, \
+        "distinct sessions must carry distinct deterministic eventIds"
+    for res in (res1, res3):
         stamped = proj.g.query(
             "MATCH (n:Point) WHERE n.id IN $ids RETURN collect(DISTINCT n.eventId)",
             params={"ids": [p["id"] for p in res["points"]]}).result_set[0][0]
         assert len(stamped) == 1, f"points of one capture share one eventId: {stamped}"
-        stamps.add(stamped[0])
-    assert stamps == eids, f"per-capture provenance broken: {stamps} vs {eids}"
 
 
 def test_capture_session_recapture_shorter_conversation_pins_state(sdk):
@@ -3513,3 +3529,69 @@ def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch
     assert res["surfaced"] == [], (
         "a failed verification read must omit the marker, never fabricate it")
     assert any("marker omitted" in w for w in res["warnings"]), res["warnings"]
+
+
+# ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────
+
+
+def test_phase_f_deterministic_event_id_converges_two_mints(tmp_path):
+    """W5 Phase F (#2104): the sessionCaptured Event id is DETERMINISTIC
+    (derived from session_id) — two writers minting the same session's
+    capture Event (the #1727 TOCTOU: two concurrent POSTs both observing
+    session_existed=False) converge on ONE Event node, never two."""
+    from tortoise.sdk import _session_capture_event_id
+
+    sid = "session_phase_f"
+    eid = _session_capture_event_id(sid)
+    assert eid.startswith("ev_"), eid
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    try:
+        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
+                         startedAt="now", endedAt="now", sessionId=sid,
+                         is_episodic=True)
+        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
+                         startedAt="now", endedAt="now", sessionId=sid,
+                         is_episodic=True)
+        proj = sdk._get_proj()
+        n = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
+            params={"eid": eid},
+        ).result_set
+        assert n[0][0] == 1, f"two mints must converge on ONE Event (got {n[0][0]})"
+    finally:
+        sdk.close()
+
+
+# ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────
+
+
+
+# ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────
+
+
+def test_phase_f_deterministic_event_id_converges_two_mints(tmp_path):
+    """W5 Phase F (#2104): the sessionCaptured Event id is DETERMINISTIC
+    (derived from session_id) — two writers minting the same session's
+    capture Event (the #1727 TOCTOU: two concurrent POSTs both observing
+    session_existed=False) converge on ONE Event node, never two."""
+    from tortoise.sdk import _session_capture_event_id
+
+    sid = "session_phase_f"
+    eid = _session_capture_event_id(sid)
+    assert eid.startswith("ev_"), eid
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    try:
+        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
+                         startedAt="now", endedAt="now", sessionId=sid,
+                         is_episodic=True)
+        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
+                         startedAt="now", endedAt="now", sessionId=sid,
+                         is_episodic=True)
+        proj = sdk._get_proj()
+        n = proj.g.query(
+            "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
+            params={"eid": eid},
+        ).result_set
+        assert n[0][0] == 1, f"two mints must converge on ONE Event (got {n[0][0]})"
+    finally:
+        sdk.close()
