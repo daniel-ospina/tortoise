@@ -1083,8 +1083,12 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     include_terminal=True for the complete supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
-    Point results annotated with EP breakdown (confidence_mean + variance + contested + contention).
-    min_confidence defaults to 0.0 (no filter).
+    Point results annotated with EP breakdown. confidence_mean is THE point's
+    confidence (belief mean α/(α+β): persisted posterior when EP has run,
+    else persisted prior mean, else neutral 0.5) — agrees with
+    tortoise_get_confidence / recall for the same point. contention is the
+    structural edge-ratio family (a different quantity). min_confidence
+    filters on confidence_mean (belief); defaults to 0.0 (no filter).
 
     relationship_filter: 'predicate:target_id' — only return points connected to
         target_id via an operator with label=predicate
@@ -1094,8 +1098,8 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 
     order_by (#25, #560):
       - 'relevance' (default): pure RRF fusion order (FTS + vector + structural).
-      - 'confidence': sort by the PERSISTED EP confidence (n.confidence), not the
-        structural edge ratio.
+      - 'confidence': sort by the PERSISTED EP confidence (n.confidence — the
+        same belief mean ep.confidence_mean carries, post-#2206).
       - 'graph': graph-informed rerank — weighted fusion of similarity +
         persisted EP confidence + operator connectivity + 30-day recency decay
         (tortoise.ranking.GraphRanker). Results annotated with a

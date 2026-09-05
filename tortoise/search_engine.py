@@ -167,25 +167,36 @@ class EpEvidence:
 
 @dataclass
 class EpBreakdown:
-    confidence_mean: float = 0.0
+    # THE point confidence (issue #2206 contract): the belief mean α/(α+β)
+    # of the PERSISTED posterior when EP has run on the claim
+    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta),
+    # else the neutral Beta(1,1) mean 0.5 — identical to the number
+    # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
+    # point (coalesce(n.posterior_alpha, n.ep_alpha, 1.0)). Historically this
+    # field was the structural edge-ratio impl/(impl+nand); it is NOT that
+    # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
+    # edges reads 0.88 here, and 0.0 only for a genuinely impossible store.
+    confidence_mean: float = 0.5
     evidence: EpEvidence | None = None
-    # Structural ratio nand/(impl+nand) — kept for backward compat. It answers
-    # "how much of the incoming evidence is contradiction" but is NOT a
-    # posterior-stability measure: a claim with 1 IMPL + 1 NAND that EP
-    # converged tightly still reads 0.5.
+    # Structural ratio nand/(impl+nand) — a DIFFERENT quantity from
+    # confidence_mean (issue #2206): it answers "how much of the incoming
+    # evidence is contradiction" (edge-ratio family, alongside
+    # evidence.impl_count/total), never a belief. A claim with 1 IMPL + 1 NAND
+    # that EP converged tightly still reads contention 0.5.
     contention: float = 0.0
     # True EP posterior variance v = αβ/((α+β)²(α+β+1)) from the persisted
-    # ep_alpha/ep_beta — the epistemically correct "is this claim destabilized"
-    # signal (same formula as TortoiseEP.get_contested_claims).
+    # posterior_alpha/ep_alpha — the epistemically correct "is this claim
+    # destabilized" signal (same formula as TortoiseEP.get_contested_claims).
     variance: float = 0.0
     # variance > CONTESTED_VARIANCE_THRESHOLD → the claim's posterior is
     # contested: competing evidence is actively destabilizing it. Surface this
     # as a first-class flag so agents treat the claim as disputed, not merely
     # high/low probability.
     contested: bool = False
-    # Whether this point has persisted EP data (ep_alpha / ep_beta).
-    # False means the point is uncalibrated — Beta(1,1) default priors
-    # produce variance 0.0833 but that is NOT a signal of contestation.
+    # Whether this point has persisted EP data (posterior_alpha OR ep_alpha).
+    # True = EP has run on the claim (posterior) or a prior was persisted
+    # (baseline/evidence); False = unmeasured — confidence_mean is the neutral
+    # Beta(1,1) mean 0.5, which is NOT a signal of contestation.
     has_ep: bool = False
 
     def __post_init__(self):
@@ -1190,12 +1201,38 @@ def _beta_variance(alpha: float, beta: float) -> float:
     return (alpha * beta) / (s * s * (s + 1))
 
 
+def _beta_mean(alpha: float, beta: float) -> float:
+    """Mean of the Beta(α, β) belief: α/(α+β) — the issue #2206 contract
+    resolution for a point's confidence.
+
+    Same guard as TortoiseEP.compute_confidence / why._mean: degenerate
+    (0,0) params fall back to the neutral Beta(1,1) mean 0.5 instead of
+    ZeroDivisionError.
+    """
+    s = alpha + beta
+    return alpha / s if s > 0 else 0.5
+
+
 def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     """Fetch EP confidence breakdown for a batch of Point IDs.
 
     Single Cypher query — NOT N+1. Returns EpBreakdown per Point ID.
-    Points with no EP data get EpBreakdown with confidence_mean=0.0, contention=0.0.
-    variance/contested are computed from the PERSISTED posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)
+
+    Issue #2206 contract — ``EpBreakdown.confidence_mean`` is THE point's
+    confidence and agrees with ``get_confidence``/``recall`` for the same
+    point: it is the belief mean α/(α+β) of the persisted posterior
+    (posterior_alpha/beta) when EP has run on the claim, else the persisted
+    prior mean (ep_alpha/beta), else the neutral Beta(1,1) mean 0.5. It is
+    NOT the structural edge-ratio impl/(impl+nand) that this field used to
+    carry — that quantity lives on in ``evidence`` (impl_count/nand_count/
+    total) and ``contention`` (the NAND fraction), which are legitimately
+    different from a belief.
+
+    Points with no EP data (no posterior_alpha AND no ep_alpha) get
+    has_ep=False + confidence_mean=0.5 (neutral — absence of measurement is
+    NOT low support, matching the recall/why-layer convention);
+    contention=0.0. variance/contested are computed from the PERSISTED
+    posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)
     (posterior stability), not from edge ratios.
     """
     if not point_ids:
@@ -1223,10 +1260,9 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
         for row in rows:
             pid, impl, nand, contention, alpha, beta, has_ep = row[0], int(row[1]), int(row[2]), float(row[3]), float(row[4]), float(row[5]), row[6]
             total = impl + nand
-            confidence_mean = impl / total if total > 0 else 0.0
             variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
-                confidence_mean=confidence_mean,
+                confidence_mean=round(_beta_mean(alpha, beta), 4),
                 evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
                 contention=contention,
                 variance=round(variance, 6),
@@ -1237,11 +1273,12 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
                 has_ep=bool(has_ep),
             )
 
-        # Fill in defaults for IDs with no edges
+        # Fill in defaults for IDs that are not Point nodes (defaults match
+        # the neutral contract: confidence_mean 0.5, has_ep False).
         for pid in point_ids:
             if pid not in breakdowns:
                 breakdowns[pid] = EpBreakdown(
-                    confidence_mean=0.0,
+                    confidence_mean=0.5,
                     evidence=EpEvidence(impl_count=0, nand_count=0, total=0),
                     contention=0.0,
                 )
