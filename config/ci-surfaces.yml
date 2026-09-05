@@ -68,6 +68,7 @@ surfaces:
   - test_hosted_api.py
   - test_hosted_auth.py
   - test_hosted_backup.py
+  - test_hosted_volunteer_context.py   # #2278: volunteer-context hosted surface (POST /v1/context)
   - test_import_endpoint.py
   - test_index_mcp.py
   - test_init_apikey_validation.py
@@ -84,6 +85,7 @@ surfaces:
   - test_redis_guard.py
   - test_selfhost.py
   - test_selfhost_rest.py
+  - test_selfhost_volunteer_context.py   # #2278: volunteer-context selfhost surface
   - test_ask_api.py
   - test_ask_gating.py
   - test_commit_supersession_parity.py
@@ -178,6 +180,7 @@ surfaces:
   - test_canonical.py
   - test_capture_session.py
   - test_capture_session_supersession_e2e.py
+  - test_capture_phase_d_dedup.py   # #2282: W5 phase D — per-point dedup classification (capture/ingest)
   - test_ci_selection.py
   - test_connector_loader.py
   - test_connector_secrets.py
@@ -358,6 +361,9 @@ surfaces:
   - test_uri_env_mutations_declared.py
   - test_validity_windows.py
   - test_value_extractor.py
+  - test_volunteer_contract.py      # #2278: volunteer_context SDK/engine contract
+  - test_volunteer_pipeline.py     # #2278: EP-scored volunteer reflex pipeline
+  - test_volunteer_reflex_harness_seam.py   # #2278: volunteer reflex harness seam
   - test_wipe_server.py
   - test_wiring_phase01.py
   - test_write_verb.py
