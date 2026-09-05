@@ -27,17 +27,152 @@ from __future__ import annotations  # noqa: I001
 
 import logging
 import math
+import re
 from datetime import datetime, timezone
 
-from .search_engine import _beta_variance, CONTESTED_VARIANCE_THRESHOLD  # noqa: E402, RUF100
+from .search_engine import (  # noqa: E402, RUF100
+    _beta_variance,
+    _exclude_status_clause,
+    CONTESTED_VARIANCE_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _w4_flag_on() -> bool:
+    """Resolve the W4 enrichment flag for the ranking boost (same env seam
+    as why.py's w4_enrichment_enabled — imported lazily to avoid a hard
+    ranking→why dependency at import time)."""
+    try:
+        from .why import w4_enrichment_enabled
+
+        return w4_enrichment_enabled()
+    except Exception:  # pragma: no cover — defensive
+        return False
+
 
 # Default signal weights — must sum to 1.0.
 DEFAULT_SIMILARITY_WEIGHT = 0.5
 DEFAULT_GRAPH_BOOST_WEIGHT = 0.35
 DEFAULT_RECENCY_WEIGHT = 0.15
 DEFAULT_HALF_LIFE_DAYS = 30.0
+
+# W4-b (issue #2102): the bounded contested-relevance boost, in graph-boost
+# space (weighted by graph_boost_weight in the final score).  Small by
+# design — it tips relevance-matched contested claims ABOVE their
+# uncontested twins (E2E-1, pinned twin deltas < the boost effect), it does
+# not reorder the tail.  Strictly > 0 so a boost never lowers a score.
+W4_CONTESTED_BOOST = 0.05
+# Significant-token floor: query/counter-claim overlap needs tokens ≥ this
+# many alphanumerics (1-3 char function words and subword noise never count;
+# a >=4-char generic word DOES count — the floor is lexical, not
+# stopword-filtered, a documented tradeoff for zero-vocabulary zero-cost
+# relevance).
+W4_RELEVANCE_TOKEN_MIN_LEN = 4
+
+
+def _significant_tokens(text: str) -> set[str]:
+    """Casefolded alphanumeric tokens ≥ W4_RELEVANCE_TOKEN_MIN_LEN."""
+    return {
+        tok for tok in re.findall(r"[a-z0-9]+", (text or "").casefold())
+        if len(tok) >= W4_RELEVANCE_TOKEN_MIN_LEN
+    }
+
+
+def _query_touches_conflict(query: str, counter_claims: list[str]) -> bool:
+    """Relevance signal (issue #2102 indicator 2): the query shares >= 2
+    significant tokens (>= W4_RELEVANCE_TOKEN_MIN_LEN alnum) with the
+    NAND-side counter-claim of the contested edge.  Purely lexical — no
+    embedding call, no per-result query.  The >= 2 threshold keeps generic
+    single-token overlap ("data", "study", "claim") from firing the gate;
+    a counter-claim is conflict-RELEVANT only when the query and the
+    contradiction share real vocabulary."""
+    if not query or not counter_claims:
+        return False
+    query_tokens = _significant_tokens(query)
+    if not query_tokens:
+        return False
+    for cc in counter_claims:
+        overlap = query_tokens & _significant_tokens(cc)
+        if len(overlap) >= 2:
+            return True
+    return False
+
+
+def resolve_contested_relevance(
+    projection,
+    contested_ids: list[str],
+    query: str,
+) -> dict[str, float]:
+    """ONE batch read (S8 N+1 guard): contested id → whether the query is
+    conflict-relevant.  Returns {pid: W4_CONTESTED_BOOST} for contested
+    points whose NAND-side counter-claim shares >= 2 significant tokens
+    with the query.  Never per-result queries; never raises (defensive).
+
+    The counter-claim resolution mirrors why.py's canonical conflict
+    shape: a NANDer ``c`` NANDs INTO the point — either a direct
+    operator-less statement or a NAND operator whose counterargument is its
+    INPUT source at idx 0 (the NAND edge into the target sits at idx > 0).
+    Mirroring why.py also means: terminal-status counter-claims are
+    excluded (``_exclude_status_clause('c')``), each contested point's
+    claims are severity-ranked (high-severity first — a NANDer whose
+    persisted EP mean >= 0.6 is a strong dispute) then id-ordered, and
+    budget-capped at why.py's W4_MAX_CONFLICTS — the SAME subset the
+    canonical why-layer would surface (a boost never fires on a conflict
+    the why-layer wouldn't show, and never misses one it would).  The
+    whole read + row-processing is fail-open — ranking must never break
+    from enrichment (non-str raw-graph content is coerced, never raised)."""
+    if not contested_ids or not query:
+        return {}
+    try:
+        try:  # single source of truth: the why-layer UI budget
+            from .why import W4_MAX_CONFLICTS as _claim_budget
+        except Exception:  # pragma: no cover — defensive
+            _claim_budget = 2
+        rows = projection.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator = false OR n.is_operator IS NULL) "
+            "MATCH (c:Point)-[r:NAND]->(n) "
+            "OPTIONAL MATCH (src:Point)-[ri:INPUT]->(c) "
+            "WITH n, c, r, src, ri "
+            "WHERE c.id <> n.id AND (src.id IS NULL OR src.id <> n.id) AND ("
+            "  (c.is_operator = true AND r.idx > 0 AND ri.idx = 0) OR "
+            "  (c.is_operator = false OR c.is_operator IS NULL)) "
+            "AND " + _exclude_status_clause("c") + " "
+            "RETURN n.id, coalesce(src.id, c.id), "
+            "  coalesce(src.content, c.label, c.content, ''), "
+            "  coalesce(src.posterior_alpha, src.ep_alpha, c.posterior_alpha, c.ep_alpha, 1.0), "
+            "  coalesce(src.posterior_beta, src.ep_beta, c.posterior_beta, c.ep_beta, 1.0)",
+            params={"ids": contested_ids},
+        ).result_set
+        # Severity-then-id selection mirrors why.py's _assemble_conflicts:
+        # a NANDer with persisted EP mean >= 0.6 is a high-severity dispute
+        # and ranks above medium ones; ids break the tie deterministically
+        # (Cypher row order never decides the budgeted subset).
+        pending: dict[str, dict[str, dict]] = {}
+        for pid, claim_id, content, a, b in rows:
+            if not pid or not claim_id:
+                continue
+            a_f, b_f = float(a), float(b)
+            s = a_f + b_f
+            mean = (a_f / s) if s > 0 else 0.5
+            pending.setdefault(pid, {})[claim_id] = {
+                "content": str(content or ""),
+                "mean": mean,
+                "claim_id": claim_id,
+            }
+        boosts: dict[str, float] = {}
+        for pid, claims in pending.items():
+            chosen = sorted(
+                claims.values(),
+                key=lambda c: (0 if c["mean"] >= 0.6 else 1, c["claim_id"]))
+            texts = [c["content"] for c in chosen[:_claim_budget]]
+            if _query_touches_conflict(query, texts):
+                boosts[pid] = W4_CONTESTED_BOOST
+        return boosts
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("contested-relevance read failed: %s", e)
+        return {}
 
 
 def recency_decay(age_days: float, half_life_days: float = DEFAULT_HALF_LIFE_DAYS) -> float:
@@ -120,6 +255,7 @@ class GraphRanker:
         results: list[dict],
         *,
         entity_type: str = "point",
+        query: str | None = None,
     ) -> list[dict]:
         """Re-rank results, each annotated with a ``graph_ranking`` breakdown.
 
@@ -127,12 +263,25 @@ class GraphRanker:
         (``scores.rrf``, else ``similarity``, else ``confidence``). Returns the
         list sorted by final_score descending; input dicts are NOT mutated —
         annotated copies are returned.
-        """
+
+        W4-b (issue #2102): ``query`` is OPTIONAL.  When a query is present
+        AND the W4 flag is on, contested points whose conflict is
+        query-relevant receive a bounded graph-boost increment
+        (``w4_contested_boost``) — flag-off or no-query runs are
+        byte-identical to the pre-W4-b ranking (R11 golden-ordering
+        regression)."""
         if not results:
             return results
 
         ids = [r.get("id") for r in results if r.get("id")]
         signals = self._fetch_signals(ids, entity_type) if self.projection is not None else {}
+        contested_boosts: dict[str, float] = {}
+        if query and self.projection is not None and _w4_flag_on():
+            contested_boosts = resolve_contested_relevance(
+                self.projection,
+                [pid for pid, sig in signals.items() if sig.get("contested")],
+                query,
+            )
 
         similarities = []
         for r in results:
@@ -144,6 +293,13 @@ class GraphRanker:
         for r, norm_sim in zip(results, norm_sims):  # noqa: B905
             sig = signals.get(r.get("id"), {})
             graph_boost = self.graph_boost(r, sig)
+            cb = contested_boosts.get(r.get("id"), 0.0)
+            if cb:
+                # W4-b: bounded relevance-gated contested boost, folded into
+                # the graph term (flag-off/irrelevant ⇒ 0 ⇒ unchanged).  The
+                # clamp keeps the documented [0, 1] graph_boost invariant even
+                # when a maxed structural boost meets the W4-b increment.
+                graph_boost = round(min(1.0, graph_boost + cb), 4)
             recency = self.recency_boost(r, sig)
             final = (
                 self.similarity_weight * norm_sim
@@ -157,6 +313,8 @@ class GraphRanker:
                 "recency_boost": round(recency, 4),
                 "final_score": round(final, 4),
             }
+            if cb:
+                copy["graph_ranking"]["w4_contested_boost"] = round(cb, 4)
             sig = signals.get(r.get("id"), {})
             if "variance" in sig:
                 copy["graph_ranking"]["variance"] = round(sig["variance"], 6)
@@ -176,11 +334,14 @@ class GraphRanker:
         Events/Sessions: 0.6·aboutObject count (Objects referenced) +
         0.4·mean EP confidence of produced Points.
 
-        Contestation is deliberately NOT used as a ranking penalty: a
-        contested claim is a claim the agent should KNOW is contested (the
-        ep.contested flag + variance on the result), not one that is silently
-        ranked lower. Ranking stays about relevance and graph structure;
-        epistemic honesty is surfaced, not scored.
+        Contestation is deliberately NOT used as a blanket ranking penalty:
+        a contested claim is a claim the agent should KNOW is contested, not
+        one that is silently ranked lower.  W4-b (issue #2102) adds the
+        narrow scored exception — a bounded boost when the CONFLICT is
+        relevant to the query (see ``rerank(query=...)``), flag-gated and
+        byte-identical when off.  Ranking stays about relevance and graph
+        structure; epistemic honesty is surfaced always, scored only on
+        conflict-relevant queries under the W4 flag.
         """
         if signals:
             confidence = signals.get("confidence", 0.0)
@@ -367,6 +528,7 @@ class StateRanker:
         results: list[dict],
         *,
         entity_type: str = "point",
+        query: str | None = None,
     ) -> list[dict]:
         """Re-rank results with the multiplicative gate.
 
@@ -378,7 +540,13 @@ class StateRanker:
 
         ``{relevance_norm, confidence, confidence_source, centrality_norm,
           base_score, final_score, degree, variance, contested}``
-        """
+
+        W4-b (issue #2102): ``query`` is OPTIONAL.  When a query is present
+        AND the W4 flag is on, contested POINTS whose conflict is
+        query-relevant receive a bounded multiplicative boost
+        (``w4_contested_boost``) — flag-off or no-query runs are
+        byte-identical to the pre-W4-b ranking (R11 golden-ordering
+        regression)."""
         if not results:
             return results
 
@@ -400,6 +568,17 @@ class StateRanker:
                     logger.warning("StateRanker signal fetch failed (%s): %s", et, e)
         else:
             signals = self._embedded_signals(results)
+        # W4-b contested-relevance resolution (ONE batch read, S8): only
+        # POINT results can be contested (objects aggregate means); the
+        # embedded (projection=None) unit path has no graph to resolve
+        # counter-claims, so the boost is inert there.
+        contested_boosts: dict[str, float] = {}
+        if query and self.projection is not None and _w4_flag_on():
+            contested_boosts = resolve_contested_relevance(
+                self.projection,
+                [pid for pid, sig in signals.items() if sig.get("contested")],
+                query,
+            )
 
         # 1. relevance_norm: min-max within the result set.
         relevances = [_similarity_of(r) for r in results]
@@ -439,8 +618,14 @@ class StateRanker:
         for a, nd in zip(ann, norm_deg):  # noqa: B905
             a["recall_ranking"]["centrality_norm"] = round(nd, 6)
             base = a["recall_ranking"]["base_score"]
+            cb = contested_boosts.get(a.get("id"), 0.0)
+            if cb:
+                # W4-b: bounded relevance-gated contested boost as a weak
+                # multiplicative factor (flag-off/irrelevant ⇒ absent ⇒ the
+                # pre-W4-b final score is untouched).
+                a["recall_ranking"]["w4_contested_boost"] = round(cb, 4)
             a["recall_ranking"]["final_score"] = round(
-                base * (1.0 + self.centrality_weight * nd), 6)
+                base * (1.0 + self.centrality_weight * nd) * (1.0 + cb), 6)
 
         ann.sort(key=lambda r: r["recall_ranking"]["final_score"], reverse=True)
         return ann

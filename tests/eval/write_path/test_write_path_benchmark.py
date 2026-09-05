@@ -34,8 +34,8 @@ Assertions cover the can-fail gate properties the issue owns:
 """
 from __future__ import annotations
 
+import contextlib
 import json
-import os
 import shutil
 import tempfile
 import uuid
@@ -55,7 +55,7 @@ EXTRACTOR_MOCK = {"TORTOISE_SESSION_LLM_MOCK": "1", "TORTOISE_SESSION_EXTRACTOR"
 
 
 @pytest.fixture()
-def sdk_factory():
+def sdk_factory(monkeypatch):
     """Yields a factory that mints ONE fresh hermetic graph per call (docker
     lane: a unique server graph via the redirect seam; embedded lane: a
     transient redislite file).  Every minted SDK is wiped + closed at test
@@ -64,7 +64,16 @@ def sdk_factory():
     run needs its own graph."""
     from tortoise.sdk import TortoiseSDK
 
-    os.environ.update(EXTRACTOR_MOCK)
+    # #2183 regression (main CI red 2026-09-04, fixed here): this was a raw
+    # os.environ.update(EXTRACTOR_MOCK) with NO restore — the mock-extractor
+    # env leaked process-wide for every test after the first sdk_factory use,
+    # hijacking the extraction lane and breaking
+    # test_pack_manifest_store_extraction.py (tenant pack kinds never reached
+    # the S1/S2 prompts) whenever the benchmark module ran before it in the
+    # same pytest process (the test (b) leg). monkeypatch.setenv auto-restores
+    # at test teardown — env stays set for this test's duration only.
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
     created: list[tuple] = []
 
     def _make() -> TortoiseSDK:
@@ -76,19 +85,13 @@ def sdk_factory():
 
     yield _make
     for sdk, _dir in created:
-        try:
+        with contextlib.suppress(Exception):  # #2174-lint SIM105
             sdk._get_proj().g.query("MATCH (n) DETACH DELETE n")
-        except Exception:  # noqa: BLE001
-            pass
-        try:
+        with contextlib.suppress(Exception):  # #2174-lint SIM105
             sdk.close()
-        except Exception:  # noqa: BLE001
-            pass
     for _sdk, _dir in created:
-        try:
+        with contextlib.suppress(Exception):  # #2174-lint SIM105
             shutil.rmtree(_dir, ignore_errors=True)
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def _tmp_corpus(tmp_path: Path) -> Path:

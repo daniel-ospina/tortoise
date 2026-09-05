@@ -53,7 +53,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Callable
+from collections.abc import Callable
 
 from tests.eval.write_path import grading, schema
 
@@ -260,8 +260,8 @@ class SalienceJudge:
 
     def record_usage(self, model: object) -> None:
         """Fold one model's per-call usage into the judge's cost snapshot."""
-        if hasattr(model, "last_cost") and isinstance(getattr(model, "last_cost"), (int, float)):
-            self.cost_usd += float(getattr(model, "last_cost") or 0.0)
+        if hasattr(model, "last_cost") and isinstance(model.last_cost, (int, float)):
+            self.cost_usd += float(model.last_cost or 0.0)
 
     def synthesize_probes(self, gold: dict, session: dict) -> dict[str, str]:
         """Paraphrase-stage: gold's salient units → {unit_id: probe}."""

@@ -101,7 +101,8 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_ep_directed_nand.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # MCP-tool + SDK shared-store contract (PR #1684)
     "test_extractor_reliability.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_hard_reject.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
-    "test_hosted_api.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],  # #1686: register/provision journal tests force the embedded lane (the delenv IS the point)
+    "test_hosted_api.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',  # #1686: register/provision journal tests force the embedded lane (the delenv IS the point)
+                             r'monkeypatch\.setenv\(\s*$'],  # #2251: URI-mode namespace-derivation envelope tests force the docker branch of _make_sdk/_registry_anchor with a RECORD-ONLY __init__ spy (the setenv IS the point — the (db_path=None, namespace=...) construction contract is pinned without touching a server)
     "test_index_cli.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_index_restore.py": [r'os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'],  # embedded-file-contract module fixture (PR #1684)
     "test_mcp_client.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
@@ -114,6 +115,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     "test_quota.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_selfhost.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
     "test_selfhost_rest.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],
+    "test_selfhost_volunteer_context.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI",\s*""'],  # #2103 (W4C) — selfhost volunteer forces the embedded lane (the selfhost_rest pattern)
     "test_turnstile_signup.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     "test_value_extractor.py": [r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
     # ── DELIBERATE_URI: module-level live-FalkorDB probes (set + restore at

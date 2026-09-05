@@ -410,8 +410,11 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
     def test_last_decide_attempt_lww_conditional(self):
-        """'failed' is SKIPPED once decide-completed exists (dismissal alone
-        never completes; failed never un-completes)."""
+        """Epic DM-1 contract: decide-completed (success) CLEARS the
+        attempt to null; ANY later attempt write ('failed' OR 'dismissed')
+        is SKIPPED once decide-completed exists (a completed decide never
+        re-gains an attempt marker — dismissal alone never completes;
+        failed never un-completes; retry reachability is pre-completion)."""
         tc, _team_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
@@ -423,14 +426,22 @@ class TestCheckpoint:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "decide-completed"})
             assert r.json()["onboarding"]["status"] == "complete"
+            # success clears the attempt (epic DM-1: success clears to null)
+            assert r.json()["onboarding"]["last_decide_attempt"] is None
             r2 = tc.post("/v1/onboarding/state/checkpoint",
                          json={"last_decide_attempt": "failed"})
             assert r2.status_code == 200
-            # pin the PRESERVED value (dismissal survives; failed never
-            # un-completes) — the old `!= "failed"` passed even if the field
-            # were silently dropped/reset, masking a data-loss regression.
-            assert r2.json()["onboarding"]["last_decide_attempt"] == "dismissed"
+            # post-complete attempt writes are skipped — the field stays
+            # cleared and the decide stays complete (no silent regression,
+            # no data-loss: the old test pinned dismissed-survives which
+            # contradicted the epic DM-1 success-clears-to-null pin).
+            assert r2.json()["onboarding"]["last_decide_attempt"] is None
             assert r2.json()["onboarding"]["status"] == "complete"
+            # 'dismissed' post-complete is equally skipped
+            r3 = tc.post("/v1/onboarding/state/checkpoint",
+                         json={"last_decide_attempt": "dismissed"})
+            assert r3.json()["onboarding"]["last_decide_attempt"] is None
+            assert r3.json()["onboarding"]["status"] == "complete"
         finally:
             tc.__exit__(None, None, None)
 
@@ -1093,6 +1104,75 @@ class TestJourneyLeg:
                 "(s:Subject {subjectKind: 'organization'}) RETURN s.org_id",
                 oid=team_id)
             assert res.result_set and res.result_set[0][0] == team_id
+        finally:
+            tc.__exit__(None, None, None)
+
+
+class TestOnboardsEdge:
+    """#1999 (W3): the DM-1 node↔anchor link — org_subject_id property +
+    onboards edge → Organization Subject, written by the seed (the Subject
+    itself is created by the seed core first; this writer links).
+    Idempotent: replay does not duplicate the edge (created-signal False)."""
+
+    def _make_org_subject(self, team_id: str) -> str:
+        import uuid
+        sdk = _make_sdk(namespace=team_id)
+        try:
+            node = sdk.create_subject(
+                f"org{uuid.uuid4().hex[:8]}", subjectKind="organization",
+                org_id=team_id)
+            return node["id"]
+        finally:
+            sdk.close()
+
+    def test_write_sets_org_subject_id_and_edge(self):
+        tc, team_id = _registered_client()
+        try:
+            proj = _make_sdk(namespace=team_id)._get_proj()
+            sid = self._make_org_subject(team_id)
+            res = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            assert res["created"] is True
+            node = _read_node(team_id)
+            assert node.get("org_subject_id") == sid
+            r = proj.query(
+                "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
+                "(s:Subject) RETURN s.id, n.org_subject_id", oid=team_id)
+            rows = r.result_set
+            assert rows and rows[0][0] == rows[0][1] == sid
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_replay_noop_same_subject(self):
+        tc, team_id = _registered_client()
+        try:
+            proj = _make_sdk(namespace=team_id)._get_proj()
+            sid = self._make_org_subject(team_id)
+            r1 = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            r2 = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            assert r1["created"] is True
+            assert r2["created"] is False
+            assert r2["subject_id"] == sid
+            r = proj.query(
+                "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
+                "(s:Subject) RETURN count(s)", oid=team_id)
+            assert r.result_set[0][0] == 1
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_subject_kind_is_never_object_statement(self):
+        """B1 regression: the anchor linked by write_onboards_edge is a
+        Subject — never Object/Statement."""
+        tc, team_id = _registered_client()
+        try:
+            proj = _make_sdk(namespace=team_id)._get_proj()
+            sid = self._make_org_subject(team_id)
+            onboarding_state.write_onboards_edge(proj, team_id, sid)
+            r = proj.query(
+                "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->(s) "
+                "RETURN labels(s)", oid=team_id)
+            assert r.result_set
+            labels = r.result_set[0][0]
+            assert "Subject" in labels
         finally:
             tc.__exit__(None, None, None)
 

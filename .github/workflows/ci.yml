@@ -190,6 +190,7 @@ jobs:
               # convention; deploy-pages rebuilds from src at deploy).
               "dashboard_e2e": any_file(
                   isfile("tests/e2e/test_keys_table_mixed.py"),
+                  isfile("tests/e2e/test_graphs_management.py"),
                   isfile("tests/e2e/test_session_login_flow.py",
                          "tests/e2e/conftest.py"),
                   startswith("website/apps/dashboard/src/"),
@@ -232,6 +233,26 @@ jobs:
       - uses: actions/checkout@v4
       - name: Check migration prefix invariants
         run: bash .github/scripts/check-migration-append-only prefix
+  # C8 #2117: the migration ROLLBACK DRILL — applies every migration on
+  # PGlite, runs the assertion suites, then proves the R18 reversibility
+  # round trip (apply → rollback → re-apply) for the multi-graph migration:
+  # drop graphs + the api_keys graph columns restores the pre-C1 shape, and
+  # re-applying migration 20260901000001 restores the invariants (verified
+  # by re-running its assertion suite). Runs whenever a migration changes.
+  schema-drill:
+    needs: changes
+    if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: PGlite schema tests + rollback drill
+        run: |
+          cd supabase/tests/pglite
+          npm ci --no-audit --no-fund
+          npm run validate
   migration-append-only:
     needs: changes
     if: needs.changes.outputs.migrations == 'true'  # #2149: migrations surface only
@@ -509,22 +530,48 @@ jobs:
       # legal-e2e job) instead of the LIVE page — the strict-validity gates,
       # the provision-401 clear→/auth path and the waitForSession validity
       # check land in this PR and only exist in the deployed page AFTER merge.
+      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
+      # clock starts — a fresh runner's npx fetch was eating most of the 120s
+      # boot budget (empty /tmp/wrangler.log = cold npx install never finished).
+      - name: Pre-warm wrangler toolchain
+        run: |
+          npx --yes wrangler@4 --version
+          npx --yes wrangler@4 pages dev --help >/dev/null
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
-          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
-            --compatibility-date=2024-09-23 \
-            > /tmp/wrangler.log 2>&1 &
-          echo $! > /tmp/wrangler.pid
-          for i in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-              echo "wrangler dev ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
+          for attempt in 1 2; do
+            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 \
+              > /tmp/wrangler.log 2>&1 &
+            echo $! > /tmp/wrangler.pid
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+                echo "wrangler dev ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8788' 2>/dev/null || true
+            pkill workerd 2>/dev/null || true
+            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
+            # with > anyway, and deleting after the LAST attempt would remove
+            # the only evidence before the final cat (review P1 — a double
+            # failure must still surface wrangler's own diagnostics).
+            sleep 3
           done
-          echo "::error::wrangler dev server failed to start"
-          tail -50 /tmp/wrangler.log || true
+          # Final cleanup: flush the log + free :8788 before surfacing it
+          # below — a future failure must NOT be a black box.
+          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill workerd 2>/dev/null || true
+          sleep 2
+          echo "::error::wrangler dev server failed to start (2 attempts)"
+          echo "--- /tmp/wrangler.log ---"
+          cat /tmp/wrangler.log || true
+          echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
       - name: Run welcome page E2E (mocked against the local preview) (#373/#1511)
         run: python -m pytest tests/e2e/test_welcome_page.py -q -rs -p no:cacheprovider
@@ -564,28 +611,64 @@ jobs:
       # tortoise/__init__) + the e2e test extras (playwright, pytest-playwright).
       - run: pip install -e '.[test]'
       - run: python -m playwright install --with-deps chromium
+      # #2178 (review P1): pre-warm the npx + wrangler caches BEFORE the boot
+      # clock starts — a fresh runner's npx fetch was eating most of the 120s
+      # boot budget (empty /tmp/wrangler.log = cold npx install never finished;
+      # #2211 hit this 4x in a row 2026-09-04). --version is fast; the
+      # readiness loop below retries twice at 240s each.
+      - name: Pre-warm wrangler toolchain
+        run: |
+          npx --yes wrangler@4 --version
+          npx --yes wrangler@4 pages dev --help >/dev/null
       - name: Start wrangler pages dev preview (website/ = Pages root)
         run: |
           cd website
+          # wrangler pinned to 4.127.0 (@4 floats to latest each run — same
+          # drift class as the ruff pin, agent-infra#414). 2026-09-04 ~04:00Z
+          # a runner-fleet cold-npx stall broke this boot on EVERY PR (the
+          # #2178/#2211 hardening class): /tmp/wrangler.log stayed EMPTY — the
+          # cold npx install never finished inside the 120s budget. 4.127.0 is
+          # the version verified to start (macOS in 5s, cold linux ~90s); the
+          # retry's 2nd attempt reuses the warm npm cache.
+          #
           # --compatibility-date pinned: wrangler defaults to "today", but the
           # bundled workerd lags a day behind (max date < today) → dev server
           # fails to start. Any stable date ≤ workerd's max works; the
           # middleware uses only stable APIs (next()/ASSETS.fetch).
-          npx --yes wrangler@4 pages dev . --port 8788 --ip 127.0.0.1 \
-            --compatibility-date=2024-09-23 \
-            > /tmp/wrangler.log 2>&1 &
-          echo $! > /tmp/wrangler.pid
-          # Wait for the dev server to accept connections (first start also
-          # downloads workerd + bundles website/functions/_middleware.ts).
-          for i in $(seq 1 120); do
-            if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
-              echo "wrangler dev ready after ${i}s"
-              exit 0
-            fi
-            sleep 1
+          for attempt in 1 2; do
+            npx --yes wrangler@4.127.0 pages dev . --port 8788 --ip 127.0.0.1 \
+              --compatibility-date=2024-09-23 \
+              > /tmp/wrangler.log 2>&1 &
+            echo $! > /tmp/wrangler.pid
+            # Wait for the dev server to accept connections (first start also
+            # downloads workerd + bundles website/functions/_middleware.ts).
+            for i in $(seq 1 240); do
+              if curl -fsS http://127.0.0.1:8788/ >/dev/null 2>&1; then
+                echo "wrangler dev ready after ${i}s (attempt ${attempt})"
+                exit 0
+              fi
+              sleep 1
+            done
+            echo "attempt ${attempt} timed out — retrying"
+            kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+            pkill -f 'wrangler.*8788' 2>/dev/null || true
+            pkill workerd 2>/dev/null || true
+            # NO rm of /tmp/wrangler.log here: attempt 2's relaunch truncates
+            # with > anyway, and deleting after the LAST attempt would remove
+            # the only evidence before the final cat (review P1 — a double
+            # failure must still surface wrangler's own diagnostics).
+            sleep 3
           done
-          echo "::error::wrangler dev server failed to start"
-          tail -50 /tmp/wrangler.log || true
+          # Final cleanup: flush the log + free :8788 before surfacing it
+          # below — a future failure must NOT be a black box.
+          kill $(cat /tmp/wrangler.pid) 2>/dev/null || true
+          pkill -f 'wrangler.*8788' 2>/dev/null || true
+          pkill workerd 2>/dev/null || true
+          sleep 2
+          echo "::error::wrangler dev server failed to start (2 attempts)"
+          echo "--- /tmp/wrangler.log ---"
+          cat /tmp/wrangler.log || true
+          echo "--- /tmp/wrangler.pid: $(cat /tmp/wrangler.pid 2>/dev/null || echo missing) ---"
           exit 1
       - name: Run legal pages E2E suite (#657)
         # LEGAL_E2E_SKIP_EXTERNAL_CRAWL=1: the third-party external-link
@@ -700,7 +783,7 @@ jobs:
       - name: Run keys-table mixed-fixture e2e (#2166/#2178)
         run: >
           RUN_DASHBOARD_E2E=1
-          python -m pytest tests/e2e/test_keys_table_mixed.py
+          python -m pytest tests/e2e/test_keys_table_mixed.py tests/e2e/test_graphs_management.py
           -q -rs -p no:cacheprovider
         env:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required

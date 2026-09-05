@@ -414,6 +414,89 @@ mean_dropped / mean_selected_count / **max_session_chunks_max** — the
 E2E-10 cap assertion — / pool_recall_mean@k). Baseline reports carry **zero**
 rerank keys.
 
+## LLM token usage + cost (#2185)
+
+Every real LLM call in the eval pipeline (reader, judge, extractor_v2) is
+metered through an additive `usage_sink` seam on the chat transports
+(`OpenRouterModel` / `DeepSeekDirectModel` / `VeniceModel` /
+`OpenAICompatModel` / the eval's `OfficialJudgeModel` — all no-op by
+default) and collected per question by the harness collector
+(`tools/longmem_eval/usage.py`). Mock runs call no LLM → **zero usage
+keys** anywhere (reports stay byte-identical to pre-#2185, pinned).
+
+**Per-question outcomes** (completed questions only) conditionally carry
+`llm_usage` — an envelope bucketed by `(stage, provider, model)` with
+`by_stage` + a flat `total` (`prompt_tokens` / `completion_tokens` /
+`calls`); the projection emits the key ONLY when present (the `rerank_pass`
+conditional pattern — never a null). Cache/reasoning detail keys ride the
+per-lane buckets when the provider reports them.
+
+**The report's conditional top-level `usage` block** appears iff ≥1
+completed outcome carries `llm_usage` OR overhead rows exist (breaker-open
+/failed-question / preflight spend). Schema:
+
+- `per_question` — `{qid: {prompt_tokens, completion_tokens, calls,
+  cost_usd, priced, estimated}}` over the completed outcomes;
+- `totals` — Σ per-question + overhead tokens/calls;
+- `overhead` — ONLY when rows exist: breaker-open drops, failed questions,
+  preflight/keyless spend (tokens/calls/cost + per-lane `lanes`). Never
+double-counted: per-question usage lives on the outcomes; everything else
+rides the drained collector envelope (replicas on failure entries are the
+kill-9-safe durability copy, folded shortfall-only on resume — A4);
+- `cost` — `usd` run total, `priced`, `estimated`, and the per-data-point
+  USD over the evidence-bearing WITH-usage subset
+  (`evidence_written > 0` and envelope present):
+  `data_point_usd` / `data_point_n` / `data_point_priced`;
+- `coverage` — `evidence_bearing` / `with_usage` counts; the `partial`
+  marker is emitted when `0 < with_usage < evidence_bearing` (a mixed
+  report — e.g. resumed pre-#2185 outcomes — is disclosed, never silent);
+- `priced` — False when ANY lane was unpriced (unknown model OR a
+  `usage_present=False` lane), with the offending lanes listed in the
+  cost breakdown — loud, never a silent $0;
+- `pricing` — snapshot: `map_version` / `git_sha` / `verified_on` (also
+  recorded in `methodology.usage_pricing`).
+
+**Pricing map** (`tools/longmem_eval/costing.py`): versioned
+per-(provider, model) USD-per-1M table (`PRICING_MAP_VERSION`), computed
+at report time from the RAW envelopes (outcome `llm_usage` is never
+mutated — a map correction can reprice any future report from the same
+raw tokens, but an already-published report's block is a fixed snapshot →
+COGS corrections are FORWARD-ONLY for published artifacts). Provenance
+discipline per entry: `source` (URL/page) + `verified_on` + `estimated`
+(True = single-source or cross-check-conflicting — surfaced in the
+breakdown, never silently asserted). Cache-hit input tokens price at the
+reduced `cache_read_per_1m` rate ONLY where the map entry carries a
+verified rate; otherwise full-priced with a `cache_discount_unpriced`
+flag. Out-of-map lanes never crash and never guess: `priced=False` with a
+reason.
+
+**Out-of-coverage producers**: producers that run a real LLM OUTSIDE the
+runner pipeline (e.g. `tools/longmem_eval/full_context.py`
+`--limit` cells, the product spot-check `tools/ask_spotcheck.py` judge
+lane) do not register a collector — their reports carry no `usage` block
+until a collector registers them. Only the `run_main`/`run_evaluation`
+pipeline records usage today; retrieval-only runs never call the reader/
+judge → no usage keys.
+
+**Bounded-loss windows** (round-2 code-review, PR #2250 — same status as
+the documented post-drain late-fire bound above):
+
+- A kill-9 between a SUCCESS question's usage drain and the trailing
+  checkpoint write loses that envelope (no replica exists on the success
+  path); on resume the question re-runs and re-bills, so the report counts
+  the re-run's spend only. Window is the drain→save gap under flock.
+- Failure/breaker-open spend is protected by the A4 replica (kill-9-safe
+  failure-entry usage); the replica is the CUMULATIVE qid envelope
+  (payload + drained rows), so a `--retry-failed` re-attempt that burns
+  fewer tokens than the persisted payload still folds its exact un-saved
+  delta on the next resume.
+
+```bash
+# offline smoke (--mock mocks reader+judge only — the extractor is real,
+# so the post-#2185 smoke report GAINS exactly one top-level key: "usage")
+uv run python -m tools.longmem_eval.run_protocol smoke --mock
+```
+
 ## Full run prerequisites
 
 - The dataset (~tens of MB; auto-downloaded to the cache dir — needs
