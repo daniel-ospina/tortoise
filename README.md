@@ -80,6 +80,14 @@ claude mcp add tortoise https://api.premiselabs.co/mcp/
 claude mcp add tortoise http://localhost:8000/mcp
 ```
 
+> ℹ️ **Claude Code one-time approval:** servers registered at **project
+> scope** (`.mcp.json` — `claude mcp add --scope project`, the default in
+> older clients) show as **⏸ Pending approval** in `claude mcp list` until
+> you approve them once — start `claude` in this project and allow the
+> prompt (or use `/mcp`). The tools stay disabled until then; this is
+> expected, not a failure. (The current `claude mcp add` default is *local*
+> scope — active immediately, no approval.)
+
 ```bash
 # Codex
 codex mcp add tortoise http://localhost:8000/mcp --bearer-token-env-var TORTOISE_API_KEY
