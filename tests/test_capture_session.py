@@ -3647,5 +3647,58 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         ev2 = sdk.create_event("x", "meeting", is_episodic=False)
         assert ev2.get("id"), ev2
         assert ev2.get("id") != eid, "no _server_id must not reuse a prior id"
+        # eventId is server-managed on the UPDATE surface too (an Event rename
+        # desyncs the live node from its EventRecorded journal entry; a Point
+        # re-stamp spoofs provenance).
+        try:
+            sdk.update_entity(ev2.get("id"), eventId="ev_renamed")
+            raise AssertionError("update_entity eventId must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        pt = sdk.create_point("statement", "a point")
+        try:
+            sdk.update_point(pt["id"], eventId="ev_other")
+            raise AssertionError("update_point eventId must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+    finally:
+        sdk.close()
+
+
+def test_phase_f_sweep_event_delete_session_guard(tmp_path):
+    """W5 Phase F (#2104, review r3): the orphaned-writes sweep's Event delete
+    carries a session-absence guard (deterministic eventIds are shared by
+    every capture of a session — a concurrent same-session re-capture must not
+    lose its Event under the delete-during-capture race). Executes the EXACT
+    production Cypher (_SWEEP_EVENT_DELETE_CYPHER) against the real graph in
+    both states."""
+    from tortoise import hosted_api
+    from tortoise.sdk import _session_capture_event_id
+
+    sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
+    try:
+        sid = "session_sweep_guard"
+        eid = _session_capture_event_id(sid)
+        proj = sdk._get_proj()
+        # Stage a Session + its deterministic capture Event (real graph).
+        ev = sdk.create_event(f"session_{sid}", "sessionCaptured",
+                              _server_id=eid, startedAt="now",
+                              endedAt="now", sessionId=sid,
+                              is_episodic=True)
+        assert ev.get("id") == eid, ev
+        proj.g.query("MERGE (s:Session {id:$sid})", params={"sid": sid})
+        q = lambda: proj.g.query(  # noqa: E731
+            "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
+            params={"eid": eid}).result_set[0][0]
+        # Live Session present (the concurrent re-capture) → Event survives.
+        proj.g.query(hosted_api._SWEEP_EVENT_DELETE_CYPHER,
+                     params={"sid": sid, "eid": eid})
+        assert q() == 1, "a live Session must protect its deterministic Event"
+        # Session absent (true orphan) → Event is deleted.
+        proj.g.query("MATCH (s:Session {id:$sid}) DETACH DELETE s",
+                     params={"sid": sid})
+        proj.g.query(hosted_api._SWEEP_EVENT_DELETE_CYPHER,
+                     params={"sid": sid, "eid": eid})
+        assert q() == 0, "an absent Session must let the orphaned Event through"
     finally:
         sdk.close()

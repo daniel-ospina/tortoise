@@ -5861,6 +5861,23 @@ async def capture_session(body: SessionRequest, request: Request, team: dict = D
         raise
 
 
+# W5 Phase F (#2104, review r3/r4): the sweep's Event delete carries the same
+# session-absence guard as the Point/Source deletes — a live Session (a
+# concurrent same-session re-capture owns the shared deterministic eventId)
+# makes the delete a no-op. Guard shape: aggregated present-count (the
+# ``OPTIONAL MATCH ... WITH s WHERE s IS NULL`` shape does NOT filter on
+# FalkorDB — docker AND embedded fold the NULL predicate into the optional
+# match and keep the row; verified by execution, review r4). Module-level so
+# the real-graph regression test executes the EXACT production Cypher (no
+# drift) on both lanes.
+_SWEEP_EVENT_DELETE_CYPHER = (
+    "OPTIONAL MATCH (s:Session {id:$sid}) "
+    "WITH count(s) AS present "
+    "WHERE present = 0 "
+    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e"
+)
+
+
 async def _capture_session_impl(body: SessionRequest, request: Request | None,
                                 team: dict) -> dict:
     """The capture pipeline (gates + writes). Shared by the REST endpoint and
@@ -6416,10 +6433,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # Session (C's re-capture owns the shared {sid}_t{i} id-space) makes
             # the query a no-op and the re-capture re-absorbs the turns; only a
             # truly absent Session lets the orphans through.
+            # W5 Phase F (#2104, review r4): the guard is an AGGREGATED present
+            # count (``WHERE present = 0``), NOT the ``OPTIONAL MATCH ... WITH s
+            # WHERE s IS NULL`` shape — FalkorDB (docker AND embedded) folds a
+            # NULL-predicate WHERE into the OPTIONAL MATCH failure and KEEPS the
+            # row, so the old shape never filtered (verified by execution: the
+            # delete ran with a live Session present).
             with suppress(Exception):
                 proj.g.query(
-                    "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
-                    "WHERE s IS NULL "
+                    "OPTIONAL MATCH (s:Session {id:$sid}) "
+                    "WITH count(s) AS present "
+                    "WHERE present = 0 "
                     "MATCH (p:Point) WHERE p.id IN $ids DETACH DELETE p",
                     params={"sid": session_id, "ids": point_ids},
                 )
@@ -6434,17 +6458,20 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # dangle with no live Event for their eventId provenance and the
             # EventRecorded journal entry would point at a deleted node (the
             # per-capture ULID premise the old comment relied on is gone).
+            # Guard shape: aggregated present-count (see the Point delete
+            # above — the NULL-predicate WHERE shape does not filter on
+            # FalkorDB). Shared with tests via _SWEEP_EVENT_DELETE_CYPHER
+            # (real-graph pin, both lanes).
             with suppress(Exception):
                 proj.g.query(
-                    "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
-                    "WHERE s IS NULL "
-                    "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e",
+                    _SWEEP_EVENT_DELETE_CYPHER,
                     params={"sid": session_id, "eid": event_id},
                 )
         with suppress(Exception):
             proj.g.query(
-                "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
-                "WHERE s IS NULL "
+                "OPTIONAL MATCH (s:Session {id:$sid}) "
+                "WITH count(s) AS present "
+                "WHERE present = 0 "
                 "MATCH (src:Source {url:$url}) DETACH DELETE src",
                 params={"sid": session_id, "url": f"session:{session_id}"},
             )
