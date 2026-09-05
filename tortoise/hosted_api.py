@@ -6221,13 +6221,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # materialization run ONLY on a genuine capture — a re-POST of an
     # existing session_id is a pure NO-OP replay. W5 Phase F (#2104): the
     # skip is NOT because a mint would duplicate the Event (the deterministic
-    # ``ev_<sha256(session_id)>`` id converges on the SAME node) — it is
+    # ``_session_capture_event_id(session_id)`` (= ev_<sha256("sessionCaptured:"+session_id)[:62]>) converges on the SAME node) — it is
     # because re-running the mint would MUTATE the first capture's Event
     # (the projection's ON MATCH SET refreshes startedAt/endedAt) and append
     # a duplicate EventRecorded journal entry; a replay must never touch the
     # first capture's Event or Source (SDK mirror byte-parity).
     # W5 Phase F (#2104): when the mint DOES run, the Event id is the
-    # DETERMINISTIC ``ev_<sha256(session_id)>`` (NOT a fresh ULID) so two
+    # DETERMINISTIC ``ev_<sha256("sessionCaptured:"+session_id)[:62]>`` id (_session_capture_event_id(session_id), NOT a fresh ULID) so two
     # concurrent fresh-session POSTs of the same session_id — the #1727
     # TOCTOU: both observe session_existed=False — MERGE onto ONE Event
     # node (the Event projection MERGEs on eventId; the second concurrent

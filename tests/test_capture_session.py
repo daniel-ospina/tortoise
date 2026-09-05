@@ -436,8 +436,9 @@ def test_capture_session_event_recorded_write_lands(sdk):
     assert len(rows) == 1
     event_id, node_id, started_at, ended_at = rows[0]
     # W5 Phase F (#2104): the sessionCaptured Event id is now DETERMINISTIC
-    # (ev_<sha256(session_id)> — derived from the capture's idempotency key)
-    # so two concurrent fresh-session captures converge on ONE Event node.
+    # (_session_capture_event_id(session_id) = ev_<sha256("sessionCaptured:"+
+    # session_id)[:62]> — derived from the capture's idempotency key) so two
+    # concurrent fresh-session captures converge on ONE Event node.
     # The old per-capture ULID made the #1727 TOCTOU mint two Events.
     assert event_id.startswith("ev_") and len(event_id) > 40, event_id
     assert not re.match(r"^[0-9a-f]+-[0-9a-f]{12}$", event_id), \

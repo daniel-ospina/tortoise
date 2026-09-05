@@ -14099,7 +14099,8 @@ class TortoiseSDK:
         proj = self._get_proj()
         # W5 Phase F (#2104, review r4): eventId is the EVENT node's identity
         # (the projection MERGEs on it; capture Events carry the DETERMINISTIC
-        # ev_<sha256(session_id)> id) — a tenant renaming it via update_entity
+        # _session_capture_event_id(session_id) id — ev_<sha256("sessionCaptured:"
+        # +session_id)[:62]>) — a tenant renaming it via update_entity
         # would desync the live node from its EventRecorded journal entry
         # (rebuild re-MERGEs a duplicate at the old id) and break Phase F's
         # one-Event-per-eventId convergence premise. No sanctioned internal
