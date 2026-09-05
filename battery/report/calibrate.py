@@ -12,15 +12,21 @@ from pathlib import Path  # noqa: F401
 from typing import Any  # noqa: F401
 
 
-def cal_table_hash(cal_rows: tuple[tuple[str, str, float], ...]) -> str:
-    """Canonical hash of the [cal] table.
+def cal_table_hash(cal_rows: tuple[tuple[str, str, float], ...],
+                   determinism_tolerances: tuple[tuple[str, float], ...] = ()
+                   ) -> str:
+    """Canonical hash of the [cal] table + determinism tolerance rows
+    (E2E-7.1 re-scope, #2284 Task 7: the tolerance table folds into the
+    same hash the --print route prints).
 
     Delegates to ThresholdsConfig.cal_table_hash (the #1406 provenance
     implementation) so the value recorded in artifacts and the one printed
     by `battery calibrate` are IDENTICAL (code-review P2-2).
     """
     from battery.config.thresholds import ThresholdsConfig
-    return ThresholdsConfig(cal_rows=tuple(cal_rows)).cal_table_hash()
+    return ThresholdsConfig(cal_rows=tuple(cal_rows),
+                            determinism_tolerances=tuple(
+                                determinism_tolerances)).cal_table_hash()
 
 
 def print_deltas(cal_rows: tuple[tuple[str, str, float], ...],
