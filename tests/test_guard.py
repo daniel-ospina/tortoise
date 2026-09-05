@@ -138,3 +138,44 @@ def test_placeholder_branch_raises_clear_import_error():
 
     # Restored: the guarded subclass is back and constructible.
     assert issubclass(tortoise.FalkorDB, rfc.FalkorDB)
+
+
+def test_tilde_path_expands_and_boots(monkeypatch, tmp_path):
+    """#2204 review (round 1): a `~`-prefixed path must be expanduser'd
+    BEFORE redislite sees it — redislite derives its config ``dir`` verbatim
+    from os.path.dirname(path) and never expands ``~`` itself, so an
+    unexpanded tilde dies with the raw FATAL CONFIG FILE ERROR at config
+    load. Constructing with '~<sub>/<missing-dir>/tortoise.db' under a
+    monkeypatched HOME must succeed, create the expanded data dir + DB, and
+    open the store at the EXPANDED path (proving the args tuple rebuild
+    forwarded the expanded path to super().__init__)."""
+    import os  # noqa: I001
+    from tortoise import FalkorDB
+    home = str(tmp_path / "home")
+    monkeypatch.setenv("HOME", home)
+    rel = "~/fresh-dir/tortoise.db"  # parent dir intentionally missing
+    db = FalkorDB(rel)
+    try:
+        expanded = os.path.join(home, "fresh-dir")
+        assert os.path.isdir(expanded)  # data dir created before config read
+    finally:
+        db.close()
+
+
+def test_tilde_unresolvable_user_rejected_as_relative():
+    """#2204 review (round 2): expanduser leaves '~<no-such-user>/...'
+    unchanged (still non-absolute) — the relative-path RuntimeError must
+    fire instead of creating a literal '~<user>' tree under the CWD
+    (Category-3 per-CWD server hazard)."""
+    from tortoise import FalkorDB
+    with pytest.raises(RuntimeError):
+        FalkorDB("~definitely-no-such-user-xyz/tortoise.db")
+
+
+def test_memory_branch_forwards_original_args():
+    """#2204 review (round 2): ':memory:' must bypass the expansion/makedirs
+    branch entirely and forward the ORIGINAL args (no dir creation)."""
+    import os  # noqa: I001
+    from tortoise import FalkorDB
+    db = FalkorDB(":memory:")
+    db.close()

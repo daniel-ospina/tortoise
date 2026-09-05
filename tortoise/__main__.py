@@ -3855,12 +3855,13 @@ def _cmd_doctor(args):
     # path → embedded projection via _projection_for.
     if target is not None:
         # #2204 pre-init guard: an EMBEDDED target with no Tortoise DB FILE is
-        # a never-initialized machine (e.g. `tortoise init` never ran).
-        # Starting the embedded redis server there would print a raw
+        # a never-initialized machine (e.g. `tortoise init` never ran). Probe-
+        # skipping is what makes doctor side-effect-free here: pre-#2204,
+        # starting the embedded server on a missing data dir printed a raw
         # "*** FATAL CONFIG FILE ERROR" (redislite writes `dir <db-parent>`
-        # into its config and the daemon dies at config load when that
-        # directory is missing) — report the first-run state readably instead
-        # and SKIP the probe. Doctor never creates state or spawns a server
+        # into its config); since the choke-point makedirs fix (#2204, in
+        # tortoise/__init__.py) that failure mode became a SILENT dir+DB
+        # creation — which is exactly the side effect the guard must prevent
         # on a machine the user has not set up.
         #
         # "Initialized" = the DB FILE exists (`tortoise init` creates both

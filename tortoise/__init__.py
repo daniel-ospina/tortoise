@@ -61,6 +61,12 @@ if _OriginalFalkorDB is not None:
         cannot be created at all (e.g. unwritable parent) — never a redislite
         subprocess FATAL.
 
+        ``~``-prefixed paths are permitted and expanded via os.path.expanduser
+        BEFORE forwarding — redislite derives its config ``dir`` verbatim from
+        os.path.dirname(path) and never expands ``~`` itself (issue #2204
+        review), so tilde callers previously died with the raw FATAL CONFIG
+        error at config load.
+
         Issue #1005 (lifecycle): context-manager support + idempotent close +
         atexit registration so normal process exit never orphans the server.
         NOTE: no GC-time weakref.finalize here — the object IS the redislite
@@ -79,19 +85,22 @@ if _OriginalFalkorDB is not None:
                     # file-backed servers only)
                     pass
                 else:
-                    if not os.path.isabs(path) and not path.startswith("~"):
-                        raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
                     # #2204: expand the path BEFORE anything else reads it.
                     # redislite derives its config ``dir`` verbatim from
                     # os.path.dirname(path) and does NOT expanduser itself, so
                     # an unexpanded "~" would still die with the raw
                     # "FATAL CONFIG FILE ERROR" this guard exists to kill.
-                    # Expanding here (a) makes the absolute-check below exact,
-                    # (b) lets the makedirs target the real dir, and (c) means
-                    # super().__init__ receives the expanded path redislite
-                    # can actually open (review #2204: tilde callers never
-                    # worked before — dir "~/..." did not exist).
+                    # Expansion also resolves valid ``~user`` forms; a tilde
+                    # that fails to resolve (unknown user) stays non-absolute
+                    # and is rejected below like any other relative path.
                     path = os.path.expanduser(path)
+                    # Reject relative paths AFTER expansion: the original
+                    # relative-path RuntimeError contract is preserved (a
+                    # plain relative input is unchanged by expanduser), while
+                    # the round-1 expansion makes "~..." absolute and legal.
+                    # Never permit a per-CWD relative db (Category-3 leak).
+                    if not os.path.isabs(path):
+                        raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
                     # Create the data dir BEFORE redislite reads its config
                     # (see class docstring). Never fails on an existing dir;
                     # bare filenames (impossible after the absolute reject
