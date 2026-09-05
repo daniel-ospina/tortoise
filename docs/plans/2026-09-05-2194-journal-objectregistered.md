@@ -9,7 +9,7 @@
 **Team:** epistemic-team
 **Complexity:** standard (Architecture: standard, Ontology: low — no new vocabulary)
 
-**Architecture:** SDK-local, probe-gated emission in `_create_entity` (A1 — scoping decision, verified across problem-verify/solution-verify/second-model/Phase-7 gates). When an event log is configured and the label is Object, a pre-apply existence probe on the canonical deterministic id (`obj-<sha26(name)>`) discriminates a canonical re-mention (row exists → skip; the issue's only-on-create mandate) from a first canonical registration (no row → fresh create OR #1155 stub adoption → journal). `createdAt` is synthesized into the event dict pre-apply so live, journal, and replay carry the identical value (#2164-P4 drift class). Emission is post-apply (phantom-event ordering hazard — a journaled registration whose live apply never happened would replay-create a phantom node) through the existing `_emit_event` JSONL-only path (`ObjectRegistered ∉ _GRAPH_EVENT_TYPES` → no GraphEvent-store double-write). Rebuild consumers already exist: pass-1b `_upsert_object` (projection/__init__.py:1389) + the deferred fold sweep (:1417-1434). No-op when `event_log_path` is unset (S1 bound — journal-less SDKs stay byte-identical; same bound as #2061/#2164/#2193).
+**Architecture:** SDK-local, probe-gated emission in `_create_entity` (A1 — scoping decision, verified across problem-verify/solution-verify/second-model/Phase-7 gates). When an event log is configured and the label is Object, a pre-apply existence probe on the canonical deterministic id + name (`MATCH (o:Object {id:$cid, name:$name})` — the name conjunct hardens against a cross-name sha-digest collision, which would otherwise fail-closed on a genuinely-new registration) discriminates a canonical re-mention (row exists → skip; the issue's only-on-create mandate) from a first canonical registration (no row → fresh create OR #1155 stub adoption → journal). `createdAt` is synthesized into the event dict pre-apply ONLY on the journaling path (probe-no-row), so live, journal, and replay carry the identical value (#2164-P4 drift class) while re-mentions and journal-less SDKs stay byte-identical to pre-#2194. Stub adoption: `_upsert_object` ON MATCH adopts the synthesized `createdAt` via `coalesce(o.createdAt, $ca)` (idempotent — existing created value wins; the #1155 coalesce-id pattern in the same clause) so the adopted live node, the journal, and replay all carry it. Emission is post-apply (phantom-event ordering hazard — a journaled registration whose live apply never happened would replay-create a phantom node) through the existing `_emit_event` JSONL-only path (`ObjectRegistered ∉ _GRAPH_EVENT_TYPES` → no GraphEvent-store double-write). Rebuild consumers already exist: pass-1b `_upsert_object` (projection/__init__.py:1389) + the deferred fold sweep (:1417-1434). No-op when `event_log_path` is unset (S1 bound — journal-less SDKs stay byte-identical; same bound as #2061/#2164/#2193).
 
 ### Pattern Research
 > **Findings date:** 2026-09-05
@@ -38,9 +38,10 @@
 - **Probe TOCTOU** (concurrent same-name create, both probe-empty) → two journal lines → replay idempotent (MERGE by name; ON MATCH never touches status; first line's createdAt wins) → accepted, documented in the emission comment.
 - **Probe failure (query raises)** → **fail-open-to-journal** with a warning (durable bias — a duplicate line is replay-safe and matches the EventAPI unconditional precedent; a skip would silently re-open the node-loss bug). Wrapped in try/except around the probe only.
 - **Log append failure** → `_emit_event` best-effort warn-and-continue (existing sdk.py:1892-1904); the Object is live-but-not-durable for that write (≡ pre-fix; no regression). No Object #548-snapshot backstop exists — **accepted and documented** (loss-backstop tracked in #2296).
-- **Re-mention prop churn** (title/objectKind mutated on a later ON MATCH mention) → journal keeps first-registration props; rebuild restores first-registration state (live-only for the mutation). **Accepted divergence** (issue's only-on-create mandate; capture writes only name+kind+is_episodic) — documented in the emission comment + pinned in a test.
-- **Pre-#2194-history ghost** (canonical Object created pre-fix, superseded post-fix, re-mentioned post-fix) → probe hits → skip → still no registration in this journal → fold-miss on rebuild. **Accepted** (no backfill in scope — first post-fix rebuild loses pre-fix population; disaster-recovery journal semantics; reworded fold-sweep comment names the residual sources).
-- **Mixed-producer id churn** (EventAPI `obj_`-scheme log + SDK `obj-`-scheme log covering one name in one rebuild dir) → last file-sorted registration's id wins on replay; pre-existing cross-producer class (#330-documented) — no mechanism change; probe-by-id retained (a superseded same-name Object must NOT suppress the canonical registration).
+- **Re-mention prop churn** (title/objectKind mutated on a later ON MATCH mention) → journal keeps first-registration props; rebuild restores first-registration state (live-only for the mutation). **Accepted divergence** (issue's only-on-create mandate; capture writes only name+kind+is_episodic) — documented in the emission comment + **pinned in T1 test 3** (mutate objectKind/title on the second mention → journal holds first values → rebuild reverts to them).
+- **Stub-adoption title asymmetry** (title-bearing connector stub adopted by a title-less capture mention): live keeps the stub's title (ON MATCH `coalesce($title, o.title)`); rebuild ON CREATE writes `''` (EventAPI-parity, pre-existing) — accepted + documented; createdAt is NOT asymmetric (ON MATCH `coalesce(o.createdAt, $ca)` adopts the synthesized value).
+- **Pre-#2194-history ghost** (canonical Object created pre-fix, superseded post-fix, re-mentioned post-fix) → probe hits → skip → still no registration in this journal → fold-miss on rebuild. **Accepted** (no backfill in scope — first post-fix rebuild loses pre-fix population; disaster-recovery journal semantics; reworded fold-sweep comment names the residual sources). **The 0-row fold-miss warning firing path is pinned by a test** (T1 test 8 — caplog level, not string, so the T4.4 reword survives).
+- **Mixed-producer id churn** (EventAPI `obj_`-scheme log + SDK `obj-`-scheme log covering one name in one rebuild dir) → last file-sorted registration's id wins on replay; pre-existing cross-producer class (#330-documented) — intentionally untested (documented deferral; a determinism test would pin pre-existing behavior outside this issue's scope). Probe-by-id+name retained (a superseded same-name Object must NOT suppress the canonical registration).
 
 **Tech Stack:** Python 3.12+, FalkorDB docker lane (`TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix'`), `uv run pytest`, EventLog JSONL. No new deps.
 
@@ -53,17 +54,19 @@
 **Files:**
 - Create: `tests/test_object_registered_journal.py` (docker lane — NOT in the tests/_embedded.py carve-out)
 
-**Step 1.1** — Write the tests (all use `TortoiseSDK(str(tmp_path / "<n>.db"), event_log_path=str(events / "events.jsonl"))` with `events.mkdir()`; `sdk.close()` in `finally`; distinct DB paths per SDK pairing so docker-lane redirect hashes don't collide):
+**Step 1.1** — Write the tests (all use `TortoiseSDK(str(tmp_path / "<n>.db"), event_log_path=str(events / "events.jsonl"))` with `events.mkdir()`; `sdk.close()` in `finally`; distinct DB paths per SDK pairing so docker-lane redirect hashes don't collide). **RED acceptance applies to tests 1-6; tests 7-9 are green-pin guards** (see Step 1.2):
 
-1. `test_capture_object_and_fold_survive_rebuild_all` — create successor + target Objects via `create_entity("object", name, objectKind=..., is_episodic=False)` (the capture shape), fold via `apply_supersessions(proj, sdk, [{"superseded": "strategy-A", "supersedes_by": "strategy-B", "evidence": "capture fold"}], session_id="s1")`, then `proj.rebuild_all(str(events))`. Assert: node exists; `status == "superseded"`, `supersededBy == "strategy-B"`, `objectKind == "core:strategy"`, `is_episodic is False`; **`supersededAt == the journaled ObjectSuperseded envelope ts`** (NOT the live node's supersededAt — live folds stamp `now()` micros later; assert against `[e for e in EventLog(...).read_all() if e["type"] == "ObjectSuperseded"][-1]["ts"]`).
-2. `test_plain_object_survives_rebuild_all_byte_identical` — create one Object (no fold), read the journal: exactly one `ObjectRegistered` with `id == _entity_name_id("Object", name)`, `name`, `object_kind`, `status == "live"`, `createdAt` present, `is_episodic` matching. Rebuild → node present; `createdAt == journaled createdAt` (no rebuild-time drift).
-3. `test_remention_does_not_double_journal` — create twice (second = canonical re-mention, ON MATCH). Journal holds EXACTLY ONE `ObjectRegistered` for the name; both calls return the same canonical id (#452); one Object node.
-4. `test_remention_after_fold_does_not_journal_or_resurrect` — create A+B, fold A→B, then `create_entity("object", "strategy-A", ...)` again (superseded name re-mentioned): zero new ObjectRegistered lines (total stays 1 for A), live A stays `superseded`, and after `rebuild_all` A is still `superseded` (fold line already in journal; no resurrect).
-5. `test_stub_adoption_journals_canonicalization` — pre-create a name-stub Object with a random ulid id (raw `proj.g.query("CREATE (o:Object {name:$n, id:$id})", ...)` simulating a connector produces-edge mint). SDK `create_entity` of the same name adopts/canonicalizes it. Assert: journal has the ObjectRegistered (probe by canonical id found no canonical row); rebuild → node carries `obj-<sha26>` id (not the ulid) — guards the id-probe choice (a name-probe would skip and the canonicalization would die on rebuild).
-6. `test_journaled_line_has_no_envelope_prop_pollution` — journal line: envelope keys (`event_id`/`ts`/`type`/`initiated_by`/`projection_version`) at top level; payload keys = applied-dict mirror minus `(type,id,point,payload,event_id,ts,initiated_by,projection_version)`. Post-rebuild the Object node's property set contains none of `event_id`/`ts`/`initiated_by`/`projection_version`.
-7. `test_no_log_sdk_no_journal_no_prop_change` — journal-less SDK (no `event_log_path`): create_object → no log file exists / no ObjectRegistered anywhere; node props are the pre-change set (createdAt from the projection path; no synthesis artifacts; no envelope keys).
+1. `test_capture_object_and_fold_survive_rebuild_all` (RED) — create successor + target Objects via `create_entity("object", name, objectKind=..., is_episodic=False)` (the capture shape), fold via `apply_supersessions(proj, sdk, [{"superseded": "strategy-A", "supersedes_by": "strategy-B", "evidence": "capture fold"}], session_id="s1")`, then `proj.rebuild_all(str(events))`. Assert: node exists; `status == "superseded"`, `supersededBy == "strategy-B"`, `objectKind == "core:strategy"`, `is_episodic is False`; **`supersededAt == the journaled ObjectSuperseded envelope ts`** (NOT the live node's supersededAt — live folds stamp `now()` micros later; assert against `[e for e in EventLog(...).read_all() if e["type"] == "ObjectSuperseded"][-1]["ts"]`).
+2. `test_plain_object_survives_rebuild_all_byte_identical` (RED) — create one Object (no fold); snapshot the FULL live node property set BEFORE the wipe; read the journal: exactly one `ObjectRegistered` with `id == _entity_name_id("Object", name)`, `name`, `object_kind`, `status == "live"`, `createdAt` present, `is_episodic` matching. Rebuild → node present; **full replayed property set == live snapshot** (embedding compared via same-call recompute or explicitly excluded with a comment — the point-path precedent); `createdAt == journaled createdAt` (no rebuild-time drift).
+3. `test_remention_does_not_double_journal_and_prop_churn_is_live_only` (RED on the double-journal half) — create "strategy-A" with `objectKind="dev:issue"`; re-create the same name with `objectKind="core:strategy"` (+ a `title`) — the second call is a canonical re-mention (ON MATCH). Assert: live node `objectKind == "core:strategy"` (the mutation IS live); journal holds EXACTLY ONE ObjectRegistered whose `object_kind` is the FIRST value `"dev:issue"` (no double-journal, no mirror-of-latest); both calls return the same canonical id (#452); one Object node. Rebuild → node reverts to `"dev:issue"` — **the accepted only-on-create divergence pinned as behavior**.
+4. `test_remention_after_fold_does_not_journal_or_resurrect` (RED) — create A+B, fold A→B, then `create_entity("object", "strategy-A", ...)` again (superseded name re-mentioned): zero new ObjectRegistered lines (total stays 1 for A), live A stays `superseded`, and after `rebuild_all` A is still `superseded` (fold line already in journal; no resurrect). *(Note: the live-status asserts hold pre-fix; the journal-total + rebuild asserts are the RED half.)*
+5. `test_stub_adoption_journals_canonicalization` (RED) — pre-create a name-stub Object with a random ulid id (raw `proj.g.query("CREATE (o:Object {name:$n, id:$id})", ...)` simulating a connector produces-edge mint). SDK `create_entity` of the same name adopts/canonicalizes it. Assert: journal has the ObjectRegistered (probe by canonical id+name found no canonical row); **live adopted node `createdAt == the journaled createdAt`** (ON MATCH `coalesce(o.createdAt, $ca)` adoption — the byte-identity invariant holds on the stub path); rebuild → node carries `obj-<sha26>` id (not the ulid) and the same createdAt.
+6. `test_journaled_line_and_live_node_drop_reserved_props` (RED) — pass `point`/`payload` props on the Object create. Assert: the journal line EXCLUDES them (mirror minus the exclusion tuple) AND the live node does not carry them (`_persist_extra_props` can't persist what the pop removed — pins the parity rationale for the unconditional pop); envelope keys (`event_id`/`ts`/`type`/`initiated_by`/`projection_version`) at top level of the line only; post-rebuild the node's property set contains none of `event_id`/`ts`/`initiated_by`/`projection_version`.
+7. `test_no_log_sdk_no_journal_no_prop_change` (**green-pin guard** — journal-less SDK: no `event_log_path`): create_object → no log file exists / no ObjectRegistered anywhere; node props are the pre-change set (createdAt from the projection path; no synthesis artifacts; no envelope keys). Cannot fail pre-fix (a correct fix must produce zero observable difference for journal-less SDKs) — it only guards against an over-broad implementation.
+8. `test_fold_miss_warning_fires_for_unregistered_target` (RED-guard) — journal ONLY an `ObjectSuperseded` (manual `_emit_event`, no ObjectRegistered for the name, no node pre-seeded) → `rebuild_all` → assert via `caplog` that the fold-miss warning fires at rebuild (assert on log level/event, NOT the string — the T4.4 reword must survive) AND the Object is absent (no phantom resurrection). Pins the warning firing path for the accepted residual-loss classes (pre-#2194 ghosts, legacy/raw producers).
+9. `test_duplicate_registration_lines_replay_idempotently` (**green-pin guard** — replay idempotency already holds pre-fix): two `ObjectRegistered` lines for the same name (manual second `_emit_event` after the auto line — simulating the probe-window race) + a fold → `rebuild_all` → exactly one Object node, `status == "superseded"`, `createdAt ==` the FIRST line's value (ON CREATE / ON MATCH `coalesce(o.createdAt, $ca)` split means createdAt must not flip to the second line's).
 
-**Step 1.2** — Run RED: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_object_registered_journal.py -v` → every test FAILS on the pre-fix cause (no journal lines → objects absent post-rebuild; no double-journal semantics). Verify no setup-error failures (each RED assertion is the *behavior* assertion, not a fixture problem).
+**Step 1.2** — Run RED: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_object_registered_journal.py -v` → **tests 1-6 FAIL on the pre-fix cause** (no journal lines → objects absent post-rebuild / no double-journal semantics yet); **tests 7-9 PASS pre-fix by construction** (green-pin guards: no-log parity, warning firing, replay idempotency are pre-existing behavior the fix must not break) — do NOT force-fail the guards; their RED-phase value is the no-setup-error run. Verify no setup-error failures (each RED assertion is the *behavior* assertion, not a fixture problem).
 
 **Step 1.3** — Commit: `git add tests/test_object_registered_journal.py && git commit -m "test(#2194): RED — journal ObjectRegistered behaviors (capture fold round-trip, only-on-create, byte-identity, stub adoption, no-log gate)"`.
 
@@ -73,7 +76,8 @@
 **Acceptance:** Task 1 file fully green; journal-less SDK behavior byte-identical (no-log test passes); no change to the Event branch's behavior.
 **Files:**
 - Modify: `tortoise/sdk.py:13969-14073` (`_create_entity`)
-- Test: `tests/test_object_registered_journal.py`
+- Modify: `tortoise/projection/entities.py:316-367` (`_upsert_object` ON MATCH — createdAt adoption clause)
+- Test: `tests/test_object_registered_journal.py` (adds test 10 post-T2)
 
 **Step 2.1** — Code change (single region; keep the Event block shape and its #2061 comment; re-anchor START via `grep -n "def _create_entity"`, TAIL via `grep -n "# #452: Subject/Object MERGE by name"`):
 
@@ -84,22 +88,13 @@ if label in ("Event", "Object"):
     event.pop("payload", None)
 ```
 
-(b) Pre-apply `createdAt` synthesis (only when a journal exists; never overrides a caller value; EventAPI `add_object` precedent stamps `createdAt=now_iso()`):
-```python
-# (#2194) Synthesize createdAt BEFORE apply so live + journal + replay carry
-# the identical value (replay would otherwise stamp rebuild time — the
-# #2164-P4 drift class). Gated on the journal: journal-less SDKs keep the
-# projection's coalesce($now) behavior byte-identical to pre-#2194.
-if label == "Object" and self._event_log_path and "createdAt" not in event:
-    from .ids import now_iso  # noqa: I001
-    event["createdAt"] = now_iso()
-```
-
-(c) Pre-apply existence probe on the CANONICAL id + post-apply gated emission (place the probe before `apply_result = proj.apply(event)`, the emission after it — phantom-event ordering):
+(b) Pre-apply existence probe on the CANONICAL id + name FIRST (determines the journal decision), then synthesize `createdAt` ONLY on the journaling path, then apply, then emit (phantom-event ordering: emission strictly after `proj.apply`):
 ```python
 # (#2194) Journal ObjectRegistered on FIRST canonical registration only —
-# probe the deterministic canonical id (obj-<sha26(name)>) before apply. A
-# row = canonical re-mention (MERGE by name, ON MATCH — the #1350 clobber
+# probe the deterministic canonical id + name (obj-<sha26(name)>) before
+# apply. The name conjunct hardens against a cross-name sha-digest
+# collision (would otherwise fail-closed on a genuinely new registration).
+# A row = canonical re-mention (MERGE by name, ON MATCH — the #1350 clobber
 # guard keeps status; journaling again would double-register). No row =
 # fresh create OR #1155 stub adoption (name-stub under a random ulid — the
 # canonical registration is genuinely new) → journal after apply. Probe
@@ -112,13 +107,21 @@ _journal_object_registration = False
 if label == "Object" and self._event_log_path and "name" in event:
     try:
         _journal_object_registration = not proj.g.query(
-            "MATCH (o:Object {id:$cid}) RETURN o.id",
-            params={"cid": id_val}).result_set
+            "MATCH (o:Object {id:$cid, name:$name}) RETURN o.id",
+            params={"cid": id_val, "name": event["name"]}).result_set
     except Exception:  # noqa: BLE001 — fail-open: journal (durable bias)
         _logger.warning(
             "ObjectRegistered existence probe failed for %s — journaling "
             "optimistically (id=%s)", event.get("name"), id_val)
         _journal_object_registration = True
+if _journal_object_registration and "createdAt" not in event:
+    # (#2194) Synthesize createdAt BEFORE apply ONLY on the journaling path
+    # (probe-no-row), so live + journal + replay carry the identical value
+    # (replay would otherwise stamp rebuild time — the #2164-P4 drift
+    # class). Re-mentions (skip path) and journal-less SDKs keep the
+    # projection's coalesce($now) behavior byte-identical to pre-#2194.
+    from .ids import now_iso  # noqa: I001
+    event["createdAt"] = now_iso()
 ```
 …after `apply_result = proj.apply(event)`:
 ```python
@@ -140,11 +143,13 @@ if label == "Object" and _journal_object_registration:
     )
 ```
 
-**Step 2.2** — GREEN: rerun `tests/test_object_registered_journal.py` → all 7 pass.
+**Step 2.2** — Add test 10 `test_probe_failure_fails_open_to_journal` to the new file (RED-capable only post-implementation, so it lands here): monkeypatch `proj.g.query` to raise on the probe MATCH → create an Object → assert (a) the create still succeeds (no probe exception escapes), (b) a warning is logged, (c) the ObjectRegistered line IS journaled (durable bias), (d) a subsequent `rebuild_all` restores the node. This pins the try/except — a regression to fail-closed (silent skip) would re-open the node-loss bug with no test catching it.
 
-**Step 2.3** — Quick regression sanity (before T3 migrates the scaffolding): `uv run pytest tests/test_status_projection.py -q` — the 4 manual-`_emit_event` sites now coexist with auto-journaling (replay stays idempotent; tests still pass — this is the accidental-proof state T3 cleans up). Expected: 19 passed (the manual scaffolding duplicates are harmless on replay).
+**Step 2.3** — GREEN: rerun `tests/test_object_registered_journal.py` → all 10 pass.
 
-**Step 2.4** — Commit: `git add tortoise/sdk.py && git commit -m "feat(#2194): journal ObjectRegistered on first canonical registration in _create_entity (probe-gated, createdAt-synthesized, post-apply)"`.
+**Step 2.4** — Quick regression sanity (before T3 migrates the scaffolding): `uv run pytest tests/test_status_projection.py -q` — the 4 manual-`_emit_event` sites now coexist with auto-journaling (replay stays idempotent; tests still pass — this is the accidental-proof state T3 cleans up). Expected: 19 passed (the manual scaffolding duplicates are harmless on replay).
+
+**Step 2.5** — Commit: `git add tortoise/sdk.py tortoise/projection/entities.py && git commit -m "feat(#2194): journal ObjectRegistered on first canonical registration in _create_entity (probe-gated, createdAt-synthesized, post-apply) + stub-adoption createdAt coalesce"`.
 
 ### Task 3: Migrate manual ObjectRegistered scaffolding + stale docstrings in test_status_projection.py
 
@@ -155,7 +160,7 @@ if label == "Object" and _journal_object_registration:
 
 **Step 3.1** — `test_rebuild_all_restores_object_superseded_fold` (:145-209): **drop** the manual `sdk._emit_event("ObjectRegistered", id=oid, ...)` (:184) — `create_entity` at the top now auto-journals the registration; the replay gets its node from the real production line. Rewrite the docstring (delete the "NOT journaled … until the separate OD2 journaling issue lands" note at :158-164); optionally strengthen: assert the auto journal contains exactly one ObjectRegistered for the name.
 
-**Step 3.2** — `test_rebuild_all_fold_before_registration_still_folds` (:211-256): **restructure to preserve the adversarial [fold, registration] journal order with the real producer.** Live `create_entity` now auto-journals its registration BEFORE any later fold emission — dropping :244's manual line would leave [OR, OS] and unpin the two-sweep regression. Instead: journal the `ObjectSuperseded` first (manual `sdk._emit_event` — simulating a connector/journaled producer that supersedes a name not yet registered in this log), THEN `create_entity` on the fresh name (probe misses → auto-journals the registration after the fold) → stream is [OS, OR]. Update the docstring: the adversarial producer is the connector/journaled-producer lane, not an SDK create.
+**Step 3.2** — `test_rebuild_all_fold_before_registration_still_folds` (:211-256): **restructure to preserve the adversarial [OS, OR] journal order with the real producer.** The current body starts with a create-if-missing preamble that graph-resolves `oid` — under auto-journaling that preamble create would journal its ObjectRegistered FIRST → [OR, OS] → the test passes for the wrong reason and the two-sweep fold regression goes unpinned (this is the plan's ONLY [OS, OR] adversarial-order coverage). Exact new body: (1) DELETE the create-first preamble entirely; (2) emit the manual `ObjectSuperseded` FIRST with `id=_entity_name_id("Object", "strategy-A")` (synthesized — no live node exists yet, so the old graph-resolution pattern would raise IndexError; the id-branch fold must match the node the later auto-registration recreates) + `name`; (3) THEN `create_entity("object", "strategy-A", ...)` on the fresh graph (probe misses → auto-ObjectRegistered lands after the fold) → stream is [OS, OR]; (4) add an explicit journal-order assertion (the two line types appear in `read_all()` order as [OS, OR]) so a future migration that reverts to the preamble fails loudly. Update the docstring: the adversarial producer is the connector/journaled-producer lane, not an SDK create.
 
 **Step 3.3** — `test_rebuild_all_legacy_6b_id_only_shape_supersedes` (:258-295): **drop** the manual ObjectRegistered (:277) — create_entity auto-journals the node for replay; the test's purpose (legacy id-only ObjectSuperseded shape) is unchanged.
 
@@ -163,7 +168,7 @@ if label == "Object" and _journal_object_registration:
 
 **Step 3.5** — Docstrings at :127/:145-164 reworded to the post-fix world (capture Objects ARE journaled from #2194).
 
-**Step 3.6** — Green: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_status_projection.py tests/test_object_registered_journal.py -v` → all pass (19 migrated + 7 new).
+**Step 3.6** — Green: `TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' uv run pytest tests/test_status_projection.py tests/test_object_registered_journal.py -v` → all pass (19 migrated + 10 in the new file).
 
 **Step 3.7** — Commit: `git add tests/test_status_projection.py && git commit -m "test(#2194): migrate manual ObjectRegistered scaffolding to real auto-journaling; stale docstrings"`.
 
@@ -180,11 +185,11 @@ if label == "Object" and _journal_object_registration:
 
 **Step 4.3** — sdk.py EventRecorded block comment (:14027-14043): add a cross-ref sentence — the Object block (above) mirrors this shape with the same exclusion set, probe-gated instead of unconditional.
 
-**Step 4.4** — projection/__init__.py fold-sweep comment (:1417-1424) + warning (:1431-1434): the "pre-#2194 capture OD2 gap" explanation is now historical — capture Objects ARE journaled. Reword the comment + the warning `"(OD2 capture gap?)"` → residual 0-row folds come from pre-#2194 journals, legacy/raw unjournaled producers, or delete races. Keep behavior unchanged. (No test asserts the warning string — verified.)
+**Step 4.4** — projection/__init__.py fold-sweep comment (:1417-1424) + warning (:1431-1434): the "pre-#2194 capture OD2 gap" explanation is now historical — capture Objects ARE journaled. Reword the comment + the warning `"(OD2 capture gap?)"` → residual 0-row folds come from pre-#2194 journals, legacy/raw unjournaled producers, or delete races. Keep behavior unchanged. The warning's FIRING path is pinned by T1 test 8 (caplog level, not string) — the reword must preserve the log level/event structure the test asserts.
 
 **Step 4.5** — Check docs/ONTOLOGY.md:132/357 (Object.status cache doctrine) — expected fine (event stream = truth); update only if adjacent text claims capture Objects are not journaled.
 
-**Step 4.6** — Note (docs sweep, no code): MCP `create_object` reserved-name behavior — a tenant passing `point`/`payload` props today persists them live via extras; post-change they are dropped (mirrors Event's pre-existing #2061 behavior) — a consistency improvement, visible narrowing.
+**Step 4.6** — Docs entry (not just a note): MCP `create_object` reserved-name behavior — the unconditional `point`/`payload` pop (Task 2 Step 2.1(a)) is a real tenant-visible narrowing: today a tenant passing them persists them live via `_persist_extra_props`; post-change they are dropped — mirroring Event's pre-existing #2061 behavior (unconditional, regardless of journal config — consistent persistence semantics across journaled/journal-less SDKs is the point: a journal-gated pop would create divergent live persistence, the exact drift class this issue fights). Pinned by T1 test 6 (both the journal line and the live node exclude them).
 
 **Step 4.7** — Commit: `git add tortoise/sdk.py tortoise/projection/__init__.py && git commit -m "docs(#2194): sweep stale not-journaled claims; honest fold-sweep warning reword"`.
 
@@ -211,7 +216,7 @@ uv run pytest tests/test_entity_stage.py tests/test_semantic_extractor.py tests/
 |---|---|---|
 | 1. `_create_entity` emits ObjectRegistered when it creates an Object | Exactly one line per fresh create; probe skip on canonical re-mention; no-op when `event_log_path` unset | T1 tests 2/3/7 |
 | 2. Capture Object + fold survive rebuild_all (status='superseded' + supersededBy restored) | Round-trip via real `apply_supersessions` lane; supersededAt == journaled fold ts | T1 test 1 |
-| 3. Replay byte-identity (id/name/object_kind/status; no drift) | Replayed node props == live node props (canonical id, objectKind, status, is_episodic, title); createdAt == journaled; no envelope pollution | T1 tests 2/5/6 |
+| 3. Replay byte-identity (id/name/object_kind/status; no drift) | FULL replayed property set == live snapshot (canonical id, objectKind, status, is_episodic, title); createdAt == journaled (fresh + stub-adoption paths); no envelope pollution; reserved-name drop parity | T1 tests 2/5/6 + guard 9 |
 | 4. Existing rebuild tests green (incl. #2164's fold test) | 19-test baseline green post-T3 migration | T3.6 / T5.1 |
 
 **Step 5.4** — commit-workflow skill (mandatory gate before merge: pre-flight typecheck/tests, PR, code-review + test-review gates, merge). Commit any residual: `git add -A && git commit -m "chore(#2194): verification pass"` if needed before the PR.
