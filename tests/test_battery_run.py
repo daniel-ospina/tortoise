@@ -82,7 +82,7 @@ class TestRunArtifacts:
                     "isolation_breach", "excluded", "setup", "timestamps",
                     "provenance"):
             assert key in art, key
-        assert art["schema_version"] == "1.0"
+        assert art["schema_version"] == "1.1"
         assert art["model"]["temperature"] == 0.0
         assert art["ep_outcome"] == "converged"
         assert art["isolation_breach"] is False
@@ -90,7 +90,7 @@ class TestRunArtifacts:
 
     def test_summary_schema(self, tmp_path):
         _, _, summary = _run(tmp_path, mock=True)
-        assert summary["schema_version"] == "1.0"
+        assert summary["schema_version"] == "1.1"
         assert summary["run"]["exit_code"] == 0
         assert summary["arms"][0]["arm_present"] is True
         assert summary["arms"][0]["valid_episodes"] == 2

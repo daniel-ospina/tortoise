@@ -12,6 +12,15 @@ from typing import Any
 from battery.probes.base import ProbeResult
 
 
+#: Schema-v1.1 emitter-registry contract (issue #2284): the trace semantic
+#: keys this probe reads. Declarative only — behavior unchanged until the
+#: probe re-points reads onto the registry-emitted log (Task 9).
+CONSUMED_FIELDS: tuple[str, ...] = (
+    "contradiction_surfaced", "flip_flopped", "explicit_resolution",
+    "false_positive", "surfaced_within_turn", "injection_turn",
+)
+
+
 class R1ContradictionProbe:
     """Scores the contradiction-surfacing gate from episode traces."""
 
