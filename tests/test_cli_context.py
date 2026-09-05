@@ -215,6 +215,45 @@ class TestCliOnboardDbTarget:
         assert "Embedded mode initialized" in out
         assert "single-writer, eval only" in out
 
+    def test_init_status_failure_never_prints_points_placeholder(self, monkeypatch, capsys, tmp_path):
+        """#2210: when the post-init status read fails, `tortoise init` must
+        not print 'Points: ?' (a placeholder the user can't act on) — it
+        prints a real count on success and an actionable note on failure."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "init-fail.db"))
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+        from tortoise.sdk import TortoiseSDK as _SDK
+
+        def _boom(self):
+            raise RuntimeError("status read failed")
+
+        monkeypatch.setattr(_SDK, "status", _boom)
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Graph: tortoise" in out
+        assert "Points: ?" not in out
+        assert "unavailable" in out  # actionable note, never a fake count
+
+    def test_init_success_prints_real_point_count(self, monkeypatch, capsys, tmp_path):
+        """#2210: on success `tortoise init` prints the REAL graph point
+        count from sdk.status() (the welcome Point exists -> >= 1)."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "init-ok.db"))
+        _delenv_falkordb(monkeypatch)
+        from tortoise import __main__ as m
+
+        rc = m._cmd_init(mock.Mock(
+            path=None, cmd="init", yes=True, api_key=None, no_index=True))
+
+        out = capsys.readouterr().out
+        assert rc == 0
+        assert "Points: ?" not in out
+        assert re.search(r"Points: \d+", out), out
+
     def test_falkordb_env_honored_as_docker_uri(self, monkeypatch, capsys):
         """#715 P2 conf 55: legacy FALKORDB_* trio (still in .env.example,
         still probed by doctor) set without TORTOISE_DB_URI must be HONORED

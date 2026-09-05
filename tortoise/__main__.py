@@ -558,6 +558,23 @@ def _cmd_init(args):
             from tortoise.projection import FalkorProjection
             _proj = FalkorProjection(db_path)
             _proj.g.query("RETURN 1")
+            # #2210: the probe above opened this embedded store (redislite
+            # daemon) but raw FalkorProjection never registers the path in
+            # sdk._embedded_busy_known — so the TortoiseSDK below would fail
+            # its cross-process busy probe against OUR OWN daemon's pidfile
+            # and silently skip the welcome write + count (init printed
+            # 'Points: ?' on every embedded first run). Mark it same-process
+            # so the SDK reuses the daemon by construction.
+            #
+            # Corner (accepted): if the probe ATTACHED to a daemon held by
+            # another live process instead of starting one (redislite never
+            # runs two daemons for a path), the mark also covers that attach
+            # and init writes through the shared daemon. HEAD's behavior in
+            # that eval-only misuse was a silent no-op + '?', so this only
+            # turns a masked non-write into a masked write — never a second
+            # daemon, never a new loud failure.
+            from tortoise.sdk import _mark_embedded_opened
+            _mark_embedded_opened(db_path)
             print(f"  ✅ Embedded mode initialized at {db_path} (single-writer, eval only — docker compose for durable multi-writer)")
             graph_ready = True
         except ImportError:
@@ -605,9 +622,15 @@ def _cmd_init(args):
         status = sdk.status()
         point_count = status.get("counts", {}).get("Point", 0)
     except Exception:
-        point_count = "?"
+        # #2210: the welcome-write or status read failed — never print a
+        # '?' placeholder a user can't act on. Omit the count and point at
+        # doctor so the failure is diagnosable, not masked.
+        point_count = None
 
-    print(f"  Graph: tortoise  |  Points: {point_count}")
+    if point_count is None:
+        print("  Graph: tortoise  |  Points: unavailable — run 'tortoise doctor'")
+    else:
+        print(f"  Graph: tortoise  |  Points: {point_count}")
     print()
     print("Graph ready. The graph starts empty — it fills as you and your agents")
     print("file decisions, observations, and findings.")
