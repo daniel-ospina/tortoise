@@ -1058,8 +1058,24 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
         _llm = (out.get("stats") or {}).get("llm") or {}
         for _k in ("calls", "retries", "truncated"):
             stats["llm"][_k] += _llm.get(_k, 0)
+        # #2134 Task 0 (P1-41/P2-32 + R3-6): the truncation-token keys are
+        # MAX-PRESERVING, not sums — the per-session recovery values are
+        # already a DOUBLE roll-up (the extractor sums stages per session,
+        # so a per-question `+=` here would be ~N× any single list and the
+        # "measured max list" read would be unsatisfiable). The per-question
+        # outcome therefore carries the per-session MAX (the measured lower
+        # bound Task 1 reads) under a `_max` suffix; the unconditional `+=`
+        # stays for ALL other recovery keys (whose ladder counters must be
+        # sums). Combined keys (truncation_*_tokens) AND per-seam keys
+        # (truncation_*_tokens_{s1,s2,s4}) are both max-preserved.
         for _k, _v in ((out.get("stats") or {}).get("recovery") or {}).items():
-            stats["recovery"][_k] = stats["recovery"].get(_k, 0) + _v
+            if (_k.startswith("truncation_prompt_tokens")
+                    or _k.startswith("truncation_completion_tokens")):
+                _maxk = _k + "_max"
+                stats["recovery"][_maxk] = max(
+                    stats["recovery"].get(_maxk, 0), _v)
+            else:
+                stats["recovery"][_k] = stats["recovery"].get(_k, 0) + _v
 
         # the ACTUAL writes (the _write_payload stats are authoritative —
         # they skip duplicates, so payload-len double-counts) + the E7

@@ -2177,6 +2177,76 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
         sdk.close()
 
 
+def test_ingest_truncation_tokens_max_preserving(tmp_path, monkeypatch):
+    """#2134 Task 0 (P1-41/P2-32 + R3-6): the truncation-token recovery keys
+    are MAX-PRESERVING at the ingest roll-up — the per-session values are
+    already stage-sums, so a per-question `+=` would produce an N× value that
+    makes Task 1's "measured max list" read unsatisfiable. The outcome
+    carries the per-session MAX under a `_max` suffix, and per-seam keys
+    (s2/s4) stay separable — never conflated into one S2+S4 sum."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    # Session-level recovery values as the extractor emits them (already
+    # stage-sums before this roll-up): combined + per-seam keys. Three
+    # truncating sessions — 17K/25K/8K combined (the plan's ``never the
+    # 50000 sum`` pin), with per-seam keys in separate sessions so each
+    # seam's max stays separable.
+    _per_session = [
+        {"truncation_completion_tokens": 17000,
+         "truncation_prompt_tokens": 900,
+         "truncation_completion_tokens_s2": 17000,
+         "repaired": 2},  # a non-truncation counter that MUST stay a sum
+        {"truncation_completion_tokens": 25000,
+         "truncation_prompt_tokens": 1100,
+         "truncation_completion_tokens_s4": 25000,
+         "repaired": 1},
+        {"truncation_completion_tokens": 8000,
+         "truncation_prompt_tokens": 300,
+         "truncation_completion_tokens_s2": 8000,
+         "repaired": 0},
+    ]
+    _idx = {"n": 0}
+
+    def _fake_extract(model, conversation, **kw):
+        rec = _per_session[_idx["n"] % len(_per_session)]
+        _idx["n"] += 1
+        return {"payload": {"entities": [], "events": [], "points": [],
+                             "operators": []},
+                "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": [],
+                "stats": {"recovery": rec}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "test_max_q",
+            "haystack_session_ids": ["sess-1", "sess-2", "sess-3"],
+            "haystack_dates": ["2026-08-01"] * 3,
+            "haystack_sessions": [[
+                {"role": "user", "content": "hi", "has_answer": False},
+            ]] * 3,
+        }
+        stats = ingest_haystack_v2(sdk, question, model=object(),
+                                   chunk_turns=2)
+        rec = stats["recovery"]
+        # max-preserving: the per-session MAX (25000), NEVER the 50000 sum
+        assert rec["truncation_completion_tokens_max"] == 25000
+        assert rec["truncation_prompt_tokens_max"] == 1100
+        # the summed key is REPLACED by the _max capture (never N×)
+        assert "truncation_completion_tokens" not in rec
+        # R3-6: per-seam maxes stay separable — s4's 25000 never inflates
+        # the s2 max, and vice versa
+        assert rec["truncation_completion_tokens_s2_max"] == 17000
+        assert rec["truncation_completion_tokens_s4_max"] == 25000
+        # non-truncation recovery counters stay SUMS (unchanged semantics)
+        assert rec["repaired"] == 3
+    finally:
+        sdk.close()
+
+
 def test_v2_ingest_out_of_range_source_turn_drops_link(tmp_path, monkeypatch):
     """E3: the index→node-id resolution guard (type() is int, bounded to the
     session's turn count) silently drops a link for out-of-range / non-int /

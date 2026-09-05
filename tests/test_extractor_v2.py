@@ -542,6 +542,101 @@ class TestParseLadder:
         assert model.calls == 1  # no same-prompt retry
         assert stats["truncated"] is True
 
+    def test_complete_records_prompt_and_completion_tokens_in_stats(self):
+        """#2134 Task 0: ``_complete`` writes the per-call token counts into
+        ``stats`` next to ``finish_reason`` (captured in the calling thread
+        by ``_call_once`` — never the shared adapter attrs read post-hoc).
+        A model that DOES NOT set the token attrs (all mocks lacking them)
+        normalizes to 0 via the None-guard — never a TypeError."""
+        class _WithTokens:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_prompt_tokens = 1234
+                self.last_completion_tokens = 567
+                return '{"ok": true}'
+
+        stats: dict = {}
+        out = v2._complete(_WithTokens(), "s", "u", max_tokens=16000,
+                           stats=stats)
+        assert out == '{"ok": true}'
+        assert stats["prompt_tokens"] == 1234
+        assert stats["completion_tokens"] == 567
+        assert stats["finish_reason"] == "stop"
+        assert stats["attempts"] == 1
+
+        # None-attr arm (P2-36): a mock without the token attrs (the norm —
+        # _Bad/_Trunc/CapAware backstops) contributes 0, never a TypeError.
+        class _NoTokens:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                return '{"ok": true}'
+
+        stats2: dict = {}
+        v2._complete(_NoTokens(), "s", "u", max_tokens=16000, stats=stats2)
+        assert stats2["prompt_tokens"] == 0
+        assert stats2["completion_tokens"] == 0
+
+    def test_complete_truncation_accumulates_recovery_tokens(self):
+        """#2134 Task 0 (P1-22): a ``length``-truncated call accumulates its
+        emitted token counts into the recovery-carried combined keys
+        (``truncation_prompt_tokens``/``truncation_completion_tokens``) so
+        the per-call overage rides the roll-up to the outcome — the
+        lower-bound read surface Task 1 consumes."""
+        class _TruncWithTokens:
+            last_finish_reason = "length"
+            def complete(self, *, system, user, max_tokens=None):
+                self.last_prompt_tokens = 200
+                self.last_completion_tokens = 16000  # filled the 16K budget
+                return '{"entities": []'
+
+        stats: dict = {}
+        v2._complete(_TruncWithTokens(), "s", "u", max_tokens=16000,
+                     stats=stats)
+        assert stats["truncated"] is True
+        assert stats["recovery"]["truncation_prompt_tokens"] == 200
+        assert stats["recovery"]["truncation_completion_tokens"] == 16000
+        # a non-truncated call never accumulates truncation tokens
+        class _StopNoTokens:
+            last_finish_reason = "stop"
+            def complete(self, *, system, user, max_tokens=None):
+                return '{"ok": true}'
+
+        stats2: dict = {}
+        v2._complete(_StopNoTokens(), "s", "u", max_tokens=16000,
+                     stats=stats2)
+        assert "recovery" not in stats2  # no recovery dict is ever created
+        # on a non-truncated call
+
+    def test_complete_parsed_seam_accumulates_per_seam_tokens(self):
+        """#2134 Task 0 (R3-6): ``_complete_parsed`` with ``seam="s2"``
+        (run_s2's wiring) accumulates the truncating call's tokens into the
+        PER-SEAM recovery keys in addition to the combined keys — keeping
+        the S2 overage separable from S4 for the Task-1 calibration read.
+        The kind_classifier path (seam=None) stays combined-only."""
+        class _S2Trunc:
+            last_finish_reason = "length"
+            def __init__(self):
+                self.calls = 0
+            def complete(self, *, system, user, max_tokens=None):
+                self.calls += 1
+                self.last_prompt_tokens = 400
+                self.last_completion_tokens = 16000
+                # no recoverable prefix (mirrors the reject-empty-prefix
+                # fixture) → _parse_json_robust raises; the seam accumulation
+                # fired BEFORE the parse (right after finish is read).
+                return ('{"entities": [], "events": [], "operators": [], '
+                        '"points": [')
+
+        model = _S2Trunc()
+        stats: dict = {}
+        with pytest.raises(ValueError):
+            v2.run_s2(model, "STORY", stats=stats)  # seam="s2" wired in run_s2
+        assert model.calls == 1  # D3 deterministic retry-skip preserved (no
+        # escalation yet — that is Task 3)
+        assert stats["recovery"]["truncation_completion_tokens"] == 16000
+        assert stats["recovery"]["truncation_completion_tokens_s2"] == 16000
+        assert "truncation_completion_tokens_s4" not in stats["recovery"]
+
     def test_parse_error_with_stop_still_retries(self):
         """D3 (#1746): a stop-class parse failure STILL gets the single
         error-informed re-prompt — only the truncation class skips."""

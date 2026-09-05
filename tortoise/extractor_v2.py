@@ -1013,7 +1013,8 @@ def _error_excerpt(response: str, err: BaseException) -> str:
 
 
 def _complete_parsed(model, system: str, user: str, *,
-                     max_tokens: int | None, stats: dict | None) -> dict:
+                     max_tokens: int | None, stats: dict | None,
+                     seam: str | None = None) -> dict:
     """``_complete`` + the parse-recovery ladder with one error-informed
     re-prompt on parse failure (pilot #1549 + #1746 D3/D4).
 
@@ -1030,7 +1031,16 @@ def _complete_parsed(model, system: str, user: str, *,
     ``finish_reason == "length"`` SKIPS the retry — same prompt + same cap
     is deterministic failure (the ladder's rung-4 partial-accept already
     ran in-process on attempt 1); a ``stop``/``None`` failure re-prompts
-    with the bounded parse-error block (``_error_informed_reprompt``)."""
+    with the bounded parse-error block (``_error_informed_reprompt``).
+
+    #2134 Task 0 (R3-6): ``seam`` names the calling stage (run_s2 passes
+    ``"s2"``, run_s4 ``"s4"``; the kind_classifier adjudication path leaves
+    it ``None``) so a length-truncated call's tokens accumulate into
+    PER-SEAM recovery keys (``truncation_*_tokens_{seam}``) in addition to
+    the seam-less combined keys `_complete` already accumulates — keeping
+    the S2 (16K-capped) and S4 (16K-capped) truncation overage separable
+    for the Task-1 calibration read (a seam-less sum conflates S2+S4+S1 in
+    a multi-truncating session)."""
     attempts = 0
     last: Exception | None = None
     first_truncated = False
@@ -1058,6 +1068,18 @@ def _complete_parsed(model, system: str, user: str, *,
         stage_truncated = stage_truncated or finish == "length"
         if stats is not None:
             stats["truncated"] = stage_truncated
+            # #2134 Task 0 (R3-6): per-seam truncation-token accumulation —
+            # read the in-stats token fields `_complete` just wrote (same
+            # thread, post-return). Guarded on `seam` so the adjudication
+            # path (seam=None) contributes only the combined keys.
+            if finish == "length" and seam:
+                _rec = stats.setdefault("recovery", {})
+                _pk = f"truncation_prompt_tokens_{seam}"
+                _ck = f"truncation_completion_tokens_{seam}"
+                _rec[_pk] = (_rec.get(_pk, 0)
+                             + int(stats.get("prompt_tokens") or 0))
+                _rec[_ck] = (_rec.get(_ck, 0)
+                             + int(stats.get("completion_tokens") or 0))
         try:
             return _parse_json_robust(response, stats=stats)
         except ValueError as e:
@@ -1127,7 +1149,7 @@ def run_s2(model, story: str, master: dict | None = None, *,
                                              core_only=core_only),
                             "S1 STORY:\n" + story,
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
-                            stats=stats)
+                            stats=stats, seam="s2")
 
 
 # ── S3: SEARCH THE GRAPH (real backend, graceful degradation) ─────────────
@@ -1529,7 +1551,7 @@ def run_s4(model, story: str, search: dict, embed_list: dict,
                                              core_only=core_only),
                             "Complete the embed list.",
                             max_tokens=_stage_cap(_S2_S4_MAX_TOKENS),
-                            stats=stats)
+                            stats=stats, seam="s4")
 
 
 # ── E4 (#1536): S4 merges-not-replaces — programmatic union (S2 ∪ S4) ──────
@@ -4183,8 +4205,10 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
     """One wall-clock-bounded completion attempt (M3 D1: each retry attempt
     gets its OWN deadline — a wedged call cannot stay wedged across retries).
 
-    Returns ``(resp, finish_reason)`` — the finish reason captured in the
-    calling thread right after ``complete()`` returns (F4 #1780).
+    Returns ``(resp, finish_reason, prompt_tokens, completion_tokens)`` — the
+    finish reason AND per-call token counts captured in the calling thread
+    right after ``complete()`` returns (F4 #1780; token capture #2134
+    Task 0 — never read the shared adapter attrs from the caller thread).
 
     The model call runs in a thread; exceptions are captured and RE-RAISED
     after join (Python threads do not propagate exceptions to the joiner —
@@ -4211,8 +4235,17 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         # ``model.last_finish_reason`` later from the caller thread is a
         # cross-thread race under ``--workers > 1``: another thread's
         # complete() can overwrite the shared attribute between the
-        # return and the read.
+        # return and the read. The SAME in-thread capture applies to the
+        # per-call token counts (#2134 Task 0 — the escalation cost delta
+        # (D6) and the truncation-token read surface (Task 1) must never
+        # read the shared adapter attrs post-hoc; the None-guarded
+        # normalization mirrors ``_billed()`` (sdk.py:216) so mocks
+        # without the token attrs contribute 0, never a TypeError).
         box["finish_reason"] = getattr(model, "last_finish_reason", None)
+        box["prompt_tokens"] = int(
+            getattr(model, "last_prompt_tokens", None) or 0)
+        box["completion_tokens"] = int(
+            getattr(model, "last_completion_tokens", None) or 0)
 
     def _run():
         try:
@@ -4246,7 +4279,8 @@ def _call_once(model, system: str, user: str, *, deadline_s: int,
         raise TimeoutError(f"model call exceeded {deadline_s}s")
     if "exc" in box:
         raise box["exc"]
-    return (box.get("resp"), box.get("finish_reason"))
+    return (box.get("resp"), box.get("finish_reason"),
+            box.get("prompt_tokens", 0), box.get("completion_tokens", 0))
 
 
 def _scaled_deadline(base: int, max_tokens: int | None) -> int:
@@ -4307,15 +4341,37 @@ def _complete(model, system: str, user: str, *, deadline_s: int | None = None,
         deadline_s = _scaled_deadline(600, max_tokens)
     for attempt in range(1, retries + 2):
         try:
-            resp, finish_reason = _call_once(model, system, user,
-                                             deadline_s=deadline_s,
-                                             max_tokens=max_tokens,
-                                             stats=stats)
+            (resp, finish_reason,
+             prompt_tokens, completion_tokens) = _call_once(
+                 model, system, user, deadline_s=deadline_s,
+                 max_tokens=max_tokens, stats=stats)
             truncated = finish_reason == "length"
             if stats is not None:
                 stats.update(attempts=attempt, retries=attempt - 1,
                              last_class=None, truncated=bool(truncated),
-                             finish_reason=finish_reason)
+                             finish_reason=finish_reason,
+                             prompt_tokens=prompt_tokens,
+                             completion_tokens=completion_tokens)
+                # #2134 Task 0 (P1-22): the truncation-token read surface —
+                # a length-truncated call's emitted tokens are the lower
+                # bound on the true list size (the model filled its budget
+                # then was cut). Accumulate into recovery-carried keys so the
+                # per-call values roll for free through _rollup_recovery ->
+                # ingest_v2 -> run.py outcome recovery (the per-stage
+                # stats["prompt_tokens"]/["completion_tokens"] are transient;
+                # _rollup_llm copies only attempts/retries/truncated/
+                # deadline_aborts). The seam-less COMBINED keys count every
+                # truncating call across all seams (S1 chunks, S2, S4, the
+                # kind_classifier adjudication path); the per-seam keys are
+                # accumulated at the _complete_parsed/run_s1 seams (R3-6).
+                if truncated:
+                    _rec = stats.setdefault("recovery", {})
+                    _rec["truncation_prompt_tokens"] = (
+                        _rec.get("truncation_prompt_tokens", 0)
+                        + prompt_tokens)
+                    _rec["truncation_completion_tokens"] = (
+                        _rec.get("truncation_completion_tokens", 0)
+                        + completion_tokens)
             return resp
         except BaseException as e:  # noqa: BLE001, RUF100
             if not isinstance(e, Exception):  # never retry SystemExit/KeyboardInterrupt
