@@ -449,10 +449,11 @@ class GraphRanker:
 #   signal the existing order_by="confidence" path reads (n.confidence).
 #   Uncalibrated points (no persisted α/β → Beta(1,1)) fall back to a
 #   documented neutral 0.5: absence of measurement is NOT evidence against.
-#   NOTE: EpBreakdown.confidence_mean is deliberately NOT used — it is the
-#   structural impl/(impl+nand) edge-ratio ("edge-ratio, not belief", per
-#   sdk.py order_by=confidence) and ties equally-relevant claims with
-#   different support levels (3 IMPL vs 1 IMPL both read 1.0).
+#   NOTE: EpBreakdown.confidence_mean is deliberately NOT used — post-#2206
+#   it carries the SAME belief mean (α/(α+β) over the coalesce read, rounded
+#   4dp), so this is a single-source-read optimization (n.confidence is the
+#   raw persisted property), not a semantics split. contention/evidence on
+#   the breakdown remain the structural edge-ratio family — never beliefs.
 # * centrality_norm = min-max normalized degree centrality (incident
 #   IMPL/NAND + about* edge count, within the result set). w_c ≈ 0.10 is
 #   deliberately WEAK and subordinate to confidence: with w_c=0.10 the whole
