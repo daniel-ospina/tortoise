@@ -609,6 +609,162 @@ def test_locked_reader_forwards_finish_reason(monkeypatch):
     assert locked2.last_finish_reason is None
 
 
+def test_locked_reader_forwards_max_tokens(monkeypatch):
+    """#2280: _LockedReader forwards a per-call max_tokens override to the
+    inner model (the escalation lever) and omits it when not provided."""
+    import tortoise.sdk as sdk_mod
+
+    seen = {}
+
+    class CapReader:
+        def complete(self, *, system, user, max_tokens=None):
+            seen["mt"] = max_tokens
+            self.last_completion_tokens = 7
+            self.last_finish_reason = "stop"
+            return "x"
+
+        def close(self):
+            pass
+
+    locked = sdk_mod._LockedReader(CapReader())
+    assert locked.complete(system="s", user="u", max_tokens=2000) == "x"
+    assert seen["mt"] == 2000
+    locked.complete(system="s", user="u")
+    assert seen["mt"] is None
+
+
+class _CollapsingReader:
+    """complete() stub emulating a reasoning-budget collapse (#2280):
+    scripted replies + finish_reasons; records per-call max_tokens."""
+
+    def __init__(self, sequence, finish_reasons, tokens=None):
+        self.sequence = list(sequence)
+        self.finish_reasons = list(finish_reasons)
+        # per-call completion-token reports (billed usage); default 12
+        self.tokens = list(tokens) if tokens is not None else [12] * max(
+            len(self.sequence), 1)
+        self.calls = 0
+        self.max_tokens_seen: list = []
+        self.last_finish_reason = None
+        self.last_completion_tokens = 0
+
+    def complete(self, *, system, user, max_tokens=None):
+        self.calls += 1
+        self.max_tokens_seen.append(max_tokens)
+        self.last_finish_reason = self.finish_reasons[
+            min(self.calls - 1, len(self.finish_reasons) - 1)]
+        self.last_completion_tokens = self.tokens[
+            min(self.calls - 1, len(self.tokens) - 1)]
+        return self.sequence[min(self.calls - 1, len(self.sequence) - 1)]
+
+    def close(self):
+        pass
+
+
+def _install_collapsing(sdk, monkeypatch, sequence, finish_reasons):
+    import tortoise.sdk as sdk_mod
+    fake = _CollapsingReader(sequence, finish_reasons)
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
+                        lambda: fake)
+    # deterministic escalation budget for the assertions
+    monkeypatch.setenv("TORTOISE_ASK_ESCALATION_TOKENS", "2000")
+    return fake
+
+
+def test_collapse_escalates_and_answers(monkeypatch):
+    """#2280: first call collapses empty with finish_reason='length' (the
+    reasoning-budget collapse) → ONE escalated retry answers; the result is
+    a real answer, NEVER a fabricated abstention."""
+    sdk = _new_sdk()
+    _seed_event_graph(sdk, [
+        {"content": "I spent $25 on a chain and $40 on bike lights",
+         "eventId": "ev1", "session_date": "2026-01-05"},
+    ])
+    fake = _install_collapsing(sdk, monkeypatch,
+                               sequence=[None, "$65"],
+                               finish_reasons=["length", "length"])
+    result = sdk.ask("How much did I spend on bike stuff?",
+                     question_date="2026-02-01")
+    assert fake.calls == 2
+    assert fake.max_tokens_seen == [None, 2000]
+    assert result["answer"] == "$65"
+    assert result["abstained"] is False
+
+
+def test_collapse_persists_fails_loud_not_abstention(monkeypatch):
+    """#2280: empty output after the escalated retry → AskReaderUnavailable
+    (fail-loud). An empty model output is NEVER an abstention."""
+    from tortoise.exceptions import AskReaderUnavailable
+    sdk = _new_sdk()
+    _seed_event_graph(sdk, [
+        {"content": "the gym schedule is Monday", "eventId": "ev1",
+         "session_date": "2026-08-01"},
+    ])
+    fake = _install_collapsing(sdk, monkeypatch,
+                               sequence=[None, None],
+                               finish_reasons=["length", "length"])
+    with pytest.raises(AskReaderUnavailable):
+        sdk.ask("what is the gym schedule?")
+    assert fake.calls == 2
+    assert fake.max_tokens_seen == [None, 2000]
+
+
+def test_empty_stop_finish_recovers_on_same_budget_retry(monkeypatch):
+    """#2280: empty output with a NON-length finish reason (transient
+    empty/provider variance) retries ONCE at the SAME budget and can
+    recover — no escalation needed."""
+    sdk = _new_sdk()
+    fake = _install_collapsing(sdk, monkeypatch,
+                               sequence=[None, "I do not know."],
+                               finish_reasons=["stop", "stop"])
+    result = sdk.ask("something not in memory")
+    assert fake.calls == 2
+    assert fake.max_tokens_seen == [None, None]
+    assert result["answer"] == "I do not know."
+    assert result["abstained"] is True  # a WRITTEN abstention
+
+
+def test_empty_stop_finish_persists_fails_loud(monkeypatch):
+    """#2280: empty output twice with a non-length finish reason →
+    AskReaderUnavailable (fail-loud), never abstained."""
+    from tortoise.exceptions import AskReaderUnavailable
+    sdk = _new_sdk()
+    fake = _install_collapsing(sdk, monkeypatch,
+                               sequence=[None, None],
+                               finish_reasons=["stop", "stop"])
+    with pytest.raises(AskReaderUnavailable):
+        sdk.ask("q")
+    assert fake.calls == 2
+    assert fake.max_tokens_seen == [None, None]
+
+
+def test_collapse_metering_counts_both_billed_calls(monkeypatch):
+    """#2280: on the 2-call escalation path the metering record + response
+    cost estimate account for BOTH billed calls (the collapsed first call's
+    tokens were dropped pre-fix — the per-call last_completion_tokens
+    capture only reflects the LAST call)."""
+    import tortoise.metering as metering_mod
+    import tortoise.sdk as sdk_mod
+
+    captured = {}
+
+    def _capture(team_id, *, tokens_in=0, tokens_out=0, cost_usd=0.0, **_):
+        captured.update(tokens_out=tokens_out, cost_usd=cost_usd)
+        return None
+
+    monkeypatch.setattr(metering_mod, "record_ask_usage", _capture)
+    sdk = _new_sdk()
+    fake = _CollapsingReader(sequence=[None, "x"],
+                             finish_reasons=["length", "length"],
+                             tokens=[500, 20])
+    monkeypatch.setattr(sdk_mod, "_default_ask_reader_factory",
+                        lambda: fake)
+    monkeypatch.setenv("TORTOISE_ASK_ESCALATION_TOKENS", "2000")
+    sdk.ask("q", team_id="team-x")
+    assert captured, "the record path must have run (explicit team_id)"
+    assert captured["tokens_out"] == 520  # 500 (collapsed) + 20 (escalated)
+
+
 def test_both_not_either_control(monkeypatch):
     """tortoise_search / tortoise_recall never invoke the reader factory."""
     sdk = _new_sdk()

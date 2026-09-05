@@ -388,11 +388,6 @@ def _get_sdk():
         _sdk = TortoiseSDK(db_path=_resolve_db_path())
     return _sdk
 
-# Announce auth mode at startup
-if _is_dev_mode():
-    _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
-
-
 # #329: node/edge-creating MCP write tools that MUST be quota-gated. Completeness
 # is enforced by an introspective test (tests/test_mcp_http.py) that scans every
 # HTTP_ALLOWED tool body for node/edge-creating SDK calls and asserts membership.
@@ -1674,6 +1669,27 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
 
 def main():
     _transport_mode.set("stdio")
+    # #2203: the stdio server must terminate its embedded redis-server child
+    # when the parent is killed — SIGTERM from the harness/session teardown,
+    # SIGHUP on terminal/session death, SIGINT when the process started with
+    # it ignored (non-tty stdin). The guard's handler closes every live
+    # embedded server INLINE (registry of guarded FalkorDB clients) and then
+    # re-raises the signal, so the server dies with the parent on any of
+    # those kills — no dependence on atexit or on unwinding the event loop.
+    # (Client disconnect = stdin EOF → mcp.run returns → the explicit close
+    # after it below.) Idempotent.
+    from tortoise.embedded_lifecycle import (
+        close_embedded_clients,
+        install_embedded_signal_cleanup,
+    )
+    install_embedded_signal_cleanup()
+    # #2204: announce dev mode (no auth) at the actual serve start, NOT at
+    # module import — incidental importers (hosted_api, doctor, tests) must
+    # stay quiet. Stdio is the only path that cannot carry auth headers, so
+    # the announcement lives here (python -m tortoise.mcp_server and
+    # `tortoise serve` both funnel through main()).
+    if _is_dev_mode():
+        _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
     monitoring.register(_get_sdk())
     uri = os.environ.get("TORTOISE_DB_URI")
     db_path = os.environ.get("TORTOISE_DB_PATH")
@@ -1702,7 +1718,15 @@ def main():
         from tortoise._embedded import EMBEDDED_EVAL_BANNER
 
         print(EMBEDDED_EVAL_BANNER, file=sys.stderr)
-    mcp.run(transport="stdio")
+    try:
+        mcp.run(transport="stdio")
+    finally:
+        # #2203: deterministic teardown when the stdio session ends (client
+        # disconnect / stdin EOF / abnormal session end) — close every
+        # embedded server this process opened NOW instead of relying on
+        # atexit ordering; a no-op when nothing was opened (docker-URI
+        # mode), idempotent (already-closed clients skip).
+        close_embedded_clients()
 
 
 # ── P0 Group 3: Checkpoint, Diary, Status, Ingest ──────────────
@@ -2174,7 +2198,6 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
         return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                            sourceDate: str | None = None, props: Any = None) -> dict:
     """Create a Source node for provenance (document, web, db, etc.).
@@ -2196,7 +2219,10 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
-@mcp.tool()
+# #2204: decorator removed — the tool is registered by the registry adapter
+# (TOOL_REGISTRY entry carries the same annotations; see module bottom). The
+# stale @mcp.tool() decorator double-registered the name with fastmcp's local
+# provider ("Component already exists" noise at import).
 def tortoise_get_source_reliability(url: str) -> dict:
     """Derive a Source's reliability (0-1) — query-time, cache-consistency-checked.
 
@@ -2208,7 +2234,8 @@ def tortoise_get_source_reliability(url: str) -> dict:
     return _safe(_get_team_sdk().get_source_reliability, url)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+# #2204: decorator removed — registry adapter owns registration (see
+# tortoise_create_source note).
 def tortoise_assess_source(url: str, assessor: str, score: float,
                            rationale: str) -> dict:
     """Record an agent's assessment of a Source (0-1 score + rationale).
@@ -2223,7 +2250,8 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
                  url, assessor, score, rationale)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+# #2204: decorator removed — registry adapter owns registration (see
+# tortoise_create_source note).
 def tortoise_set_source_tier(url: str, tier: str) -> dict:
     """Set (or change) a Source's credibility tier (T0-T4). Non-destructive.
 
@@ -2585,18 +2613,11 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # Replaces @mcp.tool() decorators with programmatic registration.
 # Function bodies remain module-level callables; the adapter wraps each
 # via FunctionTool.from_function() and registers them on the shared mcp.
-# Must execute AFTER all tool function definitions (at module bottom).
-from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
-
-_adapter = FastMCPAdapter(mcp)
-_adapter.register_all(TOOL_REGISTRY, {
-    t.name: globals()[t.name]
-    for t in TOOL_REGISTRY
-    if t.name in globals()
-})
-
-
-
+# The register_all call lives at the MODULE BOTTOM — after every module-level
+# tool definition (incl. the onboarding tools + tortoise_session_capture
+# defined below) — so the adapter resolves a handler for every registry
+# entry from globals() (#2210: entries defined after this point used to be
+# logged "no handler — skipped" while decorators half-registered them).
 # ── Onboarding MCP tools (#498/#499/#500) ───────────────────────
 # Wrappers for the hosted onboarding flow. These call the team-scoped SDK
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
@@ -2605,8 +2626,10 @@ _adapter.register_all(TOOL_REGISTRY, {
 # Epic #888 no-regret: once a team's onboarding completes, the six
 # tortoise_onboarding_* tools retire from that team's steady-state MCP
 # surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
-# web onboarding flow. Definitions and handlers are untouched; only the
-# listing hides them. See _HTTPToolFilter.list_tools.
+# web onboarding flow. Function bodies are untouched; only the listing hides
+# them. #2210: no @mcp.tool decorators here — the module-bottom register_all
+# registers each from its registry entry (annotations are registry-canonical).
+# See _HTTPToolFilter.list_tools.
 _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
     "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
@@ -2662,7 +2685,6 @@ def _onboarding_state() -> dict:
     return _read_state(team_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_onboarding_demo_create() -> dict:
     """Create the demo epistemic graph (4 layers) for this team. Idempotent.
 
@@ -2687,13 +2709,11 @@ def tortoise_onboarding_demo_create() -> dict:
     return result
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_onboarding_state() -> dict:
     """Return this team's onboarding progress (Q6 verification step)."""
     return _onboarding_state()
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_seed(org_name: str | None = None,
                              person_name: str | None = None) -> dict:
     """File the two onboarding anchor Subjects for this team (#1999, W3):
@@ -2757,7 +2777,6 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     return {"onboarding": state}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
     team_id = _current_team_id.get()
@@ -2788,7 +2807,6 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     return {"auth_url": auth_url, "state": state}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_onboarding_github_status() -> dict:
     """Return GitHub connection status for this team (Q1 verify)."""
     team_id = _current_team_id.get()
@@ -2895,7 +2913,6 @@ def tortoise_session_capture(conversation: list[dict],
         return {"error": str(detail), "status": status}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     """Start background GitHub indexing of an org's issues/PRs (Q2).
 
@@ -3108,11 +3125,28 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
 
 # #993: the stdio entrypoint guard MUST run AFTER every @mcp.tool decorator
-# and the FastMCPAdapter.register_all() call above. Placing it earlier (was
+# and the FastMCPAdapter.register_all() call above (every tool function in
+# this module has been defined by this point, so the adapter below resolves
+# a handler for EVERY registry entry — #2210). Placing it earlier (was
 # line ~1211) made `python -m tortoise.mcp_server` enter mcp.run() with ZERO
 # tools registered — onboarding's Step 0 (tortoise_health) failed with
 # "Can't connect to Tortoise". Importing callers (tortoise serve via
 # __main__.py, deployment.py) are unaffected: they import the module first
 # (which executes register_all), then call main().
+
+# ── Tool Registry Adapter (#454) — registration (module bottom) ──
+# Executes after EVERY module-level tool function definition above, so the
+# handlers dict covers the whole registry: the six onboarding tools and
+# tortoise_session_capture used to be logged "no handler — skipped" (they
+# were defined after this block's old mid-module position) — #2210.
+from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
+
+_adapter = FastMCPAdapter(mcp)
+_adapter.register_all(TOOL_REGISTRY, {
+    t.name: globals()[t.name]
+    for t in TOOL_REGISTRY
+    if t.name in globals()
+})
+
 if __name__ == "__main__":
     main()
