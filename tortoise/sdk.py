@@ -2364,11 +2364,13 @@ class TortoiseSDK:
         # session_existed BEFORE the Session MERGE, mirroring the hosted
         # #1727 replay skip — a re-capture of an EXISTING session_id skips
         # extraction (the M2 lane mints non-deterministic time-ULID claim
-        # ids; a naive re-extract would mint DUPLICATE claims) + skips the
-        # sessionCaptured Event mint + provenance stamp (the deterministic
-        # event id below makes the CONCURRENT fresh race converge too). The
-        # Session MERGE + turn loop stay unconditional (idempotent no-ops —
-        # 0 new nodes).
+        # ids; a naive re-extract would mint DUPLICATE claims) AND skips the
+        # sessionCaptured Event mint + provenance stamp (hosted byte-parity;
+        # the deterministic event id below makes the CONCURRENT fresh race
+        # converge too). The Session MERGE + turn loop stay unconditional
+        # (idempotent no-ops for an identical-payload re-POST — 0 new nodes;
+        # a LONGER replay payload extends the stored turn list, the hosted
+        # #1727 scope).
         session_existed = bool(proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN count(s)",
             params={"sid": session_id},
@@ -2469,65 +2471,77 @@ class TortoiseSDK:
         # extracted point's provenance surface; aboutEvent stays clean for
         # content (B3's event slot).
         event_id: str | None = None
-        try:
-            # W5 Phase F (#2104): the Event mint uses the DETERMINISTIC id
-            # derived from session_id — two concurrent fresh-session captures
-            # of the same session_id (per-thread SDKs / two POSTs) MERGE onto
-            # ONE Event node instead of minting two fresh-ULID Events (the
-            # #1727 TOCTOU residue). The Event projection MERGEs on eventId
-            # so the second concurrent writer's create is an idempotent no-op
-            # — a REPLAY of an existing session_id re-mints the SAME Event
-            # (0 new nodes; the extraction was skipped above by the #1727
-            # session_existed gate, so nothing re-stamps).
-            event = self.create_event(
-                f"session_{session_id}", "sessionCaptured",
-                id=_session_capture_event_id(session_id),
-                startedAt=now, endedAt=now, sessionId=session_id,
-                is_episodic=True,
-            )
-            event_id = event.get("id") or event.get("eventId")
-            if event_id:
-                # W5 (#2104, S1): the SDK mirror stamps the full write
-                # provenance alongside the ontology-compliant eventId —
-                # byte-parity with hosted_api's capture stamp (the W2
-                # benchmark grades provenance_accuracy over these fields).
-                # W5 Phase D (#2104): the stamp gates over the MINTED ids —
-                # a dedup-folded entry (content_hash_hit/rephrase_linked)
-                # resolved to an existing node whose provenance belongs to
-                # its original ingest; re-stamping would clobber the first
-                # session's single-eventId provenance.
-                source_harness = harness or "unknown"
-                proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids "
-                    "SET n.eventId=$eid, n.source_session=$sid, "
-                    "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": _capture_minted_ids(extracted),
-                            "eid": event_id, "sid": session_id,
-                            "harness": source_harness, "ing": now},
+        # W5 Phase F (#2104, indicator 8 — hosted #1727 byte-parity): the
+        # sessionCaptured Event mint + provenance stamp run ONLY on a genuine
+        # capture — a REPLAY of an existing session_id SKIPS them, exactly
+        # like hosted_api._capture_session_impl (re-running the mint would
+        # converge on the SAME deterministic Event node, but the projection's
+        # ON MATCH SET would refresh the first capture's startedAt/endedAt and
+        # the _emit_event journal would append a duplicate EventRecorded). The
+        # Session MERGE + turn loop above stay unconditional (idempotent
+        # no-ops for an identical-payload re-POST — 0 new nodes).
+        if not session_existed:
+            try:
+                # W5 Phase F (#2104): the mint uses the DETERMINISTIC id
+                # derived from session_id (_server_id channel — the
+                # server-only explicit-id convention, mirroring the explicit
+                # ``is_episodic`` param) so two concurrent FRESH-session
+                # captures of the same session_id (per-thread SDKs / two
+                # POSTs — the #1727 TOCTOU: both observe
+                # session_existed=False) MERGE onto ONE Event node instead of
+                # minting two fresh-ULID Events. The Event projection MERGEs
+                # on eventId, so the second concurrent writer's create is an
+                # idempotent no-op.
+                event = self.create_event(
+                    f"session_{session_id}", "sessionCaptured",
+                    _server_id=_session_capture_event_id(session_id),
+                    startedAt=now, endedAt=now, sessionId=session_id,
+                    is_episodic=True,
                 )
-            else:
-                # P1 #1529 (D4): create_event returning no id/eventId silently
-                # skips stamping — surface as an additive warning.
+                event_id = event.get("id") or event.get("eventId")
+                if event_id:
+                    # W5 (#2104, S1): the SDK mirror stamps the full write
+                    # provenance alongside the ontology-compliant eventId —
+                    # byte-parity with hosted_api's capture stamp (the W2
+                    # benchmark grades provenance_accuracy over these fields).
+                    # W5 Phase D (#2104): the stamp gates over the MINTED ids —
+                    # a dedup-folded entry (content_hash_hit/rephrase_linked)
+                    # resolved to an existing node whose provenance belongs to
+                    # its original ingest; re-stamping would clobber the first
+                    # session's single-eventId provenance.
+                    source_harness = harness or "unknown"
+                    proj.g.query(
+                        "MATCH (n:Point) WHERE n.id IN $ids "
+                        "SET n.eventId=$eid, n.source_session=$sid, "
+                        "    n.source_harness=$harness, n.ingested_at=$ing",
+                        params={"ids": _capture_minted_ids(extracted),
+                                "eid": event_id, "sid": session_id,
+                                "harness": source_harness, "ing": now},
+                    )
+                else:
+                    # P1 #1529 (D4): create_event returning no id/eventId
+                    # silently skips stamping — surface as an additive warning.
+                    _logger.warning(
+                        "capture_session: sessionCaptured Event write returned "
+                        "no id/eventId for session %s — extracted points not "
+                        "stamped",
+                        session_id,
+                    )
+                    extraction_warnings.append(
+                        "sessionCaptured Event write returned no id/eventId — "
+                        "extracted points not stamped")
+            except Exception as e:
+                # Non-fatal — mirrors hosted behavior, but surface the failure
+                # so silent event-log loss is visible (#721). P1 #1529 (D4):
+                # also append an additive warnings entry (never
+                # indistinguishable from a clean capture).
                 _logger.warning(
-                    "capture_session: sessionCaptured Event write returned no "
-                    "id/eventId for session %s — extracted points not stamped",
-                    session_id,
+                    "capture_session: sessionCaptured Event/EventRecorded write "
+                    "failed (non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
                 )
                 extraction_warnings.append(
-                    "sessionCaptured Event write returned no id/eventId — "
-                    "extracted points not stamped")
-        except Exception as e:
-            # Non-fatal — mirrors hosted behavior, but surface the failure so
-            # silent event-log loss is visible (#721). P1 #1529 (D4): also
-            # append an additive warnings entry (never indistinguishable from
-            # a clean capture).
-            _logger.warning(
-                "capture_session: sessionCaptured Event/EventRecorded write "
-                "failed (non-fatal) for session %s: %s", session_id, e,
-                exc_info=True,
-            )
-            extraction_warnings.append(
-                f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
+                    f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
         # #1352: the extraction projection auto-created a document-typed Source
         # stub at `session:{id}` (default sourceKind in _link_source) — the
         # ontology v3.6 §4.6 session source kind is agentSession. Materialize
@@ -14082,7 +14096,7 @@ class TortoiseSDK:
         return bool(total)
 
     def create_entity(self, type: str, name: str, *, is_episodic: bool | None = None,
-                       **props) -> dict:
+                       _server_id: str | None = None, **props) -> dict:
         """Create an entity — consolidated surface (epic #888 W2, PR #912).
 
         ``type`` routes to the right entity kind:
@@ -14120,17 +14134,20 @@ class TortoiseSDK:
                     "create_entity(type='event') requires eventKind")
             # Legacy create_event about* wiring — preserved verbatim (#888 W2).
             # W5 Phase F (#2104, TOCTOU): an explicit deterministic id
-            # (server-side channel — the sessionCaptured capture mints pass
+            # (server-ONLY channel via the ``_server_id`` keyword — the
+            # sessionCaptured capture mints pass
             # ``_session_capture_event_id(session_id)`` so two concurrent
             # fresh-session captures converge on ONE Event node) wins over
             # the fresh ULID. The Event projection MERGEs on ``eventId``
             # (``_upsert_event`` plain path), so a repeated id is an
             # idempotent no-op — never a duplicate node, never a
-            # duplicate-key error. Mirrors create_point's explicit-id pop
-            # (#52 / operator path); tenant surfaces reject 'id' at the MCP
-            # boundary and via ``_sanitize_props(reject_id=True)`` on every
-            # other entity kind.
-            eid = props.pop("id", None)
+            # duplicate-key error. Mirrors the explicit ``is_episodic`` param
+            # convention (never the props passthrough): an ``id`` arriving via
+            # props is REJECTED fail-closed by ``_create_entity``'s
+            # ``_sanitize_props(reject_id=True)`` backstop — the MCP boundary
+            # rejects top-level server-managed props and the backstop catches
+            # nested-props flattens (pre-Phase F behavior restored).
+            eid = _server_id
             if not isinstance(eid, str) or not eid:
                 eid = self.ulid()
             about_subject = props.pop("aboutSubject", None)
@@ -14253,7 +14270,7 @@ class TortoiseSDK:
                                   objectKind=objectKind, **props)["node"]
 
     def create_event(self, name: str, eventKind: str, *, is_episodic: bool | None = None,
-                      **props) -> dict:
+                      _server_id: str | None = None, **props) -> dict:
         """Create an Event node (alias for create_entity(type='event')).
 
         If aboutSubject, aboutObject, aboutPoint, or aboutDocument are provided
@@ -14275,7 +14292,8 @@ class TortoiseSDK:
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         return self.create_entity("event", name,
-                                  eventKind=eventKind, **props)["node"]
+                                  eventKind=eventKind, _server_id=_server_id,
+                                  **props)["node"]
 
 
     # ── Session Indexing (AgentSession) ─────────────────────────

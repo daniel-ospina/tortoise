@@ -3539,17 +3539,25 @@ def test_phase_f_deterministic_event_id_converges_two_mints(tmp_path):
     (derived from session_id) — two writers minting the same session's
     capture Event (the #1727 TOCTOU: two concurrent POSTs both observing
     session_existed=False) converge on ONE Event node, never two."""
+    import hashlib
+
     from tortoise.sdk import _session_capture_event_id
 
     sid = "session_phase_f"
     eid = _session_capture_event_id(sid)
-    assert eid.startswith("ev_"), eid
+    # Byte-parity format lock: ev_<sha256("sessionCaptured:"+session_id)>
+    # truncated to 62 hex chars — the SDK and hosted mint sites share this
+    # exact value (a drift would mint two different Event nodes for one
+    # session under the concurrent race).
+    expected = "ev_" + hashlib.sha256(
+        f"sessionCaptured:{sid}".encode()).hexdigest()[:62]
+    assert eid == expected, (eid, expected)
     sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
     try:
-        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
+        sdk.create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
                          startedAt="now", endedAt="now", sessionId=sid,
                          is_episodic=True)
-        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
+        sdk.create_event(f"session_{sid}", "sessionCaptured", _server_id=eid,
                          startedAt="now", endedAt="now", sessionId=sid,
                          is_episodic=True)
         proj = sdk._get_proj()
@@ -3562,36 +3570,46 @@ def test_phase_f_deterministic_event_id_converges_two_mints(tmp_path):
         sdk.close()
 
 
-# ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────
-
-
-
-# ── W5 Phase F (#2104): concurrent session_id idempotency ──────────────────
-
-
-def test_phase_f_deterministic_event_id_converges_two_mints(tmp_path):
-    """W5 Phase F (#2104): the sessionCaptured Event id is DETERMINISTIC
-    (derived from session_id) — two writers minting the same session's
-    capture Event (the #1727 TOCTOU: two concurrent POSTs both observing
-    session_existed=False) converge on ONE Event node, never two."""
+def test_phase_f_event_id_is_server_only_channel(tmp_path):
+    """W5 Phase F (#2104): the deterministic Event id is a SERVER-ONLY
+    channel — an ``id`` arriving via the props passthrough (flat kwarg or
+    MCP-style nested props dict) is rejected fail-closed by the
+    ``_sanitize_props(reject_id=True)`` backstop, restoring the pre-Phase F
+    posture (create_point's #52 pop is the only id-through-props surface).
+    The ``_server_id`` keyword (internal capture mints) is the only way in."""
     from tortoise.sdk import _session_capture_event_id
 
-    sid = "session_phase_f"
-    eid = _session_capture_event_id(sid)
-    assert eid.startswith("ev_"), eid
     sdk = TortoiseSDK(db_path=str(tmp_path / "t.db"))
     try:
-        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
-                         startedAt="now", endedAt="now", sessionId=sid,
-                         is_episodic=True)
-        sdk.create_event(f"session_{sid}", "sessionCaptured", id=eid,
-                         startedAt="now", endedAt="now", sessionId=sid,
-                         is_episodic=True)
-        proj = sdk._get_proj()
-        n = proj.g.query(
-            "MATCH (e:Event {eventId:$eid}) RETURN count(e)",
-            params={"eid": eid},
-        ).result_set
-        assert n[0][0] == 1, f"two mints must converge on ONE Event (got {n[0][0]})"
+        sid = "session_server_only"
+        eid = _session_capture_event_id(sid)
+        # Genuine capture mint still works through the internal channel.
+        ev = sdk.create_event(f"session_{sid}", "sessionCaptured",
+                              _server_id=eid, is_episodic=True)
+        assert ev.get("id") == eid, ev
+        # Flat id kwarg — rejected (previously popped + accepted).
+        try:
+            sdk.create_event("x", "meeting", id="ev_forced")
+            raise AssertionError("flat id kwarg must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # MCP-style nested props id — flattened by _coerce_props, rejected by
+        # the backstop (the MCP boundary only inspects top-level keys).
+        try:
+            sdk.create_event("x", "meeting", props={"id": "ev_forced"})
+            raise AssertionError("nested props id must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # create_entity event branch — same reject.
+        try:
+            sdk.create_entity("event", "x", eventKind="meeting",
+                              id="ev_forced")
+            raise AssertionError("create_entity id must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # A fresh ULID is still minted when no _server_id is supplied.
+        ev2 = sdk.create_event("x", "meeting", is_episodic=False)
+        assert ev2.get("id"), ev2
+        assert ev2.get("id") != eid, "no _server_id must not reuse a prior id"
     finally:
         sdk.close()

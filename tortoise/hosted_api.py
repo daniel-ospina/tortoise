@@ -6215,7 +6215,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             event = sdk.create_event(
                 f"session_{session_id}",
                 "sessionCaptured",
-                id=_session_capture_event_id(session_id),
+                _server_id=_session_capture_event_id(session_id),
                 startedAt=now,
                 endedAt=now,
                 sessionId=session_id,
