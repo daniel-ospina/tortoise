@@ -323,17 +323,19 @@ class TestResolveEnforcement:
         assert resolve_enforcement(relation="x") == "warn"
         assert resolve_enforcement(chain_id="x") == "warn"
 
-    def test_only_agent_ops_rule_is_index_reachable_retry(self):
+    def test_index_reachable_retry_kinds_are_agent_ops_rule_and_dev_incident(self):
         """#2030 boundary-note-5 drift pin — compile the REAL kind index
-        spec and assert exactly one index kind resolves retry. Pins the
-        'product-strategy retry declarations stay dormant' claim (FIX P
-        excludes point kinds from the index) against future manifest drift.
-        RED on pre-fix code (every index kind resolves warn)."""
+        spec and assert which index kinds resolve retry. FIX P excludes
+        point kinds from the index, so point-kind retry declarations
+        (product-strategy useCase/userJourney, dev risk) stay dormant; an
+        OBJECT kind with retry (dev:incident, added by the #2238 problem-
+        family landing) IS index-reachable and live. RED on pre-fix code
+        (every index kind resolves warn)."""
         from tortoise.enforcement import resolve_enforcement
         from tortoise.value_extractor import compile_kind_index_spec
         spec = compile_kind_index_spec()
         retry_kinds = {k for k in spec if resolve_enforcement(kind=k) == "retry"}
-        assert retry_kinds == {"agent-ops:rule"}
+        assert retry_kinds == {"agent-ops:rule", "dev:incident"}
 
     def test_warn_default(self):
         from tortoise.enforcement import resolve_enforcement
