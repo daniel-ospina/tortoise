@@ -115,11 +115,20 @@ class _LockedReader:
         self._lock = threading.Lock()
         self._inflight = 0
 
-    def complete(self, *, system: str, user: str) -> str:
+    def complete(self, *, system: str, user: str,
+                 max_tokens: int | None = None) -> str:
         with self._lock:
             self._inflight += 1
             try:
-                out = self._model.complete(system=system, user=user)
+                # #2280: forward a per-call max_tokens override (RoutingModel
+                # / adapters already support it) — the ask lane uses it for
+                # bounded budget ESCALATION when the first call collapses
+                # empty (reasoning-budget collapse on reasoning models).
+                if max_tokens is None:
+                    out = self._model.complete(system=system, user=user)
+                else:
+                    out = self._model.complete(system=system, user=user,
+                                               max_tokens=max_tokens)
                 # same-frame capture — atomic with the call under the lock
                 self.last_prompt_tokens = getattr(
                     self._model, "last_prompt_tokens", 0)
@@ -167,6 +176,78 @@ class _LockedReader:
     @property
     def last_route(self):
         return getattr(self._model, "last_route", None)
+
+
+def _ask_reader_complete(model, *, system: str, user: str) -> tuple[str, int]:
+    """ONE ask-lane reader call with bounded output-budget escalation
+    (#2280).
+
+    Reasoning-capable models (e.g. qwen3.8-max via OpenRouter) can spend
+    the whole reader output budget (``DEFAULT_READER_MAX_TOKENS``=500)
+    THINKING on hard questions and emit NOTHING — ``content`` empty/None
+    with ``finish_reason="length"`` (the reasoning-budget collapse class;
+    the DeepSeekDirect variant is fixed by disabling thinking, #1790, but
+    qwen refuses that knob). An empty model output is NEVER a legitimate
+    abstention — the two-phase prompt abstains in WRITING — so the product
+    must not read a collapsed call as "no evidence" (the pre-#2280 behavior
+    silently fabricated abstentions on answerable questions).
+
+    Policy (bounded, cost-controlled; at most TWO calls):
+      * non-empty output → returned (exactly one call, the common path);
+      * empty + ``finish_reason == "length"`` (budget exhausted before any
+        content) → ONE retry at an escalated budget
+        (``TORTOISE_ASK_ESCALATION_TOKENS``, default
+        ``DEFAULT_READER_ESCALATION_MAX_TOKENS``);
+      * empty + any other finish reason → ONE retry at the SAME budget
+        (transient empty/provider variance);
+      * still empty after the retry → ``AskReaderUnavailable``
+        (fail-loud) — NEVER abstained/``NO_EVIDENCE_TEXT``.
+
+    Returns ``(raw, completion_tokens_total)`` — the total is the SUM of
+    billed completion tokens across the (≤2) calls, so the collapsed first
+    call's tokens are never dropped from metering/cost estimates (the
+    per-call ``last_completion_tokens`` capture on ``_LockedReader`` only
+    reflects the LAST call).
+    """
+    from tortoise.exceptions import AskReaderUnavailable
+    from tortoise.reader import DEFAULT_READER_ESCALATION_MAX_TOKENS
+    from tortoise.retrieval import ask_env_int
+
+    def _billed() -> int:
+        return int(getattr(model, "last_completion_tokens", 0) or 0)
+
+    total = 0
+    raw = model.complete(system=system, user=user)
+    total += _billed()
+    if raw is not None and str(raw).strip():
+        return raw, total
+    finish_reason = getattr(model, "last_finish_reason", None)
+    if finish_reason == "length":
+        # Budget exhausted before any content — escalate ONCE.
+        esc = ask_env_int(
+            "TORTOISE_ASK_ESCALATION_TOKENS",
+            DEFAULT_READER_ESCALATION_MAX_TOKENS, lo=512, hi=8192)
+        raw = model.complete(system=system, user=user, max_tokens=esc)
+        total += _billed()
+        if raw is not None and str(raw).strip():
+            _logger.warning(
+                "ask reader: empty output at budget cap, escalated to "
+                "max_tokens=%s and answered (finish_reason=%r)", esc,
+                finish_reason)
+            return raw, total
+        raise AskReaderUnavailable(
+            "reader returned empty output after budget escalation "
+            f"(finish_reason={finish_reason!r}) — not an abstention")
+    # Non-length empty output — retry ONCE at the same budget (transient),
+    # then fail loud. Never a silent abstention.
+    raw = model.complete(system=system, user=user)
+    total += _billed()
+    if raw is not None and str(raw).strip():
+        return raw, total
+    raise AskReaderUnavailable(
+        "reader returned empty output "
+        f"(finish_reason={finish_reason!r}) — not an abstention")
+
 
 # P0 Group 3: register custom kinds for diary + checkpoint
 register_kind("diary")
@@ -11286,8 +11367,15 @@ class TortoiseSDK:
         estimate cap AND 32 KiB byte cap, whole-hit drop) →
         ``detect_question_type`` (or caller override) →
         ONE reader call via ``build_reader_model()`` (never an
-        LLM-skip pre-gate — exactly one model call incl. empty context) →
-        ``_looks_abstained`` (blank → ``NO_EVIDENCE_TEXT``) → best-effort
+        LLM-skip pre-gate — exactly one model call incl. empty context;
+        #2280: an EMPTY model output escalates ONCE to a larger output
+        budget when the first call collapsed thinking-only
+        (``finish_reason="length"``), then fails loud as
+        ``AskReaderUnavailable`` — an empty output is never read as
+        an abstention) →
+        ``_looks_abstained`` (abstained is ALWAYS the model's written
+        decision; the blank→``NO_EVIDENCE_TEXT`` substitution is a
+        retired defensive invariant) → best-effort
         ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
         None → no-op).
 
@@ -11474,9 +11562,12 @@ class TortoiseSDK:
             raise AskReaderUnavailable(
                 f"reader unavailable (build): {type(e).__name__}") from e
         try:
-            raw = model.complete(
+            raw, reader_out_tokens = _ask_reader_complete(
+                model,
                 system=system_prompt_for(qtype),
                 user=build_reader_user_message(evidence, question))
+        except AskReaderUnavailable:
+            raise  # #2280: empty-output failure — never an abstention
         except Exception as e:  # noqa: BLE001, RUF100
             raise AskReaderUnavailable(
                 f"reader unavailable: {type(e).__name__}") from e
@@ -11486,6 +11577,12 @@ class TortoiseSDK:
                 decr()
         answer = (raw or "").strip()
         abstained = _looks_abstained(answer)
+        # #2280: an empty output can no longer reach here — the escalation
+        # helper either returns non-empty text or raises AskReaderUnavailable.
+        # ``abstained`` is therefore ALWAYS the model's written abstention
+        # decision, never a blank-output substitution. (The substitution is
+        # retained as a defensive invariant for a future caller that skips
+        # the helper — it must never fire on the product path.)
         if abstained and not answer:
             answer = NO_EVIDENCE_TEXT
 
@@ -11498,8 +11595,7 @@ class TortoiseSDK:
                 from tortoise.metering import record_ask_usage
                 input_tokens = (estimate_tokens_ask(system_prompt_for(qtype))
                                 + estimate_tokens_ask(evidence))
-                out_tokens = getattr(model, "last_completion_tokens", 0) \
-                    or 500
+                out_tokens = reader_out_tokens or 500
                 record_ask_usage(
                     team_id,
                     tokens_in=input_tokens, tokens_out=out_tokens,
@@ -11546,7 +11642,7 @@ class TortoiseSDK:
             cost_estimate = estimate_ask_cost_usd(
                 estimate_tokens_ask(system_prompt_for(qtype))
                 + estimate_tokens_ask(evidence),
-                getattr(model, "last_completion_tokens", 0) or 500,
+                reader_out_tokens or 500,
                 rates=select_ask_meter_rates(
                     getattr(model, "model", None) or ""))
         except Exception:  # noqa: BLE001, RUF100

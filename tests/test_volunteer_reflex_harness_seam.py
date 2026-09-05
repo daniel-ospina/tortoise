@@ -82,12 +82,13 @@ def _replay_turns(sdk, fixture_turns, *, min_confidence, max_pointers):
 KTA_CORPUS = ("kta01_reminder_turns", "kta02_aurora_status")
 
 
-def test_reflex_replays_kta_corpus_with_honest_numbers():
+def test_reflex_replays_kta_corpus_with_honest_numbers(monkeypatch):
     """Replay the committed W3 know-to-ask fixtures through the REAL write
     seam (m2 capture) + the reflex; grade in the harness vocabulary. The
     numbers are reported, not blessed: this is the first graded measurement
     (expected bad per the fix-wave protocol — corpus cells are unmeasured
     by the write path the reflex reads)."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")  # offline MockModel extractor (the #822 seam — capture never calls an LLM)
     import json
     import sys
     sys.path.insert(0, str(HARNESS_ROOT.parent.parent))

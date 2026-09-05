@@ -1708,11 +1708,9 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     keep-first — A stays supersededBy='successor-B', the C claim is never
     folded in (applied=0, no second journal, successor-C stays live), and
     the rejection is a LOUD warning naming the ref, the kept successor, and
-    the rejected one. This pins the helper's deliberate divergence from
-    hosted §6b's blind clobber (the M5 PHASE-2 GAP: a §6b commit resolving
-    A→C after a capture A→B blind-overwrites supersededBy to C with NO
-    warning — DOCUMENTED and asserted in T9's parity harness, NOT fixed
-    in-PR). The helper-routed keep-first is the one consumer discipline
+    the rejected one. hosted §6b migrated onto the helper in #2193 — this
+    is now the ONE discipline; the helper-routed keep-first is the one
+    consumer discipline
     that never blind-overwrites; a capture CAN trip it — the extractor's
     S3 search_graph calls tortoise_fts_query(entity_type='object'),
     which does NOT exclude terminal Objects (the terminal clause is
