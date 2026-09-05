@@ -14007,15 +14007,65 @@ class TortoiseSDK:
                 event["eventId"] = id_val
         if label == "Source":
             event["url"] = id_val
-        if label == "Event":
+        if label in ("Event", "Object"):
             # #2061: 'point'/'payload' are JSONL-envelope-reserved names (the
             # rebuild journal uses 'point' for full point snapshots, and
             # _emit_event reserves both as kwargs) — drop them from the node
             # write as well so live and replay stay byte-identical (a caller
             # passing them as event props gets NO persistence on either path,
-            # never divergent persistence).
+            # never divergent persistence). #2194: extended to Object — a
+            # tenant passing point/payload on create_object would otherwise
+            # persist them live via _persist_extra_props (they are not in
+            # _OBJECT_HANDLED) while the journal mirror drops them → divergent
+            # live/replay persistence. The pop is UNCONDITIONAL (both lanes,
+            # like the Event branch): a journal-gated pop would make live
+            # persistence depend on journal config — the same divergence
+            # class this fights. (Tenant-visible narrowing; T4.6 docs.)
             event.pop("point", None)
             event.pop("payload", None)
+        # (#2194) Journal ObjectRegistered on FIRST canonical registration
+        # only — probe the deterministic canonical id + name
+        # (obj-<sha26(name)>) before apply. The name conjunct hardens against
+        # a cross-name sha-digest collision (would otherwise fail-closed on a
+        # genuinely new registration). A row = canonical re-mention (MERGE by
+        # name, ON MATCH — the #1350 clobber guard keeps status; journaling
+        # again would double-register). No row = fresh create OR #1155 stub
+        # adoption (name-stub under a random ulid — the canonical
+        # registration is genuinely new) → journal after apply. Probe failure
+        # → warning + fail-open-to-journal (a duplicate line is replay-safe;
+        # a skip would silently re-open the node-loss bug). Accepted
+        # divergences (only-on-create mandate): re-mention prop mutations and
+        # pre-#2194-history re-mentions are live-only / never registered —
+        # byte-identity holds for the first canonical registration.
+        _journal_object_registration = False
+        # Truthy-name gate mirrors _upsert_object's persistence predicate (it
+        # no-ops on falsy names) — a falsy-name create must not mint a
+        # phantom ObjectRegistered line (junk-line journal growth on a no-op
+        # path).
+        if label == "Object" and self._event_log_path and event.get("name"):
+            try:
+                _journal_object_registration = not proj.g.query(
+                    "MATCH (o:Object {id:$cid, name:$name}) RETURN o.id",
+                    params={"cid": id_val, "name": event["name"]},
+                ).result_set
+            except Exception:  # noqa: BLE001 — fail-open: journal (durable
+                # bias — a duplicate is replay-safe; skipping would silently
+                # re-open the node-loss bug).
+                _logger.warning(
+                    "ObjectRegistered existence probe failed for %s — "
+                    "journaling optimistically (id=%s)",
+                    event.get("name"), id_val)
+                _journal_object_registration = True
+        if _journal_object_registration and "createdAt" not in event:
+            # (#2194) Synthesize createdAt BEFORE apply ONLY on the
+            # journaling path (probe-no-row), so live + journal + replay
+            # carry the identical value (replay would otherwise stamp rebuild
+            # time — the #2164-P4 drift class; EventAPI add_object precedent
+            # stamps createdAt=now_iso()). Re-mentions (skip path) and
+            # journal-less SDKs keep the projection's coalesce($now) behavior
+            # byte-identical to pre-#2194.
+            from .ids import now_iso  # noqa: I001
+            event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)
         apply_result = proj.apply(event)
         if label == "Source":
@@ -14043,6 +14093,28 @@ class TortoiseSDK:
             # _create_entity — no double-emission.
             self._emit_event(
                 "EventRecorded",
+                id=event["id"],
+                **{k: v for k, v in event.items()
+                   if k not in ("type", "id", "point", "payload",
+                                "event_id", "ts", "initiated_by",
+                                "projection_version")},
+            )
+        if label == "Object" and _journal_object_registration:
+            # (#2194) Mirror the EventRecorded block above: payload = the
+            # exact applied dict (minus type/id + envelope-reserved keys) so
+            # replay upserts a byte-identical Object. ObjectRegistered is NOT
+            # in _GRAPH_EVENT_TYPES → JSONL-only emission; _emit_event no-ops
+            # when the log is unset (S1 bound). event["type"] is
+            # "ObjectRegistered" for every Object create — kept coupled to the
+            # branch rather than hardcoded so a future label==Object
+            # event_type stays self-consistent. Emission is post-apply
+            # (phantom-event ordering — a journaled registration whose live
+            # apply never happened would replay-create a node that never
+            # existed live). Best-effort: a lost ObjectRegistered line leaves
+            # the Object live-but-not-durable (≡ pre-fix for that write); the
+            # #2296 follow-up tracks an Object loss backstop.
+            self._emit_event(
+                event["type"],
                 id=event["id"],
                 **{k: v for k, v in event.items()
                    if k not in ("type", "id", "point", "payload",

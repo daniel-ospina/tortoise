@@ -402,3 +402,179 @@ class TestDuplicateReplay:
             assert rows[0][2] == "winner-name", rows[0]
         finally:
             sdk.close()
+
+
+# ── Tests 10-13 (post-implementation pins) ─────────────────────────────────
+
+class TestFailureInjection:
+    def test_probe_failure_fails_open_to_journal(self, tmp_path, monkeypatch,
+                                                  caplog):
+        """A probe-query raise must NOT fail the create: warning + optimistic
+        journal (durable bias) — a regression to fail-closed (silent skip)
+        would re-open the node-loss bug."""
+        import logging  # noqa: I001
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t10.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            # _GuardedGraph uses __slots__ — patch at class level.
+            guarded_type = type(proj.g)
+            orig_query = guarded_type.query
+
+            def _raise_on_probe(self, cypher, params=None, timeout=None):
+                if "id:$cid" in cypher:
+                    raise RuntimeError("probe boom")
+                return orig_query(self, cypher, params=params,
+                                  timeout=timeout)
+
+            monkeypatch.setattr(guarded_type, "query", _raise_on_probe)
+            with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+                sdk.create_entity("object", "fail-open-name",
+                                  objectKind="core:other", is_episodic=False)
+            journal = _journaled(sdk, events)
+            ors = _name_ors(journal, "fail-open-name")
+            assert len(ors) == 1, (
+                "probe failure must fail OPEN to journaling (durable bias): "
+                f"{ors}")
+            assert _object_row(proj, "fail-open-name"), "create must succeed"
+            proj.rebuild_all(str(events))
+            assert _object_row(proj, "fail-open-name"), (
+                "fail-open journal must let rebuild restore the node")
+        finally:
+            sdk.close()
+
+    def test_log_append_failure_warns_and_keeps_live(self, tmp_path,
+                                                     monkeypatch, caplog):
+        """An EventLog.append raise must not crash the create: warning logged,
+        node live; the accepted consequence — rebuild omits the Object (no
+        registration line; #2296 backstop covers the loss)."""
+        import logging  # noqa: I001
+
+        from tortoise.log import EventLog  # noqa: I001
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t11.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            orig_append = EventLog.append
+
+            def _raise_append(self, event):
+                raise OSError("disk full (test)")
+
+            monkeypatch.setattr(EventLog, "append", _raise_append)
+            with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+                sdk.create_entity("object", "append-fail-name",
+                                  objectKind="core:other", is_episodic=False)
+            assert _object_row(proj, "append-fail-name"), (
+                "append failure must not crash the create; node stays live")
+            assert any("failed to append" in r.getMessage()
+                       for r in caplog.records), caplog.records
+            monkeypatch.setattr(EventLog, "append", orig_append)
+            proj.rebuild_all(str(events))
+            assert not _object_row(proj, "append-fail-name"), (
+                "accepted consequence: rebuild omits the Object whose "
+                "registration line was lost")
+        finally:
+            sdk.close()
+
+    def test_registration_without_fold_line_restores_live_on_rebuild(
+            self, tmp_path, monkeypatch, caplog):
+        """Fold-side append failure: live A is superseded but the journal
+        holds only the registrations → rebuild restores A LIVE (journal-
+        consistent), no phantom fold, no fold-miss warning."""
+        import logging  # noqa: I001
+
+        from tortoise.commit_ops import apply_supersessions  # noqa: I001
+        from tortoise.log import EventLog  # noqa: I001
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t12.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "strategy-B",
+                              objectKind="core:strategy", is_episodic=False)
+            sdk.create_entity("object", "strategy-A",
+                              objectKind="core:strategy", is_episodic=False)
+            orig_append = EventLog.append
+
+            def _raise_on_fold(self, event):
+                if event.get("type") == "ObjectSuperseded":
+                    raise OSError("fold-line append failed (test)")
+                return orig_append(self, event)
+
+            monkeypatch.setattr(EventLog, "append", _raise_on_fold)
+            with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+                assert apply_supersessions(
+                    proj, sdk,
+                    [{"superseded": "strategy-A",
+                      "supersedes_by": "strategy-B", "evidence": "fold"}],
+                    session_id="s1") == 1, (
+                    "the LIVE fold still applies (count-verified)")
+            # live A superseded; journal has NO ObjectSuperseded line
+            rows = _object_row(proj, "strategy-A", "status")
+            assert rows and rows[0][0] == "superseded", rows
+            monkeypatch.setattr(EventLog, "append", orig_append)
+            journal = _journaled(sdk, events)
+            assert not [e for e in journal
+                        if e.get("type") == "ObjectSuperseded"], journal
+            proj.rebuild_all(str(events))
+            rows = _object_row(proj, "strategy-A", "status")
+            assert rows and rows[0][0] == "live", (
+                "journal-consistent outcome: without the fold line, rebuild "
+                f"restores live, not superseded: {rows}")
+            assert not any("fold" in r.getMessage() and
+                           "match" in r.getMessage().lower()
+                           for r in caplog.records), (
+                "no fold-miss warning — the warning only fires for folds "
+                "present in the journal")
+        finally:
+            sdk.close()
+
+
+class TestLineOrder:
+    def test_capture_journal_line_order_registration_before_fold(
+            self, tmp_path):
+        """Synchronous post-apply emission: ObjectRegistered lines PRECEDE
+        the ObjectSuperseded line in a capture journal — load-bearing for the
+        single-log chronological rebuild() path (NO deferred fold sweep),
+        which would otherwise resurrect the superseded Object."""
+        from tortoise.commit_ops import apply_supersessions  # noqa: I001
+
+        events = tmp_path / "events"
+        events.mkdir()
+        sdk = TortoiseSDK(str(tmp_path / "t13.db"),
+                          event_log_path=str(events / "events.jsonl"))
+        try:
+            proj = sdk._get_proj()
+            sdk.create_entity("object", "strategy-B",
+                              objectKind="core:strategy", is_episodic=False)
+            sdk.create_entity("object", "strategy-A",
+                              objectKind="core:strategy", is_episodic=False)
+            assert apply_supersessions(
+                proj, sdk,
+                [{"superseded": "strategy-A", "supersedes_by": "strategy-B",
+                  "evidence": "fold"}],
+                session_id="s1") == 1
+            journal = _journaled(sdk, events)
+            types = [e.get("type") for e in journal
+                     if e.get("type") in ("ObjectRegistered",
+                                          "ObjectSuperseded")]
+            assert types.index("ObjectSuperseded") > types.index(
+                "ObjectRegistered"), types
+            # single-log chronological rebuild (no deferred sweep): with
+            # [OR..., OS] order the fold applies — the Object stays superseded.
+            from tortoise.log import EventLog  # noqa: I001
+            proj.rebuild(EventLog(str(events / "events.jsonl")))
+            rows = _object_row(proj, "strategy-A", "status", "supersededBy")
+            assert rows and rows[0][0] == "superseded", rows
+            assert rows[0][1] == "strategy-B", rows[0]
+        finally:
+            sdk.close()
+
