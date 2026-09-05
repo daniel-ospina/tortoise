@@ -1,9 +1,10 @@
 namespace: dev
 name: Development
-version: 0.2.0
+version: 0.3.0
 tier: free
 description: Software development concepts — epics, issues, code, APIs, databases,
-  deployments
+  deployments, and the planning/reliability layer CTOs work with (themes,
+  incidents, PRs, risks, runbooks)
 ontology:
   extends: core
   objectKinds:
@@ -16,60 +17,154 @@ ontology:
   - infrastructure
   - deployment
   - indicator
+  - theme
+  - pullRequest
+  - bug
+  - incident
   subclassOf:
     epic: Project
     issue: WorkItem
+    pullRequest: WorkItem
+    bug: Problem
+    incident: Problem
   equivalentTo:
     issue:
     - pm:issue
   pointKinds:
   - requirement
-  - bug
   - technicalDebt
+  - risk
   documentKinds:
   - architectureDoc
   - apiSpec
   - deployRunbook
+  - runbook
   kindDefs:
     epic:
       description: A large body of work decomposed into issues
       nearMisses:
       - issue
+      - theme
     issue:
       description: A tracked unit of work (≡ pm:issue)
       synonyms:
       - ticket
+      - task
       nearMisses:
+      - code
+      - bug
+    theme:
+      description: A strategic investment area that groups epics (e.g. scalability,
+        reliability, developer friction)
+      synonyms:
+      - initiative
+      - strategic theme
+      - workstream
+      - pillar
+      nearMisses:
+      - feature
+      - goal
+      - epic
+    pullRequest:
+      description: A proposed code change with a review lifecycle (GitHub PR / merge
+        request)
+      synonyms:
+      - pr
+      - merge request
+      nearMisses:
+      - issue
       - code
     code:
       description: Source code that implements features
       nearMisses:
       - api
       - software
+      - pullRequest
+    bug:
+      description: A technical defect — code deviates from expected behavior (problem
+        family)
+      synonyms:
+      - defect
+      - fault
+      nearMisses:
+      - issue
+      - incident
+      - requirement
+    incident:
+      description: A production problem — service deviates from its SLO/standard (problem
+        family)
+      synonyms:
+      - outage
+      nearMisses:
+      - friction
+      - bug
+      - deployment
     requirement:
       description: A stated need a feature must satisfy (≡ product-strategy:requirement)
       nearMisses:
       - bug
+      - risk
+    risk:
+      description: A claim that a problem may occur — the potential form of the problem
+        family
+      synonyms:
+      - threat
+      - hazard
+      nearMisses:
+      - requirement
+      - bug
+      - standard
+    indicator:
+      description: A measured value of system behavior — DORA/DRIVE metrics (deploy
+        frequency, change lead time, change fail rate, MTTR, SLO coverage, error budget
+        burn, flaky build rate)
+      synonyms:
+      - metric
+      - sli
+      - dora metric
+      nearMisses:
+      - target
+    technicalDebt:
+      description: 'A known shortcut that costs future velocity (register item with
+        cost-of-delay framing: velocity tax, incident risk, owner)'
+      nearMisses:
+      - risk
+      - bug
+    runbook:
+      description: Operational instructions for responding to incidents or running a
+        service
+      synonyms:
+      - playbook
+      - sop
+      nearMisses:
+      - deployRunbook
+      - handoff
     architectureDoc:
       description: 'Documentation of architecture decisions (link: the architecture
         artifact kind is product-strategy:architecture)'
       nearMisses:
       - architecture
-  chains:
-  - id: epicToCode
-    name: Epic-to-Code Chain
-    description: How planned work flows from epics through issues into shipped code
-    steps:
-    - epic
-    - issue
-    - code
-    enforcement: warn
+    target:
+      description: A committed value or range — an SLO is a service-level target measured
+        by an indicator
+      synonyms:
+      - slo
+      nearMisses:
+      - indicator
+      - requirement
+      - goal
   relations:
   - predicate: decomposesInto
     mechanism: IMPL
     semantics: hasPart
     fromKind: dev:epic
     toKind: dev:issue
+    cardinality: one_to_many
+  - predicate: hasPart
+    mechanism: IMPL
+    semantics: hasPart
+    fromKind: dev:theme
+    toKind: dev:epic
     cardinality: one_to_many
   - predicate: implements
     mechanism: IMPL
@@ -86,13 +181,74 @@ ontology:
     semantics: addresses
     fromKind: dev:api
     toKind: dev:database
+  - predicate: causes
+    mechanism: IMPL
+    semantics: supports
+    fromKind: dev:bug
+    toKind: dev:incident
+  - predicate: fixes
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:pullRequest
+    toKind: dev:bug
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:issue
+    toKind: dev:incident
+  - predicate: addresses
+    mechanism: IMPL
+    semantics: addresses
+    fromKind: dev:pullRequest
+    toKind: dev:issue
   hierarchies:
+  - path: Theme → Epic
+    type: hasPart
   - path: Epic → Issue
     type: hasPart
-  memory_granularity: 'Durable: root-cause analysis, the chosen fix approach vs rejected
-    alternatives, durable constraints (e.g. preserve production semantics), and environment
-    beliefs that affect future work (e.g. subagents stall under load). Ephemeral:
-    issue/PR numbers, CI status, test counts, commit hashes, tool workarounds.'
+  chains:
+  - id: epicToCode
+    name: Epic-to-Code Chain
+    description: How planned work flows from themes through epics into shipped code
+    steps:
+    - theme
+    - epic
+    - issue
+    - pullRequest
+    - prMerged
+    - code
+    - deployment
+    enforcement: warn
+  - id: incidentLearning
+    name: Incident Learning Loop
+    description: How a production problem closes into a fixed bug
+    steps:
+    - incident
+    - reflectPostmortem
+    - bug
+    - prMerged
+    enforcement: warn
+  eventKinds:
+  - prOpened
+  - prReviewed
+  - prMerged
+  - prClosed
+  - incidentDeclared
+  - incidentResolved
+  memory_granularity: 'Durable: problem-family reasoning — incident root causes and
+    the chosen vs rejected mitigations; debt items with cost-of-delay framing (velocity
+    tax, incident risk, owner); theme/epic allocation decisions; the delivery chain
+    shape (theme → epic → issue → PR → deployment). Ephemeral: issue/PR numbers, CI
+    status, test counts, commit hashes, tool workarounds, sprint mechanics.'
+extraction:
+  active: true
+  sourceTypes:
+  - conversation
+  - document
+  enforcement:
+    kinds:
+      incident: retry
+      risk: retry
 connectors: []
 tools: []
 depends_on: []
