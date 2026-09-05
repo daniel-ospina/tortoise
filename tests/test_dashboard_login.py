@@ -8,6 +8,9 @@ Covers (all Supabase-mode via the FakeControlPlane):
 - gate: dashboard_key_login=false → key-auth management 403 dashboard_login_disabled
 - gate: session JWT (non-tt_) still passes management endpoints when flag off
 - POST /v1/claim/email: creates user via admin API + claim_membership
+- #2230: key DELETE/PATCH honor ?team_id= in session mode (multi-membership
+  fixture — non-first team revoke/rename/toggle with the pin 200s, a
+  wrong-team or non-member pin fails closed 403, pinless PATCH unchanged)
 """
 from __future__ import annotations
 
@@ -555,6 +558,190 @@ class TestCrossTeamMintProtection:
             json={"enabled": False},
         )
         assert r.status_code == 403, r.text
+
+
+class TestKeyManagementTeamPins:
+    """#2230: key DELETE/PATCH honor ?team_id= in session mode for
+    multi-membership users (the #2167 rule-4 carve-out — create/list pins
+    shipped in #2167; revoke/rename/toggle were the gap).
+
+    Fixture: one session user who OWNS two teams (A claimed first →
+    memberships[0]=A, B second). The pre-#2230 dashboard on team B (≠ first
+    membership) could not revoke B's key — the session resolved A and DELETE
+    403'd "Not your API key" — and its PATCH pins were SILENTLY IGNORED (a
+    wrong-team key_id mutated whenever the user owned both teams). DELETE
+    resolves the pin via get_current_team_session → _session_user_team;
+    PATCH (session-only, get_current_user + intrinsic key team) now enforces
+    the pin in the supabase lane: membership-check first (same 403 as the
+    mint/list pins), then fail closed on a key outside the pinned team with
+    DELETE's exact 403 detail."""
+
+    def _two_claimed_teams(self, client, fake, monkeypatch):
+        """Provision A + B, claim both for one session user (A first so
+        memberships[0]=A). Returns (teamA, teamB)."""
+        keyA, teamA = _provision_anon(client, fake)
+        keyB, teamB = _provision_anon(client, fake)
+        user_id = str(uuid.uuid4())
+        _patch_session_user(monkeypatch, user_id)
+        from tortoise.auth import lookup_hash
+        sc.claim_membership(fake, lookup_hash=lookup_hash(keyA),
+                            user_id=user_id, email="ownerA@example.com")
+        sc.claim_membership(fake, lookup_hash=lookup_hash(keyB),
+                            user_id=user_id, email="ownerB@example.com")
+        return teamA, teamB
+
+    def _key_id(self, fake, team_id):
+        rows = fake.query("api_keys", select=["id"],
+                          filters=[("team_id", "eq", team_id)])
+        assert rows, f"no api_keys row for {team_id}"
+        return rows[0]["id"]
+
+    def test_delete_non_first_team_key_no_pin_403(self, client, fake, monkeypatch):
+        """The pre-fix dashboard failure, pinned as the fail-closed default:
+        a PINLESS session DELETE resolves memberships[0] (team A) — team B's
+        key must 403 "Not your API key", never delete. This is why the
+        dashboard's revokeKey sends the pin."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        kid = self._key_id(fake, teamB)
+        r = client.delete(f"/v1/team/keys/{kid}",
+                          headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Not your API key"
+
+    def test_delete_non_first_team_key_pinned_200(self, client, fake, monkeypatch):
+        """#2230 target flow: DELETE with ?team_id=<selected B> revokes B's
+        key (the session lane honors the pin membership-checked)."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        kid = self._key_id(fake, teamB)
+        r = client.delete(f"/v1/team/keys/{kid}?team_id={teamB}",
+                          headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 200, r.text
+        assert r.json()["revoked"] is True
+        row = fake.query("api_keys", select=["revoked_at"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row["revoked_at"] is not None
+
+    def test_delete_pinned_wrong_team_403(self, client, fake, monkeypatch):
+        """Fail-closed: pin A while the key belongs to B (or vice versa) →
+        the same 403 DELETE raises on team mismatch — never a cross-team
+        revoke, even when the user owns both teams."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        kid = self._key_id(fake, teamB)
+        r = client.delete(f"/v1/team/keys/{kid}?team_id={teamA}",
+                          headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Not your API key"
+
+    def test_delete_pinned_unrelated_team_403(self, client, fake, monkeypatch):
+        """Membership gate on the pin (mirrors _session_user_team): a user
+        pinning a team they don't belong to gets the mint/list 403 — no
+        existence oracle, no cross-team revoke."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        _, teamC = _provision_anon(client, fake)  # third team, NOT claimed
+        kid = self._key_id(fake, teamC)
+        r = client.delete(f"/v1/team/keys/{kid}?team_id={teamC}",
+                          headers={"Authorization": "Bearer eyJ.sess"})
+        assert r.status_code == 403, r.text
+        assert "No membership in team" in str(r.json())
+
+    def test_patch_rename_non_first_team_key_pinned_200(self, client, fake, monkeypatch):
+        """#2230 target flow: rename (PATCH {name}) with ?team_id=<selected B>
+        persists on B's key."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        kid = self._key_id(fake, teamB)
+        r = client.patch(f"/v1/team/keys/{kid}?team_id={teamB}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"name": "bravo-ci"})
+        assert r.status_code == 200, r.text
+        assert r.json()["name"] == "bravo-ci"
+        # Persistence, not just the response echo (the handler builds the
+        # response name from the request — a silently dropped _sb_set_name
+        # write would otherwise false-pass).
+        row = fake.query("api_keys", select=["name"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row.get("name") == "bravo-ci"
+
+    def test_patch_toggle_non_first_team_key_pinned_200(self, client, fake, monkeypatch):
+        """#2230 target flow: enable/disable (PATCH {enabled}) with
+        ?team_id=<selected B> flips B's key."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        kid = self._key_id(fake, teamB)
+        r = client.patch(f"/v1/team/keys/{kid}?team_id={teamB}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"enabled": False})
+        assert r.status_code == 200, r.text
+        row = fake.query("api_keys", select=["enabled"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row["enabled"] is False
+
+    def test_patch_pinned_wrong_team_403_no_write(self, client, fake, monkeypatch):
+        """The NEW server behavior (the pre-#2230 hole): a PATCH pinning team
+        A while the key belongs to B was silently IGNORED — the rename
+        succeeded whenever the user owned both teams (acting in B's context
+        mutated A's key). Now it fails closed with DELETE's exact 403 and the
+        row is untouched (no partial write)."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        kid = self._key_id(fake, teamB)
+        r = client.patch(f"/v1/team/keys/{kid}?team_id={teamA}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"name": "hijacked"})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "Not your API key"
+        row = fake.query("api_keys", select=["name"],
+                         filters=[("id", "eq", kid)])[0]
+        assert row.get("name") is None  # label unchanged
+
+    def test_patch_toggle_pinned_wrong_team_403_no_write(self, client, fake, monkeypatch):
+        """Same fail-closed for the enabled toggle: a wrong-team pin must not
+        flip the key."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)
+        kid = self._key_id(fake, teamB)
+        r = client.patch(f"/v1/team/keys/{kid}?team_id={teamA}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"enabled": False})
+        assert r.status_code == 403, r.text
+        row = fake.query("api_keys", select=["enabled"],
+                         filters=[("id", "eq", kid)])[0]
+        # provisioned rows have no explicit enabled column (None = enabled at
+        # resolve time) — unchanged means still NOT disabled.
+        assert row["enabled"] is not False
+
+    def test_patch_pinned_unrelated_team_403(self, client, fake, monkeypatch):
+        """Membership gate on the PATCH pin too — pinning a team the user
+        doesn't belong to 403s with the same message as the mint/list pins."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        _, teamC = _provision_anon(client, fake)  # third team, NOT claimed
+        kid = self._key_id(fake, teamC)
+        r = client.patch(f"/v1/team/keys/{kid}?team_id={teamC}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"name": "x"})
+        assert r.status_code == 403, r.text
+        assert "No membership in team" in str(r.json())
+
+    def test_patch_non_member_pin_unknown_key_403_no_oracle(self, client, fake, monkeypatch):
+        """#2230 (code-review P2): the membership gate precedes the key
+        lookup — a non-member pin 403s even when the key_id exists NOWHERE
+        (no cross-team key-existence oracle). Pre-fix the api_key_by_id 404
+        fired first, so a guessed key_id on an unclaimed team answered 404
+        vs 403 — the exact divergence DELETE's DI-time gate never had."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        _, teamC = _provision_anon(client, fake)  # third team, NOT claimed
+        r = client.patch(f"/v1/team/keys/{uuid.uuid4()}?team_id={teamC}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"name": "x"})
+        assert r.status_code == 403, r.text
+        assert r.json()["detail"] == "No membership in team"
+
+    def test_patch_no_pin_still_works_backwards_compatible(self, client, fake, monkeypatch):
+        """The pin is additive: a PINLESS multi-membership PATCH keeps today's
+        intrinsic-team behavior (200 when the user is owner/admin of the
+        key's team) — existing API consumers are unaffected."""
+        teamA, teamB = self._two_claimed_teams(client, fake, monkeypatch)  # noqa: RUF059
+        kid = self._key_id(fake, teamB)
+        r = client.patch(f"/v1/team/keys/{kid}",
+                         headers={"Authorization": "Bearer eyJ.sess"},
+                         json={"name": "pinless"})
+        assert r.status_code == 200, r.text
 
 
 class TestBackupsSessionAuth:
