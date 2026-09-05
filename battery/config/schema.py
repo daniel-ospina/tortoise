@@ -76,10 +76,11 @@ REP_VALUES: tuple[int, ...] = (1, 2, 3)
 # here, never inline). Guard matching is exact-token for these.
 GOLD_ENUMS: tuple[str, ...] = ("undecided",)
 
-# Exact pack counts (v1 — growing a pack requires bumping CORPUS_VERSION).
+# Exact pack counts (v1.1 — growing a pack requires bumping CORPUS_VERSION;
+# contradiction = 15 planted ct-* + 6 benign bct-* FP surface twins, #2284 T3).
 PACK_COUNTS: dict[str, int] = {
     "decision": 20,
-    "contradiction": 15,
+    "contradiction": 21,
     "calibration": 15,
     "retraction": 10,
     "loopy_contested": 12,
@@ -95,7 +96,7 @@ PACK_COUNTS: dict[str, int] = {
 # Exact per-pack split distribution (contamination control pinned at creation).
 PACK_SPLITS: dict[str, dict[str, int]] = {
     "decision": {"train": 14, "wave-1": 6},
-    "contradiction": {"train": 15},
+    "contradiction": {"train": 21},  # 15 ct-* + 6 bct-* twins, all train
     "calibration": {"train": 12, "wave-2": 3},
     "retraction": {"train": 10},
     "loopy_contested": {"train": 8, "wave-2": 4},
@@ -125,7 +126,7 @@ FAMILY_REP_NAMES: tuple[str, ...] = (
 )
 HELD_OUT_FAMILY = "compliance-assessment"
 
-CORPUS_VERSION = "1.0"
+CORPUS_VERSION = "1.1"  # v1.1: bct-* benign FP surface twins (#2284 T3)
 
 # Injection-turn pin for contradiction packs (R1 k=5; L4 cross-session k = the
 # session index of the ¬A plant).
