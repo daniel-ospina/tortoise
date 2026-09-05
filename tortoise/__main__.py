@@ -1,9 +1,45 @@
 """CLI entry point: python -m tortoise <command>"""
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
+
+# #2201: single source of truth for markdown discovery. The "Found N markdown
+# files" count announced during `tortoise init` and `tortoise onboard` (whose
+# step-3 index runs the REAL indexer, so the indexer's own line is the one
+# announce) comes from the SAME walk the indexer performs — count == walk
+# always. In-repo paths beneath a _NON_CONTENT_DIRS component are excluded:
+# they are never repo content, so counting them made the onboard announce
+# hundreds of files it would never index (652 announced vs 527 walked in the
+# #2201 repro). Exclusion matches in-repo components only — never checkout
+# ancestors.
+
+# #2201: directory names that never hold repo content. Matched as in-repo
+# path COMPONENTS only (see _markdown_files) — `docs/venv/` is dropped while
+# a repo merely LIVING under an ancestor dir named venv/ is not.
+_NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
+
+
+def _markdown_files(root: Path | str) -> list[Path]:
+    """Sorted *.md files under `root` that the indexer will walk (and
+    init/onboard announce).
+
+    Discoverability is the membership criterion, not readability — unreadable
+    entries (e.g. a dangling symlink) are deliberately retained and skipped
+    at read time (#2201); pre-filtering them here would silently re-break
+    the count == walk invariant. Excludes anything beneath a non-content
+    directory (_NON_CONTENT_DIRS — component match against in-repo paths
+    only, so `docs/venv/` is dropped the way the indexer always dropped it,
+    while `docs/venv-setup/` is kept). Used by the init/onboard counts AND
+    the indexer walk so the announced count always matches the walk.
+    """
+    root = Path(root)
+    return sorted(
+        f for f in root.rglob("*.md")
+        if not _NON_CONTENT_DIRS.intersection(f.relative_to(root).parts)
+    )
+
 
 def _cmd_rebuild(args):
     print(f"Rebuilding from {args.dir} → {args.db}")
@@ -632,7 +668,9 @@ def _cmd_init(args):
         )
         if result.returncode == 0:
             repo_root = result.stdout.strip()
-            md_count = len(list(__import__("pathlib").Path(repo_root).rglob("*.md")))
+            # #2201: share the indexer's discovery so the count excludes .venv
+            # and other non-content dirs (previously counted everything).
+            md_count = len(_markdown_files(repo_root))
             auto_index = getattr(args, 'yes', False)
             if md_count > 0:
                 if auto_index:
@@ -2874,9 +2912,13 @@ def _cmd_onboard(args) -> int:
     )
     if result.returncode == 0:
         repo_root = result.stdout.strip()
-        md_count = len(list(Path(repo_root).rglob("*.md")))
-        if md_count > 0:
-            print(f"  Found {md_count} markdown files. Indexing…")
+        # #2201: count only what the indexer will walk — .venv and other
+        # non-content dirs are excluded (previously inflated the count).
+        md_files = _markdown_files(repo_root)
+        if md_files:
+            # The inline indexer below announces its OWN "Found N markdown
+            # files. Indexing…" (same shared discovery) — the onboard path
+            # must have exactly ONE announce, so no duplicate count line here.
             # #1362: frontmatter validation is OPTIONAL + warn-only — surface
             # the shared flag so onboard users know the gate is on.
             from tortoise.frontmatter_validator import validation_enabled
@@ -3754,13 +3796,10 @@ def _cmd_index_github(args):
             print(f"Clone failed: {result.stderr}", file=sys.stderr)
             return 1
 
-    # Walk .md files
-    md_files = sorted(repo_path.rglob("*.md"))
-    # ponytail: skip node_modules, .git, venv
-    md_files = [f for f in md_files if ".git/" not in str(f)
-                and "node_modules/" not in str(f)
-                and "venv/" not in str(f)
-                and "__pycache__" not in str(f)]
+    # Walk .md files — shared discovery (#2201): skips non-content dirs
+    # (.venv, venv, .git, node_modules, __pycache__) the same way the
+    # init/onboard counts do, so what we announce is what we read.
+    md_files = _markdown_files(repo_path)
     total = len(md_files)
     if total == 0:
         print("No markdown files found.")
@@ -3815,11 +3854,19 @@ def _cmd_index_github(args):
     # Users can swap to LLM models via tortoise ingest for richer extraction.
     point_model = MockModel("cheap")
     relation_model = MockModel("reason")
-    indexed, skipped, errors = 0, 0, 0
+    indexed, skipped, unreadable, errors = 0, 0, 0, 0
 
     for i, fp in enumerate(md_files, 1):
         rel = fp.relative_to(repo_path)
-        raw_text = fp.read_text(encoding="utf-8")
+        try:
+            raw_text = fp.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as e:
+            # #2201: one unreadable file (dangling symlink, permission error,
+            # bad encoding) must never abort the whole run — skip it with a
+            # warning and keep indexing the rest.
+            unreadable += 1
+            print(f"  [{i}/{total}] {rel}… ⚠ skipped (unreadable: {e})", flush=True)
+            continue
         # ponytail: strip frontmatter before hashing — extractor may add
         # frontmatter, which would change the hash on the next run.
         text_for_hash = raw_text
@@ -3866,7 +3913,8 @@ def _cmd_index_github(args):
         pass
 
     print()
-    print(f"Done: {indexed} indexed, {skipped} skipped, {errors} errors")
+    print(f"Done: {indexed} indexed, {skipped} skipped, "
+          f"{unreadable} unreadable, {errors} errors")
     if indexed > 0:
         print(f"  Log: {log_path}")
         print(f"  Graph: query with tortoise_suggest_entry_points()")  # noqa: F541
@@ -3874,7 +3922,18 @@ def _cmd_index_github(args):
     # Cleanup (only if we cloned)
     if tmpdir:
         __import__("shutil").rmtree(tmpdir, ignore_errors=True)
-    return 0 if errors == 0 else 1
+    # #32/#39 lineage: index failures must stay VISIBLE to callers/CI — the
+    # onboard step-3 gates "Onboarding complete." on this rc (#39 killed the
+    # silent-failure false-green). An all-unreadable run (0 indexed but
+    # unreadable files skipped) is the same failure class #2201 fixes, so it
+    # must exit 1 too; a partial run (some indexed) keeps exit 0. `skipped >
+    # 0` keeps an idempotent RE-run green: on re-runs the already-indexed
+    # skips prove prior success (a repo with a permanent unreadable file
+    # indexes 0 on re-run — readable docs are hash-skipped — yet must return
+    # the same rc 0 its first run returned). An all-unreadable FRESH run has
+    # skipped == 0 and still exits 1. No-claims skips are the pre-existing
+    # "nothing to extract" success class, unchanged from before #2201.
+    return 0 if errors == 0 and (indexed > 0 or unreadable == 0 or skipped > 0) else 1
 
 
 def _cmd_doctor(args):
