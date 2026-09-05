@@ -6450,11 +6450,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         if minted_event and event_id:
             # W5 Phase F (#2104, review r3): the session guard is REQUIRED —
             # the minted eventId is now DETERMINISTIC
-            # (ev_<sha256("sessionCaptured:"+session_id)>) and shared by every
-            # capture of the same session. Under the delete-during-capture race
-            # a concurrent same-session re-capture (which re-MERGEs a fresh
-            # Session and mints the SAME eventId) must NOT have its Event
-            # deleted by this sweep — the re-capture's extracted Points would
+            # (_session_capture_event_id(session_id) =
+            # ev_<sha256("sessionCaptured:"+session_id)[:62]>) and shared by
+            # every capture of the same session. Under the delete-during-
+            # capture race a concurrent same-session re-capture (which
+            # re-MERGEs a fresh Session and mints the SAME eventId) must NOT
+            # have its Event deleted by this sweep — the re-capture's
+            # extracted Points would
             # dangle with no live Event for their eventId provenance and the
             # EventRecorded journal entry would point at a deleted node (the
             # per-capture ULID premise the old comment relied on is gone).
