@@ -903,8 +903,9 @@ class EntityStage(_SemanticStage):
     def __init__(self, model, *, object_kinds: list[str] | None = None):
         super().__init__(model, object_kinds=_intersect_object_kinds(
             object_kinds or [
-                "project", "workitem", "document", "tag", "user", "skill",
-                "tool", "agent", "workflow", "agreement", "standard", "other",
+                "project", "workitem", "problem", "document", "tag", "user",
+                "skill", "tool", "agent", "workflow", "agreement",
+                "standard", "other",
             ],
         ))
         self._system = _ENTITY_CONV_SYS
