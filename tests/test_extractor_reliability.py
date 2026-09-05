@@ -411,6 +411,12 @@ def test_llm_truncated_warning_only_not_error(monkeypatch):
             if "STORY SUMMARIZER" in system:
                 self.last_finish_reason = "stop"
                 return "A narrative."
+            if max_tokens == 32000:
+                # #2134: the ESCALATED call completes the clean emit at
+                # stop — recovered (terminal parse), never an error class.
+                self.last_finish_reason = "stop"
+                return '{"points": [], "entities": [], "events": [], ' \
+                       '"operators": []}'
             self.last_finish_reason = "length"
             return '{"points": [], "entities": [], "events": [], ' \
                    '"operators": []}'
@@ -419,6 +425,10 @@ def test_llm_truncated_warning_only_not_error(monkeypatch):
     assert out["errors"] == []
     assert out["error_census"] == {}
     assert out["stats"]["llm"]["truncated"] == 2  # S2 + S4 (per-STAGE flag)
+    # both truncations were RECOVERED by the one-shot escalation (the
+    # warning-only readout survives under R2 — recovery is not an error)
+    assert out["stats"]["recovery"]["escalated"] == 2
+    assert out["stats"]["recovery"]["escalated_recovered"] == 2
 
 
 def test_recovered_retry_records_truncation_flag(monkeypatch):
@@ -435,19 +445,25 @@ def test_recovered_retry_records_truncation_flag(monkeypatch):
         last_finish_reason = None
 
         def __init__(self):
-            self.calls = 0
+            self.extract_calls = 0  # S2/S4 only (S1 summaries skip this)
 
         def complete(self, *, system, user, max_tokens=None):
-            self.calls += 1
             if "STORY SUMMARIZER" in system:
                 self.last_finish_reason = "stop"
                 return "A narrative."
-            if self.calls % 2 == 1:  # retry attempt: valid JSON, truncated
-                self.last_finish_reason = "length"
+            if max_tokens == 32000:
+                # #2134: the ESCALATED call (post re-prompt length) returns
+                # the full clean emit at stop — terminal parse recovers.
+                self.last_finish_reason = "stop"
                 return ('{"points": [], "entities": [], "events": [], '
                         '"operators": []}')
-            self.last_finish_reason = "stop"
-            return "not json"   # first attempt: garbage, stop
+            self.extract_calls += 1
+            if self.extract_calls % 2 == 1:
+                self.last_finish_reason = "stop"
+                return "not json"   # first attempt: garbage, stop
+            self.last_finish_reason = "length"  # re-prompt at base: truncated
+            return ('{"points": [], "entities": [], "events": [], '
+                    '"operators": []}')
 
     out = v2.extract_session_v2(_RetryTruncated(), _conv())
     assert out["errors"] == []
@@ -807,6 +823,14 @@ def test_stage_cap_thread_safety_mixed_env(monkeypatch):
                 captured.append(max_tokens)
             # finish_reason keys off the PASSED cap, so a thread that received
             # the wrong cap is observable as a wrong finish/partial signal.
+            # #2134: the ESCALATED (32000) call returns stop + the SAME
+            # rung-4 cut — the escalated_partial contract (a malformed
+            # escalated response partial-accepts its valid prefix; partial
+            # stays True and thread-local).
+            if max_tokens == 32000:
+                self.last_finish_reason = "stop"
+                return ('{"entities": [], "points": [{"content": "p", '
+                        '"pointKind": "statement"}, {"content": "q"')
             self.last_finish_reason = ("length" if max_tokens and max_tokens <= 8000
                                        else "stop")
             return ('{"entities": [], "events": [], "operators": [], '
@@ -841,6 +865,7 @@ def test_stage_cap_thread_safety_mixed_env(monkeypatch):
     # Phase 2 — mixed stage-defaults with no env (4 threads → 16000, 4 → 8000):
     captured.clear()
     monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    monkeypatch.setattr(v2, "_extractor_escalation_tokens", lambda b: 32000)
     ts = [threading.Thread(target=worker,
                            args=((16000, 16000) if i % 2 == 0 else (8000, 8000)))
           for i in range(8)]
@@ -848,8 +873,12 @@ def test_stage_cap_thread_safety_mixed_env(monkeypatch):
         t.start()
     for t in ts:
         t.join()
-    assert len(captured) == 8 * 25
-    assert set(captured) == {16000, 8000}  # no stray/mis-derived cap
+    # #2134: each 8000-cap thread's length now fires the one-shot escalation
+    # (base 8000 + escalated 32000 = 2 calls/iteration); the escalated call
+    # returns stop + the SAME rung-4 cut → escalated_partial (partial=True,
+    # the phase-2 pin survives). 16000-cap threads stay single-call/clean.
+    assert len(captured) == 4 * 25 * 2 + 4 * 25 * 1
+    assert set(captured) == {16000, 8000, 32000}  # no stray/mis-derived cap
 
 
 # ── #1787 Task 2 Step 6: deadline scaling with max_tokens ──────────────────

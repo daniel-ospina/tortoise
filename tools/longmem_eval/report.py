@@ -1442,6 +1442,45 @@ def build_report(
         o.get("question_id") for o in outcomes
         if (o.get("llm_truncated") or 0) > 0 and _outcome_grade(o) == "clean"
     ]
+    # #2134 (Task 5): the ONE-SHOT ESCALATION readout — question counts by
+    # bucket (each escalated question is exactly ONE mechanism call: a clean
+    # outcome may carry recovered; residual/abort questions grade invalid
+    # via truncated_parse_error at the callers — the buckets name the
+    # mechanism, error_classes name the outcome). Criterion 3's escalation
+    # arm: an escalation that RECOVERED is never an unrecorded truncation
+    # (truncated_valid_qids above already lists every clean+truncated
+    # question — an escalated-recovered question appears in BOTH, by
+    # design). Legacy checkpoints without the fields project None → ``or 0``.
+    escalated_qids = {
+        bucket: [o.get("question_id") for o in outcomes
+                 if (o.get(f"llm_escalations_{bucket}") or 0) > 0]
+        for bucket in ("recovered", "residual", "abort", "partial")
+    }
+    escalation_summary = {
+        "n_escalated_questions": sum(
+            1 for o in outcomes if (o.get("llm_escalations") or 0) > 0),
+        "n_escalations_recovered": sum(
+            o.get("llm_escalations_recovered") or 0 for o in outcomes),
+        "n_escalations_residual": sum(
+            o.get("llm_escalations_residual") or 0 for o in outcomes),
+        "n_escalations_abort": sum(
+            o.get("llm_escalations_abort") or 0 for o in outcomes),
+        "n_escalations_partial": sum(
+            o.get("llm_escalations_partial") or 0 for o in outcomes),
+        # the marginal-cost numerator maxes (D6): the LARGEST single
+        # escalated call's output + its wasted base call (read from the
+        # ingest max-preserving captures)
+        "escalation_output_tokens_max": max(
+            (o.get("escalation_tokens_output_max") or 0 for o in outcomes),
+            default=0),
+        "escalation_base_output_tokens_max": max(
+            (o.get("escalation_tokens_base_output_max") or 0
+             for o in outcomes), default=0),
+        "escalated_valid_qids": escalated_qids["recovered"],
+        "escalated_residual_qids": escalated_qids["residual"],
+        "escalated_abort_qids": escalated_qids["abort"],
+        "escalated_partial_qids": escalated_qids["partial"],
+    }
     checks = [
         "python >= 3.12 guard enforced at run entry",
         "dataset loaded and recall-semantics audited",
@@ -1500,6 +1539,10 @@ def build_report(
         # a close-blocker by itself.
         "truncated_valid_qids": truncated_valid_qids,
         "n_truncated_valid": len(truncated_valid_qids),
+        # #2134 (Task 5): escalation telemetry rides the integrity dict —
+        # the report's Task-6 criterion (ZERO truncation-attributable
+        # residual/partial + no empty_embed_list) reads from here.
+        "escalation": escalation_summary,
         # #1900/#1937: whole-run gated-outcome count (gate-red union per
         # outcome — the watchdog's ``_n_gated_total`` at report time, from
         # the outcomes list so resumed runs count prior-session outcomes

@@ -405,6 +405,17 @@ class KindClassifier:
                 parsed = _complete_parsed(
                     self.model, system, user, max_tokens=ADJUDICATION_MAX_TOKENS,
                     stats=batch_stats,
+                    # #2134 (P1-30): the kind-classifier adjudication seam is
+                    # SCOPED OUT of the length-escalation net — 32000 ≈ 21× the
+                    # 1500 adjudication budget is disproportionate headroom, a
+                    # residual fail-loud raise would be swallowed by the
+                    # fail-open except below (kNN top-1 fallback), and the
+                    # finally block forwards only attempts/retries/truncated/
+                    # deadline_aborts into usage — recovery.* escalation
+                    # counters would never reach the roll-up. Today's ladder
+                    # behavior is preserved verbatim (length → rung-4 partial
+                    # or _ParseError → kNN fallback).
+                    escalate=False,
                 )
             except Exception as e:  # fail-open
                 warnings.append(

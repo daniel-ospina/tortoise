@@ -4,7 +4,7 @@ type: plan
 domain: engineering
 doc_status: draft
 created: 2026-09-05
-revised: 2026-09-06 (R2 — owner-directed architecture revision: calibration-first + durable call-level core, #2335 filed) + R3 (delta-review round: terminal post-escalation parse closes the base-cap re-truncation leak; running-total attempts accounting; per-seam overage keys; dead R1 flag-clear/full-override machinery removed)
+revised: 2026-09-06 (R2 — owner-directed architecture revision: calibration-first + durable call-level core, #2335 filed) + R3 (delta-review round: terminal post-escalation parse closes the base-cap re-truncation leak; running-total attempts accounting; per-seam overage keys; dead R1 flag-clear/full-override machinery removed) + Tasks 2-5 LANDED (2026-09-07: env knob 32000 [16000..64000] + `_parse_canonical_strict`; `_complete_parsed` one-shot escalation + 4-bucket terminal contract; run_s1 3-bucket wrap; run.py/report.py `integrity.escalation` readout)
 ownedBy: epistemic-team
 governingAgreement: "#2134 (parent #1987), #1746, #1787/#1811, #1778, #2280, #2281, #2136, #2069, #2335 (R2)"
 ---
