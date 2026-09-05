@@ -62,21 +62,30 @@ New to Tortoise? Choose a path:
   ```bash
   git clone https://github.com/daniel-ospina/tortoise.git && cd tortoise
   uv sync                             # creates .venv from committed uv.lock (Python 3.12)
-  uv run python -m tortoise.selfhost  # embedded FalkorDBLite — SINGLE-WRITER, eval only
   # or straight from GitHub (no clone):
   pip install git+https://github.com/daniel-ospina/tortoise.git
   ```
+
+  Embedded (no Docker) is the EVAL-ONLY fallback: `tortoise init` creates
+  `~/.tortoise/tortoise.db` (a bare init prints a one-line "embedded engine
+  active — eval-only fallback" notice first) and your agent connects over
+  **stdio** (quickstart
+  §5) — FalkorDBLite is SINGLE-WRITER / EVAL-ONLY, one agent evaluating
+  Tortoise, never a team deployment. Want the daemon's HTTP surface on
+  embedded anyway? `uv run python -m tortoise.selfhost` serves
+  `http://localhost:8000` — still eval-only on embedded.
 
 Operator/infra (deploying and maintaining the daemon): [docs/infra-runbook.md](docs/infra-runbook.md).
 
 ### 2. Connect
 
-Point your agent at Tortoise over MCP:
+One transport per setup — daemon MCP over **HTTP** for hosted + the Docker
+path; **stdio** for the no-Docker single-agent eval path (quickstart §5):
 
 ```bash
 # Hosted
 claude mcp add tortoise https://api.premiselabs.co/mcp/
-# or self-hosted
+# Self-hosted — Docker path (compose daemon from §1): daemon MCP over HTTP
 claude mcp add tortoise http://localhost:8000/mcp
 ```
 
@@ -105,6 +114,13 @@ Or add to `.mcp.json`:
   }
 }
 ```
+
+No Docker — single-agent eval on embedded FalkorDBLite (SINGLE-WRITER, eval
+only)? Connect over **stdio**, not the daemon HTTP: `tortoise init` creates
+`~/.tortoise/tortoise.db`, then use the stdio `.mcp.json` form
+(`command: python3 -m tortoise.mcp_server`, `TORTOISE_DB_PATH` set) from
+[quickstart §5](docs/quickstart-selfhosted.md). The Docker path never
+connects over stdio; the eval path never needs the daemon.
 
 ### 3. Query
 
