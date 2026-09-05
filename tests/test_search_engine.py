@@ -155,8 +155,12 @@ class TestSearchResult:
 
 class TestEpBreakdown:
     def test_defaults(self):
+        # Issue #2206: the default confidence_mean is the neutral Beta(1,1)
+        # mean 0.5 (unmeasured == no information, NOT zero support) — never
+        # the old structural edge-ratio default 0.0.
         ep = EpBreakdown()
-        assert ep.confidence_mean == 0.0
+        assert ep.confidence_mean == 0.5
+        assert ep.has_ep is False
         assert ep.contention == 0.0
 
     def test_evidence_counts(self):

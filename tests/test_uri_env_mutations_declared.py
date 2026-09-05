@@ -139,6 +139,7 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
                                      r'monkeypatch\.setenv\(\s*$'],
     "test_session_index_health.py": [r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     "test_tortoise_client.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],
+    "test_2206_confidence_surfaces.py": [r'os\.environ(?:\["TORTOISE_DB_URI"\]\s*=|\.pop\(\s*["\']TORTOISE_DB_URI["\']|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']\])'],  # #2206: module-level live-FalkorDB probe + per-test isolated-graph fixture (set/restore, never leaves a mutation)
     # ── E2E-8 conformance (Task 8): the leg env control IS the test input —
     #    the embedded leg delenvs the URI, the docker leg setenvs it (the
     #    E2E-1 pattern); declared so the guard stays green ────────────────
