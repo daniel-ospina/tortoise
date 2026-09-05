@@ -5707,3 +5707,421 @@ class TestC3ReviewGatePins:
             params={"uid": _U1, "tid": tid},
         )
         return tc.post("/v1/team/keys", json=body)
+
+
+# ── #2251 embedded path/namespace divergence regression ─────────────────────
+# Scoped plan: docs/epics/2026-09-05-2251-path-divergence/plan.md (A2).
+# Markerless (an embedded_only marker would dead-run: skipped in the docker
+# slow leg AND excluded from the D14 -k subset). Env-control per test via the
+# test_register_journals_minted_team_graph shape. Record-only __init__ spy
+# never delegates to the real ctor (no real DB opens, no EmbeddedStoreBusyError
+# on the shared matrix). Tests that mint the "registry" anchor close+clear it.
+
+
+def _record_only_sdk_init_spy(monkeypatch, ha_mod):
+    """Record (db_path, namespace, graph_name) on every TortoiseSDK
+    construction WITHOUT delegating to the real __init__ (no real DB opens).
+    Returns the record list; the spy is auto-undone by monkeypatch."""
+    records = []
+
+    def _spy(self, db_path=None, *, namespace=None, graph_name=None, **kw):
+        records.append((db_path, namespace, graph_name))
+
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "__init__", _spy)
+    return records
+
+
+def _pin_hermetic_default_store(monkeypatch, tmp_path):
+    """Point the bare-construction default (config.DEFAULT_DB_PATH, bound at
+    import via expanduser — a HOME redirect does NOT move it) at a tmp store
+    so ANY construction that resolves the ~/.tortoise default (pre-fix bare
+    ctors, or a future bare-construction regression) lands hermetically and
+    never touches/creates the developer's real ~/.tortoise (#2251 stray-DB
+    side effect). resolve_db_path reads the module global at call time, so
+    the monkeypatch is effective post-import. The parent dir is created so a
+    pre-fix bare open SUCCEEDS against the empty store (returns the absent-
+    graph verdict) instead of failing open on a missing parent — the false-
+    green the guard must prevent. Returns the pinned path."""
+    import tortoise.config as tconfig
+
+    pinned = str(tmp_path / "home" / ".tortoise" / "tortoise.db")
+    os.makedirs(os.path.dirname(pinned), exist_ok=True)
+    monkeypatch.setattr(tconfig, "DEFAULT_DB_PATH", pinned)
+    return pinned
+
+
+class TestEmbeddedRegistryPathDivergence:
+    """#2251: _iter_registered_teams + _graph_has_team_namespace must read the
+    SAME embedded db + registry graph the writers use (registry_control_plane
+    via _make_sdk(namespace="registry")), not ns-less control_plane on
+    ~/.tortoise. Plan tests 1-4."""
+
+    def test_iter_registered_teams_reads_registry_control_plane(
+            self, monkeypatch, tmp_path):
+        """Graph-name leg (namespace fix) — discriminates even with paths
+        pinned: a Team seeded via the writer seam (ns=registry) must be
+        enumerated. Pre-fix: queries ns-less control_plane → []."""
+        import tortoise.hosted_api as ha_mod
+
+        # Force the registry branch (selfhost/registry control-plane mode).
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "conv.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        # is_supabase_enabled reads TORTOISE_CONTROL_PLANE=registry → False;
+        # belt-and-braces against ambient creds:
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        try:
+            writer = ha_mod._make_sdk(namespace="registry")
+            writer._get_registry().query(
+                "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
+                params={"id": "2251-team-1", "name": "T2251"},
+            )
+            # Falsy-id row must be skipped (site-1 guard).
+            writer._get_registry().query(
+                "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
+                params={"id": "", "name": "Falsy"},
+            )
+            teams = ha_mod._iter_registered_teams()
+            writer.close()
+        finally:
+            _close_keepalive_anchors(ha_mod)
+        assert {"team_id": "2251-team-1", "name": "T2251"} in teams, teams
+        assert all(t["team_id"] for t in teams), teams
+
+    def test_graph_has_team_namespace_probes_writer_db(
+            self, monkeypatch, tmp_path):
+        """Path leg — isolated env (URI + TORTOISE_DB_PATH unset, the bare-
+        construction default pointed at a tmp store): writer seam and both
+        site reads record ONE identical db_path + namespace='registry'.
+        Pre-fix: bare sites record db_path=None (real ctor never runs under
+        the spy) → mismatch vs writer's real path + namespace=None."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # config.DEFAULT_DB_PATH is bound at import time (expanduser) — a HOME
+        # redirect does NOT move it (resolve_db_path reads the module global at
+        # call time, so patching the attribute IS hermetic). Point it at a tmp
+        # store so a pre-fix bare-construction red run never touches the real
+        # ~/.tortoise (#2251's stray-DB side effect).
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            ha_mod._make_sdk(namespace="registry")  # writer shape
+            assert records, "writer seam constructed nothing"
+            writer_records = list(records)
+            records.clear()
+            ha_mod._iter_registered_teams()
+            sweep_records = list(records)
+            assert sweep_records, "_iter_registered_teams constructed nothing"
+            records.clear()
+            ha_mod._graph_has_team_namespace("team-2251-x")
+            probe_records = list(records)
+            assert probe_records, "_graph_has_team_namespace constructed nothing"
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # EVERY construction in the embedded leg must carry the resolved
+        # db_path (a bare/unanchored construction records db_path=None — the
+        # ~/.tortoise resolution happens inside the never-run real ctor). Do
+        # NOT filter None out: the path-divergence half is exactly the bug
+        # where the sites' constructions differ from the writer's path.
+        all_records = writer_records + sweep_records + probe_records
+        assert all(db is not None for db, _ns, _gn in all_records), \
+            f"bare (db_path=None) construction recorded: {all_records}"
+        paths = {db for db, _ns, _gn in all_records}
+        assert len(paths) == 1, f"divergent db_paths recorded: {all_records}"
+        (shared_path,) = paths
+        # Guard (b): the shared embedded path must not resolve under the
+        # bare-construction default store (tmp/home/.tortoise). Subpath check
+        # — dirname(shared_path) == .../.tortoise, never .../home itself.
+        assert str(tmp_path / "home") not in shared_path, all_records
+        for phase in (writer_records, sweep_records, probe_records):
+            assert all(ns == "registry" for _db, ns, _gn in phase), phase
+            assert all(gn is None for _db, _ns, gn in phase), phase
+
+    def test_iter_registered_teams_never_raises_on_sweep_failure(
+            self, monkeypatch, tmp_path):
+        """Site-1 best-effort contract: a raising _make_sdk (e.g.
+        EmbeddedStoreBusyError on a cross-process-held DB) must degrade to []
+        — never raise into _lifespan's boot path (plan surface map)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Hermetic red-run default: any construction resolving the bare
+        # ~/.tortoise default lands on a tmp store, never the real home.
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        def _busy(namespace=None, graph_name=None):
+            raise RuntimeError("embedded store busy")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _busy)
+        assert ha_mod._iter_registered_teams() == []
+
+    def test_graph_has_team_namespace_real_verdict(self, monkeypatch, tmp_path):
+        """Consumer-visible verdict on a REAL embedded store: a minted
+        team_{tid} graph on the anchored/writer store → True; an unminted id
+        → False. Pre-fix the bare construction probed resolve_db_path()'s
+        default store (pointed at a tmp home here for hermeticity) → False
+        for the present graph (acceptance (e)(ii) re-enables the FLOW leg)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Hermetic bare-construction default: pre-fix (red) runs probe
+        # resolve_db_path()'s store — point it at a tmp home so the run never
+        # touches the real ~/.tortoise (#2251 stray-DB side effect).
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+        # Confine the post-fix writer/probe store to a per-test tmp file (the
+        # env-unset fallback would otherwise be the process-shared
+        # tempfile.gettempdir()/tortoise.db — cross-suite busy-probe risk,
+        # #1502/#1950 class). The discriminator survives: pre-fix never calls
+        # _resolve_embedded_db_path (inline policy), so its probe still hits
+        # the patched DEFAULT_DB_PATH tmp-home store ≠ this tmp store.
+        monkeypatch.setattr(
+            ha_mod, "_resolve_embedded_db_path",
+            lambda: str(tmp_path / "store.db"), raising=False)
+        tid = "team-2251-verdict"
+        try:
+            # Mint the team graph via the anchored writer seam (a real graph
+            # on the writers' /data-or-tempdir store).
+            ha_mod._make_sdk(namespace=tid)._get_proj()
+            # Post-fix: both sites resolve the SAME anchored store → True for
+            # a present graph, False for an absent one. Pre-fix this probed
+            # the (empty) default store → False for the present graph.
+            assert ha_mod._graph_has_team_namespace(tid) is True
+            assert ha_mod._graph_has_team_namespace("team-absent-999") is False
+        finally:
+            # Close every anchor minted (registry + the team graph) — the
+            # #1950 close-then-drop pattern.
+            _close_keepalive_anchors(ha_mod)
+
+    def test_iter_registered_teams_uri_mode_registry_namespace(
+            self, monkeypatch, tmp_path):
+        """Bug (a) is mode-independent: in URI mode the sweep must STILL
+        construct namespace='registry' (registry_control_plane), not bare
+        (control_plane). Record-spy: exactly one (db_path=None,
+        namespace='registry') construction; no real server touched."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI", "docker://:pw@localhost:6379/2251_uri_ns")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            teams = ha_mod._iter_registered_teams()
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # URI-branch _make_sdk returns a fresh TortoiseSDK(namespace="registry")
+        # with no db_path. The stub's _get_registry() raises → fail-open [].
+        assert teams == [], teams
+        assert records == [(None, "registry", None)], records
+
+    def test_supabase_mode_never_constructs_registry_sdk(
+            self, monkeypatch, tmp_path):
+        """Invariant guard (NOT a pre-fix discriminator — the early return
+        already exists): Supabase mode enumerates via the control plane and
+        must never construct the registry SDK (post-#669 no-recreate)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://2251.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251")
+        fake = FakeControlPlane()
+        fake.seed("teams", [{"id": "supa-team-1", "name": "Supa T",
+                             "deleted_at": None}])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            teams = ha_mod._iter_registered_teams()
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        assert teams == [{"team_id": "supa-team-1", "name": "Supa T"}], teams
+        assert records == [], f"Supabase mode constructed {len(records)} SDKs"
+
+    def test_iter_registered_teams_supabase_query_failure_returns_empty(
+            self, monkeypatch, tmp_path):
+        """Supabase-mode boot contract: a control-plane query failure at boot
+        (transient PostgREST outage) must degrade to [] — never crash
+        _lifespan (the branch that runs in hosted production)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://2251b.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251b")
+        fake = FakeControlPlane()
+
+        def _query_boom(table, **kw):
+            raise RuntimeError("PostgREST transient outage")
+
+        monkeypatch.setattr(fake, "query", _query_boom)
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        assert ha_mod._iter_registered_teams() == []
+        assert records == [], "registry SDK must never be built in Supabase mode"
+
+    def test_graph_has_team_namespace_uri_mode_parity(
+            self, monkeypatch, tmp_path):
+        """URI-mode envelope: with TORTOISE_DB_URI set, _graph_has_team_namespace
+        constructs exactly one (db_path=None, namespace='registry') SDK and
+        does NOT populate _FALLBACK_KEEPALIVE — URI construction semantics
+        unchanged (plan test 4)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI", "docker://:pw@localhost:6379/2251_parity")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            ha_mod._graph_has_team_namespace("team-2251-uri")
+            # The no-anchor URI contract the docstring claims: URI mode must
+            # never populate the keepalive dict.
+            assert ha_mod._FALLBACK_KEEPALIVE.get("registry") is None
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # URI-mode constructions carry no db_path (server mode). Under the
+        # record-only spy the stub SDK's _get_proj() raises → the fail-open
+        # except returns True deterministically (the success path is
+        # unreachable with a stub) — assert the exact construction record.
+        assert records == [(None, "registry", None)], records
+
+
+class TestResolveEmbeddedDbPath:
+    """_resolve_embedded_db_path corner tests (#2251 plan tests 5)."""
+
+    def test_unset_env_defaults_to_data(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        import os as _os
+
+        def _makedirs_ok(_path, **kw):
+            return None  # pretend /data is writable
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "/data/tortoise.db"
+
+    def test_env_honored_verbatim(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/x/y/custom.db")
+
+        def _makedirs_ok(_path, **kw):
+            return None
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "/x/y/custom.db"
+
+    def test_env_relative_honored_verbatim_not_absified(self, monkeypatch):
+        """The resolver returns the env value verbatim — a relative path is
+        NOT cwd-abs-ified (the deliberate divergence from
+        config.resolve_db_path, which _abs()-ifies)."""
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_DB_PATH", "custom-relative.db")
+
+        def _makedirs_ok(_path, **kw):
+            return None
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "custom-relative.db"
+
+    def test_unwritable_data_falls_back_to_tempdir(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        # dirname-is-a-file: real makedirs raises FileExistsError (an OSError)
+        # deterministically — no /data assumption.
+        monkeypatch.setattr(_os, "makedirs", _raise_file_exists)
+        result = ha_mod._resolve_embedded_db_path()
+        assert os.path.dirname(result) == tempfile.gettempdir()
+        assert result.endswith("tortoise.db")
+
+    def test_empty_env_falls_back_to_tempdir(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        # dirname("") == "" → makedirs("") raises FileNotFoundError (OSError).
+        monkeypatch.setattr(_os, "makedirs", _raise_file_exists)
+        monkeypatch.setenv("TORTOISE_DB_PATH", "")
+        result = ha_mod._resolve_embedded_db_path()
+        assert os.path.dirname(result) == tempfile.gettempdir()
+        assert result.endswith("tortoise.db")
+
+
+def _raise_file_exists(path, **kw):
+    if path == "":
+        raise FileNotFoundError(f"no such dir: {path!r}")
+    raise FileExistsError(f"blocked: {path!r}")
+
+
+class TestGraphHasTeamNamespaceExceptionPath:
+    """Site-2 close-on-exception leak fix: the fresh SDK is closed even when
+    list_graphs raises (finally), and the never-raise fail-open contract is
+    preserved when the construction itself raises. Env-isolated + hermetic
+    default store so a future bare-construction refactor cannot fall through
+    to the real ~/.tortoise behind the monkeypatch (#2251 stray-DB guard)."""
+
+    def test_close_runs_when_list_graphs_raises(self, monkeypatch, tmp_path):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        class _RaisingProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("list_graphs boom")
+
+            db = _db()
+
+        closed = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return _RaisingProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._graph_has_team_namespace("team-leak") is True
+        assert closed == [True], "close() must run on the exception path"
+
+    def test_construction_raise_keeps_fail_open(self, monkeypatch, tmp_path):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        def _boom(namespace=None, graph_name=None):
+            raise RuntimeError("embedded store busy")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _boom)
+        assert ha_mod._graph_has_team_namespace("team-busy") is True
