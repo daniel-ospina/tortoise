@@ -22,17 +22,21 @@ import tempfile
 
 import pytest
 
+from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
+from tortoise.backup_config import BackupConfig
 from tortoise.backup_sweep import (
     enumerate_team_graphs,
     read_graph_state,
     resolve_active_graph,
     run_backup_sweep,
 )
-from tortoise.backup_config import BackupConfig
-from tortoise.hosted_backup import MemoryStorage, create_backup, list_backups
-from tortoise.hosted_backup import prune_backups, restore_backup
-from tests._embedded import _wipe_or as wipe  # noqa: E402, RUF100
 from tortoise.config import is_db_uri as _is_db_uri_seam
+from tortoise.hosted_backup import (
+    MemoryStorage,
+    list_backups,
+    prune_backups,
+    restore_backup,
+)
 
 _DOCKER_LANE = _is_db_uri_seam(os.environ.get("TORTOISE_DB_URI"))
 _REGISTRY_GRAPH = (f"test_registry_{os.urandom(4).hex()}" if _DOCKER_LANE
@@ -180,10 +184,10 @@ def test_multigraph_sweep_and_per_graph_restore_e2e(monkeypatch):
             live = proj.db.select_graph(ns_a)
             live.query("CREATE (x:Point {id:'pt-g_a-mut', content:'mut'})")
             live.query("MATCH (p:Point {id:'pt-g_a-0'}) SET p.content = 'corrupted'")
-            g_a_archive = [
+            g_a_archive = next(
                 k for k in store.list(f"backups/{team_id}/g_a/")
                 if k.endswith("dump.enc")
-            ][0]
+            )
             row = resolve_active_graph(reg, team_id, "g_a")
             result = restore_backup(
                 proj.db, reg, store, g_a_archive,

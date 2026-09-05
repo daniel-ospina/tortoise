@@ -385,7 +385,7 @@ def test_watcher_custom_graph_removal_resolves_incidents():
     w.poll()
     assert any("STALE — team_a:g_gone" in t for t in list(ch.issues.values()))
     # graph deleted from the control plane → provider drops it → resolved
-    w._graphs_for = lambda t: []  # noqa: SLF001
+    w._graphs_for = lambda t: []
     w.poll()
     assert ch.issues == {}
 
@@ -413,8 +413,8 @@ def test_watcher_degraded_never_fabrication_for_new_custom_graph():
     assert s1["per_graph"]["team_a:g_old"] == "ok"  # healthy baseline
 
     # R2 dies; a NEW custom graph joins the seam surface mid-outage.
-    w._storage = _BoomListStorage()  # noqa: SLF001
-    w._graphs_for = lambda t: ["g_old", "g_new"]  # noqa: SLF001
+    w._storage = _BoomListStorage()
+    w._graphs_for = lambda t: ["g_old", "g_new"]
     s2 = w.poll()
     # g_old from the cache stays ok; g_new (unconfirmed) is stale, never NEVER.
     assert s2["per_graph"]["team_a:g_old"] == "ok"
@@ -424,8 +424,8 @@ def test_watcher_degraded_never_fabrication_for_new_custom_graph():
 
     # R2 recovers; the scan is now a CONFIRMED listing — g_new has no archives
     # → never is legitimate again.
-    w._storage = MemoryStorage()  # noqa: SLF001
-    w._storage._objects = dict(storage._objects)  # noqa: SLF001
+    w._storage = MemoryStorage()
+    w._storage._objects = dict(storage._objects)
     s3 = w.poll()
     assert s3["per_graph"]["team_a:g_new"] == "never"
     assert any("NEVER_BACKED_UP" in t and "team_a:g_new" in t
@@ -457,7 +457,7 @@ def test_watcher_shrink_does_not_resolve_on_unconfirmed_surface():
     # CP blip → provider returns None (unconfirmed). Issue must SURVIVE and
     # the poll must NOT crash — the team-level surface keeps evaluating
     # (per_team present, no poll_error, per_graph empty not fabricated).
-    w._graphs_for = lambda t: None  # noqa: SLF001
+    w._graphs_for = lambda t: None
     s2 = w.poll()
     assert not s2.get("poll_error"), s2
     assert s2.get("per_team", {}) is not None
@@ -466,7 +466,7 @@ def test_watcher_shrink_does_not_resolve_on_unconfirmed_surface():
         "an unconfirmed surface must not resolve real incidents"
 
     # Genuine deletion → provider returns [] (confirmed empty) → resolved.
-    w._graphs_for = lambda t: []  # noqa: SLF001
+    w._graphs_for = lambda t: []
     w.poll()
     assert not any("STALE — team_a:g_x" in t for t in list(ch.issues.values()))
 

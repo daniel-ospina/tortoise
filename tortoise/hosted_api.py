@@ -16847,8 +16847,8 @@ async def backups_restore(body: BackupRestoreRequest, request: Request, team: di
             # #2304). Default graph name: teams.graph_name in Supabase mode
             # (the old team_{id} hardcode would reject the restore as
             # cross-graph for SDK-created teams), team_{id} in registry mode.
-            from tortoise.hosted_backup import _parse_backup_key
             from tortoise.backup_sweep import resolve_active_graph
+            from tortoise.hosted_backup import _parse_backup_key
             try:
                 _parsed_team, _parsed_graph, _ = _parse_backup_key(body.backup_key)
             except ValueError as e:
@@ -17029,8 +17029,7 @@ async def backups_acl_reconcile(request: Request):
     cfg = _backup_config_safe()
     if cfg is None:
         raise HTTPException(status_code=503, detail="Backup sweep disabled")
-    from tortoise.backup_sweep import enumerate_eligible_teams
-    from tortoise.backup_sweep import _sweep_graph_list
+    from tortoise.backup_sweep import _sweep_graph_list, enumerate_eligible_teams
 
     reg_sdk = _registry_sdk()
     registry = reg_sdk._get_registry()
@@ -17038,12 +17037,14 @@ async def backups_acl_reconcile(request: Request):
         team_ids = enumerate_eligible_teams(registry)
     except RuntimeError as e:
         raise HTTPException(status_code=503,
-                            detail=f"team enumeration failed: {e}")  # noqa: B904
+                            detail=f"team enumeration failed: {e}") from e
+
+    import threading as _threading
+    from typing import Any as _Any
 
     from tortoise.acl_graph_users import create_acl_user  # type: ignore[import-not-found]
-    import threading as _threading
 
-    results: dict[str, Any] = {}
+    results: dict[str, _Any] = {}
     lock = _threading.Lock()
     for team_id in sorted(team_ids):
         try:
@@ -17262,8 +17263,8 @@ async def backups_rebaseline(request: Request, body: dict):
     if not team_id:
         raise HTTPException(status_code=400, detail="team_id required")
     from tortoise.backup_sweep import (
-        _write_json,
         _graph_state_key,
+        _write_json,
         read_team_state,
         resolve_active_graph,
     )
@@ -17321,9 +17322,8 @@ async def backups_drill(request: Request, body: dict):
         raise HTTPException(status_code=429, detail="drill cooldown — ≥1h between drills")
     _LAST_DRILL_AT = _time.time()
 
-    from tortoise.hosted_backup import restore_backup
-    from tortoise.hosted_backup import _parse_backup_key
     from tortoise.backup_sweep import resolve_active_graph
+    from tortoise.hosted_backup import _parse_backup_key, restore_backup
 
     reg_sdk = _registry_sdk()
     registry = reg_sdk._get_registry()

@@ -43,7 +43,7 @@ class _FakeRegistry:
     def __init__(self, graph_nodes: list[dict]):
         self._nodes = graph_nodes
 
-    def query(self, q, params=None):  # noqa: N803
+    def query(self, q, params=None):
         if "RETURN properties(g)" in q:
             return _ResultSet([(dict(p),) for p in self._nodes])
         raise AssertionError(f"unexpected cypher: {q}")

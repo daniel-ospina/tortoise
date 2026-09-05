@@ -5,7 +5,7 @@ from __future__ import annotations  # noqa: I001
 import json
 import os
 import tempfile
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, UTC
 
 import pytest
 
@@ -1145,7 +1145,7 @@ def test_sweep_skips_deleted_custom_tombstone(shared_proj):
         reg.query("CREATE (t:Team {id:'team_tomb', tier:'pro'})")
         team_g = proj.db.select_graph(_team_graph("team_tomb"))
         team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
-        ns = f"team_team_tomb_g_dead"
+        ns = "team_team_tomb_g_dead"
         g = proj.db.select_graph(ns)
         g.query("CREATE (p:Point {id:'pt-x', content:'x', pointKind:'claim'})")
         reg.query(
@@ -1215,14 +1215,14 @@ def test_sweep_drains_legacy_flat_pool_leaves_nested(shared_proj):
         # Seed an OLD legacy flat artifact (pre-#2313 shape) that must be
         # drained by the team sweep, plus one fresh nested default artifact
         # (created by the sweep itself this run — newest).
-        old_ts = (datetime.now(timezone.utc) - timedelta(days=40)).strftime(
+        old_ts = (datetime.now(UTC) - timedelta(days=40)).strftime(
             "%Y%m%dT%H%M%S") + "000Z_00000000"
         legacy_id = f"team_drain/{old_ts}"
         store.upload(f"backups/{legacy_id}/dump.enc", b"old")
         store.upload(f"backups/{legacy_id}/manifest.json", json.dumps({
             "backup_id": legacy_id, "team_id": "team_drain",
             "graph_name": _team_graph("team_drain"),
-            "created_at": (datetime.now(timezone.utc) - timedelta(days=40)).isoformat(),
+            "created_at": (datetime.now(UTC) - timedelta(days=40)).isoformat(),
             "node_count": 1, "edge_count": 0, "sha256": "x",
             "format": "tortoise-dump-v1",
         }).encode())
@@ -1246,7 +1246,6 @@ def test_sweep_drains_legacy_flat_pool_leaves_nested(shared_proj):
 
 
 def test_resolve_active_graph_registry_lane(shared_proj):
-    from tortoise.backup_sweep import resolve_active_graph
     with tempfile.TemporaryDirectory() as tmp:  # noqa: F841
         if shared_proj is None:
             return
@@ -1286,7 +1285,6 @@ def test_resolve_active_graph_registry_lane(shared_proj):
 
 def test_resolve_active_graph_supabase_fake():
     from tests.test_backup_graph_enum import _FakeGraphsTable
-    from tortoise.backup_sweep import resolve_active_graph
     from tortoise.hosted_backup import _is_supabase_source
 
     cp = _FakeGraphsTable(
@@ -1348,7 +1346,7 @@ def test_sweep_custom_graph_data_loss_transition_fires_per_graph(shared_proj):
         reg.query("CREATE (t:Team {id:'team_dl', tier:'pro'})")
         team_g = proj.db.select_graph(_team_graph("team_dl"))
         team_g.query("CREATE (p:Point {id:'pt-d', content:'d', pointKind:'claim'})")
-        ns = f"team_team_dl_g_c1"
+        ns = "team_team_dl_g_c1"
         g = proj.db.select_graph(ns)
         for i in range(5):
             g.query("CREATE (p:Point {id:$id, content:'c', pointKind:'claim'})",
@@ -1406,14 +1404,14 @@ def test_sweep_legacy_drain_skipped_when_default_fails(shared_proj):
         # drain would otherwise legitimately prune it): only run 2's drain —
         # which must NOT run on a failing default — would erode it
         from datetime import timedelta
-        old_ts = (datetime.now(timezone.utc) - timedelta(days=30)).strftime(
+        old_ts = (datetime.now(UTC) - timedelta(days=30)).strftime(
             "%Y%m%dT%H%M%S") + "000Z_00000000"
         legacy_id = f"team_keep/{old_ts}"
         store.upload(f"backups/{legacy_id}/dump.enc", b"old")
         store.upload(f"backups/{legacy_id}/manifest.json", json.dumps({
             "backup_id": legacy_id, "team_id": "team_keep",
             "graph_name": _team_graph("team_keep"),
-            "created_at": (datetime.now(timezone.utc) - timedelta(days=30)).isoformat(),
+            "created_at": (datetime.now(UTC) - timedelta(days=30)).isoformat(),
             "node_count": 2, "edge_count": 0, "sha256": "x",
             "format": "tortoise-dump-v1",
         }).encode())
