@@ -31,6 +31,11 @@ distinct derived server graphs — the two arms are truly isolated.
 
 from __future__ import annotations
 
+import os
+from urllib.parse import urlparse
+
+import pytest
+
 from tortoise import hosted_api
 from tortoise.commit_ops import apply_supersessions
 from tortoise.commit_schema import (
@@ -51,6 +56,35 @@ from tortoise.commit_schema import (
     point_content_id,
 )
 from tortoise.sdk import TortoiseSDK
+
+# URI-less skip guard — mirrors test_acl_graph_users.py's module skipif
+# (docker-lane tests must SKIP, not fail, on the URI-less tier-2 api-surface
+# leg: this file is registered in the api surface, which the tier-2 selector
+# runs embedded/carve-out when a PR touches hosted_api.py — see AGENTS.md).
+# Both arms below assert the derived test_* SERVER-graph redirect, which only
+# exists under a server URI (docker lane); a URI-less embedded run lands on
+# the default graph and fails the redirect assertion deterministically.
+_SUPPORTED = {"docker", "redis", "rediss"}
+
+
+# Skip reason uses the "requires TORTOISE_DB_URI" exempt family (the
+# skip-guard tool's intentional URI-gate prefix — tools/skip-guard.py) so a
+# URI-less skip can never trip the CI live-FalkorDB skip guard.
+def _server_uri_set() -> bool:
+    uri = os.environ.get("TORTOISE_DB_URI") or ""
+    scheme = uri.split("://", 1)[0]
+    return scheme in _SUPPORTED and bool(urlparse(uri).hostname)
+
+
+pytestmark = pytest.mark.skipif(
+    not _server_uri_set(),
+    reason=(
+        "requires TORTOISE_DB_URI (docker test-server lane) — parity arms "
+        "assert the derived test_* server-graph redirect; URI-less "
+        "embedded runs skip (mirrors test_acl_graph_users.py)"
+    ),
+)
+
 
 # ── Fixture scenario (mirrors the T3/T4/T7 capture fixtures) ───────────────
 # One OLD Point (a prior session's live statement) superseded by a NEW
