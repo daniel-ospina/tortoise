@@ -145,6 +145,32 @@ def _render_turns(turns: list[dict]) -> str:
     return "\n".join(f"{t['role']}: {t['content']}" for t in turns)
 
 
+def _evidence_block(scenario: dict) -> str:
+    """Authored ``evidence_tiers`` content rendered as an Evidence block
+    (#2284 T2). Emission is EXACTLY the authored {tier, claim, valence}
+    triples — never synthesized numbers, never gold. Empty when the pack
+    carries no evidence_tiers."""
+    tiers = scenario.get("evidence_tiers")
+    if not tiers:
+        return ""
+    lines = ["Evidence:"]
+    for item in tiers:
+        tier = str(item.get("tier", ""))
+        valence = str(item.get("valence", ""))
+        claim = str(item.get("claim", ""))
+        tag = f"{tier} ({valence})" if valence else tier
+        lines.append(f"{tag}: {claim}")
+    return "\n".join(lines)
+
+
+def render_from_scenario(scenario, session: int | None = None) -> str:
+    """Convenience: render a run-path Scenario through the ONE renderer —
+    ``render_reader_prompt(scenario.to_render_dict(), session=session)``
+    (#2284 T2 — the Scenario reader surface is the corpus.json-shaped dict,
+    no second renderer)."""
+    return render_reader_prompt(scenario.to_render_dict(), session=session)
+
+
 def _session_scripts_of(scenario: dict) -> list[dict] | None:
     """Session scripts live at scenario level or nested under prompt — normalize."""
     scripts = scenario.get("session_scripts")
@@ -166,6 +192,11 @@ def render_reader_prompt(scenario: dict, session: int | None = None) -> str:
     renders system + session N's turns + question only. Per-session delivery
     is owned by the harness (#1410).
 
+    #2284 T2: packs carrying authored ``evidence_tiers`` get their Evidence
+    block appended (authored tier/claim content verbatim — no synthesis); the
+    question line is emitted only when the question is non-empty (never a bare
+    ``question: `` line).
+
     Scorer metadata (``attack_type``, ``hostile``, ``gold_sha256``,
     ``matched_control_for``, ``variant_of``, ``graph_script``) is NEVER
     rendered.
@@ -173,13 +204,18 @@ def render_reader_prompt(scenario: dict, session: int | None = None) -> str:
     assert_no_gold(scenario)
     system = scenario["prompt"]["system"]
     parts = [system]
+    evidence = _evidence_block(scenario)
     scripts = _session_scripts_of(scenario)
     if scripts:
         ordered = sorted(scripts, key=lambda s: s["session"])
         if session is None:
             for s in ordered:
                 parts.append(_render_turns(s["turns"]))
-                parts.append("question: " + s["question"])
+                question = str(s.get("question", ""))
+                if question.strip():
+                    parts.append("question: " + question)
+            if evidence:
+                parts.append(evidence)
         else:
             s = next((x for x in ordered if x["session"] == session), None)
             if s is None:
@@ -187,10 +223,18 @@ def render_reader_prompt(scenario: dict, session: int | None = None) -> str:
                     f"scenario {scenario.get('id')!r} has no session {session!r} "
                     f"(sessions: {[x['session'] for x in ordered]})")
             parts.append(_render_turns(s["turns"]))
-            parts.append("question: " + s["question"])
+            question = str(s.get("question", ""))
+            if question.strip():
+                parts.append("question: " + question)
+            if evidence:
+                parts.append(evidence)
     else:
         parts.append(_render_turns(scenario["prompt"]["turns"]))
-        parts.append("question: " + scenario["prompt"]["question"])
+        question = str(scenario["prompt"].get("question", ""))
+        if question.strip():
+            parts.append("question: " + question)
+        if evidence:
+            parts.append(evidence)
     return "\n\n".join(parts)
 
 
