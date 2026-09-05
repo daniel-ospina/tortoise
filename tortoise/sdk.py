@@ -261,6 +261,70 @@ register_kind("evidence")  # used by file_decision (#133)
 # edge on a live point), NOT a stored status.
 POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'outdated', 'archived'})
 
+# ── #2199 decide-part calibration + baseline provenance ────────────────
+# Decision parts filed through the decide tooling (create_point / commit_ops /
+# mitigate_operator) are HUMAN-AUTHORED judgment — they carry no document
+# Source to inherit belief from (a Source only imparts belief when tiered
+# T0-T4, at EP-run time). They are born LIVE with an EXPLICIT, provenance-
+# recorded starting belief so the documented decide flow ranks on the first
+# attempt (no promote + calibrate chores, no CalibrationError). The default
+# prior is the ladder's middle rung 'medium' = Beta(3,1), mean 0.75 (issue
+# #2199 knock-on decision 2: reuse the ladder, do not invent a new number).
+DECIDE_PART_KINDS = frozenset({"decision", "option", "criterion", "evidence"})
+DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
+
+
+def _baseline_create_fields() -> str:
+    """Extra CREATE-map fields for the #2199 baseline (see create_point)."""
+    return ", ep_alpha:$ba, ep_beta:$bb, baseline_set:true, baseline_source:$bsrc"
+
+
+def _baseline_create_params(baseline: tuple[float, float, str]) -> dict:
+    """CREATE params for a resolved (#2199) baseline: (alpha, beta, source)."""
+    return {"ba": baseline[0], "bb": baseline[1], "bsrc": baseline[2]}
+
+# baseline_source token family (issue #2199 direction, 2026-09-03):
+#   set-by-author         — belief stated directly by whoever filed the point
+#                           (human OR agent; the species is already tracked in
+#                           authoredBy, so the token stays author-agnostic)
+#   inherited-from-source — belief inherited from the source's trust rating at
+#                           confidence time
+#   system-default        — no belief stated when filed; the system applied its
+#                           standard starting belief (decide-part default)
+# Renamed from the pre-#2199 spellings 'explicit' → 'set-by-author' and
+# 'inherited' → 'inherited-from-source' (one-time upgrade migration:
+# graph-scripts/2199_baseline_source_rename.py — old and new spellings never
+# coexist). system-default is new (no deployed data, no migration needed).
+BASELINE_SOURCE_SET_BY_AUTHOR = "set-by-author"
+BASELINE_SOURCE_INHERITED = "inherited-from-source"
+BASELINE_SOURCE_SYSTEM_DEFAULT = "system-default"
+BASELINE_SOURCE_TOKENS = frozenset({
+    BASELINE_SOURCE_SET_BY_AUTHOR,
+    BASELINE_SOURCE_INHERITED,
+    BASELINE_SOURCE_SYSTEM_DEFAULT,
+})
+
+# Human display copy for the provenance tokens — ONE shared anchor phrase
+# ('Starting belief:') with per-token full form (issue #2199 design pin).
+# calibrate_summary and audits route every token through this map so the copy
+# never drifts per surface.
+BASELINE_SOURCE_DISPLAY: dict[str, str] = {
+    BASELINE_SOURCE_SET_BY_AUTHOR: (
+        "Starting belief: stated by the author when this was filed."
+    ),
+    BASELINE_SOURCE_INHERITED: (
+        "Starting belief: inherited from its source's trust rating "
+        "(e.g. high), applied when confidence is computed."
+    ),
+    BASELINE_SOURCE_SYSTEM_DEFAULT: (
+        "Starting belief: none was stated when this was filed, so the system "
+        "applied its standard starting belief (medium). You can set your own "
+        "any time — e.g. recreate with credibility=, or call "
+        "set_point_baseline()."
+    ),
+}
+
+
 # #913: statuses that make a Point STALE for review_connections(mode=prune)
 # — terminal states plus the legacy outdated flag (supersede/invalidate set
 # status='superseded'/'outdated' AND/OR outdated=true). draft/live are the
@@ -1934,6 +1998,7 @@ class TortoiseSDK:
             )
 
     def create_point(self, kind: str, content: str, *, is_episodic: bool | None = None,
+                      credibility: str | int | float | None = None,
                       **props) -> dict:
         # #1486 (code-review P1): is_episodic is a SERVER-MANAGED flag — bound
         # to this explicit param (never the props passthrough, which
@@ -1943,6 +2008,21 @@ class TortoiseSDK:
         """Create a new Point node. Raises ValueError if kind is invalid.
 
         Set dedup=True for idempotent creation (matches by content hash).
+
+        Decision parts (#2199) — pointKind in {decision, option, criterion,
+        evidence} created WITHOUT an explicit status — land LIVE (not draft)
+        with an explicit, provenance-recorded starting belief: the default
+        prior 'medium' = Beta(3,1) stamped ``system-default`` unless the
+        author passes ``credibility`` (plain-language ladder word
+        gold/high/medium/low/unverified, T0-T4 form, or numeric 0-4), which
+        is stamped ``set-by-author``. Decision parts are human-authored
+        judgment with no document Source to inherit belief from; the explicit
+        default keeps the documented decide flow rankable on the first try
+        with zero promote/calibrate chores and no silent Beta(1,1)-as-
+        calibrated (the #7478 guard). Author-set baselines on any kind are
+        unchanged. Callers that explicitly pass a status (e.g. the capture/
+        extraction paths, which pass status="draft" + extractedFrom) keep
+        full manual control — no system default is applied.
         """
         self._validate_kind(kind)
         _coerce_props(props)
@@ -1965,8 +2045,27 @@ class TortoiseSDK:
 
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
-        # Calibration: pop credibility before storing as node property
-        credibility = props.pop("credibility", None)
+        # Calibration: pop credibility before storing as node property. The
+        # explicit ``credibility`` kwarg binds at the signature; a caller may
+        # also reach it through a nested props dict (flattened by _coerce_props
+        # above) — the explicit kwarg wins, the pop covers the nested path.
+        credibility = credibility if credibility is not None \
+            else props.pop("credibility", None)
+        # #2199: resolve + validate an author-stated belief BEFORE any graph
+        # write — a bad ladder word fails loud with nothing created (never a
+        # silent Beta(1,1) fallback, #7478; and never an uncalibrated live
+        # orphan left behind by a mid-create raise). The resolved Beta is
+        # applied below once the point id exists.
+        cred_prior: tuple[float, float] | None = None
+        if credibility is not None:
+            from tortoise.source_credibility import credibility_prior
+            cred_prior = credibility_prior(credibility)
+            if cred_prior is None:
+                raise ValueError(
+                    f"Unknown credibility {credibility!r}. Ladder words: "
+                    "gold / high / medium / low / unverified "
+                    "(or the T0-T4 / numeric forms)."
+                )
         # Always compute and store content hash — dedup flag only gates the
         # existing-point lookup, not hash persistence (fix #80).
         ch = _content_hash(content)
@@ -1979,7 +2078,16 @@ class TortoiseSDK:
         explicit_id = props.pop("id", None)
         # Idempotency guard: dedup by content hash when requested
         dedup = props.pop("dedup", False)
-        # Points enter as draft, go live when first edge is created (#131).
+        # Points enter as draft, go live when first edge is created (#131) —
+        # EXCEPT decision parts (#2199): a decision-part kind created without
+        # an explicit status is born live (matching how the decide skill's
+        # protocol is written), so EP factor extraction sees the option /
+        # criterion / finding right away. "Was status given?" is decided
+        # BEFORE the pop so a caller that explicitly passes a status (the
+        # capture/extraction paths pass status="draft" + extractedFrom, or a
+        # decide flow staging drafts deliberately) keeps full manual control
+        # and the #344/#1212 fail-closed posture.
+        explicit_status = "status" in props
         # Status is popped+validated BEFORE the dedup branch (#1905): a dedup
         # hit must never forward the caller's status into update_point (which
         # rejects any non-'live' status — a gated re-ingest of the same draft
@@ -1987,7 +2095,10 @@ class TortoiseSDK:
         # items as committed). Popping up front also keeps vocabulary
         # validation uniform for both paths: an invalid status raises even
         # when the point already exists (no silent-ignore asymmetry).
-        status = props.pop("status", "draft")
+        if not explicit_status and kind in DECIDE_PART_KINDS:
+            status = props.pop("status", "live")
+        else:
+            status = props.pop("status", "draft")
         # Fail-closed vocabulary validation (mirrors update_point): a
         # non-canonical status (case variant, junk, non-str, typo) would
         # otherwise be stored verbatim and treated as EP-LIVE by _live_only
@@ -2073,12 +2184,35 @@ class TortoiseSDK:
         except Exception:
             pass  # Graceful — embedding is optional
 
+        # #2199 baseline — resolved BEFORE the CREATE so the ep_* provenance
+        # fields land in the node's FIRST write. Embedded (FalkorDB Lite)
+        # fulltext reindexes on a post-CREATE SET: a later baseline write
+        # delete+re-adds the doc and silently drops its indexed content terms
+        # (score -> 0, ranking collapse — the #2206/issue-insight E2E caught
+        # it: the seeded decision fell below the observation hits). One write,
+        # one index entry, on every engine.
+        _create_baseline: tuple[float, float, str] | None = None
+        if cred_prior is not None:
+            _alpha, _beta = cred_prior
+            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SET_BY_AUTHOR)
+        elif not explicit_status and kind in DECIDE_PART_KINDS:
+            # #2199: system default applies ONLY to decide parts that were
+            # BORN live (no explicit status in the call) — see the tail
+            # comment block below for the full rationale.
+            from tortoise.source_credibility import credibility_prior
+            _alpha, _beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SYSTEM_DEFAULT)
+
+        _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
+                                "now": now, "embedding": embedding}
+        if _create_baseline is not None:
+            _create_params.update(_baseline_create_params(_create_baseline))
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now}) "
+            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now"
+            + (_baseline_create_fields() if _create_baseline is not None else "") + "}) "
             "SET n.embedding = vecf32($embedding)",
-            params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
-                    "embedding": embedding},
+            params=_create_params,
         )
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
@@ -2096,17 +2230,40 @@ class TortoiseSDK:
             # inherit-eligible on the next EP run (no interval wait, #398).
             self._invalidate_inheritance_gate([pid])
 
-        # Apply credibility baseline (only on new creation, not dedup)
-        if credibility is not None:
-            tier_map = {
-                "gold": (10, 1), "T0": (10, 1), 0: (10, 1),
-                "high": (5, 1), "T1": (5, 1), 1: (5, 1),
-                "medium": (3, 1), "T2": (3, 1), 2: (3, 1),
-                "low": (2, 1), "T3": (2, 1), 3: (2, 1),
-                "unverified": (1.1, 1), "T4": (1.1, 1), 4: (1.1, 1),
-            }
-            alpha, beta = tier_map.get(credibility, (1, 1))
-            self.set_point_baseline(pid, alpha, beta)
+        # Apply the starting belief (only on new creation, not dedup).
+        #
+        # #2199: decision parts (kind in DECIDE_PART_KINDS) that were born
+        # live get an EXPLICIT, provenance-recorded prior so the documented
+        # decide flow ranks on the first try with zero undocumented
+        # promote/calibrate chores. The author can override the default with
+        # ``credibility`` (plain-language ladder word gold/high/medium/low/
+        # unverified, T0-T4 form, or numeric 0-4 → Beta via the single-sourced
+        # ladder); an override stamps provenance 'set-by-author'. No belief
+        # stated → the standard starting belief 'medium' = Beta(3,1), stamped
+        # 'system-default' — an EXPLICIT default with labeled provenance, never
+        # a silent Beta(1,1)-as-calibrated uniform (the #7478 guard).
+        # Author-set credibility on ANY kind/status is unchanged.
+        #
+        # The graph write already happened inside the CREATE (above) — this
+        # block only records the in-memory evidence cache + EP message
+        # invalidation, so the fresh-create path never issues the separate
+        # post-CREATE SET (embedded fulltext reindex hazard, above).
+        # System-default note: it applies ONLY to decide parts that were BORN
+        # live (no explicit status in the call) — a caller that explicitly
+        # passed a status keeps full manual control per the docstring: no
+        # auto default. This matters for sourced decide parts filed live from
+        # a capture/commit receiver: they must stay inherit-eligible
+        # (baseline_source IS NULL) so a tiered source's belief is applied at
+        # EP time instead of being frozen at the flat medium default (which
+        # would silently overwrite source belief — never-write-source-
+        # inheritance class).
+        if _create_baseline is not None:
+            _b_a, _b_b, _b_src = _create_baseline
+            self._evidence[pid] = (_b_a, _b_b)
+            # Epic 903-C4 (#1242): a prior change alters factor behavior
+            # WITHOUT a topology change — warm-start seeds computed under the
+            # OLD prior are stale. Full drop (cheap) per the plan's W3 rule.
+            self._get_ep().invalidate_messages()
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
@@ -4909,15 +5066,35 @@ class TortoiseSDK:
             annotator_bias=bias, annotator_precision=precision,
             annotator_consistency=consistency, annotator_directness=directness)
 
-    def mitigate_operator(self, id: str, reason: str, strength: float = 0.5) -> dict:
+    def mitigate_operator(self, id: str, reason: str, strength: float = 0.5,
+                          credibility: str | int | float | None = None) -> dict:
         """Create a mitigation Point that modulates an operator's edge strength.
+
+        MITIGATION STRENGTH SEMANTICS (single-sourced — issue #2199 knock-on
+        decision 3): ``strength`` means how much this reason reduces the
+        edge — 0 = fully neutralized, 1 = fully intact (default 0.5). It is
+        NOT a statement of how true the reason is, and it is NOT fused into
+        the mitigation point's Beta prior (that would invert the meaning).
+        Strength is currently ADVISORY metadata: EP does not read
+        ``mitigation_strength`` / ``mitigated_by`` yet (nothing in ep.py
+        references either) — a future issue may wire it as edge modulation;
+        until then the decide tooling clamps to [0.10, 0.50] and the number
+        is auditable metadata on the mitigation point.
 
         Args:
             id: Operator Point ID to mitigate.
             reason: Why the edge is weaker than it appears.
-            strength: 0-1, 0=fully neutralized, 1=fully intact (default 0.5).
+            strength: 0-1 edge-modulation hint (advisory — see above).
+            credibility: optional plain-language starting belief for the
+                mitigation reason itself (gold/high/medium/low/unverified,
+                T0-T4 form, or numeric 0-4) — stamped 'set-by-author'.
+                Default None → the #2199 system starting belief ('medium',
+                Beta(3,1), provenance 'system-default') so the mitigation
+                point is a calibrated live evidence point and the decide
+                flow ranks on the first try (no CalibrationError).
 
-        Raises ValueError if id not found or not an operator.
+        Raises ValueError if id not found, not an operator, strength out of
+        [0, 1], or credibility outside the ladder.
         Idempotent: second call updates existing mitigation (reason + strength),
         does not create a duplicate.
         """
@@ -4928,6 +5105,18 @@ class TortoiseSDK:
             raise ValueError(f"Operator {id!r} not found")
         if not point.get("is_operator"):
             raise ValueError(f"Point {id!r} is not an operator")
+        from tortoise.source_credibility import credibility_prior
+        # Resolve the author-stated belief up front so a bad ladder word
+        # fails before any write (never a silent Beta(1,1) fallback, #7478).
+        author_prior = None
+        if credibility is not None:
+            author_prior = credibility_prior(credibility)
+            if author_prior is None:
+                raise ValueError(
+                    f"Unknown credibility {credibility!r}. Ladder words: "
+                    "gold / high / medium / low / unverified "
+                    "(or the T0-T4 / numeric forms)."
+                )
         # Idempotency: check for existing mitigation
         proj = self._get_proj()
         existing = proj.g.query(
@@ -4936,8 +5125,26 @@ class TortoiseSDK:
         ).result_set
         if existing:
             mid = existing[0][0]
-            return self.update_point(mid, content=f"[MITIGATION] {reason}",
-                                     mitigation_strength=strength)
+            self.update_point(mid, content=f"[MITIGATION] {reason}",
+                              mitigation_strength=strength)
+            # An explicit belief on the idempotent-update path re-baselines
+            # (never silently ignored). No credibility → keep whatever the
+            # mitigation already carries — EXCEPT a legacy pre-#2199
+            # mitigation with NO baseline at all: that is the exact
+            # uncalibrated-live-evidence case the decide flow must not leave
+            # behind (it would trip the fail-closed CalibrationError on the
+            # documented first-run EP). Heal it with the system default so a
+            # legacy mitigation becomes rankable on the next re-mitigation.
+            if author_prior is not None:
+                self.set_point_baseline(
+                    mid, author_prior[0], author_prior[1],
+                    source=BASELINE_SOURCE_SET_BY_AUTHOR)
+            elif not self.get_point(mid).get("baseline_set"):
+                alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+                self.set_point_baseline(
+                    mid, alpha, beta,
+                    source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+            return self.get_point(mid)
         # Create new mitigation Point
         mid = ulid()
         from datetime import datetime, timezone
@@ -4953,6 +5160,17 @@ class TortoiseSDK:
             "CREATE (m)-[:IMPL]->(op), (op)-[:mitigated_by]->(m)",
             params={"mid": mid, "oid": id},
         )
+        # #2199: mitigation reasons are human-authored judgment — give the
+        # fresh live point its explicit, provenance-recorded starting belief
+        # (author override or the documented system default) so the decide
+        # flow's EP run never trips the fail-closed CalibrationError.
+        if author_prior is not None:
+            alpha, beta = author_prior
+            source = BASELINE_SOURCE_SET_BY_AUTHOR
+        else:
+            alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            source = BASELINE_SOURCE_SYSTEM_DEFAULT
+        self.set_point_baseline(mid, alpha, beta, source=source)
         # Dreaming (#85): new mitigation + IMPL edge change propagation.
         self._mark_dirty([mid, id])
         # #548: emit events for rebuild parity
@@ -9109,16 +9327,35 @@ class TortoiseSDK:
                 self._evidence[pid] = (alpha, beta)
 
     def set_point_baseline(self, claim_id: str, alpha: float, beta: float, *,
-                           source: str = "explicit") -> dict:
+                           source: str = BASELINE_SOURCE_SET_BY_AUTHOR) -> dict:
         """Set Beta prior evidence for a claim. Persists to graph immediately.
 
         ``source`` records the baseline's provenance (``baseline_source`` graph
-        property): "explicit" (default) — manual/hosted baseline, NEVER
-        recomputed by ``_apply_source_inheritance``; "inherited" — derived from
-        Source evidence, recomputed per EP run subject to the per-point time
-        gate (``n.inherited_at``). Explicit baselines are always distinguishable
-        from legacy ``baseline_set=true`` rows (issue #398 2x2 mapping).
+        property) — the #2199 token family, ONE of:
+          - "set-by-author" (default): belief stated directly by whoever filed
+            the point (human OR agent — species is tracked in authoredBy).
+            NEVER recomputed by ``_apply_source_inheritance``.
+          - "inherited-from-source": derived from Source evidence, recomputed
+            per EP run subject to the per-point time gate (``n.inherited_at``).
+          - "system-default": no belief was stated when filed; the system
+            applied its standard starting belief (decide-part default, #2199).
+            Never recomputed — same persistence class as set-by-author.
+
+        Pre-#2199 spellings ('explicit' / 'inherited') are rejected with a
+        migration pointer — run graph-scripts/2199_baseline_source_rename.py
+        so old and new spellings never coexist. Set baselines are always
+        distinguishable from legacy ``baseline_set=true`` rows with no source
+        token (issue #398 2x2 mapping — calibrate_summary renders those as
+        set-by-author legacy).
         """
+        if source not in BASELINE_SOURCE_TOKENS:
+            raise ValueError(
+                f"Unknown baseline source {source!r}. Valid provenance tokens: "
+                f"{sorted(BASELINE_SOURCE_TOKENS)}. Pre-#2199 spellings "
+                "'explicit'/'inherited' were renamed — run "
+                "graph-scripts/2199_baseline_source_rename.py against the graph "
+                "before writing new baselines."
+            )
         self._evidence[claim_id] = (alpha, beta)
         # Persist to graph so baselines survive SDK restarts
         proj = self._get_proj()
@@ -9199,12 +9436,13 @@ class TortoiseSDK:
             lands — Task 5).
           - Positive-only: NAND contradiction is EP's factor domain — inheritance
             never folds negative pseudo-counts (double-count guard).
-          - Baseline provenance (2x2 mapping): explicit baselines (baseline_source
-            = 'explicit' or legacy baseline_set=true) are NEVER recomputed;
-            inherited baselines (baseline_source='inherited') recompute per run
-            subject to the per-point time gate (``n.inherited_at``); points with
-            no baseline (baseline_source IS NULL AND baseline_set IS NOT true)
-            are ALWAYS eligible.
+          - Baseline provenance (2x2 mapping): author-set/system-default
+            baselines (baseline_source = 'set-by-author' / 'system-default', or
+            legacy baseline_set=true with no token) are NEVER recomputed;
+            inherited baselines (baseline_source='inherited-from-source')
+            recompute per run subject to the per-point time gate
+            (``n.inherited_at``); points with no baseline (baseline_source IS
+            NULL AND baseline_set IS NOT true) are ALWAYS eligible.
           - Gate: recompute at most once per ``recompute_interval`` (default 3600s,
             env TORTOISE_EP_REINHERIT_INTERVAL; 0 = always), unless the gate was
             dirty-marked by a write event. Epsilon guard (rel 1e-9) suppresses
@@ -9256,13 +9494,13 @@ class TortoiseSDK:
 
         # Inherit-eligible points:
         #   (baseline_source IS NULL AND baseline_set IS NOT true)  → always eligible
-        #   (baseline_source = 'inherited')                          → gated by inherited_at
+        #   (baseline_source = 'inherited-from-source')              → gated by inherited_at
         where = (
             "WHERE n.is_operator = false "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "AND ("
             "  (n.baseline_source IS NULL AND (n.baseline_set IS NULL OR n.baseline_set = false)) "
-            "  OR n.baseline_source = 'inherited'"
+            "  OR n.baseline_source = 'inherited-from-source'"
             ") "
             "AND (s.credibilityTier IS NOT NULL OR s.sourceKind IS NOT NULL) "
         )
@@ -9293,7 +9531,7 @@ class TortoiseSDK:
         else:
             sourced_ids = set()
         revert_rows = proj.g.query(
-            "MATCH (n:Point) WHERE n.baseline_source = 'inherited' "
+            "MATCH (n:Point) WHERE n.baseline_source = 'inherited-from-source' "
             "AND (n.pointKind IS NULL OR n.pointKind <> 'assessment') "
             "RETURN n.id, n.inherited_at",
             params={},
@@ -9335,7 +9573,7 @@ class TortoiseSDK:
             ).result_set
             bl_src, inherited_at, cur_a, cur_b = row[0] if row else (None, None, 1.0, 1.0)
 
-            is_inherited = bl_src == "inherited"
+            is_inherited = bl_src == BASELINE_SOURCE_INHERITED
             if is_inherited and inherited_at is not None and recompute_interval > 0:
                 try:
                     last = datetime.fromisoformat(str(inherited_at).replace("Z", "+00:00"))
@@ -9365,7 +9603,7 @@ class TortoiseSDK:
                 self._touch_inherited_at(pid, now)
                 continue
 
-            self.set_point_baseline(pid, alpha, beta, source="inherited")
+            self.set_point_baseline(pid, alpha, beta, source=BASELINE_SOURCE_INHERITED)
             self._touch_inherited_at(pid, now)
 
     def _touch_inherited_at(self, point_id: str, now) -> None:
@@ -9381,6 +9619,16 @@ class TortoiseSDK:
         
         Checks baseline_set flag on non-operator Points. For uncalibrated
         points, traverses extractedFrom→Source to check for inherited credibilityTier.
+
+        #2199 provenance: calibrated rows carry ``baseline_source`` — the raw
+        graph provenance token (one of ``set-by-author`` /
+        ``inherited-from-source`` / ``system-default``; None for legacy
+        ``baseline_set=true`` rows written before the token family) — plus a
+        human ``provenance`` phrase routed through the single BASELINE_SOURCE_
+        DISPLAY map (auto-assigned system-default priors are VISIBLE here,
+        never a silent uniform: issue #2199 indicator 3). Legacy token-less
+        rows render as set-by-author (the #398 2x2 mapping — their persistence
+        class is author-set: never recomputed by inheritance).
         """
         proj = self._get_proj()
         where = "WHERE n.is_operator = false"
@@ -9393,16 +9641,38 @@ class TortoiseSDK:
             "OPTIONAL MATCH (n)-[:extractedFrom]->(s:Source) "
             "RETURN n.id, n.content, n.pointKind, "
             "coalesce(n.baseline_set, false) AS calibrated, "
-            "n.status, "
+            "n.status, n.baseline_source AS bl_source, "
             "s.credibilityTier, s.sourceKind, s.url AS src_url",
             params=params,
         ).result_set
         
         results = []
         for row in rows:
-            pid, content, pk, calibrated, status, ctier, skind, src_url = row
+            (pid, content, pk, calibrated, status,
+             bl_source, ctier, skind, src_url) = row
             item = {"id": pid, "content": content, "pointKind": pk,
-                    "calibrated": calibrated, "status": status}
+                    "calibrated": calibrated, "status": status,
+                    "baseline_source": bl_source}
+            # #2199: every calibrated row routes through the single provenance
+            # display map so the copy never drifts per surface. Legacy
+            # token-less rows (pre-#2199 baseline_set=true) render as
+            # set-by-author — same persistence class (never recomputed).
+            if calibrated:
+                if bl_source in BASELINE_SOURCE_DISPLAY:
+                    item["provenance"] = BASELINE_SOURCE_DISPLAY[bl_source]
+                elif bl_source is None:
+                    item["provenance"] = BASELINE_SOURCE_DISPLAY[
+                        BASELINE_SOURCE_SET_BY_AUTHOR]
+                else:
+                    # Unrecognized token (pre-#2199 'explicit'/'inherited'
+                    # spelling on a graph the rename migration has not run
+                    # against) — surface it loudly with the fix path so old
+                    # and new spellings never silently coexist.
+                    item["provenance"] = (
+                        f"Legacy baseline_source token {bl_source!r} — run "
+                        "graph-scripts/2199_baseline_source_rename.py to "
+                        "rename to the #2199 token family."
+                    )
             # Effective tier: explicit credibilityTier > sourceKind tier-form >
             # registry default (issue #398 Task 6 — legacy-inherited advisory).
             eff_tier = resolve_tier(ctier, skind)

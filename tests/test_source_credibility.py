@@ -324,20 +324,21 @@ def _set_source_tier_raw(sdk, url, tier, ingested_at="2024-01-01T00:00:00+00:00"
 
 class TestBaselineProvenance:
     def test_explicit_default_persists_explicit(self, sdk):
+        """Default provenance token is set-by-author (#2199 rename of 'explicit')."""
         p = sdk.create_point("statement", "explicit claim")
         sdk.set_point_baseline(p["id"], 5.0, 1.0)
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.baseline_source", params={"id": p["id"]}
         ).result_set
-        assert row[0][0] == "explicit"
+        assert row[0][0] == "set-by-author"
 
     def test_inherited_source_persists_inherited(self, sdk):
         p = sdk.create_point("statement", "inherited claim")
-        sdk.set_point_baseline(p["id"], 5.0, 1.0, source="inherited")
+        sdk.set_point_baseline(p["id"], 5.0, 1.0, source="inherited-from-source")
         row = sdk._get_proj().g.query(
             "MATCH (n:Point {id:$id}) RETURN n.baseline_source", params={"id": p["id"]}
         ).result_set
-        assert row[0][0] == "inherited"
+        assert row[0][0] == "inherited-from-source"
 
     def test_legacy_baseline_set_true_no_marker_never_clobbered(self, sdk):
         """Legacy NULL+true baselines are explicit — inheritance never overwrites."""
@@ -410,7 +411,7 @@ class TestBaselineProvenance:
         # No eligible sources → inherited baseline removed, back to neutral
         pt = sdk.get_point(p["id"])
         assert pt.get("ep_alpha") in (None, 1.0), f"expected neutral, got {pt.get('ep_alpha')}"
-        assert pt.get("baseline_source") != "inherited"
+        assert pt.get("baseline_source") != "inherited-from-source"
 
     def test_two_sdk_instances_dedupe_within_interval(self, sdk):
         """Graph-persisted gate: a second SDK instance within the interval dedupes."""

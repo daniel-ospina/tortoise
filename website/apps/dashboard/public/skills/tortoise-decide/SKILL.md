@@ -66,8 +66,19 @@ Use the Tortoise MCP tools (no local FalkorDB needed for hosted tenants; self-ho
 1. **Create the nodes** — `tortoise_create_point` per point (dedup by
    content): options → `pointKind: option`, criteria → `criterion`,
    findings → `evidence`; keep ids stable (`opt:a`, `crit:1`, `finding:1`).
+   Decision parts are born LIVE with an explicit starting belief (#2199):
+   omit `credibility` for the system starting belief (medium = Beta(3,1),
+   provenance `system-default`, visible in `tortoise_calibrate_summary`), or
+   pass `credibility="high|medium|low"` (ladder gold/high/medium/low/
+   unverified) when you have a real belief — recorded `set-by-author`. There
+   is NO promote/calibrate step in this workflow: the documented flow ranks
+   on the first try.
 2. **Wire the edges** — `tortoise_create_operator` for each IMPL/NAND;
-   mitigation strength in `[0.10, 0.50]` for relevance edges.
+   mitigation strength in `[0.10, 0.50]` for relevance edges. `strength`
+   means how much the reason reduces the edge (0 = fully neutralized, 1 =
+   fully intact) — it is NOT how true the reason is, it is NOT fused into
+   any prior, and EP does not read it yet (advisory metadata; the
+   mitigation POINT's own belief is calibrated like any decision part).
 3. **Compute** — `tortoise_compute_confidence` (EP belief propagation on the
    decision subgraph) → the per-option confidence.
 4. **Sanity** — `tortoise_check_structure` before presenting (the graph must
