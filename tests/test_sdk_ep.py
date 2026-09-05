@@ -33,9 +33,10 @@ def _make_claim(sdk: TortoiseSDK, content: str):
 class TestEvidence:
     def test_set_returns_data(self, sdk):
         result = sdk.set_point_baseline("claim-1", 5.0, 2.0)
-        # #398: return includes baseline provenance (source="explicit" default).
+        # #398/#2199: return includes baseline provenance (source defaults to
+        # the #2199 token family's author-set value, renamed from 'explicit').
         assert result == {"claim_id": "claim-1", "alpha": 5.0, "beta": 2.0,
-                          "source": "explicit"}
+                          "source": "set-by-author"}
 
     def test_get_confidence_default(self, sdk):
         p = _make_claim(sdk, "some claim")
