@@ -388,11 +388,6 @@ def _get_sdk():
         _sdk = TortoiseSDK(db_path=_resolve_db_path())
     return _sdk
 
-# Announce auth mode at startup
-if _is_dev_mode():
-    _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
-
-
 # #329: node/edge-creating MCP write tools that MUST be quota-gated. Completeness
 # is enforced by an introspective test (tests/test_mcp_http.py) that scans every
 # HTTP_ALLOWED tool body for node/edge-creating SDK calls and asserts membership.
@@ -1677,6 +1672,13 @@ def tortoise_traverse(entity_id: str, max_hops: int = 2,
 
 def main():
     _transport_mode.set("stdio")
+    # #2204: announce dev mode (no auth) at the actual serve start, NOT at
+    # module import — incidental importers (hosted_api, doctor, tests) must
+    # stay quiet. Stdio is the only path that cannot carry auth headers, so
+    # the announcement lives here (python -m tortoise.mcp_server and
+    # `tortoise serve` both funnel through main()).
+    if _is_dev_mode():
+        _log.warning("TORTOISE_API_KEY not set — running in dev mode (no auth)")
     monitoring.register(_get_sdk())
     uri = os.environ.get("TORTOISE_DB_URI")
     db_path = os.environ.get("TORTOISE_DB_PATH")
@@ -2177,7 +2179,6 @@ def tortoise_create_document(title: str, documentKind: str, props: Any = None) -
         return {"error": _reject, "code": ERR_INVALID}
     return _safe(_quota_gated(_get_team_sdk().create_document, "points"), title, documentKind, **(props or {}))
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                            sourceDate: str | None = None, props: Any = None) -> dict:
     """Create a Source node for provenance (document, web, db, etc.).
@@ -2199,7 +2200,10 @@ def tortoise_create_source(url: str, sourceKind: str, tier: str | None = None,
                  tier=tier, sourceDate=sourceDate, **props)
 
 
-@mcp.tool()
+# #2204: decorator removed — the tool is registered by the registry adapter
+# (TOOL_REGISTRY entry carries the same annotations; see module bottom). The
+# stale @mcp.tool() decorator double-registered the name with fastmcp's local
+# provider ("Component already exists" noise at import).
 def tortoise_get_source_reliability(url: str) -> dict:
     """Derive a Source's reliability (0-1) — query-time, cache-consistency-checked.
 
@@ -2211,7 +2215,8 @@ def tortoise_get_source_reliability(url: str) -> dict:
     return _safe(_get_team_sdk().get_source_reliability, url)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+# #2204: decorator removed — registry adapter owns registration (see
+# tortoise_create_source note).
 def tortoise_assess_source(url: str, assessor: str, score: float,
                            rationale: str) -> dict:
     """Record an agent's assessment of a Source (0-1 score + rationale).
@@ -2226,7 +2231,8 @@ def tortoise_assess_source(url: str, assessor: str, score: float,
                  url, assessor, score, rationale)
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
+# #2204: decorator removed — registry adapter owns registration (see
+# tortoise_create_source note).
 def tortoise_set_source_tier(url: str, tier: str) -> dict:
     """Set (or change) a Source's credibility tier (T0-T4). Non-destructive.
 
@@ -2593,9 +2599,6 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # defined below) — so the adapter resolves a handler for every registry
 # entry from globals() (#2210: entries defined after this point used to be
 # logged "no handler — skipped" while decorators half-registered them).
-
-
-
 # ── Onboarding MCP tools (#498/#499/#500) ───────────────────────
 # Wrappers for the hosted onboarding flow. These call the team-scoped SDK
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
