@@ -156,17 +156,19 @@ def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
 
 
 def _resolve_embedded_db_path() -> str:
-    """Resolve the server-process embedded DB path (env → /data → tempdir).
+    """Resolve the server-process embedded DB path (env → /data default → tempdir).
 
     Single source of the inline policy `_make_sdk`/`_registry_anchor` used to
-    duplicate (hosted #2251): TORTOISE_DB_PATH when set to a path with a
-    non-empty dirname (returned verbatim — deliberately NOT abs-ified/
-    expanded, unlike config.resolve_db_path), else /data/tortoise.db (the
-    fly.io volume default), falling back to tempfile.gettempdir()/tortoise.db
-    when /data is not writable (test env / bare daemon run /
-    dirname-is-a-file / empty dirname — an empty-string env OR a bare
-    filename like "tortoise.db": dirname("") / dirname("x.db") is "" →
-    makedirs("") raises FileNotFoundError, an OSError).
+    duplicate (hosted #2251): TORTOISE_DB_PATH when set to a path whose
+    dirname exists or can be created (returned verbatim — deliberately NOT
+    abs-ified/expanded, unlike config.resolve_db_path), else /data/tortoise.db
+    (the fly.io volume default), with tempfile.gettempdir()/tortoise.db as
+    the fallback whenever makedirs(dirname(candidate)) raises OSError — the
+    /data default when the volume is unwritable (test env / bare daemon run /
+    dirname-is-a-file), OR the env value when its dirname is empty
+    (empty-string env or a bare filename like "tortoise.db": dirname("") /
+    dirname("x.db") is "" → makedirs("") raises FileNotFoundError, an OSError)
+    or otherwise uncreatable.
 
     Callers MUST dispatch on TORTOISE_DB_URI *before* calling (URI mode never
     resolves an embedded path). Mirror of selfhost_api._resolve_embedded_db_path
@@ -516,11 +518,12 @@ async def _lifespan(app):
                     # team_{tid} graph was never minted (orphan registry
                     # rows) — a purge query against an absent graph would
                     # materialize an empty one. None → probe failed → skip
-                    # this cycle (best-effort; same store as the team
-                    # enumeration, so a store that can't be listed yields no
-                    # teams anyway).
+                    # this cycle (best-effort — the per-team purges below
+                    # hit the same graph store, so they would fail anyway;
+                    # the per-team SDK lazy hook still covers purges).
                     existing = _registry_existing_graphs()
                     if existing is None:
+                        _logger.warning("event retention sweep skipped: registry graph probe failed")
                         return
                     # Sweep every registered team's graph (registry Team nodes).
                     for team in _iter_registered_teams():

@@ -96,11 +96,13 @@ _SELFHOST_KEEPALIVE: dict[str, TortoiseSDK] = {}  # noqa: F821
 
 def _resolve_embedded_db_path() -> str:
     """Resolve the embedded DB path, mirroring hosted_api._resolve_embedded_db_path (the policy moved out of hosted _make_sdk in #2251):
-    TORTOISE_DB_PATH, else /data/tortoise.db with a tempdir fallback when
-    /data is not writable (test env / bare daemon run). The anchor AND the
-    per-request SDK must agree on this path or the anchor pins a stray
-    server while requests close-on-GC the real one (the #1475 regression
-    silently persists)."""
+    TORTOISE_DB_PATH (returned verbatim when its dirname is non-empty and
+    creatable), else /data/tortoise.db, with a tempdir fallback whenever
+    makedirs(dirname) raises OSError — /data unwritable (test env / bare
+    daemon run), dirname-is-a-file, or an empty dirname from an empty-string
+    env or bare filename. The anchor AND the per-request SDK must agree on
+    this path or the anchor pins a stray server while requests close-on-GC
+    the real one (the #1475 regression silently persists)."""
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
     try:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
