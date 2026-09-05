@@ -312,6 +312,17 @@ def test_outcomes_to_report_golden_shape():
     assert integ["invalid_rate"] == 0.0
     assert integ["error_census"] == {}
     assert len(integ["checks"]) == 5
+    # #2134 (Task 5): the escalation readout rides integrity.escalation —
+    # the golden outcome carries no escalation fields → all-zero projection.
+    esc = integ["escalation"]
+    assert esc["n_escalated_questions"] == 0
+    assert esc["n_escalations_recovered"] == 0
+    assert esc["n_escalations_residual"] == 0
+    assert esc["n_escalations_abort"] == 0
+    assert esc["n_escalations_partial"] == 0
+    assert esc["escalation_output_tokens_max"] == 0
+    assert esc["escalated_valid_qids"] == []
+    assert esc["escalated_residual_qids"] == []
 
     # M7 D2/D3/D4 aggregates.
     assert report["leg_mix"]["total_counts"] == {"tfidf": 3}
@@ -422,6 +433,15 @@ def test_outcomes_to_report_golden_shape():
         # checkpoints render; never a KeyError).
         "gate_reasons": None,
         "post_retrieval_reasons": None,
+        # #2134 (Task 5): the escalation fields — o.get-based projection,
+        # absent on golden outcomes → None (pre-#2134 checkpoints render).
+        "llm_escalations": None,
+        "llm_escalations_recovered": None,
+        "llm_escalations_residual": None,
+        "llm_escalations_abort": None,
+        "llm_escalations_partial": None,
+        "escalation_tokens_output_max": None,
+        "escalation_tokens_base_output_max": None,
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
@@ -485,6 +505,85 @@ def test_report_truncation_readout_warning_only():
         ks=(5,), top_k=5, split="s",
         dataset_semantics_audit=_trusted_audit(), integrity_threshold=0.0)
     assert report3["integrity"]["truncated_valid_qids"] == []
+
+
+def test_report_escalation_readout_2134():
+    """#2134 (Task 5): ``integrity.escalation`` — the ONE-SHOT escalation
+    readout. An escalated-RECOVERED question (clean + truncation recovered)
+    appears in BOTH truncated_valid_qids AND escalated_valid_qids (criterion
+    3: never an unrecorded truncation, never a silent recovery); a residual
+    question carries its fail-loud census class and grades invalid (the
+    buckets name the mechanism, error_classes name the outcome). Legacy
+    outcomes without the fields project an all-zero readout."""
+    base = {
+        "question_id": "q", "question_type": "single-session-user",
+        "question_date": "2024-01-15", "label": True, "hypothesis": "h",
+        "session_recall@k": {"5": 1.0}, "turn_recall@k": {"5": 1.0},
+        "evidence_recall@k": {"5": 1.0},
+        "chunk_evidence_recall@k": {"5": 0.5},
+        "n_ingest_errors": 0,
+        "ingest_error_text": None,
+        "llm_calls": 4, "llm_retries": 0, "llm_truncated": 1,
+        "recovery": {},
+        "context_tokens": 100, "context_point_count": 2,
+        "retrieval_latency_ms": 1.0, "reader_latency_ms": 2.0,
+        "judge_latency_ms": 3.0, "total_ms": 6.0,
+        "valid": True, "error_classes": {},
+        "leg_mix": {"tfidf": 2}, "leg_mix@k": {"5": {"tfidf": 2}},
+        "pool_size": 5, "evidence_written": 1,
+        "evidence_retrieved@k": {"5": 1}, "ingest_latency_ms": 1.0,
+        # #2134 outcome fields (what run.py now emits per question).
+        "llm_escalations": 1,
+        "llm_escalations_recovered": 1,
+        "llm_escalations_residual": 0,
+        "llm_escalations_abort": 0,
+        "llm_escalations_partial": 0,
+        "escalation_tokens_output_max": 31800,
+        "escalation_tokens_base_output_max": 16000,
+    }
+    rec = dict(base)
+    residual = dict(base)
+    residual["question_id"] = "q-residual"
+    residual["llm_escalations_recovered"] = 0
+    residual["llm_escalations_residual"] = 1
+    residual["n_ingest_errors"] = 1
+    residual["valid"] = False
+    residual["error_classes"] = {"truncated_parse_error": 1}
+    legacy = dict(base)
+    legacy["question_id"] = "q-legacy"
+    legacy["llm_truncated"] = 0  # a pre-#2134 clean outcome (no escalation)
+    for k in ("llm_escalations", "llm_escalations_recovered",
+              "llm_escalations_residual", "llm_escalations_abort",
+              "llm_escalations_partial", "escalation_tokens_output_max",
+              "escalation_tokens_base_output_max"):
+        legacy.pop(k)
+    report = outcomes_to_report(
+        [rec, residual, legacy], reader_model="r", judge_model="j",
+        ks=(5,), top_k=5, split="s",
+        dataset_semantics_audit=_trusted_audit(), integrity_threshold=1.0)
+    esc = report["integrity"]["escalation"]
+    assert esc["n_escalated_questions"] == 2  # legacy excluded (or 0)
+    assert esc["n_escalations_recovered"] == 1
+    assert esc["n_escalations_residual"] == 1
+    assert esc["n_escalations_abort"] == 0
+    assert esc["n_escalations_partial"] == 0
+    # D6 marginal-cost numerator maxes
+    assert esc["escalation_output_tokens_max"] == 31800
+    assert esc["escalation_base_output_tokens_max"] == 16000
+    assert esc["escalated_valid_qids"] == ["q"]
+    assert esc["escalated_residual_qids"] == ["q-residual"]
+    # criterion-3 cross-read: the recovered question is ALSO in the
+    # truncation warning-only list (truncated recorded, valid clean)
+    assert report["integrity"]["truncated_valid_qids"] == ["q"]
+    # the residual question grades invalid via its census class
+    assert "truncated_parse_error" in report["integrity"]["error_census"]
+    # the published outcome projection carries the new fields (o.get-based)
+    pub = next(o for o in report["outcomes"]
+               if o.get("question_id") == "q")
+    assert pub["llm_escalations"] == 1
+    leg = next(o for o in report["outcomes"]
+               if o.get("question_id") == "q-legacy")
+    assert leg.get("llm_escalations") is None  # legacy renders, no KeyError
 
 
 def test_census_s1_chunk_summary_recoverable_grade():
@@ -2173,6 +2272,76 @@ def test_v2_ingest_writes_payload_with_evidence_marks(tmp_path, monkeypatch):
             "MATCH (s:Session {id:$id})-[:CONTAINS]->(p) RETURN count(*)",
             params={"id": "lme:test_v2_q:s0"}).result_set
         assert cnt[0][0] == 5  # 1 chunk + 2 extracted + 2 turn points
+    finally:
+        sdk.close()
+
+
+def test_ingest_truncation_tokens_max_preserving(tmp_path, monkeypatch):
+    """#2134 Task 0 (P1-41/P2-32 + R3-6): the truncation-token recovery keys
+    are MAX-PRESERVING at the ingest roll-up — the per-session values are
+    already stage-sums, so a per-question `+=` would produce an N× value that
+    makes Task 1's "measured max list" read unsatisfiable. The outcome
+    carries the per-session MAX under a `_max` suffix, and per-seam keys
+    (s2/s4) stay separable — never conflated into one S2+S4 sum."""
+    import tortoise.extractor_v2 as ev2
+    from tools.longmem_eval.ingest_v2 import ingest_haystack_v2
+
+    # Session-level recovery values as the extractor emits them (already
+    # stage-sums before this roll-up): combined + per-seam keys. Three
+    # truncating sessions — 17K/25K/8K combined (the plan's ``never the
+    # 50000 sum`` pin), with per-seam keys in separate sessions so each
+    # seam's max stays separable.
+    _per_session = [
+        {"truncation_completion_tokens": 17000,
+         "truncation_prompt_tokens": 900,
+         "truncation_completion_tokens_s2": 17000,
+         "repaired": 2},  # a non-truncation counter that MUST stay a sum
+        {"truncation_completion_tokens": 25000,
+         "truncation_prompt_tokens": 1100,
+         "truncation_completion_tokens_s4": 25000,
+         "repaired": 1},
+        {"truncation_completion_tokens": 8000,
+         "truncation_prompt_tokens": 300,
+         "truncation_completion_tokens_s2": 8000,
+         "repaired": 0},
+    ]
+    _idx = {"n": 0}
+
+    def _fake_extract(model, conversation, **kw):
+        rec = _per_session[_idx["n"] % len(_per_session)]
+        _idx["n"] += 1
+        return {"payload": {"entities": [], "events": [], "points": [],
+                             "operators": []},
+                "minted_kinds": [], "supersessions": [],
+                "errors": [], "warnings": [],
+                "stats": {"recovery": rec}}
+
+    monkeypatch.setattr(ev2, "extract_session_v2", _fake_extract)
+
+    sdk = _fresh_sdk(tmp_path)
+    try:
+        question = {
+            "question_id": "test_max_q",
+            "haystack_session_ids": ["sess-1", "sess-2", "sess-3"],
+            "haystack_dates": ["2026-08-01"] * 3,
+            "haystack_sessions": [[
+                {"role": "user", "content": "hi", "has_answer": False},
+            ]] * 3,
+        }
+        stats = ingest_haystack_v2(sdk, question, model=object(),
+                                   chunk_turns=2)
+        rec = stats["recovery"]
+        # max-preserving: the per-session MAX (25000), NEVER the 50000 sum
+        assert rec["truncation_completion_tokens_max"] == 25000
+        assert rec["truncation_prompt_tokens_max"] == 1100
+        # the summed key is REPLACED by the _max capture (never N×)
+        assert "truncation_completion_tokens" not in rec
+        # R3-6: per-seam maxes stay separable — s4's 25000 never inflates
+        # the s2 max, and vice versa
+        assert rec["truncation_completion_tokens_s2_max"] == 17000
+        assert rec["truncation_completion_tokens_s4_max"] == 25000
+        # non-truncation recovery counters stay SUMS (unchanged semantics)
+        assert rec["repaired"] == 3
     finally:
         sdk.close()
 
