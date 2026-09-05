@@ -95,7 +95,7 @@ _SELFHOST_KEEPALIVE: dict[str, TortoiseSDK] = {}  # noqa: F821
 
 
 def _resolve_embedded_db_path() -> str:
-    """Resolve the embedded DB path, mirroring hosted_api._make_sdk:
+    """Resolve the embedded DB path, mirroring hosted_api._resolve_embedded_db_path (the policy moved out of hosted _make_sdk in #2251):
     TORTOISE_DB_PATH, else /data/tortoise.db with a tempdir fallback when
     /data is not writable (test env / bare daemon run). The anchor AND the
     per-request SDK must agree on this path or the anchor pins a stray

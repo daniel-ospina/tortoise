@@ -159,12 +159,14 @@ def _resolve_embedded_db_path() -> str:
     """Resolve the server-process embedded DB path (env → /data → tempdir).
 
     Single source of the inline policy `_make_sdk`/`_registry_anchor` used to
-    duplicate (hosted #2251): TORTOISE_DB_PATH when set (returned verbatim —
-    deliberately NOT abs-ified/expanded, unlike config.resolve_db_path),
-    else /data/tortoise.db (the fly.io volume default), falling back to
-    tempfile.gettempdir()/tortoise.db when /data is not writable (test env /
-    bare daemon run / dirname-is-a-file / empty-string env → dirname("") raises
-    FileNotFoundError, an OSError).
+    duplicate (hosted #2251): TORTOISE_DB_PATH when set to a path with a
+    non-empty dirname (returned verbatim — deliberately NOT abs-ified/
+    expanded, unlike config.resolve_db_path), else /data/tortoise.db (the
+    fly.io volume default), falling back to tempfile.gettempdir()/tortoise.db
+    when /data is not writable (test env / bare daemon run /
+    dirname-is-a-file / empty dirname — an empty-string env OR a bare
+    filename like "tortoise.db": dirname("") / dirname("x.db") is "" →
+    makedirs("") raises FileNotFoundError, an OSError).
 
     Callers MUST dispatch on TORTOISE_DB_URI *before* calling (URI mode never
     resolves an embedded path). Mirror of selfhost_api._resolve_embedded_db_path
@@ -509,8 +511,21 @@ async def _lifespan(app):
                     from tortoise.event_store import purge_expired, purge_overflow
                     days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
                     cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+                    # Probe-before-purge (#2251 review P2): enumerate the
+                    # server-wide existing graphs ONCE and skip teams whose
+                    # team_{tid} graph was never minted (orphan registry
+                    # rows) — a purge query against an absent graph would
+                    # materialize an empty one. None → probe failed → skip
+                    # this cycle (best-effort; same store as the team
+                    # enumeration, so a store that can't be listed yields no
+                    # teams anyway).
+                    existing = _registry_existing_graphs()
+                    if existing is None:
+                        return
                     # Sweep every registered team's graph (registry Team nodes).
                     for team in _iter_registered_teams():
+                        if f"team_{team['team_id']}" not in existing:
+                            continue
                         try:
                             sdk = _make_sdk(namespace=team["team_id"])
                             proj = sdk._get_proj()
@@ -521,14 +536,14 @@ async def _lifespan(app):
                 except Exception as exc:
                     _logger.warning("event retention sweep failed: %s", exc)
 
-            _sweep_events()  # boot sweep
+            await asyncio.to_thread(_sweep_events)  # boot sweep (#310, off the loop — same shape as the #302 purge below)
             await asyncio.to_thread(_purge_deleted_teams)  # boot purge (#302)
             interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
 
             async def _event_retention_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
-                    _sweep_events()
+                    await asyncio.to_thread(_sweep_events)
                     # #302: hard-delete past grace (sync DB work off the loop)
                     await asyncio.to_thread(_purge_deleted_teams)
 
@@ -13870,6 +13885,31 @@ def _graph_has_team_namespace(team_id: str) -> bool:
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
+
+
+def _registry_existing_graphs() -> set[str] | None:
+    """Server-wide existing graph names via the registry seam (best-effort).
+
+    list_graphs() is a read that never mints a graph (pin-4) and never
+    auto-recreates the deleted registry_control_plane in Supabase mode
+    (#669) — same safe shape _graph_has_team_namespace already uses on
+    the onboarding hot path. Used as a probe-before-purge gate by the
+    retention sweep (#2251 review P2): purging an ABSENT team_{tid} graph
+    (orphan registry row from a partial provision between the Team-node
+    create and the graph mint) would silently materialize an empty graph,
+    flipping the onboarding existence verdict for teams whose graph never
+    existed. None = probe failed → caller skips the sweep this cycle
+    (best-effort; the per-team SDK lazy hook still purges per-team graphs).
+    """
+    try:
+        sdk = _make_sdk(namespace="registry")
+        try:
+            graphs = sdk._get_proj().db.list_graphs() or []
+        finally:
+            sdk.close()
+        return set(graphs)
+    except Exception:
+        return None
 
 
 def _graph_available(team_id: str) -> bool:

@@ -6032,19 +6032,24 @@ class TestResolveEmbeddedDbPath:
         assert ha_mod._resolve_embedded_db_path() == "/x/y/custom.db"
 
     def test_env_relative_honored_verbatim_not_absified(self, monkeypatch):
-        """The resolver returns the env value verbatim — a relative path is
-        NOT cwd-abs-ified (the deliberate divergence from
-        config.resolve_db_path, which _abs()-ifies)."""
+        """The resolver returns the env value verbatim — a RELATIVE path
+        WITH a directory component is NOT cwd-abs-ified (the deliberate
+        divergence from config.resolve_db_path, which _abs()-ifies). The
+        directory component is load-bearing: a bare filename has dirname("")
+        → makedirs("") raises, so it would fall through to the tempdir
+        fallback under a real os.makedirs; "relative/sub/custom.db" has a
+        non-empty dirname, so the verbatim claim holds with or without the
+        patch below."""
         import os as _os
 
         import tortoise.hosted_api as ha_mod
-        monkeypatch.setenv("TORTOISE_DB_PATH", "custom-relative.db")
+        monkeypatch.setenv("TORTOISE_DB_PATH", "relative/sub/custom.db")
 
         def _makedirs_ok(_path, **kw):
             return None
 
         monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
-        assert ha_mod._resolve_embedded_db_path() == "custom-relative.db"
+        assert ha_mod._resolve_embedded_db_path() == "relative/sub/custom.db"
 
     def test_unwritable_data_falls_back_to_tempdir(self, monkeypatch):
         import os as _os
@@ -6074,6 +6079,99 @@ def _raise_file_exists(path, **kw):
     if path == "":
         raise FileNotFoundError(f"no such dir: {path!r}")
     raise FileExistsError(f"blocked: {path!r}")
+
+
+class TestRegistryExistingGraphs:
+    """_registry_existing_graphs probe-before-purge helper (#2251 review P2).
+
+    The retention sweep must not purge an ABSENT team_{tid} graph (an orphan
+    registry row from a partial provision) — the purge query would
+    materialize an empty graph. The helper lists the server-wide existing
+    graphs via the registry seam and returns None on probe failure so the
+    caller skips the cycle (best-effort)."""
+
+    def test_success_returns_set_of_graph_names(self, monkeypatch):
+        """A successful probe returns the graph names as a set — the sweep
+        gate then skips teams whose team_{tid} graph was never minted."""
+        import tortoise.hosted_api as ha_mod
+
+        class _FakeDb:
+            @staticmethod
+            def list_graphs():
+                return ["registry_control_plane", "team_a", "team_b"]
+
+        class _FakeProj:
+            db = _FakeDb()
+
+        closed = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return _FakeProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() == {
+            "registry_control_plane", "team_a", "team_b"}
+        assert closed == [True], "the probe SDK must be closed"
+
+    def test_probe_exception_returns_none(self, monkeypatch):
+        """A probe failure (list_graphs raise) → None — the caller skips the
+        sweep this cycle instead of purging blind (best-effort contract)."""
+        import tortoise.hosted_api as ha_mod
+
+        class _BoomProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("list_graphs boom")
+
+            db = _db()
+
+        class _Sdk:
+            def _get_proj(self):
+                return _BoomProj()
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() is None
+
+    def test_sdk_close_runs_when_list_graphs_raises(self, monkeypatch):
+        """close() runs on the exception path (finally) — no leaked probe
+        handle on the embedded keepalive daemon (mirror of the site-2
+        close-on-exception leak fix)."""
+        import tortoise.hosted_api as ha_mod
+
+        closed = []
+
+        class _BoomProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("boom")
+
+            db = _db()
+
+        class _Sdk:
+            def _get_proj(self):
+                return _BoomProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() is None
+        assert closed == [True], "close() must run on the exception path"
 
 
 class TestGraphHasTeamNamespaceExceptionPath:
