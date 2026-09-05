@@ -1103,3 +1103,83 @@ def test_index_sessions_constructor_failure_clean_error(monkeypatch, capsys, tmp
     assert "graph unreachable" in err
     assert "Traceback" not in err
 
+
+class TestOnboardCountExcludesNonContentDirs:
+    """#2201: the 'Found N markdown files' ANNOUNCE sites (init auto-index and
+    the indexer itself — the onboard step-3 index runs the REAL indexer, its
+    duplicate count line was removed) share the indexer's discovery — .venv
+    and other non-content dirs must not inflate the announced count (the
+    652-announced vs 527-walked divergence from the issue repro)."""
+
+    @staticmethod
+    def _repo_with_junk(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "README.md").write_text("# readme\n\ncontent\n")
+        junk = repo / ".venv"
+        junk.mkdir()
+        (junk / "junk.md").write_text("# junk\n\nbody\n")
+        return repo
+
+    @staticmethod
+    def _embedded_env(monkeypatch, tmp_path):
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+    def test_onboard_announce_count_excludes_venv(self, tmp_path, monkeypatch, capsys):
+        """`tortoise onboard` step 3 runs the REAL indexer, which announces
+        only the README (1 md file — the .venv/junk.md must not inflate the
+        count). The README has no ## headers, so nothing is indexed; the
+        all-empty run still exits 0 and onboard completes."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            # #715 P2 (prescription): dispatch through the REAL argparse
+            # parser, not a hand-built Namespace/bare Mock — those drift.
+            rc = m.main(["onboard"])
+
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        # Exactly ONE announce: the real indexer's bare line. The two-space
+        # pre-announce was removed from _cmd_onboard — a revert would print
+        # "  Found N markdown files. Indexing…" again (count N, whether the
+        # shared count of 1 or a raw-rglob count of 2) and fail the regex.
+        assert out.count("Found 1 markdown files. Indexing…") == 1, out
+        assert not re.search(
+            r"^  Found \d+ markdown files\. Indexing…", out, re.M), out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert "Onboarding complete." in out, out
+
+    def test_init_autoindex_announce_count_excludes_venv(self, tmp_path,
+                                                        monkeypatch, capsys):
+        """`tortoise init --yes` auto-index announce counts the README only —
+        same shared discovery as the indexer (#2201)."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch("subprocess.run") as fake_run, \
+             mock.patch("subprocess.Popen") as fake_popen, \
+             mock.patch("tortoise.projection.FalkorProjection"), \
+             mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            # #715 P2 (prescription): dispatch through the REAL argparse
+            # parser, not a hand-built Namespace/bare Mock — those drift.
+            rc = m.main(["init", "--yes"])
+
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "Found 1 markdown files in this repo. Auto-indexing…" in out, out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert fake_popen.called
+
