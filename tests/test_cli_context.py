@@ -84,6 +84,32 @@ class TestCliContext:
         assert "Use FalkorDB as primary graph store" in out
         assert "file new decisions with tortoise_create_point" in out
 
+    def test_digest_omits_rule_noise_from_recent_points(self, db_env, capsys):
+        """#2207: the session-start digest (session-start.sh → `tortoise
+        context`) lists genuine recent decisions/claims only — markdown rule
+        lines ('---', '*Gate: filed as child issue…') and list/config fragments
+        never surface as 'recent decisions'."""
+        db_env.create_point(kind="decision", content="We decided to adopt BSL 1.1 for the engine")
+        db_env.create_point(kind="statement", content="---")
+        db_env.create_point(kind="statement", content="*Gate: filed as child issue via "
+                             "`issue-creation` — number recorded in the epic plan doc "
+                             "(Stage 4).")
+        db_env.create_point(kind="statement", content="| Trigger | Must invoke |")
+        db_env.create_point(kind="statement", content="model: gpt-5")
+
+        rc = _run_context()
+        assert rc == 0
+        out = capsys.readouterr().out
+        # Genuine decision present, token intact.
+        assert "We decided to adopt BSL 1.1 for the engine" in out
+        # Rule/config noise absent from the digest body.
+        assert "Gate:" not in out
+        assert "| Trigger" not in out
+        assert "model: gpt-5" not in out
+        # '---' separators never appear as digest lines (only '-' bullets).
+        assert "\n---\n" not in out
+        print("PASS test_digest_omits_rule_noise_from_recent_points")
+
     def test_empty_prints_to_stdout_not_stderr(self, db_env, capsys):
         """Empty notice goes to stdout (so it's injected, not swallowed)."""
         _run_context()
@@ -1076,4 +1102,84 @@ def test_index_sessions_constructor_failure_clean_error(monkeypatch, capsys, tmp
     assert rc == 1
     assert "graph unreachable" in err
     assert "Traceback" not in err
+
+
+class TestOnboardCountExcludesNonContentDirs:
+    """#2201: the 'Found N markdown files' ANNOUNCE sites (init auto-index and
+    the indexer itself — the onboard step-3 index runs the REAL indexer, its
+    duplicate count line was removed) share the indexer's discovery — .venv
+    and other non-content dirs must not inflate the announced count (the
+    652-announced vs 527-walked divergence from the issue repro)."""
+
+    @staticmethod
+    def _repo_with_junk(tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / "README.md").write_text("# readme\n\ncontent\n")
+        junk = repo / ".venv"
+        junk.mkdir()
+        (junk / "junk.md").write_text("# junk\n\nbody\n")
+        return repo
+
+    @staticmethod
+    def _embedded_env(monkeypatch, tmp_path):
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "onboard.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        _delenv_falkordb(monkeypatch)
+
+    def test_onboard_announce_count_excludes_venv(self, tmp_path, monkeypatch, capsys):
+        """`tortoise onboard` step 3 runs the REAL indexer, which announces
+        only the README (1 md file — the .venv/junk.md must not inflate the
+        count). The README has no ## headers, so nothing is indexed; the
+        all-empty run still exits 0 and onboard completes."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch.object(m, "_cmd_init", return_value=0), \
+             mock.patch.object(m, "_cmd_demo", return_value=0), \
+             mock.patch.object(m, "_cmd_doctor", return_value=0), \
+             mock.patch("subprocess.run") as fake_run:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            # #715 P2 (prescription): dispatch through the REAL argparse
+            # parser, not a hand-built Namespace/bare Mock — those drift.
+            rc = m.main(["onboard"])
+
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        # Exactly ONE announce: the real indexer's bare line. The two-space
+        # pre-announce was removed from _cmd_onboard — a revert would print
+        # "  Found N markdown files. Indexing…" again (count N, whether the
+        # shared count of 1 or a raw-rglob count of 2) and fail the regex.
+        assert out.count("Found 1 markdown files. Indexing…") == 1, out
+        assert not re.search(
+            r"^  Found \d+ markdown files\. Indexing…", out, re.M), out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert "Onboarding complete." in out, out
+
+    def test_init_autoindex_announce_count_excludes_venv(self, tmp_path,
+                                                        monkeypatch, capsys):
+        """`tortoise init --yes` auto-index announce counts the README only —
+        same shared discovery as the indexer (#2201)."""
+        from tortoise import __main__ as m
+        repo = self._repo_with_junk(tmp_path)
+        self._embedded_env(monkeypatch, tmp_path)
+
+        with mock.patch("subprocess.run") as fake_run, \
+             mock.patch("subprocess.Popen") as fake_popen, \
+             mock.patch("tortoise.projection.FalkorProjection"), \
+             mock.patch("tortoise.sdk.TortoiseSDK") as fake_sdk:
+            fake_run.return_value.returncode = 0  # git repo detected
+            fake_run.return_value.stdout = str(repo)
+            fake_sdk.return_value.status.return_value = {"counts": {"Point": 1}}
+            # #715 P2 (prescription): dispatch through the REAL argparse
+            # parser, not a hand-built Namespace/bare Mock — those drift.
+            rc = m.main(["init", "--yes"])
+
+        out = capsys.readouterr().out
+        assert rc == 0, out
+        assert "Found 1 markdown files in this repo. Auto-indexing…" in out, out
+        assert "junk.md" not in out, "non-content files must not be announced"
+        assert fake_popen.called
 

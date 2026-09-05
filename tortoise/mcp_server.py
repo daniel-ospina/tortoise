@@ -15,7 +15,6 @@ from typing import Any, Literal
 from fastmcp import FastMCP
 from fastmcp.exceptions import (AuthorizationError, FastMCPError, ToolError,
                                 ValidationError as FastMCPValidationError)
-from mcp.types import ToolAnnotations
 from pydantic import ValidationError as PydanticValidationError
 from tortoise.auth import is_dev_mode as _is_dev_mode
 from tortoise.config import is_db_uri as _is_db_uri
@@ -1101,8 +1100,12 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
     include_terminal=True for the complete supersede-structure view).
     Best-match mode: provide query → RRF fusion of FTS + vector + structural.
 
-    Point results annotated with EP breakdown (confidence_mean + variance + contested + contention).
-    min_confidence defaults to 0.0 (no filter).
+    Point results annotated with EP breakdown. confidence_mean is THE point's
+    confidence (belief mean α/(α+β): persisted posterior when EP has run,
+    else persisted prior mean, else neutral 0.5) — agrees with
+    tortoise_get_confidence / recall for the same point. contention is the
+    structural edge-ratio family (a different quantity). min_confidence
+    filters on confidence_mean (belief); defaults to 0.0 (no filter).
 
     relationship_filter: 'predicate:target_id' — only return points connected to
         target_id via an operator with label=predicate
@@ -1112,8 +1115,8 @@ def tortoise_search(query: str | None = None, kind: str | None = None,
 
     order_by (#25, #560):
       - 'relevance' (default): pure RRF fusion order (FTS + vector + structural).
-      - 'confidence': sort by the PERSISTED EP confidence (n.confidence), not the
-        structural edge ratio.
+      - 'confidence': sort by the PERSISTED EP confidence (n.confidence — the
+        same belief mean ep.confidence_mean carries, post-#2206).
       - 'graph': graph-informed rerank — weighted fusion of similarity +
         persisted EP confidence + operator connectivity + 30-day recency decay
         (tortoise.ranking.GraphRanker). Results annotated with a
@@ -2683,7 +2686,7 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
 
-# Epic #888 no-regret: once a team's onboarding completes, the six
+# Epic #888 no-regret: once a team's onboarding completes, the seven
 # tortoise_onboarding_* tools retire from that team's steady-state MCP
 # surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
 # web onboarding flow. Function bodies are untouched; only the listing hides
@@ -2815,7 +2818,6 @@ def tortoise_onboarding_seed(org_name: str | None = None,
         return {"error": f"seed failed: {exc}"}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     """Toggle automatic session recording for this team (Q3 / dashboard
     Memory sources sessions toggle).
@@ -3196,7 +3198,7 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
 # ── Tool Registry Adapter (#454) — registration (module bottom) ──
 # Executes after EVERY module-level tool function definition above, so the
-# handlers dict covers the whole registry: the six onboarding tools and
+# handlers dict covers the whole registry: the seven onboarding tools and
 # tortoise_session_capture used to be logged "no handler — skipped" (they
 # were defined after this block's old mid-module position) — #2210.
 from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
