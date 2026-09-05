@@ -273,6 +273,16 @@ POINT_STATUS_VALUES = frozenset({'draft', 'live', 'retracted', 'superseded', 'ou
 DECIDE_PART_KINDS = frozenset({"decision", "option", "criterion", "evidence"})
 DECIDE_DEFAULT_CREDIBILITY = "medium"  # → Beta(3,1) via source_credibility
 
+
+def _baseline_create_fields() -> str:
+    """Extra CREATE-map fields for the #2199 baseline (see create_point)."""
+    return ", ep_alpha:$ba, ep_beta:$bb, baseline_set:true, baseline_source:$bsrc"
+
+
+def _baseline_create_params(baseline: tuple[float, float, str]) -> dict:
+    """CREATE params for a resolved (#2199) baseline: (alpha, beta, source)."""
+    return {"ba": baseline[0], "bb": baseline[1], "bsrc": baseline[2]}
+
 # baseline_source token family (issue #2199 direction, 2026-09-03):
 #   set-by-author         — belief stated directly by whoever filed the point
 #                           (human OR agent; the species is already tracked in
@@ -2173,12 +2183,35 @@ class TortoiseSDK:
         except Exception:
             pass  # Graceful — embedding is optional
 
+        # #2199 baseline — resolved BEFORE the CREATE so the ep_* provenance
+        # fields land in the node's FIRST write. Embedded (FalkorDB Lite)
+        # fulltext reindexes on a post-CREATE SET: a later baseline write
+        # delete+re-adds the doc and silently drops its indexed content terms
+        # (score -> 0, ranking collapse — the #2206/issue-insight E2E caught
+        # it: the seeded decision fell below the observation hits). One write,
+        # one index entry, on every engine.
+        _create_baseline: tuple[float, float, str] | None = None
+        if cred_prior is not None:
+            _alpha, _beta = cred_prior
+            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SET_BY_AUTHOR)
+        elif not explicit_status and kind in DECIDE_PART_KINDS:
+            # #2199: system default applies ONLY to decide parts that were
+            # BORN live (no explicit status in the call) — see the tail
+            # comment block below for the full rationale.
+            from tortoise.source_credibility import credibility_prior
+            _alpha, _beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
+            _create_baseline = (_alpha, _beta, BASELINE_SOURCE_SYSTEM_DEFAULT)
+
+        _create_params: dict = {"id": pid, "c": content, "k": kind, "st": status,
+                                "now": now, "embedding": embedding}
+        if _create_baseline is not None:
+            _create_params.update(_baseline_create_params(_create_baseline))
         proj.g.query(
             "CREATE (n:Point {id:$id, content:$c, pointKind:$k, "
-            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now}) "
+            "is_operator:false, status:$st, createdAt:$now, updatedAt:$now"
+            + (_baseline_create_fields() if _create_baseline is not None else "") + "}) "
             "SET n.embedding = vecf32($embedding)",
-            params={"id": pid, "c": content, "k": kind, "st": status, "now": now,
-                    "embedding": embedding},
+            params=_create_params,
         )
         # Tag handling: create :Tag nodes + TAGGED edges (#215, #485)
         tags = props.get("tags") or []
@@ -2209,24 +2242,27 @@ class TortoiseSDK:
         # 'system-default' — an EXPLICIT default with labeled provenance, never
         # a silent Beta(1,1)-as-calibrated uniform (the #7478 guard).
         # Author-set credibility on ANY kind/status is unchanged.
-        if cred_prior is not None:
-            alpha, beta = cred_prior
-            self.set_point_baseline(pid, alpha, beta,
-                                    source=BASELINE_SOURCE_SET_BY_AUTHOR)
-        elif not explicit_status and kind in DECIDE_PART_KINDS:
-            # #2199: system default applies ONLY to decide parts that were
-            # BORN live (no explicit status in the call) — a caller that
-            # explicitly passed a status keeps full manual control per the
-            # docstring: no auto default. This matters for sourced decide
-            # parts filed live from a capture/commit receiver: they must stay
-            # inherit-eligible (baseline_source IS NULL) so a tiered source's
-            # belief is applied at EP time instead of being frozen at the
-            # flat medium default (which would silently overwrite source
-            # belief — never-write-source-inheritance class).
-            from tortoise.source_credibility import credibility_prior
-            alpha, beta = credibility_prior(DECIDE_DEFAULT_CREDIBILITY)
-            self.set_point_baseline(pid, alpha, beta,
-                                    source=BASELINE_SOURCE_SYSTEM_DEFAULT)
+        #
+        # The graph write already happened inside the CREATE (above) — this
+        # block only records the in-memory evidence cache + EP message
+        # invalidation, so the fresh-create path never issues the separate
+        # post-CREATE SET (embedded fulltext reindex hazard, above).
+        # System-default note: it applies ONLY to decide parts that were BORN
+        # live (no explicit status in the call) — a caller that explicitly
+        # passed a status keeps full manual control per the docstring: no
+        # auto default. This matters for sourced decide parts filed live from
+        # a capture/commit receiver: they must stay inherit-eligible
+        # (baseline_source IS NULL) so a tiered source's belief is applied at
+        # EP time instead of being frozen at the flat medium default (which
+        # would silently overwrite source belief — never-write-source-
+        # inheritance class).
+        if _create_baseline is not None:
+            _b_a, _b_b, _b_src = _create_baseline
+            self._evidence[pid] = (_b_a, _b_b)
+            # Epic 903-C4 (#1242): a prior change alters factor behavior
+            # WITHOUT a topology change — warm-start seeds computed under the
+            # OLD prior are stale. Full drop (cheap) per the plan's W3 rule.
+            self._get_ep().invalidate_messages()
         # Dreaming (#85): a new point can carry confidence-affecting props;
         # mark it dirty so the next dream/lazy-read stabilizes it.
         self._mark_dirty([pid])
