@@ -18,6 +18,8 @@ import sys  # noqa: E402
 
 sys.path.insert(0, sys_path)
 
+import pytest  # noqa: E402
+
 from tortoise.ids import ulid  # noqa: E402
 from tortoise.log import EventLog  # noqa: E402
 from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
@@ -100,34 +102,43 @@ class TestCaptureFoldRoundTrip:
         finally:
             sdk.close()
 
-    def test_plain_object_survives_rebuild_all_byte_identical(self, tmp_path):
+    @pytest.mark.parametrize("name", ["acme", "estrategia-ñ-日本語-💡"])
+    def test_plain_object_survives_rebuild_all_byte_identical(self, tmp_path,
+                                                              name):
         """Indicator 1+3: auto ObjectRegistered exists per fresh create; the
         FULL replayed property set equals the pre-wipe live snapshot;
-        createdAt == journaled createdAt (no rebuild-time drift)."""
+        createdAt == journaled createdAt (no rebuild-time drift).
+
+        Parametrized over an ASCII name and a non-ASCII name so the probe's
+        name-conjunct + _entity_name_id sha-digest + JSONL mirror get unicode
+        coverage — a digest/param regression on non-ASCII input would
+        silently fail-closed on genuinely-new registrations (the plan's
+        Step 1.1 acceptance; the fail-closed consequence is the exact
+        node-loss class this issue closes)."""
         events = tmp_path / "events"
         events.mkdir()
         sdk = TortoiseSDK(str(tmp_path / "t1b.db"),
                           event_log_path=str(events / "events.jsonl"))
         try:
             proj = sdk._get_proj()
-            sdk.create_entity("object", "acme",
+            sdk.create_entity("object", name,
                               objectKind="core:org", is_episodic=False)
-            live_rows = _object_row(proj, "acme")
+            live_rows = _object_row(proj, name)
             assert live_rows, "object must exist live"
             live_props = {k: v for k, v in live_rows[0][0].items()
                           if k != "embedding"}
             journal = _journaled(sdk, events)
-            ors = _name_ors(journal, "acme")
+            ors = _name_ors(journal, name)
             assert len(ors) == 1, f"exactly one ObjectRegistered expected: {ors}"
             line = ors[0]
-            assert line["id"] == _entity_name_id("Object", "acme"), line
-            assert line["name"] == "acme"
+            assert line["id"] == _entity_name_id("Object", name), line
+            assert line["name"] == name
             assert line["object_kind"] == "core:org"
             assert line["status"] == "live"
             assert line.get("createdAt"), line
             assert line["is_episodic"] == False  # noqa: E712
             proj.rebuild_all(str(events))
-            rebuilt = _object_row(proj, "acme")
+            rebuilt = _object_row(proj, name)
             assert rebuilt, "Object must survive rebuild"
             rebuilt_props = {k: v for k, v in rebuilt[0][0].items()
                              if k != "embedding"}
