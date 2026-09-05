@@ -367,13 +367,20 @@ class TestGetChainStatus:
     def test_expected_keys(self, sdk):
         status = sdk.summarize_structure()
         for key in ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
-                     "gate3_workflows", "gate4_requirements", "total"):
+                     "gate3_workflows", "gate4_requirements",
+                     "total", "operators", "gate_total"):
             assert key in status, f"missing key: {key}"
+            assert isinstance(status[key], int), f"{key} should be int"
 
-    def test_total_matches_sum(self, sdk):
+    def test_gate_total_matches_gate_sum(self, sdk):
+        """#2205 total-vs-gate semantics: gate_total is the gate-kind
+        subtotal (the pre-#2205 meaning of 'total'); total spans ALL kinds
+        and is >= the gate-only subtotal."""
         status = sdk.summarize_structure()
-        gate_sum = sum(v for k, v in status.items() if k != "total")
-        assert status["total"] == gate_sum
+        gate_keys = ("gate0_jtbds", "gate1_use_cases", "gate2_user_journeys",
+                     "gate3_workflows", "gate4_requirements")
+        assert status["gate_total"] == sum(status[k] for k in gate_keys)
+        assert status["total"] >= status["gate_total"]
 
 
 # ── file_jtbd ────────────────────────────────────────────────────────
