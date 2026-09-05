@@ -1,3 +1,17 @@
+---
+title: "Registry/Knowledge-Graph Backup DR — Runbook (#596)"
+type: operations
+domain: platform
+doc_status: live
+created: 2026-08-08
+issue: 596
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+aboutObjects:
+- tortoise-hosted-platform
+---
+
 # Registry/Knowledge-Graph Backup DR — Runbook (#596)
 
 > "registry" naming is retained from the registry-era design — the content is

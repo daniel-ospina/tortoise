@@ -1,3 +1,16 @@
+---
+title: "Registry Graph Schema"
+type: engineering
+domain: platform
+doc_status: live
+created: 2025-08-01
+ownedBy: epistemic-team
+subjects:
+  team: epistemic-team
+aboutObjects:
+- tortoise-hosted-platform
+---
+
 # Registry Graph Schema
 
 The registry graph is a dedicated FalkorDB namespace (`registry`) storing control-plane entities for the Tortoise Hosted Platform. It is separate from tenant namespaces. Control-plane data migrates to Supabase under #669 (managed backups + PITR); until then it has no operator-controlled backup — see #596/#669.
