@@ -81,11 +81,10 @@ class TestRegistryEquivalence:
             assert excluded not in HTTP_ALLOWED, f"{excluded} must be HTTP-excluded"
 
     def test_registry_count(self):
-        """97 tools = the merged census (96 on main + tortoise_ask from the
-        #1987 surface, re-grouped ask memory→ask, adding 0 tools net).
+        """98 tools = the merged census (97 + #1999 tortoise_onboarding_seed).
         The census is bumped per add."""
         from tortoise.tool_registry import TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 97, f"Expected 97, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 98, f"Expected 98, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
         assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
@@ -93,7 +92,8 @@ class TestRegistryEquivalence:
                       "tortoise_onboarding_session_recording",
                       "tortoise_onboarding_github_connect",
                       "tortoise_onboarding_github_status",
-                      "tortoise_onboarding_github_index"}
+                      "tortoise_onboarding_github_index",
+                      "tortoise_onboarding_seed"}
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
         assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
         assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"

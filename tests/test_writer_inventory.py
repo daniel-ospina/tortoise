@@ -855,6 +855,7 @@ class TestGraphSurface:
         graphs = r.json()
         assert graphs == [{"graph_id": "default", "name": "default",
                            "kind": "default", "status": "active",
+                           "recording": None,  # C6 #2115 read-back
                            "key_count": 0}]
 
     def test_list_my_teams_uses_derived_graphs(self, user_client):

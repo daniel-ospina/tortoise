@@ -187,7 +187,7 @@ TOOL_REGISTRY: list[ToolDefinition] = [
                     "manifest in the tenant graph and activates it. Deployment- "
                     "gated: on self-host this is an actionable stub (use the "
                     "filesystem packs dir + tortoise pack CLI).",
-        annotations=_ro(),
+        annotations=_rw(),  # C5 #2114 (re-review P2): MERGEs manifests/installs — a write
         http_policy=True,
         sdk_method="upsert_tenant_manifest",  # pack_manifest_store helper
         group="admin",
@@ -978,6 +978,18 @@ TOOL_REGISTRY: list[ToolDefinition] = [
         rest_spec=RestSpec(method="GET", path="/v1/onboarding/state"),
     ),
     ToolDefinition(
+        name="tortoise_onboarding_seed",
+        description=("File the two onboarding anchor Subjects (Organization/"
+                     "organization + User/naturalPerson linked memberOf) — "
+                     "interactive, ontology-precise (#1999 W3): call without "
+                     "names to discover gaps/collisions, with user-confirmed "
+                     "names to file."),
+        annotations=_rw(),
+        http_policy=True,
+        sdk_method="",
+        rest_spec=RestSpec(method="POST", path="/v1/onboarding/seed"),
+    ),
+    ToolDefinition(
         name="tortoise_onboarding_session_recording",
         description="Toggle automatic session recording for this team (Q3).",
         annotations=_rw(),
@@ -1217,6 +1229,7 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_backfill_v25": "admin",
     # onboarding
     "tortoise_onboarding_demo_create": "onboarding", "tortoise_onboarding_state": "onboarding",
+    "tortoise_onboarding_seed": "onboarding",  # #1999 (W3)
     "tortoise_onboarding_session_recording": "onboarding",
     "tortoise_onboarding_github_connect": "onboarding",
     "tortoise_onboarding_github_index": "onboarding",

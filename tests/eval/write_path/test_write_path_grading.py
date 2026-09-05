@@ -12,8 +12,6 @@ synthetic session snapshots.
 """
 from __future__ import annotations
 
-import copy
-
 import pytest
 
 from tests.eval.write_path import corpus, grading, judge, schema

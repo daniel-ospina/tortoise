@@ -44,6 +44,9 @@ TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
+    # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
+    # data-plane gates otherwise (mirrors the #2241 migration pattern).
+    "legacy_full_access": True,
     "tier": "free",
     "max_users": 1,
     "max_graphs": 1,
