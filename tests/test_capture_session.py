@@ -3607,6 +3607,26 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
             raise AssertionError("create_entity id must be rejected")
         except ValueError as ex:
             assert "server-managed" in str(ex), ex
+        # The server-only _server_id kwarg must NOT be reachable through the
+        # props passthrough — the MCP boundary denylist catches top-level keys;
+        # the post-_coerce_props reject catches nested-props flattens (a
+        # props={"props": {...}} dict would otherwise splat-bind the
+        # keyword-only param).
+        try:
+            sdk.create_event("x", "meeting",
+                             props={"_server_id": "ev_forced"})
+            raise AssertionError("nested _server_id props must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        try:
+            sdk.create_entity("event", "x", eventKind="meeting",
+                              props={"_server_id": "ev_forced"})
+            raise AssertionError("nested _server_id props must be rejected")
+        except ValueError as ex:
+            assert "server-managed" in str(ex), ex
+        # The EXPLICIT internal param stays the one working channel.
+        ev3 = sdk.create_event("x", "meeting", _server_id="ev_internal_ok")
+        assert ev3.get("id") == "ev_internal_ok", ev3
         # A fresh ULID is still minted when no _server_id is supplied.
         ev2 = sdk.create_event("x", "meeting", is_episodic=False)
         assert ev2.get("id"), ev2

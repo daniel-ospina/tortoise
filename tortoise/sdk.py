@@ -2542,26 +2542,33 @@ class TortoiseSDK:
                 )
                 extraction_warnings.append(
                     f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
-        # #1352: the extraction projection auto-created a document-typed Source
-        # stub at `session:{id}` (default sourceKind in _link_source) — the
-        # ontology v3.6 §4.6 session source kind is agentSession. Materialize
-        # the typed Source (capture metadata + sessionId + capturedAt + eventId)
-        # and wire (Source)-[:references]->(sessionCaptured Event). Always runs:
-        # the Source upgrade is independent of the Event write's health; the
-        # references edge is skipped when no Event landed (event_id None).
-        # P1 #1529 (D4): a Source materialization failure is non-fatal and
-        # surfaced as an additive warning — never a raw exception after
-        # partial writes.
-        try:
-            self._materialize_session_source(
-                session_id, event_id, now, conversation)
-        except Exception as e:
-            _logger.warning(
-                "capture_session: session Source materialization failed "
-                "(non-fatal) for session %s: %s", session_id, e, exc_info=True,
-            )
-            extraction_warnings.append(
-                f"session Source materialization failed: {type(e).__name__}: {e}")
+            # #1352: the extraction projection auto-created a document-typed
+            # Source stub at `session:{id}` (default sourceKind in _link_source)
+            # — the ontology v3.6 §4.6 session source kind is agentSession.
+            # Materialize the typed Source (capture metadata + sessionId +
+            # capturedAt + eventId) and wire (Source)-[:references]->(sessionCaptured
+            # Event). W5 Phase F (#2104, review r1): runs ONLY on a genuine
+            # capture — inside the mint gate (hosted #1727 parity) — a REPLAY
+            # must not re-SET the first capture's Source capturedAt/contentHash
+            # (a replay is a true no-op). Still runs when the mint itself
+            # failed: the Source upgrade is independent of the Event write's
+            # health; the references edge is skipped when no Event landed
+            # (event_id None).
+            # P1 #1529 (D4): a Source materialization failure is non-fatal and
+            # surfaced as an additive warning — never a raw exception after
+            # partial writes.
+            try:
+                self._materialize_session_source(
+                    session_id, event_id, now, conversation)
+            except Exception as e:
+                _logger.warning(
+                    "capture_session: session Source materialization failed "
+                    "(non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
+                )
+                extraction_warnings.append(
+                    f"session Source materialization failed: "
+                    f"{type(e).__name__}: {e}")
 
         # P1 #1529 (D2): truthful extraction_mode + ok/errors/warnings on every
         # response. "empty" always co-occurs with an error entry; belt-and-
@@ -14114,6 +14121,15 @@ class TortoiseSDK:
         a suggested IMPL/NAND/mitigate relation — advisory only, never enforced.
         """
         _coerce_props(props)  # accept MCP-style nested props= dict (#218)
+        # W5 Phase F (#2104, review r1): the explicit ``_server_id`` param must
+        # never be reachable through the props passthrough — the MCP boundary
+        # denylist catches top-level keys, this catches the nested-props
+        # flatten (a props={"props": {...}} dict would otherwise splat-bind the
+        # keyword-only param after _coerce_props).
+        if "_server_id" in props:
+            raise ValueError(
+                "'_server_id' is a server-managed field and cannot be set "
+                "via props.")
         t = (type or "").strip().lower()
         if t == "subject":
             node = self._create_entity(
@@ -14289,6 +14305,15 @@ class TortoiseSDK:
         if "is_episodic" in props:
             raise ValueError(
                 "'is_episodic' is a server-managed field and cannot be set via props.")
+        # W5 Phase F (#2104, review r1): the explicit ``_server_id`` param must
+        # never be reachable through the props passthrough — the MCP boundary
+        # denylist catches top-level keys, this catches the nested-props
+        # flatten (a props={"props": {...}} dict would otherwise splat-bind the
+        # keyword-only param after _coerce_props).
+        if "_server_id" in props:
+            raise ValueError(
+                "'_server_id' is a server-managed field and cannot be set "
+                "via props.")
         if is_episodic is not None:
             props["is_episodic"] = is_episodic  # server-managed (explicit param only)
         return self.create_entity("event", name,

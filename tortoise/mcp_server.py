@@ -699,7 +699,8 @@ ERR_INVALID = -32003
 # denylist. The MCP tools reject these AT THE BOUNDARY (before the `**props`
 # unpack can bind the SDK's explicit server-managed params); the SDK's
 # _sanitize_props reject is the fail-closed backstop.
-_SERVER_MANAGED_PROPS = frozenset({"is_episodic", "sourcePath", "source_path", "id"})
+_SERVER_MANAGED_PROPS = frozenset({
+    "is_episodic", "sourcePath", "source_path", "id", "_server_id"})
 
 
 def _reject_server_managed_props(props: dict) -> str | None:

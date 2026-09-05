@@ -6202,8 +6202,13 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # provenance via the points' eventId.
     # #1727 Slice 2 (T2-P2c): the sessionCaptured Event mint + typed Source
     # materialization run ONLY on a genuine capture — a re-POST of an
-    # existing session_id skips them (violating the "0 new nodes"
-    # idempotency contract would otherwise mint a second Event per replay).
+    # existing session_id is a pure NO-OP replay. W5 Phase F (#2104): the
+    # skip is NOT because a mint would duplicate the Event (the deterministic
+    # ``ev_<sha256(session_id)>`` id converges on the SAME node) — it is
+    # because re-running the mint would MUTATE the first capture's Event
+    # (the projection's ON MATCH SET refreshes startedAt/endedAt) and append
+    # a duplicate EventRecorded journal entry; a replay must never touch the
+    # first capture's Event or Source (SDK mirror byte-parity).
     # W5 Phase F (#2104): when the mint DOES run, the Event id is the
     # DETERMINISTIC ``ev_<sha256(session_id)>`` (NOT a fresh ULID) so two
     # concurrent fresh-session POSTs of the same session_id — the #1727
