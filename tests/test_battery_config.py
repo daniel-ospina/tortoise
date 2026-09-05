@@ -207,6 +207,32 @@ class TestDeterminismTolerances:
             assert "measured_after_exposure" in block, \
                 f"arm {arm_id}: token field not annotated measured_after_exposure"
 
+    def test_arms_token_guess_annotations_row_self_consistent(self):
+        """PR #2341 review round 2, P2: per-row annotations are
+        self-consistent — the "(800 tok/ep guess)" parenthetical sits only
+        on a4's row (the only arm whose value IS 800); the corpus-level 800
+        guess explanation lives once in the header, never on non-800 rows
+        (a0=500, a1=600, a2/a2b=700, a3=400)."""
+        text = (CONFIG / "arms.yaml").read_text(encoding="utf-8")
+        from battery.config import load_arms
+        arms = load_arms(CONFIG / "arms.yaml")
+        values = {a: arms[a].expected_tokens_per_episode for a in arms}
+        blocks = text.split("- arm_id:")
+        header = blocks[0]
+        for arm_id, value in values.items():
+            if arm_id == "mock":
+                continue  # lane cap, no budget guess annotation
+            block = next(b for b in blocks[1:]
+                         if b.splitlines()[0].strip() == arm_id)
+            guess = "(800 tok/ep guess)" in block
+            if value == 800:
+                assert guess, f"arm {arm_id}: 800-value row should carry the guess"
+            else:
+                assert not guess, \
+                    f"arm {arm_id}: value {value} annotated with the 800 guess"
+        # the corpus-level guess explanation lives in the header exactly once
+        assert header.count("800 tok/ep guess") == 1
+
 
 class TestArmsAndBudget:
     def test_arms_load(self):

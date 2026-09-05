@@ -88,6 +88,7 @@ def _config_dir(tmp_path) -> Path:
 
 def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
          arms=("a0",), emit_only: set[str] | None = None,
+         executor: str = "mock",
          monkeypatch=None, expect: ExitCode = ExitCode.OK) -> Path:
     """Run the battery into ``root`` (fresh runs root per test); returns the
     LATEST attempt dir (summary.json = completion marker). Probe scorers are
@@ -95,7 +96,10 @@ def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
 
     ``emit_only`` switches the run to REAL mode and stubs the executor's
     per-episode log emission seam (run._episode_log) so hermetic tests can
-    drive the two-phase emitter gate without a real model."""
+    drive the two-phase emitter gate without a real model. Real mode is an
+    EXPLICIT request: pass ``executor="real"`` together with the seam stub
+    (emit_only is not None) — a real request without the stub fails closed
+    (PR #2341 review round 2, P2)."""
     root.mkdir(parents=True, exist_ok=True)
     specs: list[str] | None = None
     if families:
@@ -111,7 +115,8 @@ def _run(root: Path, cfg: Path, *, families=frozenset(), mock: bool = True,
                     if e.get("field") in emit_only]
         monkeypatch.setattr(run_mod, "_episode_log", _episode_log)
     code = run_battery(RunConfig(config_dir=cfg, out_dir=root, arms=list(arms),
-                                 mock=mock, scorer_specs=specs),
+                                 mock=mock, scorer_specs=specs,
+                                 executor=executor),
                        stdout=lambda _: None)
     assert code is expect, f"run_battery exit {code} (expected {expect})"
     attempt = attempt_dir_resolve(root)
@@ -190,7 +195,38 @@ _CT_YAML = {"scenarios": [{
         {"claim": "A claim", "counter_claim": "counter claim", "k": 3}],
     "gold": {"expected": "yes"}}]}
 
+#: R1 population-split fixtures (PR #2341 review round 2, P2): ct-mini
+#: plants a ¬A pair (surfaced-rate population); bct-mini is its benign
+#: FP-control twin — contradiction family, NO planted pair.
+_R1_POP_YAML = {"scenarios": [
+    {"id": "ct-mini", "tier": "probe", "family": "contradiction",
+     "task_type": "contradiction", "attack_type": "ct", "split": "train",
+     "k": 3,
+     "prompt": {"system": "sys", "turns": [
+         {"role": "user", "content": "turn1"}]},
+     "planted_contradictions": [
+         {"claim": "A claim", "counter_claim": "counter claim", "k": 3}],
+     "gold": {"expected": "yes"}},
+    {"id": "bct-mini", "tier": "probe", "family": "contradiction",
+     "task_type": "contradiction", "attack_type": "ct", "split": "train",
+     "prompt": {"system": "sys", "turns": [
+         {"role": "user", "content": "turn1"}]},
+     "gold": {"expected": "confirm the diagnosis"}}]}
+
 _SCEN_CACHE: dict | None = None
+
+
+def _r1_pop_scenarios() -> tuple:
+    """(ct, bct) run-path Scenarios for the R1 population split (planted ct
+    + benign bct twin). Cached in a temp dir for the session."""
+    global _SCEN_CACHE
+    if _SCEN_CACHE is None or "bct" not in _SCEN_CACHE:
+        tmp = Path(tempfile.mkdtemp(prefix="battery-r1-pop-"))
+        (tmp / "corpus.yaml").write_text(yaml.safe_dump(_R1_POP_YAML),
+                                         encoding="utf-8")
+        loaded = load_corpus_yaml(tmp / "corpus.yaml")
+        _SCEN_CACHE = {"scenario": loaded[0], "bct": loaded[1]}
+    return _SCEN_CACHE["scenario"], _SCEN_CACHE["bct"]
 
 
 def _ct_scenario():
@@ -280,16 +316,19 @@ class TestEmitterGapHonesty:
     def test_emitter_gap_flips_report_status(self, tmp_path, monkeypatch):
         """A REAL artifact whose consumed (mandatory) fields are emitter-less
         carries emitter_gap and the report flips to incomplete_emitter_gap —
-        the probe cells are insufficient_n, never a measured value."""
+        the probe cells are insufficient_n, never a measured value. (The
+        fixture corpus is controls-only — no planted pairs — so the R1
+        sentinel lands on the FP-control cell.)"""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
         attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
-                       emit_only={"stated_confidence"}, monkeypatch=monkeypatch)
+                       emit_only={"stated_confidence"}, executor="real",
+                       monkeypatch=monkeypatch)
         art = _run_artifacts(attempt)[0]
         assert art["run_mode"] == "real"
         assert art["emitter_gap"]                       # uncovered consumed fields
         payload = json.loads((attempt / "family_R1.json").read_text())
-        assert payload["cells"] == {"surfaced-rate": "insufficient_n"}
+        assert payload["cells"] == {"false-positive-rate": "insufficient_n"}
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_emitter_gap"
 
@@ -300,14 +339,16 @@ class TestEmitterGapHonesty:
     def test_mock_never_flags_emitter_gap(self, tmp_path, monkeypatch):
         """mock + probe-scorer locks incomplete_missing_metrics with
         all-insufficient_n cells — mock never false-flags
-        incomplete_emitter_gap and never produces measured cells."""
+        incomplete_emitter_gap and never produces measured cells. (The
+        fixture corpus is controls-only, so the R1 cell is the FP-control
+        cell, not a phantom surfaced-rate cell.)"""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
         attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
                        monkeypatch=monkeypatch)
         payload = json.loads((attempt / "family_R1.json").read_text())
-        assert payload["cells"] == {"surfaced-rate": "insufficient_n"}
-        assert payload["values"]["surfaced-rate"] == []
+        assert payload["cells"] == {"false-positive-rate": "insufficient_n"}
+        assert payload["values"]["false-positive-rate"] == []
         for art in _run_artifacts(attempt):
             assert art["run_mode"] == "mock"
             assert art["emitter_gap"] == []
@@ -347,6 +388,7 @@ class TestEmitterGapHonesty:
         monkeypatch.setattr(run_mod, "_resolve_arm",
                             lambda *a, **k: _UnavailableRealArm())
         attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
+                       executor="real", emit_only=set(),
                        monkeypatch=monkeypatch, expect=ExitCode.ARM_FAILED)
         for art in _run_artifacts(attempt):
             assert art["run_mode"] == "real"
@@ -356,6 +398,243 @@ class TestEmitterGapHonesty:
             assert art["emitter_gap"] == []          # exempt, not gapped
         profile = invoke_report(out, cfg)
         assert profile_status(profile) == "incomplete_real_no_episodes"
+
+
+class TestR1PopulationSplit:
+    """PR #2341 review round 2, P2 (issue 1): the R1 surfaced-rate cell
+    aggregates PLANTED ct episodes only — benign bct FP controls (no planted
+    pair) never enter the surfaced-rate denominator. bct episodes route to a
+    DISTINCT FP-control record scored on the log-derived control verdict
+    (false_positive): verdict present → FP 0/1 on behavior; verdict absent →
+    insufficient_n (control-verdict emission is executor-owned, Task 9). A
+    bct FP at a later turn is never scored as a surfaced-rate true negative."""
+
+    @staticmethod
+    def _planted_log() -> list[dict]:
+        """A flawless surfaced planted-episode log: MANDATORY coverage + the
+        arm files the conflict within one turn of the planted k=3 injection."""
+        log = covered_log()
+        for e in log:
+            if e.get("field") == "contradiction_surfaced":
+                e["payload"] = {**e.get("payload", {}), "value": True}
+            elif e.get("field") == "surfaced_within_turn":
+                e["payload"] = {"at_turn": 3}  # <= k+1 (k=3)
+        return log
+
+    @staticmethod
+    def _control_log(*, fp: bool | None) -> list[dict]:
+        """A benign bct control log: MANDATORY coverage + an optional
+        control verdict (false_positive derived entry with an explicit
+        value; None = no verdict — the Task-9 executor did not emit one)."""
+        log = covered_log()
+        if fp is not None:
+            log.append({"type": "derived", "event": "control_verdict",
+                        "at": 99, "field": "false_positive",
+                        "payload": {"value": fp}})
+        return log
+
+    @staticmethod
+    def _fp_log() -> list[dict]:
+        """A bct episode where the arm FILES a false conflict at a LATER
+        turn (turn 5, after the benign conversation) — the control verdict
+        records the FP. Under the pre-fix surfaced rule (k=0 default) this
+        read as a surfaced-rate 0.0 (true-negative-identical); it must now
+        land in the FP-control cell only."""
+        log = covered_log()
+        for e in log:
+            if e.get("field") == "contradiction_surfaced":
+                e["payload"] = {**e.get("payload", {}), "value": True}
+            elif e.get("field") == "surfaced_within_turn":
+                e["payload"] = {"at_turn": 5}  # later turn — no planted ¬A
+        log.append({"type": "derived", "event": "control_verdict",
+                    "at": 99, "field": "false_positive",
+                    "payload": {"value": True}})
+        return log
+
+    def test_flawless_planted_population_reads_full_rate(self):
+        """A flawless PLANTED population reads the FULL surfaced rate while
+        bct controls never enter the surfaced-rate denominator; a bct FP
+        filed at a later turn is NOT scored as a surfaced-rate true negative
+        — it records under the FP-control metric as a measured 1.0."""
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        ct, bct = _r1_pop_scenarios()
+        scorer = ProbeScorer(
+            probe=R1ContradictionProbe(),
+            thresholds=ThresholdsConfig(
+                cal_rows=(("surfaced-rate", "a0", 0.90),)))
+        # 15-planted-equivalent flawless episodes (2 here) surface at k+1.
+        for _seed in (1, 2):
+            ep = _real_episode(ct.id, self._planted_log())
+            scorer.score(ep, ct)
+        # bct WITHOUT a verdict -> no-data sentinel on the FP-control cell.
+        scorer.score(_real_episode(bct.id, self._control_log(fp=None)), bct)
+        # bct with a later-turn FP -> FP record (1.0), never surfaced.
+        scorer.score(_real_episode(bct.id, self._fp_log()), bct)
+        rep = scorer.family_report()
+        assert rep["cells"]["surfaced-rate"] == "measured"
+        # full rate: planted-only denominator, both flawless -> 1.0 each
+        assert rep["values"]["surfaced-rate"] == [1.0, 1.0]
+        assert rep["n"] == 3
+        assert rep["cells"]["false-positive-rate"] == "measured"
+        assert rep["values"]["false-positive-rate"] == [1.0]
+
+    def test_bct_no_verdict_insufficient_and_never_surfaced(self):
+        """bct controls with NO control verdict report the FP-control cell as
+        insufficient_n (verdict emission is executor-owned, Task 9) and a
+        benign twin the arm correctly ignores (verdict False) measures a 0.0
+        FP — neither ever produces a surfaced-rate value from the k=0
+        default."""
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        _, bct = _r1_pop_scenarios()
+        scorer = ProbeScorer(
+            probe=R1ContradictionProbe(),
+            thresholds=ThresholdsConfig(
+                cal_rows=(("surfaced-rate", "a0", 0.90),)))
+        scorer.score(_real_episode(bct.id, self._control_log(fp=None)), bct)
+        scorer.score(_real_episode(bct.id, self._control_log(fp=None)), bct)
+        rep = scorer.family_report()
+        assert rep["values"]["false-positive-rate"] == []
+        assert rep["cells"] == {"false-positive-rate": "insufficient_n"}
+        assert "surfaced-rate" not in rep["values"]  # never surfaced-scored
+        # verdict False (benign twin correctly stayed quiet) -> FP 0.0
+        scorer.score(_real_episode(bct.id, self._control_log(fp=False)), bct)
+        rep = scorer.family_report()
+        assert rep["cells"]["false-positive-rate"] == "measured"
+        assert rep["values"]["false-positive-rate"] == [0.0]
+        assert "surfaced-rate" not in rep["values"]
+
+
+class TestRunModeHonesty:
+    """PR #2341 review round 2, P2 (issues 2 + 3): run_mode derives from the
+    EXECUTOR actually used (never arms.yaml presence), is recorded in
+    summary.json at write time (run.run_mode + per-arm), and the CLI report
+    prefers the summary mode over artifact inference (a summary-only
+    all-arm-fail REAL run has zero artifacts). Real episodes carry a
+    NON-VACUOUS emitter gate: MANDATORY is always expected in real mode,
+    even for the HarnessScorer — an empty real event log records a gap."""
+
+    def test_real_summary_only_all_arm_fail_reports_real_status(
+            self, tmp_path, monkeypatch):
+        """Issue 2: a REAL run whose every arm fails at INIT writes zero
+        episode artifacts (summary-only). summary.run_mode records the
+        resolved real mode at write time and the report prefers it —
+        artifact inference (zero artifacts → mock) would mislabel the run
+        with the MOCK status; the resolved mode composes the real all-failed
+        branch (incomplete_real_no_episodes), never mock
+        incomplete_missing_metrics."""
+        import battery.runner.run as run_mod
+        from battery.arms.base import ArmUnavailable
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+
+        class _InitFailingRealArm:
+            arm_id = "a0"
+            model_id = "fixed"
+            temperature = 0.0
+
+            def setup_scenarios(self, scenarios):
+                raise ArmUnavailable("init fails")
+
+            def retrieve(self, context):
+                raise ArmUnavailable
+
+            def record(self, context, item):
+                return None
+
+            def isolation_namespace(self):
+                return "init-failing-real"
+
+        monkeypatch.setattr(run_mod, "_resolve_arm",
+                            lambda *a, **k: _InitFailingRealArm())
+        attempt = _run(out, cfg, families={"R1"}, mock=False, arms=["a0"],
+                       executor="real", emit_only=set(),
+                       monkeypatch=monkeypatch, expect=ExitCode.ARM_FAILED)
+        summary = json.loads((attempt / "summary.json").read_text())
+        assert summary["run"]["run_mode"] == "real"     # written at run end
+        assert summary["arms"][0]["run_mode"] == "real"
+        assert summary["arms"][0]["arm_present"] is False
+        assert len(_run_artifacts(attempt)) == 0          # summary-only
+        profile = invoke_report(out, cfg)
+        assert profile_status(profile) == "incomplete_real_no_episodes"
+
+    def test_hermetic_fixed_model_run_labeled_mock(self, tmp_path,
+                                                  monkeypatch):
+        """Issue 3(a): run_mode derives from the EXECUTOR actually used — a
+        hermetic run over a fixed-model adapter (model_id="fixed") with NO
+        active real executor seam executes the seeded mock trajectory + no-op
+        emission seam, so every artifact is labeled mock (never real) — a
+        real label over a mock executor would pass the phase-2 emitter gate
+        with an empty event_log by construction."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        attempt = _run(out, cfg, families=set(), mock=False, arms=["a0"],
+                       monkeypatch=monkeypatch)
+        summary = json.loads((attempt / "summary.json").read_text())
+        assert summary["run"]["run_mode"] == "mock"
+        for art in _run_artifacts(attempt):
+            assert art["run_mode"] == "mock"
+            assert art["emitter_gap"] == []
+        profile = invoke_report(out, cfg)
+        assert profile_status(profile) == "incomplete_missing_metrics"
+
+    def test_real_mode_without_executor_seam_fails_closed(self, tmp_path):
+        """Issue 3(a): requesting real mode (config.executor == "real")
+        without an active real emitting executor seam raises ConfigError
+        BEFORE the attempt dir — a real label over the stock no-op emission
+        seam (mock executor) is refused, never silently produced."""
+        from battery.runner.run import RunConfig
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        with pytest.raises(ConfigError):
+            run_battery(RunConfig(config_dir=cfg, out_dir=out, mock=False,
+                                  arms=["a0"], executor="real"),
+                        stdout=lambda _: None)
+        assert not out.exists() or not [p for p in out.iterdir()]
+
+    def test_real_harness_run_empty_logs_never_clean_coverage(
+            self, tmp_path, monkeypatch):
+        """Issue 3(b): end-to-end — a real-mode HARNESS run (no probe scorer)
+        whose executor emits nothing records a NON-empty emitter_gap on
+        every artifact (MANDATORY is always expected in real mode) and the
+        report flips to incomplete_emitter_gap — a real artifact with an
+        empty event log is never clean coverage, regardless of scorer."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        attempt = _run(out, cfg, families=set(), mock=False, arms=["a0"],
+                       executor="real", emit_only=set(),
+                       monkeypatch=monkeypatch)
+        arts = _run_artifacts(attempt)
+        assert arts and all(a["run_mode"] == "real" for a in arts)
+        assert all(a["emitter_gap"] for a in arts)   # non-vacuous MANDATORY gap
+        profile = invoke_report(out, cfg)
+        assert profile_status(profile) == "incomplete_emitter_gap"
+
+    def test_synthetic_real_artifact_empty_log_gaps_mandatory(self):
+        """Issue 3(b): a synthetic real-mode artifact with an EMPTY event log
+        records a non-empty emitter_gap against the MANDATORY schema-v1.1
+        set — the artifact-level seam never claims clean coverage from an
+        emitter-less real log."""
+        from battery.runner.artifacts import build_run_artifact
+        from battery.runner.episode import EpisodeResult
+        sc = _ct_scenario()
+        ep = EpisodeResult(scenario_id=sc.id, seed=1, arm="a0",
+                           model_call_outcomes={"ok": 1}, run_mode="real")
+        art = build_run_artifact(
+            seed=1, arm="a0", scenario=sc, episode=ep,
+            metric_values={"n_turns": 1.0}, outcomes={"ok": 1},
+            ep_outcome="converged",
+            excluded={"count": 0, "episode_ids": [], "reason": "none"},
+            setup_info={"mode": "none", "round_trips": 0},
+            provenance={"git_sha": "x", "config_files": [],
+                        "cal_table_hash": "h"},
+            python_hash_seed="0",
+            model={"provider": "real", "model_id": "fixed",
+                   "temperature": 0.0},
+            event_log=[], expected=set(MANDATORY))
+        assert art["run_mode"] == "real"
+        assert art["emitter_gap"] == sorted(MANDATORY)
 
 
 class TestFreshnessGate:

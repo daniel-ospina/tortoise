@@ -449,7 +449,17 @@ def validate_scenario(
     elif task_type == "contradiction":
         if scenario.get("family") != "R1":
             errors.append(f"{sid}: contradiction family must be R1")
-        if scenario.get("control_set"):
+        control_set = scenario.get("control_set")
+        if control_set is not None and control_set not in schema.CONTROL_SET_VALUES:
+            # PR #2341 review round 2, P2: a non-empty control_set outside
+            # the sanctioned enum fails validation — a typo (BCT / "bct " /
+            # benign) must never silently key the exemption (truthiness) or
+            # silently drop out of the population sweep (exact == "bct").
+            errors.append(
+                f"{sid}: control_set {control_set!r} not in "
+                f"{schema.CONTROL_SET_VALUES} — benign FP surface twins must "
+                f"use schema.CONTROL_SET_BCT")
+        if control_set == schema.CONTROL_SET_BCT:
             # #2284 T3: benign FP surface twin (control_set == "bct") — NO
             # planted pair / no counter-claim at k-1 by construction, so the
             # contradiction bindings do not apply. A planted pair on a
@@ -562,10 +572,10 @@ def validate_controls(scenarios: list[dict]) -> list[str]:
       pair). The d-* ct-domain NEVER includes benign bct ids — bct
       scenarios are controls themselves (never decision targets) and must
       not inflate the decision completeness domain.
-    * BCT benign controls (control_set == "bct"): surface twins of the six
-      smoke ct seeds ct-001..ct-006 — each references exactly one seed and
-      the referenced-seed set == {ct-001..ct-006} exactly-once (completeness
-      sweep over the twin population).
+    * BCT benign controls (control_set == schema.CONTROL_SET_BCT): surface
+      twins of the six smoke ct seeds ct-001..ct-006 — each references
+      exactly one seed and the referenced-seed set == {ct-001..ct-006}
+      exactly-once (completeness sweep over the twin population).
 
     Ownership ceiling: a planted ct may be referenced at most TWICE across
     all sets (its decision control + its optional bct twin).
@@ -583,7 +593,7 @@ def validate_controls(scenarios: list[dict]) -> list[str]:
         and sc.get("matched_control_for"))
     bct = sorted(
         str(sc.get("matched_control_for")) for sc in scenarios
-        if sc.get("control_set") == "bct")
+        if sc.get("control_set") == schema.CONTROL_SET_BCT)
 
     if decision != planted_ct:
         errors.append(

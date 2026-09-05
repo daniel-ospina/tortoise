@@ -109,13 +109,19 @@ def write_run_artifact(attempt_dir: Path, artifact: dict[str, Any]) -> Path:
 
 def build_summary(*, arms: list[dict[str, Any]], exit_code: int,
                   run_ids: list[str], artifacts: list[str], seed: int,
+                  run_mode: str = "mock",
                   timestamps: dict[str, str]) -> dict[str, Any]:
-    """Assemble a schema-v1.0 run summary (per-arm + run-level)."""
+    """Assemble a schema-v1.1 run summary (per-arm + run-level). The
+    run-level ``run.run_mode`` records the mode the runner RESOLVED at run
+    end (mock iff every arm resolved mock; PR #2341 review round 2, P2) so
+    the CLI report prefers it over re-inferring from artifact presence — a
+    summary-only all-arm-fail REAL run carries zero episode artifacts and
+    artifact inference would mislabel it mock."""
     return {
         "schema_version": SCHEMA_VERSION,
         "arms": arms,
         "run": {"exit_code": exit_code, "run_ids": run_ids,
-                "artifacts": artifacts, "seed": seed},
+                "artifacts": artifacts, "seed": seed, "run_mode": run_mode},
         "timestamps": timestamps,
     }
 

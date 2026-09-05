@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -217,6 +218,42 @@ def test_exemption_never_applies_to_planted_ct() -> None:
     bare = _benign_dict("ct-777", control_set=False)  # benign SHAPE, no marker
     errs = validate.validate_scenario(bare, {"ct-777"}, {"ct-777"})
     assert any("no planted_contradictions" in e for e in errs), errs
+
+
+@pytest.mark.parametrize("bad", ["BCT", "bct ", "benign"])
+def test_invalid_control_set_rejected(bad: str) -> None:
+    """PR #2341 review round 2, P2: any non-empty control_set outside the
+    sanctioned enum (schema.CONTROL_SET_BCT) fails the per-scenario
+    validator — a typo (BCT / "bct " / benign) must never silently key the
+    old truthiness exemption (which disabled the planted-contradiction
+    bindings) or silently drop out of the == "bct" population sweep."""
+    sc = _benign_dict("bct-001")
+    sc["control_set"] = bad
+    errs = validate.validate_scenario(sc, {"bct-001", "ct-001"}, {"ct-001"})
+    assert any("control_set" in e and "not in" in e for e in errs), errs
+
+
+def test_builder_refuses_invalid_control_set(tmp_path) -> None:
+    """The sealed build surfaces the per-scenario rejection as an exception
+    (corpus-level refuse — a non-enum control_set never ships a seal)."""
+    bad = _benign_dict("bct-001")
+    bad["control_set"] = "BCT"
+    src = tmp_path / "corpus.yaml"
+    src.write_text(yaml.safe_dump({"scenarios": [bad]}), encoding="utf-8")
+    with pytest.raises(ValueError) as exc:  # build_corpus raises ValueError
+        build_corpus.build_corpus(source=src, out_dir=tmp_path / "out")
+    assert "control_set" in str(exc.value)
+
+
+def test_control_set_predicates_key_schema_constant() -> None:
+    """Both control-set predicates (the benign exemption + the population
+    sweep) key on schema.CONTROL_SET_BCT — a single source of truth, never
+    literal strings (schema.py module contract)."""
+    assert schema.CONTROL_SET_BCT == "bct"
+    assert schema.CONTROL_SET_VALUES == ("bct",)
+    ok = _benign_dict("bct-001")
+    assert validate.validate_scenario(
+        ok, {"bct-001", "ct-001"}, {"ct-001"}) == []  # bct validates clean
 
 
 # ---------------------------------------------------------------------------
