@@ -49,7 +49,11 @@ MIGRATIONS: list[tuple[str, str, str]] = [
     ("workflow",     "product-strategy:workflow",     "point"),
     ("valueProposition", "product-strategy:valueProposition", "point"),
     ("requirement",  "dev:requirement",               "point"),
-    ("bug",          "dev:bug",                       "point"),
+    # bug is now an OBJECT kind (Problem subclass, dev 0.3.0 problem-family
+    # landing) — a legacy bug POINT can no longer be re-typed dev:bug point
+    # (commit-schema calibration). Legacy dev:bug points pre-date the re-
+    # model; follow-up decides point→object relocation (risk is the point
+    # form).
     ("technicalDebt", "dev:technicalDebt",            "point"),
 
     # ── Document kinds ─────────────────────────────────────────────────
