@@ -10138,8 +10138,8 @@ class TortoiseSDK:
     # "relates to this issue". Gate: EP-confirmed claims count — measured
     # (has_ep: persisted posterior OR prior/evidence α/β) AND belief
     # confidence_mean >= 0.5 (post-#2206 confidence_mean is the belief mean;
-    # the unmeasured neutral 0.5 is NOT a 'we decided this' signal) — and so
-    # do hits sharing >= 2 tokens with the query text
+    # the unmeasured neutral 0.5 is NOT a 'we already decided this' signal)
+    # — and so do hits sharing >= 2 tokens with the query text
     # (a single-token TF-IDF coincidence — e.g. one shared word like
     # "unrelated" — is a false positive, not prior knowledge). Works across
     # both retrieval modes: FTS/RRF (EP-annotated) and TF-IDF fallback
