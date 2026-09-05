@@ -1,39 +1,59 @@
 # Arms config (issue #1406) — schema locked here; adapters ship in #1408.
 # Each entry: arm_id, adapter (battery.arms.<name>), config {}, and the
 # per-arm cost constants the budget formula uses.
+#
+# model_pin / temperature (#2284 Task 6): protocol-hash inputs for the
+# parity unchanged-check (seed/model_pin/temperature/event-schema/
+# tool-surface). Values below are checked-in FLASH-CLASS PLACEHOLDERS —
+# sibling #2292 re-locks each arm's measured pin before any real-run parity;
+# until then the parity protocol leg stays placeholder + #1144-gated.
 arms:
   - arm_id: mock
     adapter: battery.arms.mock
     config: {}
     price_per_1k_usd: 0.0
     expected_tokens_per_episode: 64
+    model_pin: flash-class-placeholder
+    temperature: 0.0
   - arm_id: a0
     adapter: battery.arms.a0_plain
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 500
+    model_pin: flash-class-placeholder
+    temperature: 0.0
   - arm_id: a1
     adapter: battery.arms.a1_longctx
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 600
+    model_pin: flash-class-placeholder
+    temperature: 0.0
   - arm_id: a2
     adapter: battery.arms.a2_mem0
     config: {}
     price_per_1k_usd: 1.0
     expected_tokens_per_episode: 700
+    model_pin: flash-class-placeholder
+    temperature: 0.0
   - arm_id: a2b
     adapter: battery.arms.a2b_zep
     config: {}
     price_per_1k_usd: 1.0
     expected_tokens_per_episode: 700
+    model_pin: flash-class-placeholder
+    temperature: 0.0
   - arm_id: a3
     adapter: battery.arms.a3_rag
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 400
+    model_pin: flash-class-placeholder
+    temperature: 0.0
   - arm_id: a4
     adapter: battery.arms.a4_tortoise
     config: {}
     price_per_1k_usd: 0.5
     expected_tokens_per_episode: 800
+    model_pin: flash-class-placeholder
+    temperature: 0.0
