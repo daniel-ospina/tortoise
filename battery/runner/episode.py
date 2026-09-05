@@ -50,6 +50,13 @@ class EpisodeResult:
     #: Scorer-produced metric values (populated by the runner after scoring;
     #: written to the artifact's metric_values — trace-derived, cannot drift).
     metric_values: dict[str, float] = field(default_factory=dict)
+    #: Schema-v1.1 typed event log (issue #2284): the executor emits
+    #: envelope/state/tool entries while the episode runs; the probe-scorer
+    #: derive pass APPENDS derived/gold entries at scoring time; mock runs
+    #: keep an EMPTY log (allowed — never claimed real).
+    event_log: list[dict] = field(default_factory=list)
+    #: run_mode discriminator (mock|real) — mock is never scored as real.
+    run_mode: str = "mock"
 
     @property
     def n_turns(self) -> int:

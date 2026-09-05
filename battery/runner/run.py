@@ -32,6 +32,10 @@ from battery.config import (
 )
 from battery.enums import EpOutcome, ExitCode, ModelCallOutcome, Tier
 from battery.exceptions import ConfigError, IsolationBreach  # noqa: F401
+from battery.report.assemble import (
+    write_family_files,
+    write_recall_file,
+)
 from battery.runner.aggregate import aggregate
 from battery.runner.artifacts import (
     build_run_artifact,
@@ -148,7 +152,17 @@ def _agent_context(arm: MockArm, scenario: Scenario, episode_seed: int):
 def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 ) -> ExitCode:
     """Execute the battery run; returns the exit code (artifacts written
-    before any exit-4 computation; exit 5/1 raise — caught at dispatch)."""
+    before any exit-4 computation; exit 5/1 raise — caught at dispatch).
+
+    Order (Task 5): budget guard -> pre-run FRESHNESS gate (corpus.json vs
+    the yaml source; refuses BEFORE attempt-dir creation with ZERO
+    artifacts) -> scorer build -> attempt dir -> per (arm, scenario):
+    episode (event_log via the executor seam) -> expected set via the
+    scorer seam (BEFORE scoring) -> score (probe derive pass appends
+    derived/gold entries) -> artifact (phase-2 FINAL coverage validation at
+    assembly -> emitter_gap) -> run-end writers (family_*.json + recall.json)
+    -> summary.json LAST (the completion marker; attempt_dir_resolve
+    filters on it — a crashed dir never shadows a complete attempt)."""
     corpus_path = config.config_dir / "corpus.yaml"
     scenarios = load_corpus(corpus_path, gold_base=config.config_dir.parent / "golds")
     scenarios = scenarios_by_tier(scenarios, config.tier)
@@ -170,12 +184,11 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     if refusal:
         raise ConfigError(f"budget guard: {refusal}")
 
-    # ── attempt dir (sub-second stamp — two sequential runs never collide) ─
-    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")  # noqa: UP017
-    attempt_dir = config.out_dir / ts
-    attempt_dir.mkdir(parents=True, exist_ok=True)
+    # ── pre-run freshness gate (BEFORE attempt-dir creation; refuses with
+    #    ZERO artifacts on a stale/absent corpus seal) ───────────────────
+    _verify_corpus_freshness(config.config_dir)
 
-    scorer = _build_scorer(config)
+    scorer = _build_scorer(config, thresholds)
     provenance = {
         "git_sha": _git_sha(),
         "config_files": [p.name for p in (config.config_dir).glob("*.yaml")],
@@ -183,9 +196,15 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     }
     python_hash_seed = os.environ.get("PYTHONHASHSEED", "unset")
 
+    # ── attempt dir (sub-second stamp — two sequential runs never collide) ─
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")  # noqa: UP017
+    attempt_dir = config.out_dir / ts
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+
     arms_out: list[dict[str, Any]] = []
     all_artifacts: list[str] = []
     all_run_ids: list[str] = []
+    recall_rows: list[dict[str, Any]] = []
     any_arm_failed = False
 
     for arm_id in config.arms:
@@ -193,6 +212,15 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
         if arm_config is None:
             raise ConfigError(f"unknown arm {arm_id!r} (not in arms.yaml)")
         arm = _resolve_arm(arm_id, arm_config, mock=config.mock or arm_id == "mock")
+        # run_mode mock|real discriminator: the MockArm adapter (model_id
+        # mock-agent) is mock under ANY arm slot — mock is never scored as
+        # real and real is never conflated with mock (artifact model
+        # provider == "mock-agent" => run_mode mock).
+        run_mode = ("mock" if getattr(arm, "model_id", "") == "mock-agent"
+                    else "real")
+        model = {"provider": "mock-agent" if run_mode == "mock" else "real",
+                 "model_id": arm.model_id,
+                 "temperature": float(getattr(arm, "temperature", 0.0))}
         # ── arm-init (setup_scenarios) — failure → skip arm, summary-only ──
         try:
             arm.setup_scenarios(scenarios)
@@ -220,7 +248,14 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 model_call_outcomes=outcome_counts_dict(outcomes),
                 excluded_reason=(_exclude_reason(outcomes)
                                  if not _all_ok(outcomes) else None),
+                run_mode=run_mode,
+                event_log=_episode_log(scenario, episode_seed=episode_seed,
+                                       arm_id=arm_id, run_mode=run_mode),
             )
+            # Expected set computed on the episode BEFORE scoring via the
+            # scorer seam (default HarnessScorer -> empty expected => gap
+            # empty, mock/real neutral).
+            expected = _expected_coverage(scorer, scenario, run_mode)
             result = scorer.score(episode, scenario)
             metric_values = {mv.metric_id: mv.value for mv in result.metrics}
             episode.metric_values = metric_values
@@ -234,13 +269,29 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
                 "episode_ids": [scenario.id] if not episode.valid else [],
                 "reason": episode.excluded_reason or "none",
             }
+            if not episode.valid and expected:
+                # Excluded episodes are EXEMPT from the mandatory gap, but
+                # their expected-vs-emitted snapshot is recorded in the
+                # exclusion record — an honest exclusion is never mislabeled
+                # an emission bug, and the exemption can not become a
+                # gap-gate bypass.
+                excluded["expected"] = sorted(expected)
+                excluded["emitted"] = sorted(
+                    {e.get("field") for e in episode.event_log
+                     if e.get("field")})
             artifact = build_run_artifact(
                 seed=episode_seed, arm=arm_id, scenario=scenario,
                 episode=episode, metric_values=metric_values,
                 outcomes=episode.model_call_outcomes,
                 ep_outcome=episode.ep_outcome.value, excluded=excluded,
                 setup_info=setup_info, provenance=provenance,
-                python_hash_seed=python_hash_seed,
+                python_hash_seed=python_hash_seed, model=model,
+                event_log=episode.event_log,
+                # Phase-2 final coverage validation at artifact assembly over
+                # the POST-derivation log (derive pass appended entries during
+                # scoring); excluded episodes are exempt (expected=None).
+                expected=(expected if run_mode == "real" and episode.valid
+                          else None),
             )
             validate_artifact_keys(artifact)
             path = write_run_artifact(attempt_dir, artifact)
@@ -248,6 +299,14 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             all_artifacts.append(path.name)
             all_run_ids.append(artifact["run_id"])
             arm_episodes.append(episode)
+            recall_rows.append({
+                "run_id": artifact["run_id"],
+                "arm": arm_id,
+                "scenario_id": scenario.id,
+                "excluded": not episode.valid,
+                "retrieved": [],  # executor capture lands with Task 9
+                "ep_markers": dict(episode.ep_surface or {}),
+            })
 
         agg = aggregate(arm_episodes, HARNESS_METRIC_IDS)
         arms_out.append(_arm_summary_block(
@@ -259,6 +318,16 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             any_arm_failed = True  # all-failed → exit 4 (after artifacts)
 
     exit_code = ExitCode.ARM_FAILED if any_arm_failed else ExitCode.OK
+
+    # ── run-end LIVE writers (family_*.json + recall.json) — the dead
+    #    aggregation path dies here: per-scored-family JSONs + the recall
+    #    record are written by the RUNNER path (atomic tmp+os.replace). ──
+    family_payloads = _family_payloads(scorer)
+    if family_payloads:
+        write_family_files(attempt_dir, family_payloads)
+    write_recall_file(attempt_dir, {"episodes": recall_rows})
+
+    # summary.json written LAST (the completion marker).
     summary = build_summary(
         arms=arms_out, exit_code=int(exit_code), run_ids=all_run_ids,
         artifacts=all_artifacts, seed=config.seed,
@@ -282,15 +351,143 @@ def _setup_scenario(config: RunConfig, scenario: Scenario, arm_id: str,
     return {"mode": "deferred", "round_trips": 0}
 
 
-def _build_scorer(config: RunConfig) -> Scorer:
+def _build_scorer(config: RunConfig, thresholds: ThresholdsConfig) -> Scorer:
+    """Resolve the run's scorers: harness (default) or --scorer specs.
+    Probe modules (``battery.probes.r1_contradiction`` — no ``Scorer``
+    attribute) are bridged through the ProbeScorer adapter (Task 5)."""
     if len(config.scorer_specs) == 1 and config.scorer_specs[0] == "harness":
         return HarnessScorer()
-    return _CompositeScorer([resolve_scorer(s) for s in config.scorer_specs])
+    scorers: list[Scorer] = []
+    for spec in config.scorer_specs:
+        try:
+            scorers.append(resolve_scorer(spec))
+        except ConfigError:
+            from battery.runner.probe_scorer import resolve_probe_scorer
+            scorers.append(resolve_probe_scorer(spec, thresholds))
+    return _CompositeScorer(scorers)
+
+
+def _expected_coverage(scorer: Scorer, scenario, run_mode: str) -> set[str]:
+    """Per-episode expected set via the scorer seam (empty for the default
+    HarnessScorer => gap empty, mock/real neutral)."""
+    fn = getattr(scorer, "expected_coverage", None)
+    if not callable(fn):
+        return set()
+    try:
+        return set(fn(scenario, run_mode=run_mode))
+    except TypeError:
+        return set(fn(scenario))
+
+
+def _family_payloads(scorer: Scorer) -> list[dict[str, Any]]:
+    """Per-scored-family JSON payloads from the run's scorers (probe
+    scorers report; the harness scorer never does)."""
+    fn = getattr(scorer, "family_reports", None)
+    if not callable(fn):
+        return []
+    return [p for p in fn() if p]
+
+
+def _episode_log(scenario, *, episode_seed: int, arm_id: str,
+                 run_mode: str) -> list[dict[str, Any]]:
+    """Executor emission seam (schema v1.1): the per-episode typed event
+    log that exists BEFORE scoring (envelope/state/tool entries). The mock
+    executor emits NOTHING (mock runs keep an empty event_log — allowed,
+    never claimed real); the real executor (Task 9) emits here; hermetic
+    tests stub this seam to drive the two-phase emitter gate."""
+    return []
+
+
+def _verify_corpus_freshness(config_dir: Path) -> None:
+    """Pre-run freshness gate (Task 5), BEFORE attempt-dir creation:
+    corpus.json manifest + gold_sha256 digests vs the yaml source. A stale
+    seal refuses cleanly with ZERO artifacts (no attempt dir is created).
+
+    Yaml-only config dirs (hermetic fixtures) carry no corpus.json — there
+    is no sealed twin to drift against, so the gate no-ops; config dirs
+    that DO ship a seal (the committed battery/config + re-sealed fixture
+    dirs) are rebuilt in a temp dir and byte-compared on the manifest
+    digests (content_sha256 covers every emitted scenario incl. its
+    per-scenario gold_sha256; golds_sha256 covers the gold store)."""
+    cfg = Path(config_dir)
+    corpus_json = cfg / "corpus.json"
+    if not corpus_json.is_file():
+        return
+    corpus_yaml = cfg / "corpus.yaml"
+    if not corpus_yaml.is_file():
+        raise ConfigError(
+            "corpus freshness gate: corpus.json present but corpus.yaml "
+            "missing in the same config dir")
+
+    import json
+    import tempfile
+
+    from battery.config import build_corpus as _build
+    try:
+        committed = json.loads(corpus_json.read_text(encoding="utf-8"))
+    except (ValueError, UnicodeDecodeError, OSError) as e:
+        raise ConfigError(
+            f"corpus freshness gate REFUSED: corpus.json is corrupt ({e}) — "
+            "re-seal with: uv run python -m battery.config.build_corpus"
+        ) from e
+    try:
+        with tempfile.TemporaryDirectory(prefix="battery-freshness-") as td:
+            _build.build_corpus(source=corpus_yaml, out_dir=Path(td))
+            fresh = json.loads(
+                (Path(td) / "corpus.json").read_text(encoding="utf-8"))
+    except ValueError as e:
+        raise ConfigError(
+            f"corpus freshness gate: cannot rebuild the seal from "
+            f"{corpus_yaml}: {e}") from e
+    cm = committed.get("manifest") or {}
+    fm = fresh.get("manifest") or {}
+    for key in ("corpus_version", "content_sha256", "golds_sha256"):
+        if cm.get(key) != fm.get(key):
+            raise ConfigError(
+                f"corpus freshness gate REFUSED: corpus.json is stale "
+                f"(manifest {key} {cm.get(key)!r} != fresh build "
+                f"{fm.get(key)!r}) — re-seal with: uv run python -m "
+                f"battery.config.build_corpus")
+    # Per-scenario gold_sha256 digests vs the yaml source (a tampered
+    # scenario digest does not recompute the manifest, so the manifest
+    # compare alone would miss it).
+    fresh_digest = {sc.get("id"): sc.get("gold_sha256")
+                    for sc in fresh.get("scenarios", [])}
+    for sc in committed.get("scenarios", []):
+        if sc.get("gold_sha256") != fresh_digest.get(sc.get("id")):
+            raise ConfigError(
+                f"corpus freshness gate REFUSED: corpus.json is stale "
+                f"(scenario {sc.get('id')!r} gold_sha256 does not match the "
+                f"yaml source) — re-seal with: uv run python -m "
+                f"battery.config.build_corpus")
 
 
 class _CompositeScorer:
     def __init__(self, scorers: list[Scorer]):
         self._scorers = scorers
+
+    def expected_coverage(self, scenario, *, run_mode: str = "mock") -> set:
+        """Union over member scorers (harness members contribute empty)."""
+        out: set = set()
+        for s in self._scorers:
+            fn = getattr(s, "expected_coverage", None)
+            if callable(fn):
+                try:
+                    out |= set(fn(scenario, run_mode=run_mode))
+                except TypeError:
+                    out |= set(fn(scenario))
+        return out
+
+    def family_reports(self) -> list[dict]:
+        """Per-scored-family payloads from member probe scorers."""
+        out: list[dict] = []
+        for s in self._scorers:
+            fn = getattr(s, "family_report", None)
+            if callable(fn):
+                payload = fn()
+                if payload:
+                    out.append(payload)
+        return out
 
     def score(self, episode: EpisodeResult, scenario,
               rubric_id: str | None = None) -> ScorerResult:

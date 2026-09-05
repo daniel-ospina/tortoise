@@ -41,8 +41,16 @@ class TestDeterminism:
         # dirs would silently compare a dir to itself.
         assert run1_dir != run2_dir
 
-        arts1 = sorted(p for p in run1_dir.glob("*.json") if p.name != "summary.json")
-        arts2 = sorted(p for p in run2_dir.glob("*.json") if p.name != "summary.json")
+        # Artifact count = scenario count (production corpus is 100+; the
+        # count is derived from the corpus, not hardcoded). The run-end
+        # LIVE writers (recall.json/family_*, Task 5) are not episode
+        # artifacts and are excluded from the pairwise compare.
+        arts1 = sorted(p for p in run1_dir.glob("*.json")
+                       if p.name not in ("summary.json", "recall.json")
+                       and not p.name.startswith("family_"))
+        arts2 = sorted(p for p in run2_dir.glob("*.json")
+                       if p.name not in ("summary.json", "recall.json")
+                       and not p.name.startswith("family_"))
         # Artifact count = scenario count (production corpus is 100+; the
         # count is derived from the corpus, not hardcoded).
         from battery.config.corpus import load_corpus

@@ -57,13 +57,26 @@ def _run(tmp_path, **kw) -> tuple[ExitCode, Path, dict]:
     return code, attempt_dir, summary
 
 
+def _episode_artifacts(attempt: Path) -> list:
+    """Per-episode run artifacts only — the run-end LIVE writers (recall.json
+    + family_*.json, Task 5 #2284) land in the attempt dir too, so count-
+    based artifact asserts filter them (writer files are not episode
+    artifacts)."""
+    return [p for p in attempt.glob("*.json")
+            if p.name not in ("summary.json", "recall.json")
+            and not p.name.startswith("family_")]
+
+
 class TestRunArtifacts:
     def test_per_scenario_artifacts_and_run_id(self, tmp_path):
         code, attempt, summary = _run(tmp_path, mock=True, seed=7)  # noqa: RUF059
         assert code is ExitCode.OK
-        names = [a.name for a in attempt.glob("*.json")
-                 if a.name != "summary.json"]
+        names = [a.name for a in _episode_artifacts(attempt)]
         assert len(names) == 2  # 2 scenarios × 1 mock arm
+        # writer files (Task 5) present alongside: recall.json always;
+        # family_*.json only when a family probe scorer ran
+        assert (attempt / "recall.json").is_file()
+        assert not list(attempt.glob("family_*.json"))  # harness scorer: no families
         # run_id = {episode_seed}-{arm}-{scenario}; episode seed = base+index
         assert sorted(names) == ["7-mock-s0.json", "8-mock-s1.json"]
         for n in names:
@@ -75,7 +88,7 @@ class TestRunArtifacts:
     def test_artifact_schema_keys(self, tmp_path):
         _, attempt, _ = _run(tmp_path, mock=True)
         art = json.loads((attempt / next(
-            n for n in attempt.iterdir() if n.name != "summary.json")).read_text())
+            a.name for a in _episode_artifacts(attempt))).read_text())
         for key in ("schema_version", "run_id", "seed", "arm", "scenario_id",
                     "tier", "model", "determinism", "episode_trace",
                     "metric_values", "model_call_outcomes", "ep_outcome",
@@ -177,10 +190,11 @@ class TestExit4Boundaries:
         code, attempt, summary = _run(tmp_path, mock=True)
         assert code is ExitCode.ARM_FAILED
         assert summary["arms"][0]["arm_present"] is False
-        # summary-only: no episode artifacts
+        # summary-only: no episode artifacts (the run-end writer emits the
+        # empty recall record — not an episode artifact)
         names = [n.name for n in attempt.iterdir()]
         assert "summary.json" in names
-        assert len(names) == 1
+        assert len(_episode_artifacts(attempt)) == 0
 
     def test_all_episodes_failed_exit4_after_artifacts(self, tmp_path, monkeypatch):
         """(b1) all-failed → per-scenario artifacts + summary written, THEN
@@ -195,7 +209,8 @@ class TestExit4Boundaries:
         assert code is ExitCode.ARM_FAILED
         # artifacts exist (counted in artifact) before the exit-4 computation
         names = [n.name for n in attempt.iterdir()]
-        assert len(names) == 3  # 2 episode artifacts + summary
+        assert len(names) == 4  # 2 episode artifacts + recall.json + summary
+        assert len(_episode_artifacts(attempt)) == 2
         assert summary["arms"][0]["valid_episodes"] == 0
         assert summary["arms"][0]["excluded"]["count"] == 2
 
@@ -223,14 +238,13 @@ class TestExit4Boundaries:
         by_id = {a["arm_id"]: a for a in summary["arms"]}
         assert by_id["mock"]["arm_present"] is False
         assert by_id["mock2"]["arm_present"] is True
-        names = [n.name for n in attempt.iterdir()]
-        assert len([n for n in names if n != "summary.json"]) == 2  # arm B artifacts
+        assert len([n for n in _episode_artifacts(attempt)]) == 2  # arm B artifacts
 
 
 class TestMockArmContract:
     def test_metric_values_nonempty(self, tmp_path):
         _, attempt, _ = _run(tmp_path, mock=True)
         art = json.loads((attempt / next(
-            n for n in attempt.iterdir() if n.name != "summary.json")).read_text())
+            a.name for a in _episode_artifacts(attempt))).read_text())
         assert art["metric_values"]["n_turns"] >= 1
         assert art["metric_values"]["total_tokens"] > 0
