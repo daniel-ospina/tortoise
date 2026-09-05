@@ -155,6 +155,43 @@ def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:
     return proj._probe_ok()
 
 
+def _resolve_embedded_db_path() -> str:
+    """Resolve the server-process embedded DB path (env → /data default → tempdir).
+
+    Single source of the inline policy `_make_sdk`/`_registry_anchor` used to
+    duplicate (hosted #2251): TORTOISE_DB_PATH when set to a path whose
+    dirname exists or can be created (returned verbatim — deliberately NOT
+    abs-ified/expanded, unlike config.resolve_db_path), else /data/tortoise.db
+    (the fly.io volume default), with tempfile.gettempdir()/tortoise.db as
+    the fallback whenever makedirs(dirname(candidate)) raises OSError — the
+    /data default when the volume is unwritable (test env / bare daemon run /
+    dirname-is-a-file), OR the env value when its dirname is empty
+    (empty-string env or a bare filename like "tortoise.db": dirname("") /
+    dirname("x.db") is "" → makedirs("") raises FileNotFoundError, an OSError)
+    or otherwise uncreatable.
+
+    Callers MUST dispatch on TORTOISE_DB_URI *before* calling (URI mode never
+    resolves an embedded path). Mirror of selfhost_api._resolve_embedded_db_path
+    (same-name convention; the daemon modules never cross-import — future
+    consolidation target).
+
+    ⛔ Anti-bare-construction warning (#2251): a bare ``TortoiseSDK()`` (no
+    db_path) resolves config.resolve_db_path() → ~/.tortoise/tortoise.db (the
+    CLI/dev default) when TORTOISE_DB_PATH is unset — a DIFFERENT file than
+    this server policy. Hosted request/sweep paths must construct via
+    _make_sdk/_registry_anchor, never bare.
+    """
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        # /data volume not writable (test env, or volume not mounted yet) —
+        # fall back to a temp file so embedded provisioning still works.
+        import tempfile
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    return db_path
+
+
 def _make_sdk(*, namespace: str | None = None,
               graph_name: str | None = None) -> TortoiseSDK:
     """Build an SDK backed by TORTOISE_DB_URI, or embedded mode when unset.
@@ -173,14 +210,12 @@ def _make_sdk(*, namespace: str | None = None,
     key = graph_name if graph_name is not None else (namespace or "")
     if os.environ.get("TORTOISE_DB_URI"):
         return TortoiseSDK(namespace=namespace, graph_name=graph_name)
-    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
-    try:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    except OSError:
-        # /data volume not writable (test env, or volume not mounted yet) —
-        # fall back to a temp file so provisioning still works.
-        import tempfile
-        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    # The anchor AND the per-request SDK must agree on this path or the anchor
+    # pins a stray server while requests close-on-GC the real one (the #1475
+    # regression silently persists). _resolve_embedded_db_path is the single
+    # policy owner (#2251: bare TortoiseSDK() constructions resolve a DIFFERENT
+    # ~/.tortoise path — never bare-construct on hosted paths).
+    db_path = _resolve_embedded_db_path()
     # Fast path (lock-free steady state): reuse a healthy anchor as-is — the
     # per-request fresh SDK below attaches to its daemon (the #493/#1607
     # designed shape). The probe runs outside the lock exactly as it always
@@ -240,12 +275,7 @@ def _registry_anchor() -> TortoiseSDK:
     cached handle."""
     if os.environ.get("TORTOISE_DB_URI"):
         return TortoiseSDK(namespace="registry")
-    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
-    try:
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-    except OSError:
-        import tempfile
-        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    db_path = _resolve_embedded_db_path()
     anchor = _FALLBACK_KEEPALIVE.get("registry")
     if anchor is None or not _anchor_usable(anchor, db_path):
         # Miss or stale — serialize the evict+create+insert (#2172, same
@@ -294,10 +324,12 @@ mcp_http_app = create_http_app(
 def _iter_registered_teams() -> list[dict]:
     """List registered teams from the control plane (best-effort).
 
-    Used by the event-retention sweep (#432 Task 7) and boot reconcile.
+    Used by the event-retention sweep (#432 Task 7) — the boot pass and the
+    hourly interval in _lifespan (this is its only production caller).
     Supabase mode (post-#669 flip): enumerates from Supabase teams via the
     seam — the registry is DELETED and querying it would auto-recreate the
-    empty graph. Registry mode: the Team nodes, as before.
+    empty graph. Registry mode: the Team nodes from the
+    registry_control_plane graph via _make_sdk(namespace="registry").
     Returns [] on any failure — the sweep is best-effort.
     """
     try:
@@ -311,27 +343,27 @@ def _iter_registered_teams() -> list[dict]:
                 filters=[("deleted_at", "is", None)],
             )
             return [{"team_id": r["id"], "name": r.get("name")} for r in rows]
-        from tortoise.sdk import TortoiseSDK
 
-        # #2179: direct TortoiseSDK construction (bypasses the _registry_anchor
-        # keepalive lock) is SAFE-BY-TOPOLOGY here: this runs only on the
-        # asyncio single-loop background sweep / boot reconcile (no thread
-        # overlap — sync code here executes on the one loop), it is wrapped in
-        # try/except returning [] on any failure, and the fresh SDK is
-        # short-lived (close-on-GC after the query). Do NOT "fix" this by
-        # routing through _registry_anchor without deciding the path-divergence
-        # below first (see #2179 follow-up: bare constructions resolve via
-        # config.resolve_db_path() → ~/.tortoise/tortoise.db when
-        # TORTOISE_DB_PATH is unset, whereas _registry_anchor/_make_sdk resolve
-        # to /data/tortoise.db — routing would silently change the query
-        # target). If a to_thread/threadpool shape is ever introduced here,
+        # #2251 (was #2179 follow-up): the old bare TortoiseSDK() read the
+        # ns-less control_plane graph on resolve_db_path()'s ~/.tortoise DB
+        # while every registry writer targets registry_control_plane on the
+        # anchored /data-or-tempdir store — the registry-mode sweep was
+        # always-empty (mode-independent) AND path-divergent (embedded).
+        # _make_sdk(namespace="registry") fixes BOTH halves via the seam
+        # writers/_registry_sdk share: it derives registry_control_plane and
+        # resolves the anchored path. The fresh handle per call is fine for a
+        # boot+hourly best-effort sweep; the "registry" keepalive anchor mints
+        # lazily on the first embedded call and holds the daemon between
+        # sweeps. Supabase mode returns above (never construct the registry —
+        # #669). If a to_thread/threadpool shape is ever introduced here,
         # route through _registry_anchor() first.
-        sdk = TortoiseSDK()
+        sdk = _make_sdk(namespace="registry")
         rows = sdk._get_registry().query(
             "MATCH (t:Team) WHERE t.deleted_at IS NULL RETURN t.id, t.name"
         ).result_set
-        # P2 (Qwen): skip rows with falsy team_id — namespace=None would sweep
-        # the default/shared graph.
+        # P2 (Qwen): skip rows with falsy team_id — a falsy id would otherwise
+        # produce an invalid namespace downstream (never sweep the
+        # default/shared graph).
         return [{"team_id": r[0], "name": r[1] if len(r) > 1 else None}
                 for r in rows if r and r[0]]
     except Exception:
@@ -481,8 +513,31 @@ async def _lifespan(app):
                     from tortoise.event_store import purge_expired, purge_overflow
                     days = int(os.environ.get("TORTOISE_EVENT_RETENTION_DAYS", "30"))
                     cap = int(os.environ.get("TORTOISE_EVENT_MAX_PER_TEAM", "500000"))
+                    # Probe-before-purge is registry-mode only (#2251 review
+                    # P2): a purge query against an ABSENT team_{tid} graph
+                    # (orphan registry row from a partial provision) would
+                    # materialize an empty one. Skip the probe in Supabase
+                    # mode — the registry namespace must NEVER be
+                    # constructed there (#669; the flip-gate pins the
+                    # webhook path zero-touch), and that sweep predates
+                    # #2251 so it keeps its pre-existing unconditional
+                    # per-team purge. Registry mode: enumerate the
+                    # server-wide existing graphs ONCE; None → probe failed
+                    # → skip this cycle (best-effort — the per-team purges
+                    # below hit the same graph store, so they would fail
+                    # anyway; the per-team SDK lazy hook still covers
+                    # purges).
+                    from tortoise.supabase_control import is_supabase_enabled
+                    existing = None  # None = no gate (Supabase mode)
+                    if not is_supabase_enabled():
+                        existing = _registry_existing_graphs()
+                        if existing is None:
+                            _logger.warning("event retention sweep skipped: registry graph probe failed")
+                            return
                     # Sweep every registered team's graph (registry Team nodes).
                     for team in _iter_registered_teams():
+                        if existing is not None and f"team_{team['team_id']}" not in existing:
+                            continue
                         try:
                             sdk = _make_sdk(namespace=team["team_id"])
                             proj = sdk._get_proj()
@@ -493,14 +548,14 @@ async def _lifespan(app):
                 except Exception as exc:
                     _logger.warning("event retention sweep failed: %s", exc)
 
-            _sweep_events()  # boot sweep
+            await asyncio.to_thread(_sweep_events)  # boot sweep (#310, off the loop — same shape as the #302 purge below)
             await asyncio.to_thread(_purge_deleted_teams)  # boot purge (#302)
             interval = int(os.environ.get("TORTOISE_EVENT_RETENTION_INTERVAL", "3600"))
 
             async def _event_retention_loop() -> None:
                 while True:
                     await asyncio.sleep(interval)
-                    _sweep_events()
+                    await asyncio.to_thread(_sweep_events)
                     # #302: hard-delete past grace (sync DB work off the loop)
                     await asyncio.to_thread(_purge_deleted_teams)
 
@@ -13804,33 +13859,60 @@ _ACCEPT_AND_DROP = True  # W1 (#1997) landed — PATCH onboarding_complete is dr
 
 
 def _graph_has_team_namespace(team_id: str) -> bool:
-    """Existence check WITHOUT constructing the projection (constructing it
-    materializes an absent graph — a read-path write, banned by pin 4).
-    Uses the registry SDK's live connection to list graphs."""
+    """Existence check WITHOUT constructing the TEAM projection (constructing
+    team_{tid} would materialize an absent team graph — a read-path write,
+    banned by pin 4). Probes the server-wide graph list via the registry
+    seam's projection (list_graphs never mints team_{tid})."""
     graph_name = f"team_{team_id}"
     try:
-        from tortoise.sdk import TortoiseSDK
-        # #2179: direct TortoiseSDK(namespace="registry") construction
-        # (bypasses _registry_anchor's keepalive lock) is SAFE-BY-TOPOLOGY
-        # here: called synchronously on the asyncio single-loop request path
-        # (no concurrent first-open on the embedded db_path — sync code runs
-        # on the one loop, and the #2172 lock's busy-flag read is
-        # GIL-atomic), it closes explicitly below, and it is wrapped in
-        # try/except returning True (graph-up-unknown) on failure. Do NOT
-        # route through _registry_anchor without first deciding the
-        # path-divergence (#2179 follow-up): this bare construction resolves
-        # via config.resolve_db_path() → ~/.tortoise/tortoise.db when
-        # TORTOISE_DB_PATH is unset, whereas _registry_anchor resolves to
-        # /data/tortoise.db — routing would silently change WHICH db is
-        # probed. In URI mode (production) both hit the same server.
-        sdk = TortoiseSDK(namespace="registry")
-        graphs = sdk._get_proj().db.list_graphs() or []
-        sdk.close()
+        # #2251 (was #2179 follow-up): the old bare TortoiseSDK(namespace=
+        # "registry") resolved config.resolve_db_path() → ~/.tortoise/tortoise.db
+        # when TORTOISE_DB_PATH was unset while the anchored writers use
+        # /data-or-tempdir — the existence verdict probed the WRONG (likely
+        # empty) db. _make_sdk(namespace="registry") is byte-identical to the
+        # bare construction in URI mode (returns a fresh TortoiseSDK before
+        # any anchor logic — no keepalive, no _get_registry, so the deleted
+        # registry_control_plane is never auto-recreated in Supabase mode) and
+        # resolves the ANCHORED path in embedded mode (the db writers use).
+        # The fresh handle is closed explicitly below (its close only drops
+        # the connection — the keepalive anchor holds the daemon, #493/#1607).
+        # The construction sits INSIDE this try so a cross-process
+        # EmbeddedStoreBusyError keeps the never-raise fail-open contract.
+        sdk = _make_sdk(namespace="registry")
+        try:
+            graphs = sdk._get_proj().db.list_graphs() or []
+        finally:
+            sdk.close()
         return graph_name in graphs
     except Exception:
         # connection failure — treat as graph-up-unknown → the projection
         # falls through to the read (which raises → 'unavailable' markers)
         return True
+
+
+def _registry_existing_graphs() -> set[str] | None:
+    """Server-wide existing graph names via the registry seam (best-effort).
+
+    list_graphs() is a read that never mints a graph (pin-4) and never
+    auto-recreates the deleted registry_control_plane in Supabase mode
+    (#669) — same safe shape _graph_has_team_namespace already uses on
+    the onboarding hot path. Used as a probe-before-purge gate by the
+    retention sweep (#2251 review P2): purging an ABSENT team_{tid} graph
+    (orphan registry row from a partial provision between the Team-node
+    create and the graph mint) would silently materialize an empty graph,
+    flipping the onboarding existence verdict for teams whose graph never
+    existed. None = probe failed → caller skips the sweep this cycle
+    (best-effort; the per-team SDK lazy hook still purges per-team graphs).
+    """
+    try:
+        sdk = _make_sdk(namespace="registry")
+        try:
+            graphs = sdk._get_proj().db.list_graphs() or []
+        finally:
+            sdk.close()
+        return set(graphs)
+    except Exception:
+        return None
 
 
 def _graph_available(team_id: str) -> bool:
