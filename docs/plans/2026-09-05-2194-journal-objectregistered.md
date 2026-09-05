@@ -241,3 +241,9 @@ uv run pytest tests/test_entity_stage.py tests/test_semantic_extractor.py tests/
 - **Durability write-surface invariant / Object loss backstop (extend the #548 pre-wipe snapshot or journal repair)** + capture aboutObject/CONTAINS/session-link edge durability → **#2296**.
 - **EventAPI `add_object` unconditional journaling** — a different producer (own `_emit`), relied on by mining/connector lanes; unchanged.
 - **Backfill of pre-#2194 live Objects** — no backfill in scope; the first post-fix rebuild loses the pre-fix population (disaster-recovery journal semantics) — documented in the fold-sweep comment (T4.4) and the #2194 scoping comment.
+
+
+---
+
+<!-- plan-review: cycles=5, status=clean, version=2.3.0 -->
+<!-- 🔍 second-model final gate: clean (deepseek-v4-pro) — 0 P0/P1/P2; P3 (acceptance wording) + P4s resolved in the final fix cycle -->
