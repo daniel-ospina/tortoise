@@ -2587,15 +2587,11 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # Replaces @mcp.tool() decorators with programmatic registration.
 # Function bodies remain module-level callables; the adapter wraps each
 # via FunctionTool.from_function() and registers them on the shared mcp.
-# Must execute AFTER all tool function definitions (at module bottom).
-from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
-
-_adapter = FastMCPAdapter(mcp)
-_adapter.register_all(TOOL_REGISTRY, {
-    t.name: globals()[t.name]
-    for t in TOOL_REGISTRY
-    if t.name in globals()
-})
+# The register_all call lives at the MODULE BOTTOM — after every module-level
+# tool definition (incl. the onboarding tools + tortoise_session_capture
+# defined below) — so the adapter resolves a handler for every registry
+# entry from globals() (#2210: entries defined after this point used to be
+# logged "no handler — skipped" while decorators half-registered them).
 
 
 
@@ -2607,8 +2603,10 @@ _adapter.register_all(TOOL_REGISTRY, {
 # Epic #888 no-regret: once a team's onboarding completes, the six
 # tortoise_onboarding_* tools retire from that team's steady-state MCP
 # surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
-# web onboarding flow. Definitions and handlers are untouched; only the
-# listing hides them. See _HTTPToolFilter.list_tools.
+# web onboarding flow. Function bodies are untouched; only the listing hides
+# them. #2210: no @mcp.tool decorators here — the module-bottom register_all
+# registers each from its registry entry (annotations are registry-canonical).
+# See _HTTPToolFilter.list_tools.
 _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
     "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
     "tortoise_onboarding_session_recording", "tortoise_onboarding_github_connect",
@@ -2664,7 +2662,6 @@ def _onboarding_state() -> dict:
     return _read_state(team_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(idempotentHint=True))
 def tortoise_onboarding_demo_create() -> dict:
     """Create the demo epistemic graph (4 layers) for this team. Idempotent.
 
@@ -2689,13 +2686,11 @@ def tortoise_onboarding_demo_create() -> dict:
     return result
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_onboarding_state() -> dict:
     """Return this team's onboarding progress (Q6 verification step)."""
     return _onboarding_state()
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_seed(org_name: str | None = None,
                              person_name: str | None = None) -> dict:
     """File the two onboarding anchor Subjects for this team (#1999, W3):
@@ -2759,7 +2754,6 @@ def tortoise_onboarding_session_recording(enabled: bool) -> dict:
     return {"onboarding": state}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     """Initiate GitHub OAuth — returns the authorize URL + CSRF state (Q1)."""
     team_id = _current_team_id.get()
@@ -2790,7 +2784,6 @@ def tortoise_onboarding_github_connect(org: str | None = None) -> dict:
     return {"auth_url": auth_url, "state": state}
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True))
 def tortoise_onboarding_github_status() -> dict:
     """Return GitHub connection status for this team (Q1 verify)."""
     team_id = _current_team_id.get()
@@ -2897,7 +2890,6 @@ def tortoise_session_capture(conversation: list[dict],
         return {"error": str(detail), "status": status}
 
 
-@mcp.tool(annotations=ToolAnnotations(destructiveHint=True))
 def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
     """Start background GitHub indexing of an org's issues/PRs (Q2).
 
@@ -3110,11 +3102,28 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
 
 
 # #993: the stdio entrypoint guard MUST run AFTER every @mcp.tool decorator
-# and the FastMCPAdapter.register_all() call above. Placing it earlier (was
+# and the FastMCPAdapter.register_all() call above (every tool function in
+# this module has been defined by this point, so the adapter below resolves
+# a handler for EVERY registry entry — #2210). Placing it earlier (was
 # line ~1211) made `python -m tortoise.mcp_server` enter mcp.run() with ZERO
 # tools registered — onboarding's Step 0 (tortoise_health) failed with
 # "Can't connect to Tortoise". Importing callers (tortoise serve via
 # __main__.py, deployment.py) are unaffected: they import the module first
 # (which executes register_all), then call main().
+
+# ── Tool Registry Adapter (#454) — registration (module bottom) ──
+# Executes after EVERY module-level tool function definition above, so the
+# handlers dict covers the whole registry: the six onboarding tools and
+# tortoise_session_capture used to be logged "no handler — skipped" (they
+# were defined after this block's old mid-module position) — #2210.
+from tortoise.tool_registry import TOOL_REGISTRY, GROUP_BY_NAME, FastMCPAdapter  # noqa: E402, I001
+
+_adapter = FastMCPAdapter(mcp)
+_adapter.register_all(TOOL_REGISTRY, {
+    t.name: globals()[t.name]
+    for t in TOOL_REGISTRY
+    if t.name in globals()
+})
+
 if __name__ == "__main__":
     main()
