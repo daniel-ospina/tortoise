@@ -488,9 +488,10 @@ class TestClosedVocab:
     def test_core_kinds_accepted_bare_and_namespaced(self):
         from tortoise.value_extractor import validate_summary, _object_kind_vocab  # noqa: F401, I001
         vocab = _object_kind_vocab()
-        for kind in ("Project", "WorkItem", "document", "tag", "user",
-                     "skill", "tool", "agent", "workflow", "agreement",
-                     "standard", "other", "strategy", "plan", "goal", "target"):
+        for kind in ("Project", "WorkItem", "Problem", "document", "tag",
+                     "user", "skill", "tool", "agent", "workflow",
+                     "agreement", "standard", "other", "strategy", "plan",
+                     "goal", "target"):
             assert kind in vocab, f"{kind} missing from closed vocab"
             assert f"core:{kind}" in vocab, f"core:{kind} missing"
             assert kind.lower() in vocab, f"{kind.lower()} missing"

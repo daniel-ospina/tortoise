@@ -39,7 +39,7 @@ def _warn_packs_once(key: tuple, msg: str, *args) -> None:
 
 CANONICAL_OBJECT_KINDS = frozenset({
     # Core work concepts
-    "Project", "WorkItem",
+    "Project", "WorkItem", "Problem",  # Problem: deviation from desired state — problem-family parent
     # Universal
     "document", "user", "skill", "tool", "agent",
     "workflow", "agreement", "standard", "other",
