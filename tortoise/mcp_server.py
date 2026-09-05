@@ -97,7 +97,24 @@ if "pytest" not in sys.modules:
 # destructiveHint=true: agent MUST get human confirmation
 # idempotentHint=true: repeated calls have no extra side effects
 
-mcp = FastMCP("tortoise")
+# ----
+# Server instructions (epic #2080 end-state seam #2126 — Claude-family
+# priming). FastMCP exposes these via the MCP initialize handshake; Claude
+# Code / Claude Desktop / Cursor / Codex attach them to the system prompt,
+# so this block is the low-cost per-turn memory-usage guidance for every
+# MCP-capable harness (the pull side of the seams; the per-turn push side is
+# volunteer-turn.sh registered via `tortoise install <harness>`).
+_MCP_INSTRUCTIONS = (
+    "You are connected to Tortoise, an epistemic memory graph. "
+    "tortoise_search / tortoise_query surface durable facts from prior "
+    "sessions; tortoise_session_capture ingests a session transcript. "
+    "Only persist information that is durable, factual, and reusable — "
+    "not transient task chatter. Cite what you act on, and prefer the "
+    "structured pointKinds over free text. If a search/query returns "
+    "nothing relevant, say so plainly instead of fabricating recollection."
+)
+
+mcp = FastMCP("tortoise", instructions=_MCP_INSTRUCTIONS)
 
 # ── MCP tool-call telemetry (#889) ─────────────────────────────────
 # One structured analytics event per MCP tool call — friction evidence for the

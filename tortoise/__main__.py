@@ -2154,6 +2154,371 @@ def _cmd_context(args) -> int:
     return 0
 
 
+def _cmd_volunteer(args) -> int:
+    """Per-turn volunteering-memory reflex (epic #2080 end-state seams).
+
+    Reads a turn window (JSON list of {role, content} turns, a bare-string
+    prompt, or {window, session_id, min_confidence, ...}) from --file or
+    stdin, runs the ONE canonical reflex pipeline (hosted POST /v1/context
+    when a hosted key is configured, else the local SDK volunteer_context —
+    both share tortoise/volunteer.py), and prints the injected block text
+    (default) or the full response contract (--json).
+
+    Hook ergonomics: clean silence (no pointers above the gate) prints
+    nothing and exits 0 — never an error. Failures are honest: text mode
+    prints to stderr and exits 1; --json mode emits {status: error, ...} on
+    stdout (per-harness hooks append ``|| true`` so a failed reflex can
+    never break the agent turn — fail-open content).
+    """
+    import json as _json, os as _os, sys as _sys  # noqa: E401, I001
+
+    def _fail(msg: str) -> int:
+        # Machine contract: --json failures emit {status: error, ...} on
+        # STDOUT (the repo-wide _cmd_fail convention); text mode uses stderr.
+        if args.json:
+            print(_json.dumps({"status": "error", "error": msg}))
+        else:
+            print(msg, file=_sys.stderr)
+        return 1
+
+    raw = None
+    if args.file:
+        try:
+            raw = Path(args.file).read_text(encoding="utf-8")
+        except OSError as e:
+            return _fail(f"Cannot read window file {args.file}: {e}")
+    else:
+        raw = _sys.stdin.read()
+    if not raw or not raw.strip():
+        # Empty window → clean silence (no pointers), NOT a degradation.
+        if args.json:
+            print(_json.dumps({"pointers": [], "why": [], "surfaced": [],
+                               "block": "", "degraded_reason": None}))
+        return 0
+
+    # Disambiguation: a prompt window is EITHER a JSON contract shape (a list
+    # of {role, content} turns, a JSON string prompt, or {window: [...]})
+    # OR — for hook ergonomics — a RAW prompt text blob. Input that parses as
+    # JSON but is not a contract shape (scalars, non-turn lists, foreign
+    # dicts like {"prompt": ...}) is treated as raw prompt text, never an
+    # error: a UserPromptSubmit hook pipes raw text and a prompt can look
+    # like JSON. No silent truncation: the full raw input becomes the turn.
+    payload = None
+    try:
+        payload = _json.loads(raw)
+    except ValueError:
+        payload = None
+    window = None
+    session_id = args.session_id
+    if (isinstance(payload, dict)
+            and isinstance(payload.get("window"), list)
+            and all(isinstance(t, dict) for t in payload["window"])):
+        window = payload["window"]
+        session_id = payload.get("session_id") or args.session_id
+    elif isinstance(payload, str):
+        window = [{"role": "user", "content": payload}]
+    elif (isinstance(payload, list) and payload
+          and all(isinstance(t, dict) for t in payload)):
+        window = payload
+    if window is None:
+        window = [{"role": "user", "content": raw.strip()}]
+    window = [t for t in window
+              if isinstance(t, dict) and str(t.get("content") or "").strip()]
+    if not window:
+        if args.json:
+            print(_json.dumps({"pointers": [], "why": [], "surfaced": [],
+                               "block": "", "degraded_reason": None}))
+        return 0
+
+    # Shared resolver (#1708 D1b): a file/global hosted config flips the
+    # hook to hosted mode; a bare TORTOISE_API_KEY never silently does (the
+    # documented local-memory hook posture — mirrors _cmd_context).
+    api_key = None
+    api_url = _os.environ.get("TORTOISE_API_URL", "https://api.premiselabs.co")
+    try:
+        _cfg_path, _cfg, api_key, api_url = _resolve_config_path(include_env=False)
+    except _ConfigError as e:
+        print(f"Warning: config at {e} is corrupt or unreadable — falling back "
+              "to local memory mode.", file=_sys.stderr)
+        api_key = None
+
+    body = {
+        "window": window,
+        "session_id": session_id,
+        "min_confidence": getattr(args, "min_confidence", 0.7),
+        "max_pointers": int(getattr(args, "max_pointers", 3)),
+        "why": not getattr(args, "no_why", False),
+    }
+    if api_key:
+        from urllib.request import Request, urlopen  # noqa: I001
+        from urllib.error import URLError, HTTPError
+        try:
+            req = Request(
+                f"{api_url.rstrip('/')}/v1/context",
+                data=_json.dumps(body).encode("utf-8"),
+                headers={"Authorization": f"Bearer {api_key}",
+                         "Content-Type": "application/json"},
+            )
+            with urlopen(req, timeout=15) as resp:
+                data = _json.loads(resp.read())
+        except HTTPError as e:
+            eb = e.read().decode() if e.fp else ""
+            return _fail(f"Cannot reach Tortoise API ({e.code}): {eb}")
+        except (URLError, ValueError) as e:
+            return _fail(f"Cannot reach Tortoise API: "
+                         f"{getattr(e, 'reason', e)}")
+    else:
+        try:
+            from tortoise.sdk import TortoiseSDK
+            sdk = TortoiseSDK() if _os.environ.get("TORTOISE_DB_URI") else \
+                TortoiseSDK(db_path=_os.environ.get("TORTOISE_DB_PATH"))
+            data = sdk.volunteer_context(
+                window=window,
+                session_id=session_id,
+                min_confidence=body["min_confidence"],
+                max_pointers=body["max_pointers"],
+                why=body["why"],
+            )
+        except Exception as e:
+            return _fail(f"Tortoise unavailable: {e}")
+
+    if args.json:
+        print(_json.dumps(data))
+        return 0
+    block = data.get("block") or ""
+    if block.strip():
+        print(block)
+    return 0
+
+
+def _cmd_install_hooks(args) -> int:
+    """Agent-first harness seam onboarding (epic #2080 #2123/#2124).
+
+    Writes the per-harness UserPromptSubmit hook registration pointing at the
+    SHIPPED volunteer-turn.sh (resolved from this package, so the registration
+    survives site-package installs), enabling the per-turn volunteering-memory
+    reflex in codex / claude / cline.
+
+    Safety contract:
+    - Existing unrelated registrations are NEVER touched: claude settings.json
+      hooks are merged key-wise; codex hooks.json entries are appended only
+      when our registration is absent; an existing cline UserPromptSubmit hook
+      that is not ours is REFUSED (printed conflict), never overwritten.
+    - --uninstall removes ONLY registrations whose command references
+      volunteer-turn.sh (wrapper-aware for both flat and claude shapes).
+    - Symlinked targets that resolve OUTSIDE the install dir are refused
+      (a repo .codex/.claude/.cline symlink must not write through to
+      ~/.claude/settings.json or any other real file).
+    - The shipped hook path is shlex-quoted into every registration command
+      so spaces/quotes in the install path cannot break the harness exec.
+    """
+    import json as _json, os as _os, shlex as _shlex, sys as _sys  # noqa: E401, I001
+    from pathlib import Path as _P
+
+    if getattr(args, "list", False) or not getattr(args, "harness", None):
+        print("Installable harness seams (per-turn volunteering-memory hook):")
+        print("  tortoise install codex   → <dir>/.codex/hooks.json "
+              "(UserPromptSubmit → volunteer-turn.sh codex)")
+        print("  tortoise install claude  → <dir>/.claude/settings.json "
+              "hooks merged (UserPromptSubmit → volunteer-turn.sh claude)")
+        print("  tortoise install cline   → <dir>/.cline/hooks/UserPromptSubmit "
+              "(→ volunteer-turn.sh cline)")
+        print("Other seams (docs/matrix only, this wave): pi extension, "
+              "devin, cursor, gemini, opencode — see "
+              "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
+        return 0
+
+    root = _P(getattr(args, "dir", "."))
+    harness = args.harness
+    script = Path(__file__).resolve().parent / "claude-hooks" / "volunteer-turn.sh"
+    if not script.exists():
+        print(f"volunteer-turn.sh not found at {script} — cannot install",
+              file=_sys.stderr)
+        return 1
+    # Shell-quoted command fragment (spaces/quotes in the install path are
+    # legal in the harness command strings and the cline wrapper exec).
+    quoted_script = _shlex.quote(str(script))
+
+    # Per-harness registration targets. Registration contracts verified
+    # against harness primary docs: BOTH codex (.codex/hooks.json) and claude
+    # (.claude/settings.json) use the same event → matcher-group shape, where
+    # each event entry wraps handlers in {"hooks": [{type, command}]} — a flat
+    # {type, command} under the event key is silently ignored by codex's
+    # parser (hook_config.rs deserializes events as Vec<MatcherGroup>). Cline
+    # hooks are executable files at .cline/hooks/<EventName>.
+    if harness == "codex":
+        target = root / ".codex" / "hooks.json"
+        # Nested matcher-group shape (verified against codex primary docs).
+        registration = [{"hooks": [{"type": "command",
+                                    "command": f"{quoted_script} codex"}]}]
+    elif harness == "claude":
+        target = root / ".claude" / "settings.json"
+        registration = [{"hooks": [{"type": "command",
+                                    "command": f"{quoted_script} claude"}]}]
+    else:  # cline
+        target = root / ".cline" / "hooks" / "UserPromptSubmit"
+        registration = None
+
+    dry = getattr(args, "dry_run", False)
+    uninstall = getattr(args, "uninstall", False)
+
+    # ── Symlink-escape guard: refuse when ANY existing component between the
+    #    install root and the target (including the leaf AND intermediate
+    #    dirs like .claude/ or .cline/hooks/) resolves OUTSIDE the resolved
+    #    root — a repo symlink must not write through to a real user file
+    #    (e.g. .claude/settings.json → ~/.claude/settings.json, or
+    #    .cline/ → a shared hooks dir). Resolution compares resolved paths on
+    #    both sides, so a root reached via a symlinked alias (macOS /tmp →
+    #    /private/tmp, worktrees) is NOT a false positive. ───────────────
+    root_r = root.resolve()
+    try:
+        rel_parts = target.relative_to(root).parts
+    except ValueError:
+        rel_parts = target.parts  # target outside root — fall back to leaf
+    cur = root
+    check_paths = [root]
+    for part in rel_parts:
+        cur = cur / part
+        check_paths.append(cur)
+    for cp in check_paths:
+        if cp.is_symlink():
+            resolved = cp.resolve()
+            if resolved != root_r and root_r not in resolved.parents:
+                print(f"Refusing: {cp} resolves to {resolved} — outside the "
+                      f"install dir {root_r}. Symlinked harness configs are "
+                      "not touched (unlink the symlink first or pass --dir "
+                      "explicitly).", file=_sys.stderr)
+                return 1
+
+    if harness == "cline":
+        # Cline hooks are files at .cline/hooks/<EventName> (project) or
+        # ~/.cline/hooks (global); hooks must also be enabled in settings.
+        marker_content = f"#!/usr/bin/env bash\nexec {quoted_script} cline\n"
+        if target.exists() and target.is_dir():
+            print(f"{target} is a directory — refusing to touch it.",
+                  file=_sys.stderr)
+            return 1
+        if target.exists():
+            existing_text = target.read_text(
+                encoding="utf-8", errors="replace")
+            if uninstall:
+                if "volunteer-turn.sh" not in existing_text:
+                    print(f"{target} is not a volunteer-turn.sh hook — refusing "
+                          "to delete it.", file=_sys.stderr)
+                    return 1
+            else:
+                if "volunteer-turn.sh" not in existing_text:
+                    print(f"{target} already exists and is not a "
+                          "volunteer-turn.sh hook — refusing to overwrite it. "
+                          "Remove it manually or install into another dir.",
+                          file=_sys.stderr)
+                    return 1
+        if dry:
+            print(f"[dry-run] would write {target}:")
+            print(marker_content.rstrip())
+        elif uninstall:
+            target.unlink()
+            print(f"Removed {target}")
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(marker_content)
+            _os.chmod(target, 0o755)
+            print(f"Installed {target}")
+            print("Then enable hooks in Cline settings (Hook feature) — "
+                  "project .cline/hooks or global ~/.cline/hooks both work.")
+        return 0
+
+    # ── codex / claude: JSON registration file (merge-aware). ──────────
+    def _entry_command(e) -> str:
+        """The command inside any registration entry shape (flat or wrapped).
+        Malformed entries (non-list "hooks", non-dict elements) yield "" —
+        they are treated as foreign and refused/left untouched, never crash."""
+        if isinstance(e, dict):
+            inner = e.get("command")
+            if inner is None:
+                hs = e.get("hooks")
+                if isinstance(hs, list) and hs and isinstance(hs[0], dict):
+                    inner = hs[0].get("command")
+            return inner or ""
+        return ""
+
+    existing = target.read_text(encoding="utf-8") if target.exists() else None
+    if existing is not None:
+        try:
+            existing_json = _json.loads(existing)
+        except ValueError:
+            print(f"{target} exists but is not valid JSON — refusing to touch "
+                  "it. Merge manually.", file=_sys.stderr)
+            return 1
+        if not isinstance(existing_json, dict):
+            print(f"{target} exists but its top level is not a JSON object — "
+                  "refusing to touch it. Merge manually.", file=_sys.stderr)
+            return 1
+        hooks = existing_json.get("hooks")
+        if hooks is not None and not isinstance(hooks, dict):
+            print(f"{target} exists but its \"hooks\" field is not a JSON "
+                  "object — refusing to touch it. Merge manually.",
+                  file=_sys.stderr)
+            return 1
+        hooks = hooks or {}
+        ups = hooks.get("UserPromptSubmit")
+        if ups is not None and not isinstance(ups, list):
+            print(f"{target} exists but its UserPromptSubmit entries are not "
+                  "a list — refusing to touch it. Merge manually.",
+                  file=_sys.stderr)
+            return 1
+        ups = ups or []
+        ours = [e for e in ups if "volunteer-turn.sh" in _entry_command(e)]
+        if uninstall:
+            remaining = [e for e in ups if e not in ours]
+            if remaining:
+                hooks["UserPromptSubmit"] = remaining
+            else:
+                hooks.pop("UserPromptSubmit", None)
+            existing_json["hooks"] = hooks
+            if not hooks:
+                existing_json.pop("hooks", None)
+            out = _json.dumps(existing_json, indent=2) + "\n"
+            if dry:
+                print(f"[dry-run] would uninstall from {target}:")
+                print(out)
+            else:
+                target.write_text(out)
+                print(f"Uninstalled volunteer-turn.sh from {target}")
+            return 0
+        # Merge: append our registration under UserPromptSubmit only when no
+        # volunteer-turn.sh entry is present (idempotent — wrapper-aware).
+        if not ours:
+            ups.append(registration[0])
+            existing_json.setdefault("hooks", {})["UserPromptSubmit"] = ups
+        out = _json.dumps(existing_json, indent=2) + "\n"
+        if dry:
+            print(f"[dry-run] would merge into {target}:")
+            print(out)
+        else:
+            target.write_text(out)
+            print(f"Merged volunteer-turn.sh into {target}")
+        return 0
+
+    if dry:
+        print(f"[dry-run] would write {target}:")
+        print(_json.dumps({"hooks": {"UserPromptSubmit": registration}},
+                          indent=2))
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            _json.dumps({"hooks": {"UserPromptSubmit": registration}},
+                        indent=2) + "\n")
+        print(f"Installed {target}")
+        if harness == "codex":
+            print("Project-local codex hooks require one-time trust: run "
+                  "`codex /hooks` in the project and approve the hook.")
+        print("Hook fires on every user prompt; empty output = clean silence "
+              "(nothing above the confidence gate or reflex unavailable).")
+    return 0
+
+
+
 def _cmd_session(args) -> int:
     """Manage Tortoise Cloud sessions."""
     import sys  # noqa: I001
@@ -5316,6 +5681,52 @@ def main(argv: list[str] | None = None) -> int:
     lk = sp.add_parser("list-kinds", help="List all pointKinds present in the graph with counts")  # noqa: F841
     # tortoise context — memory digest for agent session-start hooks
     ctx = sp.add_parser("context", help="Print memory digest for agent session-start injection")  # noqa: F841
+    # tortoise install — agent-first harness seam onboarding (epic #2080
+    # #2123/#2124 mandate: install = `tortoise install <harness>`). Writes the
+    # per-harness UserPromptSubmit hook registration for the per-turn
+    # volunteering-memory reflex (volunteer-turn.sh).
+    inst = sp.add_parser(
+        "install",
+        help="Install a harness seam (per-turn memory hook registration)")
+    inst.add_argument(
+        "harness", nargs="?",
+        choices=["codex", "claude", "cline"],
+        help="Harness to install (codex | claude | cline)")
+    inst.add_argument(
+        "--dir", default=".",
+        help="Project directory to install into (default: cwd)")
+    inst.add_argument(
+        "--list", action="store_true",
+        help="List installable seams with their registration targets")
+    inst.add_argument(
+        "--dry-run", action="store_true",
+        help="Print the registration file(s) without writing")
+    inst.add_argument(
+        "--uninstall", action="store_true",
+        help="Remove the hook registration for the harness")
+    # tortoise volunteer — per-turn volunteering-memory reflex (epic #2080
+    # end-state platform seams, #2119/#2123 et al). ONE thin CLI over the
+    # shared canonical pipeline (POST /v1/context hosted / SDK
+    # volunteer_context local — tortoise/volunteer.py); per-harness
+    # UserPromptSubmit hooks (claude/codex/cline/devin/…) shell out to this.
+    vol = sp.add_parser(
+        "volunteer",
+        help="Volunteer memory context for a turn window (per-turn reflex block)")
+    vol.add_argument(
+        "--file", default=None,
+        help="JSON window file (list of {role, content} turns, a bare string "
+             "prompt, or {window, session_id, ...}) — default: read stdin")
+    vol.add_argument("--session-id", default=None,
+                     help="Session continuity id (re-mention suppression)")
+    vol.add_argument("--min-confidence", type=float, default=0.7,
+                     help="Confidence gate (default 0.7)")
+    vol.add_argument("--max-pointers", type=int, default=3,
+                     help="Pointer budget (default 3)")
+    vol.add_argument("--no-why", action="store_true",
+                     help="Skip the why-block assembly (pointers only)")
+    vol.add_argument("--json", action="store_true",
+                     help="Print the full response contract as JSON (default: "
+                          "print only the injected block text, hook-ready)")
     # tortoise list-sources
     ls = sp.add_parser("list-sources", help="List all Sources with point counts")  # noqa: F841
     # tortoise decide --input <json|yaml>
@@ -5477,6 +5888,10 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_list_kinds(args)
     elif args.cmd == "context":
         return _cmd_context(args)
+    elif args.cmd == "install":
+        return _cmd_install_hooks(args)
+    elif args.cmd == "volunteer":
+        return _cmd_volunteer(args)
     elif args.cmd == "list-sources":
         return _cmd_list_sources(args)
     elif args.cmd == "decide":
