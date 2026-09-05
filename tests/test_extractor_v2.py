@@ -3301,6 +3301,103 @@ def test_s2_s4_census_clean_at_16k_through_session(monkeypatch):
     assert out_old["error_census"].get("truncated_parse_error", 0) >= 1
 
 
+def test_multi_session_haystack_truncation_escalates_or_fails_loud(
+        monkeypatch):
+    """#2134 Task 6 Step 2 — the mock-only CI guard for the multi-session
+    haystack shape (extract_session_v2 runs per haystack session; a dense
+    session's S4 emit overflows the 16K cap). POST-fix: every truncating
+    session either ESCALATES-RECOVERS (aggregate: ZERO partial_parse /
+    ZERO truncated_parse_error, recovery.escalated == sessions, the full
+    list survives — never a silent shorter valid=true list) or FAILS LOUD
+    when no escalation headroom exists (esc<=base → residual
+    truncated_parse_error per session — the census, never a silent
+    partial-accept of the truncating attempt)."""
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    monkeypatch.delenv("TORTOISE_API_URL", raising=False)
+    from tests.test_extractor_reliability import _conv
+
+    def _dense_s4(max_tokens):
+        pts = [{"content": f"gap point {i} " + "word " * 40,
+                "pointKind": "statement"} for i in range(40)]
+        pts_json = json.dumps(pts)
+        boundary = pts_json.index('}') + 1
+        return ('{"entities": [], "events": [], "operators": [], '
+                '"points": ' + pts_json[:boundary])
+
+    class _MultiSession:
+        """S4 emits a dense 40-item list: length-truncated at <=16000 (the
+        16K base cap), full at the 32000 escalation. S2 + S1 stay small."""
+        last_finish_reason = "stop"
+
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, *, system, user, max_tokens=None):
+            self.calls += 1
+            if "GAP REVIEWER" in system:
+                if max_tokens and max_tokens <= 16000:
+                    self.last_finish_reason = "length"
+                    return _dense_s4(max_tokens)
+                self.last_finish_reason = "stop"
+                pts = [{"content": f"gap point {i} " + "word " * 40,
+                        "pointKind": "statement"} for i in range(40)]
+                return json.dumps({"entities": [], "events": [],
+                                   "operators": [], "points": pts,
+                                   "link_before_create": []})
+            if "STORY SUMMARIZER" in system:
+                self.last_finish_reason = "stop"
+                return "A narrative."
+            self.last_finish_reason = "stop"
+            return ('{"entities": [], "events": [], "operators": [], '
+                    '"points": [{"content": "s2 base", '
+                    '"pointKind": "statement"}]}')
+
+    # three truncating haystack sessions → three escalation-recoveries
+    # (the per-session stats are already stage-rolled by extract_session_v2 —
+    # accumulate them the way ingest_v2 does, directly off stats["llm"] /
+    # stats["recovery"])
+    llm_agg = {"calls": 0, "retries": 0, "truncated": 0, "deadline_aborts": 0}
+    rec_agg: dict = {}
+    census_agg: dict = {}
+    for _ in range(3):
+        out = v2.extract_session_v2(_MultiSession(), _conv())
+        assert out["errors"] == []            # every truncation recovered
+        assert out["error_census"] == {}      # no partial, no residual
+        contents = [p["content"] for p in out["embed_list"]["points"]]
+        assert "s2 base" in contents
+        assert any(c.startswith("gap point 39") for c in contents)
+        _llm = out["stats"].get("llm") or {}
+        for _k in ("calls", "retries", "truncated", "deadline_aborts"):
+            llm_agg[_k] += _llm.get(_k, 0)
+        for _k, _v in (out["stats"].get("recovery") or {}).items():
+            rec_agg[_k] = rec_agg.get(_k, 0) + _v
+        for k, v in out["error_census"].items():
+            census_agg[k] = census_agg.get(k, 0) + v
+    assert llm_agg["truncated"] == 3          # criterion 3: recorded
+    assert rec_agg["escalated"] == 3
+    assert rec_agg["escalated_recovered"] == 3
+    assert rec_agg["escalated"] == (rec_agg["escalated_recovered"]
+                                    + rec_agg.get("escalated_residual", 0)
+                                    + rec_agg.get("escalated_abort", 0)
+                                    + rec_agg.get("escalated_partial", 0))
+    assert census_agg.get("partial_parse", 0) == 0
+
+    # fail-loud arm: no escalation headroom (esc == base 16000) → each
+    # session's S4 length is RESIDUAL — the census catches it (never a
+    # silent shorter valid=true list, never a rung-4 partial of the
+    # truncating attempt)
+    monkeypatch.setattr(v2, "_extractor_escalation_tokens", lambda b: 16000)
+    census_loud: dict = {}
+    for _ in range(3):
+        out = v2.extract_session_v2(_MultiSession(), _conv())
+        assert out["errors"]                   # fail-loud at the caller
+        for k, v in out["error_census"].items():
+            census_loud[k] = census_loud.get(k, 0) + v
+    assert census_loud.get("truncated_parse_error", 0) == 3
+    assert census_loud.get("partial_parse", 0) == 0
+
+
 def test_s4_dense_emit_completes_at_16k(monkeypatch):
     """#1787 P1-C (cycle 5) — the S4 re-emit surface (output ≈ 2× S2 — the
     DOMINANT truncation source) must be exercised by a genuinely dense S4
