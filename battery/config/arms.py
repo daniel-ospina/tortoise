@@ -1,9 +1,11 @@
 """Arms loader (config/arms.yaml) — per-arm config + cost constants.
 
 Each arm entry: {arm_id, adapter (battery.arms.<name>), config {},
-price_per_1k_usd, expected_tokens_per_episode} — the per-arm constants the
-budget formula uses (scope DD12/DD16). #1408 adds adapters; the schema is
-locked here.
+price_per_1k_usd, expected_tokens_per_episode, model_pin, temperature} —
+the per-arm constants the budget formula uses (scope DD12/DD16) plus the
+protocol-hash inputs (#2284 Task 6: model_pin + temperature feed the parity
+protocol hash; #2292 re-locks the measured pins). #1408 adds adapters; the
+schema is locked here.
 """
 from __future__ import annotations
 
@@ -17,6 +19,13 @@ from battery.exceptions import ConfigError
 
 DEFAULT_PRICE_PER_1K = 0.0
 DEFAULT_TOKENS_PER_EPISODE = 500
+#: Checked-in FLASH-CLASS placeholders (#2284 Task 6): arms.yaml carries
+#: model_pin/temperature for the parity protocol hash; sibling #2292
+#: re-locks the measured pins over these placeholders before real-run
+#: parity. Defaults keep legacy arms.yaml files (and tmp fixtures without
+#: the keys) loading identically — additive-only schema extension.
+DEFAULT_MODEL_PIN = "flash-class-placeholder"
+DEFAULT_TEMPERATURE = 0.0
 
 
 @dataclass(frozen=True)
@@ -26,6 +35,10 @@ class ArmConfig:
     config: dict[str, Any] = field(default_factory=dict)
     price_per_1k_usd: float = DEFAULT_PRICE_PER_1K
     expected_tokens_per_episode: int = DEFAULT_TOKENS_PER_EPISODE
+    #: Protocol-hash inputs (#2284 Task 6; parity protocol_hash) — the ONLY
+    #: population path is load_arms parsing arms.yaml (no other writer).
+    model_pin: str = DEFAULT_MODEL_PIN
+    temperature: float = DEFAULT_TEMPERATURE
 
     def estimated_cost_usd(self, n_episodes: int) -> float:
         """Per-arm episode cost estimate (scope DD12 formula)."""
@@ -57,5 +70,7 @@ def load_arms(path: str | Path) -> dict[str, ArmConfig]:
             price_per_1k_usd=float(e.get("price_per_1k_usd", DEFAULT_PRICE_PER_1K)),
             expected_tokens_per_episode=int(
                 e.get("expected_tokens_per_episode", DEFAULT_TOKENS_PER_EPISODE)),
+            model_pin=str(e.get("model_pin", DEFAULT_MODEL_PIN)),
+            temperature=float(e.get("temperature", DEFAULT_TEMPERATURE)),
         )
     return out

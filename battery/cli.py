@@ -78,6 +78,8 @@ def _parser() -> argparse.ArgumentParser:
     parity.add_argument("--arms", default=None)
     parity.add_argument("--seed", type=int, default=0)
     parity.add_argument("--mock", action="store_true")
+    parity.add_argument("--out", default=_DEFAULT_OUT,
+                        help="parity record output dir (parity_record.json)")
 
     cal = sub.add_parser("calibrate", help="threshold calibration (#1415)")
     cal.add_argument("--print", action="store_true", dest="print_deltas",
@@ -150,26 +152,88 @@ def _default_probe_pairs(rubric_id: str) -> list[tuple[str, str]]:
 
 
 def _cmd_parity(args: argparse.Namespace) -> ExitCode:
-    """battery parity — run the parity leg (issue #1414; E2E-4.1)."""
-    from battery.parity.runner import (  # noqa: I001
+    """battery parity — run the parity leg (issue #1414; E2E-4.1).
+
+    Derives the PROTOCOL hash (#2284 Task 6) from the PINNED arm's
+    arms.yaml model_pin + temperature + artifacts.SCHEMA_VERSION + the
+    pinned tool-surface ids, so a protocol change (schema bump, model pin
+    change, temp/seed/tool-surface change) trips the methodology-unchanged
+    check end-to-end instead of being invisible to parity. Old 2-tuple
+    baselines (no protocol_hash) keep matching on the reader-prompt +
+    rubric compare (back-compat) but print a warn and persist a
+    protocol-unknown parity record — the #1144 baseline re-record is
+    forced rather than leaving protocol drift invisible.
+    """
+    from pathlib import Path as _Path  # noqa: I001
+    from battery.config import load_arms
+    from battery.parity.runner import (
+        TOOL_SURFACE_IDS,
         BaselineMissingError,
         PINNED_VERSIONS,
+        ParityRun,
         VersionMismatchError,
+        protocol_hash,
         run_parity,
     )
+    from battery.runner.artifacts import SCHEMA_VERSION
+    config_dir = _Path(args.config or args.config_dir or _DEFAULT_CONFIG)
+    arms = load_arms(config_dir / "arms.yaml")
+    arm_id = args.arms or "a4"  # parity runs the released benchmarks on the
+    # pinned arm (a4); --arms overrides to another arm id.
+    if arm_id not in arms:
+        from battery.exceptions import ConfigError
+        raise ConfigError(f"parity: unknown arm {arm_id!r} (not in arms.yaml)")
+    arm_cfg = arms[arm_id]
+    model = {"model_id": arm_cfg.model_pin,
+             "temperature": arm_cfg.temperature}
+    protocol = protocol_hash(seed=args.seed, model=model,
+                             event_schema=SCHEMA_VERSION,
+                             tool_surface=TOOL_SURFACE_IDS)
     reader_prompt = _load_reader_prompt(args)
     judge_rubric = args.rubric or "longmemeval-official"
     baseline = _load_baseline(args)
+    cells: list[ParityRun] = []
     for benchmark, version in PINNED_VERSIONS.items():
         try:
-            res = run_parity(benchmark, version, "a4",
+            res = run_parity(benchmark, version, arm_id,
                              reader_prompt, judge_rubric, baseline,
-                             accuracy=0.5, samples=0)
+                             accuracy=0.5, samples=0, protocol=protocol)
+            cells.append(res)
+            state = f"protocol_unknown={res.protocol_unknown}" if \
+                res.protocol_unknown else "protocol verified"
             print(f"{benchmark}: v{version} methodology_matched="
-                  f"{res.methodology_matched}")
+                  f"{res.methodology_matched} ({state})")
+            if res.protocol_unknown:
+                print(f"{benchmark}: WARNING baseline has no protocol_hash — "
+                      f"protocol leg UNVERIFIED; a #1144 re-record is "
+                      f"required to compare protocol "
+                      f"{res.protocol_hash or '(none)'}")
         except (VersionMismatchError, BaselineMissingError) as e:
             print(f"{benchmark}: {e}")
         # any other exception propagates (exit 1) — never swallowed
+    # Persist the parity record ONLY when a baseline existed (a real
+    # comparison ran — no baseline = fail-closed, nothing to record). The
+    # record carries the protocol hash derived THIS run (backfilled on read
+    # for old baselines) + the protocol-unknown state, so protocol drift is
+    # never invisible to the #1144 baseline producer.
+    if baseline is not None and cells:
+        out_dir = _Path(args.out or _DEFAULT_OUT)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        import json as _json
+        record_path = out_dir / "parity_record.json"
+        record_path.write_text(
+            _json.dumps({
+                "arm": arm_id,
+                "seed": args.seed,
+                "protocol_hash": protocol,
+                "protocol_unknown": cells[0].protocol_unknown,
+                "benchmarks": {
+                    c.benchmark: {
+                        "version": c.version,
+                        "methodology_matched": c.methodology_matched,
+                    } for c in cells},
+            }, indent=2, sort_keys=True), encoding="utf-8")
+        print(f"parity record: {record_path}")
     return ExitCode.OK
 
 

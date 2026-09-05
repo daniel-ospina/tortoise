@@ -21,7 +21,7 @@ from battery.parity.runner import (
 
 
 def _baseline(reader_prompt="rp", judge_rubric_id="jr"):
-    rp, jr = methodology_hashes(reader_prompt, judge_rubric_id)
+    rp, jr, _ = methodology_hashes(reader_prompt, judge_rubric_id)
     return {"reader_prompt_hash": rp, "judge_rubric_id_hash": jr}
 
 

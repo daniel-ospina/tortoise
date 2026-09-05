@@ -244,7 +244,7 @@ Fleshes out the 7 high-level E2Es from scope into executable scenarios (setup / 
 ### Parity + gates (scope E2E-4, E2E-5)
 
 **E2E-4.1 — Parity leg on released benchmarks**
-**Setup:** LongMemEval (commit pinned at implementation), LoCoMo (vY), MemoryArena (HF dataset+rev pinned), MemoryAgentBench (rev pinned), **ForgetEval-class staleness/drift probe (pinned rev — scope in-scope #6)** — exact values recorded in run_artifact; 6 arms; **methodology-unchanged check: judge rubric id + reader prompt hash identical to the #1144 baseline record (stored hash, not "unchanged" prose)**.
+**Setup:** LongMemEval (commit pinned at implementation), LoCoMo (vY), MemoryArena (HF dataset+rev pinned), MemoryAgentBench (rev pinned), **ForgetEval-class staleness/drift probe (pinned rev — scope in-scope #6)** — exact values recorded in run_artifact; 6 arms; **methodology-unchanged check: judge rubric id + reader prompt + PROTOCOL hash (seed/model_pin/temperature/event-schema/tool-surface — #2284 Task 6) identical to the #1144 baseline record (stored hash, not "unchanged" prose)**. The #1144 baseline record MUST carry all three hashes: an old 2-tuple record keeps matching on reader+rubric (back-compat) but the run is protocol-unknown and the parity record forces a #1144 re-record — a decide-loop/protocol change (schema bump, model pin change) trips the check end-to-end.
 **Assert:** per-benchmark parity table incl. staleness/drift probe (supersession-vs-stale answers, per research brief Strategy Context); runner refuses to run on version mismatch (interface §6); saturation context cross-referenced to published baselines.
 
 **E2E-5.1 — Judge validation gate**
