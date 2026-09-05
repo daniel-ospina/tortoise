@@ -14,6 +14,7 @@ from __future__ import annotations
 import hmac
 import logging
 import os
+import threading
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
@@ -94,12 +95,14 @@ _SELFHOST_KEEPALIVE: dict[str, TortoiseSDK] = {}  # noqa: F821
 
 
 def _resolve_embedded_db_path() -> str:
-    """Resolve the embedded DB path, mirroring hosted_api._make_sdk:
-    TORTOISE_DB_PATH, else /data/tortoise.db with a tempdir fallback when
-    /data is not writable (test env / bare daemon run). The anchor AND the
-    per-request SDK must agree on this path or the anchor pins a stray
-    server while requests close-on-GC the real one (the #1475 regression
-    silently persists)."""
+    """Resolve the embedded DB path, mirroring hosted_api._resolve_embedded_db_path (the policy moved out of hosted _make_sdk in #2251):
+    TORTOISE_DB_PATH (returned verbatim when its dirname is non-empty and
+    creatable), else /data/tortoise.db, with a tempdir fallback whenever
+    makedirs(dirname) raises OSError — /data unwritable (test env / bare
+    daemon run), dirname-is-a-file, or an empty dirname from an empty-string
+    env or bare filename. The anchor AND the per-request SDK must agree on
+    this path or the anchor pins a stray server while requests close-on-GC
+    the real one (the #1475 regression silently persists)."""
     db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
     try:
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
@@ -109,27 +112,83 @@ def _resolve_embedded_db_path() -> str:
     return db_path
 
 
+# #2179: concurrent first _sdk() calls raced the keepalive check-then-create
+# (mirror of hosted_api #2172) — two threads could both see an empty
+# _SELFHOST_KEEPALIVE entry, both open the same embedded db_path, and the
+# setdefault loser was dropped UNCLOSED (its redislite daemon could die
+# mid-request → ConnectionError / silent empty-graph reads). _SELFHOST_LOCK
+# serializes the miss/stale path (re-check + evict + create + insert) so
+# exactly ONE anchor per path is ever created; a healthy-anchor hit stays
+# lock-free (the designed steady state — concurrent per-request fresh SDKs
+# attach to the anchored daemon). The selfhost lane is all-async today, but
+# TestClient/portal threads and any to_thread pool make it a REAL thread
+# race exactly as the hosted lane became (#2172). No re-entrancy/deadlock:
+# the SDK/projection stack never imports selfhost_api, and the lock is never
+# held across the per-request fresh-SDK construction below.
+_SELFHOST_LOCK = threading.Lock()
+
+
+def _anchor_usable(anchor: TortoiseSDK, db_path: str) -> bool:  # noqa: F821
+    """True if the anchored SDK still holds the CURRENT embedded DB.
+
+    Mirrors tortoise/hosted_api.py:_anchor_usable (keep in sync — #2179):
+    path drift (anchor bound to a PREVIOUS db_path whose daemon may still
+    answer queries — a ping alone cannot detect it) or a dead daemon with
+    the same path (crash / volume wipe — probe catches). The path comparison
+    is O(1) and runs before the graph probe so a drifted anchor is evicted
+    without a query."""
+    proj = getattr(anchor, "_proj", None)
+    if proj is None:
+        return False
+    proj_path = getattr(proj, "_path", None)
+    if proj_path is not None:
+        try:
+            same = (str(proj_path) == str(db_path)) or (
+                str(proj_path) != ":memory:"
+                and os.path.abspath(proj_path) == os.path.abspath(db_path)
+            )
+        except (TypeError, ValueError):
+            same = False
+        if not same:
+            return False
+    return proj._probe_ok()
+
+
 def _sdk():
     from tortoise.sdk import TortoiseSDK
     if not os.environ.get("TORTOISE_DB_URI"):
         # Embedded mode: hold the server alive across requests (see above).
         db_path = _resolve_embedded_db_path()
+        # Fast path (lock-free steady state): reuse a healthy anchor as-is.
         anchor = _SELFHOST_KEEPALIVE.get(db_path)
-        if anchor is None:
-            anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
-            try:  # noqa: SIM105
-                anchor._get_proj()  # eager: hold the connection so the server survives
-            except Exception:
-                pass
-            _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
-        elif anchor._proj is None:
-            # Self-heal (mirrors hosted_api): anchor stored unconnected
-            # (transient failure) — retry once so keepalive is not off
-            # permanently for this path.
-            try:  # noqa: SIM105
-                anchor._get_proj()
-            except Exception:
-                pass
+        if anchor is None or not _anchor_usable(anchor, db_path):
+            # Miss or stale — serialize the evict+create+insert (#2179, the
+            # hosted_api #2172 shape): the in-lock re-check re-arbitrates
+            # against the anchor the winner stored, so a waiter never
+            # evicts/duplicates the winner's fresh anchor.
+            with _SELFHOST_LOCK:
+                anchor = _SELFHOST_KEEPALIVE.get(db_path)
+                if anchor is not None and not _anchor_usable(anchor, db_path):
+                    # Stale/dead anchor (path drift or a daemon crash, or a
+                    # stored-unconnected _proj=None from a transient failure —
+                    # the old self-heal branch evicts instead): close + drop
+                    # so the recreate below binds the CURRENT path.
+                    try:  # noqa: SIM105
+                        anchor.close()
+                    except Exception:
+                        pass
+                    _SELFHOST_KEEPALIVE.pop(db_path, None)
+                    anchor = None
+                if anchor is None:
+                    anchor = TortoiseSDK(db_path=db_path, namespace="selfhost")
+                    try:  # noqa: SIM105
+                        anchor._get_proj()  # eager: hold the connection so the server survives
+                    except Exception:
+                        # Keepalive is best-effort — a transient connect failure must not
+                        # fail this request; the request SDK connects lazily anyway and the
+                        # anchor may connect on a later call.
+                        pass
+                    _SELFHOST_KEEPALIVE.setdefault(db_path, anchor)
         # Thread the SAME resolved path into the request SDK so anchor and
         # request share one server (path mismatch would defeat keepalive).
         return TortoiseSDK(db_path=db_path, namespace="selfhost")
@@ -297,6 +356,109 @@ async def dream(full: bool = False, mode: str | None = None,
     except Exception as e:  # noqa: BLE001, F841, RUF100
         _logger.exception("selfhost dream failed")
         raise HTTPException(status_code=500, detail="Internal error")  # noqa: B904
+
+
+# ── POST /v1/context — phase-1 volunteering-memory delivery (#2103, D1) ─
+# SELF-HOST parity: the SAME canonical pipeline the SDK method and the hosted
+# endpoint call (TortoiseSDK.volunteer_context → tortoise/volunteer.py) served
+# by the self-host container's own REST router. Single-tenant: the selfhost
+# namespace graph, static/none auth_mode via the shared _require_key
+# dependency. Request/response shape §3.2 — byte-contract-identical to hosted.
+
+
+class _VolunteerTurn(BaseModel):
+    role: str = Field(...)
+    content: str = Field(..., max_length=20000)
+
+    @field_validator("role")
+    @classmethod
+    def _valid_role(cls, v: str) -> str:
+        if v not in ("user", "assistant", "system"):
+            raise ValueError("role must be user|assistant|system")
+        return v
+
+
+class VolunteerContextRequest(BaseModel):
+    window: list[_VolunteerTurn] = Field(...)
+    session_id: str | None = Field(None, max_length=256)
+    prior_context: str | None = Field(None, max_length=20000)
+    min_confidence: float = Field(0.7, ge=0.0, le=1.0)
+    max_pointers: int = Field(3, ge=1, le=5)
+    why: bool = True
+
+
+@router.post("/context", dependencies=[Depends(_require_key)])
+async def volunteer_context(body: VolunteerContextRequest):
+    """Volunteer memory context for a turn window (self-host leg of #2103).
+
+    One code path with SDK ``volunteer_context()`` (shared canonical
+    pipeline) — the container serves the same contract as hosted. 422 on
+    out-of-contract windows; fail-open content: retrieval/assembly errors
+    degrade to the empty block + degraded_reason (never 503 on the read
+    path — zero-LLM). The pipeline is CPU/DB-blocking, so it runs off the
+    event loop (#1676) under a HARD ceiling (8 × SLO) — a pathological read
+    degrades to ``timeout`` instead of stalling every other request on the
+    daemon (SLO/parity with the hosted wrapper). NOT the session-start
+    digest of any GET.
+    """
+    import asyncio as _asyncio
+
+    from tortoise.volunteer import (
+        SLO_MS,
+        VolunteerValidationError,
+        degraded_response,
+        validate_request,
+    )
+
+    window = [t.model_dump() for t in body.window]
+    try:
+        validate_request(
+            window, session_id=body.session_id,
+            prior_context=body.prior_context,
+            min_confidence=body.min_confidence,
+            max_pointers=body.max_pointers, why=body.why,
+        )
+    except VolunteerValidationError as e:
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+    sdk = _sdk()
+    completed = False
+    try:
+        result = await _asyncio.wait_for(
+            _asyncio.to_thread(
+                sdk.volunteer_context,
+                window, body.session_id, body.prior_context,
+                body.min_confidence, body.max_pointers, body.why,
+            ),
+            timeout=SLO_MS * 8 / 1000.0,
+        )
+        completed = True
+    except TimeoutError:
+        # Hard ceiling breached → fail-open degraded timeout (never 503, and
+        # never a hung caller). The worker thread may still be running
+        # (wait_for cancels the await, not the thread) — leave the SDK open
+        # for it (read-only work), never close under it.
+        _logger.warning("selfhost volunteer_context ceiling breached → timeout")
+        return degraded_response("timeout")
+    except VolunteerValidationError as e:
+        # SDK-side validation parity (same rules — should not fire after the
+        # handler check; kept for the SDK-first contract).
+        sdk.close()
+        raise HTTPException(
+            status_code=422,
+            detail={"error_code": e.code, "message": e.message},
+        ) from e
+    except Exception:
+        # Fail-open content: never 503 on the zero-LLM read path.
+        _logger.exception("selfhost volunteer_context degraded")
+        sdk.close()
+        return degraded_response("assembly_error")
+    finally:
+        if completed:
+            sdk.close()
+    return result
 
 
 @router.post("/ask", dependencies=[Depends(_require_key)])

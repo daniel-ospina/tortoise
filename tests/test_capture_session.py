@@ -93,6 +93,195 @@ def test_capture_session_shape(sdk):
     assert isinstance(res["warnings"], list)
 
 
+def test_capture_w5_phase_c_ep_on_ingest_calibrates_wired_claims(sdk, monkeypatch):
+    """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP-on-ingest is
+    USER-VISIBLE — the pre-ingestion (uncalibrated, has_ep False) state
+    DIFFERS from the post-ingest state (extracted claims recall with real EP
+    posteriors).
+
+    ROOT CAUSE (Phase C): capture wrote extracted claims via the #131 draft
+    default and wired their IMPL/NAND operators as draft (#780 extraction
+    operators) — EP's BFS expansion excludes draft subgraphs
+    (include_draft=False default), so the ingest EP pass could never
+    calibrate the captured claims (has_ep False — structurally). Phase C
+    promotes the extracted claims AND their operators to live on the capture
+    path ONLY (never the create_point global default), then runs a BOUNDED
+    ingest EP pass (mode=local — dirty-root refresh, never full-graph) at
+    the END of the capture write path.
+
+    The M2 echo lane is used so the conversation produces a WIRED claim pair
+    (IMPL operator): operator-less claims have no EP factors and honestly
+    stay uncalibrated (the trivial stamp covers lastDreamedAt only —
+    anti-gaming, no fabricated α/β)."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The auth dead-end is the top issue "
+                                     "because it blocks every deploy."},
+        {"role": "assistant", "content": "Therefore we should ship serve "
+                                           "--http first."},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["ok"] is True, res
+    ids = [p["id"] for p in res["points"]]
+    assert len(ids) >= 2, res
+    proj = sdk._get_proj()
+
+    # 1) The extracted (non-episodic) claim points are LIVE at capture ...
+    rows = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+        params={"ids": ids},
+    ).result_set
+    by_id = {r[0]: r[1] for r in rows}
+    assert set(by_id) == set(ids), f"extracted points missing: {set(ids) - set(by_id)}"
+    assert all(st == "live" for st in by_id.values()), by_id
+    # ... with their capture operators (a live claim wired through a draft
+    # operator stays EP-inert — the #780 live-only BFS never selects it).
+    op_rows = proj.g.query(
+        "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+        "WHERE c.id IN $ids RETURN DISTINCT o.id, o.status",
+        params={"ids": ids},
+    ).result_set
+    assert op_rows, "the cue-word conversation must produce capture operators"
+    assert all(st == "live" for _oid, st in op_rows), op_rows
+    # ... while the episodic turn stream STAYS draft (turn stream, not beliefs).
+    turn_rows = proj.g.query(
+        "MATCH (t:Point) WHERE t.is_episodic = true RETURN DISTINCT t.status"
+    ).result_set
+    assert turn_rows and all(st == "draft" for (st,) in turn_rows), turn_rows
+
+# 2) The bounded ingest EP pass calibrated the wired claims: stored α/β
+    # (has_ep True — the pre-ingestion uncalibrated state has DIFFERED) and
+    # the user-visible confidence surface (get_confidence) reads real
+    # posteriors, not the unmeasured Beta(1,1) default.
+    cal = proj.g.query(
+        "MATCH (n:Point) WHERE n.id IN $ids AND "
+        "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+        "RETURN count(n)",
+        params={"ids": ids},
+    ).result_set
+    assert cal[0][0] == len(ids), \
+        f"every wired claim must calibrate post-ingest ({cal[0][0]}/{len(ids)})"
+    for pid in ids:
+        conf = sdk.get_confidence(pid, require_calibration=False)
+        assert conf.get("mean") is not None, conf
+        assert conf.get("variance") is not None, conf
+        assert conf.get("effective_n") is not None and conf["effective_n"] > 0, conf
+
+    # 3) Negative control — the create_point GLOBAL default is untouched: a
+    # claim created through the ordinary draft path stays EP-inert (no
+    # persisted α/β) after the same local dream. Capture-scoped promotion
+    # (not an EP-semantics change) is the differentiator.
+    draft_pid = sdk.create_point(
+        "statement", "a non-captured draft claim stays EP-inert")["id"]
+    sdk.dream(mode="local", require_calibration=False, warm_start=False)
+    drow = proj.g.query(
+        "MATCH (n:Point {id:$id}) RETURN n.status, "
+        "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+        params={"id": draft_pid},
+    ).result_set
+    assert drow[0][0] == "draft" and drow[0][1] is False, \
+        f"global draft default changed by Phase C: {drow}"
+
+
+def test_capture_w5_phase_c_promotion_is_rebuild_durable(tmp_path, monkeypatch):
+    """W5 Phase C review P1: the draft->live promotion must be REBUILD-
+    DURABLE — the raw status flip alone would revert on JSONL replay (the
+    #548 log snapshotted draft at PointAdded). The PointPromoted /
+    OperatorPromoted events (full live snapshots) must be journaled so a
+    wipe+rebuild (fold over the log) restores the claims AND their capture
+    operators as live."""
+    from tortoise.log import EventLog
+
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    events = tmp_path / "events"
+    events.mkdir()
+    sdk = TortoiseSDK(db_path=str(tmp_path / "replay.db"),
+                      event_log_path=str(events / "events.jsonl"))
+    try:
+        conv = [
+            {"role": "user", "content": "The auth dead-end is the top issue "
+                                         "because it blocks every deploy."},
+            {"role": "assistant", "content": "Therefore we should ship serve "
+                                               "--http first."},
+        ]
+        res = sdk.capture_session(conv)
+        assert res["ok"] is True, res
+        ids = [p["id"] for p in res["points"]]
+        assert len(ids) >= 2, res
+
+        events_list = EventLog(events / "events.jsonl").read_all()
+        # 1) The durable log carries the promotion events WITH live snapshots.
+        promos = [e for e in events_list if e.get("type") == "PointPromoted"]
+        assert promos, "PointPromoted events must be journaled"
+        promoted_ids = {e["point"]["id"] for e in promos}
+        assert set(ids) <= promoted_ids, (
+            f"all extracted claims promoted in the log: {set(ids) - promoted_ids}")
+        assert all(e["point"].get("status") == "live" for e in promos),             "the PointPromoted snapshot must carry the LIVE state"
+        op_promos = [e for e in events_list if e.get("type") == "OperatorPromoted"]
+        assert op_promos, "OperatorPromoted events must be journaled"
+        assert all(e["point"].get("status") == "live" for e in op_promos),             "the OperatorPromoted snapshot must carry the LIVE state"
+
+        # 2) A wipe+rebuild (replay the log through a FRESH projection —
+        #    the documented recovery path, backup.py: proj.apply(ev) per
+        #    event) restores the claims and operators as live, not draft.
+        rebuilt_db = str(tmp_path / "rebuilt.db")
+        rebuilt = TortoiseSDK(db_path=rebuilt_db)
+        try:
+            rproj = rebuilt._get_proj()
+            for ev in events_list:
+                rproj.apply(ev)
+            rows = rproj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.status",
+                params={"ids": list(ids)},
+            ).result_set
+            rebuilt_by_id = {r[0]: r[1] for r in rows}
+            for pid in ids:
+                assert rebuilt_by_id.get(pid) == "live", \
+                    f"rebuild must restore claim {pid} as live " \
+                    f"(got {rebuilt_by_id.get(pid)})"
+            for e in op_promos:
+                oid = e["point"]["id"]
+                orow = rproj.g.query(
+                    "MATCH (n:Point {id:$id}) RETURN n.status, "
+                    "n.is_operator, n.op_type",
+                    params={"id": oid},
+                ).result_set
+                # LIVE status AND operator identity survive rebuild — the
+                # status-SET-only replay must NOT recompute is_operator/
+                # op_type from the flat snapshot (#2256 review P1: a full
+                # upsert would silently convert operators to claims).
+                assert orow, f"operator {oid} missing after rebuild"
+                assert orow[0][0] == "live", \
+                    f"rebuild must restore operator {oid} as live (got {orow})"
+                assert orow[0][1] is True, \
+                    f"rebuild must keep operator {oid} is_operator (got {orow})"
+                assert orow[0][2] in ("IMPL", "NAND"), \
+                    f"rebuild must keep operator {oid} op_type (got {orow})"
+        finally:
+            rebuilt.close()
+    finally:
+        sdk.close()
+
+    
+def test_capture_w5_phase_c_full_dream_effective_post_capture(sdk, monkeypatch):
+    """W5 Phase C (#2104): promotion makes the W2 runner's post-capture full
+    dream EFFECTIVE — pre-fix a capture-then-dream(full=True) sequence was
+    structurally total_affected 0 / coverage 0.0 (draft subgraphs excluded by
+    EP's BFS, #780). Post-fix the same sequence reaches the captured claims."""
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user", "content": "The auth dead-end is the top issue "
+                                     "because it blocks every deploy."},
+        {"role": "assistant", "content": "Therefore we should ship serve "
+                                           "--http first."},
+    ]
+    res = sdk.capture_session(conv)
+    assert res["ok"] is True and res["extracted"] >= 2
+    d = sdk.dream(full=True, require_calibration=False, warm_start=False)
+    assert d.get("total_affected") >= 2, d
+    assert d.get("coverage") > 0.0, d
+
+
 def test_capture_session_turns_are_speaker_tagged(sdk):
     sdk.capture_session(CONV)
     proj = sdk._get_proj()
@@ -1519,11 +1708,9 @@ def test_apply_supersessions_divergent_successor_keeps_first(sdk):
     keep-first — A stays supersededBy='successor-B', the C claim is never
     folded in (applied=0, no second journal, successor-C stays live), and
     the rejection is a LOUD warning naming the ref, the kept successor, and
-    the rejected one. This pins the helper's deliberate divergence from
-    hosted §6b's blind clobber (the M5 PHASE-2 GAP: a §6b commit resolving
-    A→C after a capture A→B blind-overwrites supersededBy to C with NO
-    warning — DOCUMENTED and asserted in T9's parity harness, NOT fixed
-    in-PR). The helper-routed keep-first is the one consumer discipline
+    the rejected one. hosted §6b migrated onto the helper in #2193 — this
+    is now the ONE discipline; the helper-routed keep-first is the one
+    consumer discipline
     that never blind-overwrites; a capture CAN trip it — the extractor's
     S3 search_graph calls tortoise_fts_query(entity_type='object'),
     which does NOT exclude terminal Objects (the terminal clause is
@@ -2578,6 +2765,10 @@ _CONV = [{"role": "user", "content": "we decided to ship the memory capture slic
          {"role": "assistant", "content": "agree — the consent gate is the P0"},
          {"role": "user", "content": "ok"}]
 
+_CONV_B = [{"role": "user", "content": "we should open the mobile beta to external testers"},
+           {"role": "assistant", "content": "agreed — crash-free sessions are the gate"},
+           {"role": "user", "content": "ok"}]
+
 
 def test_fresh_team_captures_by_default(consent_client):
     """#1927: session_recording defaults to TRUE — a fresh team (never
@@ -3014,7 +3205,9 @@ def test_session_capture_tool_registered_and_invokeable(tmp_path, monkeypatch):
             conversation=_CONV, harness="claude", session_id="s-mcp-1727")
         st = _ha._get_onboarding_state("team-1727-mcp")
     assert result.get("session_id") == "s-mcp-1727", result
-    assert "error" not in result, result
+    # W5 (#2104): the memory_write_v1 envelope ALWAYS carries an error key
+    # (None on success) — assert the null value, not key absence.
+    assert not result.get("error"), result
     assert result.get("turns") == len(_CONV)
     assert st.get("session_capture_receipt_claude"), \
         "MCP capture must set the per-harness receipt"
@@ -3031,7 +3224,9 @@ def test_session_capture_tool_fresh_team_captures(tmp_path, monkeypatch):
         st = _ha._get_onboarding_state("team-1727-mcp")
     assert st.get("session_recording") is True, "read-time default must be ON"
     assert result.get("session_id") == "s-mcp-1927-default", result
-    assert "error" not in result, result
+    # W5 (#2104): memory_write_v1 envelope always carries error (None on
+    # success) — assert the null value, not key absence.
+    assert not result.get("error"), result
     assert result.get("turns") == len(_CONV)
     assert st.get("session_capture_receipt_claude"), \
         "MCP capture must set the per-harness receipt"
@@ -3079,3 +3274,240 @@ def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
         _current_team_id.reset(tok)
     assert "error" in result, result
     assert "hosted mode" in result["error"], result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W5 Phase E (#2104, S11) — ingestion-toggle disclosure marker data.
+# The S11 409 gate / per-harness last-error / toggle read-write contract were
+# shipped by #1927 + W5 Phase A/B and are covered above — Phase E ships ONLY
+# the missing disclosure marker DATA (`surfaced`, §3.2.2 vocabulary) on the
+# capture receipt + a REST+MCP single-enforcement drift-proof test.
+
+def _graph_point_ids(proj) -> set:
+    rows = proj.g.query(
+        "MATCH (n:Point) RETURN n.id").result_set
+    return {r[0] for r in rows}
+
+
+def test_phase_e_surfaced_disclosure_marker_graph_truth(consent_client):
+    """S11 disclosure marker data: a fresh capture's write-verb receipt
+    carries ``surfaced`` — one entry per memory item THIS capture added
+    (N = len = the disclosure count). Graph-truth only (anti-gaming): every
+    entry's point_id is a minted claim the graph actually holds post-write
+    (verified via the enrichment facts), every label is a deterministic
+    content-derived label, and a folded (content_hash_hit) claim never
+    appears."""
+    from tortoise.write_verb import DEDUP_NEW
+    _opt_in(enabled=True)
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude",
+                                  "session_id": "s-phase-e-marker"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["protocol_version"] == "memory_write_v1", \
+        "the disclosure marker rides the frozen write verb"
+    assert "surfaced" in body, body.keys()
+    points = body["points"]
+    assert points, "fresh capture must mint claims"
+    proj = _graph()
+    g_ids = _graph_point_ids(proj)
+    by_id = {p["id"]: p for p in points}
+    surfaced = body["surfaced"]
+    assert surfaced, "a fresh minted capture must expose marker data"
+    assert len(surfaced) == len([p for p in points
+                                 if p.get("dedup", DEDUP_NEW) == DEDUP_NEW]), (
+        "N = len(surfaced) must equal the graph-verified minted count")
+    for entry in surfaced:
+        assert entry["point_id"] in by_id, \
+            f"surfaced entry must name a point in this capture: {entry}"
+        assert entry["point_id"] in g_ids, \
+            f"surfaced entry must be graph-verified (present post-write): {entry}"
+        assert by_id[entry["point_id"]].get("dedup", DEDUP_NEW) == DEDUP_NEW, \
+            f"a folded claim must never be counted as added: {entry}"
+        assert entry["label"], entry
+        assert len(entry["label"]) <= 48, entry
+
+
+def test_phase_e_surfaced_empty_on_replay(consent_client):
+    """S11 disclosure marker data: a replay (re-POST same session_id —
+    extraction skipped, 0 new nodes) reports ``surfaced: []`` — nothing was
+    added, never a fabricated count."""
+    _opt_in(enabled=True)
+    payload = {"conversation": _CONV, "harness": "claude",
+               "session_id": "s-phase-e-replay"}
+    r1 = consent_client.post("/v1/sessions", json=payload)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["surfaced"], "first capture mints items"
+    r2 = consent_client.post("/v1/sessions", json=payload)
+    assert r2.status_code == 200, r2.text
+    b2 = r2.json()
+    assert b2["extraction_mode"] == "replayed", b2
+    assert b2["extracted"] == 0, b2
+    assert b2["surfaced"] == [], \
+        "a replay adds zero memory items — surfaced must be empty"
+
+
+def test_phase_e_surfaced_cross_session_reingest_counts_zero_added(sdk):
+    """S11 disclosure marker data (sdk mirror byte-parity): re-capturing the
+    SAME content in a NEW session is a content-hash re-ingest — per-point
+    content_hash_hit verdicts, ZERO new nodes, and ``surfaced: []`` (the
+    canonical pre-existed; this capture added no memory item)."""
+    from tortoise.write_verb import DEDUP_CONTENT_HASH_HIT, DEDUP_NEW
+    conv = [
+        {"role": "user",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "user", "content": "ok"},
+    ]
+    r1 = sdk.capture_session(conv)
+    assert r1["points"], r1
+    assert all(p["dedup"] == DEDUP_NEW for p in r1["points"])
+    assert r1["surfaced"], "first ingest must expose the marker data"
+    assert len(r1["surfaced"]) == len(r1["points"])
+    # same content, fresh auto session id → cross-session content-hash re-ingest
+    r2 = sdk.capture_session(conv)
+    assert r2["points"] and all(
+        p["dedup"] == DEDUP_CONTENT_HASH_HIT for p in r2["points"]), [
+        p["dedup"] for p in r2["points"]]
+    assert r2["surfaced"] == [], \
+        "a content-hash re-ingest adds no memory item — surfaced must be empty"
+    assert {p["id"] for p in r1["points"]} == {p["id"] for p in r2["points"]}
+
+
+def test_phase_e_surfaced_m2_in_capture_fold_counts_minted_once(sdk, monkeypatch):
+    """S11 disclosure marker data (m2 lane): an in-capture repeat folds onto
+    the canonical (content_hash_hit, 0 duplicate nodes) — ``surfaced`` counts
+    the single MINTED item once, never the folded echo."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "assistant",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "user", "content": "ok"},
+    ]
+    res = sdk.capture_session(conv)
+    verdicts = [p["dedup"] for p in res["points"]]
+    assert verdicts == ["new", "content_hash_hit"], verdicts
+    surfaced = res["surfaced"]
+    assert len(surfaced) == 1, \
+        "only the minted canonical counts — folded echoes never surface"
+    assert surfaced[0]["point_id"] == res["points"][0]["id"]
+    g_ids = _graph_point_ids(sdk._get_proj())
+    assert surfaced[0]["point_id"] in g_ids, "graph-truth only"
+
+
+def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
+    """S11 'can never drift' — ONE team, ONE flag state, both consumer
+    surfaces through the SAME shared ``_capture_session_impl``: recording OFF
+    ⇒ REST POST → 409 AND MCP tortoise_session_capture → {status: 409} with
+    the SAME detail text; neither writes a Session; each harness's per-harness
+    last-error is recorded. Recording ON ⇒ both 2xx with ``surfaced`` marker
+    data + per-harness receipts."""
+    from tortoise.hosted_api import get_current_team as _get_current_team
+    from tortoise.mcp_auth import (
+        _current_team_id,
+        _current_team_limits,
+        _transport_mode,
+    )
+    from tortoise.mcp_server import tortoise_session_capture
+
+    team_id = "team-phase-e-drift"
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # m2 lane: claims are echo-derived from each conversation's OWN content,
+    # so the REST and MCP captures below mint DISTINCT claims (the v2 mock is
+    # fully deterministic — any two captures would content-hash-fold onto the
+    # same canonical, which would make the MCP leg honestly report
+    # surfaced: [] and prove nothing about marker data on the MCP path).
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    with patched_tortoise_sdk(str(tmp_path / "drift.db")):
+        _provision_team(team_id)
+        _opt_in(team_id, enabled=False)  # OFF first
+        team = {"team_id": team_id, "tier": "free", "key_id": "k-1727",
+                "legacy_full_access": True, "max_points": 100000}
+        app.dependency_overrides[_get_current_team] = lambda: dict(team)
+        tok_t = _current_team_id.set(team_id)
+        tok_l = _current_team_limits.set(
+            {"team_id": team_id, "tier": "free", "max_points": 100000})
+        tok_m = _transport_mode.set("http")
+        try:
+            with TestClient(app) as tc:
+                # OFF: both surfaces reject with the SAME 409 state-conflict.
+                r = tc.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude"})
+                assert r.status_code == 409, r.text
+                rest_detail = r.json()["detail"]
+                mcp_res = tortoise_session_capture(
+                    conversation=_CONV, harness="pi")
+                assert mcp_res.get("status") == 409, mcp_res
+                assert rest_detail == mcp_res.get("error"), (
+                    "REST + MCP must surface the SAME recording-off message "
+                    f"(shared impl): REST={rest_detail!r} MCP={mcp_res!r}")
+                assert "disabled" in rest_detail
+                assert _session_count(team_id) == 0, \
+                    "recording OFF must not write a Session on either surface"
+                st = _state(team_id)
+                assert st.get("session_capture_last_error_claude"), \
+                    "REST 409 must record its per-harness last error"
+                assert st.get("session_capture_last_error_pi"), \
+                    "MCP 409 must record its per-harness last error"
+                assert st.get("session_capture_receipt_claude") is None
+                assert st.get("session_capture_receipt_pi") is None
+                # ON: both surfaces capture with the disclosure marker.  The
+                # MCP capture uses DIFFERENT content so it genuinely mints
+                # (a same-content re-capture would be a content-hash fold and
+                # honestly report surfaced: [] — that anti-gaming is pinned in
+                # test_phase_e_surfaced_cross_session_reingest_counts_zero_added).
+                _opt_in(team_id, enabled=True)
+                r2 = tc.post("/v1/sessions",
+                             json={"conversation": _CONV, "harness": "claude",
+                                   "session_id": "s-drift-rest"})
+                assert r2.status_code == 200, r2.text
+                assert r2.json()["surfaced"], r2.json()
+                mcp_res2 = tortoise_session_capture(
+                    conversation=_CONV_B, harness="pi",
+                    session_id="s-drift-mcp")
+                assert not mcp_res2.get("error"), mcp_res2
+                assert mcp_res2.get("surfaced"), mcp_res2
+                assert mcp_res2.get("protocol_version") == "memory_write_v1"
+                st2 = _state(team_id)
+                assert st2.get("session_capture_receipt_claude"), st2
+                assert st2.get("session_capture_receipt_pi"), st2
+                assert st2.get("session_capture_last_error_claude") is None
+                assert st2.get("session_capture_last_error_pi") is None
+        finally:
+            _current_team_id.reset(tok_t)
+            _current_team_limits.reset(tok_l)
+            _transport_mode.reset(tok_m)
+
+
+
+def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch):
+    """P2-2 (review): the SDK mirror's post-write verification read is
+    fail-open — a verification-read failure must NEVER fabricate a marker
+    count: ``surfaced: []`` + an additive warning, capture still commits."""
+    conv = [
+        {"role": "user",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "user", "content": "ok"},
+    ]
+    proj = sdk._get_proj()
+    # The guarded wrapper (proj.g) is read-only; patch the RAW graph handle
+    # (precedent: test_search_engine.py:297 / test_capture_session.py:2114).
+    raw = proj.g._g
+    real_query = raw.query
+
+    def failing_query(query, params=None, timeout=None):
+        # Only the Phase E verification read (exact text) fails — every
+        # other capture write/read proceeds, so the capture commits and the
+        # marker is the ONLY degraded surface.
+        if query == "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id":
+            raise RuntimeError("simulated verification read failure")
+        return real_query(query, params=params, timeout=timeout)
+
+    monkeypatch.setattr(raw, "query", failing_query)
+    res = sdk.capture_session(conv)
+    assert res["points"], "the capture itself commits"
+    assert res["surfaced"] == [], (
+        "a failed verification read must omit the marker, never fabricate it")
+    assert any("marker omitted" in w for w in res["warnings"]), res["warnings"]

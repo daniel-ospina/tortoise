@@ -21,6 +21,7 @@ from tortoise.write_verb import (
     build_write_verb,
     error_block,
     point_entry,
+    surfaced_marker,
 )
 
 
@@ -136,3 +137,50 @@ class TestPointEntry:
     def test_kind_optional(self):
         assert "kind" not in point_entry("pt_1")
         assert point_entry("pt_1", kind="statement")["kind"] == "statement"
+
+
+class TestSurfacedMarker:
+    """W5 Phase E (#2104, S11) — capture-receipt disclosure marker data
+    (pure-shape tests; graph-truth integration pinned in test_capture_session.py
+    test_phase_e_*)."""
+
+    def test_minted_verified_only(self):
+        pts = [{"id": "pt_a", "dedup": DEDUP_NEW, "text": "the schema needs normalization"}]
+        out = surfaced_marker(pts, verified_ids={"pt_a"})
+        assert out == [{"point_id": "pt_a", "label": "the schema needs normalization"}]
+
+    def test_verified_ids_required_fail_closed_empty(self):
+        # A caller that cannot (or does not) verify graph presence gets an
+        # EMPTY marker — never a fabricated count.  The kwarg is required,
+        # and an empty verification set is the fail-closed fallback.
+        pts = [{"id": "pt_a", "dedup": DEDUP_NEW, "text": "claim"}]
+        assert surfaced_marker(pts, verified_ids=set()) == []
+
+    def test_unverified_point_never_counted(self):
+        pts = [{"id": "pt_ghost", "dedup": DEDUP_NEW, "text": "never landed"},
+               {"id": "pt_real", "dedup": DEDUP_NEW, "text": "landed"}]
+        out = surfaced_marker(pts, verified_ids={"pt_real"})
+        assert [e["point_id"] for e in out] == ["pt_real"]
+
+    def test_folded_claims_excluded(self):
+        from tortoise.write_verb import DEDUP_CONTENT_HASH_HIT, DEDUP_REPHRASE_LINKED
+        pts = [
+            {"id": "pt_mint", "dedup": DEDUP_NEW, "text": "minted"},
+            {"id": "pt_old", "dedup": DEDUP_CONTENT_HASH_HIT, "text": "already in memory"},
+            {"id": "pt_par", "dedup": DEDUP_REPHRASE_LINKED, "text": "paraphrase"},
+        ]
+        out = surfaced_marker(pts, verified_ids={"pt_mint", "pt_old", "pt_par"})
+        assert [e["point_id"] for e in out] == ["pt_mint"], \
+            "content_hash_hit/rephrase_linked folds add no item — never counted"
+
+    def test_empty_and_content_fallback(self):
+        assert surfaced_marker([], verified_ids=set()) == []
+        # label falls back to the point id when the entry carries no content
+        pts = [{"id": "pt_a", "dedup": DEDUP_NEW, "props": {}}]
+        out = surfaced_marker(pts, verified_ids={"pt_a"})
+        assert out[0]["label"] == "pt_a"
+        # label is deterministic and bounded (the volunteer label grammar)
+        long = {"id": "pt_b", "dedup": DEDUP_NEW,
+                "text": " ".join(f"word{i}" for i in range(20))}
+        out2 = surfaced_marker([long], verified_ids={"pt_b"})
+        assert len(out2[0]["label"]) <= 48

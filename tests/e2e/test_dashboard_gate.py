@@ -339,8 +339,8 @@ def test_welcome_mode_provisions_and_reveals_key_once(page: Page) -> None:
             route.fulfill(status=200, content_type="application/json", body=json.dumps("pending"))
             return
         if url.endswith("/v1/session/key") and route.request.method == "POST":
-            # #2167: the returning visit NEVER mints — the mount is
-            # session-only (or adopts the stored welcome key via its probe).
+            # #2167/#2246: the returning visit NEVER mints and holds no key —
+            # the mount is session-only (the stored-key probe is deleted).
             # Loud 500 + counter so a regression mint fails the journey.
             mint_calls.append(url)
             route.fulfill(status=500, content_type="application/json",
@@ -568,16 +568,20 @@ def _mock_session_shell(route, url: str, json_mod, mint_calls: list | None = Non
     return False
 
 
-def test_probe_401_drops_stored_key_and_renders_session_only(page: Page) -> None:
-    """#2167 F3: a stored REVOKED/EXPIRED/disabled durable (rejections are
-    identical — 401 'Invalid API key') is DROPPED at the mount probe: the
-    KEY_STORAGE slot clears, apiKey state clears, and the dashboard renders
-    session-only (never the mint fallback, never an error card)."""
+def test_stored_key_residue_is_purged_on_session_mount(page: Page) -> None:
+    """#2246 (ADR-010) — replaces the #2167 probe-401 test: the mount
+    stored-key probe is DELETED, so a seeded REVOKED/EXPIRED/disabled
+    residue is never probed or classified — the session mount purges the
+    KEY_STORAGE slot once ("inert residue that gets cleaned") and renders
+    session-only on the JWT. Zero key-authed requests fire anywhere (the
+    old test's key-lane probe 401 is gone; every Authorization header on
+    API reads is the session JWT)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-drop401"
     dead_key = "tt_dead_abcdef0123456789"
     mint_calls: list = []
+    key_authed: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
@@ -596,13 +600,11 @@ def test_probe_401_drops_stored_key_and_renders_session_only(page: Page) -> None
                               body=json.dumps([{"team_id": "team_ok", "name": "OK", "tier": "free"}]))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                # #2246: NO key-lane probe exists — every /v1/team read is
+                # session-authed. A Bearer tt_ header would be a regression.
                 auth = (route.request.headers.get("authorization") or "")
                 if auth.startswith("Bearer tt_"):
-                    # the stored-key probe: revoked/disabled/expired reject
-                    # identically with 401 (resolve_api_key, supabase_control)
-                    route.fulfill(status=401, content_type="application/json",
-                                  body=json.dumps({"detail": "Invalid API key"}))
-                    return
+                    key_authed.append(url)
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps({"team_id": "team_ok", "team_name": "OK",
                                                "tier": "free", "anon": False, "graph_ready": True,
@@ -623,37 +625,33 @@ def test_probe_401_drops_stored_key_and_renders_session_only(page: Page) -> None
         route.continue_()
 
     page.route("**/*", handle)
-    # wait for the MOUNT PROBE (the key-authed GET /v1/team → 401) so the
-    # slot-drop assert below never races the in-flight mount
-    with page.expect_response(
-            lambda r: "/v1/team" in r.url
-            and (r.request.headers.get("authorization") or "").startswith("Bearer tt_"),
-            timeout=20000):
-        page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
     assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
-    # the dead key material is gone: slot cleared, no key-authed leftovers
+    assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+    # the session mount purged the residue once (never probed/adopted)
     slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
-    assert slot is None, f"probe-401 must clear the slot, got {slot!r}"
+    assert slot is None, f"#2246: the session mount must purge the slot, got {slot!r}"
     # session-only render — never an error card / 'Invalid API key' banner
     expect(page.locator("body")).not_to_contain_text("Invalid API key")
     expect(page.locator("body")).not_to_contain_text("Redirecting to the sign-in page")
 
 
-def test_probe_403_suspended_dict_keeps_key_and_renders_appeal(page: Page) -> None:
+def test_all_suspended_session_purges_residue_and_renders_appeal(page: Page) -> None:
     """#2167 rule 9 + F8 (the ACTUAL fresh-login suspension mechanism): an
     ALL-suspended membership set makes the server 403 the /v1/teams LIST
-    with the _suspended_detail() dict (list_my_teams — hosted_api.py), so a
-    stored DURABLE on the suspended team never even reaches the mount probe
-    (5d is a defensive belt for a hypothetical 200 list). The teams-fetch
-    catch parses the 403 dict → the recoverable durable is KEPT (slot
-    retained — nothing on this path writes the slot) and the appeal path
-    renders. Never a mint, never a drop."""
+    with the _suspended_detail() dict (list_my_teams — hosted_api.py).
+    #2246: the mount NEVER probes stored keys — the session-mount residue
+    purge runs at session resolution (before the teams fetch), so even a
+    seeded durable is purged once and the appeal path renders from the
+    403-teams catch. Never a mint, never a probe, never a drop-vs-keep
+    classification."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-susp"
     held_key = "tt_susp_abcdef0123456789"
     mint_calls: list = []
+    key_authed: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
@@ -667,6 +665,8 @@ def test_probe_403_suspended_dict_keeps_key_and_renders_appeal(page: Page) -> No
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
+            if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
+                key_authed.append(url)
             if path.endswith("/v1/teams"):
                 # the REAL contract: every membership suspended → 403 dict
                 route.fulfill(status=403, content_type="application/json",
@@ -694,10 +694,10 @@ def test_probe_403_suspended_dict_keeps_key_and_renders_appeal(page: Page) -> No
     expect(page.locator("body")).to_contain_text("Suspended for review", timeout=25_000)
     expect(page.locator("body")).to_contain_text("Appeal the suspension", timeout=10_000)
     assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
-    # the recoverable durable is KEPT — slot untouched (nothing on the
-    # 403-teams path writes it; the mount probe never ran)
+    assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+    # #2246: the session mount purged the seeded residue (never probed)
     slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
-    assert slot == held_key, f"the suspended team's durable must be retained, got {slot!r}"
+    assert slot is None, f"#2246: the session mount must purge the slot, got {slot!r}"
 
 
 def test_fresh_login_suspended_team_shows_appeal_banner(page: Page) -> None:
@@ -820,18 +820,18 @@ def test_multi_membership_suspended_first_healthy_second_renders(page: Page) -> 
     expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Healthy Co", timeout=10_000)
 
 
-def test_stored_durable_on_suspended_team_lands_healthy_alternate(page: Page) -> None:
-    """#2167 rule 5d (PR #2232 reviewer P2): a stored DURABLE whose own team
-    is SUSPENDED probes 403-dict, but a multi-membership user with a HEALTHY
-    alternate team must land on the healthy team — never the blocking
-    suspension card (the pre-change probe failure fell through to a mint for
-    the first selectable team). The suspended team's recoverable durable is
-    KEPT in the slot."""
+def test_stored_residue_on_suspended_team_lands_healthy_alternate(page: Page) -> None:
+    """#2167 #1912 + #2246: a stored DURABLE residue (never probed) whose
+    own team is SUSPENDED — a multi-membership user with a HEALTHY alternate
+    team lands on the healthy team via the mount's first-healthy pin (#1912),
+    never the blocking suspension card. The residue is purged once at session
+    resolution (never classified keep/drop — the probe machinery is gone)."""
     import time as _time
     import urllib.parse as _up
     user_id = "u-5d-alt"
     held_key = "tt_susal_abcdef0123456789"
     mint_calls: list = []
+    key_authed: list = []
     sess = {"access_token": "fake.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sig",
             "refresh_token": "rt", "expires_in": 3600,
             "expires_at": int(_time.time()) + 3600, "token_type": "bearer",
@@ -845,6 +845,8 @@ def test_stored_durable_on_suspended_team_lands_healthy_alternate(page: Page) ->
         url = route.request.url
         if "api.premiselabs.co" in url:
             path = url.split("?", 1)[0]
+            if (route.request.headers.get("authorization") or "").startswith("Bearer tt_"):
+                key_authed.append(url)
             if path.endswith("/v1/teams"):
                 route.fulfill(status=200, content_type="application/json",
                               body=json.dumps([
@@ -854,16 +856,16 @@ def test_stored_durable_on_suspended_team_lands_healthy_alternate(page: Page) ->
                               ]))
                 return
             if path.endswith("/v1/team") or path.endswith("/v1/team/"):
-                auth = (route.request.headers.get("authorization") or "")
-                if auth.startswith("Bearer tt_"):
-                    # the stored durable's own team is suspended → 403 dict
+                qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+                tid = (qs.get("team_id") or ["team_ok"])[0]
+                if tid == "team_sus":
                     route.fulfill(status=403, content_type="application/json",
                                   body=json.dumps({"detail": {"code": "SUSPENDED",
                                                                 "message": "Suspended for review",
                                                                 "appeal_url": "https://premise-labs.dev/appeal"}}))
                     return
                 route.fulfill(status=200, content_type="application/json",
-                              body=json.dumps({"team_id": "team_ok", "team_name": "Healthy Co",
+                              body=json.dumps({"team_id": tid or "team_ok", "team_name": "Healthy Co",
                                                "tier": "free", "anon": False, "graph_ready": True,
                                                "point_count": 1}))
                 return
@@ -889,18 +891,24 @@ def test_stored_durable_on_suspended_team_lands_healthy_alternate(page: Page) ->
     expect(page.locator("body")).not_to_contain_text("Appeal the suspension")
     expect(page.get_by_role("button", name=re.compile(r"Account menu"))).to_contain_text("Healthy Co", timeout=10_000)
     assert mint_calls == [], f"zero-mint: POST /v1/session/key fired: {mint_calls}"
-    # 5d: the suspended team's recoverable durable is KEPT in the slot
+    assert key_authed == [], f"#2246: key-authed requests must not fire: {key_authed}"
+    # #2246: the residue was purged once at session resolution
     slot = page.evaluate("localStorage.getItem('tortoise_api_key')")
-    assert slot == held_key, f"5d must retain the suspended team's durable, got {slot!r}"
+    assert slot is None, f"#2246: the session mount must purge the slot, got {slot!r}"
 
 
 def test_logout_redirects_to_auth(page: Page) -> None:
     """#1511 (VGATE P1): a signed-in user clicking Log out is redirected to
     /auth — the key-only card is gone, so sign-out must land on the login
-    page, never the dead redirect shell. #2167 rule 8 (F5): the logout wipe
-    is RETAINED — a probe-adopted durable held in KEY_STORAGE is cleared on
-    logout (the slot never survives a sign-out). Requires the loop harness: a
-    valid session cookie → dashboard renders → Log out → /auth."""
+    page, never the dead redirect shell. #2246 rule-8 hygiene RETAINED: the
+    logout wipe still fires on the app origin (the KEY_STORAGE slot is
+    already purged by the session mount, but logout's removeItem is the
+    belt — the slot never survives a sign-out). #2246 review round-1: the
+    residue is RE-SEEDED after the mount purge so the logout click is the
+    ONLY remaining wipe — otherwise the final wipe-cookie assert would pass
+    vacuously if logout's own wipe regressed (the mount purge already fired
+    one removeItem). Requires the loop harness: a valid session cookie →
+    dashboard renders → Log out → /auth."""
     durable = "tt_loop_durable_abcdef0123456789"
     _wire_prod_domains(page)
     page.context.add_cookies([{
@@ -909,8 +917,8 @@ def test_logout_redirects_to_auth(page: Page) -> None:
         "domain": ".premiselabs.co", "path": "/",
     }])
     page.add_init_script(f"window.__AUTH_BASE_URL = '{AUTH_HOST}';")
-    # #2167: the durable arrives via the localStorage-seeded mount probe
-    # (the wire's /v1/team 200s the key-authed probe → 5b adopt)
+    # #2246: legacy residue seeded — the session mount purges it once
+    # (never probed/adopted; the mount probe is deleted).
     page.add_init_script(f"localStorage.setItem('tortoise_api_key', '{durable}');")
     # #2167 rule 8 (F5): the logout wipe is synchronous on the APP origin,
     # but the /auth bounce lands on the TORTUISE origin (localStorage is
@@ -930,8 +938,19 @@ def test_logout_redirects_to_auth(page: Page) -> None:
     """)
     page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
     expect(page.locator("body")).to_contain_text("Graphs", timeout=20_000)
-    # the probe adopted the stored durable (held key renders in state)
-    assert page.evaluate("localStorage.getItem('tortoise_api_key')") == durable
+    # the session mount purged the residue (no held key in state)
+    assert page.evaluate("localStorage.getItem('tortoise_api_key')") is None
+    # #2246 review round-1: the mount purge ALREADY fired one removeItem (the
+    # patched wipe cookie above). Re-seed the residue NOW so the logout click
+    # below is the only remaining wipe — the final cookie assert then pins
+    # logout's own removeItem instead of passing on the mount purge's cookie.
+    page.evaluate(f"localStorage.setItem('tortoise_api_key', '{durable}')")
+    # #2246 review round-2: clear the wipe cookie the MOUNT PURGE set — the
+    # round-1 re-seed alone left that cookie in place, so the final presence
+    # assert still passed even if logout's own wipe regressed (the assert was
+    # vacuous against the earlier purge's cookie). With the cookie cleared
+    # here, the post-logout presence assert pins LOGOUT's removeItem only.
+    page.evaluate("document.cookie='tt_wipe_log=; Domain=.premiselabs.co; Path=/; Max-Age=0'")
     page.locator(".account-blob-btn").click()
     expect(page.locator(".account-menu-logout")).to_be_visible()
     page.locator(".account-menu-logout").click()
