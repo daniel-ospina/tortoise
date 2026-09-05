@@ -18,11 +18,11 @@ import json
 import tempfile
 from pathlib import Path
 
-import pytest  # noqa: F401
+import pytest
 import yaml
 
 from battery.cli import main
-from battery.config import Scenario  # noqa: F401  (type hint below)
+from battery.config import Scenario
 from battery.config.corpus import load_corpus as load_corpus_yaml
 from battery.config.thresholds import ThresholdsConfig
 from battery.enums import ExitCode
@@ -964,8 +964,8 @@ class TestFamilyThreadedScorerSeam:
         """R2 consumes coverage_subscore (judge leg, Task 9) — the derive
         pass cannot emit it in phase 1, so a real R2 episode sentinels
         (insufficient_n) instead of measuring a fabricated 0.0 default."""
-        from battery.runner.probe_scorer import ProbeScorer
         from battery.probes.r2_coverage import R2CoverageProbe
+        from battery.runner.probe_scorer import ProbeScorer
         sc = _mini_scenario(tmp_path, family="R2", sid="d-r2")
         scorer = ProbeScorer(probe=R2CoverageProbe(), thresholds=())
         ep = _real_episode(sc.id, _mandatory_log())
@@ -980,8 +980,8 @@ class TestFamilyThreadedScorerSeam:
         """A probe never measures (or gaps) an episode outside its family
         domain: no record, no sentinel — foreign-family episodes cannot
         contaminate a family cell."""
-        from battery.runner.probe_scorer import ProbeScorer
         from battery.probes.r4_defeat import R4DefeatProbe
+        from battery.runner.probe_scorer import ProbeScorer
         ct = _mini_scenario(tmp_path, family="contradiction",
                             task_type="contradiction", gold="flip", sid="ct-t")
         scorer = ProbeScorer(probe=R4DefeatProbe(), thresholds=())
