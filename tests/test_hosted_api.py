@@ -114,8 +114,12 @@ def _patch_tortoise_sdk_init(db_path: str):
 
     _orig_init = ha_mod.TortoiseSDK.__init__
 
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
+    def _patched_init(self, db_path_arg=None, *, namespace=None,
+                      graph_name=None, **kwargs):
+        # graph_name (C5 #2114 D-C5-1 seam): forward it — swallowing the
+        # kwarg would silently open the DEFAULT team graph for a custom
+        # graph request (cross-graph test blindness).
+        _orig_init(self, db_path, namespace=namespace, graph_name=graph_name)
 
     ha_mod.TortoiseSDK.__init__ = _patched_init
     # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
@@ -309,6 +313,55 @@ class TestHealthEndpoints:
         assert body["hashing"] == "pbkdf2_hmac_sha256"
         assert "api_auth_enforced" in body
         assert isinstance(body["api_auth_enforced"], bool)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Build/version surface (#2208)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestVersionEndpoint:
+    """GET /v1/version — public version/sha surface so clients (and the
+    onboarding skill) can detect an outdated server before authenticating.
+    """
+
+    def test_version_returns_package_version(self, client):
+        import tortoise
+
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"] == tortoise.__version__
+        assert "commit_sha" in body
+        # #2208 review F5: openapi info.version must mirror the package
+        # version (was a stale hardcoded "0.1.0") — pin it so drift fails loud.
+        assert app.version == tortoise.__version__
+
+    def test_version_is_public_no_auth(self, unauth_client):
+        """Skew detection must work BEFORE auth — no Authorization header."""
+        r = unauth_client.get("/v1/version")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["version"]
+
+    def test_version_commit_sha_reads_env(self, client, monkeypatch):
+        """commit_sha mirrors the deploy-time TORTOISE_GIT_SHA (baked by
+        deploy-hosted.yml); None when no deploy pipeline set it."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "16075c8f2ff182b44614d6a83dc4d92933ae70db")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] == "16075c8f2ff182b44614d6a83dc4d92933ae70db"
+
+        monkeypatch.delenv("TORTOISE_GIT_SHA")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
+
+    def test_version_commit_sha_blank_env_is_null(self, client, monkeypatch):
+        """An empty (not unset) TORTOISE_GIT_SHA must not leak as "" — null."""
+        monkeypatch.setenv("TORTOISE_GIT_SHA", "")
+        r = client.get("/v1/version")
+        assert r.status_code == 200
+        assert r.json()["commit_sha"] is None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1592,6 +1645,265 @@ class TestSessionCapture:
         r2 = client.post("/v1/sessions", json={
             "conversation": [{"role": "user", "content": "I think auth is the top issue."}]})
         assert r2.status_code == 402, r.text  # non-blank over quota: 402 still fires
+
+
+class TestSessionCaptureWriteVerb:
+    """W5 (#2104): POST /v1/sessions speaks the frozen memory_write_v1 write
+    verb (S12/DM-2) — protocol_version REQUIRED, provenance REQUIRED,
+    per-point status/ep_updated/dedup enriched in place (D8 additive); the
+    provenance stamp carries source_session/source_harness/ingested_at
+    (S1); and the gate order pins the S2 amendment (boundary 422 precedes
+    the recording-off 409)."""
+
+    CONVERSATION = [  # noqa: RUF012
+        {"role": "user", "content": "W5 write-verb provenance contract test."},
+    ]
+
+    def test_capture_response_speaks_write_verb(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-verb-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        assert body["status"] in ("ok", "partial")
+        assert body["error"] is None
+        prov = body["provenance"]
+        assert prov["source_session"] == "w5-verb-session"
+        assert prov["source_harness"] == "codex"
+        assert prov["ingested_at"]
+        # Legacy surface intact (D8) + per-point verb facts enriched.
+        assert body["extracted"] == len(body["points"])
+        for p in body["points"]:
+            assert "ep_updated" in p and "dedup" in p and "status" in p
+            assert p.get("point_id") == p.get("id")  # frozen-verb schema alias
+
+    def test_capture_no_harness_normalizes_provenance_unknown(self, client):
+        """P2-1 (review): a no-harness capture (T1-P3: harness optional) must
+        still carry a complete provenance — source_harness normalizes to
+        "unknown" in the stamp AND the envelope (FalkorDB SET null would
+        DELETE the property, leaving provenance incomplete)."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-noharness-session",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["provenance"]["source_harness"] == "unknown"
+        import tortoise.hosted_api as ha_mod
+        ids = [p["id"] for p in body["points"]]
+        if ids:
+            rows = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj().g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.source_harness",
+                params={"ids": ids},
+            ).result_set
+            for row in rows:
+                assert row[0] == "unknown"
+
+    def test_capture_points_stamped_with_provenance(self, client):
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-provenance-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert ids, "mock extraction produced no points"
+        import tortoise.hosted_api as ha_mod
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        proj = sdk._get_proj()
+        rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+            "n.source_session, n.source_harness, n.ingested_at, n.eventId",
+            params={"ids": ids},
+        ).result_set
+        by_id = {r[0]: r for r in rows}
+        for pid in ids:
+            assert pid in by_id, f"{pid} missing from graph"
+            _id, src_sess, src_har, ingested, event_id = by_id[pid]
+            assert src_sess == "w5-provenance-session"
+            assert src_har == "pi"
+            assert ingested
+            assert event_id  # ontology-compliant provenance kept
+
+    def test_capture_ingest_ep_user_visible_e2e5(self, client, monkeypatch):
+        """W5 Phase C (#2104, indicator 3 / E2E-5 acceptance): EP updates on
+        ingestion verified at the USER-VISIBLE level — after a capture the
+        write-verb response carries ``ep_updated: true`` per extracted claim
+        and the claims carry persisted EP posteriors (has_ep true); the
+        pre-ingestion uncalibrated state (has_ep false — structurally, the W2
+        strict bar was 0.0 while captured claims were draft) DIFFERS.
+
+        Phase C promotes the extracted claims AND their capture operators to
+        live on the capture path ONLY (the episodic turn stream stays draft)
+        and runs a BOUNDED ingest EP pass (local — dirty-root refresh, never
+        a full-graph pass) at the END of the capture write path, BEFORE the
+        verb's enrichment read (ep_updated = graph truth post-EP — never
+        fabricated). The m2 echo lane is used so the cue-word conversation
+        produces a WIRED claim pair (operator-less claims have no EP factors
+        and stay honestly uncalibrated)."""
+        monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+        conv = [
+            {"role": "user", "content": "The auth dead-end is the top issue "
+                                         "because it blocks every deploy."},
+            {"role": "assistant", "content": "Therefore we should ship serve "
+                                               "--http first."},
+        ]
+        r = client.post("/v1/sessions", json={
+            "conversation": conv,
+            "session_id": "w5c-e2e5-session",
+            "harness": "codex",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        ids = [p["id"] for p in body["points"]]
+        assert len(ids) >= 2, body
+        for p in body["points"]:
+            # user-visible EP-on-ingest: claims are live AND calibrated
+            assert p["status"] == "live", p
+            assert p["ep_updated"] is True, p
+        import tortoise.hosted_api as ha_mod
+        proj = ha_mod._make_sdk(namespace=TEST_TEAM_ID)._get_proj()
+        cal = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids AND "
+            "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL) "
+            "RETURN count(n)",
+            params={"ids": ids},
+        ).result_set
+        assert cal[0][0] == len(ids), \
+            f"every wired claim must calibrate post-ingest ({cal[0][0]}/{len(ids)})"
+        # the episodic turn stream stays draft (turn stream, not beliefs)
+        trows = proj.g.query(
+            "MATCH (t:Point) WHERE t.is_episodic = true RETURN DISTINCT t.status"
+        ).result_set
+        assert trows and all(st == "draft" for (st,) in trows), trows
+
+    def test_capture_isolated_claim_ep_updated_stays_honest(self, client):
+        """Anti-gaming pin (W5 Phase C #2104): an OPERATOR-LESS extracted
+        claim (the deterministic v2 mock seam emits one isolated point with
+        no operators) has no EP factors — the bounded ingest pass trivially
+        stamps lastDreamedAt but can never fabricate persisted α/β, so the
+        verb's ``ep_updated`` (has_ep = the point actually carries EP
+        params) stays False. Promotion is capture-scoped: the claim is live,
+        but uncalibrated-by-construction is reported honestly."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5c-isolated-session",
+            "harness": "pi",
+        })
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["extracted"] >= 1
+        assert all(p["ep_updated"] is False for p in body["points"]), \
+            body["points"]
+
+    def test_capture_gate_boundary_422_before_409(self, client):
+        """S2 amendment (verified order): the boundary 422 (invalid harness
+        — Pydantic SessionRequest validation, fires before the handler on
+        REST) precedes the recording-off 409.  Recording off must never mask
+        a malformed payload."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "harness": "not-a-real-harness",  # boundary failure
+        })
+        assert r.status_code == 422, (r.status_code, r.text)
+        assert "harness" in r.text.lower()
+
+    def test_capture_gate_409_when_recording_off(self, client):
+        """Recording off + VALID payload -> 409 (state-conflict), no Session
+        write, no receipt."""
+        import tortoise.hosted_api as ha_mod
+        ha_mod._update_onboarding_state(
+            TEST_TEAM_ID, session_recording=False)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-recording-off-session",
+        })
+        assert r.status_code == 409, r.text
+        sdk = ha_mod._make_sdk(namespace=TEST_TEAM_ID)
+        rows = sdk._get_proj().g.query(
+            "MATCH (s:Session {id:$sid}) RETURN count(s)",
+            params={"sid": "w5-recording-off-session"},
+        ).result_set
+        assert rows[0][0] == 0  # no Session write when recording off
+
+    def test_capture_replay_zero_new_nodes_verb_ok(self, client):
+        """Idempotency: re-POST of the same session_id (recording on) writes
+        0 new nodes — extraction is skipped, the verb still speaks ok."""
+        for _ in range(2):
+            r = client.post("/v1/sessions", json={
+                "conversation": self.CONVERSATION,
+                "session_id": "w5-replay-session",
+            })
+            assert r.status_code == 200, r.text
+        first = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-replay-session",
+        }).json()
+        assert first["protocol_version"] == "memory_write_v1"
+        # A replay extracts nothing new: the verb reports the (empty)
+        # point set honestly.
+        assert first["extracted"] == 0
+
+
+    def test_capture_session_id_overlong_rejected_boundary_422(self, client):
+        """P2 (review round 1): session_id becomes the point-level
+        source_session — unbounded caller strings would amplify onto every
+        extracted point.  Over-long ids fail the boundary 422 (Pydantic
+        max_length) BEFORE the recording gate."""
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "x" * 500,
+        })
+        assert r.status_code == 422, r.text
+
+    def test_capture_enrichment_failure_never_500s_committed_capture(
+            self, client, monkeypatch):
+        """P1 (review round 1): a transient failure in the post-write
+        enrichment read must NOT 500 a committed capture (D4 posture) — it
+        degrades to an additive warning and the verb reports what it could."""
+        # Patch the enrichment read's Graph.query at the HANDLE CLASS level
+        # on BOTH lanes (#1647 docker-lane redirect: the test-* team maps to
+        # a SERVER-backed graph — falkordb.graph.Graph — while the carve-out
+        # lane uses the embedded redislite handle; the boom must reach
+        # whichever class the lane actually executes). Selective so unrelated
+        # queries in the same window pass through untouched.
+        from redislite.falkordb_client import Graph as _EmbeddedGraph
+        _graph_classes = [_EmbeddedGraph]
+        try:
+            from falkordb.graph import Graph as _ServerGraph
+            _graph_classes.append(_ServerGraph)
+        except Exception:
+            pass
+        _orig_query = {cls: cls.query for cls in _graph_classes}
+
+        def _selective_boom(self, cypher, params=None, timeout=None):
+            if "posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL" in cypher:
+                raise RuntimeError("transient graph failure")
+            return _orig_query[type(self)](self, cypher, params=params,
+                                           timeout=timeout)
+
+        for cls in _graph_classes:
+            monkeypatch.setattr(cls, "query", _selective_boom)
+        r = client.post("/v1/sessions", json={
+            "conversation": self.CONVERSATION,
+            "session_id": "w5-enrich-fail-session",
+        })
+        # Committed + 200; the failure is additive, never a 500.
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["protocol_version"] == "memory_write_v1"
+        # facts={} -> every extracted point is skipped -> the verb is
+        # PARTIAL, never an unqualified ok over unverifiable points.
+        assert body["status"] == "partial"
+        assert any("enrichment read failed" in w for w in body["warnings"])
 
 
 class TestSessionList:
@@ -4348,36 +4660,80 @@ class TestProvisioningService:
         finally:
             gen.close()
 
-    def test_minted_key_dormant_on_data_plane(self, tmp_path):
-        """C2 #2111 (code-review security P1, #2b — posture pin): a MINTED
-        deleg=0 per-graph key is DORMANT until C5 #2114 routes resolved
-        graph scope into every request path. C1's fail-closed invariant (a
-        graph-bound key must never widen onto the default graph) is
-        unenforceable at the data plane before the spine — no endpoint
-        consumes graph_id/scopes yet — so deleg=0 keys authenticate to NO
-        capability surface: not management (KEY_NOT_USER_MINTED via
-        get_current_team_session), not raw data reads (GET /v1/points →
-        KEY_NOT_USER_MINTED via get_current_team_gated), not MCP (403 in
-        TeamResolutionMiddleware). They stay mintable / revocable /
-        listable — the provisioning lifecycle. C5 flips this off
-        deliberately with per-graph routing."""
+    def test_minted_key_activated_with_data_scope(self, tmp_path):
+        """C5 #2114 (D-C5-7 — replaces the C2/C3 dormancy pin): a MINTED
+        deleg=0 key with a DATA scope activates on the bound graph — but
+        ONLY its own graph (app-layer isolation, ACL OFF), and NEVER beyond
+        its scopes: a graphs:read child reads its custom graph, cannot read
+        the team default's points (cross-graph denied by _data_sdk's
+        ownership pre-check), cannot WRITE (graphs:read lacks graphs:write →
+        _require_scope 403), and a deleg=0 key without any data scope stays
+        dormant (KEY_NOT_USER_MINTED)."""
         import uuid
         gen = TestProvisioningService()._setup(tmp_path, "pro", None)
         sdk, tid, tc = next(gen)
         try:
             from tortoise.auth import hash_api_key
+            # A real custom graph the child binds to (registry Graph node
+            # with the derived namespace — the ownership pre-check reads it).
+            g = sdk._graph_create(tid, "minted-g", kind="custom")
+            gid = g["graph_id"]
+            # Write a point to the DEFAULT graph (the cross-graph probe: the
+            # child must never see it).
+            sdk.create_point("default-only", content="default only")
             token = "tk_" + uuid.uuid4().hex
             sdk._get_registry().query(
                 "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
-                "key_prefix:$kp, created_by:'x', graph_id:'g_x', "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
                 "scopes:['graphs:read'], delegation_depth:0})",
-                params={"id": "minted-dormant", "tid": tid,
-                        "kh": hash_api_key(token), "kp": token[:10]},
+                params={"id": "minted-active", "tid": tid,
+                        "kh": hash_api_key(token), "kp": token[:10],
+                        "gid": gid},
             )
-            # Raw data read (list points) — formerly the uncovered lane:
-            # deleg=0 must 403, never a team-wide read.
+            h = {"Authorization": f"Bearer {token}"}
+            # 1) reads ITS graph: the custom graph is empty → [] (the
+            #    default graph's point must NOT surface — cross-graph).
+            r = tc.get("/v1/points", headers=h)
+            assert r.status_code == 200, r.text
+            body = r.json()
+            names = [p if isinstance(p, str)
+                     else (p.get("name") or p.get("id")) for p in body]
+            assert "default-only" not in names, (
+                "minted child saw the default graph's points (cross-graph): "
+                f"{names}")
+            # 2) graphs:read ≠ write → 403 INSUFFICIENT_SCOPE on a write.
+            r = tc.post("/v1/points",
+                        json={"content": "child-write"}, headers=h)
+            assert r.status_code == 403, r.text
+            detail = r.json()["detail"]
+            if isinstance(detail, dict):
+                assert detail.get("error_code") == "INSUFFICIENT_SCOPE", \
+                    detail
+            # 3) a deleg=0 key bound to a VANISHED graph fails closed (404 —
+            #    never widens onto the default) .
+            dead = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:'g_ghost', "
+                "scopes:['graphs:read'], delegation_depth:0})",
+                params={"id": "minted-ghost", "tid": tid,
+                        "kh": hash_api_key(dead), "kp": dead[:10]},
+            )
             r = tc.get("/v1/points",
-                       headers={"Authorization": f"Bearer {token}"})
+                       headers={"Authorization": f"Bearer {dead}"})
+            assert r.status_code in (403, 404), r.text
+            # 4) a deleg=0 key with NO data scope stays dormant on data.
+            nodata = "tk_" + uuid.uuid4().hex
+            sdk._get_registry().query(
+                "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
+                "key_prefix:$kp, created_by:'x', graph_id:$gid, "
+                "scopes:['keys:manage'], delegation_depth:0})",
+                params={"id": "minted-nodata", "tid": tid,
+                        "kh": hash_api_key(nodata), "kp": nodata[:10],
+                        "gid": gid},
+            )
+            r = tc.get("/v1/points",
+                       headers={"Authorization": f"Bearer {nodata}"})
             assert r.status_code == 403, r.text
             detail = r.json()["detail"]
             if isinstance(detail, dict):
@@ -5351,3 +5707,519 @@ class TestC3ReviewGatePins:
             params={"uid": _U1, "tid": tid},
         )
         return tc.post("/v1/team/keys", json=body)
+
+
+# ── #2251 embedded path/namespace divergence regression ─────────────────────
+# Scoped plan: docs/epics/2026-09-05-2251-path-divergence/plan.md (A2).
+# Markerless (an embedded_only marker would dead-run: skipped in the docker
+# slow leg AND excluded from the D14 -k subset). Env-control per test via the
+# test_register_journals_minted_team_graph shape. Record-only __init__ spy
+# never delegates to the real ctor (no real DB opens, no EmbeddedStoreBusyError
+# on the shared matrix). Tests that mint the "registry" anchor close+clear it.
+
+
+def _record_only_sdk_init_spy(monkeypatch, ha_mod):
+    """Record (db_path, namespace, graph_name) on every TortoiseSDK
+    construction WITHOUT delegating to the real __init__ (no real DB opens).
+    Returns the record list; the spy is auto-undone by monkeypatch."""
+    records = []
+
+    def _spy(self, db_path=None, *, namespace=None, graph_name=None, **kw):
+        records.append((db_path, namespace, graph_name))
+
+    monkeypatch.setattr(ha_mod.TortoiseSDK, "__init__", _spy)
+    return records
+
+
+def _pin_hermetic_default_store(monkeypatch, tmp_path):
+    """Point the bare-construction default (config.DEFAULT_DB_PATH, bound at
+    import via expanduser — a HOME redirect does NOT move it) at a tmp store
+    so ANY construction that resolves the ~/.tortoise default (pre-fix bare
+    ctors, or a future bare-construction regression) lands hermetically and
+    never touches/creates the developer's real ~/.tortoise (#2251 stray-DB
+    side effect). resolve_db_path reads the module global at call time, so
+    the monkeypatch is effective post-import. The parent dir is created so a
+    pre-fix bare open SUCCEEDS against the empty store (returns the absent-
+    graph verdict) instead of failing open on a missing parent — the false-
+    green the guard must prevent. Returns the pinned path."""
+    import tortoise.config as tconfig
+
+    pinned = str(tmp_path / "home" / ".tortoise" / "tortoise.db")
+    os.makedirs(os.path.dirname(pinned), exist_ok=True)
+    monkeypatch.setattr(tconfig, "DEFAULT_DB_PATH", pinned)
+    return pinned
+
+
+class TestEmbeddedRegistryPathDivergence:
+    """#2251: _iter_registered_teams + _graph_has_team_namespace must read the
+    SAME embedded db + registry graph the writers use (registry_control_plane
+    via _make_sdk(namespace="registry")), not ns-less control_plane on
+    ~/.tortoise. Plan tests 1-4."""
+
+    def test_iter_registered_teams_reads_registry_control_plane(
+            self, monkeypatch, tmp_path):
+        """Graph-name leg (namespace fix) — discriminates even with paths
+        pinned: a Team seeded via the writer seam (ns=registry) must be
+        enumerated. Pre-fix: queries ns-less control_plane → []."""
+        import tortoise.hosted_api as ha_mod
+
+        # Force the registry branch (selfhost/registry control-plane mode).
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.setenv("TORTOISE_DB_PATH", str(tmp_path / "conv.db"))
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        # is_supabase_enabled reads TORTOISE_CONTROL_PLANE=registry → False;
+        # belt-and-braces against ambient creds:
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        try:
+            writer = ha_mod._make_sdk(namespace="registry")
+            writer._get_registry().query(
+                "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
+                params={"id": "2251-team-1", "name": "T2251"},
+            )
+            # Falsy-id row must be skipped (site-1 guard).
+            writer._get_registry().query(
+                "CREATE (t:Team {id:$id, name:$name, deleted_at:null})",
+                params={"id": "", "name": "Falsy"},
+            )
+            teams = ha_mod._iter_registered_teams()
+            writer.close()
+        finally:
+            _close_keepalive_anchors(ha_mod)
+        assert {"team_id": "2251-team-1", "name": "T2251"} in teams, teams
+        assert all(t["team_id"] for t in teams), teams
+
+    def test_graph_has_team_namespace_probes_writer_db(
+            self, monkeypatch, tmp_path):
+        """Path leg — isolated env (URI + TORTOISE_DB_PATH unset, the bare-
+        construction default pointed at a tmp store): writer seam and both
+        site reads record ONE identical db_path + namespace='registry'.
+        Pre-fix: bare sites record db_path=None (real ctor never runs under
+        the spy) → mismatch vs writer's real path + namespace=None."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # config.DEFAULT_DB_PATH is bound at import time (expanduser) — a HOME
+        # redirect does NOT move it (resolve_db_path reads the module global at
+        # call time, so patching the attribute IS hermetic). Point it at a tmp
+        # store so a pre-fix bare-construction red run never touches the real
+        # ~/.tortoise (#2251's stray-DB side effect).
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            ha_mod._make_sdk(namespace="registry")  # writer shape
+            assert records, "writer seam constructed nothing"
+            writer_records = list(records)
+            records.clear()
+            ha_mod._iter_registered_teams()
+            sweep_records = list(records)
+            assert sweep_records, "_iter_registered_teams constructed nothing"
+            records.clear()
+            ha_mod._graph_has_team_namespace("team-2251-x")
+            probe_records = list(records)
+            assert probe_records, "_graph_has_team_namespace constructed nothing"
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # EVERY construction in the embedded leg must carry the resolved
+        # db_path (a bare/unanchored construction records db_path=None — the
+        # ~/.tortoise resolution happens inside the never-run real ctor). Do
+        # NOT filter None out: the path-divergence half is exactly the bug
+        # where the sites' constructions differ from the writer's path.
+        all_records = writer_records + sweep_records + probe_records
+        assert all(db is not None for db, _ns, _gn in all_records), \
+            f"bare (db_path=None) construction recorded: {all_records}"
+        paths = {db for db, _ns, _gn in all_records}
+        assert len(paths) == 1, f"divergent db_paths recorded: {all_records}"
+        (shared_path,) = paths
+        # Guard (b): the shared embedded path must not resolve under the
+        # bare-construction default store (tmp/home/.tortoise). Subpath check
+        # — dirname(shared_path) == .../.tortoise, never .../home itself.
+        assert str(tmp_path / "home") not in shared_path, all_records
+        for phase in (writer_records, sweep_records, probe_records):
+            assert all(ns == "registry" for _db, ns, _gn in phase), phase
+            assert all(gn is None for _db, _ns, gn in phase), phase
+
+    def test_iter_registered_teams_never_raises_on_sweep_failure(
+            self, monkeypatch, tmp_path):
+        """Site-1 best-effort contract: a raising _make_sdk (e.g.
+        EmbeddedStoreBusyError on a cross-process-held DB) must degrade to []
+        — never raise into _lifespan's boot path (plan surface map)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Hermetic red-run default: any construction resolving the bare
+        # ~/.tortoise default lands on a tmp store, never the real home.
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        def _busy(namespace=None, graph_name=None):
+            raise RuntimeError("embedded store busy")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _busy)
+        assert ha_mod._iter_registered_teams() == []
+
+    def test_graph_has_team_namespace_real_verdict(self, monkeypatch, tmp_path):
+        """Consumer-visible verdict on a REAL embedded store: a minted
+        team_{tid} graph on the anchored/writer store → True; an unminted id
+        → False. Pre-fix the bare construction probed resolve_db_path()'s
+        default store (pointed at a tmp home here for hermeticity) → False
+        for the present graph (acceptance (e)(ii) re-enables the FLOW leg)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        # Hermetic bare-construction default: pre-fix (red) runs probe
+        # resolve_db_path()'s store — point it at a tmp home so the run never
+        # touches the real ~/.tortoise (#2251 stray-DB side effect).
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+        # Confine the post-fix writer/probe store to a per-test tmp file (the
+        # env-unset fallback would otherwise be the process-shared
+        # tempfile.gettempdir()/tortoise.db — cross-suite busy-probe risk,
+        # #1502/#1950 class). The discriminator survives: pre-fix never calls
+        # _resolve_embedded_db_path (inline policy), so its probe still hits
+        # the patched DEFAULT_DB_PATH tmp-home store ≠ this tmp store.
+        monkeypatch.setattr(
+            ha_mod, "_resolve_embedded_db_path",
+            lambda: str(tmp_path / "store.db"), raising=False)
+        tid = "team-2251-verdict"
+        try:
+            # Mint the team graph via the anchored writer seam (a real graph
+            # on the writers' /data-or-tempdir store).
+            ha_mod._make_sdk(namespace=tid)._get_proj()
+            # Post-fix: both sites resolve the SAME anchored store → True for
+            # a present graph, False for an absent one. Pre-fix this probed
+            # the (empty) default store → False for the present graph.
+            assert ha_mod._graph_has_team_namespace(tid) is True
+            assert ha_mod._graph_has_team_namespace("team-absent-999") is False
+        finally:
+            # Close every anchor minted (registry + the team graph) — the
+            # #1950 close-then-drop pattern.
+            _close_keepalive_anchors(ha_mod)
+
+    def test_iter_registered_teams_uri_mode_registry_namespace(
+            self, monkeypatch, tmp_path):
+        """Bug (a) is mode-independent: in URI mode the sweep must STILL
+        construct namespace='registry' (registry_control_plane), not bare
+        (control_plane). Record-spy: exactly one (db_path=None,
+        namespace='registry') construction; no real server touched."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI", "docker://:pw@localhost:6379/2251_uri_ns")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
+        monkeypatch.delenv("SUPABASE_URL", raising=False)
+        monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            teams = ha_mod._iter_registered_teams()
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # URI-branch _make_sdk returns a fresh TortoiseSDK(namespace="registry")
+        # with no db_path. The stub's _get_registry() raises → fail-open [].
+        assert teams == [], teams
+        assert records == [(None, "registry", None)], records
+
+    def test_supabase_mode_never_constructs_registry_sdk(
+            self, monkeypatch, tmp_path):
+        """Invariant guard (NOT a pre-fix discriminator — the early return
+        already exists): Supabase mode enumerates via the control plane and
+        must never construct the registry SDK (post-#669 no-recreate)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://2251.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251")
+        fake = FakeControlPlane()
+        fake.seed("teams", [{"id": "supa-team-1", "name": "Supa T",
+                             "deleted_at": None}])
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            teams = ha_mod._iter_registered_teams()
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        assert teams == [{"team_id": "supa-team-1", "name": "Supa T"}], teams
+        assert records == [], f"Supabase mode constructed {len(records)} SDKs"
+
+    def test_iter_registered_teams_supabase_query_failure_returns_empty(
+            self, monkeypatch, tmp_path):
+        """Supabase-mode boot contract: a control-plane query failure at boot
+        (transient PostgREST outage) must degrade to [] — never crash
+        _lifespan (the branch that runs in hosted production)."""
+        import tortoise.hosted_api as ha_mod
+        import tortoise.supabase_control as sc
+        from tests.fake_control_plane import FakeControlPlane
+
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setenv("SUPABASE_URL", "https://2251b.supabase.co")
+        monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-2251b")
+        fake = FakeControlPlane()
+
+        def _query_boom(table, **kw):
+            raise RuntimeError("PostgREST transient outage")
+
+        monkeypatch.setattr(fake, "query", _query_boom)
+        monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        assert ha_mod._iter_registered_teams() == []
+        assert records == [], "registry SDK must never be built in Supabase mode"
+
+    def test_graph_has_team_namespace_uri_mode_parity(
+            self, monkeypatch, tmp_path):
+        """URI-mode envelope: with TORTOISE_DB_URI set, _graph_has_team_namespace
+        constructs exactly one (db_path=None, namespace='registry') SDK and
+        does NOT populate _FALLBACK_KEEPALIVE — URI construction semantics
+        unchanged (plan test 4)."""
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.setenv(
+            "TORTOISE_DB_URI", "docker://:pw@localhost:6379/2251_parity")
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        records = _record_only_sdk_init_spy(monkeypatch, ha_mod)
+        ha_mod._FALLBACK_KEEPALIVE.clear()
+        try:
+            ha_mod._graph_has_team_namespace("team-2251-uri")
+            # The no-anchor URI contract the docstring claims: URI mode must
+            # never populate the keepalive dict.
+            assert ha_mod._FALLBACK_KEEPALIVE.get("registry") is None
+        finally:
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+        # URI-mode constructions carry no db_path (server mode). Under the
+        # record-only spy the stub SDK's _get_proj() raises → the fail-open
+        # except returns True deterministically (the success path is
+        # unreachable with a stub) — assert the exact construction record.
+        assert records == [(None, "registry", None)], records
+
+
+class TestResolveEmbeddedDbPath:
+    """_resolve_embedded_db_path corner tests (#2251 plan tests 5)."""
+
+    def test_unset_env_defaults_to_data(self, monkeypatch):
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        import os as _os
+
+        def _makedirs_ok(_path, **kw):
+            return None  # pretend /data is writable
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "/data/tortoise.db"
+
+    def test_env_honored_verbatim(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_DB_PATH", "/x/y/custom.db")
+
+        def _makedirs_ok(_path, **kw):
+            return None
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "/x/y/custom.db"
+
+    def test_env_relative_honored_verbatim_not_absified(self, monkeypatch):
+        """The resolver returns the env value verbatim — a RELATIVE path
+        WITH a directory component is NOT cwd-abs-ified (the deliberate
+        divergence from config.resolve_db_path, which _abs()-ifies). The
+        directory component is load-bearing: a bare filename has dirname("")
+        → makedirs("") raises, so it would fall through to the tempdir
+        fallback under a real os.makedirs; "relative/sub/custom.db" has a
+        non-empty dirname, so the verbatim claim holds with or without the
+        patch below."""
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.setenv("TORTOISE_DB_PATH", "relative/sub/custom.db")
+
+        def _makedirs_ok(_path, **kw):
+            return None
+
+        monkeypatch.setattr(_os, "makedirs", _makedirs_ok)
+        assert ha_mod._resolve_embedded_db_path() == "relative/sub/custom.db"
+
+    def test_unwritable_data_falls_back_to_tempdir(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        # dirname-is-a-file: real makedirs raises FileExistsError (an OSError)
+        # deterministically — no /data assumption.
+        monkeypatch.setattr(_os, "makedirs", _raise_file_exists)
+        result = ha_mod._resolve_embedded_db_path()
+        assert os.path.dirname(result) == tempfile.gettempdir()
+        assert result.endswith("tortoise.db")
+
+    def test_empty_env_falls_back_to_tempdir(self, monkeypatch):
+        import os as _os
+
+        import tortoise.hosted_api as ha_mod
+        # dirname("") == "" → makedirs("") raises FileNotFoundError (OSError).
+        monkeypatch.setattr(_os, "makedirs", _raise_file_exists)
+        monkeypatch.setenv("TORTOISE_DB_PATH", "")
+        result = ha_mod._resolve_embedded_db_path()
+        assert os.path.dirname(result) == tempfile.gettempdir()
+        assert result.endswith("tortoise.db")
+
+
+def _raise_file_exists(path, **kw):
+    if path == "":
+        raise FileNotFoundError(f"no such dir: {path!r}")
+    raise FileExistsError(f"blocked: {path!r}")
+
+
+class TestRegistryExistingGraphs:
+    """_registry_existing_graphs probe-before-purge helper (#2251 review P2).
+
+    The retention sweep must not purge an ABSENT team_{tid} graph (an orphan
+    registry row from a partial provision) — the purge query would
+    materialize an empty graph. The helper lists the server-wide existing
+    graphs via the registry seam and returns None on probe failure so the
+    caller skips the cycle (best-effort)."""
+
+    def test_success_returns_set_of_graph_names(self, monkeypatch):
+        """A successful probe returns the graph names as a set — the sweep
+        gate then skips teams whose team_{tid} graph was never minted."""
+        import tortoise.hosted_api as ha_mod
+
+        class _FakeDb:
+            @staticmethod
+            def list_graphs():
+                return ["registry_control_plane", "team_a", "team_b"]
+
+        class _FakeProj:
+            db = _FakeDb()
+
+        closed = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return _FakeProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() == {
+            "registry_control_plane", "team_a", "team_b"}
+        assert closed == [True], "the probe SDK must be closed"
+
+    def test_probe_exception_returns_none(self, monkeypatch):
+        """A probe failure (list_graphs raise) → None — the caller skips the
+        sweep this cycle instead of purging blind (best-effort contract)."""
+        import tortoise.hosted_api as ha_mod
+
+        class _BoomProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("list_graphs boom")
+
+            db = _db()
+
+        class _Sdk:
+            def _get_proj(self):
+                return _BoomProj()
+
+            def close(self):
+                return None
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() is None
+
+    def test_sdk_close_runs_when_list_graphs_raises(self, monkeypatch):
+        """close() runs on the exception path (finally) — no leaked probe
+        handle on the embedded keepalive daemon (mirror of the site-2
+        close-on-exception leak fix)."""
+        import tortoise.hosted_api as ha_mod
+
+        closed = []
+
+        class _BoomProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("boom")
+
+            db = _db()
+
+        class _Sdk:
+            def _get_proj(self):
+                return _BoomProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._registry_existing_graphs() is None
+        assert closed == [True], "close() must run on the exception path"
+
+
+class TestGraphHasTeamNamespaceExceptionPath:
+    """Site-2 close-on-exception leak fix: the fresh SDK is closed even when
+    list_graphs raises (finally), and the never-raise fail-open contract is
+    preserved when the construction itself raises. Env-isolated + hermetic
+    default store so a future bare-construction refactor cannot fall through
+    to the real ~/.tortoise behind the monkeypatch (#2251 stray-DB guard)."""
+
+    def test_close_runs_when_list_graphs_raises(self, monkeypatch, tmp_path):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        class _RaisingProj:
+            class _db:
+                @staticmethod
+                def list_graphs():
+                    raise RuntimeError("list_graphs boom")
+
+            db = _db()
+
+        closed = []
+
+        class _Sdk:
+            def _get_proj(self):
+                return _RaisingProj()
+
+            def close(self):
+                closed.append(True)
+
+        monkeypatch.setattr(
+            ha_mod, "_make_sdk",
+            lambda namespace=None, graph_name=None: _Sdk())
+        assert ha_mod._graph_has_team_namespace("team-leak") is True
+        assert closed == [True], "close() must run on the exception path"
+
+    def test_construction_raise_keeps_fail_open(self, monkeypatch, tmp_path):
+        import tortoise.hosted_api as ha_mod
+
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.delenv("TORTOISE_DB_PATH", raising=False)
+        _pin_hermetic_default_store(monkeypatch, tmp_path)
+
+        def _boom(namespace=None, graph_name=None):
+            raise RuntimeError("embedded store busy")
+
+        monkeypatch.setattr(ha_mod, "_make_sdk", _boom)
+        assert ha_mod._graph_has_team_namespace("team-busy") is True

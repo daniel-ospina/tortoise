@@ -1580,6 +1580,59 @@ jobs:
             /tmp/expected-nodeids.txt
           if-no-files-found: ignore
 
+  test-d14-hosted-api:
+    # #2188: the D14 (embedded_only) keepalive regression guards in
+    # tests/test_hosted_api.py — test_make_sdk_reuses_healthy_anchor (#1470),
+    # test_make_sdk_rebinds_stale_anchor (#1502), and the #2172 set
+    # (test_make_sdk_concurrent_first_calls_single_anchor,
+    # test_registry_anchor_reuses_healthy_anchor,
+    # test_registry_anchor_concurrent_first_calls_single_anchor) — ran in NO
+    # trunk CI job: the file is in slow_files (full runs execute it only in
+    # the docker slow leg, which sets TORTOISE_DB_URI → the autouse D14 skip
+    # hook skips them all) and the URI-less carve-out runs only the 23
+    # ci-surfaces carve_out files. A future revert of _KEEPALIVE_LOCK
+    # (#2172) or the anchor semantics would produce NO CI failure anywhere —
+    # the race would resurface only probabilistically (#2065/#2172 flake).
+    # This job runs the D14 set URI-less on every run (PR + push), ~1 min.
+    needs: changes
+    if: always() && needs.changes.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      TORTOISE_TEST_CARVE_OUT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install package + test extras
+        run: pip install -e '.[test,embeddings]'
+      - name: Run D14 hosted-api keepalive guards (embedded, URI unset — #2188)
+        # Deliberately NO TORTOISE_DB_URI (the D14 skip hook fires when URI
+        # is set); CARVE_OUT=1 permits the URI-less embedded run. Same -k as
+        # the #2172 proof gate.
+        run: |
+          set -eo pipefail
+          timeout -s INT -k 10 15m python -m pytest tests/test_hosted_api.py \
+            -k "concurrent_first_calls or registry_anchor_reuses or reuses_healthy_anchor or rebinds_stale_anchor" \
+            -v --timeout=300 -p no:cacheprovider --junitxml=/tmp/junit-d14.xml -o junit_family=xunit1 2>&1 | tee /tmp/pytest-d14.log
+          # #2188 review P3-1: fail-closed on a silent all-skip — a URI leak
+          # or broadened skip hook would skip all 5 embedded_only guards and
+          # exit 0. Assert the 5 PASSED lines are actually present.
+          passed=$(grep -c ' PASSED' /tmp/pytest-d14.log || true)
+          echo "D14 guards passed: $passed"
+          [ "$passed" -ge 5 ] || { echo "::error::expected 5 D14 guards to RUN (got $passed passed — all-skip?)"; exit 1; }
+      - name: Upload D14 log (measurement artifact, #2188)
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log-d14-hosted-api
+          path: |
+            /tmp/pytest-d14.log
+            /tmp/junit-d14.xml
+          if-no-files-found: ignore
+
   canary-streak:
     # Epic #1647 Task 9 Step 6 (D-3=A): the instrumented canary-drop streak.
     # Separate job (needs: [test] — the matrix jobs fan in; a step inside the
@@ -1694,7 +1747,7 @@ jobs:
 
   python-ci-gate:
     if: always()
-    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, canary-streak]
+    needs: [changes, test, test-slow, test-concurrency-falkor, packs-compile, test-track-b, test-carve-out, test-d14-hosted-api, canary-streak]
     runs-on: ubuntu-latest
     steps:
       - name: Aggregate matrix result

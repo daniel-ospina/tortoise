@@ -365,25 +365,59 @@ def completed_steps(graph: Any, org_id: str) -> list[str]:
     return [row[0] for row in res.result_set]
 
 
+def write_onboards_edge(graph: Any, org_id: str, subject_id: str) -> dict[str, Any]:
+    """DM-1 node↔anchor link (W3 seed writes, #1999): set the node's
+    org_subject_id property + MERGE the onboards edge → the Organization
+    Subject (the seed core creates the Subject first; this writer links).
+
+    Idempotent: replay with the same subject_id re-SETs the same property
+    and does not duplicate the edge. Returns the W11 created-signal shape:
+    {"created": bool (edge NEW), "subject_id": subject_id}.
+
+    The compact/legacy gates depend on this link (the node tracks its org
+    anchor); B1: the anchor is a Subject node, never Object/Statement.
+    """
+    ensure_onboarding_state_node(graph, org_id)
+    with _org_lock(org_id):
+        res = _run(graph,
+                   f"MERGE (s:Subject {{id: $sid}}) "
+                   f"WITH s "
+                   f"MERGE (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
+                   "SET n.org_subject_id = $sid "
+                   "WITH n, s "
+                   f"MERGE (n)-[:{ONBOARDS_EDGE}]->(s)",
+                   {"org_id": org_id, "sid": subject_id})
+    return {"created": _relations_created(res) == 1,
+            "subject_id": subject_id}
+
+
 def write_completed_step(graph: Any, org_id: str, step_id: str, *,
                          status_from_mirror: bool | None = None) -> dict[str, Any]:
     """Idempotent keyed-MERGE step write (FWW). Returns the W11 created-signal:
     ``{"created": bool, "step_id": step_id}`` — True iff the edge was NEW
     (docker lane: bolt:// MERGE stats; embedded lane: honest under the
-    per-org lock)."""
+    per-org lock).
+
+    decide-completed ALSO clears the node's ``last_decide_attempt`` (epic
+    I-1/DM-1: success clears to null — a completed decide can never keep a
+    stale 'failed'/'dismissed' marker; retry must stay recordable)."""
     if not validate_step_id(step_id):
         raise ValueError(f"unknown onboarding step: {step_id!r}")
     # write-time create-on-write seam first (byte-identical eager init).
     ensure_onboarding_state_node(graph, org_id,
                                  status_from_mirror=status_from_mirror)
+    clear_attempt = (
+        "WITH n, s "
+        "REMOVE n.last_decide_attempt "
+        if step_id == "decide-completed" else "WITH n, s ")
     with _org_lock(org_id):
         res = _run(graph,
                    f"MERGE (s:{ONBOARDING_STEP_LABEL} "
                    "{org_id: $org_id, step_id: $step_id}) "
                    f"WITH s "
                    f"MERGE (n:{ONBOARDING_NODE_LABEL} {{org_id: $org_id}}) "
-                   "WITH n, s "
-                   f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s)",
+                   + clear_attempt
+                   + f"MERGE (n)-[:{COMPLETED_STEP_EDGE}]->(s)",
                    {"org_id": org_id, "step_id": step_id})
     return {"created": _relations_created(res) == 1, "step_id": step_id}
 
@@ -457,17 +491,20 @@ def decide_completed_edge_exists(graph: Any, org_id: str) -> bool:
 def write_last_decide_attempt(graph: Any, org_id: str,
                               value: str | None, *,
                               status_from_mirror: bool | None = None) -> None:
-    """LWW write with the conditional guard: 'failed' is SKIPPED when the
-    decide-completed edge exists (a completed decide can never regress to
-    failed — dismissal alone never completes; failed never un-completes).
-    Create-on-write seam first (absent-node orgs — grandfathered pre-backfill
-    — must not silently no-op)."""
+    """LWW write with the conditional guard: ANY attempt value ('failed'
+    OR 'dismissed') is SKIPPED when the decide-completed edge exists (epic
+    DM-1: success clears to null — a completed decide can never re-gain an
+    attempt marker; retry reachability lives BEFORE completion, and
+    dismissal alone never completes / failed never un-completes).
+    Create-on-write seam first (absent-node orgs — grandfathered
+    pre-backfill — must not silently no-op)."""
     if value not in (None, "failed", "dismissed"):
         raise ValueError(f"invalid last_decide_attempt: {value!r}")
     ensure_onboarding_state_node(graph, org_id,
                                  status_from_mirror=status_from_mirror)
     with _org_lock(org_id):
-        if value == "failed" and decide_completed_edge_exists(graph, org_id):
+        if (value in ("failed", "dismissed")
+                and decide_completed_edge_exists(graph, org_id)):
             return
         if value is None:
             _run(graph,

@@ -99,7 +99,7 @@ SOURCE_PATTERNS = {
             # there: test_ask_spotcheck_judge.py).
             "tools/ask_spotcheck.py", "tools/ask_spotcheck_consistency.py",
             "tools/ask_spotcheck_probe.py"),
-    "api": ("tortoise/hosted_api.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
+    "api": ("tortoise/hosted_api.py", "tortoise/acl_graph_users.py", "tortoise/__main__.py", "tortoise/mcp_auth.py",
             "tortoise/quota.py", "tortoise/supabase_control.py",
             "tortoise/selfhost_api.py", "tortoise/session_auth.py",
             # ask-lane server surfaces: test_metering.py + test_selfhost_rest.py

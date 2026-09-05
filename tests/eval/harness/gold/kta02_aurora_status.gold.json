@@ -1,0 +1,33 @@
+{
+  "per_turn": [
+    {
+      "pointers": [
+        "pt_aurora_perf_regression"
+      ],
+      "should_retrieve": true,
+      "turn": 1
+    },
+    {
+      "should_retrieve": false,
+      "turn": 2
+    },
+    {
+      "pointers": [
+        "pt_aurora_owner_diego"
+      ],
+      "should_retrieve": true,
+      "turn": 3
+    },
+    {
+      "should_retrieve": false,
+      "turn": 4
+    },
+    {
+      "should_retrieve": false,
+      "turn": 5
+    }
+  ],
+  "schema_version": 1,
+  "session_id": "kta02_aurora_status",
+  "suite": "know_to_ask"
+}
