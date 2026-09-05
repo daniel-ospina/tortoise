@@ -36,6 +36,7 @@ from tortoise.supabase_control import (
     insert_api_key,
     insert_graph,
     invitation_accept,
+    invitation_accept_by_id,
     invitation_expire,
     invitation_mint,
     invitation_otp_mint,
@@ -2767,3 +2768,201 @@ class TestInviteFusionV2Seam:
         with pytest.raises(InvitationError) as ei:
             invitation_expire(fake, inv["id"], "team-1", actor_user_id=_U3)
         assert ei.value.status == 409
+
+
+class _InterleaveLoserFake(FakeControlPlane):
+    """Deterministic P2-1 simulation: inject a REAL concurrent winner's
+    commit at the loser's claim boundary. The loser's invitation_accept
+    passes all pre-checks (its token read sees status='pending'), then — at
+    the moment of ITS conditional claim PATCH — a winner (alice) commits
+    first (status flip + her membership). The loser's own conditional PATCH
+    (WHERE status='pending') then matches 0 rows → returns [] → the loser
+    must raise BEFORE any membership write.
+
+    Pre-fix: the loser's PATCH matched 0 rows but the code IGNORED the
+    return and re-read the row — seeing the WINNER's status='accepted' —
+    then fell through to membership_create: a SECOND membership (carol).
+    The fix makes the PATCH's own matched-row count (return=representation)
+    the claim, so the loser raises here instead.
+    """
+
+    def __init__(self, tables: dict, *, winner_uid: str,
+                 winner_email: str, trigger_claim: bool = True):
+        super().__init__(tables)
+        self.winner_uid = winner_uid
+        self.winner_email = winner_email
+        self.armed = trigger_claim
+
+    def _commit_winner(self, inv_id: str) -> None:
+        from datetime import UTC
+        from datetime import datetime as _dt
+        row = next(r for r in self.tables["invitations"]
+                   if r.get("id") == inv_id)
+        now = _dt.now(UTC).isoformat()
+        row.update({"status": "accepted",
+                    "accepted_at": now,
+                    "accepted_via": "fuse",
+                    "accepted_mismatch": True,
+                    "fused_from_email": row.get("email"),
+                    "otp_hash": None,
+                    "otp_expires_at": None,
+                    "otp_attempts": 0,
+                    "otp_verified_at": now,
+                    "otp_verified_by": self.winner_uid})
+        self.tables.setdefault("team_memberships", []).append({
+            "id": f"mem-winner-{len(self.tables['team_memberships'])}",
+            "user_id": self.winner_uid,
+            "team_id": row["team_id"],
+            "team_name": "", "key_hash": "pending",
+            "graph_name": "", "role": "member",
+            "status": "active",
+            "invited_email": row.get("email"),
+        })
+
+    def query(self, table: str, *, select=None, filters=None,
+              method: str = "GET", json_body=None, order=None,
+              limit=None):
+        is_claim = (table == "invitations" and method == "PATCH"
+                    and (json_body or {}).get("accepted_at") is not None
+                    and filters
+                    and any(f[0] == "status" and f[1] == "eq"
+                           and f[2] == "pending" for f in filters))
+        if is_claim and self.armed:
+            # Winner commits first → OUR conditional PATCH matches 0 rows.
+            self.armed = False  # once per accept attempt
+            for f in (filters or []):
+                if f[0] == "id" and f[1] == "eq":
+                    self._commit_winner(f[2])
+        return super().query(table, select=select, filters=filters,
+                             method=method, json_body=json_body,
+                             order=order, limit=limit)
+
+
+class TestConcurrentAcceptSingleUseSupabase:
+    """P2-1 concurrency regression (supabase lane): a concurrent loser of
+    the single-use token/OTP claim must raise BEFORE minting a membership
+    (InvitationError → HTTP 400 at the route, mirroring the pre-fix
+    replay status — the registry lane's equivalent is a 409).
+    invitation_accept is synchronous; the race lives in the control-plane
+    round trips (a real deploy has two PostgREST calls with a window).
+    _InterleaveLoserFake makes that window deterministic: the winner
+    commits at the loser's claim boundary."""
+
+    def _seed(self, fake):
+        fake.seed("team_memberships", [{
+            "user_id": _U3, "team_id": "team-race-sb",
+            "role": "owner", "status": "active",
+        }])
+        fake.seed("teams", [{
+            "id": "team-race-sb", "name": "Race Team",
+            "tier": "team", "max_users": 100,
+            "graph_name": "team_team-race-sb",
+            "subscription_status": "active",
+        }])
+        inv = invitation_mint(fake, "team-race-sb", "bob@example.com",
+                              "member", _U3)
+        return inv
+
+    def _otp_for(self, fake, invitation_id: str, code: str) -> str:
+        from datetime import timedelta
+
+        from tortoise.auth import hash_api_key
+        exp = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
+        ok = invitation_otp_mint(
+            fake, invitation_id, code_hash=hash_api_key(code),
+            expires_at=exp, sent_at=datetime.now(UTC).isoformat())
+        assert ok is True
+        return code
+
+    def test_loser_claim_before_membership_write(self):
+        """Carol races alice on one token (both control the invitee mailbox
+        — same code). Alice's accept commits at the boundary of Carol's own
+        claim PATCH (the interleaving window a real deploy has). Carol's
+        conditional PATCH returns [] → she raises before ANY membership
+        write. Pre-fix Carol's post-PATCH re-read saw alice's
+        status='accepted' and minted a SECOND membership — assert she did
+        NOT."""
+        base = FakeControlPlane({"api_keys": [], "team_memberships": [],
+                                 "invitations": [], "teams": []})
+        fake = _InterleaveLoserFake(base.tables, winner_uid=_U2,
+                                    winner_email="alice@example.com")
+        inv = self._seed(fake)
+        self._otp_for(fake, inv["id"], "123456")
+        # Carol's single accept: all pre-checks pass (invite still pending),
+        # then at HER claim PATCH the fake commits alice's win first.
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U4,
+                              user_email="carol@example.com",
+                              mismatch_override="fuse", otp_code="123456")
+        assert "already been accepted" in str(ei.value)
+        # Carol (_U4, the loser) has NO membership — the claim gated the write
+        mems = [m for m in fake.tables["team_memberships"]
+                if m.get("team_id") == "team-race-sb"]
+        uids = [m["user_id"] for m in mems]
+        assert uids.count(_U3) == 1   # owner
+        assert uids.count(_U2) == 1   # winner alice
+        assert _U4 not in uids        # loser carol never written
+        # invite is accepted exactly once, by the winner
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "accepted"
+        assert row["otp_verified_by"] == _U2
+
+    def test_sequential_replay_never_second_membership(self, fake):
+        """Replay after a normal accept (the pre-existing sequential guard):
+        the second accept 400s at the status gate — never a dup."""
+        inv = self._pending_invite_team1(fake)
+        invitation_accept(fake, inv["token"], _U2,
+                          user_email="bob@example.com")
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept(fake, inv["token"], _U4,
+                              user_email="bob@example.com")
+        assert ei.value.status == 400
+        mems = [m for m in fake.tables["team_memberships"]
+                if m.get("team_id") == "team-1"
+                and m.get("user_id") in (_U2, _U4)]
+        assert len(mems) == 1 and mems[0]["user_id"] == _U2
+
+    def test_by_id_loser_claim_before_membership_write(self):
+        """P2-1 by-id twin (same race, token-less accept): the invitee's
+        by-id accept races a token/v2 winner on the SAME invitation row. The
+        winner's conditional PATCH commits at the boundary of the loser's
+        own claim → the loser's PATCH returns [] → raises before ANY
+        membership write (pre-fix the follow-up GET saw the winner's
+        status='accepted' and minted a second membership)."""
+        base = FakeControlPlane({"api_keys": [], "team_memberships": [],
+                                 "invitations": [], "teams": []})
+        fake = _InterleaveLoserFake(base.tables, winner_uid=_U2,
+                                    winner_email="alice@example.com")
+        inv = self._seed(fake)
+        # bob (invitee, email match) accepts by id; at HIS claim PATCH the
+        # fake commits alice's token-accept win first (same row, cross-lane)
+        with pytest.raises(InvitationError) as ei:
+            invitation_accept_by_id(fake, inv["id"], _U4,
+                                    user_email="bob@example.com")
+        assert "already been accepted" in str(ei.value)
+        # loser _U4 (bob's OTHER session / racing user) never minted
+        mems = [m for m in fake.tables["team_memberships"]
+                if m.get("team_id") == "team-race-sb"]
+        uids = [m["user_id"] for m in mems]
+        assert uids.count(_U3) == 1   # owner
+        assert uids.count(_U2) == 1   # winner alice
+        assert _U4 not in uids        # loser never written
+        # invite accepted exactly once (winner's proof stands)
+        row = fake.tables["invitations"][0]
+        assert row["status"] == "accepted"
+        assert row["otp_verified_by"] == _U2
+
+    def _pending_invite_team1(self, fake):
+        # reuse the TestInvitationSeam team-1 owner seed (free tier, cap 100)
+        if not any(t.get("id") == "team-1"
+                   for t in fake.tables.get("teams", [])):
+            fake.seed("teams", [{
+                "id": "team-1", "name": "Invite Team", "tier": "free",
+                "max_users": 100, "graph_name": "team_team-1",
+            }])
+        fake.seed("team_memberships", [{
+            "user_id": _U3, "team_id": "team-1",
+            "role": "owner", "status": "active",
+        }])
+        return invitation_mint(fake, "team-1", "bob@example.com",
+                               "member", _U3)

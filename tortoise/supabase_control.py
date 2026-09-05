@@ -1072,10 +1072,13 @@ def invitation_accept(cp, token: str, user_id: str,
     """Accept a pending invitation by plaintext token (lookup_hash verify).
 
     Atomic single-use (E2E-3): the invitation is PATCHed to status='accepted'
-    with a conditional ``WHERE status='pending'`` filter, then re-read to
-    verify — a concurrent accept loses the race and the verify fails. On
-    success the REAL team_memberships row is created with the INVITED role
-    (O/I/T: accepted membership carries the invited role), status='active'.
+    with a conditional ``WHERE status='pending'`` filter carrying
+    ``select=["id","status"]`` (PostgREST return=representation) — the
+    PATCH's OWN matched-row count is the authoritative claim: a concurrent
+    accept loses the race and its PATCH returns [] → it raises before any
+    membership write (P2-1). On success the REAL team_memberships row is
+    created with the INVITED role (O/I/T: accepted membership carries the
+    invited role), status='active'.
 
     Rejects (InvitationError): unknown token (400), expired (400), used /
     already accepted (400), revoked (400), already an active member (409),
@@ -1222,17 +1225,24 @@ def invitation_accept(cp, token: str, user_id: str,
             "otp_verified_at": now.isoformat(),
             "otp_verified_by": otp_verified_by,
         })
-    cp.query(
+    claimed = cp.query(
         "invitations",
         method="PATCH",
+        select=["id", "status"],
         filters=[("id", "eq", inv["id"]), ("status", "eq", "pending")],
         json_body=accept_body,
     )
-    check = cp.query(
-        "invitations", select=["status"], filters=[("id", "eq", inv["id"])],
-    )
-    if not check or check[0].get("status") != "accepted":
-        # Lost the accept race — the invite was consumed in between.
+    if not claimed:
+        # P2-1 (concurrency review): the single-use claim must be
+        # AUTHORITATIVE — a concurrent accept's conditional PATCH (same
+        # status='pending' filter) may have already flipped this row to
+        # 'accepted', in which case OUR PATCH matched 0 rows and
+        # return=representation returns []. A follow-up GET can't
+        # distinguish "I won the race" from "someone else won first" — the
+        # loser would read status='accepted' (the winner's) and fall
+        # through to mint a SECOND membership. The PATCH's own matched-row
+        # count IS the claim: non-empty ⟺ this request won the single-use
+        # race. Loser raises here, never a second membership.
         raise InvitationError("Invitation has already been accepted")
 
     membership_id = uuid.uuid4().hex[:26]
@@ -2810,17 +2820,23 @@ def invitation_accept_by_id(cp, invitation_id: str, user_id: str,
             "You already have a free team — this team requires a paid plan "
             "to join", status=402)
 
-    # Single-use: conditional PATCH (status='pending' filter) then verify.
-    cp.query(
+    # Single-use: conditional PATCH (status='pending' filter) — the PATCH's
+    # OWN matched-row count is the authoritative claim (P2-1 cross-lane
+    # half, by-id twin). A concurrent winner (token/v2 accept racing this
+    # by-id accept on the SAME invitation row, or a same-user double-submit)
+    # that flipped the row first leaves THIS conditional PATCH matching 0
+    # rows → return=representation returns [] → raise here, never a second
+    # membership. A follow-up GET can't distinguish "I won" from "someone
+    # else won first" (the loser would read the winner's status='accepted'
+    # and fall through to mint) — the PATCH's own rowcount is the claim.
+    claimed = cp.query(
         "invitations",
         method="PATCH",
+        select=["id", "status"],
         filters=[("id", "eq", inv["id"]), ("status", "eq", "pending")],
         json_body={"status": "accepted", "accepted_at": now.isoformat()},
     )
-    check = cp.query(
-        "invitations", select=["status"], filters=[("id", "eq", inv["id"])],
-    )
-    if not check or check[0].get("status") != "accepted":
+    if not claimed:
         raise InvitationError("Invitation has already been accepted")
 
     membership_id = uuid.uuid4().hex[:26]
