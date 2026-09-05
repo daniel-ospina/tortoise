@@ -2767,6 +2767,10 @@ _CONV = [{"role": "user", "content": "we decided to ship the memory capture slic
          {"role": "assistant", "content": "agree — the consent gate is the P0"},
          {"role": "user", "content": "ok"}]
 
+_CONV_B = [{"role": "user", "content": "we should open the mobile beta to external testers"},
+           {"role": "assistant", "content": "agreed — crash-free sessions are the gate"},
+           {"role": "user", "content": "ok"}]
+
 
 def test_fresh_team_captures_by_default(consent_client):
     """#1927: session_recording defaults to TRUE — a fresh team (never
@@ -3272,3 +3276,240 @@ def test_session_capture_tool_stdio_honest_error(tmp_path, monkeypatch):
         _current_team_id.reset(tok)
     assert "error" in result, result
     assert "hosted mode" in result["error"], result
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# W5 Phase E (#2104, S11) — ingestion-toggle disclosure marker data.
+# The S11 409 gate / per-harness last-error / toggle read-write contract were
+# shipped by #1927 + W5 Phase A/B and are covered above — Phase E ships ONLY
+# the missing disclosure marker DATA (`surfaced`, §3.2.2 vocabulary) on the
+# capture receipt + a REST+MCP single-enforcement drift-proof test.
+
+def _graph_point_ids(proj) -> set:
+    rows = proj.g.query(
+        "MATCH (n:Point) RETURN n.id").result_set
+    return {r[0] for r in rows}
+
+
+def test_phase_e_surfaced_disclosure_marker_graph_truth(consent_client):
+    """S11 disclosure marker data: a fresh capture's write-verb receipt
+    carries ``surfaced`` — one entry per memory item THIS capture added
+    (N = len = the disclosure count). Graph-truth only (anti-gaming): every
+    entry's point_id is a minted claim the graph actually holds post-write
+    (verified via the enrichment facts), every label is a deterministic
+    content-derived label, and a folded (content_hash_hit) claim never
+    appears."""
+    from tortoise.write_verb import DEDUP_NEW
+    _opt_in(enabled=True)
+    r = consent_client.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude",
+                                  "session_id": "s-phase-e-marker"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["protocol_version"] == "memory_write_v1", \
+        "the disclosure marker rides the frozen write verb"
+    assert "surfaced" in body, body.keys()
+    points = body["points"]
+    assert points, "fresh capture must mint claims"
+    proj = _graph()
+    g_ids = _graph_point_ids(proj)
+    by_id = {p["id"]: p for p in points}
+    surfaced = body["surfaced"]
+    assert surfaced, "a fresh minted capture must expose marker data"
+    assert len(surfaced) == len([p for p in points
+                                 if p.get("dedup", DEDUP_NEW) == DEDUP_NEW]), (
+        "N = len(surfaced) must equal the graph-verified minted count")
+    for entry in surfaced:
+        assert entry["point_id"] in by_id, \
+            f"surfaced entry must name a point in this capture: {entry}"
+        assert entry["point_id"] in g_ids, \
+            f"surfaced entry must be graph-verified (present post-write): {entry}"
+        assert by_id[entry["point_id"]].get("dedup", DEDUP_NEW) == DEDUP_NEW, \
+            f"a folded claim must never be counted as added: {entry}"
+        assert entry["label"], entry
+        assert len(entry["label"]) <= 48, entry
+
+
+def test_phase_e_surfaced_empty_on_replay(consent_client):
+    """S11 disclosure marker data: a replay (re-POST same session_id —
+    extraction skipped, 0 new nodes) reports ``surfaced: []`` — nothing was
+    added, never a fabricated count."""
+    _opt_in(enabled=True)
+    payload = {"conversation": _CONV, "harness": "claude",
+               "session_id": "s-phase-e-replay"}
+    r1 = consent_client.post("/v1/sessions", json=payload)
+    assert r1.status_code == 200, r1.text
+    assert r1.json()["surfaced"], "first capture mints items"
+    r2 = consent_client.post("/v1/sessions", json=payload)
+    assert r2.status_code == 200, r2.text
+    b2 = r2.json()
+    assert b2["extraction_mode"] == "replayed", b2
+    assert b2["extracted"] == 0, b2
+    assert b2["surfaced"] == [], \
+        "a replay adds zero memory items — surfaced must be empty"
+
+
+def test_phase_e_surfaced_cross_session_reingest_counts_zero_added(sdk):
+    """S11 disclosure marker data (sdk mirror byte-parity): re-capturing the
+    SAME content in a NEW session is a content-hash re-ingest — per-point
+    content_hash_hit verdicts, ZERO new nodes, and ``surfaced: []`` (the
+    canonical pre-existed; this capture added no memory item)."""
+    from tortoise.write_verb import DEDUP_CONTENT_HASH_HIT, DEDUP_NEW
+    conv = [
+        {"role": "user",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "user", "content": "ok"},
+    ]
+    r1 = sdk.capture_session(conv)
+    assert r1["points"], r1
+    assert all(p["dedup"] == DEDUP_NEW for p in r1["points"])
+    assert r1["surfaced"], "first ingest must expose the marker data"
+    assert len(r1["surfaced"]) == len(r1["points"])
+    # same content, fresh auto session id → cross-session content-hash re-ingest
+    r2 = sdk.capture_session(conv)
+    assert r2["points"] and all(
+        p["dedup"] == DEDUP_CONTENT_HASH_HIT for p in r2["points"]), [
+        p["dedup"] for p in r2["points"]]
+    assert r2["surfaced"] == [], \
+        "a content-hash re-ingest adds no memory item — surfaced must be empty"
+    assert {p["id"] for p in r1["points"]} == {p["id"] for p in r2["points"]}
+
+
+def test_phase_e_surfaced_m2_in_capture_fold_counts_minted_once(sdk, monkeypatch):
+    """S11 disclosure marker data (m2 lane): an in-capture repeat folds onto
+    the canonical (content_hash_hit, 0 duplicate nodes) — ``surfaced`` counts
+    the single MINTED item once, never the folded echo."""
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    conv = [
+        {"role": "user",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "assistant",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "user", "content": "ok"},
+    ]
+    res = sdk.capture_session(conv)
+    verdicts = [p["dedup"] for p in res["points"]]
+    assert verdicts == ["new", "content_hash_hit"], verdicts
+    surfaced = res["surfaced"]
+    assert len(surfaced) == 1, \
+        "only the minted canonical counts — folded echoes never surface"
+    assert surfaced[0]["point_id"] == res["points"][0]["id"]
+    g_ids = _graph_point_ids(sdk._get_proj())
+    assert surfaced[0]["point_id"] in g_ids, "graph-truth only"
+
+
+def test_phase_e_rest_mcp_same_flag_drift_proof(tmp_path, monkeypatch):
+    """S11 'can never drift' — ONE team, ONE flag state, both consumer
+    surfaces through the SAME shared ``_capture_session_impl``: recording OFF
+    ⇒ REST POST → 409 AND MCP tortoise_session_capture → {status: 409} with
+    the SAME detail text; neither writes a Session; each harness's per-harness
+    last-error is recorded. Recording ON ⇒ both 2xx with ``surfaced`` marker
+    data + per-harness receipts."""
+    from tortoise.hosted_api import get_current_team as _get_current_team
+    from tortoise.mcp_auth import (
+        _current_team_id,
+        _current_team_limits,
+        _transport_mode,
+    )
+    from tortoise.mcp_server import tortoise_session_capture
+
+    team_id = "team-phase-e-drift"
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    # m2 lane: claims are echo-derived from each conversation's OWN content,
+    # so the REST and MCP captures below mint DISTINCT claims (the v2 mock is
+    # fully deterministic — any two captures would content-hash-fold onto the
+    # same canonical, which would make the MCP leg honestly report
+    # surfaced: [] and prove nothing about marker data on the MCP path).
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    with patched_tortoise_sdk(str(tmp_path / "drift.db")):
+        _provision_team(team_id)
+        _opt_in(team_id, enabled=False)  # OFF first
+        team = {"team_id": team_id, "tier": "free", "key_id": "k-1727",
+                "legacy_full_access": True, "max_points": 100000}
+        app.dependency_overrides[_get_current_team] = lambda: dict(team)
+        tok_t = _current_team_id.set(team_id)
+        tok_l = _current_team_limits.set(
+            {"team_id": team_id, "tier": "free", "max_points": 100000})
+        tok_m = _transport_mode.set("http")
+        try:
+            with TestClient(app) as tc:
+                # OFF: both surfaces reject with the SAME 409 state-conflict.
+                r = tc.post("/v1/sessions",
+                            json={"conversation": _CONV, "harness": "claude"})
+                assert r.status_code == 409, r.text
+                rest_detail = r.json()["detail"]
+                mcp_res = tortoise_session_capture(
+                    conversation=_CONV, harness="pi")
+                assert mcp_res.get("status") == 409, mcp_res
+                assert rest_detail == mcp_res.get("error"), (
+                    "REST + MCP must surface the SAME recording-off message "
+                    f"(shared impl): REST={rest_detail!r} MCP={mcp_res!r}")
+                assert "disabled" in rest_detail
+                assert _session_count(team_id) == 0, \
+                    "recording OFF must not write a Session on either surface"
+                st = _state(team_id)
+                assert st.get("session_capture_last_error_claude"), \
+                    "REST 409 must record its per-harness last error"
+                assert st.get("session_capture_last_error_pi"), \
+                    "MCP 409 must record its per-harness last error"
+                assert st.get("session_capture_receipt_claude") is None
+                assert st.get("session_capture_receipt_pi") is None
+                # ON: both surfaces capture with the disclosure marker.  The
+                # MCP capture uses DIFFERENT content so it genuinely mints
+                # (a same-content re-capture would be a content-hash fold and
+                # honestly report surfaced: [] — that anti-gaming is pinned in
+                # test_phase_e_surfaced_cross_session_reingest_counts_zero_added).
+                _opt_in(team_id, enabled=True)
+                r2 = tc.post("/v1/sessions",
+                             json={"conversation": _CONV, "harness": "claude",
+                                   "session_id": "s-drift-rest"})
+                assert r2.status_code == 200, r2.text
+                assert r2.json()["surfaced"], r2.json()
+                mcp_res2 = tortoise_session_capture(
+                    conversation=_CONV_B, harness="pi",
+                    session_id="s-drift-mcp")
+                assert not mcp_res2.get("error"), mcp_res2
+                assert mcp_res2.get("surfaced"), mcp_res2
+                assert mcp_res2.get("protocol_version") == "memory_write_v1"
+                st2 = _state(team_id)
+                assert st2.get("session_capture_receipt_claude"), st2
+                assert st2.get("session_capture_receipt_pi"), st2
+                assert st2.get("session_capture_last_error_claude") is None
+                assert st2.get("session_capture_last_error_pi") is None
+        finally:
+            _current_team_id.reset(tok_t)
+            _current_team_limits.reset(tok_l)
+            _transport_mode.reset(tok_m)
+
+
+
+def test_phase_e_sdk_mirror_verification_fail_open_omits_marker(sdk, monkeypatch):
+    """P2-2 (review): the SDK mirror's post-write verification read is
+    fail-open — a verification-read failure must NEVER fabricate a marker
+    count: ``surfaced: []`` + an additive warning, capture still commits."""
+    conv = [
+        {"role": "user",
+         "content": "The database schema needs normalization before the release."},
+        {"role": "user", "content": "ok"},
+    ]
+    proj = sdk._get_proj()
+    # The guarded wrapper (proj.g) is read-only; patch the RAW graph handle
+    # (precedent: test_search_engine.py:297 / test_capture_session.py:2114).
+    raw = proj.g._g
+    real_query = raw.query
+
+    def failing_query(query, params=None, timeout=None):
+        # Only the Phase E verification read (exact text) fails — every
+        # other capture write/read proceeds, so the capture commits and the
+        # marker is the ONLY degraded surface.
+        if query == "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id":
+            raise RuntimeError("simulated verification read failure")
+        return real_query(query, params=params, timeout=timeout)
+
+    monkeypatch.setattr(raw, "query", failing_query)
+    res = sdk.capture_session(conv)
+    assert res["points"], "the capture itself commits"
+    assert res["surfaced"] == [], (
+        "a failed verification read must omit the marker, never fabricate it")
+    assert any("marker omitted" in w for w in res["warnings"]), res["warnings"]

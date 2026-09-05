@@ -2539,6 +2539,38 @@ class TortoiseSDK:
                     self, ep_ids,
                     warn=extraction_warnings.append,
                 )
+        # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
+        # receipt — byte-parity with hosted_api._capture_session_impl (the
+        # shared-surface rule): ``surfaced`` uses the §3.2.2 marker
+        # vocabulary (one entry per memory item THIS capture added; N = len
+        # = the disclosure count). Graph-truth only (anti-gaming): an entry
+        # appears ONLY for an id this post-write verification read returned
+        # AND whose seam verdict is ``new`` (content_hash_hit /
+        # rephrase_linked folds added no item — the canonical pre-existed
+        # with its original provenance). A failed verification read yields []
+        # plus an additive warning — never a fabricated marker count.
+        verified_ids: set[str] = set()
+        if extracted:
+            try:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id",
+                    params={"ids": [p["id"] for p in extracted]},
+                ).result_set
+                verified_ids = {r[0] for r in rows}
+            except Exception:  # noqa: BLE001, RUF100 — fail-open, mirror
+                # hosted's enrichment-read posture (additive warning, never
+                # raise over a committed capture).
+                _logger.warning(
+                    "capture_session: surfaced disclosure verification read "
+                    "failed (non-fatal) for session %s", session_id,
+                    exc_info=True,
+                )
+                extraction_warnings.append(
+                    "surfaced disclosure verification read failed — "
+                    "marker omitted")
+        from tortoise.write_verb import surfaced_marker
+        resp["surfaced"] = surfaced_marker(
+            extracted, verified_ids=verified_ids)
         return resp
 
     def _extract_session_llm(
