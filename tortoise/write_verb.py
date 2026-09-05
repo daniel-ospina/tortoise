@@ -20,8 +20,13 @@ table.  It holds NO graph logic: the caller (hosted capture impl, SDK
 mirror) supplies the per-point facts (kind/status/ep_updated/dedup) it has
 truthfully observed.  Anti-gaming: a key is only ever reported when the
 caller has actually observed the fact it names (Phase A reports
-``dedup:"new"`` only for points minted by THIS request; REPHRASE/content-
-hash classification lands with the Phase D detection machinery).
+``dedup:"new"`` only for points minted by THIS request).  Phase D (#2104)
+lands the per-point dedup classification: the capture seams resolve each
+claim against existing nodes (in-capture repeats and content-addressed
+re-ingests — see tortoise/dedup_classify.py) and report
+``content_hash_hit``/``rephrase_linked`` ONLY for claims that actually
+resolved to an existing node; when the write-back cannot determine dedup
+state the point stays ``dedup:"new"`` — never fabricated.
 
 Scope note (P3, review): the envelope is wired on the hosted capture
 surface NOW; the self-host SDK mirror (``sdk.capture_session``) still

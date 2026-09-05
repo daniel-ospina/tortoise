@@ -68,6 +68,8 @@ from tortoise.schemas import AskRequest
 from tortoise.sdk import (
     TortoiseSDK,
     _apply_capture_ingest_ep,  # W5 Phase C (#2104): live-at-capture + ingest EP pass
+    _capture_ep_target_ids,  # W5 Phase D (#2104): EP pass targets (minted + first-time folds)
+    _capture_minted_ids,  # W5 Phase D (#2104): provenance-stamp gate (minted only)
     _capture_turn_window,  # #1532 D1: shared stored-window truncation
     _content_hash,
     _normalize_turn_role,  # #1532 D2: shared role normalization (None->unknown)
@@ -6188,11 +6190,16 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # (the Session-merge conditional can't apply: the stamp is
                 # one shared SET for all points).
                 source_harness = body.harness or "unknown"
+                # W5 Phase D (#2104): the stamp gates over the MINTED ids —
+                # a dedup-folded entry (content_hash_hit/rephrase_linked)
+                # resolved to an existing node whose provenance belongs to
+                # its original ingest; re-stamping would clobber the first
+                # session's single-eventId provenance (mirror byte-parity).
                 proj.g.query(
                     "MATCH (n:Point) WHERE n.id IN $ids "
                     "SET n.eventId=$eid, n.source_session=$sid, "
                     "    n.source_harness=$harness, n.ingested_at=$ing",
-                    params={"ids": [p["id"] for p in extracted],
+                    params={"ids": _capture_minted_ids(extracted),
                             "eid": event_id, "sid": session_id,
                             "harness": source_harness, "ing": now},
                 )
@@ -6486,10 +6493,17 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # extracts nothing — the helper no-ops on an empty claim set. Fail-open:
     # a promotion/EP hiccup never 500s a committed capture — additive
     # warning only; the enrichment read below then reports the TRUE post-EP
-    # graph state (never fabricated ep_updated — anti-gaming).
-    if extracted:
+    # graph state (never fabricated ep_updated — anti-gaming).  W5 Phase D
+    # (#2104): the pass gates over ``sdk._capture_ep_target_ids``
+    # (byte-parity with the mirror) — minted ids calibrate; folded entries
+    # resolved to nodes already calibrated at their original ingest are
+    # never re-calibrated (no EP churn on re-ingest); a folded canonical
+    # still draft/uncalibrated from a fail-open first ingest gets its
+    # FIRST calibration here.
+    ep_ids = _capture_ep_target_ids(extracted, proj)
+    if ep_ids:
         _apply_capture_ingest_ep(
-            sdk, [p["id"] for p in extracted],
+            sdk, ep_ids,
             warn=extraction_warnings.append,
         )
     # W5 (#2104, S12/DM-2): the capture response speaks the frozen write
@@ -6500,9 +6514,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # status/ep_updated/dedup keys read from the graph AFTER the write (and
     # after the Phase C ingest EP pass), so the verb reports only what is
     # true (anti-gaming): ep_updated = the point actually carries persisted
-    # EP alpha/beta (Phase C turns this on with the ingest EP pass); dedup =
-    # "new" only for points this request minted (REPHRASE/content-hash
-    # classification lands in Phase D).
+    # EP alpha/beta (Phase C turns this on with the ingest EP pass); dedup
+    # = the seam's Phase D verdict preserved for graph-present ids — "new"
+    # for points this request minted, content_hash_hit / rephrase_linked
+    # for claims the seam actually resolved to an existing node (never
+    # fabricated).
     from tortoise.write_verb import (
         DEDUP_NEW,
         STATUS_OK,
@@ -6545,6 +6561,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 extraction_warnings.append(
                     f"point {pid} missing from graph post-write — "
                     "reported un-enriched in the write verb")
+                # W5 Phase D (#2104): an entry whose node is NOT in the
+                # graph makes NO dedup claim — pop the seam verdict so the
+                # un-enriched entry cannot ride a fabricated
+                # content_hash_hit/rephrase_linked (anti-gaming).
+                p.pop("dedup", None)
                 continue
             kind, status, has_ep = facts[pid]
             # Graph truth wins over the extractor's claimed kind (P2-2).
@@ -6554,7 +6575,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             p.setdefault("point_id", p.get("id"))
             p["status"] = status
             p["ep_updated"] = has_ep
-            p["dedup"] = DEDUP_NEW
+            # W5 Phase D (#2104): dedup classification is graph-truthful —
+            # the seam's verdict (content_hash_hit / rephrase_linked) is
+            # kept ONLY for ids the graph actually holds (the canonical the
+            # claim resolved to exists); a seam-minted point (or an entry
+            # whose dedup state could not be determined) stays ``new``.
+            # Never fabricated: the enrichment never invents a hit for a
+            # point it did not see resolved.
+            p["dedup"] = p.get("dedup", DEDUP_NEW)
     verb_status = STATUS_OK
     if extraction_errors or skipped:
         # skipped: at least one extracted point could not be verified
