@@ -10,7 +10,9 @@ from __future__ import annotations
 import gc
 import os
 import re
-import sys  # noqa: F401
+import signal as _signal
+import subprocess as _subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -426,3 +428,424 @@ def test_team_create_journals_minted_graph(tmp_path, monkeypatch):
             "team_create mint must be journaled (#1686)"
     finally:
         sdk.close()
+
+
+# ── Issue #2203: terminating signals must close embedded servers ─────────
+#
+# Regression tests for the #2203 fix (signal guard in embedded_lifecycle +
+# entry-point wiring): redislite's redis-server child daemonizes away from
+# the python parent (ppid=1, own session), so SIGTERM/SIGHUP — whose default
+# disposition kills the parent WITHOUT running atexit — orphaned it, and a
+# piped-stdin child starts with SIGINT=SIG_IGN (CPython) so kill -INT was
+# ignored entirely. Every test is process-level (kill-parent → child-gone)
+# and pid-scoped (no global server-count asserts — safe under concurrent
+# suite churn): spawn a child that owns an embedded server, signal it, and
+# assert the child died AND its specific redis-server pid is gone.
+
+
+_REPO_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _child_env() -> dict:
+    """Environment for embedded-child subprocesses: no docker URI (embedded
+    path mode), no fast-atexit flag (real SAVE close semantics — the #1371
+    fast path is a test-tree optimization we deliberately do not exercise
+    here), repo root importable."""
+    env = dict(os.environ)
+    env.pop("TORTOISE_DB_URI", None)
+    env.pop("TORTOISE_FAST_ATEXIT", None)
+    env["PYTHONPATH"] = _REPO_ROOT
+    return env
+
+
+def _read_child_line(proc, prefix: str, timeout: float = 90) -> str:
+    """Read the child's stdout until a line starting with ``prefix`` (or
+    fail). Bounded readline via select so a hung child fails fast."""
+    import select as _select
+    deadline = time.time() + timeout
+    seen = []
+    while time.time() < deadline:
+        r, _, _ = _select.select([proc.stdout], [], [], min(5, deadline - time.time()))
+        if not r:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"child died (rc={proc.returncode}) before printing {prefix!r}; "
+                    f"saw: {''.join(seen)[-800:]}")
+            continue
+        line = proc.stdout.readline()
+        if not line:
+            raise AssertionError(
+                f"child stdout closed before {prefix!r}; saw: {''.join(seen)[-800:]}")
+        seen.append(line)
+        if line.startswith(prefix):
+            return line.strip()
+    raise AssertionError(f"timed out waiting for {prefix!r}; saw: {''.join(seen)[-800:]}")
+
+
+def _registry_redis_pid(db_path) -> int | None:
+    """The redis-server pid recorded in redislite's ``<db>.settings``
+    registry next to an embedded db file (None when not yet started)."""
+    import json as _json
+    settings = str(db_path) + ".settings"
+    if not os.path.exists(settings):
+        return None
+    try:
+        reg = _json.loads(Path(settings).read_text())
+        pidfile = reg.get("pidfile")
+        if pidfile and os.path.exists(pidfile):
+            return int(Path(pidfile).read_text().strip())
+    except Exception:
+        return None  # registry mid-write -> retry
+    return None
+
+
+def _wait_for_registry_redis(db_path, proc, timeout: float = 90) -> int:
+    """Poll the child's embedded-server registry until its redis pid is
+    alive (the CLI/serve paths don't print the pid — the .settings registry
+    is the deterministic signal the server started)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        pid = _registry_redis_pid(db_path)
+        if pid is not None and _pid_alive(pid):
+            return pid
+        if proc.poll() is not None:
+            out = ""
+            if proc.stdout is not None:
+                out = proc.stdout.read()
+            raise AssertionError(
+                f"child exited (rc={proc.returncode}) before its server was up:\n{out[-1200:]}")
+        time.sleep(0.25)
+    raise AssertionError(f"timed out waiting for embedded server at {db_path}.settings")
+
+
+def _kill_quiet(pid) -> None:
+    try:  # noqa: SIM105
+        os.kill(pid, _signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+_SIGNAL_GUARD_CHILD = (
+    "import sys, time, os, signal\n"
+    "sys.path.insert(0, %(root)r)\n"
+    "from tortoise.embedded_lifecycle import install_embedded_signal_cleanup\n"
+    "from tortoise import FalkorDB\n"
+    "install_embedded_signal_cleanup()\n"
+    "db = FalkorDB(os.path.join(sys.argv[1], 'sig.db'))\n"
+    "cli = getattr(db, 'client', db)\n"
+    "print('REDIS_PID=%%s' %% cli.pid, flush=True)\n"
+    "print('GUARD_READY', flush=True)\n"
+    "time.sleep(600)\n"
+)
+
+
+@pytest.mark.parametrize("signum", [_signal.SIGTERM, _signal.SIGHUP])
+def test_terminating_signal_closes_embedded_server(tmp_path, signum):
+    """#2203 (indicator 4): kill-parent → child-gone for the terminating
+    signals whose default disposition killed the parent WITHOUT atexit —
+    SIGTERM (daemon/stdio/indexer kill) and SIGHUP (terminal/session death).
+    Pre-fix the daemonized redis-server survived both (orphan)."""
+    dbdir = tmp_path / f"sig-{signum}"
+    dbdir.mkdir()
+    proc = _subprocess.Popen(
+        [sys.executable, "-c", _SIGNAL_GUARD_CHILD % {"root": _REPO_ROOT}, str(dbdir)],
+        stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+        stderr=_subprocess.PIPE, text=True, env=_child_env(),
+    )
+    redis_pid = None
+    try:
+        line = _read_child_line(proc, "REDIS_PID=")
+        redis_pid = int(line.split("=", 1)[1])
+        assert _pid_alive(redis_pid), "child's embedded server should be up"
+        os.kill(proc.pid, signum)
+        try:
+            proc.wait(timeout=45)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail(f"child survived {_signal.Signals(signum).name} — "
+                        "the #2203 guard did not terminate it")
+        assert proc.returncode == -signum, (
+            f"expected signal death ({-signum}), rc={proc.returncode}")
+        assert _wait_server_dead(redis_pid, timeout=20), (
+            f"child's redis-server survived its {_signal.Signals(signum).name}ed parent")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if redis_pid is not None and _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)
+
+
+def test_sigint_ignored_at_startup_still_terminates_and_closes(tmp_path):
+    """#2203 (indicator 3): a piped-stdin child starts with SIGINT=SIG_IGN
+    (CPython, stdin not a tty) — pre-fix `kill -INT` was swallowed forever.
+    The guard replaces the ignored disposition, so SIGINT terminates the
+    process AND closes its embedded server."""
+    dbdir = tmp_path / "sigint-ignored"
+    dbdir.mkdir()
+    script = (  # noqa: UP031 - child-script %-template (matches sibling tests)
+        "import sys, time, os, signal\n"
+        "signal.signal(signal.SIGINT, signal.SIG_IGN)  # CPython non-tty startup\n"
+        "sys.path.insert(0, %(root)r)\n"
+        "from tortoise.embedded_lifecycle import install_embedded_signal_cleanup\n"
+        "from tortoise import FalkorDB\n"
+        "print('PRE_IGNORED=%%s' %% (signal.getsignal(signal.SIGINT) is signal.SIG_IGN), flush=True)\n"
+        "install_embedded_signal_cleanup()\n"
+        "print('POST_HANDLED=%%s' %% (signal.getsignal(signal.SIGINT) is not signal.SIG_IGN), flush=True)\n"
+        "db = FalkorDB(os.path.join(sys.argv[1], 'sig.db'))\n"
+        "cli = getattr(db, 'client', db)\n"
+        "print('REDIS_PID=%%s' %% cli.pid, flush=True)\n"
+        "print('GUARD_READY', flush=True)\n"
+        "time.sleep(600)\n"
+    ) % {"root": _REPO_ROOT}
+    proc = _subprocess.Popen(
+        [sys.executable, "-c", script, str(dbdir)],
+        stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+        stderr=_subprocess.PIPE, text=True, env=_child_env(),
+    )
+    redis_pid = None
+    try:
+        pre = _read_child_line(proc, "PRE_IGNORED=")
+        assert pre == "PRE_IGNORED=True", f"SIGINT not ignored at startup: {pre}"
+        post = _read_child_line(proc, "POST_HANDLED=")
+        assert post == "POST_HANDLED=True", (
+            "the #2203 guard did not replace the ignored SIGINT disposition")
+        line = _read_child_line(proc, "REDIS_PID=")
+        redis_pid = int(line.split("=", 1)[1])
+        assert _pid_alive(redis_pid)
+        os.kill(proc.pid, _signal.SIGINT)
+        try:
+            proc.wait(timeout=45)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("SIGINT was ignored (pre-#2203 behavior) — guard did not fire")
+        assert proc.returncode == -_signal.SIGINT, f"rc={proc.returncode}"
+        assert _wait_server_dead(redis_pid, timeout=20), (
+            "redis-server survived its SIGINTed parent")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if redis_pid is not None and _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)
+
+
+def _tortoise_cli_popen(argv, env, cwd, sigint_ignored: bool):
+    """Spawn the real `tortoise` CLI (`python -m tortoise <argv...>`).
+
+    sigint_ignored=True runs it through ``runpy`` with SIGINT preset to
+    SIG_IGN — the harness condition (piped stdin) that made `kill -INT` a
+    no-op pre-#2203 — without touching this process's disposition."""
+    if sigint_ignored:
+        code = (
+            "import signal; signal.signal(signal.SIGINT, signal.SIG_IGN); "
+            "import runpy; runpy.run_module('tortoise', run_name='__main__')"
+        )
+        return _subprocess.Popen(
+            [sys.executable, "-c", code, *argv],
+            stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+            stderr=_subprocess.STDOUT, text=True, env=env, cwd=cwd,
+        )
+    return _subprocess.Popen(
+        [sys.executable, "-m", "tortoise", *argv],
+        stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+        stderr=_subprocess.STDOUT, text=True, env=env, cwd=cwd,
+    )
+
+
+@pytest.mark.parametrize("signum", [_signal.SIGINT, _signal.SIGTERM])
+def test_index_github_cli_signal_closes_embedded_server(tmp_path, signum):
+    """#2203 (indicator 3): `tortoise index github` honors SIGINT (even when
+    the process started with it ignored — piped stdin) and SIGTERM, and its
+    embedded redis-server dies with it. The corpus contains a FIFO that
+    sorts first, so the CLI blocks mid-index with its projection open —
+    deterministic kill window (no race with a fast-completing index)."""
+    sigint_ignored = signum == _signal.SIGINT
+    work = tmp_path / f"idx-{signum}"
+    corpus = work / "repo"
+    corpus.mkdir(parents=True)
+    db = work / "db" / "tortoise.db"
+    db.parent.mkdir(parents=True)
+    hold = corpus / "00000-hold.md"
+    os.mkfifo(hold)  # blocks the index loop's read_text with proj open
+    for i in range(3):
+        (corpus / f"1000{i}.md").write_text(
+            f"# File {i}\n\nSpeaker noted decision {i} is sound and final.\n")
+    env = _child_env()
+    proc = _tortoise_cli_popen(
+        ["index", "github", str(corpus), "--db", str(db)],
+        env=env, cwd=_REPO_ROOT, sigint_ignored=sigint_ignored,
+    )
+    redis_pid = None
+    try:
+        redis_pid = _wait_for_registry_redis(db, proc)
+        assert _pid_alive(redis_pid), "indexer's embedded server should be up"
+        os.kill(proc.pid, signum)
+        try:
+            proc.wait(timeout=45)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail(
+                f"`tortoise index github` ignored {_signal.Signals(signum).name} "
+                "(pre-#2203 behavior)")
+        assert proc.returncode == -signum, f"rc={proc.returncode}"
+        assert _wait_server_dead(redis_pid, timeout=20), (
+            "indexer's redis-server survived its killed parent")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if redis_pid is not None and _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)
+
+
+def _stdio_serve_proc(tmp_path):
+    """Spawn the real stdio MCP server (`python -m tortoise serve`) on an
+    embedded TORTOISE_DB_PATH, drive the minimal MCP handshake + one
+    DB-touching tool call (forces lazy projection creation → redis-server
+    up), and return (proc, redis_pid). A failure mid-setup kills the child
+    and its server before re-raising — the helper must never leak an orphan
+    (the caller's try/finally only starts once it returns)."""
+    import json as _json
+    db = tmp_path / "stdio" / "t.db"
+    db.parent.mkdir(parents=True)
+    env = _child_env()
+    env["TORTOISE_DB_PATH"] = str(db)
+    proc = None
+    redis_pid = None
+    try:
+        proc = _subprocess.Popen(
+            [sys.executable, "-m", "tortoise", "serve"],
+            stdin=_subprocess.PIPE, stdout=_subprocess.PIPE,
+            stderr=_subprocess.PIPE, text=True, env=env, cwd=_REPO_ROOT,
+        )
+
+        def send(obj):
+            proc.stdin.write(_json.dumps(obj) + "\n")
+            proc.stdin.flush()
+
+        send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+              "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                         "clientInfo": {"name": "lifecycle-test", "version": "1"}}})
+        _read_child_line(proc, '{"jsonrpc"', timeout=60)  # initialize result
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+              "params": {"name": "tortoise_get_point", "arguments": {"id": "missing-2203"}}})
+        _read_child_line(proc, '{"jsonrpc"', timeout=60)  # tool result
+        redis_pid = _wait_for_registry_redis(db, proc)
+        assert _pid_alive(redis_pid), "stdio server's embedded server should be up"
+        return proc, redis_pid
+    except Exception:
+        if proc is not None and proc.poll() is None:
+            proc.kill()
+            proc.wait()
+        if redis_pid is not None and _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)
+        raise
+
+
+def test_serve_stdio_sigterm_closes_embedded_server(tmp_path):
+    """#2203 (indicator 2): SIGTERM on the stdio MCP server stops its
+    embedded redis-server child (the harness kill after a client
+    disconnect used to orphan it)."""
+    proc, redis_pid = _stdio_serve_proc(tmp_path)
+    try:
+        os.kill(proc.pid, _signal.SIGTERM)
+        try:
+            proc.wait(timeout=45)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("stdio server survived SIGTERM — guard did not fire")
+        assert proc.returncode == -_signal.SIGTERM, f"rc={proc.returncode}"
+        assert _wait_server_dead(redis_pid, timeout=20), (
+            "stdio server's redis-server survived its SIGTERMed parent")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)
+
+
+def test_serve_stdio_client_disconnect_closes_embedded_server(tmp_path):
+    """#2203 (indicator 2): client disconnect (stdin EOF) ends the stdio
+    session and closes the embedded redis-server child deterministically."""
+    proc, redis_pid = _stdio_serve_proc(tmp_path)
+    try:
+        proc.stdin.close()  # EOF = MCP client disconnect
+        try:
+            proc.wait(timeout=45)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("stdio server did not exit on client disconnect")
+        assert proc.returncode == 0, f"rc={proc.returncode}"
+        assert _wait_server_dead(redis_pid, timeout=20), (
+            "stdio server's redis-server survived client disconnect")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)
+
+
+def test_selfhost_daemon_sigterm_closes_embedded_server(tmp_path):
+    """#2203 (indicator 1): SIGTERM on the selfhost daemon (docker CMD /
+    `python -m tortoise.selfhost`) stops its embedded redis-server child.
+    uvicorn's graceful shutdown restores the #2203 guard as the original
+    SIGTERM handler and re-raises into it, which closes the server before
+    the final death (verified composition)."""
+    import socket as _socket
+    import urllib.request as _urlreq
+    env = _child_env()
+    db = tmp_path / "daemon" / "tortoise.db"
+    db.parent.mkdir(parents=True)
+    env["TORTOISE_DB_PATH"] = str(db)
+    # Pre-probe a free loopback port (uvicorn does not print its bound port
+    # when stdout is not a tty).
+    _s = _socket.socket()
+    _s.bind(("127.0.0.1", 0))
+    port = _s.getsockname()[1]
+    _s.close()
+    env["TORTOISE_PORT"] = str(port)
+    proc = _subprocess.Popen(
+        [sys.executable, "-m", "tortoise.selfhost"],
+        stdout=_subprocess.PIPE, stderr=_subprocess.STDOUT,
+        text=True, env=env, cwd=_REPO_ROOT,
+    )
+    redis_pid = None
+    try:
+        # Probe /health until it answers (deep DB probe creates the SDK →
+        # embedded server).
+        deadline = time.time() + 90
+        healthy = False
+        while time.time() < deadline:
+            if proc.poll() is not None:
+                raise AssertionError(
+                    f"daemon exited early rc={proc.returncode}: "
+                    f"{proc.stdout.read()[-1500:]}")
+            try:
+                with _urlreq.urlopen(f"http://127.0.0.1:{port}/health", timeout=2) as resp:
+                    if resp.status == 200:
+                        healthy = True
+                        break
+            except Exception:
+                pass
+            time.sleep(0.4)
+        assert healthy, f"daemon never became healthy on :{port}"
+        redis_pid = _wait_for_registry_redis(db, proc)
+        assert _pid_alive(redis_pid), "daemon's embedded server should be up"
+        os.kill(proc.pid, _signal.SIGTERM)
+        try:
+            proc.wait(timeout=60)
+        except _subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("daemon survived SIGTERM")
+        assert _wait_server_dead(redis_pid, timeout=25), (
+            "daemon's redis-server survived its SIGTERMed parent")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if redis_pid is not None and _pid_alive(redis_pid):
+            _kill_quiet(redis_pid)

@@ -54,6 +54,23 @@ if _OriginalFalkorDB is not None:
         paths create per-CWD servers, the Category-3 leak). Absolute paths and
         no-arg construction pass through to the original.
 
+        Issue #2204 (first-run): redislite writes its redis-server config with
+        ``dir <db-path-parent>`` and the embedded daemon FATALs at config load
+        when that directory does not exist (fresh machine — no ~/.tortoise
+        yet). The data dir is created HERE, at the single embedded choke-point,
+        BEFORE the server config is read — so `tortoise init` / `doctor` /
+        any first embedded open on a clean machine works instead of printing a
+        raw "FATAL CONFIG FILE ERROR". Idempotent (exist_ok). No-op for
+        :memory:. Fails clean (OSError propagates as-is) only when the dir
+        cannot be created at all (e.g. unwritable parent) — never a redislite
+        subprocess FATAL.
+
+        ``~``-prefixed paths are permitted and expanded via os.path.expanduser
+        BEFORE forwarding — redislite derives its config ``dir`` verbatim from
+        os.path.dirname(path) and never expands ``~`` itself (issue #2204
+        review), so tilde callers previously died with the raw FATAL CONFIG
+        error at config load.
+
         Issue #1005 (lifecycle): context-manager support + idempotent close +
         atexit registration so normal process exit never orphans the server.
         NOTE: no GC-time weakref.finalize here — the object IS the redislite
@@ -71,11 +88,44 @@ if _OriginalFalkorDB is not None:
                     # (mirrors config.py; #1005 lifecycle applies to
                     # file-backed servers only)
                     pass
-                elif not os.path.isabs(path) and not path.startswith("~"):
-                    raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
+                else:
+                    # #2204: expand the path BEFORE anything else reads it.
+                    # redislite derives its config ``dir`` verbatim from
+                    # os.path.dirname(path) and does NOT expanduser itself, so
+                    # an unexpanded "~" would still die with the raw
+                    # "FATAL CONFIG FILE ERROR" this guard exists to kill.
+                    # Expansion also resolves valid ``~user`` forms; a tilde
+                    # that fails to resolve (unknown user) stays non-absolute
+                    # and is rejected below like any other relative path.
+                    path = os.path.expanduser(path)
+                    # Reject relative paths AFTER expansion: the original
+                    # relative-path RuntimeError contract is preserved (a
+                    # plain relative input is unchanged by expanduser), while
+                    # the round-1 expansion makes "~..." absolute and legal.
+                    # Never permit a per-CWD relative db (Category-3 leak).
+                    if not os.path.isabs(path):
+                        raise RuntimeError(RELATIVE_PATH_ERROR.format(path=path))
+                    # Create the data dir BEFORE redislite reads its config
+                    # (see class docstring). Never fails on an existing dir;
+                    # bare filenames (impossible after the absolute reject
+                    # above) would no-op via dirname "" → ".".
+                    data_dir = os.path.dirname(path)
+                    os.makedirs(data_dir or ".", exist_ok=True)
+                    args = (path, *args[1:])
             super().__init__(*args, **kwargs)
             import atexit as _atexit
             self._t_closed = False
+            # #2203: track this client for the terminating-signal teardown
+            # (SIGTERM/SIGHUP/ignored-SIGINT close every live embedded server
+            # before the parent dies). Path-based constructions only — a
+            # host=/port= construction is server mode (no redis child to
+            # reap; its pool belongs to a live remote server). Presence check
+            # mirrors redislite's own (RedisMixin.__init__: 'host' in kwargs
+            # or 'port' in kwargs → server mode). Weak registry: never pins
+            # the client, so #1475 close-on-GC stays intact.
+            if "host" not in kwargs and "port" not in kwargs:
+                from tortoise.embedded_lifecycle import register_embedded_client
+                register_embedded_client(self)
             # #1371: route the atexit seam through the fast-close wrapper
             # (ephemeral test servers) so interpreter exit does not spend
             # 3-4s per leaked server on redislite's response-waiting close.
