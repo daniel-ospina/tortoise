@@ -306,6 +306,11 @@ jobs:
       - name: Set all app secrets on Fly.io (keeps in sync with GitHub/Supabase)
         run: |
           ARGS="FASTAPI_INTERNAL_KEY=${{ secrets.FASTAPI_INTERNAL_KEY }} TORTOISE_SECRET_PEPPER=${{ secrets.TORTOISE_SECRET_PEPPER }} FALKORDB_CLOUD_URI=${{ secrets.FALKORDB_CLOUD_URI }}"
+          # #2208: TORTOISE_GIT_SHA — the exact deploy commit, exposed by GET
+          # /v1/version so clients/skills can detect an outdated server.
+          # GITHUB_SHA is the checked-out commit on push AND workflow_dispatch
+          # (the ref head), so it always matches what this run deploys.
+          ARGS="$ARGS TORTOISE_GIT_SHA=${GITHUB_SHA}"
           # #1703: SUPABASE_ANON_KEY — public client key the OAuth consent page
           # embeds (supabase-js createClient). Was never synced to Fly, so the
           # page rendered with an empty key ('supabaseKey is required').

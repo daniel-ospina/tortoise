@@ -2,6 +2,7 @@
  "$schema": "pricing-schema-v1",
  "status": "current",
  "owner_confirmed": "2026-08-07",
+ "_comment": "Epic #2083 (multi-graph tenancy) shipped 2026-09-04: graphs, per-graph API keys (C3/C5), per-graph recording (C6). NO pricing values changed — owner decision (Gate #2, 2026-09-01) = pro/team unlimited graphs (max_graphs_per_team null); free=1, solo=2 (quota 409; the 402 tier gate is free/anon only). The per_graph_keys feature strings below still read 'planned' on pro/team: the flags shipped with this epic and are kept for the pricing-schema contract (flip to 'shipped' in a pure-doc follow-up without touching values).",
  "billing": {
   "model": "per-team",
   "per_seat": false,

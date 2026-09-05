@@ -598,6 +598,7 @@ class TestOnboardingToolGating:
         "tortoise_onboarding_session_recording",
         "tortoise_onboarding_github_connect",
         "tortoise_onboarding_github_index", "tortoise_onboarding_github_status",
+        "tortoise_onboarding_seed",  # #1999 (W3)
     }
 
     @staticmethod
@@ -623,6 +624,42 @@ class TestOnboardingToolGating:
         key = reg.apikey_create(team["id"], "t")["api_key"]
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
+
+    def test_onboarding_seed_tool_files_two_subjects(self, tmp_path, monkeypatch):
+        """#1999 (W3): tortoise_onboarding_seed is listed + callable over the
+        MCP surface; explicit names file the two anchor Subjects (no
+        email on this team → the person name must be provided, never
+        invented)."""
+        from tortoise.mcp_server import create_http_app
+        db_path = str(tmp_path / "onb-seed.db")
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+        reg = TortoiseSDK(db_path=db_path, namespace="registry")
+        team = reg.team_create("seedteam")
+        key = reg.apikey_create(team["id"], "t")["api_key"]
+        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
+        tc = _mounted_test_client(app)
+        with tc:
+            names = self._list_names(tc, key)
+            assert "tortoise_onboarding_seed" in names
+            r = tc.post("/mcp", headers={
+                "Authorization": f"Bearer {key}",
+                "Accept": "application/json, text/event-stream",
+                "Content-Type": "application/json",
+            }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 2,
+                    "params": {"name": "tortoise_onboarding_seed",
+                                "arguments": {"org_name": "Seed Co",
+                                               "person_name": "Sam Seed"}}})
+            assert r.status_code == 200, r.text
+            body = _parse_sse_json(r)
+            text = body["result"]["content"][0]["text"]
+            import json as _json
+            payload = _json.loads(text)
+            assert payload["status"] == "seeded", payload
+            assert payload["org_subject"]["subjectKind"] == "organization"
+            assert payload["user_subject"]["subjectKind"] == "naturalPerson"
+            assert payload["member_of"]["edge"]["relation"] == "memberOf"
+            assert payload["member_of"]["created"] is True
 
     def test_onboarding_tools_hidden_after_completion(self, tmp_path, monkeypatch):
         from tortoise.hosted_api import _update_onboarding_state  # noqa: I001
