@@ -1,32 +1,29 @@
-"""#2164 Task 9a — differential parity: the shared apply_supersessions helper
-vs the hosted §6b inline consumer produce IDENTICAL supersession END-STATE.
+"""#2193 — the hosted commit write phase's supersession lane, post-migration.
 
-WHY THIS TEST EXISTS (drift-recurrence guard): #2164's root cause was THREE
-divergent consumers of the supersession discipline (capture, eval ingest, and
-the hosted commit endpoint), each resolving/folding supersession records
-differently. ``tortoise.commit_ops.apply_supersessions`` (used by capture +
-eval ingest) is now ONE implementation; the hosted commit path's §6b inline
-consumer (``hosted_api._execute_commit_writes``, ~:6140-6185) is the OTHER.
-§6b's migration onto the helper is deferred to phase 2 — so THIS PR ships a
-differential parity test that pins the interim two-implementation state safe:
-the same supersession payload driven through BOTH implementations must leave
-IDENTICAL graph end-state (CORRECTS edge, point statuses, Object
-.status/.supersededBy).
+WHAT THIS FILE PINS: #2193 migrated the hosted §6b inline consumer
+(``hosted_api._execute_commit_writes``) onto the SHARED
+``tortoise.commit_ops.apply_supersessions`` helper — ONE supersession
+consumer-side discipline now serves capture (_extract_session_v2), eval
+ingest_v2, and the hosted commit endpoint. The #2164 Task 9a differential
+parity test is therefore DELETED (its two arms were the helper after the
+migration, so the pairwise equality went vacuous); this file holds the
+hosted-path coverage that replaces it:
 
-KNOWN, DELIBERATE ASYMMETRIES — OUT OF PARITY SCOPE (documented, do NOT
-assert on them):
-- warning channels: helper routes skips/failures to the caller's warn()
-  (capture: meta warnings); §6b routes them to the module _logger.
-- journal shapes: the helper emits id-style kwargs (full provenance incl.
-  session_id on the JSONL line AND the synthesized GraphEvent payload); §6b
-  emits positional payload + id kwarg (the phase-2 C2 journaling gap). The
-  fold SET is the same either way, so parity asserts GRAPH END-STATE only —
-  never journal contents.
+- ``test_hosted_commit_writes_supersession_end_state`` — a supersession
+  payload driven through the real hosted write phase leaves the expected
+  end-state (CORRECTS edge, point statuses, Object .status/.supersededBy).
+- ``test_hosted_commit_wires_apply_supersessions_once`` — the wiring spy:
+  the write phase routes payload.supersessions through the helper EXACTLY
+  once, with typed records, session_id and a warn callable that DELEGATES
+  to the hosted module logger (hosted attribution — the call site wraps it
+  in a warn-counting closure so the summary log reserves WARNING for
+  records that actually warned). Pre-#2193 §6b's inline loop never called
+  the helper — the spy is the regression guard that pins the seam.
 
-Test env: docker lane (TORTOISE_DB_URI set — see AGENTS.md). Each arm's SDK
-constructs with its own db_path; under the test-session redirect
-(tortoise/projection/__init__.py, epic #1647) the two paths land on two
-distinct derived server graphs — the two arms are truly isolated.
+Test env: docker lane (TORTOISE_DB_URI set — see AGENTS.md). The SDKs
+construct with their own db_path; under the test-session redirect
+(tortoise/projection/__init__.py, epic #1647) each path lands on a distinct
+derived test_* server graph.
 """
 
 from __future__ import annotations
@@ -37,7 +34,6 @@ from urllib.parse import urlparse
 import pytest
 
 from tortoise import hosted_api
-from tortoise.commit_ops import apply_supersessions
 from tortoise.commit_schema import (
     BudgetDecision,
     CommitPayload,
@@ -99,7 +95,8 @@ ENTITY_EVIDENCE = "entity lifecycle supersedes"
 SESSION_ID = "session_parity_9a"
 CAPTURED_AT = "2026-08-11T10:00:00Z"
 
-# The end-state BOTH consumers must converge on (the parity contract).
+# The end-state the hosted write phase must converge on (the smoke
+# contract).
 _EXPECTED_END_STATE = {
     "old_pt_status": "superseded",
     "old_pt_outdated": True,
@@ -118,25 +115,17 @@ def _pt_id(content: str) -> str:
 
 
 def _seed_baseline(sdk, old_pt_id: str) -> None:
-    """The superseded side both consumers receive: an old live statement
-    point and an old live Object, both written by an EARLIER session (the
-    commit/capture under test only carries the supersession records)."""
+    """The superseded side the hosted write phase receives: an old live
+    statement point and an old live Object, both written by an EARLIER
+    session (the commit under test only carries the supersession records)."""
     sdk.create_point("statement", OLD_PT_CONTENT, id=old_pt_id, status="live")
     sdk.create_entity("object", OLD_OBJECT_NAME, objectKind=OBJECT_KIND)
 
 
-def _write_successors(sdk, new_pt_id: str) -> None:
-    """The new-session content both consumers carry: the successor point +
-    successor entity. Written BEFORE the supersessions apply (the capture/
-    commit ordering — a dangling successor would be invisible to recall)."""
-    sdk.create_point("statement", NEW_PT_CONTENT, id=new_pt_id, status="live")
-    sdk.create_entity("object", SUCCESSOR_OBJECT_NAME, objectKind=OBJECT_KIND)
-
-
 def _supersession_records(old_pt_id: str, new_pt_id: str) -> list[dict]:
-    """The SAME extractor-format supersession records (the extractor_v2
-    ``{superseded, supersedes_by, evidence}`` shape) fed to BOTH consumers:
-    one pt_ point record, one entity-name record."""
+    """The extractor-format supersession records (the extractor_v2
+    ``{superseded, supersedes_by, evidence}`` shape) fed to the hosted write
+    phase: one pt_ point record, one entity-name record."""
     return [
         {"superseded": old_pt_id, "supersedes_by": new_pt_id, "evidence": PT_EVIDENCE},
         {
@@ -151,9 +140,9 @@ def _commit_payload_and_plan(old_pt_id: str, new_pt_id: str):
     """A minimal but valid CommitPayload + CommitPlan driving the hosted
     write phase. §5 reconciles the successor POINT (new), §6 the successor
     ENTITY (new) — the natural pre-§6b writes — and payload.supersessions
-    carries the same records Arm A fed the helper. Everything else is empty
-    (the §6b consumer does not read reconcile.supersessions; it reads
-    payload.supersessions directly, hosted_api.py:6140)."""
+    carries the supersession records (the hosted §6b helper call reads
+    payload.supersessions directly, not reconcile.supersessions). Everything
+    else is empty."""
     pt = Point(
         id=new_pt_id,
         content=NEW_PT_CONTENT,
@@ -209,8 +198,8 @@ def _commit_payload_and_plan(old_pt_id: str, new_pt_id: str):
 
 
 def _supersession_end_state(sdk, old_pt_id: str, new_pt_id: str) -> dict:
-    """Read the supersession-relevant GRAPH END-STATE (never the journals —
-    journal shapes deliberately diverge, phase-2 C2 gap)."""
+    """Read the supersession-relevant GRAPH END-STATE after the hosted write
+    phase (the smoke contract — never the journals)."""
     g = sdk._get_proj().g
     old_pt = g.query(
         "MATCH (p:Point {id:$id}) RETURN p.status, p.outdated",
@@ -239,69 +228,15 @@ def _supersession_end_state(sdk, old_pt_id: str, new_pt_id: str) -> dict:
     }
 
 
-def test_parity_helper_vs_hosted_section6b_identical_end_state(tmp_path):
-    """THE differential parity test (#2164 Task 9a): the SAME supersession
-    records through the shared helper (Arm A — the capture/eval ingest
-    consumer) and through the hosted §6b inline consumer (Arm B —
-    ``_execute_commit_writes``) must leave IDENTICAL end-state on two
-    isolated graphs. The pre-#2164 drift class (a consumer that drops or
-    diverges on the fold) fails the equality below."""
-    old_pt_id = _pt_id(OLD_PT_CONTENT)
-    new_pt_id = _pt_id(NEW_PT_CONTENT)
-
-    # ── Arm A — the shared helper (capture path: write the session's new
-    #    successors, then apply_supersessions with payload-format records;
-    #    every skip/failure must surface through warn — never silent) ──
-    sdk_a = TortoiseSDK(str(tmp_path / "arm-a.db"))
-    _seed_baseline(sdk_a, old_pt_id)
-    _write_successors(sdk_a, new_pt_id)
-    warns: list[str] = []
-    applied = apply_supersessions(
-        sdk_a._get_proj(),
-        sdk_a,
-        _supersession_records(old_pt_id, new_pt_id),
-        session_id=SESSION_ID,
-        warn=warns.append,
-    )
-    assert applied == 2, f"helper must apply both records: {warns}"
-    assert warns == [], f"unambiguous fixtures must not warn: {warns}"
-
-    # ── Arm B — the hosted §6b inline consumer, driven directly through the
-    #    real write-phase function the endpoint executes (test_commit_endpoint
-    #    treats it as the injectable seam; the endpoint wrapper adds only
-    #    Layer-1/reconcile/budget/record-store, which §6b does not read).
-    #    §5 writes the successor point, §6 the successor entity, then §6b
-    #    consumes payload.supersessions (hosted_api.py:6140-6185). ──
-    sdk_b = TortoiseSDK(str(tmp_path / "arm-b.db"))
-    # Isolation precondition (non-vacuity): the two db_paths must land on
-    # DISTINCT graphs — a shared graph would make the end-state comparison
-    # graph-vs-itself (the #942-class vacuous pass this issue's parity guard
-    # exists to prevent). The docker-lane redirect derives per-path graphs.
-    assert sdk_a._get_proj()._graph_name != sdk_b._get_proj()._graph_name, (
-        f"parity arms must run on DISTINCT graphs, got both on {sdk_a._get_proj()._graph_name!r}"
-    )
-    _seed_baseline(sdk_b, old_pt_id)
-    payload, plan = _commit_payload_and_plan(old_pt_id, new_pt_id)
-    hosted_api._execute_commit_writes(sdk_b, payload, plan)
-
-    state_a = _supersession_end_state(sdk_a, old_pt_id, new_pt_id)
-    state_b = _supersession_end_state(sdk_b, old_pt_id, new_pt_id)
-    assert state_a == state_b, (
-        "helper and hosted §6b must fold the SAME supersession payload to "
-        "the SAME end-state (drift guard #2164):\n"
-        f"  helper (arm A): {state_a}\n"
-        f"  hosted (arm B): {state_b}"
-    )
-    assert state_a == _EXPECTED_END_STATE, state_a
-
-
-def test_hosted_section6b_arm_alone_produces_the_fold(tmp_path):
-    """Non-vacuity of the §6b harness side: the hosted consumer ALONE (no
-    helper in the picture) must produce the fold — old pt terminal with a
-    single CORRECTS edge from the successor, old Object superseded by the
-    successor name. If §6b's records were dropped or mis-resolved, this
-    test (not just the pairwise equality) fails — the parity test's Arm B is
-    proven independently live."""
+def test_hosted_commit_writes_supersession_end_state(tmp_path):
+    """Hosted-path end-state smoke (#2193): a supersession payload driven
+    through the real hosted write phase (_execute_commit_writes — the
+    injectable seam the commit endpoint executes; the endpoint wrapper adds
+    only Layer-1/reconcile/budget/record-store, which the supersession lane
+    does not read) must produce the fold: old pt terminal with a single
+    CORRECTS edge from the successor, old Object superseded by the successor
+    name. If the shared apply_supersessions call dropped or mis-resolved the
+    records, this smoke fails."""
     old_pt_id = _pt_id(OLD_PT_CONTENT)
     new_pt_id = _pt_id(NEW_PT_CONTENT)
     sdk = TortoiseSDK(str(tmp_path / "arm-b-alone.db"))
@@ -313,3 +248,124 @@ def test_hosted_section6b_arm_alone_produces_the_fold(tmp_path):
     hosted_api._execute_commit_writes(sdk, payload, plan)
     state = _supersession_end_state(sdk, old_pt_id, new_pt_id)
     assert state == _EXPECTED_END_STATE, state
+
+
+def test_hosted_commit_wires_apply_supersessions_once(monkeypatch, tmp_path):
+    """#2193 (Tasks 3/4) wiring spy — the hosted commit write phase must
+    route payload.supersessions through the SHARED apply_supersessions
+    helper: EXACTLY ONE call, typed SupersessionRecords, session_id and warn
+    = the hosted module logger (hosted attribution). Pre-#2193 §6b's inline
+    loop never calls the helper — this spy fails (zero calls) against the
+    old shape and pins the seam after the migration."""
+    import tortoise.commit_ops as commit_ops
+    calls: list[tuple] = []
+
+    def spy(proj, sdk_, records, **kwargs):
+        # mimic a full apply — the Task-4 summary log formats `applied`
+        # (a None-returning spy would TypeError inside logging's % fmt)
+        calls.append((proj, sdk_, list(records), dict(kwargs)))
+        return len(list(records))
+
+    monkeypatch.setattr(commit_ops, "apply_supersessions", spy)
+    # hosted-attribution probe: the call site wraps the module logger in a
+    # warn-counting closure (hosted_api._supersession_warn) so the summary
+    # log can reserve WARNING for records that actually warned. The spy must
+    # still see that closure DELEGATE to the hosted module logger — swap the
+    # logger's warning for a recorder before driving the commit.
+    recorded_warns: list[tuple] = []
+
+    def _recorder(msg, *args, **kwargs):
+        recorded_warns.append((msg, args, kwargs))
+
+    monkeypatch.setattr(hosted_api._logger, "warning", _recorder)
+    old_pt_id = _pt_id(OLD_PT_CONTENT)
+    new_pt_id = _pt_id(NEW_PT_CONTENT)
+    sdk = TortoiseSDK(str(tmp_path / "wiring.db"))
+    assert sdk._get_proj()._graph_name.startswith("test_"), (
+        "docker-lane redirect must isolate the wiring arm on a test_* graph"
+    )
+    _seed_baseline(sdk, old_pt_id)
+    payload, plan = _commit_payload_and_plan(old_pt_id, new_pt_id)
+    hosted_api._execute_commit_writes(sdk, payload, plan)
+    assert len(calls) == 1, \
+        f"apply_supersessions must be called EXACTLY once, got {len(calls)}"
+    proj, sdk_, records, kwargs = calls[0]
+    assert proj is sdk._get_proj(), "the shared proj must be passed"
+    assert sdk_ is sdk, "the committing SDK must be passed"
+    assert records == list(payload.supersessions), "typed records passthrough"
+    assert kwargs["session_id"] == SESSION_ID, kwargs
+    # `==` NOT `is` — Logger.warning is a bound method, a fresh object per
+    # access; `is` can never pass. The call site passes a warn-counting
+    # closure that DELEGATES to the hosted module logger — probe it routes.
+    assert kwargs["warn"] is not hosted_api._logger.warning, (
+        "call site must pass the warn-counting wrapper, not the bare logger"
+    )
+    kwargs["warn"]("__probe__")
+    assert recorded_warns and recorded_warns[-1][0] == "__probe__", (
+        "the passed warn callable must delegate to hosted_api._logger.warning"
+    )
+
+
+def test_hosted_commit_summary_log_reserves_warning_for_real_warns(
+    monkeypatch, tmp_path,
+):
+    """#2193 (review R2) — the commit-level summary log must NOT WARNING on
+    the helper's documented SILENT class (applied<total with zero warns = a
+    silent no-op/absorb, e.g. an idempotent re-dedup); WARNING is reserved
+    for records that actually warned. Drives the real call site against a
+    scripted apply_supersessions: full apply → INFO; partial with warn →
+    WARNING."""
+    import tortoise.commit_ops as commit_ops
+
+    def make_spy(returns):
+        def spy(proj, sdk_, records, **kwargs):
+            return returns(records, kwargs)
+
+        return spy
+
+    def run_commit(spy_fn, monkeypatch_, tmp_path_):
+        monkeypatch_.setattr(commit_ops, "apply_supersessions", spy_fn)
+        # record BOTH levels — the summary log picks info or warning.
+        lines: list[tuple[str, str]] = []
+
+        def _info(msg, *a, **k):
+            lines.append(("info", str(msg)))
+
+        def _warn(msg, *a, **k):
+            lines.append(("warning", str(msg)))
+
+        monkeypatch_.setattr(hosted_api._logger, "info", _info)
+        monkeypatch_.setattr(hosted_api._logger, "warning", _warn)
+        old_pt_id = _pt_id(OLD_PT_CONTENT)
+        new_pt_id = _pt_id(NEW_PT_CONTENT)
+        sdk = TortoiseSDK(str(tmp_path_ / "summary.db"))
+        _seed_baseline(sdk, old_pt_id)
+        payload, plan = _commit_payload_and_plan(old_pt_id, new_pt_id)
+        hosted_api._execute_commit_writes(sdk, payload, plan)
+        return lines
+
+    # (1) full apply, helper never warns → the summary log goes INFO.
+    lines = run_commit(
+        make_spy(lambda records, kwargs: len(records)), monkeypatch, tmp_path,
+    )
+    assert any(
+        level == "info" and "supersessions applied=" in msg
+        for level, msg in lines
+    ), f"full apply must log INFO summary, got {lines}"
+    assert not any(
+        level == "warning" and "supersessions applied=" in msg
+        for level, msg in lines
+    ), f"full apply must NOT WARNING-summary, got {lines}"
+
+    # (2) one record skipped with a real warn → WARNING summary.
+    def partial_with_warn(proj, sdk_, records, **kwargs):
+        kwargs["warn"]("ref %r not found — skipped", "pt_deadbeef")
+        return max(0, len(records) - 1)
+
+    lines = run_commit(
+        partial_with_warn, monkeypatch, tmp_path,
+    )
+    assert any(
+        level == "warning" and "supersessions applied=" in msg
+        for level, msg in lines
+    ), f"a real warn must WARNING-summary, got {lines}"
