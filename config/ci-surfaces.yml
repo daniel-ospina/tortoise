@@ -5,6 +5,7 @@ surfaces:
   - test_abuse.py
   - test_abuse_integration.py
   - test_acl_graph_users.py   # C4 #2113: per-graph FalkorDB ACL layer (docker-lane; skipif no URI)
+  - test_delivery_tenancy.py  # C6 #2115: delivery-shape tenancy + session_recording per-graph override
   - test_tenancy_spine.py     # C5 #2114: data-plane tenancy spine (cross-graph suite)
   - test_agent_signup.py
   - test_agent_signup_idempotency.py
@@ -115,6 +116,19 @@ surfaces:
   - eval/harness/test_harness_benchmark.py
   - eval/harness/test_harness_schema.py
   - eval/harness/test_harness_corpus.py
+  # W3-b (#2100): the why-layer suite gate — seeds the shared E2E-1
+  # planted-conflict corpus (40 points, content-pinned to W4-a's E2E-1
+  # seeding via the jointly-pinned corpus manifest), assembles the canonical
+  # why-blocks through the REAL tortoise.why assembly, and grades the four
+  # why-questions from the surfaced context ALONE (A11).  Deterministic m2
+  # lane vs its OWN committed baselines/m2.json: the standing E2E-7 bars
+  # (conflict-surfacing >= 0.95, dig-deeper navigation >= 0.95, 0 clean
+  # false positives) REGRESSION a W4 assembly that cannot answer.  Also
+  # covers the hermetic schema/grading/A4 tests.
+  - eval/why_suite/test_why_suite_benchmark.py
+  - eval/why_suite/test_why_suite_schema.py
+  - eval/why_suite/test_why_suite_grading.py
+  - eval/why_suite/test_why_suite_ab.py
   # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
   # boundary PR (hosted capture code changes) must run the real-pipeline
   # replay gate against the write-path corpus. The deterministic M2 echo
@@ -124,6 +138,14 @@ surfaces:
   # First-match ownership (api before eval) is fine: the tier-2 union
   # includes it whenever api OR eval matches.
   - eval/write_path/test_write_path_benchmark.py
+  # #2280 (CI drift repair): volunteer §3.2 + W3 reflex surfaces merged in
+  # #2283 but never registered — the drift gate failed every PR (incl.
+  # #2283's own python-ci-gate). Hosted/selfhost transports mirror
+  # test_hosted_api/test_selfhost_rest; the reflex seam mirrors the W3
+  # harness gate entries above.
+  - test_hosted_volunteer_context.py   # volunteer §3.2 hosted transport (docker-lane; skipif no URI)
+  - test_selfhost_volunteer_context.py # volunteer §3.2 selfhost transport (embedded)
+  - test_volunteer_reflex_harness_seam.py  # W3 reflex graded seam (volunteer.decide)
   battery:
   - test_battery_arms.py
   - test_battery_judge.py
@@ -253,13 +275,18 @@ surfaces:
   - test_lint_tripwire.py
   - test_list_contexts.py
   - test_lme_m6_evidence.py
+  - test_longmem_costing.py
   - test_longmem_errors.py
   - test_longmem_preflight.py
   - test_longmem_reader_aggregation.py
   - test_longmem_reader_pinning.py
   - test_longmem_reader_prompting.py
+  - test_longmem_report_usage.py
   - test_longmem_rerank.py
   - test_longmem_runner.py
+  - test_longmem_usage.py
+  - test_longmem_usage_e2e.py
+  - test_longmem_usage_seam.py
   - test_lookup_hash.py
   - test_loopback_predicate_single_source.py
   - test_m0.py
@@ -344,6 +371,12 @@ surfaces:
   - test_write_verb.py
   - test_write_consolidation.py
   - test_writer_inventory.py
+  # #2280 (CI drift repair): see the api-surface note — these files also
+  # landed in #2283 unregistered. Contract (hermetic) + capture Phase-D
+  # dedup are fast-lane core; the canonical pipeline needs live FalkorDB.
+  - test_volunteer_contract.py          # volunteer contract (hermetic, no DB)
+  - test_capture_phase_d_dedup.py       # capture Phase-D content-hash/rephrase dedup
+  - test_volunteer_pipeline.py          # volunteer canonical pipeline (docker-lane; skipif no URI)
   # W2-b (#2098): BPRE write-path gate — core fallback catches engine
   # code with no surface mapping (tortoise/session_import/ parsers etc.).
   - eval/write_path/test_write_path_benchmark.py
@@ -418,6 +451,7 @@ surfaces:
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_signup_form_safety.py
   - test_waitlist_form.py
+  - test_w7_publish.py
   - test_welcome_url_consolidation.py
   - test_website_static.py
   sdk:

@@ -2255,6 +2255,19 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
     )
     if not rows or not rows[0].get("graph_name"):
         return []
+    # C6 #2115: the default graph's override (kind='default' row, upserted by
+    # set_graph_recording) rides the derived default row when present; None =
+    # inherit team default (registry parity, #2110).
+    default_rec = None
+    try:
+        drow = cp.query(
+            "graphs", select=["recording"],
+            filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
+        )
+        if drow:
+            default_rec = drow[0].get("recording")
+    except Exception:
+        default_rec = None  # one migration behind → no default row support
     default = {
         "graph_id": "default",
         "team_id": team_id,
@@ -2262,7 +2275,7 @@ def graph_metadata(cp, team_id: str) -> list[dict]:
         "kind": "default",
         "namespace": rows[0]["graph_name"],
         "status": "active",
-        "recording": None,  # inherit team default (registry parity, #2110)
+        "recording": default_rec,  # inherit team default when None
     }
     try:
         custom = cp.query(
@@ -2327,6 +2340,89 @@ def soft_delete_graph(cp, team_id: str, graph_id: str) -> bool:
         filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
         json_body={"status": "deleted"},
     )
+    return True
+
+
+def set_graph_recording(cp, team_id: str, graph_id: str,
+                        value: bool | None) -> bool:
+    """C6 #2115: set the session_recording override on a graphs row.
+
+    Custom rows PATCH directly. The DEFAULT graph has NO row (derived from
+    ``teams.graph_name``) — an override for graph 0 upserts a kind='default'
+    row (the partial unique index permits name='default' per team; the
+    kind='default' rows are invisible to every custom-only reader: graph_metadata
+    lists custom rows only + derives the default separately, graph_count counts
+    custom active only, soft_delete_graph kind-guards them). ``value`` None =
+    inherit team default — on a MISSING row that is a no-op (NULL IS inherit);
+    on an existing row it PATCHes recording to null. Returns True when the
+    override was written/cleared against a known graph (row PATCHed/upserted
+    OR None-on-missing-row), False when the custom graph is unknown."""
+    if graph_id != "default":
+        rows = cp.query(
+            "graphs", select=["id"],
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+        )
+        if not rows:
+            return False
+        cp.query(
+            "graphs", method="PATCH",
+            filters=[("id", "eq", graph_id), ("team_id", "eq", team_id)],
+            json_body={"recording": value},
+        )
+        return True
+    # Default graph: read any kind='default' row (upsert on set).
+    rows = cp.query(
+        "graphs", select=["id"],
+        filters=[("team_id", "eq", team_id), ("kind", "eq", "default")],
+    )
+    if value is None and not rows:
+        return True  # no override exists — inherit is already the state
+    if rows:
+        gid = rows[0]["id"]
+        cp.query(
+            "graphs", method="PATCH",
+            filters=[("id", "eq", gid), ("team_id", "eq", team_id)],
+            json_body={"recording": value},
+        )
+        return True
+    # Review P1: graphs.namespace is text NOT NULL (20260901000001) — the
+    # default row's namespace is the TEAM graph name (what graph_metadata
+    # derives the default from: teams.graph_name). PostgREST would reject a
+    # null-namespace INSERT (500); populate it from the team row.
+    import uuid as _uuid
+    gid = f"g_{_uuid.uuid4().hex[:16]}"
+    from datetime import UTC, datetime
+    tro = cp.query(
+        "teams", select=["graph_name"], filters=[("id", "eq", team_id)])
+    team_graph_name = tro[0].get("graph_name") if tro else None
+    try:
+        cp.query(
+            "graphs", method="POST",
+            json_body={
+                "id": gid, "team_id": team_id, "name": "default",
+                "kind": "default", "namespace": team_graph_name,
+                "status": "active", "recording": value,
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+    except Exception:
+        # Review P2 (convergent upsert): a concurrent PATCH observed no row
+        # and POSTed first — re-read + PATCH the winner instead of surfacing
+        # a duplicate-key 500 (idempotent convergence).
+        rows = cp.query(
+            "graphs", select=["id"],
+            filters=[("team_id", "eq", team_id),
+                     ("kind", "eq", "default")],
+        )
+        if rows:
+            cp.query(
+                "graphs", method="PATCH",
+                filters=[("id", "eq", rows[0]["id"]),
+                         ("team_id", "eq", team_id)],
+                json_body={"recording": value},
+            )
+            return True
+        raise
     return True
 
 

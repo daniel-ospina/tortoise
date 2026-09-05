@@ -2837,7 +2837,15 @@ def tortoise_session_capture(conversation: list[dict],
     recorded on non-2xx, cleared on 2xx — same receipt semantics as the
     REST path).
     """
-    from tortoise.mcp_auth import SELFHOST_TEAM_ID, _current_team_id, _current_team_limits  # noqa: I001
+    from tortoise.mcp_auth import (  # noqa: I001
+        SELFHOST_TEAM_ID,
+        _current_team_id,
+        _current_team_limits,
+        _current_graph_id,
+        _current_graph_namespace,
+        _current_scopes,
+        _current_legacy_full_access,
+    )
     team_id = _current_team_id.get()
     if not team_id or team_id == SELFHOST_TEAM_ID:
         # stdio / self-host HTTP: no hosted state plane, no receipts — the
@@ -2855,6 +2863,17 @@ def tortoise_session_capture(conversation: list[dict],
     limits = _current_team_limits.get() or {}
     team = {"team_id": team_id, "tier": limits.get("tier", "free"),
             "key_id": None}
+    # C6 #2115 (D-C6-4): a graph-bound key's capture must land in ITS graph
+    # — carry the resolution ContextVars into the impl's team dict so
+    # _data_sdk routes there (and the per-graph recording gate reads the
+    # key's override). Session/OAuth/team-wide resolutions have empty
+    # context → no graph fields → default graph (unchanged).
+    _gid = _current_graph_id.get()
+    if _gid:
+        team["graph_id"] = _gid
+        team["graph_namespace"] = _current_graph_namespace.get()
+        team["scopes"] = _current_scopes.get() or []
+        team["legacy_full_access"] = bool(_current_legacy_full_access.get())
     if limits.get("max_points") is not None:
         team["max_points"] = int(limits["max_points"])
     try:

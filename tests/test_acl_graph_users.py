@@ -33,7 +33,7 @@ def _server_uri_set() -> bool:
 
 # Single skipif (re-review P2): _HAS_FALKORDB subsumes the URI check — it is
 # only ever True when a URI is set (else-branch False), so a URI-less run
-# skips here with the module-absence reason (docker lane only: per-graph ACL
+# skips here with the URI-gate reason below (docker lane only: per-graph ACL
 # needs a server FalkorDB; bare redis → module no-ops → skip).
 # falkordb module present gate (bare redis → module no-ops → skip).
 # RETRIES: a freshly-provisioned falkordb container answers the health
@@ -44,6 +44,15 @@ def _server_uri_set() -> bool:
 # (bare redis behind a docker URI) still lands False → skip; in the docker
 # lane that skip reds the skip-fail guard, which is CORRECT (the lane
 # promises falkordb — silent-green would mask the probe regression).
+# LANE-AWARE REASON (#2276): the reason is chosen by whether a URI was set
+# at all. URI-less runs (tier-2 api-surface legs, epic #1647 carve-out — no
+# TORTOISE_DB_URI) skip BY DESIGN and must use the skip-guard's exempt
+# "requires TORTOISE_DB_URI" URI-gate family — the previous docker-lane
+# reason mentioned FalkorDB non-exempt, redding the guard on an otherwise-
+# green URI-less leg (masked until the supersession-parity test learned to
+# skip and the leg first reached rc==0). URI-set runs that fail the probe
+# keep the availability-REGRESSION family so the docker lane still reds a
+# probe regression (the #1436/#1382 silent-green class).
 if _server_uri_set():
     import time as _time
     _HAS_FALKORDB = False
@@ -58,8 +67,14 @@ else:
 
 pytestmark = pytest.mark.skipif(
     not _HAS_FALKORDB,
-    reason="docker lane only — needs a server FalkorDB with the module "
-           "(no URI set, or bare redis — ACL layer no-ops)")
+    reason=(
+        "Live FalkorDB (Docker) not available — server-URI run without the "
+        "falkordb module (probe regression; must red the skip guard)"
+        if _server_uri_set()
+        else "requires TORTOISE_DB_URI (docker lane only — per-graph ACL "
+        "needs a server FalkorDB with the module)"
+    ),
+)
 
 
 def _patch_tortoise_sdk_init(db_path):
