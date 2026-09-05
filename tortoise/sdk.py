@@ -2293,7 +2293,11 @@ class TortoiseSDK:
         conversation has no extractable content — always with ok=False and an
         errors entry — and "error" when extraction failed), errors/warnings
         are additive and never clobbered, and an empty/blank conversation is
-        rejected BEFORE any write (no Session stub, turns=0).
+        rejected BEFORE any write (no Session stub, turns=0). W5 Phase F
+        (#2104): a re-capture of an EXISTING session_id reports
+        "extraction_mode": "replayed" (ok=True, 0 points, additive warning —
+        the hosted #1727 replay skip; a replay is a no-op on the first
+        capture's Event + Source).
 
         Requires an LLM provider key (OPENROUTER/DEEPSEEK/OPENAI/GEMINI_API_KEY)
         or the TORTOISE_SESSION_LLM_MOCK=1 test seam — raises ValueError
@@ -2480,12 +2484,16 @@ class TortoiseSDK:
         # the _emit_event journal would append a duplicate EventRecorded). The
         # Session MERGE + turn loop above stay unconditional (idempotent
         # no-ops for an identical-payload re-POST — 0 new nodes).
-        # Known limitation (review r3, accepted — hosted #1727 mirrors it): a
-        # GENUINE capture whose mint/stamp failed mid-write (non-fatal catch
+        # Known limitation (review r3/r6, accepted — hosted #1727 mirrors it):
+        # a GENUINE capture whose mint/stamp failed mid-write (non-fatal catch
         # below) leaves the Session with an un-stamped Event gap; a same-
         # session retry observes session_existed=True and replays (never
-        # re-mints), so the gap does not self-heal. Byte-parity with hosted;
-        # heal-on-replay would diverge the two surfaces.
+        # re-mints), so the gap does not self-heal. The replay skip also masks
+        # a retry after a FAILED EXTRACTION (a first capture that committed the
+        # Session + turn points but errored in the extractor: a same-session
+        # retry is a no-op "replayed" — recovery requires a fresh session_id).
+        # Byte-parity with hosted; heal-on-replay would diverge the two
+        # surfaces.
         if not session_existed:
             try:
                 # W5 Phase F (#2104): the mint uses the DETERMINISTIC id
@@ -14088,21 +14096,29 @@ class TortoiseSDK:
     def _update_entity(self, id_val: str, **props) -> dict:
         # #329: id + sourcePath/source_path are server-managed — reject
         props = _sanitize_props(props, reject_id=True)
-        # W5 Phase F (#2104, review r4): on the ENTITY-update surface, eventId
-        # is the Event node's identity (the projection MERGEs on it; capture
-        # Events carry the DETERMINISTIC ev_<sha256(session_id)> id) — a tenant
-        # renaming it via update_entity would desync the live node from its
-        # EventRecorded journal entry (rebuild re-MERGEs a duplicate at the old
-        # id) and break Phase F's one-Event-per-eventId convergence premise. No
-        # sanctioned internal re-keying path exists. (Point eventId is a
-        # WRITABLE provenance property with an established authoring path via
-        # create_point/update_point — #1417 semantics — and is unaffected;
-        # Points route to update_point through update(id).)
-        if "eventId" in props:
-            raise ValueError(
-                "'eventId' is server-managed (Event identity) and cannot be "
-                "set via props.")
         proj = self._get_proj()
+        # W5 Phase F (#2104, review r4): eventId is the EVENT node's identity
+        # (the projection MERGEs on it; capture Events carry the DETERMINISTIC
+        # ev_<sha256(session_id)> id) — a tenant renaming it via update_entity
+        # would desync the live node from its EventRecorded journal entry
+        # (rebuild re-MERGEs a duplicate at the old id) and break Phase F's
+        # one-Event-per-eventId convergence premise. No sanctioned internal
+        # re-keying path exists. LABEL-AWARE (review r6): Point eventId is a
+        # WRITABLE provenance property with an established authoring path
+        # (create_point/update_point/update_entity-on-a-Point — #1417
+        # semantics, pinned by test_operator_route_point_with_eventid_prop_not
+        # _resolvable); the reject fires ONLY when the update targets an Event
+        # node (matched by id or eventId).
+        if "eventId" in props:
+            ev_hits = proj.g.query(
+                "MATCH (e:Event) WHERE e.eventId = $id OR e.id = $id "
+                "RETURN count(e)",
+                params={"id": id_val},
+            ).result_set[0][0]
+            if ev_hits:
+                raise ValueError(
+                    "'eventId' is server-managed (Event identity) and cannot "
+                    "be set via props.")
         # NOTE (issue #327): like _get_entity, entity mutation covers only the
         # canonical labels (Point/Subject/Object/Document/Source/Event).
         # Session/APIKey/Team/Tag nodes are intentionally NOT updated — legacy

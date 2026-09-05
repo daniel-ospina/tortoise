@@ -3662,6 +3662,12 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         assert sdk._get_proj().g.query(
             "MATCH (p:Point {id:$i}) RETURN p.eventId",
             params={"i": pt["id"]}).result_set[0][0] == "ev_authorable", upd
+        # The _update_entity reject is LABEL-AWARE: a Point target (matched by
+        # id) keeps eventId authoring; only Event targets reject.
+        sdk.update_entity(pt["id"], eventId="ev_authorable_2")
+        assert sdk._get_proj().g.query(
+            "MATCH (p:Point {id:$i}) RETURN p.eventId",
+            params={"i": pt["id"]}).result_set[0][0] == "ev_authorable_2"
     finally:
         sdk.close()
 
