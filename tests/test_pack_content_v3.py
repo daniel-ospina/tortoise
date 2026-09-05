@@ -2,17 +2,16 @@
 
 Loads the REAL packs from the repo and verifies the converted manifests:
   - product-strategy: full §4 worked example — productDelivery chain
-    (customerProblem → JTBD → useCase → feature → userJourney → workflow →
-    requirement → architecture — 8 steps, problem-family framing),
-    `architecture` expansion (subclassOf Document), customerProblem
-    subclassOf Problem, `requirement` ≡ dev:requirement (bidirectional),
-    2 extractable chain edges, extraction activation + enforcement
-    defaults (useCase → retry).
-  - dev: epicToCode chain (theme → epic → issue → pullRequest → prMerged →
-    code → deployment) + incidentLearning chain (incident →
-    reflectPostmortem → bug → prMerged) + kindDefs (requirement ≡
+    (JTBD → useCase → feature → userJourney → workflow → requirement →
+    architecture — 7 steps, #405 step-0; the problem family anchors it via
+    the feature → customerProblem relation), `architecture` expansion
+    (subclassOf Document), customerProblem subclassOf Problem, `requirement`
+    ≡ dev:requirement (bidirectional), 2 extractable chain edges, extraction
+    activation + enforcement defaults (useCase → retry).
+  - dev: epicToCode chain (epic → issue → code) + kindDefs (requirement ≡
     ps:requirement, architectureDoc link note); problem-family kinds
-    (bug/incident subclassOf Problem) + enforcement (incident/risk → retry).
+    (bug/incident subclassOf Problem) + typed relations (causes/fixes/
+    addresses/hasPart) + enforcement (incident → retry).
   - marketing: campaign→content→channel chain (real kind names).
   - pm: kindDefs enrichment for issue/sprint/card.
   - All 5 packs compile with zero validation errors (whole-registry compile,
@@ -56,10 +55,10 @@ class TestWholeRegistryCompile:
 
     def test_versions_reflect_pack_releases(self, registry):
         # dev + product-strategy bumped to 0.3.0 by the problem-family pack
-        # expansion (theme/pullRequest/bug/incident/customerProblem kinds,
-        # incidentLearning chain — landed from the #2238 dirty-hub salvage);
-        # marketing + pm untouched at 0.2.0; agent-ops (#1933) is new at
-        # 0.1.0
+        # expansion (theme/pullRequest/bug/incident/customerProblem kinds +
+        # relations/eventKinds/enforcement — landed from the #2238 dirty-hub
+        # salvage); marketing + pm untouched at 0.2.0; agent-ops (#1933) is
+        # new at 0.1.0
         for ns in ("dev", "product-strategy"):
             assert registry.get_pack(ns).version == "0.3.0", ns
         for ns in ("marketing", "pm"):
@@ -70,19 +69,20 @@ class TestWholeRegistryCompile:
 class TestProductDeliveryChain:
     """product-strategy: the owner's chain (research-r6 §4, worked example).
 
-    #405 (2026-08-15) made jobToBeDone step-0; the problem-family expansion
-    (2026-08-31, landed from the #2238 dirty-hub salvage) prepended
-    customerProblem — a product starts from an unmet customer need before
-    the job-to-be-done is articulated (customerProblem → JTBD → useCase →
-    feature → userJourney → workflow → requirement → architecture)."""
+    #405 (2026-08-15) made jobToBeDone step-0 of productDelivery; that chain
+    stays point-state-shaped (7 steps). The problem family anchors the chain
+    via relations instead (feature → customerProblem, cross-pack manifests
+    dev:incident → customerProblem) — an OBJECT-kind step (customerProblem)
+    could never be a payload pointKind, so it is declared relationally, not
+    as a chain position."""
 
-    def test_chain_parsed_with_all_eight_steps(self, registry):
+    def test_chain_parsed_with_all_seven_steps(self, registry):
         ps = registry.get_pack("product-strategy")
         assert [c["id"] for c in ps.chains] == ["productDelivery"]
         chain = ps.chains[0]
         assert chain["steps"] == [
-            "customerProblem", "jobToBeDone", "useCase", "feature",
-            "userJourney", "workflow", "requirement", "architecture",
+            "jobToBeDone", "useCase", "feature", "userJourney",
+            "workflow", "requirement", "architecture",
         ]
         # Chain resolves post-load (zero errors == every step resolved,
         # incl. bare `workflow` → core kind and the new kinds).
@@ -184,25 +184,14 @@ class TestProductStrategyEnforcement:
 
 
 class TestDevManifest:
-    """dev: epicToCode (theme→…→deployment) + incidentLearning chains and
-    kindDefs (requirement, architectureDoc link)."""
+    """dev: epicToCode chain + kindDefs (requirement, architectureDoc link),
+    problem-family kinds/relations/enforcement/eventKinds."""
 
     def test_epic_to_code_chain(self, registry):
         dev = registry.get_pack("dev")
-        assert [c["id"] for c in dev.chains] == ["epicToCode", "incidentLearning"]
-        assert dev.chains[0]["steps"] == [
-            "theme", "epic", "issue", "pullRequest", "prMerged",
-            "code", "deployment",
-        ]
+        assert [c["id"] for c in dev.chains] == ["epicToCode"]
+        assert dev.chains[0]["steps"] == ["epic", "issue", "code"]
         assert dev.enforcement_for_chain("epicToCode") == "warn"
-
-    def test_incident_learning_chain(self, registry):
-        # problem-family loop: a production problem closes into a fixed bug
-        dev = registry.get_pack("dev")
-        assert dev.chains[1]["steps"] == [
-            "incident", "reflectPostmortem", "bug", "prMerged",
-        ]
-        assert dev.enforcement_for_chain("incidentLearning") == "warn"
 
     def test_problem_family_subclass_wiring(self, registry):
         # dev-side half of the Problem canonicalization (pack_registry.py
@@ -284,7 +273,9 @@ class TestDevManifest:
     def test_problem_family_enforcement(self, registry):
         dev = registry.get_pack("dev")
         assert dev.enforcement_for("incident") == "retry"
-        assert dev.enforcement_for("risk") == "retry"
+        # risk stays a point kind → FIX P keeps point kinds out of the
+        # kind index → `risk: retry` would be dead config → default warn.
+        assert dev.enforcement_for("risk") == "warn"
         # default-warn probes: unrelated kinds are not swept into retry
         assert dev.enforcement_for("bug") == "warn"
         assert dev.enforcement_for("epic") == "warn"

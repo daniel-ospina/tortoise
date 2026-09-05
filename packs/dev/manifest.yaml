@@ -144,15 +144,6 @@ ontology:
         artifact kind is product-strategy:architecture)'
       nearMisses:
       - architecture
-    target:
-      description: A committed value or range — an SLO is a service-level target measured
-        by an indicator
-      synonyms:
-      - slo
-      nearMisses:
-      - indicator
-      - requirement
-      - goal
   relations:
   - predicate: decomposesInto
     mechanism: IMPL
@@ -209,24 +200,11 @@ ontology:
   chains:
   - id: epicToCode
     name: Epic-to-Code Chain
-    description: How planned work flows from themes through epics into shipped code
+    description: How planned work flows from epics through issues into shipped code
     steps:
-    - theme
     - epic
     - issue
-    - pullRequest
-    - prMerged
     - code
-    - deployment
-    enforcement: warn
-  - id: incidentLearning
-    name: Incident Learning Loop
-    description: How a production problem closes into a fixed bug
-    steps:
-    - incident
-    - reflectPostmortem
-    - bug
-    - prMerged
     enforcement: warn
   eventKinds:
   - prOpened
@@ -237,7 +215,7 @@ ontology:
   - incidentResolved
   memory_granularity: 'Durable: problem-family reasoning — incident root causes and
     the chosen vs rejected mitigations; debt items with cost-of-delay framing (velocity
-    tax, incident risk, owner); theme/epic allocation decisions; the delivery chain
+    tax, incident risk, owner); theme/epic allocation decisions; the delivery flow
     shape (theme → epic → issue → PR → deployment). Ephemeral: issue/PR numbers, CI
     status, test counts, commit hashes, tool workarounds, sprint mechanics.'
 extraction:
@@ -247,8 +225,10 @@ extraction:
   - document
   enforcement:
     kinds:
+      # incident is an OBJECT kind → index-reachable (extraction retry fires on
+      # incident near-misses; #2030 decision note). risk stays a point kind — FIX P
+      # keeps point kinds out of the index, so `risk: retry` would be dead config.
       incident: retry
-      risk: retry
 connectors: []
 tools: []
 depends_on: []

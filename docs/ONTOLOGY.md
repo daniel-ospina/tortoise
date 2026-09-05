@@ -1,18 +1,26 @@
 ---
-title: "Tortoise — Canonical Ontology v3.9"
+title: "Tortoise — Canonical Ontology v3.10"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-09-02
+updated: 2026-09-05
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.9
+# Tortoise — Canonical Ontology v3.10
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.10 (2026-09-05, #2238 dirty-hub salvage landing — Problem family):**
+> - §5: registers core object kind `Problem` (deviation between actual and desired
+>   state) + Problem-family note — dev `bug`/`incident` and product-strategy
+>   `customerProblem` subclass it; `risk` is its potential/claim form (dev point kind).
+> - §11.5: new *Object Confidence — Compositional Projection* spec — **proposed,
+>   not yet implemented** (the compositional read path ships separately).
+> - §1/§4.3/§6: core-subclass enumerations extended with `Problem`.
 >
 > **Changelog v3.9 (2026-09-02, issue #2101 / epic #2080 — §5 response-contract vocabulary, W4 why-layer DM-12):**
 > - §5: new Response-Contract Vocabulary section — additive response-contract
@@ -116,7 +124,7 @@ Five core types.
 | 4 | **Event** | `prov:Activity` (instantiated) / `schema:Event` | Temporal occurrence — the verb. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object) | What happened |
 | 5 | **Source** | `prov:Entity` (provenance) / `pav:Source` | Provenance anchor — where content was extracted from | Where it came from |
 
-**Core subclass model (§6):** Document ⊂ Object (`objectKind: document`). Object has core subclasses (Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9).
+**Core subclass model (§6):** Document ⊂ Object (`objectKind: document`). Object has core subclasses (Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard). Subject has core subclasses (organization, team, role, legalPerson, naturalPerson, other). Expansion packs declare further subclasses via `subclassOf` (§9).
 
 ---
 
@@ -352,7 +360,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 |-------|------|----------|-------------|------|---------|
 | `id` | string | ✅ | `dc:identifier` | ✅ | Canonical identifier |
 | `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
-| `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
+| `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, Problem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
 | `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
 | `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — **the event stream is the truth (§11 cache doctrine); the property is a performance cache, folded keep-first per Object (divergent re-folds never blind-overwrite — #2193 resolved)** |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
@@ -463,10 +471,14 @@ Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, a
 strategy, plan, goal, target    # commitment-state family (state-centric, 2026-08-12) — states that
                                 # commitments produce; carry lifecycle + derived confidence
 ```
-> **Problem family (2026-08-31):** `Problem` = a deviation between actual and desired state
-> (violates a core `standard`). The problem-family parent: packs subclass it (dev:`bug`,
-> dev:`incident`, product-strategy:`customerProblem`) and `risk` is its EPISTEMIC mode — a
-> Point claiming a problem may occur, superseded when it materializes into an actual problem.
+> **Problem family (2026-08-31):** `Problem` = a deviation between actual and desired
+> state (anchored in a core `standard`, SLO/target, or declared need). The problem-family
+> parent: packs subclass it (dev:`bug` — code deviates from expected behavior,
+> dev:`incident` — a service deviates from its SLO/standard, product-strategy:
+> `customerProblem` — an unmet customer need) and `risk` is its potential form — a dev
+> `risk` POINT (claim) that a problem may occur; when the problem materializes, the
+> claim point is superseded/retracted and the materialized `bug`/`incident` Object
+> carries the state (Point supersession is Point→Point; Object creation is separate).
 > **State-centric alignment (2026-08-12):** `strategy`/`plan`/`goal`/`target`
 > are STATE objects (superseded when a new commitment lands — the old strategy
 > is deprecated, the new one promoted). Pack pointKinds used as options
@@ -580,7 +592,7 @@ At query time, `expand_kind("Project")` returns `["Project", "dev:epic"]`. Queri
 
 | Parent | Core subclasses |
 |--------|-----------------|
-| Object | Project, WorkItem, document, tag, user, skill, tool, agent, workflow, agreement, standard |
+| Object | Project, WorkItem, Problem, document, tag, user, skill, tool, agent, workflow, agreement, standard |
 | Document (⊂ Object) | research, reflectPostmortem, strategyDoc, visionDoc, planDoc, decisionDoc, meetingNotes, experimentResults, evidenceLog, handoff, transcript, roadmap, brief |
 | Subject | organization, team, role, legalPerson, naturalPerson |
 
@@ -783,21 +795,31 @@ subject -[:performs]-> events → outcome operators (Event→Point IMPL/NAND)
 
 ---
 
-## §11.5 Object Confidence — Compositional Projection (2026-08-31)
+## §11.5 Object Confidence — Compositional Projection (spec — proposed, not yet implemented)
 
-Object confidence is derived at read time (never stored — same philosophy as status
-projection, §2) as the **compensating mean** of two evidence sets:
+> **Status:** PROPOSED design — no code implements this projection yet (landed with the
+> #2238 problem-family manifests, which declare the composition-eligible relations).
+> Follow-up issue filed for the read-time projection. Do not treat as shipped behavior.
 
-1. the mean EP posterior of Points `aboutObject → O` (existing derivation), and
+Object confidence is derived at read time — a **derived value that may be cached but is
+never authoritative**, per the §11 v3.2 cache doctrine (the same doctrine Object.status
+follows: §2/§4.3 describe a write-through fold cache, NOT a query-time projection) — as
+the **compensating mean** of two evidence sets:
+
+1. the mean EP posterior of Points `aboutObject → O` (the §11 reputation/derivation
+   family — the epistemic base already computed for subjects extends naturally), and
 2. the derived confidence of O's parts via declared **composition channels** —
-   pack relations with `semantics: hasPart` / `contains` / `measuredBy`:
-   `{ confidence(C) : (O)-[:hasPart|contains|measuredBy]->(C) }`.
+   pack relations carrying `semantics: hasPart` (currently an intent annotation on
+   relations: `semantics` is NOT yet validated or read by any code), e.g.
+   `(O)-[:hasPart]->(C)` for dev's theme → epic decomposition:
+   `{ confidence(C) : (O)-[:hasPart]->(C) }`.
 
 Propagation flows **child → parent** (reverse traversal of the declared edge),
 recursive over the composition DAG with fixpoint iteration (reusing EP convergence).
 A drop in any child lowers the parent, but the mean is compensating — *"unless
-another child rises"*. v1: composition channels only; signed channels
-(`mechanism: NAND`, e.g. `competesWith`) deferred.
+another child rises"*. v1: composition channels only; signed channels (e.g.
+`competesWith`) deferred — note `mechanism: NAND` remains an EPISTEMIC operator
+between Points (§4 operator table), not an object-relation sign.
 
 Objects remain nouns — no object-level operators. The projection only walks
 structural edges at read time; the epistemic layer (Points) is unchanged and is

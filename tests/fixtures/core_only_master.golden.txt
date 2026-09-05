@@ -3,6 +3,7 @@ MASTER LIST — the closed vocabulary (CORE ONLY). EVERY kind you emit MUST come
 OBJECTS (core)
 - core:Project — A project
 - core:WorkItem — A unit of work
+- core:Problem — A deviation between actual and desired state — problem-family parent (2026-08-31)
 - core:document — A document artifact
 - core:tag — A tag
 - core:user — A user
@@ -44,7 +45,7 @@ USER-PERSONAL-STATE VOCABULARY (Tier-A classification hint — the VALUE is the 
 
 MEMORY GRANULARITY (what to keep, what to strip)
 - agent-ops: Durable: the rule text, the situation that created it, and the reasoning that supports or undermines it. Ephemeral: rule mechanics, approval logistics, tool-specific workarounds.
-- dev: Durable: root-cause analysis, the chosen fix approach vs rejected alternatives, durable constraints (e.g. preserve production semantics), and environment beliefs that affect future work (e.g. subagents stall under load). Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds.
+- dev: Durable: problem-family reasoning — incident root causes and the chosen vs rejected mitigations; debt items with cost-of-delay framing (velocity tax, incident risk, owner); theme/epic allocation decisions; the delivery flow shape (theme → epic → issue → PR → deployment). Ephemeral: issue/PR numbers, CI status, test counts, commit hashes, tool workarounds, sprint mechanics.
 - marketing: Durable: campaign strategy — which campaigns/channels/audiences are being pursued and why, the positioning decisions, the reasoning, the actual content pieces (they ARE the product), and the metric snapshots showing whether a strategy is working. Ephemeral: publishing mechanics, scheduling logistics.
 - pm: Durable: plan/goal/target state — what was decided, what's committed, the reasoning, and milestone outcomes. Ephemeral: card/board status, sprint burndown, assignment logistics, issue triage.
 - product-strategy: Durable: the productDelivery chain itself — which JTBDs/use-cases/features are being pursued, the chosen vs rejected options at each step, and the reasoning (what supports, undermines, tempers each choice). A customer / competitor / market fact is durable if it changes a decision. Ephemeral: ticket status, sprint mechanics, meeting logistics.

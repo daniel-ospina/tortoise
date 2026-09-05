@@ -133,7 +133,6 @@ ontology:
     name: Product Delivery Chain
     description: How product strategy flows into shipped architecture
     steps:
-    - customerProblem
     - jobToBeDone
     - useCase
     - feature

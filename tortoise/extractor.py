@@ -354,10 +354,10 @@ class MockExtractor:
 _ISSUE_REF_RE = re.compile(r"([a-zA-Z0-9_-]+)#(\d+)")
 
 # objectKind vocab reuse (issue #782 complexity table + plan §4.1):
-# Project, WorkItem, document, tag, user, skill, tool, agent, workflow,
-# agreement, standard, other.
+# Project, WorkItem, Problem, document, tag, user, skill, tool, agent,
+# workflow, agreement, standard, other.
 _OBJECT_KIND_VOCAB = frozenset({
-    "project", "workitem", "document", "tag", "user", "skill", "tool",
+    "project", "workitem", "problem", "document", "tag", "user", "skill", "tool",
     "agent", "workflow", "agreement", "standard", "other",
 })
 
