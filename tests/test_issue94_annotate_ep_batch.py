@@ -208,7 +208,7 @@ class TestAnnotateEpBatchIssue94:
         proj = sdk._get_proj()
         graph = proj.g
         # Simulate the EP flush: posterior_alpha/beta persisted, no edges.
-        graph.query(
+        _rows = graph.query(
             "MATCH (n:Point {id: $id}) "
             "SET n.posterior_alpha = 22.0, n.posterior_beta = 3.0",
             params={"id": claim_id},

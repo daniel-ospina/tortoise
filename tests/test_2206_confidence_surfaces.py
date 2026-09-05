@@ -18,7 +18,7 @@ persisted prior mean (ep_alpha/beta), else the neutral Beta(1,1) mean 0.5
 
 MUST run against a live FalkorDB (Docker). Test-prefixed isolated graph.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 import os
 import sys
@@ -27,10 +27,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import pytest  # noqa: I001
+import pytest
 
-from tortoise.sdk import TortoiseSDK  # noqa: I001
-from tortoise.search_engine import annotate_ep_batch  # noqa: I001
+from tortoise.sdk import TortoiseSDK
+from tortoise.search_engine import annotate_ep_batch
 
 # Requires live FalkorDB (Docker). Skip gracefully when unavailable.
 _GRAPH = f"tortoise_test_2206conf_{uuid.uuid4().hex[:8]}"
