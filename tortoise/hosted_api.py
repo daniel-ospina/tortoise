@@ -9682,11 +9682,27 @@ async def accept_invite(body: dict, request: Request,
                     status_code=402,
                     detail="Team member limit reached — upgrade to invite more")
 
-        # Token single-use: mark accepted
-        reg.query(
-            "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
-            params={"id": invite["id"], "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
-        )
+        # Token single-use: CONDITIONAL claim — the SET's own matched-row
+        # count is authoritative (P2-1 concurrency review, cross-lane half):
+        # a concurrent v2 OTP-mismatch winner racing THIS legacy email-match
+        # accept on the same token commits first → this conditional SET
+        # matches 0 rows → 409, never a second membership and never an
+        # accepted_by clobber (pre-fix this write was unconditional — the
+        # legacy loser overwrote the winner's accepted_by AND minted a dup).
+        # The capacity 402 above stays NON-consuming (invite untouched).
+        claimed = reg.query(
+            "MATCH (i:Invitation {id:$id}) "
+            "WHERE i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status = 'pending') "
+            "SET i.accepted_at = $now, i.accepted_by = $uid "
+            "RETURN count(i)",
+            params={"id": invite["id"],
+                    "now": datetime.now(UTC).isoformat(),
+                    "uid": user["user_id"]},
+        ).result_set
+        if not claimed or not claimed[0][0]:
+            raise HTTPException(status_code=409,
+                                detail="Invitation has already been accepted")
         # Create the active membership (route through membership_create for the max_users gate)
         try:
             sdk.membership_create(invite["team_id"], user["user_id"], invite["role"])
@@ -10068,27 +10084,30 @@ async def _registry_mismatch_accept_v2(sdk, invite: dict, user: dict,
                     status_code=402,
                     detail="Team member limit reached — upgrade to invite more")
         # Token single-use + OTP single-use: CONDITIONAL write (still-pending
-        # guard) + re-check — a concurrent accept (email-match Bob racing
-        # OTP-verified Alice on the same token) loses here and the loser
-        # bails with 409, never a second membership. The OTP is consumed in
-        # the SAME statement (single-use at commit — a 402 above never burns
-        # it). The accept also re-reads the recorded proof post-write so the
-        # committed row carries otp_verified_at/by.
-        reg.query(
+        # guard) + the write's OWN matched-row count IS the authoritative
+        # single-use claim — a concurrent accept (email-match invitee racing
+        # an OTP-verified mismatch user on the same token, OR a same-user
+        # double-submit) that won first leaves this request's conditional
+        # SET matching 0 rows → claimed=False → 409, never a second
+        # membership. (P2-1 concurrency review: a post-write re-read of
+        # accepted_at alone can't distinguish "I won the race" from "someone
+        # else won first" — the loser would see the winner's accepted_at and
+        # mint a duplicate. The write's own rowcount is the claim: non-zero
+        # ⟺ THIS request's SET transitioned pending→accepted.) The OTP is
+        # consumed in the SAME statement (single-use at commit — a 402 above
+        # never burns it).
+        claimed = reg.query(
             "MATCH (i:Invitation {id:$id}) "
             "WHERE i.accepted_at IS NULL AND (i.status IS NULL OR i.status = 'pending') "
             "SET i.accepted_at = $now, i.accepted_by = $uid, i.accepted_via = $via, "
             "i.accepted_mismatch = true, i.fused_from_email = $fused, "
             "i.otp_hash = null, i.otp_expires_at = null, i.otp_attempts = 0, "
-            "i.otp_verified_at = $now, i.otp_verified_by = $uid",
+            "i.otp_verified_at = $now, i.otp_verified_by = $uid "
+            "RETURN count(i)",
             params={"id": invite["id"], "now": now, "uid": user["user_id"],
                     "via": path, "fused": invite["email"]},
-        )
-        consumed = reg.query(
-            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at",
-            params={"id": invite["id"]},
         ).result_set
-        if not consumed or consumed[0][0] is None:
+        if not claimed or not claimed[0][0]:
             raise HTTPException(status_code=409,
                                 detail="Invitation has already been accepted")
         try:
@@ -10154,9 +10173,19 @@ async def _accept_mismatch_v2(body: dict, request: Request, user: dict,
         # consumes it atomically at the conditional single-use commit — a
         # code-less or wrong-code override is blocked before any write.
         try:
-            res = _sb_accept_v2(get_control_plane(), token, user["user_id"],
-                                user_email=user_email, mismatch_override=path,
-                                otp_code=otp_code)
+            # P2-2 (concurrency review): mirror the legacy supabase accept's
+            # #1954 serialization — the v2 mismatch accept's membership
+            # check + write are the same read-then-write shape (free-cap /
+            # existing-membership reads, then the membership insert), and a
+            # same-user double-submit (double-click/retry) racing past those
+            # reads would let the loser hit uq_member_team, whose compensating
+            # rollback unwinds the winner's committed accept. Serialize per
+            # user so the loser re-checks AFTER the winner's commit and 409s
+            # before any write.
+            async with _team_create_lock(user["user_id"]):
+                res = _sb_accept_v2(get_control_plane(), token, user["user_id"],
+                                    user_email=user_email,
+                                    mismatch_override=path, otp_code=otp_code)
         except _InvErr as e:
             if e.status == 403 and "Verification code" in str(e):
                 raise HTTPException(status_code=403, detail={
@@ -10551,10 +10580,26 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
                 raise HTTPException(
                     status_code=402,
                     detail="Team member limit reached — upgrade to invite more")
-        reg.query(
-            "MATCH (i:Invitation {id:$id}) SET i.accepted_at = $now, i.accepted_by = $uid",
-            params={"id": iid, "now": datetime.now(UTC).isoformat(), "uid": user["user_id"]},
-        )
+        # Single-use: CONDITIONAL claim — the SET's own matched-row count is
+        # authoritative (P2-1 cross-lane half, by-id twin): a concurrent v2
+        # OTP-mismatch winner on the SAME invitation row (or a same-user
+        # double-submit) commits first → this conditional SET matches 0 rows
+        # → 409, never a second membership / accepted_by clobber (pre-fix
+        # this write was unconditional — the loser overwrote the winner's
+        # accepted_by and minted a dup). The capacity 402 above stays
+        # NON-consuming.
+        claimed = reg.query(
+            "MATCH (i:Invitation {id:$id}) "
+            "WHERE i.accepted_at IS NULL "
+            "AND (i.status IS NULL OR i.status = 'pending') "
+            "SET i.accepted_at = $now, i.accepted_by = $uid "
+            "RETURN count(i)",
+            params={"id": iid, "now": datetime.now(UTC).isoformat(),
+                    "uid": user["user_id"]},
+        ).result_set
+        if not claimed or not claimed[0][0]:
+            raise HTTPException(status_code=409,
+                                detail="Invitation has already been accepted")
         try:
             sdk.membership_create(team_id, user["user_id"], role)
         except Exception as e:

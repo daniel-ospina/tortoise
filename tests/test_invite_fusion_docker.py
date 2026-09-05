@@ -13,6 +13,7 @@ Journey under test (epic DE2E-8 surface 12):
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 
@@ -32,12 +33,14 @@ if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
 from fastapi.testclient import TestClient
 
 from tortoise import email_notify
-from tortoise.hosted_api import _make_sdk, app, get_current_user
+from tortoise.hosted_api import _make_sdk, _registry_mismatch_accept_v2, app, get_current_user
 from tortoise.onboarding import state as _os
 
 # real-JWT-shaped uuid subjects (#1719)
 _U_OWNER = "9f2c1a40-0000-4a00-8000-000000000101"
 _U_INVITEE = "9f2c1a40-0000-4a00-8000-000000000102"
+_U_RACER_B = "9f2c1a40-0000-4a00-8000-000000000103"
+_U_RACER_C = "9f2c1a40-0000-4a00-8000-000000000104"
 
 V2_ACCEPT = "application/vnd.tortoise.onboarding+json;version=2"
 
@@ -262,3 +265,213 @@ class TestFusionDockerJourney:
         r = client.post("/v1/invites/accept", json={"token": r.json()["token"]})
         assert r.status_code == 403
         assert r.json()["detail"] == "Invite email does not match this account"
+
+
+class TestConcurrentClaimRace:
+    """P2-1/P2-2 concurrency regression (review fixes at 424fc2df~..): the
+    executor's single-use claim is authoritative because the conditional
+    SET's OWN matched-row count is the claim (RETURN count(i)) — a loser who
+    races a winner that already consumed the token sees count(i)=0 and 409s
+    BEFORE any membership write. On THIS lane the executor's critical
+    section is synchronous (atomic per coroutine, cf. #1965), so the loser
+    is rejected at whichever gate fires first in the interleaving (OTP 403
+    after the winner's commit, or the claim 409) — the INVARIANT is exactly
+    one winner and exactly one membership under every interleaving. Seam
+    level on the real graph: two users share ONE outstanding OTP code (OTP
+    verify is NON-consuming)."""
+
+    def _seed(self, client, reg):
+        owner_email = f"owner-race-{_suffix()}@example.com"
+        r = client.post("/v1/register",
+                        json={"email": owner_email, "password": "password123"})
+        assert r.status_code == 200, r.text
+        team_id = r.json()["team_id"]
+        reg.query(
+            "CREATE (m:Membership {user_id:$uid, team_id:$tid, role:'owner', "
+            "status:'active', created_at:'2026-09-01T00:00:00+00:00'})",
+            params={"uid": _U_OWNER, "tid": team_id},
+        )
+        reg.query("MATCH (t:Team {id:$id}) SET t.tier = 'team', "
+                  "t.max_users = 5",
+                  params={"id": team_id})
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _U_OWNER, "email": owner_email,
+        }
+        inv_email = f"invitee-race-{_suffix()}@example.com"
+        r = client.post("/v1/invites",
+                        json={"team_id": team_id, "email": inv_email})
+        assert r.status_code == 200, r.text
+        return team_id, inv_email, r.json()
+
+    def test_loser_409_no_dup_membership(self, client, env, monkeypatch):
+        """Two DIFFERENT users race one token with the same valid OTP — one
+        membership, loser 409 (never 200+200 / never a duplicate)."""
+        reg = _make_sdk(namespace="registry")._get_registry()
+        team_id, inv_email, inv = self._seed(client, reg)
+
+        # a different logged-in account mints the OTP (sent to the invitee
+        # mailbox — captured via the email seam, like the DE2E-7 test)
+        captured = {}
+
+        def fake_send(team_name, invitee_email, code, on_sent=None):
+            captured.update(code=code, email=invitee_email)
+
+        monkeypatch.setattr(email_notify, "send_otp_email", fake_send)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _U_INVITEE, "email": f"other-{_suffix()}@example.com",
+        }
+        r = client.post("/v1/invites/otp", json={"token": inv["token"]})
+        assert r.status_code == 200, r.text
+        assert captured["email"] == inv_email
+        code = captured["code"]
+
+        # Two racers (both CONTROL the mailbox — both hold the same code).
+        # OTP verify is non-consuming, so both pass the OTP gate; they then
+        # serialize at _invite_team_lock. The loser's conditional claim SET
+        # matches 0 rows (winner already transitioned pending→accepted) → 409.
+        sdk = _make_sdk(namespace="registry")
+        invite_row = {"id": inv["invite_id"], "team_id": team_id,
+                      "email": inv_email, "role": "member"}
+
+        async def _race():
+            async def _accept(uid, email):
+                return await _registry_mismatch_accept_v2(
+                    sdk, invite_row, {"user_id": uid, "email": email},
+                    "fuse", code)
+            return await asyncio.gather(
+                _accept(_U_RACER_B, f"racer-b-{_suffix()}@example.com"),
+                _accept(_U_RACER_C, f"racer-c-{_suffix()}@example.com"),
+                return_exceptions=True,
+            )
+
+        results = asyncio.run(_race())
+        # INVARIANT (holds under every interleaving): exactly ONE winner and
+        # exactly ONE membership. On this lane the executor's critical section
+        # is synchronous (atomic per coroutine, cf. #1965 test comment) — so
+        # the loser is rejected at the OTP gate (403 no_otp, the code is
+        # consumed by the winner's commit) rather than reaching the claim
+        # 409. The claim rowcount (RETURN count(i)) is the defense-in-depth
+        # for lanes with real awaits between verify and claim (supabase).
+        ok = [r for r in results if isinstance(r, dict)]
+        errs = [r for r in results if isinstance(r, Exception)]
+        assert len(ok) == 1, f"expected exactly 1 winner, got {results}"
+        assert len(errs) == 1, f"expected exactly 1 loser, got {results}"
+        from fastapi import HTTPException as _HTTPException
+        assert isinstance(errs[0], _HTTPException) and \
+            errs[0].status_code in (403, 409), f"loser: {errs[0]}"
+        # exactly ONE active membership for the racers (no dup from loser)
+        rows = reg.query(
+            "MATCH (m:Membership {team_id:$tid, status:'active'}) "
+            "WHERE m.user_id = $b OR m.user_id = $c "
+            "RETURN collect(m.user_id)",
+            params={"tid": team_id, "b": _U_RACER_B, "c": _U_RACER_C},
+        ).result_set[0][0]
+        assert len(rows) == 1, f"expected 1 racer membership, got {rows}"
+        # invite consumed exactly once by the winner (accepted_by matches)
+        winner_uid = rows[0]
+        row = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at, "
+            "i.accepted_by, i.accepted_via",
+            params={"id": inv["invite_id"]},
+        ).result_set[0]
+        assert row[0] is not None
+        assert row[1] == winner_uid and row[2] == "fuse"
+        # loser was NOT written (accepted_via/otp state belongs to winner only)
+        app.dependency_overrides.pop(get_current_user, None)
+
+    def test_deterministic_loser_claim_409_registry(self, client, env,
+                                                    monkeypatch):
+        """The registry executor's claim rowcount, pinned deterministically
+        (the seam race above can't reach the claim on this lane because the
+        executor's critical section is synchronous/atomic per coroutine —
+        the loser is always rejected at the OTP gate first). Here a winner
+        commits BETWEEN the loser's OTP verify and the loser's claim SET by
+        injecting at the reg.query boundary: the loser's conditional claim
+        then matches 0 rows → RETURNS count(i)=0 → 409, never a second
+        membership. Pre-fix (SET without rowcount + re-read of accepted_at)
+        the loser saw the winner's accepted_at and minted a dup — this test
+        FAILS pre-fix."""
+        from datetime import UTC
+        from datetime import datetime as _dt
+        sdk = _make_sdk(namespace="registry")
+        reg = sdk._get_registry()
+        team_id, inv_email, inv = self._seed(client, reg)
+
+        # mint ONE outstanding code (captured via the email seam)
+        captured = {}
+
+        def fake_send(team_name, invitee_email, code, on_sent=None):
+            captured.update(code=code, email=invitee_email)
+
+        monkeypatch.setattr(email_notify, "send_otp_email", fake_send)
+        app.dependency_overrides[get_current_user] = lambda: {
+            "user_id": _U_INVITEE, "email": f"other-{_suffix()}@example.com",
+        }
+        r = client.post("/v1/invites/otp", json={"token": inv["token"]})
+        assert r.status_code == 200, r.text
+        code = captured["code"]
+
+        orig_query = reg.query
+        winner_uid = _U_RACER_C
+        loser_uid = _U_RACER_B
+        now_iso = _dt.now(UTC).isoformat()
+        fired = {"win": False}
+
+        def _wrapped(q, *, params=None, **kw):
+            # Fire the winner's commit at the LOSER's claim SET (the only
+            # v2 claim write — matches the otp-consuming conditional SET).
+            if (not fired["win"]
+                    and "RETURN count(i)" in q
+                    and "i.otp_verified_at = $now" in q):
+                fired["win"] = True
+                orig_query(
+                    "MATCH (i:Invitation {id:$id}) "
+                    "WHERE i.accepted_at IS NULL "
+                    "AND (i.status IS NULL OR i.status = 'pending') "
+                    "SET i.accepted_at = $now, i.accepted_by = $uid, "
+                    "i.accepted_via = 'fuse', i.accepted_mismatch = true, "
+                    "i.fused_from_email = $fused, i.otp_hash = null, "
+                    "i.otp_expires_at = null, i.otp_attempts = 0, "
+                    "i.otp_verified_at = $now, i.otp_verified_by = $uid "
+                    "RETURN count(i)",
+                    params={"id": inv["invite_id"], "now": now_iso,
+                            "uid": winner_uid, "via": "fuse",
+                            "fused": inv_email},
+                )
+                sdk.membership_create(team_id, winner_uid, "member")
+            return orig_query(q, params=params, **kw)
+
+        monkeypatch.setattr(reg, "query", _wrapped)
+        invite_row = {"id": inv["invite_id"], "team_id": team_id,
+                      "email": inv_email, "role": "member"}
+
+        async def _loser_accept():
+            return await _registry_mismatch_accept_v2(
+                sdk, invite_row, {"user_id": loser_uid,
+                                  "email": f"loser-{_suffix()}@example.com"},
+                "fuse", code)
+
+        from fastapi import HTTPException as _HTTPException
+        try:
+            asyncio.run(_loser_accept())
+            raise AssertionError("loser must NOT succeed (claim lost)")
+        except _HTTPException as e:
+            assert e.status_code == 409, e
+        # loser did NOT mint; winner has exactly one membership
+        rows = reg.query(
+            "MATCH (m:Membership {team_id:$tid, status:'active'}) "
+            "WHERE m.user_id = $b OR m.user_id = $c "
+            "RETURN collect(m.user_id)",
+            params={"tid": team_id, "b": loser_uid, "c": winner_uid},
+        ).result_set[0][0]
+        assert rows == [winner_uid], f"expected only winner, got {rows}"
+        # invite carries the winner's proof (never clobbered by the loser)
+        row = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_by, "
+            "i.accepted_via, i.otp_verified_by",
+            params={"id": inv["invite_id"]},
+        ).result_set[0]
+        assert row[0] == winner_uid
+        assert row[1] == "fuse" and row[2] == winner_uid
+        assert fired["win"], "winner-injection never fired — test is vacuous"
+        app.dependency_overrides.pop(get_current_user, None)

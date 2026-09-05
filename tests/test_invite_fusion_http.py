@@ -18,6 +18,8 @@ Security posture under test:
 """
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import os
 import tempfile
 from datetime import UTC, datetime, timedelta
@@ -676,3 +678,155 @@ class TestMemberProgressArming:
         steps = self._completed_steps("team-m3")
         assert "harness-connected" not in steps
         assert node.get("status") != _os.STATUS_COMPLETE
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Concurrency regressions (W7 review P2-1/P2-2): the single-use accept claim
+# must be AUTHORITATIVE under parallel submits. Pre-fix, the loser of the
+# token-consume race re-read accepted_at (the WINNER's) and minted a SECOND
+# membership — the fix makes the conditional write's own matched-row count
+# the claim (registry) / return=representation row (supabase), so a loser
+# always 409s before any membership write. No concurrency test existed
+# (all replay tests are sequential — they pass because the invite is already
+# consumed before the second call reaches the claim).
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestConcurrentAcceptSingleUse:
+    def test_two_users_race_one_token_one_membership(self, client, reg,
+                                                     monkeypatch):
+        """P2-1: email-match invitee (legacy one-click, no OTP) racing an
+        OTP-verified mismatch user (v2 fuse) on the SAME token — exactly ONE
+        accept wins; the loser 409s; exactly ONE active membership exists
+        (never a second from the losing request)."""
+        import httpx
+        inv = _invite(client, reg, team_id="team-race1", email="bob@example.com")
+        # Alice mints + captures the OTP (mismatch override needs it)
+        _as_user(_U_ALICE, "alice@example.com")
+        captured = {}
+        _capture_otp(monkeypatch, captured)
+        assert client.post("/v1/invites/otp",
+                           json={"token": inv["token"]}).status_code == 200
+        code = captured["code"]
+
+        # Per-request identity (contextvar, test_invites_http pattern):
+        # Bob acts as the email-match invitee; Alice as the OTP mismatch.
+        _actor = contextvars.ContextVar("invite_actor", default=None)
+
+        def _override():
+            return _actor.get() or {"user_id": _U1,
+                                    "email": "owner@example.com"}
+
+        app.dependency_overrides[get_current_user] = _override
+
+        async def _accept_bob():
+            _actor.set({"user_id": _U_BOB, "email": "bob@example.com"})
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                # email match → legacy one-click accept (no v2 header)
+                return await ac.post("/v1/invites/accept",
+                                     json={"token": inv["token"]})
+
+        async def _accept_alice():
+            _actor.set({"user_id": _U_ALICE, "email": "alice@example.com"})
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.post("/v1/invites/accept",
+                                     json={"token": inv["token"],
+                                           "path": "fuse", "otp": code},
+                                     headers={"Accept": V2_ACCEPT})
+
+        async def _run_race():
+            return await asyncio.gather(_accept_bob(), _accept_alice())
+
+        bob_r, alice_r = asyncio.run(_run_race())
+        codes = sorted([bob_r.status_code, alice_r.status_code])
+        # One wins (200). The loser is rejected by whichever gate fires first
+        # in the interleaving — the token-resolution 400 (invite already
+        # consumed), the OTP 403, or the authoritative claim 409. The REGRESSION
+        # contract (P2-1) is the INVARIANT: never 200+200, never a second
+        # membership — the loser must not mint under any interleaving.
+        assert codes[0] == 200 and codes[1] in (400, 403, 409), [
+            bob_r.text, alice_r.text]
+        # exactly ONE active NON-owner membership on this team (owner _U1 is
+        # seeded by _seed_team_with_owner) — pre-fix the loser minted a dup
+        rows = reg.query(
+            "MATCH (m:Membership {team_id:'team-race1', status:'active'}) "
+            "RETURN collect(m.user_id)",
+        ).result_set[0][0]
+        non_owner = [u for u in rows if u != _U1]
+        assert len(non_owner) == 1, f"expected 1 accepted member, got {rows}"
+        # the invite is consumed exactly once (accepted_by is the winner)
+        winner_uid = _U_BOB if bob_r.status_code == 200 else _U_ALICE
+        row = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at, "
+            "i.accepted_by",
+            params={"id": inv["invite_id"]},
+        ).result_set[0]
+        assert row[0] is not None
+        assert row[1] == winner_uid
+        app.dependency_overrides.pop(get_current_user, None)
+
+    def test_same_user_double_submit_one_membership(self, client, reg,
+                                                    monkeypatch):
+        """P2-2: the SAME user double-submits the v2 fuse accept concurrently
+        (double-click / client retry). Exactly one wins; the loser 409s on the
+        authoritative claim and NEVER reaches the membership write (pre-fix it
+        minted a duplicate — registry has no (user,team) unique constraint)."""
+        import httpx
+        inv = _invite(client, reg, team_id="team-race2", email="bob@example.com")
+        _as_user(_U_ALICE, "alice@example.com")
+        captured = {}
+        _capture_otp(monkeypatch, captured)
+        assert client.post("/v1/invites/otp",
+                           json={"token": inv["token"]}).status_code == 200
+        code = captured["code"]
+
+        _actor = contextvars.ContextVar("invite_actor", default=None)
+
+        def _override():
+            return _actor.get() or {"user_id": _U1,
+                                    "email": "owner@example.com"}
+
+        app.dependency_overrides[get_current_user] = _override
+
+        async def _accept_alice():
+            _actor.set({"user_id": _U_ALICE, "email": "alice@example.com"})
+            transport = httpx.ASGITransport(app=app)
+            async with httpx.AsyncClient(transport=transport,
+                                         base_url="http://test") as ac:
+                return await ac.post("/v1/invites/accept",
+                                     json={"token": inv["token"],
+                                           "path": "fuse", "otp": code},
+                                     headers={"Accept": V2_ACCEPT})
+
+        async def _run_race():
+            return await asyncio.gather(_accept_alice(), _accept_alice())
+
+        r1, r2 = asyncio.run(_run_race())
+        codes = sorted([r1.status_code, r2.status_code])
+        # One 200, the loser rejected at the first gate in the interleaving
+        # (resolution 400 / OTP 403 / claim 409). INVARIANT: never 200+200
+        # and never a compensating rollback that unwinds the winner (P2-2 —
+        # pre-fix the loser's membership-write exception PATCHed the invite
+        # back to pending, orphaning the winner's active membership).
+        assert codes[0] == 200 and codes[1] in (400, 403, 409), [r1.text,
+                                                                 r2.text]
+        # exactly ONE active membership for alice on this team (no dup)
+        rows = reg.query(
+            "MATCH (m:Membership {team_id:'team-race2', user_id:$uid, "
+            "status:'active'}) RETURN count(m)",
+            params={"uid": _U_ALICE},
+        ).result_set[0][0]
+        assert rows == 1, f"expected 1 alice membership, got {rows}"
+        # the winner's commit is NOT unwound: the invite stays accepted (not
+        # rolled back to pending by a loser's compensating write)
+        row = reg.query(
+            "MATCH (i:Invitation {id:$id}) RETURN i.accepted_at, "
+            "i.accepted_by",
+            params={"id": inv["invite_id"]},
+        ).result_set[0]
+        assert row[0] is not None and row[1] == _U_ALICE
+        app.dependency_overrides.pop(get_current_user, None)
