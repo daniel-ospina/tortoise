@@ -442,3 +442,248 @@ def test_solo_tier_create_stays_open_with_used_total_meter(page: Page) -> None:
     expect(page.get_by_label("New graph name")).to_be_visible()
     expect(page.locator('[aria-label="Graph usage meter"]')).to_contain_text("2/2 graphs used")
     expect(page.locator("section")).not_to_contain_text("🔒")
+
+
+# ── #2298 (the #2248 sync-review gap): two-team panel-revoke pin ────────────
+# The per-graph [Keys] panel revoke (revokePanelKey) pins ?team_id= on its
+# DELETE only since #2230; the pin is guarded by the STATIC
+# keyTeamPinsTripwire unit (presence of the pin string) — no behavioral
+# multi-team e2e proves the revoke TARGETS the SELECTED team. This leg is the
+# F10 two-team twin of the API-Keys-tab writes leg
+# (test_keys_table_mixed.py::test_two_team_key_writes_pin_selected_team):
+# a multi-membership session user on a NON-first membership team (Bravo)
+# revoking from the per-graph panel must have the DELETE carry
+# team_id=team_b (200), a dropped pin must 403 (server memberships[0]
+# resolution = Alpha → "Not your API key"), and a wrong-team pin must 403
+# too. Mirrors the real server fail-closed detail.
+
+_TWO_TEAM_KEYS_GRAPH_ALPHA = {
+    "id": "gk_alpha_01", "key_prefix": "tt_alpha01", "name": "alpha-ci",
+    "created_at": "2026-09-05T00:00:00.000Z", "revoked_at": None,
+    "graph_id": "g_alpha", "scopes": ["graphs:read", "graphs:write"],
+    "delegation_depth": None,
+}
+_TWO_TEAM_KEYS_GRAPH_BETA = {
+    "id": "gk_beta_01", "key_prefix": "tt_beta01", "name": "beta-ci",
+    "created_at": "2026-09-05T00:00:00.000Z", "revoked_at": None,
+    "graph_id": "g_beta", "scopes": ["graphs:read", "graphs:write"],
+    "delegation_depth": None,
+}
+
+
+def _two_team_graph_row(graph_id: str, name: str) -> dict:
+    return {
+        "graph_id": graph_id, "name": name, "kind": "custom",
+        "status": "active", "key_count": 1, "recording": None,
+    }
+
+
+def test_two_team_graphs_panel_revoke_pins_selected_team(page: Page) -> None:
+    """#2298: the graphs [Keys] panel revoke on a non-first membership team.
+    Session user in TWO teams (Alpha = memberships[0], Bravo = selected via
+    the account menu). Bravo's beta custom graph has one per-graph key
+    (gk_beta_01) and Alpha's alpha graph one (gk_alpha_01). Harness resolves
+    every DELETE /v1/team/keys/{id} under the PINNED team (team_id param;
+    absent → team_a, the server's memberships[0] session resolution):
+    - dropped pin (Bravo's key, no team_id)  → 403 "Not your API key"
+    - wrong pin (Alpha's key, team_id=team_b) → 403 "Not your API key"
+    - panel revoke of Bravo's key (team_id=team_b) → 200, row gone, empty
+      state renders (the panel refresh re-reads the emptied g_beta bucket).
+    Assertions: the one 200 delete URL pins team_b; Bravo's bucket emptied;
+    Alpha's bucket untouched; zero POST /v1/session/key; zero key-authed."""
+    import re as _re
+    team_a = {"team_id": "team_a", "team_name": "Alpha", "tier": "team",
+              "max_graphs": None, "role": "owner", "anon": False}
+    team_b = {"team_id": "team_b", "team_name": "Bravo", "tier": "team",
+              "max_graphs": None, "role": "owner", "anon": False}
+    # Per-team per-graph key buckets (F10 shape) — writes resolve ONLY under
+    # the owning team's bucket; a wrong/dropped pin cannot accidentally hit.
+    keys_by_team: dict = {
+        "team_a": {"g_alpha": [_TWO_TEAM_KEYS_GRAPH_ALPHA]},
+        "team_b": {"g_beta": [_TWO_TEAM_KEYS_GRAPH_BETA]},
+    }
+    graphs_by_team: dict = {
+        "team_a": [dict(DEFAULT_ROW), _two_team_graph_row("g_alpha", "alpha")],
+        "team_b": [dict(DEFAULT_ROW), _two_team_graph_row("g_beta", "beta")],
+    }
+    delete_log: list = []
+    mint_calls: list = []
+    key_authed: list = []
+
+    def handle(route):
+        url = route.request.url
+        if url.startswith(API_HOST):
+            path = urllib.parse.urlsplit(url).path
+            method = route.request.method
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+            tid = (qs.get("team_id") or ["team_a"])[0]  # server memberships[0]
+            auth = (route.request.headers.get("authorization") or "")
+            if auth.startswith("Bearer tt_"):
+                key_authed.append(url)
+            if path.endswith("/v1/session/key") and method == "POST":
+                mint_calls.append(route.request.post_data or "")
+                route.fulfill(status=500, content_type="application/json",
+                              body=json.dumps({"detail": "loud 500 — zero-mint tripwire"}))
+                return
+            if path.endswith("/v1/teams") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps([team_a, team_b]))
+                return
+            if path.endswith("/v1/onboarding/state") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"onboarding": {"onboarding_complete": True}}))
+                return
+            if path.endswith("/v1/user/identity") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"methods": [], "login_methods": 0,
+                                                "banner": {"show": False}}))
+                return
+            if path.endswith("/v1/team/keys") and method == "GET":
+                gid = qs.get("graph_id", [None])[0]
+                if gid:
+                    rows = keys_by_team.get(tid, {}).get(gid, [])
+                else:
+                    # API-Keys-tab union read (mount loadAll) — not opened in
+                    # this leg, but must 200 so the shell boots clean.
+                    rows = [r for b in keys_by_team.get(tid, {}).values() for r in b]
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"keys": rows}))
+                return
+            m = _re.match(r"^/v1/team/keys/([^/]+)$", path)
+            if m and method == "DELETE":
+                kid = m.group(1)
+                # Resolve under the PINNED team only — absent pin mirrors the
+                # server's memberships[0] resolution (team_a). The key lives
+                # in exactly one team's buckets; wrong/dropped pin → 403
+                # (server fail-closed "Not your API key"), no mutation.
+                bucket = keys_by_team.get(tid, {})
+                found = next((r for rows in bucket.values() for r in rows
+                              if r["id"] == kid), None)
+                if found is None:
+                    delete_log.append({"url": url, "status": 403})
+                    route.fulfill(status=403, content_type="application/json",
+                                  body=json.dumps({"detail": "Not your API key"}))
+                    return
+                for rows in bucket.values():
+                    rows[:] = [r for r in rows if r["id"] != kid]
+                delete_log.append({"url": url, "status": 200})
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"revoked": True, "key_id": kid}))
+                return
+            if path.endswith("/v1/graphs") and method == "GET":
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(graphs_by_team.get(tid, [])))
+                return
+            if path.endswith("/v1/sessions"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"sessions": []}))
+                return
+            if path.endswith("/backups"):
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps({"backups": []}))
+                return
+            if path.endswith("/v1/team") or path.endswith("/v1/team/"):
+                t = team_b if tid == "team_b" else team_a
+                route.fulfill(status=200, content_type="application/json",
+                              body=json.dumps(t))
+                return
+            if path.endswith("/v1/team/alerts"):
+                route.fulfill(status=200, content_type="application/json", body="[]")
+                return
+            route.fulfill(status=401, content_type="application/json", body="{}")
+            return
+        if url.startswith(AUTH_HOST):
+            local = AUTH_ORIGIN + url[len(AUTH_HOST):]
+            _proxy_body(route, local, page)
+            return
+        if url.startswith(APP_HOST):
+            local = DASHBOARD_URL.rstrip("/") + url[len(APP_HOST):]
+            _proxy_body(route, local, page)
+            return
+        route.continue_()
+
+    page.route("**/*", handle)
+    page.context.add_cookies([{
+        "name": "sb-tortoise-auth-token",
+        "value": urllib.parse.quote(json.dumps(_session_json("u-two-team-panel"))),
+        "domain": ".premiselabs.co", "path": "/",
+    }])
+    page.goto(APP_HOST + "/", wait_until="domcontentloaded", timeout=30_000)
+    expect(page.locator("body")).to_contain_text("Graphs", timeout=25_000)
+    # Select Bravo (≠ first membership Alpha) via the account menu — the
+    # switch's loadAll must pin ?team_id=team_b (a dropped pin cannot
+    # false-pass: expect_response only fires on the pinned read).
+    page.get_by_role("button", name=_re.compile(r"Account menu")).click()
+    with page.expect_response(lambda r: "/v1/team/keys" in r.url
+                              and "team_id=team_b" in r.url,
+                              timeout=15000):
+        page.locator(".account-menu").get_by_role("button", name="Bravo").click()
+    expect(page.locator("body")).to_contain_text("Bravo", timeout=15_000)
+
+    # ── Graphs tab: Bravo's rows ONLY (per-team truth) ──
+    page.locator('[data-tab="graphs"]').click()
+    rows = page.locator("table tbody tr")
+    expect(rows).to_have_count(2, timeout=15_000)  # default + beta
+    expect(rows.filter(has_text="beta")).to_be_visible()
+    # Alpha's "alpha" graph row NEVER renders on the selected team's tab.
+    expect(rows.filter(has_text="alpha")).to_have_count(0)
+
+    # ── Wrong-pin negatives (harness probes, BEFORE the UI delete) ──
+    # 1) Bravo's key with NO pin → server resolves memberships[0] = Alpha →
+    #    the key is not Alpha's → 403 "Not your API key", nothing mutated.
+    probe1 = page.evaluate("""async (spec) => {
+      const res = await fetch(spec.url, {method: 'DELETE'})
+      let detail = null
+      try { detail = (await res.json()).detail } catch (e) {}
+      return {status: res.status, detail}
+    }""", {"url": f"{API_HOST}/v1/team/keys/gk_beta_01"})
+    assert probe1["status"] == 403 and probe1["detail"] == "Not your API key", probe1
+    # 2) Alpha's key pinned to the WRONG team (team_b) → 403, nothing mutated.
+    probe2 = page.evaluate("""async (spec) => {
+      const res = await fetch(spec.url, {method: 'DELETE'})
+      let detail = null
+      try { detail = (await res.json()).detail } catch (e) {}
+      return {status: res.status, detail}
+    }""", {"url": f"{API_HOST}/v1/team/keys/gk_alpha_01?team_id=team_b"})
+    assert probe2["status"] == 403 and probe2["detail"] == "Not your API key", probe2
+    # Both probes must have mutated nothing (keys still in their own buckets).
+    assert [r["id"] for r in keys_by_team["team_b"]["g_beta"]] == ["gk_beta_01"]
+    assert [r["id"] for r in keys_by_team["team_a"]["g_alpha"]] == ["gk_alpha_01"]
+
+    # ── The REAL panel revoke on Bravo (owner) ──
+    beta_row = rows.filter(has_text="beta")
+    beta_row.get_by_role("button", name="Keys").click()
+    panel = page.locator(".graph-key-panel")
+    expect(panel).to_contain_text("Keys for beta", timeout=15_000)
+    # Panel lists Bravo's per-graph key — never Alpha's.
+    panel_rows = panel.locator("tbody tr")
+    expect(panel_rows).to_have_count(1)
+    expect(panel).to_contain_text("tt_beta01")
+    expect(panel).not_to_contain_text("tt_alpha01")
+    # Revoke with the confirm dialog naming the row; the DELETE must carry
+    # ?team_id=team_b (the SELECTED team) and return 200.
+    confirm_msgs: list = []
+    page.once("dialog", lambda d: (confirm_msgs.append(d.message), d.accept()))
+    with page.expect_response(lambda r: r.request.method == "DELETE"
+                              and "/v1/team/keys/" in r.url
+                              and "team_id=team_b" in r.url,
+                              timeout=15000):
+        panel_rows.get_by_role("button", name="Revoke key tt_beta01").click()
+    assert confirm_msgs and "Revoke beta-ci" in confirm_msgs[0], confirm_msgs
+    assert "tt_beta01" in confirm_msgs[0], confirm_msgs
+    # Panel refresh re-reads the EMPTIED g_beta bucket → empty state.
+    expect(panel).to_contain_text("No keys for this graph yet — mint one above (shown once).",
+                                  timeout=15_000)
+    expect(panel_rows).to_have_count(0)
+
+    # ── Terminal: exactly one 200 delete, pinned team_b; buckets + tripwires ──
+    ok = [d for d in delete_log if d["status"] == 200]
+    forbidden = [d for d in delete_log if d["status"] == 403]
+    assert len(ok) == 1, f"exactly one successful panel revoke: {delete_log}"
+    assert "team_id=team_b" in ok[0]["url"], f"panel revoke must pin team_b: {ok[0]}"
+    assert len(forbidden) == 2, f"the two wrong-pin probes must 403: {delete_log}"
+    assert keys_by_team["team_b"]["g_beta"] == [], "Bravo's bucket must be emptied"
+    assert [r["id"] for r in keys_by_team["team_a"]["g_alpha"]] == ["gk_alpha_01"], \
+        "Alpha's bucket must be untouched by Bravo-pinned writes"
+    assert mint_calls == [], f"zero-mint tripwire: POST /v1/session/key fired: {mint_calls}"
+    assert key_authed == [], f"no key-authed requests in session mode: {key_authed}"
