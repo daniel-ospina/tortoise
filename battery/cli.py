@@ -14,6 +14,7 @@ and the dispatch mapping is tested via raised classes (no monkeypatching).
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from typing import Callable  # noqa: UP035
 
@@ -191,11 +192,19 @@ def _load_baseline(args) -> dict | None:
 
 def _cmd_report(args: argparse.Namespace) -> ExitCode:
     """battery report — assemble the differentiation profile + verdict
-    (issue #1415; E2E-3.2/6.1/6.2)."""
+    (issue #1415; E2E-3.2/6.1/6.2). Reads the LATEST attempt dir's live
+    family/recall writer files (attempt_dir_resolve filters on summary.json
+    = completion marker; crashed dirs never shadow a complete attempt);
+    root-level family files remain the legacy fallback when no attempt dir
+    exists."""
     from battery.config.thresholds import load_thresholds
     from battery.differential.d1_sweep import METRIC_FAMILIES
-    from battery.report.assemble import assemble, save_profile
-    artifacts = _load_measured_artifacts(args)
+    from battery.report.assemble import (
+        assemble,
+        compose_run_status,
+        save_profile,
+    )
+    artifacts, run_ctx = _load_report_inputs(args)
     if not artifacts:
         print("WARNING: zero measured families found — no sweep artifacts "
               "in the out dir; the verdict below is a NO-DATA state, not a "
@@ -206,8 +215,13 @@ def _cmd_report(args: argparse.Namespace) -> ExitCode:
         _Path(args.config or args.config_dir or _DEFAULT_CONFIG)
         / "thresholds.yaml")
     delta = thresholds.classification_delta
+    # Run-level report_status precedence (mock / emitter-gap / real-*)
+    # composed from run_mode + summary exit_code + per-episode statuses;
+    # None -> the base missing-family rule inside assemble decides.
+    run_status = (compose_run_status(**run_ctx) if run_ctx is not None
+                  else None)
     profile = assemble(artifacts, METRIC_FAMILIES, mitigation, recall,
-                       delta_threshold=delta)
+                       delta_threshold=delta, run_status=run_status)
     out = save_profile(profile, _Path(args.out or _DEFAULT_OUT) / "profile.json")
     print(f"verdict: {profile.verdict.outcome} "
           f"(families {profile.families_measured}/"
@@ -218,7 +232,8 @@ def _cmd_report(args: argparse.Namespace) -> ExitCode:
 
 def _cmd_calibrate(args: argparse.Namespace) -> ExitCode:
     """battery calibrate --print — print [cal] deltas, NEVER assert or
-    re-lock (issue #1415; E2E-7.1)."""
+    re-lock (issue #1415; E2E-7.1). Reads the LATEST attempt dir's live
+    family files (root fallback for legacy layouts)."""
     from battery.config.thresholds import load_thresholds
     from battery.report.calibrate import cal_table_hash, print_deltas
     thresholds = load_thresholds(_Path(args.config or args.config_dir
@@ -228,21 +243,118 @@ def _cmd_calibrate(args: argparse.Namespace) -> ExitCode:
               "(print-only; re-lock is a reviewable table change).")
         return ExitCode.OK
     print(f"cal table hash: {cal_table_hash(thresholds.cal_rows)}")
-    for line in print_deltas(thresholds.cal_rows, _load_measured_artifacts(args)):
+    for line in print_deltas(thresholds.cal_rows, _load_cal_measured(args)):
         print(line)
     print("PRINT ONLY — re-lock is a reviewable table change (never auto).")
     return ExitCode.OK
 
 
-def _load_measured_artifacts(args) -> dict:
-    from pathlib import Path as _P
-    base = _P(args.out or _DEFAULT_OUT)
-    data = {}
-    for fam_file in base.glob("family_*.json"):
-        import json
-        fam = json.loads(fam_file.read_text())
-        data.update(fam)
-    return data
+# ---------------------------------------------------------------------------
+# Live writer readers — LATEST attempt dir via attempt_dir_resolve (dirs
+# with summary.json = completion marker); root fallback for legacy layouts.
+# ---------------------------------------------------------------------------
+
+WRITER_FILE_EXCLUDED = ("summary.json", "recall.json")
+
+
+def _attempt_base(args) -> tuple[_Path, bool]:
+    """(base_dir, is_attempt) — the LATEST completed attempt dir under
+    args.out, or (out_root, False) for legacy layouts without attempt
+    dirs (--out pointing AT an attempt dir resolves to itself)."""
+    from battery.report.assemble import attempt_dir_resolve
+    base = _Path(args.out or _DEFAULT_OUT)
+    attempt = attempt_dir_resolve(base)
+    return (attempt, True) if attempt is not None else (base, False)
+
+
+def _family_payloads(base: _Path) -> list[dict]:
+    """Readable family_<F>.json payloads (corrupt/partial files are
+    skipped — never readable as measured cells)."""
+    from battery.report.assemble import read_family_file
+    payloads: list[dict] = []
+    for f in sorted(base.glob("family_*.json")):
+        payload = read_family_file(f)
+        if payload is not None:
+            payloads.append(payload)
+    return payloads
+
+
+def _run_artifacts(base: _Path) -> list[dict]:
+    """Per-episode run artifacts inside a base dir (writer files + summary
+    excluded); corrupt files are skipped (never a crash on a torn write)."""
+    out: list[dict] = []
+    for f in sorted(base.glob("*.json")):
+        if f.name in WRITER_FILE_EXCLUDED or f.name.startswith("family_"):
+            continue
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (ValueError, UnicodeDecodeError, OSError):
+            continue
+        if isinstance(data, dict):
+            out.append(data)
+    return out
+
+
+def _load_report_inputs(args) -> tuple[dict, dict | None]:
+    """Report inputs from the LATEST attempt dir: (run_artifacts
+    family -> arm -> value|None) + the run-level status context. A family
+    whose cells are all insufficient_n contributes a None value (reported
+    as an insufficient_n cell — never a measured value, never vacuous)."""
+    base, is_attempt = _attempt_base(args)
+    matrix: dict[str, dict[str, float | None]] = {}
+    measured_cells = 0
+    insufficient_cells = 0
+    for payload in _family_payloads(base):
+        arm = payload.get("arm", "?")
+        means: list[float] = []
+        cells = payload.get("cells") or {}
+        for metric, vals in (payload.get("values") or {}).items():
+            if cells.get(metric) == "measured" and vals:
+                means.append(sum(float(v) for v in vals) / len(vals))
+            else:
+                insufficient_cells += 1
+        if means:
+            measured_cells += len(means)
+        matrix.setdefault(payload["family"], {})[arm] = (
+            sum(means) / len(means) if means else None)
+    if not is_attempt:
+        # Legacy root fallback: family files at the out root carry no
+        # summary/run artifacts — no run-level status context.
+        return matrix, None
+    arts = _run_artifacts(base)
+    summary = json.loads((base / "summary.json").read_text(encoding="utf-8"))
+    run_mode = ("real" if any(a.get("run_mode") == "real" for a in arts)
+                else "mock")
+    ctx = {
+        "run_mode": run_mode,
+        "exit_code": int(summary.get("run", {}).get("exit_code", 0)),
+        "measured_cells": measured_cells,
+        "insufficient_cells": insufficient_cells,
+        "excluded_episodes": sum(
+            1 for a in arts if a.get("excluded", {}).get("count")),
+        "emitter_gap": any(
+            a.get("run_mode") == "real" and a.get("emitter_gap")
+            for a in arts),
+        "over_budget": any(
+            "budget" in str(a.get("excluded", {}).get("reason", "")).lower()
+            for a in arts),
+    }
+    return matrix, ctx
+
+
+def _load_cal_measured(args) -> dict:
+    """[cal]-metric-keyed measured values for `battery calibrate --print`:
+    {metric: {arm: mean}} over measured cells only."""
+    base, _ = _attempt_base(args)
+    out: dict[str, dict[str, float]] = {}
+    for payload in _family_payloads(base):
+        arm = payload.get("arm", "?")
+        cells = payload.get("cells") or {}
+        for metric, vals in (payload.get("values") or {}).items():
+            if cells.get(metric) == "measured" and vals:
+                out.setdefault(metric, {})[arm] = (
+                    sum(float(v) for v in vals) / len(vals))
+    return out
 
 
 def _load_mitigations(args) -> dict:
@@ -255,12 +367,12 @@ def _load_mitigations(args) -> dict:
 
 
 def _load_recall(args) -> dict | None:
-    from pathlib import Path as _P
-    p = _P(args.out or _DEFAULT_OUT) / "recall.json"
-    if not p.is_file():
-        return None
-    import json
-    return json.loads(p.read_text())
+    """Matched-recall record: the LATEST attempt dir's recall.json (per-
+    episode retrieved Memories + EP markers), or the legacy root-level
+    recall.json when no attempt dir exists."""
+    from battery.report.assemble import read_recall_file
+    base, _ = _attempt_base(args)
+    return read_recall_file(base)
 
 
 def _cmd_run(args: argparse.Namespace) -> ExitCode:

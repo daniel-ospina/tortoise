@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Any
 
 from battery.enums import ModelCallOutcome
+from battery.runner.emit import (
+    validate_emitter_coverage,
+    validate_event_entry,
+)
 
 SCHEMA_VERSION = "1.1"
 
@@ -20,7 +24,7 @@ _ARTIFACT_KEYS = (
     "schema_version", "run_id", "seed", "arm", "scenario_id", "tier", "model",
     "determinism", "episode_trace", "metric_values", "model_call_outcomes",
     "ep_outcome", "isolation_breach", "excluded", "setup", "timestamps",
-    "provenance", "event_log",
+    "provenance", "event_log", "run_mode", "emitter_gap",
 )
 _SUMMARY_KEYS = ("schema_version", "arms", "run", "timestamps")
 
@@ -30,6 +34,13 @@ def run_id(seed: int, arm: str, scenario_id: str) -> str:
     return f"{seed}-{arm}-{scenario_id}"
 
 
+def run_mode_for(model: dict[str, Any] | None) -> str:
+    """mock|real discriminator: ``model.provider == "mock-agent"`` is the
+    MockArm (mock episodes keep an empty event log — never claimed real);
+    everything else is a real-mode artifact (emitter-gap applies)."""
+    return "mock" if (model or {}).get("provider") == "mock-agent" else "real"
+
+
 def build_run_artifact(
     *, seed: int, arm: str, scenario, episode, metric_values: dict[str, float],
     outcomes: dict[str, int], ep_outcome: str, excluded: dict[str, Any],
@@ -37,8 +48,29 @@ def build_run_artifact(
     python_hash_seed: str, isolation_breach: bool = False,
     model: dict[str, Any] | None = None,
     event_log: list[dict[str, Any]] | None = None,
+    expected: set[str] | None = None,
 ) -> dict[str, Any]:
-    """Assemble a schema-v1.1 run artifact (all top-level keys present)."""
+    """Assemble a schema-v1.1 run artifact (all top-level keys present).
+
+    Phase-2 FINAL coverage validation at artifact assembly: when ``expected``
+    is given (real episodes only — the runner computes the per-episode
+    expected set through the scorer seam BEFORE scoring), the post-
+    derivation log is validated against it and the uncovered fields are
+    recorded as ``emitter_gap``. Excluded episodes are exempt (the runner
+    passes ``expected=None`` and records the expected-vs-emitted snapshot in
+    the exclusion record) — an honest exclusion is never mislabeled an
+    emission bug, and the exemption cannot bypass the gap gate.
+    """
+    log = list(event_log) if event_log is not None else []
+    for entry in log:
+        validate_event_entry(entry)  # integrity: never a silent pass
+    if expected is not None:
+        emitter_gap = sorted(validate_emitter_coverage(log, expected=set(expected)))
+    else:
+        emitter_gap = []
+    model = model or {"provider": "mock-agent", "model_id": "mock-agent",
+                      "temperature": 0.0}
+    run_mode = run_mode_for(model)
     now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
     return {
         "schema_version": SCHEMA_VERSION,
@@ -47,8 +79,7 @@ def build_run_artifact(
         "arm": arm,
         "scenario_id": scenario.id,
         "tier": scenario.tier.value,
-        "model": model or {"provider": "mock", "model_id": "mock-agent",
-                           "temperature": 0.0},
+        "model": model,
         "determinism": {"seed": seed, "execution_order": "sequential",
                         "python_hash_seed": python_hash_seed},
         "episode_trace": episode.to_artifact_trace(),
@@ -60,7 +91,9 @@ def build_run_artifact(
         "setup": setup_info,
         "timestamps": {"written_utc": now},
         "provenance": provenance,
-        "event_log": event_log or [],
+        "event_log": log,
+        "run_mode": run_mode,
+        "emitter_gap": emitter_gap,
     }
 
 
