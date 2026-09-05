@@ -85,6 +85,9 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
     stats = {"entities": 0, "points": 0, "events": 0, "operators": 0,
              "evidence_points": 0, "minted_kinds": 0,
              "supersessions_written": 0,
+             # #2164: entity-level ObjectSuperseded folds applied (the pt_
+             # ``supersessions_written`` counter stays pt_-only).
+             "objects_superseded": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0, "answer_string": 0}}
     proj = sdk._get_proj()
@@ -103,7 +106,8 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
     # operator ids are simply absent from the set (today's behavior —
     # operators over events stay skipped). Supersession endpoints are NOT
     # here: the new point is created by the points loop BELOW, so its
-    # existence is probed by the supersession section's own single batch.
+    # existence is probed by the supersession section (apply_supersessions)
+    # itself.
     batch_ids: list[str] = [
         str(p.get("id") or "") for p in (payload.get("points") or [])
         if p.get("id")]
@@ -327,52 +331,51 @@ def _write_payload(sdk: TortoiseSDK, payload: dict, *, sid: str, qid: str,
             logger.warning("v2 ingest operator %s->%s failed: %s",
                            src, dst, ex)
 
-    # ── supersessions (E5 #1537): materialize point-level records via the
-    # EXISTING canonical supersede() — CORRECTS edge + outdated + edge
-    # transfer. Runs AFTER the points loop so the new point exists (ordering
-    # contract, mirrored from the hosted §6b loop). Unresolvable endpoints /
-    # already-terminal olds are skipped with a warning (idempotent re-ingest;
-    # supersede_point would raise on a terminal old). ONE batched probe
-    # (id + status) covers every endpoint — no per-record N+1 (D6). ──
+    # ── supersessions (E5 #1537 → #2164 Task 5): ONE consumer-side
+    # discipline via the SHARED commit_ops.apply_supersessions helper
+    # (capture/eval parity — the pre-#2164 inline loop here was pt_-only
+    # and SILENTLY continue-dropped entity-level supersession records, so
+    # eval graphs never folded Object supersessions). pt_ records →
+    # supersede() CORRECTS (terminal-probed silent skip — the inline
+    # loop's exact semantics); entity records → ObjectSuperseded
+    # (id-style, journaled) + _fold_object_superseded (count-verified).
+    # Runs AFTER the points/entities loops so endpoints exist (ordering
+    # contract, mirrored from the hosted §6b loop + the helper's
+    # successor-visibility rule). The helper is called PER KIND (its
+    # return is one combined int — capture tests pin that shape) so the
+    # applied count lands in the right stats key: pt_ applications →
+    # supersessions_written (byte-identical to the pre-#2164 counter),
+    # entity applications → objects_superseded (additive — never the pt_
+    # record-count key). Records bucket by the helper's OWN dispatch key
+    # (the stripped ``superseded`` ref prefix) so the two calls cannot
+    # drift from the helper's branch.
+    # #1786 (R1) retry note: the helper never raises out of its write
+    # loop (per-record containment — capture's §6b rule). The stage-level
+    # retry still fires for transport transients raised by the helper's
+    # PROBE queries (they sit outside its per-record try/except); a
+    # transient mid-``supersede``/emit/fold is absorbed as a warned skip
+    # — the pre-#2164 re-raise covered only the supersede() call, and the
+    # record is deterministically re-derived + idempotently re-applied
+    # (terminal probe + keep-first conflict rules) on any --retry-failed
+    # resume, so the stage retry no longer re-burns a whole payload write
+    # for an advisory fold. Never a silent drop either way — every skip is
+    # warned. ──
     ss_records = [sr for sr in (payload.get("supersessions") or [])
                   if isinstance(sr, dict)]
-    ss_existing: dict[str, str] = {}
     if ss_records:
-        ss_endpoints: list[str] = []
-        for sr in ss_records:
-            old_id = str(sr.get("superseded") or "").strip()
-            new_id = str(sr.get("supersedes_by") or "").strip()
-            if old_id.startswith("pt_") and new_id.startswith("pt_")\
-                    and old_id != new_id:
-                ss_endpoints += [old_id, new_id]
-        if ss_endpoints:
-            rows = proj.g.query(
-                "MATCH (n:Point) WHERE n.id IN $ids "
-                "RETURN n.id, n.status",
-                params={"ids": ss_endpoints}).result_set
-            ss_existing = {r[0]: (r[1] or "") for r in rows}
-    for sr in ss_records:
-        old_id = str(sr.get("superseded") or "").strip()
-        new_id = str(sr.get("supersedes_by") or "").strip()
-        if not (old_id.startswith("pt_") and new_id.startswith("pt_")) \
-                or old_id == new_id:
-            continue
-        if old_id not in ss_existing or new_id not in ss_existing:
-            logger.warning("v2 supersession skip %s→%s: endpoint missing "
-                           "(fail-open)", old_id, new_id)
-            continue
-        if ss_existing[old_id] in ("superseded", "retracted", "archived"):
-            continue   # idempotent re-ingest — already terminal
-        try:
-            sdk.supersede(old_id, new_id)     # EXISTING canonical unified tool
-            stats["supersessions_written"] += 1
-        except Exception as ex:  # noqa: BLE001, RUF100 — best-effort in the eval
-            # #1786 (R1): re-raise-when-retryable — a timeout mid-supersession
-            # is absorbed by the stage-level retry (never a silently-missing
-            # supersede record).
-            if retryable_transient(ex):
-                raise
-            logger.warning("v2 supersede %s→%s failed: %s", old_id, new_id, ex)
+        from tortoise.commit_ops import apply_supersessions
+        pt_recs = [sr for sr in ss_records
+                   if str(sr.get("superseded") or "").strip()
+                   .startswith("pt_")]
+        entity_recs = [sr for sr in ss_records
+                       if not str(sr.get("superseded") or "").strip()
+                       .startswith("pt_")]
+        if pt_recs:
+            stats["supersessions_written"] += apply_supersessions(
+                proj, sdk, pt_recs, session_id=sid, warn=logger.warning)
+        if entity_recs:
+            stats["objects_superseded"] += apply_supersessions(
+                proj, sdk, entity_recs, session_id=sid, warn=logger.warning)
 
     stats["minted_kinds"] = len(payload.get("minted_kinds", []) or [])
     return stats
@@ -480,6 +483,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
              "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
              "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
              "supersessions_written": 0,
+             "objects_superseded": 0,   # #2164 — rolled up per session below
              "noops_applied": 0, "deletions_applied": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0, "answer_string": 0}, "errors": [],
@@ -663,6 +667,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                   "evidence_points"):
             stats[k] += written.get(k, 0)
         stats["supersessions_written"] += written.get("supersessions_written", 0)
+        stats["objects_superseded"] += written.get("objects_superseded", 0)
         for mk in ("source_session", "verbatim", "raw_chunk",
                    "answer_string"):
             stats["evidence_marks"][mk] = (
@@ -935,6 +940,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
              "events": 0, "entities": 0, "operators": 0, "evidence_points": 0,
              "evidence_turns": 0, "minted_kinds": 0, "supersessions": 0,
              "supersessions_written": 0,
+             "objects_superseded": 0,   # #2164 — rolled up per session below
              "noops_applied": 0, "deletions_applied": 0,
              "evidence_marks": {"source_session": 0, "verbatim": 0,
                                 "raw_chunk": 0, "answer_string": 0}, "errors": [],
@@ -1083,6 +1089,7 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,  # noqa: F811
                   "evidence_points"):
             stats[k] += _written.get(k, 0)
         stats["supersessions_written"] += _written.get("supersessions_written", 0)
+        stats["objects_superseded"] += _written.get("objects_superseded", 0)
         for mk in ("source_session", "verbatim", "raw_chunk",
                    "answer_string"):
             stats["evidence_marks"][mk] = (

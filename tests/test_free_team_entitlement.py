@@ -55,6 +55,22 @@ def supabase_env(monkeypatch, fake) -> FakeControlPlane:
     return fake
 
 
+def _close_keepalive_anchors(module) -> None:
+    """Deterministically close every keepalive anchor (SHUTDOWN SAVE).
+
+    #2090: replaces the clear-without-close leak (each eviction shut the
+    redislite daemon down mid-test → 403). # mirrors
+    tests/test_hosted_api.py:144-153 — keep in sync.
+    """
+    for ns in list(module._FALLBACK_KEEPALIVE):
+        anchor = module._FALLBACK_KEEPALIVE.pop(ns, None)
+        if anchor is not None:
+            try:  # noqa: SIM105  (mirrors tests/test_hosted_api.py:149)
+                anchor.close()
+            except Exception:
+                pass
+
+
 @pytest.fixture
 def client(monkeypatch, supabase_env):
     """TestClient in Supabase mode with a temp embedded DB (the gate's
@@ -70,12 +86,19 @@ def client(monkeypatch, supabase_env):
 
         ha_mod.TortoiseSDK.__init__ = _patched
         ha_mod._FALLBACK_KEEPALIVE.clear()
+        # #1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched init
+        # forces, so _make_sdk's keepalive anchor path matches and the anchor
+        # is REUSED instead of evicted + closed on every registry access (each
+        # eviction shut the redislite daemon down mid-test, losing the seed
+        # between this fixture's write and the gate read → 403).
+        os.environ["TORTOISE_DB_PATH"] = db_path
         try:
             with TestClient(app) as tc:
                 yield tc, supabase_env
         finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
             ha_mod.TortoiseSDK.__init__ = _orig
-            ha_mod._FALLBACK_KEEPALIVE.clear()
+            _close_keepalive_anchors(ha_mod)  # replaces clear() — close-before-clear
             app.dependency_overrides.clear()
 
 
@@ -257,13 +280,20 @@ def reg_client(monkeypatch):
 
         ha_mod.TortoiseSDK.__init__ = _patched
         ha_mod._FALLBACK_KEEPALIVE.clear()
+        # #1950: pin TORTOISE_DB_PATH (see client fixture) — the anchor is
+        # reused, not evicted, on every registry access.
+        os.environ["TORTOISE_DB_PATH"] = db_path
         try:
             with TestClient(app) as tc:
+                # #2090: the dropped _make_sdk SDK below is benign — the same
+                # call's anchor eagerly holds a connection (count >= 2 at GC →
+                # disconnect-only, never NOSAVE).
                 reg = ha_mod._make_sdk(namespace="registry")._get_registry()
                 yield tc, reg
         finally:
+            os.environ.pop("TORTOISE_DB_PATH", None)
             ha_mod.TortoiseSDK.__init__ = _orig
-            ha_mod._FALLBACK_KEEPALIVE.clear()
+            _close_keepalive_anchors(ha_mod)  # replaces clear() — close-before-clear
             app.dependency_overrides.clear()
 
 

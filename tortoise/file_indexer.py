@@ -36,6 +36,12 @@ pipeline consumes (plan §5.1 component boundary; the #280/#330 ``_FM_RE`` /
 PURITY: this module imports no graph/SDK code — stdlib + the pure
 ``source_credibility`` registry only. Consumers (sdk.py, session_indexer,
 ingest.py, mining.py) import FROM here, never the reverse. No import cycle.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Document indexer' (file-identity primitives for the index workflow) —
+tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename an
+extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations
 

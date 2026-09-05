@@ -35,6 +35,29 @@ logger = logging.getLogger(__name__)
 _FALKORDB_VERSION_CACHE: dict[tuple, tuple[int, int, int] | None] = {}
 
 
+
+
+def _promotion_point_with_operator(p: dict) -> dict:
+    """Restore operator-ness on an OperatorPromoted snapshot (P1 #2256).
+
+    Promotion emitters journal ``point=get_point(id)`` — FLAT node props
+    (``is_operator``/``op_type``/``direction`` at top level, NO nested
+    ``operator`` key).  ``_upsert_point_props`` derives operator-ness from
+    the NESTED key, so a flat-only upsert would write ``is_operator=false``
+    + ``op_type=NULL`` and silently convert the operator to a claim node on
+    rebuild.  Synthesize the canonical nested shape (mirroring the
+    OperatorAdded snapshot) from the flat props when the nested key is
+    absent — the upsert then restores the LIVE OPERATOR node faithfully.
+    """
+    if not isinstance(p, dict) or "operator" in p:
+        return p
+    if p.get("is_operator") and p.get("op_type"):
+        out = dict(p)
+        out["operator"] = {"op_type": p["op_type"],
+                           "inputs": p.get("inputs") or []}
+        return out
+    return p
+
 def _reset_falkordb_version_cache() -> None:
     """Test hook: drop all cached version probes."""
     _FALKORDB_VERSION_CACHE.clear()
@@ -1080,9 +1103,20 @@ class FalkorProjection(
                 self._upsert(p)
         elif t == "OperatorPromoted":
             # #785/R16: restore the operator's live status on replay.
+            # (#2256 review P1): promotion emitters journal FLAT get_point
+            # snapshots — for the CAPTURE path this event is the operator's
+            # ONLY durable record (the m2 lane writes the live graph without
+            # OperatorAdded journaling), so the replay must UPSERT, not
+            # status-SET (a MATCH-SET on a never-created node is a no-op and
+            # the operator is lost on rebuild).  The flat snapshot is
+            # synthesized into the canonical nested-operator shape first —
+            # otherwise _upsert_point_props derives operator-ness from the
+            # absent nested key and writes is_operator=false (silent
+            # operator→claim conversion on rebuild).  Heals the pre-existing
+            # R16 emitter shape (promote_point, since #785) too.
             p = ev.get("point")
             if isinstance(p, dict) and p.get("id"):
-                self._upsert(p)
+                self._upsert(_promotion_point_with_operator(p))
             else:
                 oid = ev.get("id") or ev.get("event_id")
                 if oid is not None:
@@ -1297,6 +1331,7 @@ class FalkorProjection(
                 # embedding, validFrom/To, extractedFrom, provenanceSource.
                 self._upsert_point_props(p)
 
+        supersede_folds: list = []  # ObjectSuperseded replays (pass-1b fold sweep)
         # Pass 1b: apply revisions + other non-edge events AFTER all nodes exist
         for ev in events:
             ev = self._norm(ev)
@@ -1319,12 +1354,15 @@ class FalkorProjection(
                         p.pop("context", None)
                     self._upsert_point_props(p)
             elif t == "OperatorPromoted":
-                # #785/R16: restore the operator's live status on replay.
+                # #785/R16: fold/apply parity with the main handler
+                # (#2256 review P1): UPSERT the snapshot synthesized into
+                # the canonical nested-operator shape — for the capture path
+                # this event is the operator's only durable record.
                 p = ev.get("point")
                 if isinstance(p, dict) and p.get("id"):
                     if ev.get("projection_version", 0) >= 2:
                         p.pop("context", None)
-                    self._upsert_point_props(p)
+                    self._upsert_point_props(_promotion_point_with_operator(p))
                 else:
                     oid = ev.get("id") or ev.get("event_id")
                     if oid is not None:
@@ -1350,12 +1388,50 @@ class FalkorProjection(
                 self._upsert_subject(ev)
             elif t == "ObjectRegistered":
                 self._upsert_object(ev)
+            elif t == "ObjectSuperseded":
+                # #2164 pass-1b rebuild parity: apply() folds ObjectSuperseded
+                # into Object.status, but the rebuild chain had no branch — a
+                # journaled ObjectSuperseded silently fell through and the
+                # Object reverted to status='live' on JSONL wipe+rebuild.
+                # Mirror the apply() dispatch — but defer the fold to a
+                # trailing sweep (below, after this loop): a journaled
+                # producer (connector EventRecorded → _upsert_event produces-
+                # edge MERGE ON CREATE, or a later ObjectRegistered) can
+                # legitimately re-create the Object AFTER the fold event sits
+                # in the journal. Folding chronologically inside this loop
+                # would no-op (0 rows) while the object does not yet exist,
+                # then the later re-creation resurrects it status='live' —
+                # a dead Object reappearing in recall_state's default view.
+                # Replay the fold only once every object-creation event has
+                # run: the fold is an idempotent SET, so ordering vs its own
+                # registration is irrelevant and later re-creations are
+                # re-folded correctly.
+                supersede_folds.append(ev)
             elif t == "DocumentCreated":
                 self._upsert_document(ev)
             elif t == "SourceCreated":
                 # #330 parity with apply(): SourceCreated was dropped by rebuild.
                 self._upsert_source(ev)
             # ConfidenceChanged: no graph effect (audit-only event)
+
+        # Pass 1b fold sweep: ObjectSuperseded replays AFTER all object
+        # creation events (see the branch above). Warn on 0-row folds — a
+        # fold that matched nothing during rebuild means the journal claims
+        # a supersession whose Object never re-existed (the pre-#2194
+        # capture OD2 gap: capture-created Objects are not journaled as
+        # ObjectRegistered, so their folds can only match when another
+        # journaled producer re-created the same-named Object). The fold is
+        # idempotent — a superseded Object that is later re-created by a
+        # future event is caught on the NEXT rebuild, but this rebuild's
+        # graph is honest about what it could not fold.
+        for ev in supersede_folds:
+            matched = self._fold_object_superseded(ev)
+            if matched == 0:
+                logger.warning(
+                    "rebuild: ObjectSuperseded fold matched no Object "
+                    "(event_id=%s superseded_by=%r) — object not "
+                    "re-created by any journaled event (OD2 capture gap?)",
+                    ev.get("event_id"), ev.get("supersedes_by"))
 
         # Pass 1b tail: restore :Batch marker nodes AND the Point.batch_id
         # enforcement links from the pre-wipe snapshot (#990) — quarantine
@@ -2178,3 +2254,21 @@ class FalkorProjection(
         svbp = TortoiseSVBP(**svbp_kwargs)
         svbp.run(factors, evidence=evidence)
         return svbp
+
+
+def is_missing_graph_error(e: Exception) -> bool:
+    """True when a graph error means the graph no longer exists (idempotent).
+
+    #2163: GRAPH.DELETE (select_graph(name).delete()) raises on an ABSENT
+    graph — real server text (v4.16.7, empirically verified): "Invalid graph
+    operation on empty key". Graph-drop callers treat this family as SUCCESS
+    so the deleted-team purge sweep's #926 retry anchor converges (a graph
+    dropped by a previous sweep, never minted, or manually removed must not
+    keep the team row poisoned forever); genuine failures (auth, dead
+    connection) still propagate. Canonical prod copy — tests/_embedded.py's
+    private _is_missing_graph_error is kept in sync with these patterns.
+    """
+    s = str(e).lower()
+    return any(k in s for k in ("graph not found", "no such graph",
+                                "does not exist", "unknown graph",
+                                "invalid graph operation", "empty key"))

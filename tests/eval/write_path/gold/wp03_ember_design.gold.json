@@ -1,0 +1,293 @@
+{
+  "attribution_hazards": [
+    {
+      "id": "wp03_ember_design_h_01",
+      "planted_turn": 5,
+      "quote": "roughly thirty percent of alerts are unactionable because the ownership lookup fails",
+      "source": "maya"
+    },
+    {
+      "id": "wp03_ember_design_h_02",
+      "planted_turn": 21,
+      "quote": "Tomas wants to watch the first two weeks of ownership-based routing before we expand",
+      "source": "maya"
+    }
+  ],
+  "distractor_leakage_tolerance": 1,
+  "distractors": [
+    {
+      "anchor": "The on-call room has been quiet lately",
+      "id": "wp03_ember_design_d_01",
+      "planted_turn": 1,
+      "statement": "Routine aside that the on-call room has been quiet."
+    },
+    {
+      "anchor": "the team demo is Thursday afternoon",
+      "id": "wp03_ember_design_d_02",
+      "planted_turn": 13,
+      "statement": "Routine scheduling note about the team demo."
+    }
+  ],
+  "planted_units": [
+    {
+      "depth_bucket": "early",
+      "id": "wp03_ember_design_u_01",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 1,
+      "verbatim_anchor": "the pager fired twelve times per week"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp03_ember_design_u_10",
+      "kind": "entity",
+      "notability": "medium",
+      "planted_turn": 3,
+      "verbatim_anchor": "Tomas pulled double duty for three weeks in September"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp03_ember_design_u_02",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 5,
+      "verbatim_anchor": "thirty percent of alerts are unactionable"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp03_ember_design_u_03",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 7,
+      "verbatim_anchor": "We route ember alerts by service ownership instead of by page group"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp03_ember_design_u_04",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 7,
+      "verbatim_anchor": "the ownership table in lumen becomes the single source of truth"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp03_ember_design_u_05",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 9,
+      "verbatim_anchor": "falls to the default rotation and we flag it in the weekly ownership report"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp03_ember_design_u_06",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "get the pager down to four actionable pages per week"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp03_ember_design_u_07",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 13,
+      "verbatim_anchor": "Add a severity preflight that requires a real user impact statement"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp03_ember_design_u_08",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 15,
+      "verbatim_anchor": "auto-suppress alerts during declared maintenance windows"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp03_ember_design_u_09",
+      "kind": "idea",
+      "notability": "high",
+      "planted_turn": 17,
+      "verbatim_anchor": "Aisha suggested we keep the declarations human-owned rather than automated"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp03_ember_design_u_11",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "Migrate service by service over two sprints"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp03_ember_design_u_12",
+      "kind": "fact",
+      "notability": "medium",
+      "planted_turn": 19,
+      "verbatim_anchor": "starting with the ten noisiest services"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp03_ember_design_u_13",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 21,
+      "verbatim_anchor": "first cutover review is scheduled for October 2"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp03_ember_design_u_14",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 23,
+      "verbatim_anchor": "suppressed alerts still land in the morning digest"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp03_ember_design_u_15",
+      "kind": "vibe",
+      "notability": "high",
+      "planted_turn": 23,
+      "verbatim_anchor": "we want people to page early, not hide alerts"
+    }
+  ],
+  "salient_units": [
+    {
+      "id": "wp03_ember_design_u_01",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the pager fired twelve times per week"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_10",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Tomas pulled double duty for three weeks in September"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_02",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "thirty percent of alerts are unactionable"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_03",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "We route ember alerts by service ownership instead of by page group"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_04",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "the ownership table in lumen becomes the single source of truth"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_05",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "falls to the default rotation and we flag it in the weekly ownership report"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_06",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "get the pager down to four actionable pages per week"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_07",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Add a severity preflight that requires a real user impact statement"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_08",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "auto-suppress alerts during declared maintenance windows"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_09",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Aisha suggested we keep the declarations human-owned rather than automated"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_11",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Migrate service by service over two sprints"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_12",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "starting with the ten noisiest services"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_13",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "first cutover review is scheduled for October 2"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_14",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "suppressed alerts still land in the morning digest"
+      }
+    },
+    {
+      "id": "wp03_ember_design_u_15",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "we want people to page early, not hide alerts"
+      }
+    }
+  ],
+  "scenario": "Maya and Tomas review the ember alerting redesign: route alerts by service ownership, cut unactionable pages, and target a sustainable on-call load.",
+  "schema_version": 1,
+  "session_id": "wp03_ember_design"
+}

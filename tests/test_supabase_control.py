@@ -26,11 +26,15 @@ from tortoise.supabase_control import (
     active_api_keys,
     api_key_by_id,
     claim_membership,
+    count_graph_keys,
+    delete_graph_row,
     expired_bootstrap_keys,
     get_control_plane,
     github_credentials,
+    graph_key_ids,
     graph_metadata,
     insert_api_key,
+    insert_graph,
     invitation_accept,
     invitation_mint,
     invitation_rescind,
@@ -44,6 +48,7 @@ from tortoise.supabase_control import (
     resolve_api_key,
     revoke_api_key,
     set_membership,
+    soft_delete_graph,
     store_github_credentials,
     team_by_email,
     team_by_id,
@@ -200,6 +205,119 @@ class TestResolveApiKey:
         resolves to nothing in Supabase → None → 401 on both paths."""
         fake.seed("api_keys", [_key_row(lookup_hash="deadbeef" * 8)])
         assert resolve_api_key(fake, TOKEN) is None
+
+    # ── C1 (#2110): tenancy fields on the resolve dict ─────────────────────
+
+    def test_c1_legacy_key_resolves_default_graph(self, fake):
+        """E2E-5: a pre-C1 key (no graph_id/scopes/delegation columns in the
+        row) resolves as the legacy full-access class → default graph."""
+        fake.tables["teams"] = [{
+            "id": "team-free-001", "name": "Free Team", "tier": "free",
+            "max_users": 1, "max_graphs": 1, "graph_size_cap": 10000,
+            "ops_allowance": 1000, "graph_name": "team_team-free-001",
+        }]
+        fake.seed("api_keys", [_key_row()])  # no C1 columns in the row
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["graph_id"] is None           # team-wide key
+        assert team["graph_namespace"] == "team_team-free-001"  # default graph
+        assert team["scopes"] == []               # empty allowlist
+        assert team["legacy_full_access"] is True  # deleg NULL + empty = legacy
+        assert team["delegation_depth"] is None
+        assert team["created_by_key_id"] is None
+
+    def test_c1_minted_key_reports_scopes_and_no_legacy(self, fake):
+        """E2E-9: a C1-minted key (graph_id set, scopes, deleg=0) reports its
+        allowlist and is NOT legacy full-access."""
+        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.seed("api_keys", [_key_row(
+            graph_id="g_abc123def4567890",
+            scopes=["graphs:read", "graphs:write"],
+            delegation_depth=0,
+            created_by_key_id="key-000",
+        )])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] == "g_abc123def4567890"
+        assert team["scopes"] == ["graphs:read", "graphs:write"]
+        assert team["delegation_depth"] == 0
+        assert team["created_by_key_id"] == "key-000"
+        assert team["legacy_full_access"] is False  # deleg=0 → not legacy
+
+    def test_c1_membership_path_is_legacy_full_access(self, fake):
+        """A long-lived key with no api_keys row (membership path) has no
+        scopes/delegation → legacy full access (matches today)."""
+        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.seed("team_memberships", [_membership_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] is None
+        assert team["scopes"] == []
+        assert team["delegation_depth"] is None
+        assert team["legacy_full_access"] is True
+        assert team["graph_namespace"] is None  # FREE_TEAM has no graph_name
+
+    def test_c1_graph_bound_namespace_resolved_from_graphs_table(self, fake):
+        """A graph-bound key resolves its namespace from the graphs row."""
+        fake.tables["teams"] = [dict(FREE_TEAM)]
+        fake.seed("api_keys", [_key_row(
+            graph_id="g_abc123def4567890",
+            scopes=["graphs:read"],
+            delegation_depth=0,
+        )])
+        fake.seed("graphs", [{
+            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_abc123def4567890",
+            "status": "active",
+        }])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_namespace"] == (
+            "team_team-free-001_g_g_abc123def4567890")
+
+    def test_c1_drift_safe_pre_c1_schema(self, fake):
+        """D3 (#1096): a schema one migration behind (no C1 columns) fails
+        soft to the pre-C1 shape — and the #1148 enabled gate SURVIVES the
+        drift (ladder drops the C1 tier first, never `enabled`; history
+        review P1: #1705 round-1 rejected dropping an older gate)."""
+        fake = FakeControlPlane(
+            {"teams": [dict(FREE_TEAM)]},
+            missing_columns={"api_keys": {
+                "graph_id", "scopes", "delegation_depth", "created_by_key_id"}})
+        fake.seed("api_keys", [_key_row()])
+        team = resolve_api_key(fake, TOKEN)
+        assert team is not None
+        assert team["graph_id"] is None
+        assert team["scopes"] == []
+        assert team["delegation_depth"] is None
+        assert team["legacy_full_access"] is True
+
+    def test_c1_drift_preserves_enabled_gate(self):
+        """P1 fix: a pre-C1 schema (C1 columns missing, enabled present) must
+        still REJECT a disabled key — the ladder drops the C1 tier first,
+        never the #1148 enabled gate."""
+        fake = FakeControlPlane(
+            {"teams": [dict(FREE_TEAM)]},
+            missing_columns={"api_keys": {
+                "graph_id", "scopes", "delegation_depth", "created_by_key_id"}})
+        fake.seed("api_keys", [_key_row(enabled=False)])
+        assert resolve_api_key(fake, TOKEN) is None  # disabled key stays rejected
+
+    def test_c1_graph_bound_missing_row_fails_closed(self):
+        """Security review P1: a graph-bound key whose graphs row is missing
+        (drift race / soft-deleted graph) resolves graph_namespace None —
+        NEVER the team default graph (a scoped key must not widen onto the
+        default graph boundary)."""
+        fake = FakeControlPlane({"teams": [{
+            "id": "team-free-001", "name": "Free Team", "tier": "free",
+            "max_users": 1, "max_graphs": 1, "graph_size_cap": 10000,
+            "ops_allowance": 1000, "graph_name": "team_team-free-001",
+        }]})
+        fake.seed("api_keys", [_key_row(
+            graph_id="g_missingrow00", scopes=["graphs:read"],
+            delegation_depth=0)])
+        team = resolve_api_key(fake, TOKEN)
+        assert team["graph_id"] == "g_missingrow00"
+        assert team["graph_namespace"] is None  # fail-closed, not default
+        assert team["legacy_full_access"] is False
 
     def test_inactive_membership_does_not_resolve(self, fake):
         fake.seed("team_memberships",
@@ -1519,12 +1637,88 @@ class TestTask8Helpers:
         assert [r["id"] for r in got] == ["e1"]
 
     def test_graph_metadata_derives_default(self, fake):
+        """C1 (#2110): the seam emits the registry-shaped row
+        {graph_id, team_id, name, kind, namespace, status} — default derived
+        from teams.graph_name (no row needed), status active."""
         fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
         assert graph_metadata(fake, "team-free-001") == [{
-            "graph_id": "default", "name": "default", "kind": "default",
-            "namespace": "team_team-free-001"}]
+            "graph_id": "default", "team_id": "team-free-001",
+            "name": "default", "kind": "default",
+            "namespace": "team_team-free-001", "status": "active",
+            "recording": None}]  # recording key present both modes (#2110)
         assert graph_metadata(fake, "no-such-team") == []
         assert graph_metadata(fake, "team-free-001")[0]["graph_id"] == "default"
+
+    def test_graph_count_supabase_branch(self, fake, monkeypatch):
+        """C1 (#2110): the quota count source in Supabase mode =
+        1 (default, derived) + count(custom active). Deleted excluded;
+        missing graphs table (pre-C1 drift) degrades to default-only."""
+        from tortoise.sdk import TortoiseSDK
+        sdk = TortoiseSDK(db_path="unused")
+        # Force the Supabase branch (graph_count routes via
+        # is_supabase_enabled + get_control_plane).
+        monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "supabase")
+        monkeypatch.setattr(
+            "tortoise.supabase_control.get_control_plane", lambda: fake)
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        # default only → 1
+        assert sdk.graph_count("team-free-001") == 1
+        # default + 1 active custom; deleted excluded → 2
+        fake.seed("graphs", [{
+            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_abc123def4567890",
+            "status": "active",
+        }, {
+            "id": "g_deleted0000000", "team_id": "team-free-001",
+            "name": "old", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_deleted0000000",
+            "status": "deleted",
+        }])
+        assert sdk.graph_count("team-free-001") == 2
+        # drift: missing graphs table → default-only (count 1), no raise
+        fake2 = FakeControlPlane({"teams": [dict(FREE_TEAM)]})
+        fake2.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        monkeypatch.setattr(
+            "tortoise.supabase_control.get_control_plane", lambda: fake2)
+        assert sdk.graph_count("team-free-001") == 1
+
+    def test_graph_metadata_lists_custom_graphs_from_table(self, fake):
+        """C1 (#2110): custom graphs table rows (active) ride the seam after
+        the default — deleted rows excluded, missing table degrades to
+        default-only (D3 drift-safe)."""
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.seed("graphs", [{
+            "id": "g_abc123def4567890", "team_id": "team-free-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_abc123def4567890",
+            "status": "active",
+        }, {
+            "id": "g_deleted0000000", "team_id": "team-free-001",
+            "name": "old", "kind": "custom",
+            "namespace": "team_team-free-001_g_g_deleted0000000",
+            "status": "deleted",
+        }])
+        got = graph_metadata(fake, "team-free-001")
+        assert [g["graph_id"] for g in got] == [
+            "default", "g_abc123def4567890"]
+        assert got[1]["status"] == "active"
+        # drift: missing graphs table (pre-C1 schema) → default-only, no raise
+        fake2 = FakeControlPlane({"teams": [dict(FREE_TEAM)]})
+        fake2.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        assert graph_metadata(fake2, "team-free-001")[0]["graph_id"] == "default"
+
+    def test_graph_metadata_foreign_team_sees_own_rows_only(self, fake):
+        """C1 (#2110): another team's graphs don't leak into the list."""
+        fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
+        fake.seed("graphs", [{
+            "id": "g_otherteam0001", "team_id": "team-other-000",
+            "name": "theirs", "kind": "custom",
+            "namespace": "team_team-other-000_g_g_otherteam0001",
+            "status": "active",
+        }])
+        got = graph_metadata(fake, "team-free-001")
+        assert [g["graph_id"] for g in got] == ["default"]
 
     def test_seam_helpers_fail_closed(self):
         cp = ErrorControlPlane()
@@ -2131,3 +2325,170 @@ class TestIdentitySeam:
         assert owner_user_id(fake, "t-own") == "u-owner"
         assert owner_user_id(fake, "t-anon") is None  # anon owner → None
         assert owner_user_id(fake, "t-none") is None  # zero-owner → None
+
+
+# ── C2 (#2111): graph write + lifecycle seams ────────────────────────────────
+
+class TestGraphLifecycleSeam:
+    """Supabase-mode seams for the provisioning service: insert/delete/
+    soft-delete graph rows + graph-key counting + delete cascade source."""
+
+    def _seed_team(self, fake):
+        fake.seed("teams", [{
+            "id": "team-c2-001", "name": "C2 Team", "tier": "solo",
+            "max_graphs": 2, "graph_name": "team_team-c2-001",
+        }])
+
+    def test_insert_graph_writes_row(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000001", "team_id": "team-c2-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000001",
+            "status": "active", "recording": None,
+        })
+        rows = fake.query("graphs", select=["id", "name", "status"],
+                          filters=[("team_id", "eq", "team-c2-001")])
+        assert rows == [{"id": "g_c2test00000001", "name": "prod",
+                         "status": "active"}]
+
+    def test_soft_delete_tombstones_non_default(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000002", "team_id": "team-c2-001",
+            "name": "prod", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000002",
+            "status": "active", "recording": None,
+        })
+        assert soft_delete_graph(fake, "team-c2-001",
+                                 "g_c2test00000002") is True
+        rows = fake.query("graphs", select=["status"],
+                          filters=[("id", "eq", "g_c2test00000002")])
+        assert rows[0]["status"] == "deleted"
+
+    def test_soft_delete_unknown_returns_false(self, fake):
+        self._seed_team(fake)
+        assert soft_delete_graph(fake, "team-c2-001", "g_ghost00000000") is False
+
+    def test_delete_graph_row_rollback(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000003", "team_id": "team-c2-001",
+            "name": "rb", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000003",
+            "status": "active", "recording": None,
+        })
+        delete_graph_row(fake, "team-c2-001", "g_c2test00000003")
+        assert fake.query("graphs", select=["id"],
+                          filters=[("team_id", "eq", "team-c2-001")]) == []
+
+    def test_count_graph_keys_active_only(self, fake):
+        self._seed_team(fake)
+        insert_graph(fake, {
+            "id": "g_c2test00000004", "team_id": "team-c2-001",
+            "name": "keys", "kind": "custom",
+            "namespace": "team_team-c2-001_g_g_c2test00000004",
+            "status": "active", "recording": None,
+        })
+        fake.seed("api_keys", [
+            {"id": "k1", "team_id": "team-c2-001", "lookup_hash": "h1",
+             "graph_id": "g_c2test00000004", "revoked_at": None},
+            {"id": "k2", "team_id": "team-c2-001", "lookup_hash": "h2",
+             "graph_id": "g_c2test00000004",
+             "revoked_at": "2026-09-01T00:00:00Z"},
+            {"id": "k3", "team_id": "team-c2-001", "lookup_hash": "h3",
+             "graph_id": None, "revoked_at": None},
+        ])
+        assert count_graph_keys(fake, "team-c2-001",
+                                "g_c2test00000004") == 1  # k1 only
+        assert graph_key_ids(fake, "team-c2-001",
+                             "g_c2test00000004") == ["k1", "k2"]  # cascade all
+
+
+# ── C3 (#2112): key lifecycle seams ─────────────────────────────────────────
+
+class TestC3KeyLifecycleSeam:
+    """Supabase-mode seams for the C3 key lifecycle: scoped-row writes
+    (mint with C1 columns), list graph_id filter + tenancy columns, shrink
+    (set_api_key_scopes) reflected in api_key_by_id, and the api_keys cap
+    count."""
+
+    def _seed_team(self, fake):
+        fake.seed("teams", [{
+            "id": "team-c3-001", "name": "C3 Team", "tier": "pro",
+            "max_api_keys": 5, "graph_name": "team_team-c3-001",
+        }])
+
+    def _seed_graph(self, fake, gid="g_c3test00000001"):
+        fake.seed("graphs", [{
+            "id": gid, "team_id": "team-c3-001", "name": "acme",
+            "kind": "custom", "namespace": f"team_team-c3-001_g_{gid}",
+            "status": "active", "recording": None,
+        }])
+
+    def test_insert_scoped_key_row_round_trips(self, fake):
+        """Mint row carries the C1 columns (scopes/delegation/graph_id/
+        created_by_key_id) and api_key_by_id returns them."""
+        from tortoise.auth import lookup_hash
+        self._seed_team(fake)
+        self._seed_graph(fake)
+        token = "tk_c3test000000000000000001"
+        insert_api_key(fake, {
+            "id": "k-c3-1", "team_id": "team-c3-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": "user-1",
+            "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "name": "ci",
+            "graph_id": "g_c3test00000001",
+            "scopes": ["graphs:read", "graphs:write"],
+            "created_by_key_id": "parent-key", "delegation_depth": 0,
+        })
+        row = api_key_by_id(fake, "k-c3-1")
+        assert row["graph_id"] == "g_c3test00000001"
+        assert row["scopes"] == ["graphs:read", "graphs:write"]
+        assert row["delegation_depth"] == 0
+        assert row["created_by_key_id"] == "parent-key"
+        # list with the graph_id filter narrows.
+        rows = team_api_keys(fake, "team-c3-001", graph_id="g_c3test00000001")
+        assert [r["id"] for r in rows] == ["k-c3-1"]
+        rows_all = team_api_keys(fake, "team-c3-001")
+        assert len(rows_all) == 1
+
+    def test_team_api_keys_graph_filter_omits_unbound(self, fake):
+        """A team-wide key (graph_id null) is invisible under a graph filter."""
+        from tortoise.auth import lookup_hash
+        self._seed_team(fake)
+        token = "tt_c3test000000000000000002"
+        insert_api_key(fake, {
+            "id": "k-c3-2", "team_id": "team-c3-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": "user-1",
+            "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "name": None,
+            "graph_id": None, "scopes": [], "delegation_depth": None,
+            "created_by_key_id": None,
+        })
+        rows = team_api_keys(fake, "team-c3-001", graph_id="g_other000000")
+        assert rows == []
+        rows_all = team_api_keys(fake, "team-c3-001")
+        assert [r["id"] for r in rows_all] == ["k-c3-2"]
+
+    def test_set_api_key_scopes_shrinks_row(self, fake):
+        """set_api_key_scopes replaces the row's scopes (subset validated at
+        the endpoint) — api_key_by_id reflects the shrunken set."""
+        from tortoise.auth import lookup_hash
+        from tortoise.supabase_control import set_api_key_scopes
+        self._seed_team(fake)
+        token = "tk_c3test000000000000000003"
+        insert_api_key(fake, {
+            "id": "k-c3-3", "team_id": "team-c3-001",
+            "lookup_hash": lookup_hash(token), "key_prefix": token[:10],
+            "created_via": "provisioned", "created_by": "user-1",
+            "created_at": "2026-09-03T00:00:00Z", "revoked_at": None,
+            "expires_at": None, "name": None,
+            "graph_id": None, "scopes": ["graphs:read", "graphs:write"],
+            "delegation_depth": None, "created_by_key_id": None,
+        })
+        set_api_key_scopes(fake, "k-c3-3", ["graphs:read"])
+        row = api_key_by_id(fake, "k-c3-3")
+        assert row["scopes"] == ["graphs:read"]

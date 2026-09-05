@@ -20,7 +20,6 @@ self-contained fixtures.
 """
 from __future__ import annotations
 
-import contextlib
 import os
 
 import pytest
@@ -39,6 +38,7 @@ for _v in ("SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY", "SUPABASE_SERVICE_KEY",
 
 from tortoise.hosted_api import app  # noqa: E402, I001
 
+from tests._http_fixtures import patched_tortoise_sdk  # noqa: E402
 from tests.fake_control_plane import FakeControlPlane  # noqa: E402
 
 
@@ -49,38 +49,6 @@ def _oversized_chunked(n_chunks: int = 8, step: int = 8192):
     (256 B / 8192 B / 1024 B monkeypatched below)."""
     for _ in range(n_chunks):
         yield b"x" * step
-
-
-def _patch_sdk_init(monkeypatch, db_path: str):
-    """Route EVERY TortoiseSDK construction to one temp DB (embedded lane),
-    mirroring test_hosted_api._patch_tortoise_sdk_init. Teardown CLOSES the
-    _FALLBACK_KEEPALIVE anchors before clearing (the #1950 lesson: clearing
-    alone leaks the anchored redislite daemons — they stay alive until the
-    last connection is GC'd, tripping the CI redislite-orphan hygiene check)."""
-    import tortoise.hosted_api as ha_mod
-
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    @contextlib.contextmanager
-    def _manager():
-        monkeypatch.setattr(ha_mod.TortoiseSDK, "__init__", _patched)
-        ha_mod._FALLBACK_KEEPALIVE.clear()
-        try:
-            yield
-        finally:
-            app.dependency_overrides.clear()
-            for ns in list(ha_mod._FALLBACK_KEEPALIVE):
-                anchor = ha_mod._FALLBACK_KEEPALIVE.pop(ns, None)
-                if anchor is not None:
-                    try:  # noqa: SIM105
-                        anchor.close()
-                    except Exception:
-                        pass
-
-    return _manager()
 
 
 @pytest.fixture
@@ -94,7 +62,13 @@ def embedded_client(monkeypatch, tmp_path):
         monkeypatch.delenv(_v, raising=False)
     monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
     db_path = os.path.join(tmp_path, "sweep.db")
-    with _patch_sdk_init(monkeypatch, db_path), \
+    # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+    # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+    # clear at enter; pop-pin → restore __init__ → deterministic anchor
+    # close → clear overrides at exit. Its internal CM already closed the
+    # anchors at teardown (most helper-like local shape) — the helper adds
+    # the env pin + close-at-enter.
+    with patched_tortoise_sdk(db_path), \
             TestClient(app, raise_server_exceptions=False) as tc:
         yield tc
 
@@ -111,7 +85,8 @@ def supabase_client(monkeypatch, tmp_path):
                            "team_memberships": [], "invitations": []})
     monkeypatch.setattr(sc, "get_control_plane", lambda: cp)
     db_path = os.path.join(tmp_path, "oauth_sweep.db")
-    with _patch_sdk_init(monkeypatch, db_path), \
+    # #2127: shared helper (see embedded_client).
+    with patched_tortoise_sdk(db_path), \
             TestClient(app, raise_server_exceptions=False) as tc:
         yield tc
 

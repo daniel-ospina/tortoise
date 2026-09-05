@@ -121,6 +121,13 @@ class TestPhase1Phase2Parity:
                 "points": [{"ref": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
                             "kind": "statement", "content": "a"}],
             },
+            # #1553: prefixed entity ids (label[:3] + '-' + sha256[:26], e.g.
+            # sub-<hex26>) shadow existing nodes via refs.get(x, x) just like
+            # bare ULIDs — _is_entity_id covers both shapes.
+            "prefixed entity-id-shaped ref": {
+                "points": [{"ref": "sub-0123456789abcdef0123456789",
+                            "kind": "statement", "content": "a"}],
+            },
         }
         for name, bundle in cases.items():  # noqa: B007
             self._assert_both_phases(sdk, bundle)

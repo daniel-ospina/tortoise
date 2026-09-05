@@ -34,6 +34,7 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 from tortoise.auth import lookup_hash  # noqa: I001
 from tortoise.hosted_api import app, get_current_team, get_current_user
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import ErrorControlPlane, FakeControlPlane
 from tests.test_supabase_control import FREE_TEAM, TOKEN, _key_row, _membership_row  # noqa: F401
 
@@ -43,6 +44,13 @@ TEST_TEAM = {
     "team_id": "team-free-001",
     "key_id": "key-001",
     "tier": "free",
+    # C1/C2 tenancy fields (tt_ legacy-key resolution dict — deleg NULL,
+    # scopes [] → legacy_full_access owner class).
+    "graph_id": None,
+    "scopes": [],
+    "legacy_full_access": True,
+    "delegation_depth": None,
+    "created_by_key_id": None,
     "max_users": 1,
     "max_graphs": 1,
     "max_points": 10000,
@@ -112,34 +120,18 @@ def supabase_env(monkeypatch, fake) -> FakeControlPlane:
     return fake
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    import tortoise.hosted_api as ha_mod
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
 @pytest.fixture
 def client(monkeypatch, supabase_env, spy):
     """TestClient in Supabase mode with a temp embedded DB + registry spy."""
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "inv.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, supabase_env, spy
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces this file's local
+        # _patch_tortoise_sdk_init — the #1497 original).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, supabase_env, spy
 
 
 @pytest.fixture
@@ -794,26 +786,67 @@ class TestReconcile:
 # ── Graph surface: create_graph / list_graphs / list_my_teams ──────────────
 
 class TestGraphSurface:
+    """C2 (#2111) contract: POST /v1/graphs is the session alias of the ONE
+    provisioning service — free tier 402s (E2E-3 pin), the graphs row is
+    written in Supabase mode (C1 deferred the INSERT; C2 owns it), and the
+    list shape carries status/key_count (point_count dropped, §6.2)."""
+
     def _seed_default_graph(self, fake):
         """Real teams rows always carry graph_name (provision_team requires
         it) — the shared FREE_TEAM fixture predates the column."""
         fake.tables["teams"][0]["graph_name"] = "team_team-free-001"
 
-    def test_create_graph_no_registry_write(self, user_client):
-        """E5: _graph_create is env-gated in sdk.py — Supabase mode returns a
-        deterministic id without writing a registry Graph node."""
+    def test_create_graph_writes_row_supabase_mode(self, user_client):
+        """C2: the session alias writes the graphs row via the seam in
+        Supabase mode (the #765 no-persistence era is over — the graphs
+        table is the SOR). Uses a PRO team (free 402s per E2E-3)."""
         tc, fake, _ = user_client
+        self._seed_default_graph(fake)
+        fake.tables["teams"][0]["tier"] = "pro"
+        fake.tables["teams"][0]["max_graphs"] = None
         fake.seed("team_memberships", [_owner_membership()])
         r = tc.post("/v1/graphs", json={
             "team_id": "team-free-001", "name": "research"})
-        assert r.status_code == 200, r.text
+        assert r.status_code == 201, r.text
         body = r.json()
-        assert body["kind"] == "custom"
-        assert body["graph_name"].startswith("team_team-free-001_g_")
-        assert body["graph_id"].startswith("g_")
+        # The nested 201 envelope (additive for the dashboard caller)
+        assert body["graph"]["kind"] == "custom"
+        assert body["graph"]["namespace"].startswith("team_team-free-001_g_")
+        assert body["graph"]["id"].startswith("g_")
+        assert body["key_plaintext"].startswith("tk_")
+        assert body["revealed_once"] is True
+        # The row landed in Supabase (the seam write)
+        rows = fake.query("graphs", select=["id", "name", "status"],
+                          filters=[("team_id", "eq", "team-free-001")])
+        assert len(rows) == 1 and rows[0]["name"] == "research"
+        # The minted key records WHO minted — the session user UUID
+        # (#1511 attribution parity with create_api_key; not "api").
+        krows = fake.query("api_keys",
+                           select=["created_by", "created_by_key_id",
+                                   "delegation_depth", "graph_id",
+                                   "scopes"],
+                           filters=[("team_id", "eq", "team-free-001")])
+        assert len(krows) == 1
+        assert krows[0]["created_by"] == _USER1
+        assert krows[0]["created_by_key_id"] is None  # session mint
+        assert krows[0]["delegation_depth"] == 0
+        assert krows[0]["graph_id"] == body["graph"]["id"]
+        assert krows[0]["scopes"] == ["graphs:read"]  # safe default
 
-    def test_list_graphs_derives_default(self, user_client):
-        """E7: graph_list derives the default graph from teams.graph_name."""
+    def test_free_tier_402_blocks_custom(self, user_client):
+        """E2E-3 pin: free (max 1 — default fills the slot) → 402 upgrade
+        CTA, NOT a silent no-op 200 (the pre-C2 behavior)."""
+        tc, fake, _ = user_client
+        self._seed_default_graph(fake)
+        fake.seed("team_memberships", [_owner_membership()])
+        r = tc.post("/v1/graphs", json={
+            "team_id": "team-free-001", "name": "research"})
+        assert r.status_code == 402, r.text
+        assert "Upgrade" in r.json()["detail"]
+
+    def test_list_graphs_derives_default_and_key_count(self, user_client):
+        """E7/C2: list derives the default graph from teams.graph_name;
+        rows carry status + key_count; point_count dropped."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
         fake.seed("team_memberships", [_owner_membership()])
@@ -821,7 +854,9 @@ class TestGraphSurface:
         assert r.status_code == 200, r.text
         graphs = r.json()
         assert graphs == [{"graph_id": "default", "name": "default",
-                           "kind": "default", "point_count": 0}]
+                           "kind": "default", "status": "active",
+                           "recording": None,  # C6 #2115 read-back
+                           "key_count": 0}]
 
     def test_list_my_teams_uses_derived_graphs(self, user_client):
         """E6: team switcher — graph_count/default_graph_id come from the
@@ -837,30 +872,36 @@ class TestGraphSurface:
         assert rows[0]["graph_count"] == 1
         assert rows[0]["default_graph_id"] == "default"
 
-    def test_graph_quota_counts_default_graph(self, user_client):
-        """#765 quota paths: with the default graph derived from
-        teams.graph_name, free tier max_graphs=1 → a custom graph 402s (the
-        default occupies the slot). Without a graph_name (no default) the
-        count is 0 and custom graphs pass — the count comes from Supabase,
-        never the registry."""
+    def test_graph_quota_409_at_cap_solo(self, user_client):
+        """C2 quota gate: solo (max 2 — default + 1 custom) 201s the 1st
+        custom and 409s (X-Graph-Quota) on the 2nd. No graph_name → no
+        default → count 0 (the count comes from Supabase, never registry)."""
         tc, fake, _ = user_client
         self._seed_default_graph(fake)
+        fake.tables["teams"][0]["tier"] = "solo"
+        fake.tables["teams"][0]["max_graphs"] = 2
         fake.seed("team_memberships", [_owner_membership()])
-        r = tc.post("/v1/graphs", json={
+        # 1st custom: 2 of 2 reached → 201
+        r1 = tc.post("/v1/graphs", json={
             "team_id": "team-free-001", "name": "g1"})
-        assert r.status_code == 402, r.text
-        # no default graph → no slot occupied → custom graphs pass
-        fake.tables["teams"][0].pop("graph_name", None)
-        assert tc.post("/v1/graphs", json={
-            "team_id": "team-free-001", "name": "g1"}).status_code == 200
-        assert tc.post("/v1/graphs", json={
-            "team_id": "team-free-001", "name": "g2"}).status_code == 200
+        assert r1.status_code == 201, r1.text
+        # 2nd custom: at cap → 409 + X-Graph-Quota (not 402 — quota ≠ tier)
+        r2 = tc.post("/v1/graphs", json={
+            "team_id": "team-free-001", "name": "g2"})
+        assert r2.status_code == 409, r2.text
+        assert r2.headers.get("X-Graph-Quota") == "2/2"
 
     def test_never_touches_registry(self, user_client, spy):
+        """#765 gate preserved: Supabase-mode writes go to the graphs table
+        (fake control plane), never the registry graph."""
         tc, fake, _ = user_client
+        self._seed_default_graph(fake)
+        fake.tables["teams"][0]["tier"] = "pro"
+        fake.tables["teams"][0]["max_graphs"] = None
         fake.seed("team_memberships", [_owner_membership()])
         assert tc.post("/v1/graphs", json={
-            "team_id": "team-free-001", "name": "research"}).status_code == 200
+            "team_id": "team-free-001",
+            "name": "research"}).status_code == 201
         assert tc.get("/v1/graphs?team_id=team-free-001").status_code == 200
         assert tc.get("/v1/teams").status_code == 200
         spy.assert_clean()

@@ -8,13 +8,16 @@ tortoise host; both hosts share the premise-labs Pages project).
 Two test groups:
 1. Static/live tests — no Supabase session needed:
    - page loads, shows loading state then the no-session error
-   - the canonical prompt URL serves markdown (PROMPT_URL contract)
+   - the live tortoise-onboarding skill mirror serves markdown
+     (ONBOARDING_SKILL_URL contract — #1998 superseded the retired
+     onboarding-prompt.md URL; see the module constant comment)
 2. Mocked-session tests — drive the success state (harness tabs, copy
    buttons, MCP config JSON) by intercepting Supabase REST calls. These
    verify the welcome page v2 UI without needing real credentials.
 
 Run:  python -m pytest tests/e2e/ -q
 Env:   WELCOME_URL overrides the target (default https://tortoise.premiselabs.co/welcome)
+       ONBOARDING_SKILL_URL overrides the onboarding-skill target
        SUPABASE_URL/SUPABASE_SERVICE_KEY enable the live no-429 signup smoke
        (skipped by default — no creds in CI; see #801).
 
@@ -38,7 +41,20 @@ from playwright.sync_api import Page, expect
 # Canonical host for the auth surface is tortoise.premiselabs.co (host
 # consolidation 2026-08-17: premiselabs.co 301s /welcome → the tortoise host).
 WELCOME_URL = os.environ.get("WELCOME_URL", "https://tortoise.premiselabs.co/welcome")
-PROMPT_URL = os.environ.get("PROMPT_URL", "https://premiselabs.co/onboarding-prompt.md")
+# The canonical onboarding artifact is the tortoise-onboarding skill mirror
+# (app.premiselabs.co/skills/tortoise-onboarding/SKILL.md) — W2 #1998 archived
+# the AGENT_ONBOARDING.md prompt pipeline (stage_variants.py -> website/
+# onboarding-prompt.md) under tortoise/onboarding/archive/ (M8: one live
+# onboarding script; deployed mirror byte-identical by test). The old
+# premiselabs.co/onboarding-prompt.md URL is retired: no deployment has staged
+# it since #2161 (2026-09-03) and requests fall through to the Pages HTML
+# fallback — the live-signup monitor failures #2171/#2187/#2190/#2191 were this
+# static assertion against the retired URL, masked intermittently by a stale
+# CDN cache entry (this module's e2e was the consumer the M8 sweep missed).
+ONBOARDING_SKILL_URL = os.environ.get(
+    "ONBOARDING_SKILL_URL",
+    "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md",
+)
 
 
 
@@ -53,15 +69,19 @@ def test_welcome_page_no_session_redirects_to_auth(page: Page) -> None:
     expect(page).to_have_url(re.compile(r"/auth($|\?|#)"), timeout=25_000)
 
 
-def test_onboarding_prompt_serves_markdown(page: Page) -> None:
-    """The canonical onboarding prompt (#540) must be fetchable as markdown —
-    this is the onboarding-prompt URL."""
-    resp = page.request.get(PROMPT_URL, timeout=15_000)
-    assert resp.ok, f"prompt URL returned {resp.status}"
+def test_onboarding_skill_serves_markdown(page: Page) -> None:
+    """The live tortoise-onboarding skill (#1998) must be fetchable as
+    markdown from the deployed dashboard mirror — the onboarding artifact URL
+    the CLI prints after `tortoise onboard` (#544, repointed by #1998)."""
+    resp = page.request.get(ONBOARDING_SKILL_URL, timeout=15_000)
+    assert resp.ok, f"skill URL returned {resp.status}"
     assert "text/markdown" in (resp.headers.get("content-type") or "")
     body = resp.text()
-    assert body.startswith("# Tortoise Onboarding"), "unexpected prompt body"
-    assert "Q1" in body and "Q6" in body, "prompt missing question set"
+    assert body.startswith("---"), "unexpected skill body (frontmatter missing)"
+    assert "name: tortoise-onboarding" in body, "unexpected skill body (frontmatter name)"
+    assert "tortoise_health" in body and "harness-connected" in body, (
+        "skill missing canonical content markers"
+    )
 
 
 def test_mcp_endpoint_rejects_unauthenticated(page: Page) -> None:
@@ -148,12 +168,18 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
     email_confirm=true — NO confirmation email is sent). The POST must return
     200 — NOT 429 (over_email_send_rate_limit / per-IP register buckets) —
     then the page auto-signs-in (auth/v1/token?grant_type=password) and
-    redirects to /welcome.
+    redirects to the app root (signup.html:536 WELCOME_URL =
+    https://app.premiselabs.co — #1566: the post-auth destination for the
+    SIGNUP flow is the CROSS-SITE app root, where first-timers are
+    provisioned in welcome mode). (The login path still transits legacy
+    /welcome.html — signin.html:366 — which bounces signed-in users to the
+    app root; this monitor drives signup only.)
 
-    The /welcome navigation is route-blocked: a live key-reveal there would
-    mint an un-deletable prod team + api_keys row + FalkorDB graph (no
-    cleanup endpoint in-repo) — the monitor only needs the signup + auto
-    sign-in to succeed.
+    The app-origin navigation is route-blocked: a live landing on the app
+    root would run the #1566 welcome-mode provisioning and mint an
+    un-deletable prod team + api_keys row + FalkorDB graph (no cleanup
+    endpoint in-repo) — the monitor only needs the signup + auto sign-in to
+    succeed, and the intercepted navigation still proves the redirect fired.
 
     Teardown deletes the created auth user via the Admin API (best-effort;
     the FK cascade removes the placeholder team_memberships row)."""
@@ -168,12 +194,19 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             token["status"] = resp.status
 
     page.on("response", _on_response)
-    # #801: the account is created pre-confirmed, so the page redirects to
-    # /welcome — block it so the welcome page's provisioning never runs.
+    # #1566: the account is created pre-confirmed, so the SIGNUP flow
+    # redirects to the APP ROOT (signup.html WELCOME_URL =
+    # https://app.premiselabs.co) — block that origin so the app's
+    # welcome-mode provisioning (prod team + api_keys row + FalkorDB graph
+    # mint) never runs against prod. (The legacy /welcome stub is dead for
+    # THIS flow: the signup path navigates straight cross-site;
+    # tortoise.premiselabs.co/welcome is only reached via the login path,
+    # which this monitor never drives.)
     page.route(
-        "**/welcome*",
+        "**://app.premiselabs.co/**",
         lambda route: route.fulfill(
-            status=200, content_type="text/html", body="<html><body>ok</body></html>"
+            status=200, content_type="text/html",
+            body="<html><body>LIVE-SIGNUP-ROUTE-BLOCKED</body></html>",
         ),
     )
     email = f"e2e-live-{uuid.uuid4().hex[:8]}@premise-labs.dev"
@@ -205,9 +238,17 @@ def test_live_signup_no_429_confirmation_required(page: Page) -> None:
             page.wait_for_timeout(250)
         assert token["status"] is not None, "no auto sign-in (auth/v1/token) response observed"
         assert token["status"] == 200, f"auto sign-in returned {token['status']}"
-        # The flow redirects to /welcome (route-blocked stub above) — the
-        # redirect itself is the user-visible success state of #801.
-        page.wait_for_url("**/welcome*", timeout=15_000)
+        # The flow redirects to the app root (route-blocked stub above) —
+        # the redirect itself is the user-visible success state of #801.
+        page.wait_for_url("**://app.premiselabs.co/**", timeout=15_000)
+        # Fail-closed tripwire (#2140 review): the URL match alone proves
+        # nothing — it passes whether the stub served the app-origin page or
+        # the REAL app loaded (which would run #1566 welcome-mode
+        # provisioning against prod). Assert the stub's unique marker so a
+        # glob under-match (host drift, www/port variant) fails the monitor
+        # instead of silently re-minting prod state.
+        expect(page.locator("body")).to_contain_text(
+            "LIVE-SIGNUP-ROUTE-BLOCKED", timeout=5_000)
         assert "email=" not in page.url and "password=" not in page.url, (
             f"credentials echoed into URL: {page.url}"
         )

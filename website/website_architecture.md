@@ -153,7 +153,7 @@ The user-approved end state for the auth/marketing surfaces:
 
 `.github/workflows/deploy-pages.yml` (on push to main touching `website/**`):
 
-1. **deploy** — stages onboarding variants, syncs DNS, deploys
+1. **deploy** — verifies the onboarding skill mirror, syncs DNS, deploys
    `website/` → Pages project `premise-labs`
 2. **deploy-dashboard** — `npm ci && npm run build` in
    `website/apps/dashboard`, deploys `dist/` → Pages project

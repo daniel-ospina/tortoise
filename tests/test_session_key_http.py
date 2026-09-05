@@ -32,6 +32,7 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.auth import hash_api_key, verify_api_key  # noqa: F401
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
@@ -48,32 +49,6 @@ _U2 = "9f2c1a40-0000-4a00-8000-000000000002"
 # ── Fixtures ─────────────────────────────────────────────────────────────────
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make TortoiseSDK use a temp db_path when constructed without one."""
-    import tortoise.hosted_api as ha_mod
-
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    # Break the _make_sdk embedded fallback anchor (#1470): _FALLBACK_KEEPALIVE
-    # is module-level and survives test files, so an anchored SDK bound to a
-    # PREVIOUS test's temp DB leaks state into this test (the anchor's socket
-    # dies when that tempdir is removed → redis.socket ConnectionError, or the
-    # previous graph's rows appear in the "fresh" temp DB). Clear it so
-    # _make_sdk re-binds to THIS test's temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig_init
-
-
-def _restore_tortoise_sdk_init(original_init):
-    import tortoise.hosted_api as ha_mod
-
-    ha_mod.TortoiseSDK.__init__ = original_init
-
-
 @pytest.fixture
 def client():
     """TestClient with get_current_user (session JWT) overridden + temp DB.
@@ -88,18 +63,22 @@ def client():
             "user_id": _U1,
             "email": "owner@example.com",
         }
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
-            while _REG_SDKS:
-                try:  # noqa: SIM105
-                    _REG_SDKS.pop().close()
-                except Exception:
-                    pass
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch/_restore_tortoise_sdk_init copies). The _REG_SDKS hold +
+        # close stay here (direct SDK constructions, not keepalive anchors).
+        with patched_tortoise_sdk(db_path):
+            try:
+                with TestClient(app) as tc:
+                    yield tc
+            finally:
+                while _REG_SDKS:
+                    try:  # noqa: SIM105
+                        _REG_SDKS.pop().close()
+                    except Exception:
+                        pass
 
 
 # ── Registry seeding helpers ─────────────────────────────────────────────────

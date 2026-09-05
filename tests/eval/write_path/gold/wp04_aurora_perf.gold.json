@@ -1,0 +1,259 @@
+{
+  "attribution_hazards": [
+    {
+      "id": "wp04_aurora_perf_h_01",
+      "planted_turn": 15,
+      "quote": "he flagged the sidebar as a risk in the design review",
+      "source": "priya"
+    },
+    {
+      "id": "wp04_aurora_perf_h_02",
+      "planted_turn": 19,
+      "quote": "the number we promised the account teams",
+      "source": "priya"
+    }
+  ],
+  "distractor_leakage_tolerance": 1,
+  "distractors": [
+    {
+      "anchor": "the ramen place was great",
+      "id": "wp04_aurora_perf_d_01",
+      "planted_turn": 3,
+      "statement": "Routine aside thanking for a lunch recommendation."
+    },
+    {
+      "anchor": "the notes were thorough",
+      "id": "wp04_aurora_perf_d_02",
+      "planted_turn": 15,
+      "statement": "Routine note about a long design review."
+    }
+  ],
+  "planted_units": [
+    {
+      "depth_bucket": "early",
+      "id": "wp04_aurora_perf_u_01",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 1,
+      "verbatim_anchor": "it hit 4.2 seconds yesterday afternoon"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp04_aurora_perf_u_02",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 3,
+      "verbatim_anchor": "The spike correlates with the October 5 release"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp04_aurora_perf_u_03",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 5,
+      "verbatim_anchor": "a page with forty rows issues forty separate calls"
+    },
+    {
+      "depth_bucket": "early",
+      "id": "wp04_aurora_perf_u_04",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 5,
+      "verbatim_anchor": "The N+1 embedding calls are what blew up the p95"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp04_aurora_perf_u_05",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 7,
+      "verbatim_anchor": "batch the lookup into a single call per page"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp04_aurora_perf_u_06",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 9,
+      "verbatim_anchor": "cache the embedding results in memory with a ten minute TTL"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp04_aurora_perf_u_07",
+      "kind": "idea",
+      "notability": "medium",
+      "planted_turn": 9,
+      "verbatim_anchor": "refresh them ahead of the next view"
+    },
+    {
+      "depth_bucket": "middle",
+      "id": "wp04_aurora_perf_u_08",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 11,
+      "verbatim_anchor": "forty thousand load requests per day"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp04_aurora_perf_u_09",
+      "kind": "decision",
+      "notability": "high",
+      "planted_turn": 13,
+      "verbatim_anchor": "ship this behind a flag"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp04_aurora_perf_u_10",
+      "kind": "entity",
+      "notability": "high",
+      "planted_turn": 15,
+      "verbatim_anchor": "Felix runs the dashboard perf review"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp04_aurora_perf_u_11",
+      "kind": "idea",
+      "notability": "high",
+      "planted_turn": 17,
+      "verbatim_anchor": "Invalidate the cache entry for a team whenever a write lands"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp04_aurora_perf_u_12",
+      "kind": "fact",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "gets the p95 back under 800 milliseconds"
+    },
+    {
+      "depth_bucket": "late",
+      "id": "wp04_aurora_perf_u_13",
+      "kind": "vibe",
+      "notability": "high",
+      "planted_turn": 19,
+      "verbatim_anchor": "glad we finally measured it, the dashboard has been getting slower for months"
+    }
+  ],
+  "salient_units": [
+    {
+      "id": "wp04_aurora_perf_u_01",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "it hit 4.2 seconds yesterday afternoon"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_02",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "The spike correlates with the October 5 release"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_03",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "a page with forty rows issues forty separate calls"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_04",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "The N+1 embedding calls are what blew up the p95"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_05",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "batch the lookup into a single call per page"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_06",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "cache the embedding results in memory with a ten minute TTL"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_07",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "refresh them ahead of the next view"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_08",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "forty thousand load requests per day"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_09",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "ship this behind a flag"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_10",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Felix runs the dashboard perf review"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_11",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "Invalidate the cache entry for a team whenever a write lands"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_12",
+      "survival": {
+        "accepts_rephrase_linked": false,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "gets the p95 back under 800 milliseconds"
+      }
+    },
+    {
+      "id": "wp04_aurora_perf_u_13",
+      "survival": {
+        "accepts_rephrase_linked": true,
+        "ep_update_required": true,
+        "provenance_required": true,
+        "via_anchor": "glad we finally measured it, the dashboard has been getting slower for months"
+      }
+    }
+  ],
+  "scenario": "Priya investigates aurora (customer dashboard) latency regressions: N+1 embedding calls behind the p95 spike, fixed with a bounded cache and a batch lookup.",
+  "schema_version": 1,
+  "session_id": "wp04_aurora_perf"
+}

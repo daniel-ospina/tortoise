@@ -41,10 +41,10 @@ os.environ.setdefault("RATE_LIMIT_DISABLED", "1")
 import pytest  # noqa: I001
 from fastapi.testclient import TestClient
 
-import tortoise.hosted_api as ha_mod
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM,
@@ -72,23 +72,11 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
     return cp
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make hosted_api's TortoiseSDK use a temp embedded DB (mirrors
-    test_export_delete) so registry/team reads don't touch prod."""
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
-def _restore_sdk_init(_orig):
-    ha_mod.TortoiseSDK.__init__ = _orig
-    app.dependency_overrides.clear()
-
+# #2127: local _patch_tortoise_sdk_init/_restore_sdk_init copies
+# superseded by the shared tests._http_fixtures.patched_tortoise_sdk helper
+# (patch → temp DB, #1950 pin, close-then-clear at enter; pop-env → restore
+# → deterministic close → clear overrides at exit). The old restore cleared
+# WITHOUT closing anchors — the #1950 leak the helper fixes.
 
 @pytest.fixture
 def sb_client(monkeypatch):
@@ -99,12 +87,8 @@ def sb_client(monkeypatch):
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "susp.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, fake, db_path
-        finally:
-            _restore_sdk_init(_orig)
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, fake, db_path
 
 
 @pytest.fixture
@@ -184,12 +168,8 @@ def reg_client(monkeypatch):
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "susp-reg.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
-        finally:
-            _restore_sdk_init(_orig)
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, db_path
 
 
 def _assert_suspended(r):
@@ -216,6 +196,26 @@ class TestSuspendedTeamLockdown:
         as_user()
         r = tc.get(f"/v1/graphs?team_id={TEAM_ID}")
         _assert_suspended(r)
+
+    def test_delete_graph_403_suspended(self, sb_client, as_user):
+        """C2 delete lifecycle: a suspended team 403s on DELETE before any
+        graph resolution (authz-first — the team check precedes the kind
+        lookup, so even an unknown gid on a suspended team is SUSPENDED,
+        never 404: no existence oracle)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=True)
+        as_user()
+        import tortoise.hosted_api as ha_mod
+        team_dict = {"team_id": TEAM_ID, "tier": "free", "key_id": None,
+                     "session_user_id": OWNER}
+        app.dependency_overrides[ha_mod.get_current_team_session] = \
+            lambda: dict(team_dict)
+        try:
+            r = tc.delete(f"/v1/graphs/g_doesnotexist?team_id={TEAM_ID}")
+            _assert_suspended(r)
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_team_session,
+                                         None)
 
     def test_list_my_teams_403(self, sb_client, as_user):
         """#1912 regression: EVERY membership suspended → nothing healthy to
@@ -421,12 +421,76 @@ class TestHealthyTeamControl:
     """Control: the same seams must NOT block healthy teams (regression)."""
 
     def test_create_graph_still_works(self, sb_client, as_user):
+        """#1853: a healthy team can still create graphs. Suspension is
+        checked FIRST (before the tier gate — load-bearing: a suspended
+        FREE team must 403 SUSPENDED, not 402, per TestSuspendedTeamLockdown);
+        a healthy PRO team is used here so the free tier's 402 gate is not
+        in play and the success path is what's asserted."""
         tc, fake, _ = sb_client
         _seed_team(fake, suspended=False)
+        fake.tables["teams"][0]["tier"] = "pro"
+        fake.tables["teams"][0]["max_graphs"] = None
         as_user()
         r = tc.post("/v1/graphs", json={"team_id": TEAM_ID, "name": "g1"})
-        assert r.status_code == 200, r.text
-        assert r.json()["graph_id"]
+        assert r.status_code == 201, r.text
+        assert r.json()["graph"]["id"]
+
+    def test_delete_graph_session_owner_204(self, sb_client, as_user):
+        """C2 session face (E2E-8): an OWNER session user can delete a
+        custom graph. The delete endpoint resolves the session via
+        get_current_team_session (the key-only dependency would 401 an eyJ
+        token at the format gate) — the session team dict carries
+        session_user_id, which the endpoint reads for the role check."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False)
+        fake.tables["teams"][0]["tier"] = "pro"
+        fake.tables["teams"][0]["max_graphs"] = None
+        as_user()
+        r = tc.post("/v1/graphs", json={"team_id": TEAM_ID, "name": "g1"})
+        assert r.status_code == 201, r.text
+        gid = r.json()["graph"]["id"]
+        # Session-authed delete: override get_current_team_session (the
+        # established dual-auth session pattern — the dep dict carries
+        # session_user_id, set by the real dependency's JWT lane).
+        import tortoise.hosted_api as ha_mod
+        team_dict = {"team_id": TEAM_ID, "tier": "pro", "key_id": None,
+                     "session_user_id": OWNER}
+        app.dependency_overrides[ha_mod.get_current_team_session] = \
+            lambda: dict(team_dict)
+        try:
+            r = tc.delete(f"/v1/graphs/{gid}?team_id={TEAM_ID}")
+            assert r.status_code == 204, r.text
+            rows = fake.query("graphs", select=["status"],
+                              filters=[("id", "eq", gid)])
+            assert rows[0]["status"] == "deleted"
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_team_session,
+                                         None)
+
+    def test_delete_graph_session_member_403(self, sb_client, as_user):
+        """C2 session face: a MEMBER session user 403s on delete (owner/
+        admin only — parity with the key face's graphs:delete requirement)."""
+        tc, fake, _ = sb_client
+        _seed_team(fake, suspended=False, role="member")
+        fake.tables["teams"][0]["tier"] = "pro"
+        fake.tables["teams"][0]["max_graphs"] = None
+        as_user()
+        r = tc.post("/v1/graphs", json={"team_id": TEAM_ID, "name": "g1"})
+        # A member CAN create (pre-existing E5 gates on membership only,
+        # D12) — but cannot delete.
+        assert r.status_code == 201, r.text
+        gid = r.json()["graph"]["id"]
+        import tortoise.hosted_api as ha_mod
+        team_dict = {"team_id": TEAM_ID, "tier": "pro", "key_id": None,
+                     "session_user_id": OWNER}
+        app.dependency_overrides[ha_mod.get_current_team_session] = \
+            lambda: dict(team_dict)
+        try:
+            r = tc.delete(f"/v1/graphs/{gid}?team_id={TEAM_ID}")
+            assert r.status_code == 403, r.text
+        finally:
+            app.dependency_overrides.pop(ha_mod.get_current_team_session,
+                                         None)
 
     def test_list_my_teams_still_works(self, sb_client, as_user):
         tc, fake, _ = sb_client

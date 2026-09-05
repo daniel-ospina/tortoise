@@ -1,18 +1,28 @@
 ---
-title: "Tortoise — Canonical Ontology v3.6"
+title: "Tortoise — Canonical Ontology v3.9"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-08-11
+updated: 2026-09-02
 ownedBy: epistemic-team
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.6
+# Tortoise — Canonical Ontology v3.9
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
+>
+> **Changelog v3.9 (2026-09-02, issue #2101 / epic #2080 — §5 response-contract vocabulary, W4 why-layer DM-12):**
+> - §5: new Response-Contract Vocabulary section — additive response-contract
+>   labels (dig_deeper kinds/labels, why-block sections, conflict severity,
+>   degraded_reason), NOT new entity kinds. Registered so the W4 why-block
+>   assembly (tortoise/why.py) and the S6 contract test share one vocabulary
+>   (S15 schema-correctness review prevents drift).
+> - §5: conflict severity boundary pinned — `high` when the counter-claim's
+>   persisted EP mean ≥ 0.6, else `medium` (repo-wide high-confidence bar,
+>   analyze.py consensus pattern).
 >
 > **Changelog v3.8 (2026-08-13, issue #388 — connector Source nodes):**
 > - §3.4: connector events (GitHub/Linear/Slack poll + webhook + entity paths)
@@ -119,12 +129,12 @@ Each layer answers a different question. All four are live mechanisms.
 | **Semantic** | Who/what exists? | Subject, Object (incl. Document), Source | Nouns. Standing structural relations (owns, memberOf, hasPart) via plain edges. |
 | **Epistemic** | What do we believe and why? | Point, Operator (IMPL/NAND + label + EP confidence) | Operators connect epistemic targets (Event→Point, Point→Event, Point→Point). Belief strength = EP confidence, computed by propagation. **Point→Event operators are recorded argumentation annotations — write-only in v1, no EP propagation; decision semantics remain on the Event timeline; decisions stay non-first-class Points.** |
 | **Episodic** | What happened when? | Event | Verbs. Append-only, timestamped. Reified middle node: (Subject)-[performs]->(Event)-[produces]->(Object). |
-| **Procedural** | What is the current state of work? | Event + projected status on Object | **Status is derived, not stored.** An Object's status (in_progress, completed, failed) is projected at query time from its event stream — the events are the truth, the status is a read-only projection. |
+| **Procedural** | What is the current state of work? | Event + folded Object status | **Object.status is a write-through cache of lifecycle events** (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — the journal/event stream is the truth (§11), status is a performance cache, non-monotone across writers (#2193). |
 
 > **State-centric model (core hypothesis, 2026-08-12 — the graph stores STATE, not decisions):**
 > The record is three layers. **State** — Objects/options carry their lifecycle
 > (promoted/deprecated/superseded — the Episodic layer's events are the truth;
-> status is a read-only projection) and their **confidence** (derived from the
+> status is a fold cache over the events — never the truth itself) and their **confidence** (derived from the
 > attached Points). **Points** — the logic: statements (pointKind `statement` —
 > the only extraction point kind; hypothesis folded into confidence) connected
 > to the state they argue about (aboutObject); IMPL/NAND/MITIGATES among them
@@ -344,7 +354,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | `name` | string | ✅ | `schema:name` | ⚠️ | Human-readable name (`_upsert_object` writes `title`; `name` aliased) |
 | `objectKind` | string | ✅ | — | ✅ | Project, WorkItem, document, user, skill, tool, agent, workflow, agreement, standard, other + pack objectKinds |
 | `title` | string | — | `dc:title` | ✅ | Display title (what `_upsert_object` actually stores) |
-| `status` | string | — | `pav:status` | ❌ | Projected from event stream (in_progress, completed, failed) — **derived at query time, NOT stored** |
+| `status` | string | — | `pav:status` | ✅ | Write-through cache of lifecycle events (ObjectRegistered→live; ObjectSuperseded→superseded + `supersededBy`; connector work-item events→in_progress/completed) — **the event stream is the truth (§11 cache doctrine); the property is a performance cache, non-monotone across writers (#2193)** |
 | `createdAt` | ISO8601 | ✅ | `dc:created` | ✅ | Timestamp (set ON CREATE) |
 | `updatedAt` | ISO8601 | — | `dc:modified` | ❌ | **Not written by `_upsert_object`** — planned follow-up |
 | `passes_frequency_gate` | bool | — | — | ❌ | S5 frequency-gate result flag — false entities are still written, flagged (registered #909 §4.3 #12; planned for the capture path, slice 5+) |
@@ -415,7 +425,7 @@ About edges: `aboutSubject`, `aboutObject`, `aboutEvent`, `aboutPoint`, `aboutDo
 | name/title | — | name | name | title | — | title |
 | createdAt | ✅ | ✅ | ✅ | ✅ | ✅ startedAt | ✅ ingestedAt |
 | updatedAt | ✅ | ❌ | ❌ | ✅ | — | ✅ |
-| status | status | ❌ (planned) | ❌ (projected, not stored) | doc_status | — | — |
+| status | status | ❌ (planned) | ✅ (fold cache — event-derived) | doc_status | — | — |
 | responsibility | authoredBy | — | edge (§3.5) | — | — | — |
 | ownership | — | — | edge (§3.5) | — | — | — |
 | management | — | — | edge (§3.5) | — | — | — |
@@ -472,7 +482,7 @@ occurrence, turn    # state-centric (2026-08-12): occurrence = generic extracted
 > TIMELINE record of a commitment (the resolution is expressed as lifecycle
 > writes on the state objects); `occurrence` covers extracted happenings;
 > `turn` covers capture turn records. The Episodic layer is the truth for
-> lifecycle: Object status is projected from its event stream (§2).
+> lifecycle: Object status is a fold cache over its event stream — never authoritative on its own (§2).
 
 > **#909 §4.3 #1:** `AgentSession` (EXACT code spelling — capital A; sdk.py `ingest_corpus`/session_indexer.py) is the canonical kind for session-capture Events; `sessionCaptured` (the core kind written by the regex capture path) is an **alias of the same concept** — both remain valid kinds, **no migration**.
 
@@ -508,6 +518,22 @@ T0 (meta-analysis), T1 (peer-reviewed), T2 (expert), T3 (anecdotal), T4 (unverif
 > **Expansion-pack kinds live in the packs, not here.** Pack-declared kinds (dev:epic, product-strategy:product, etc.) are defined in their pack manifests (§9) and registered at load time via the pack registry. This file documents only the core vocabulary; it is not the home for pack kinds.
 
 > **#909 §4.3 #6:** `sourceKind: agentSession` is a registered source-type VALUE (the four-node capture model's session Source — the provenance bridge — carries it; the value belongs to the extensible sourceKind vocabulary above, alongside github_issue/slack_message/linear_card/…). Credibility-tier inheritance is keyed on **sourceKind** (#398): the tier resolves via the kind's registered tier default (`register_source_kind_default`) or an explicit `credibilityTier` assignment; unregistered kinds stay neutral (no inheritance).
+
+### Response-Contract Vocabulary (W4 why-layer, #2101 / epic #2080 DM-12)
+
+Additive response-contract labels — NOT new entity kinds. Registered so the
+W4 why-block assembly and the S6 contract test share one vocabulary (vocabulary
+drift is prevented by the S15 schema-correctness review).
+
+```
+dig_deeper kinds   supports | nand | superseded | tradeoff     # dig_deeper[k].kind (deterministic labels, never LLM prose)
+dig_deeper labels  read supports · read the counterargument (NAND)
+                   · see what changed · weigh the alternatives  # derived from kind + target verb phrases (UXD 4)
+why-block sections why · conflicts · supersession · tradeoffs · dig_deeper · warnings   # enriched-item additive keys (§3.1.1/§6.1)
+conflict severity  high | medium                                # deterministic from the counter-claim's persisted EP mean
+                                                               # high ⟺ mean ≥ 0.6 (repo high-confidence bar); else medium
+degraded_reason    timeout | assembly_error | breaker_open      # degradations only; clean empty = null + empty arrays (§3.1.3)
+```
 
 ### Point Status Vocabulary (canonical, #432/#690)
 
@@ -701,7 +727,7 @@ Evidence aging is **user-configurable with a light default** — NOT blunt time 
 When an evidence source's confidence changes, downstream propositions that
 depend on it through operator chains are **re-evaluated, not stored-flagged**.
 Invalidation is a *derived* cascade — consistent with the ontology's
-"status is derived, not stored" principle (§2, §11):
+"Object.status is a cache of the event stream, never authoritative" doctrine (§2, §11):
 
 ```
 supersede_point / invalidate_point          (§3.1: mark old outdated:true,

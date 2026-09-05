@@ -1,0 +1,31 @@
+{
+  "per_turn": [
+    {
+      "pointers": [
+        "pt_lumen_boundary",
+        "pt_lumen_test_strategy"
+      ],
+      "should_retrieve": true,
+      "turn": 1
+    },
+    {
+      "should_retrieve": false,
+      "turn": 2
+    },
+    {
+      "pointers": [
+        "pt_lumen_boundary",
+        "pt_lumen_test_strategy"
+      ],
+      "should_retrieve": true,
+      "turn": 3
+    },
+    {
+      "should_retrieve": false,
+      "turn": 4
+    }
+  ],
+  "schema_version": 1,
+  "session_id": "push01_lumen_decisions",
+  "suite": "push"
+}

@@ -932,6 +932,42 @@ class TestS5:
         result = v2.execute_embed(embed, search, session_id="s1")
         assert result["supersessions"][0]["superseded"] == "obj-old"
 
+    def test_superseded_lifecycle_with_ref_warns_never_guesses(self):
+        """Final-review P2 (#2164): an OLD entity emitted lifecycle='superseded'
+        with supersedes=<its replacement> is direction-ambiguous — recording
+        it would INVERT (superseded=<the LIVE replacement>, supersedes_by=<the
+        old name>) and capture would fold the live successor to superseded,
+        hiding it from recall_state. Never-guess: warn and record nothing;
+        the canonical shape is the NEW entity with lifecycle='created' +
+        supersedes=<old>."""
+        search = {"entities": [
+            {"id": "obj-old", "name": "strategy-A",
+             "kind": "core:strategy"},
+            {"id": "obj-new", "name": "strategy-B",
+             "kind": "core:strategy"},
+        ], "points": [], "events": []}
+        embed = {"entities": [
+            {"name": "strategy-A", "kind": "core:strategy",
+             "lifecycle": "superseded", "supersedes": "strategy-B",
+             "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        result = v2.execute_embed(embed, search, session_id="s1")
+        assert result["supersessions"] == [], (
+            "superseded-with-ref must never form a record — the ref target "
+            "is the LIVE successor; the record would invert the fold")
+        assert any("lifecycle='superseded' with supersedes" in w
+                   and "never-guess" in w for w in result["warnings"])
+        # canonical shape (NEW entity lifecycle='created' + ref) still records
+        embed["entities"] = [
+            {"name": "strategy-B", "kind": "core:strategy",
+             "lifecycle": "created", "supersedes": "strategy-A",
+             "note": None}]
+        result2 = v2.execute_embed(embed, search, session_id="s1")
+        assert result2["supersessions"] == [{
+            "superseded": "obj-old", "supersedes_by": "strategy-B",
+            "evidence": "entity lifecycle supersedes (conversation-driven)"}]
+
     def test_unresolvable_supersedes_warns_no_record(self):
         """#1386: a supersedes ref that matches nothing in S3 warns and is
         NOT recorded (never guess a graph id)."""
@@ -958,6 +994,22 @@ class TestS5:
         out = v2.derive_supersessions(embed, search)
         assert out == [{"superseded": "obj-old", "supersedes_by": "strategy-B",
                         "evidence": "entity lifecycle supersedes (conversation-driven)"}]
+        # never-guess parity with execute_embed's collection: a 'superseded'
+        # entity carrying a ref (the OLD side) must NOT derive an inverted
+        # record. The search fixture must include BOTH sides so the guard
+        # regression is RED-capable (a ref to an unresolvable name returns []
+        # even with the guard removed).
+        both = {"entities": [
+            {"id": "obj-old", "name": "strategy-A", "kind": "core:strategy"},
+            {"id": "obj-new", "name": "strategy-B", "kind": "core:strategy"}],
+            "points": [], "events": []}
+        old_side = {"entities": [
+            {"name": "strategy-A", "kind": "core:strategy",
+             "lifecycle": "superseded", "supersedes": "strategy-B",
+             "note": None}],
+            "events": [], "points": [], "operators": [],
+            "chain_notes": [], "link_before_create": []}
+        assert v2.derive_supersessions(old_side, both) == []
 
     def test_supersession_kind_collision_warns_no_wrong_record(self):
         """Review fix (P1): a name colliding across kinds resolves to the

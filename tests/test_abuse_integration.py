@@ -40,6 +40,7 @@ import tortoise.supabase_control as sc
 from tortoise import abuse
 from tortoise.abuse import SupabaseAbuseStore
 from tortoise.auth import lookup_hash
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 
 TEAM = "team-abuse-1"
@@ -114,31 +115,18 @@ def env(monkeypatch, fake, notified):
     app = ha.app
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "abuse.db")
-        orig = _patch_sdk_init(ha, db_path)
+        # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+        # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+        # __init__ → deterministic anchor close → clear overrides at exit.
+        # Supersedes the local _patch_sdk_init/_restore_sdk_init (restore
+        # was restore-init-only: no pin, no anchor close — the #1497/#2090
+        # gap). set_engine(None) keeps running AFTER the helper exit, same
+        # relative order as the old restore → set_engine pair.
         try:
-            yield {"fake": fake, "notified": notified, "app": app}
+            with patched_tortoise_sdk(db_path):
+                yield {"fake": fake, "notified": notified, "app": app}
         finally:
-            _restore_sdk_init(ha, orig)
             abuse.set_engine(None)
-
-
-def _patch_sdk_init(ha, db_path):
-    orig = ha.TortoiseSDK.__init__
-
-    def patched(self, db_path_arg=None, *, namespace=None, **kw):
-        orig(self, db_path, namespace=namespace)
-
-    ha.TortoiseSDK.__init__ = patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    from tortoise.hosted_api import _FALLBACK_KEEPALIVE
-    _FALLBACK_KEEPALIVE.clear()
-    return orig
-
-
-def _restore_sdk_init(ha, orig):
-    ha.TortoiseSDK.__init__ = orig
 
 
 def _auth(token=TOKEN_A):
@@ -764,6 +752,47 @@ class TestIntrospection:
         # every wrap site's tool must be classified as a WRITE (never a read)
         missing = {method_to_tool[m] for m in wrapped_methods} - ms.WRITE_TOOL_NAMES
         assert not missing, f"write tools missing from WRITE_TOOL_NAMES: {missing}"
+
+    def test_destructive_mutating_tools_never_read_classified(self):
+        """C5 #2114 (code-review P1): the NON-wrapped destructive/mutating
+        tools carry _rw() annotations but bypass _quota_gated — they must
+        still be classified as writes (WRITE_TOOL_NAMES) so the MCP scope
+        gate (graphs:write required) + read-velocity metering treat them as
+        writes. A graphs:read-only key invoking any of these would otherwise
+        be a write-scope bypass (deleting points/entities, mutating
+        operators/sources)."""
+        import tortoise.mcp_server as ms
+        destructive = {
+            "tortoise_delete_point",      # DESTRUCTIVE — cannot be undone
+            "tortoise_delete",            # destructive
+            "tortoise_delete_entity",     # destructive
+            "tortoise_set_point_baseline",  # mutates claims
+            "tortoise_set_source_tier",   # mutates source metadata
+            "tortoise_annotate_operator",  # mutates operator state
+        }
+        missing = destructive - ms.WRITE_TOOL_NAMES
+        assert not missing, (
+            f"destructive/mutating tools missing from WRITE_TOOL_NAMES "
+            f"(a graphs:read-only MCP key could invoke them): {missing}")
+
+    def test_rw_annotated_http_tools_never_read_classified(self):
+        """C5 #2114 (re-review 3 hardening): DERIVE the write set from the
+        registry — every HTTP-allowed tool whose annotation is NOT read-only
+        (readOnlyHint=False: _rw/_idem — writes/mutations) must be in
+        WRITE_TOOL_NAMES, so a graphs:read-only MCP key can never invoke a
+        write-classified tool. Future-proof: a new _rw() HTTP tool missing
+        from WRITE_TOOL_NAMES fails HERE, not in a review round."""
+        import tortoise.mcp_server as ms
+        from tortoise.tool_registry import TOOL_REGISTRY
+        writers = {
+            d.name for d in TOOL_REGISTRY
+            if d.http_policy and d.annotations is not None
+            and d.annotations.readOnlyHint is False
+        }
+        missing = writers - ms.WRITE_TOOL_NAMES
+        assert not missing, (
+            f"_rw()-annotated HTTP tools missing from WRITE_TOOL_NAMES "
+            f"(a graphs:read-only MCP key could invoke them): {missing}")
 
     def test_mcp_read_hook_classification(self, monkeypatch):
         """maybe_record_mcp_read: writes skipped, reads counted, selfhost and

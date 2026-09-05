@@ -33,6 +33,7 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 import pytest
 from fastapi.testclient import TestClient
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise import extractor_v2 as v2
 from tortoise.hosted_api import app, get_current_team
 from tortoise.sdk import TortoiseSDK
@@ -43,6 +44,9 @@ TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
+    # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
+    # data-plane gates otherwise (mirrors the #2241 migration pattern).
+    "legacy_full_access": True,
     "tier": "free",
     "max_users": 1,
     "max_graphs": 1,
@@ -129,27 +133,6 @@ def _embed(rule_kind: str = "agent-ops:rule", *, with_rationale: bool = True,
     return embed
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make TortoiseSDK use a temp db_path when constructed without one."""
-    import tortoise.hosted_api as ha_mod
-
-    _orig_init = ha_mod.TortoiseSDK.__init__
-
-    def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig_init(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched_init
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig_init
-
-
-def _restore_tortoise_sdk_init(original_init):
-    import tortoise.hosted_api as ha_mod
-
-    ha_mod.TortoiseSDK.__init__ = original_init
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-
-
 @pytest.fixture
 def client():
     """TestClient with auth override + a temp FalkorDBLite DB (the
@@ -158,13 +141,13 @@ def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
-        _orig_init = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
-        finally:
-            _restore_tortoise_sdk_init(_orig_init)
-            app.dependency_overrides.clear()
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk) —
+        # patch __init__ → temp DB + #1950 TORTOISE_DB_PATH pin + close-then-
+        # clear at enter; pop-pin → restore __init__ → deterministic anchor
+        # close → clear overrides at exit (replaces the local
+        # _patch/_restore_tortoise_sdk_init copies incl. the clear-at-restore).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, db_path
 
 
 def _team_sdk(db_path: str) -> TortoiseSDK:

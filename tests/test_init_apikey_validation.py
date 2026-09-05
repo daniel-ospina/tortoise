@@ -196,7 +196,7 @@ class TestInitApiKeyEnhancements:
         # cursor shape has no `type` field; codex is a command
         assert "type" not in out["mcp"]["configs"]["cursor"]["config"]["mcpServers"]["tortoise"]
         assert out["mcp"]["configs"]["codex"]["command"].startswith("codex mcp add tortoise")
-        assert out["onboarding_prompt_url"] == "https://premiselabs.co/onboarding-prompt.md"
+        assert out["onboarding_prompt_url"] == "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
         assert out["config_path"].endswith(".tortoise")
         assert out["next_steps"]
         # config still saved with 600 perms
@@ -260,7 +260,7 @@ class TestInitApiKeyEnhancements:
         assert "codex mcp add" not in out  # only the claude config
         assert "Cursor" not in out
         assert "[2] Codex" not in out
-        assert "onboarding-prompt.md" in out
+        assert "tortoise-onboarding/SKILL.md" in out
 
     # ── --write-mcp-config ────────────────────────────────────
     def test_write_mcp_config_creates_file(self, monkeypatch, tmp_path, capsys):
@@ -365,7 +365,7 @@ class TestInitApiKeyEnhancements:
         assert out["api_url"] == "https://api.premiselabs.co"
         assert out["mcp"]["endpoint"] == "https://api.premiselabs.co/mcp/"
         assert set(out["mcp"]["configs"]) == {"claude", "codex", "cursor", "pi"}
-        assert out["onboarding_prompt_url"] == "https://premiselabs.co/onboarding-prompt.md"
+        assert out["onboarding_prompt_url"] == "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md"
         assert out["next_steps"]
         assert out["config_path"].endswith(".tortoise")
 

@@ -297,7 +297,7 @@ callers get a `ValueError` subclass (`BundleValidationError`) with
 | 3 | Ref misuse | `duplicate bundle ref 'pA'` (shipped); `refs shaped like real ULIDs are rejected` (**planned** — Phase 1) | Refs must be unique, bundle-local labels; don't address real ids through refs. |
 | 4 | Connection contract | `connections[1] must carry exactly one of 'relation' or 'operator'`; `connections[0] requires 'from' and 'to'`; `connections[2]: 'to' must be a list or string`; `connections[3]: multi-item 'to' on a plain IMPL/NAND connection` (**planned**) | Exactly one of relation/operator; `from`+`to` present; singular `to` on plain direct edges (multi-input → `mitigation`/`reify:true`); self-edges rejected on IMPL/NAND. |
 | 5 | Unknown types / fields | `connections[4] operator must be one of ['IMPL','NAND', …]`; `connections[5] unknown relation 'SUPPORTS'`; `reify:true connection carrying 'confidence' is rejected` (**planned** — route-scoped fields) | Operator ∈ IMPL/NAND; relation ∈ the structural predicate set ∪ `extractedFrom`; drop attributes that don't belong on the route. |
-| 6 | Endpoint typing | `external endpoint 'ghost-id' does not exist`; `connection endpoint must be a plain Point, got a Source` | Direct-edge and operator-requiring connections need existing plain-Point endpoints (or bundle-local refs to point items). |
+| 6 | Endpoint typing | `external endpoint 'ghost-id' does not exist`; `connection endpoint must be a plain Point, got a Source` | Operator-routed connections (reify:true / mitigation / part-whole → create_operator) accept existing plain-Point **or Event** endpoints addressed **by node id** (A1b #1272 parity — dedup collects both; an Event that resolves only by `eventId` is not an operator endpoint and stays a violation); bundle-local refs to point items or `type:"event"` entity items are accepted. Note: Event entity items are **append-only** — re-ingesting a full bundle mints a NEW Event occurrence (new id) and thus a NEW operator; dedup applies to id-stable external Event endpoints (re-ingest connection-only against the resolved id). Direct-edge (plain IMPL/NAND) connections need existing plain-Point endpoints (or bundle-local refs to point items). |
 | 7 | Terminal endpoints | `endpoint '01J8…' is superseded/retracted — new direct edges to terminal points are rejected` | Point the connection at a live/draft point; supersede transfers are the mechanism to repoint. |
 | 8 | Conflicting duplicates | `same-pair IMPL connections with differing direction/confidence are ambiguous`; label / direction / mitigation-reason conflicts | Identical duplicates are cleanly deduped; **conflicting** duplicates are rejected fail-closed. Unify the conflicting attribute, or use label-differing pairs (legal on the operator route). |
 | 9 | any effective status other than `"draft"` under gated (case variants, `props:{...}` nesting, terminal statuses) | `status:'X' is not allowed under promotion_policy 'gated'` | Use `promotion_policy="auto"` for explicit live, or keep draft and promote via `tortoise_update_point(status="live")` (the interim promotion route — see [§11](#11-promotion--ep)). |
@@ -476,6 +476,17 @@ the MCP tool is tracked as a follow-up so the system-wide default matches the in
   only via promotion — today via `tortoise_update_point(status="live")`
   (the interim route; guarded draft→live), and via the dedicated promote
   tools when they ship.
+
+  **Capture-surface exception (W5 Phase C, #2104):** the session-capture
+  write path (`POST /v1/sessions` + `sdk.capture_session`) auto-promotes
+  ITS extracted claim points and their capture operators draft→live as part
+  of the EP-on-ingest contract (the ingested session is memory, not a
+  pending-review draft — §2.5 measured-good; E2E-5). Scope is strictly the
+  capture write path: `create_point`'s global draft default, the gated
+  `ingest` surface, and non-capture extraction (the #780 draft-operator
+  shape) are untouched. Promotion is rebuild-durable (PointPromoted /
+  OperatorPromoted events, #548 replay parity) and NOT reviewer-gated — the
+  auto-promoted snapshot never fabricates a `reviewed` flag.
   **Interim-route caveat (Track A — no zombie-operator resolution):** the
   interim route promotes a single point; it does NOT resolve draft operator
   nodes whose endpoints are now all live (the "zombie operator" — a draft

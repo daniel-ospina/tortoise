@@ -5,7 +5,8 @@ mounted at /mcp on the hosted FastAPI app. Imports ONLY tortoise.sdk +
 starlette — mcp_server imports from here (one-directional; no circular import).
 
 Design: per-request team-scoped SDK via ContextVar. TeamResolutionMiddleware
-validates the Bearer tt_ token against the control plane — Supabase
+validates the Bearer tt_/tk_ token (API_KEY_PREFIXES) against the control
+plane — Supabase
 (lookup_hash, #767 plan Task 3) when SUPABASE_URL + service key are set,
 otherwise the FalkorDB registry (apikey_verify) — and sets
 _current_team_id / _transport_mode. Tools resolve the request-scoped SDK via
@@ -38,6 +39,16 @@ _current_team_id: ContextVar[str | None] = ContextVar("_current_team_id", defaul
 # #329: resolved team quota limits (from the registry Team node), cached 60s
 # with the auth cache so MCP write tools enforce the SAME limits REST sees.
 _current_team_limits: ContextVar[dict | None] = ContextVar("_current_team_limits", default=None)
+# C5 #2114 (D-C5-4): graph scope rides the ContextVars — the resolved team's
+# C1 tenancy fields (graph_id / FULL graph namespace / flat scopes /
+# legacy_full_access), set by TeamResolutionMiddleware at resolution time so
+# _get_team_sdk() + the tool-call scope gate see the SAME scope REST sees.
+_current_graph_id: ContextVar[str | None] = ContextVar("_current_graph_id", default=None)
+_current_graph_namespace: ContextVar[str | None] = ContextVar(
+    "_current_graph_namespace", default=None)
+_current_scopes: ContextVar[list | None] = ContextVar("_current_scopes", default=None)
+_current_legacy_full_access: ContextVar[bool | None] = ContextVar(
+    "_current_legacy_full_access", default=None)
 _transport_mode: ContextVar[str | None] = ContextVar("_transport_mode", default=None)
 # Curation group for the active MCP app (#523) — set per request by the app's
 # middleware so the shared tools/list transform filters correctly even when
@@ -62,10 +73,25 @@ def _get_base_sdk() -> TortoiseSDK:
 
 # ── Team-scoped SDK (D2) ────────────────────────────────────────────────────
 def _get_team_sdk() -> TortoiseSDK:
-    """Request-scoped SDK: team namespace in HTTP mode, base SDK in stdio."""
+    """Request-scoped SDK: team namespace in HTTP mode, base SDK in stdio.
+
+    C5 #2114 (D-C5-4): a graph-bound key (graph_id + namespace ContextVars
+    set at resolution) opens ITS OWN graph via the SDK graph-name seam
+    (TortoiseSDK(graph_name=ns) — the namespace derivation would prepend
+    team_). The middleware resolution already proved key→graph ownership
+    (the same trusted resolver REST uses: graph_id/scopes only resolve from
+    the owned Graph node / graphs row) and graph-delete revokes the graph's
+    keys (C3) — a deleted graph's key fails resolution (401), so no
+    per-call re-probe (REST's _data_sdk probe is defense-in-depth for the
+    resolve→open window; MCP's resolve→open window is the same request).
+    Team-wide keys / OAuth / selfhost → the default graph (unchanged)."""
     team_id = _current_team_id.get()
     if team_id is None:
         return _get_base_sdk()
+    gid = _current_graph_id.get()
+    ns = _current_graph_namespace.get()
+    if gid and ns:
+        return TortoiseSDK(graph_name=ns)
     return TortoiseSDK(namespace=team_id)
 
 
@@ -101,8 +127,11 @@ def _jsonrpc_error(code: int, message: str, data: dict | None = None,
 class TeamResolutionMiddleware(BaseHTTPMiddleware):
     """Bearer token → team_id ContextVar. 401 pre-tool-leak (D3, D17).
 
-    Accepts TWO credential families (#524, D3 — additive, never breaking):
-      * ``tt_<key>`` — tenant API keys (pre-existing path). Supabase-backed
+    Accepts THREE credential families (#524, C2 #2111 — additive, never
+    breaking):
+      * ``tt_<key>`` / ``tk_<key>`` — tenant API keys (tt_ = legacy/owner
+        mints; tk_ = C2 per-graph scoped keys, both in API_KEY_PREFIXES).
+        Supabase-backed
         (#767): resolves via tortoise.supabase_control.resolve_api_key
         (lookup_hash exact-match; api_keys.revoked_at authoritative;
         tier/quota from teams) — the SAME shared function REST
@@ -143,17 +172,21 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             return _jsonrpc_error(
                 ERR_UNAUTHORIZED,
                 "Unauthorized: invalid or missing Bearer token. "
-                "Expected format: Authorization: Bearer tt_<key> "
+                "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                 "(or an OAuth access token for #524 OAuth clients)",
                 status=401,
             )
         token = auth[7:]
-        if not (token.startswith("tt_") or token.startswith("oat_")):
+        # C2 (#2111): accept tk_ scoped keys too. Lazy import preserves the
+        # module's documented "imports ONLY tortoise.sdk + starlette"
+        # contract (auth.py triggers pepper env checks at module import).
+        from tortoise.auth import API_KEY_PREFIXES
+        if not (token.startswith(API_KEY_PREFIXES) or token.startswith("oat_")):
             if not token:
                 return _jsonrpc_error(
                     ERR_UNAUTHORIZED,
                     "Unauthorized: invalid or missing Bearer token. "
-                    "Expected format: Authorization: Bearer tt_<key> "
+                    "Expected format: Authorization: Bearer tt_<key>/tk_<key> "
                     "(or an OAuth access token for #524 OAuth clients)",
                     status=401,
                 )
@@ -172,6 +205,15 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             # cache-invalidation signal only; durable suspended_at decides.
             from tortoise.abuse import is_suspended_signal
             if is_suspended_signal(cached[1].get("team_id") or ""):
+                cached = None
+            # C2 (#2111) defense-in-depth: a deleg=0 minted key must never
+            # ride a warm cache entry. Fresh resolution gates BEFORE the
+            # cache is written, so this can only trip on an entry cached
+            # before the mint stamped delegation_depth — a 60s TTL edge
+            # that costs one dict lookup to close.
+            if cached is not None and not is_oauth \
+                    and cached[1].get("delegation_depth") == 0:
+                self._cache.pop(token, None)
                 cached = None
         if cached and now - cached[0] < 60:
             team, limits = cached[1], cached[2]
@@ -212,8 +254,33 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
                 return _jsonrpc_error(
                     ERR_UNAUTHORIZED,
                     "Unauthorized: invalid API key. "
-                    "Expected format: Authorization: Bearer tt_<key>",
+                    "Expected format: Authorization: Bearer tt_<key>/tk_<key>",
                     status=401,
+                )
+            # C2 (#2111) → C5 (#2114) one-level-deep guard (code-review P1,
+            # #2b): a MINTED (deleg=0) key drives MCP tools ONLY when it
+            # carries a data scope (graphs:read/write) — C5 routes it to its
+            # OWN graph (_get_team_sdk) and the tool-call scope gate enforces
+            # read/write. A deleg=0 key WITHOUT a data scope stays rejected
+            # (a keys:manage/team:manage-only child has no graph data to
+            # exercise; escalation scopes never land on children). Pre-C5
+            # this rejected ALL deleg=0 keys blanket (dormancy). resolve_api_key
+            # (Supabase) and apikey_verify (registry, extended in C2) both
+            # carry delegation_depth + scopes. tk_ keys minted with deleg=NULL
+            # (an owner-minted scoped key — C3 surface) pass regardless.
+            if not is_oauth and team.get("delegation_depth") == 0 and not (
+                    {"graphs:read", "graphs:write"}
+                    & set(team.get("scopes") or [])):
+                # jsonrpc -32001 (ERR_UNAUTHORIZED) with HTTP 403 — mirrors
+                # the ERR_SUSPENDED precedent (403 status + data payload
+                # carrying a machine-readable code): MCP clients switching
+                # on the jsonrpc code get a distinct authz signal.
+                return _jsonrpc_error(
+                    ERR_UNAUTHORIZED,
+                    "Minted keys cannot be used over MCP without a data "
+                    "scope (graphs:read/write).",
+                    {"code": "KEY_NOT_USER_MINTED"},
+                    status=403,
                 )
             # #1854 (review P2): best-effort #685 write-through on MCP
             # resolution — a recovery key used ONLY via MCP (never REST)
@@ -287,6 +354,13 @@ class TeamResolutionMiddleware(BaseHTTPMiddleware):
             self._cache[token] = (now, team, limits)
         _current_team_id.set(team["team_id"])
         _current_team_limits.set(limits)
+        # C5 #2114 (D-C5-4): graph scope rides the resolution — the SAME C1
+        # tenancy fields REST get_current_team carries. Session/legacy/OAuth
+        # resolutions (no graph_id) leave the defaults → team-wide SDK.
+        _current_graph_id.set(team.get("graph_id"))
+        _current_graph_namespace.set(team.get("graph_namespace"))
+        _current_scopes.set(team.get("scopes"))
+        _current_legacy_full_access.set(team.get("legacy_full_access"))
         _transport_mode.set("http")
         # #308 (R4, delta 10): geo check on EVERY post-auth request —
         # cache-hit and cache-miss alike, so an IP-rotation burst cannot ride
@@ -330,6 +404,13 @@ class TransportModeMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         _transport_mode.set("http")
         _current_team_id.set(SELFHOST_TEAM_ID)
+        # C5: selfhost/static transports have no graph scope — clear any
+        # prior tenant request's ContextVars (ContextVar defaults are
+        # per-request here, but an explicit reset is cheap + future-proof).
+        _current_graph_id.set(None)
+        _current_graph_namespace.set(None)
+        _current_scopes.set(None)
+        _current_legacy_full_access.set(None)
         from tortoise.transport import _selfhost_transport
         _selfhost_transport.set(True)
         try:

@@ -7,7 +7,11 @@ preserves fork + completed_steps; OnboardingState/OnboardingStep are NEVER
 added to _EXPORT_SKIP_LABELS (backup-safe, scope pin 17).
 
 Runs in the docker lane (TORTOISE_DB_URI) — the graph writes land on the
-real FalkorDB test matrix graph.
+real FalkorDB test matrix graph. URI-less runs (tier-2 embedded legs,
+carve-out) SKIP at module level: these assertions exercise hosted
+registry lanes whose eager-init Cypher + keyed-MERGE writers are
+server-mode graph semantics (embedded redislite cannot satisfy them —
+#1997 tier-2 regression).
 """
 from __future__ import annotations
 
@@ -19,6 +23,16 @@ os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 os.environ.setdefault("TORTOISE_ENCRYPTION_KEY", "I2n-E3K857hF9ENLgrOZ8YBPkEB4tu4jyrb1aJMUtnI=")
 
 import pytest
+
+# docker-lane gate (epic #1647 P4 / #1997): URI-less embedded legs cannot
+# run these server-mode graph assertions — skip cleanly instead of failing
+# (the full-matrix docker half + local docker runs still exercise them).
+from tortoise.config import is_db_uri as _is_db_uri
+
+if not _is_db_uri(os.environ.get("TORTOISE_DB_URI")):
+    pytest.skip("docker-lane onboarding state tests require TORTOISE_DB_URI "
+                "(tier-2 embedded legs skip)", allow_module_level=True)
+
 from fastapi.testclient import TestClient
 
 from tortoise.hosted_api import _make_sdk, app
@@ -396,8 +410,11 @@ class TestCheckpoint:
             tc.__exit__(None, None, None)
 
     def test_last_decide_attempt_lww_conditional(self):
-        """'failed' is SKIPPED once decide-completed exists (dismissal alone
-        never completes; failed never un-completes)."""
+        """Epic DM-1 contract: decide-completed (success) CLEARS the
+        attempt to null; ANY later attempt write ('failed' OR 'dismissed')
+        is SKIPPED once decide-completed exists (a completed decide never
+        re-gains an attempt marker — dismissal alone never completes;
+        failed never un-completes; retry reachability is pre-completion)."""
         tc, _team_id = _registered_client()
         try:
             tc.post("/v1/onboarding/state/checkpoint",
@@ -409,14 +426,22 @@ class TestCheckpoint:
             r = tc.post("/v1/onboarding/state/checkpoint",
                         json={"step": "decide-completed"})
             assert r.json()["onboarding"]["status"] == "complete"
+            # success clears the attempt (epic DM-1: success clears to null)
+            assert r.json()["onboarding"]["last_decide_attempt"] is None
             r2 = tc.post("/v1/onboarding/state/checkpoint",
                          json={"last_decide_attempt": "failed"})
             assert r2.status_code == 200
-            # pin the PRESERVED value (dismissal survives; failed never
-            # un-completes) — the old `!= "failed"` passed even if the field
-            # were silently dropped/reset, masking a data-loss regression.
-            assert r2.json()["onboarding"]["last_decide_attempt"] == "dismissed"
+            # post-complete attempt writes are skipped — the field stays
+            # cleared and the decide stays complete (no silent regression,
+            # no data-loss: the old test pinned dismissed-survives which
+            # contradicted the epic DM-1 success-clears-to-null pin).
+            assert r2.json()["onboarding"]["last_decide_attempt"] is None
             assert r2.json()["onboarding"]["status"] == "complete"
+            # 'dismissed' post-complete is equally skipped
+            r3 = tc.post("/v1/onboarding/state/checkpoint",
+                         json={"last_decide_attempt": "dismissed"})
+            assert r3.json()["onboarding"]["last_decide_attempt"] is None
+            assert r3.json()["onboarding"]["status"] == "complete"
         finally:
             tc.__exit__(None, None, None)
 
@@ -657,14 +682,20 @@ class TestPatchRouting:
         finally:
             tc.__exit__(None, None, None)
 
-    def test_onboarding_complete_carve_out_echo(self):
-        tc, _team_id = _registered_client()
+    def test_onboarding_complete_accept_and_drop(self):
+        """#1997 (W1): accept-and-drop — a client PATCH onboarding_complete
+        on a NODE-PRESENT org is DROPPED (accepted 200; the echo is
+        node-governed — the legacy jsonb flag is inert there)."""
+        tc, team_id = _registered_client()
         try:
+            from tortoise.hosted_api import _get_onboarding_state as _raw
             r = tc.patch("/v1/onboarding/state",
                          json={"onboarding_complete": True})
             assert r.status_code == 200
-            # node present, active, ZERO edges → grandfathered-window guard
-            assert r.json()["onboarding"]["onboarding_complete"] is True
+            # dropped → node governs (active, zero edges → not complete)
+            assert r.json()["onboarding"]["onboarding_complete"] is False
+            # the jsonb flag was never written
+            assert _raw(team_id).get("onboarding_complete") is False
         finally:
             tc.__exit__(None, None, None)
 
@@ -847,11 +878,15 @@ class TestBackfill:
 class TestCompletionWire:
     def test_poisoned_new_org_negative(self):
         """A new org's legacy flag is never trusted once the agent flow
-        engages (node governs — the poisoned-TRUE the precedence kills)."""
-        tc, _team_id = _registered_client()
+        engages (node governs — the poisoned-TRUE the precedence kills).
+        The flag is raw-written (post-W1 the PATCH surface accept-and-drops)."""
+        tc, team_id = _registered_client()
         try:
-            tc.patch("/v1/onboarding/state",
-                     json={"onboarding_complete": True})
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            from tortoise.hosted_api import _write_onboarding_state as _w
+            st = _raw(team_id)
+            st["onboarding_complete"] = True
+            _w(team_id, st)
             tc.post("/v1/onboarding/state/checkpoint",
                     json={"step": "harness-connected"})
             st = tc.get("/v1/onboarding/state").json()["onboarding"]
@@ -887,12 +922,19 @@ class TestCompletionWire:
 
     def test_poisoned_false_guard(self):
         """The grandfathered-window guard (cycle-2 P1-1 fix): node present,
-        active, ZERO agent edges, jsonb true → wire TRUE (a legacy-wizard
-        completer is never re-onboarded)."""
-        tc, _team_id = _registered_client()
+        active, ZERO agent edges, LEGACY jsonb true (raw-written — the PATCH
+        surface accept-and-drops onboarding_complete post-W1) → wire TRUE (a
+        legacy-wizard completer is never re-onboarded)."""
+        tc, team_id = _registered_client()
         try:
-            r = tc.patch("/v1/onboarding/state",
-                         json={"onboarding_complete": True})
+            # seed the legacy jsonb flag via the RAW writer (the PATCH
+            # surface accept-and-drops it on node-present orgs, #1997)
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            from tortoise.hosted_api import _write_onboarding_state as _w
+            st = _raw(team_id)
+            st["onboarding_complete"] = True
+            _w(team_id, st)
+            r = tc.get("/v1/onboarding/state")
             st = r.json()["onboarding"]
             assert st["onboarding_complete"] is True
             assert st["status"] == "active"
@@ -907,10 +949,15 @@ class TestCompletionWire:
         zero-edge guard disables, and the org is re-onboarded."""
         tc, team_id = _registered_client()
         try:
-            # make this a grandfathered org: jsonb true, node PRESENT active
-            # with ZERO agent step edges (the eager-init node)
-            tc.patch("/v1/onboarding/state",
-                     json={"onboarding_complete": True})
+            # make this a grandfathered org: jsonb true (RAW-written — the
+            # PATCH surface accept-and-drops onboarding_complete post-W1,
+            # #1997), node PRESENT active with ZERO agent step edges (the
+            # eager-init node)
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            from tortoise.hosted_api import _write_onboarding_state as _w
+            st = _raw(team_id)
+            st["onboarding_complete"] = True
+            _w(team_id, st)
             st = tc.get("/v1/onboarding/state").json()["onboarding"]
             assert st["onboarding_complete"] is True
             assert st["status"] == "active"
@@ -932,6 +979,31 @@ class TestCompletionWire:
             body = r.json()["onboarding"]
             assert body["onboarding_complete"] is True, body
             assert body["status"] == "complete"
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_accept_and_drop_node_absent_keeps_jsonb_writer(self):
+        """#1997 (W1): node-ABSENT (grandfathered pre-backfill) orgs keep
+        the legacy jsonb writer — a client PATCH onboarding_complete still
+        lands in jsonb (their fallback until backfill)."""
+        tc, team_id = _registered_client()
+        try:
+            # drop the node → node-absent grandfathered org
+            import tortoise.onboarding.state as _os2
+            from tortoise.hosted_api import _make_sdk as _mk
+            proj = _mk(namespace=team_id)._get_proj()
+            _os2._run(proj,
+                      f"MATCH (n:{_os2.ONBOARDING_NODE_LABEL} "
+                      f"{{org_id: $oid}}) DETACH DELETE n",
+                      {"oid": team_id})
+            assert _os2.read_onboarding_node(proj, team_id) is None
+            r = tc.patch("/v1/onboarding/state",
+                         json={"onboarding_complete": True})
+            assert r.status_code == 200, r.text
+            from tortoise.hosted_api import _get_onboarding_state as _raw
+            assert _raw(team_id).get("onboarding_complete") is True
+            # wire completes via the grandfathered window (no node, jsonb true)
+            assert r.json()["onboarding"]["onboarding_complete"] is True
         finally:
             tc.__exit__(None, None, None)
 
@@ -1032,6 +1104,75 @@ class TestJourneyLeg:
                 "(s:Subject {subjectKind: 'organization'}) RETURN s.org_id",
                 oid=team_id)
             assert res.result_set and res.result_set[0][0] == team_id
+        finally:
+            tc.__exit__(None, None, None)
+
+
+class TestOnboardsEdge:
+    """#1999 (W3): the DM-1 node↔anchor link — org_subject_id property +
+    onboards edge → Organization Subject, written by the seed (the Subject
+    itself is created by the seed core first; this writer links).
+    Idempotent: replay does not duplicate the edge (created-signal False)."""
+
+    def _make_org_subject(self, team_id: str) -> str:
+        import uuid
+        sdk = _make_sdk(namespace=team_id)
+        try:
+            node = sdk.create_subject(
+                f"org{uuid.uuid4().hex[:8]}", subjectKind="organization",
+                org_id=team_id)
+            return node["id"]
+        finally:
+            sdk.close()
+
+    def test_write_sets_org_subject_id_and_edge(self):
+        tc, team_id = _registered_client()
+        try:
+            proj = _make_sdk(namespace=team_id)._get_proj()
+            sid = self._make_org_subject(team_id)
+            res = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            assert res["created"] is True
+            node = _read_node(team_id)
+            assert node.get("org_subject_id") == sid
+            r = proj.query(
+                "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
+                "(s:Subject) RETURN s.id, n.org_subject_id", oid=team_id)
+            rows = r.result_set
+            assert rows and rows[0][0] == rows[0][1] == sid
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_replay_noop_same_subject(self):
+        tc, team_id = _registered_client()
+        try:
+            proj = _make_sdk(namespace=team_id)._get_proj()
+            sid = self._make_org_subject(team_id)
+            r1 = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            r2 = onboarding_state.write_onboards_edge(proj, team_id, sid)
+            assert r1["created"] is True
+            assert r2["created"] is False
+            assert r2["subject_id"] == sid
+            r = proj.query(
+                "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->"
+                "(s:Subject) RETURN count(s)", oid=team_id)
+            assert r.result_set[0][0] == 1
+        finally:
+            tc.__exit__(None, None, None)
+
+    def test_subject_kind_is_never_object_statement(self):
+        """B1 regression: the anchor linked by write_onboards_edge is a
+        Subject — never Object/Statement."""
+        tc, team_id = _registered_client()
+        try:
+            proj = _make_sdk(namespace=team_id)._get_proj()
+            sid = self._make_org_subject(team_id)
+            onboarding_state.write_onboards_edge(proj, team_id, sid)
+            r = proj.query(
+                "MATCH (n:OnboardingState {org_id: $oid})-[:onboards]->(s) "
+                "RETURN labels(s)", oid=team_id)
+            assert r.result_set
+            labels = r.result_set[0][0]
+            assert "Subject" in labels
         finally:
             tc.__exit__(None, None, None)
 

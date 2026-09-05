@@ -43,17 +43,23 @@ from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
 import tortoise.sdk as sdk_mod
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.hosted_api import app, get_current_team
 
 TEST_TEAM_ID = f"team-{uuid.uuid4().hex[:8]}"
 TEST_TEAM = {
     "team_id": TEST_TEAM_ID,
     "key_id": "test-key-001",
+    # C5 #2114 (#2260): legacy tt_ class — scope-less key_id dicts 403 the
+    # data-plane gates otherwise (mirrors the #2241 migration pattern).
+    "legacy_full_access": True,
     "tier": "free",
     "max_users": 1, "max_graphs": 1, "max_points": 10000,
     "max_api_keys": 2, "max_sessions": 1000,
 }
 TEST_TEAM_B = {"team_id": f"team-{uuid.uuid4().hex[:8]}", "key_id": "test-key-002",
+               # C5 #2114 (#2260): legacy tt_ class (see TEST_TEAM note).
+               "legacy_full_access": True,
                "tier": "free", "max_users": 1, "max_graphs": 1,
                "max_points": 10000, "max_api_keys": 2, "max_sessions": 1000}
 
@@ -130,26 +136,19 @@ def mock_extractor(monkeypatch):
     return _TenantAwareMock
 
 
-def _patch_sdk_init(db_path: str):
-    _orig = sdk_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-    sdk_mod.TortoiseSDK.__init__ = _patched
-    return _orig
-
-
 @pytest.fixture
 def client():
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
         app.dependency_overrides[get_current_team] = lambda: dict(TEST_TEAM)
-        _orig = _patch_sdk_init(db_path)
-        try:
+        # #2127: shared helper (tests._http_fixtures.patched_tortoise_sdk).
+        # sdk_mod.TortoiseSDK is hosted_api.TortoiseSDK (same class object) —
+        # the helper's hosted_api patch applies identically; it adds the
+        # #1950 TORTOISE_DB_PATH pin + deterministic close of the
+        # _team_sdk/_make_sdk anchors at exit (this file's local helper
+        # neither pinned nor closed — the churn class).
+        with patched_tortoise_sdk(db_path):
             yield TestClient(app)
-        finally:
-            app.dependency_overrides.clear()
-            sdk_mod.TortoiseSDK.__init__ = _orig
 
 
 def _team_sdk(team_id: str = TEST_TEAM_ID):

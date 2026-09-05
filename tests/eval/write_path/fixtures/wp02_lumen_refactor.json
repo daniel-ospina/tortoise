@@ -1,0 +1,94 @@
+{
+  "conversation": [
+    {
+      "content": "Let us scope the lumen auth migration. We are moving lumen auth to per-graph API keys so each graph gets its own credential and its own audit trail. I sketched this after the last cross-team token incident and the team signed off last Friday.",
+      "role": "user"
+    },
+    {
+      "content": "Per-graph keys change the issuer shape: the key now encodes the graph id, not the team id. What prefix scheme do you want on the public key material so the registry can route a key back to its graph without a lookup?",
+      "role": "assistant"
+    },
+    {
+      "content": "I like the tt_ prefix that the platform keys already use, so operators cannot mistake one for the other. Wait, actually let me double check what the platform team standardized on.",
+      "role": "user"
+    },
+    {
+      "content": "The platform standard is the tt_ prefix with a random 32-byte secret after it. Reusing it for graph keys keeps the operator mental model to a single key family.",
+      "role": "assistant"
+    },
+    {
+      "content": "Then graph keys get the tt_ prefix as well. Decision recorded: every graph key starts with tt_ and nothing else in the system may mint that prefix.",
+      "role": "user"
+    },
+    {
+      "content": "Locked. Next: token lifetime. The current team tokens never expire, which is exactly how the leaked token stayed valid for weeks. What lifetime do you want for graph keys?",
+      "role": "assistant"
+    },
+    {
+      "content": "Give every graph key a token lifetime of twenty-four hours and require rotation on the boundary. Short-lived keys mean a leak is a one-day problem, not a quarterly audit finding.",
+      "role": "user"
+    },
+    {
+      "content": "Twenty-four-hour lifetime with rotation on the boundary. Do legacy team tokens get revoked at cutover, or do they keep working while teams rotate their callers?",
+      "role": "assistant"
+    },
+    {
+      "content": "Legacy keys remain valid until the rotation window closes, but we stop minting new ones the day we flip. Forcing every team to rotate on day one would break the pilot.",
+      "role": "user"
+    },
+    {
+      "content": "Grace period model: stop minting, keep honoring, revoke at window close. Who is piloting the cutover so we can watch a real traffic shape?",
+      "role": "assistant"
+    },
+    {
+      "content": "Bluepeak Logistics is the pilot customer for the per-graph rollout. Their integration team is small and they were already asking for scoped credentials.",
+      "role": "user"
+    },
+    {
+      "content": "Bluepeak as pilot, noted. The registry service will need to resolve a key to exactly one graph, which is a change from the team-scoped resolver. Who owns the registry service?",
+      "role": "assistant"
+    },
+    {
+      "content": "Priya owns the registry service now, she inherited it with the data platform handoff. I will loop her into the interface review before we touch the resolver. Also the weather finally cleared up, I managed to run outside both mornings.",
+      "role": "user"
+    },
+    {
+      "content": "Before the resolver work, we should pin the failure semantics. What should happen when a caller presents a revoked key mid-request?",
+      "role": "assistant"
+    },
+    {
+      "content": "Fail closed with a 401, no fallback to team scope. If a key is revoked it must be dead on the next request, otherwise the audit story falls apart.",
+      "role": "user"
+    },
+    {
+      "content": "Fail-closed 401 on revoked keys. For the audit trail, what retention do you need on key-usage events? The registry already logs issuance and revocation.",
+      "role": "assistant"
+    },
+    {
+      "content": "Keep key usage events for ninety days, same as the rest of the audit log. Anything shorter and we cannot answer the incident questions we get asked. Also, reminder that the quarterly demo is next Tuesday.",
+      "role": "user"
+    },
+    {
+      "content": "Ninety-day retention on key usage. Deployment shape: this touches issuance, resolution, and enforcement, so a single-commit flip is risky. How do you want to stage it?",
+      "role": "assistant"
+    },
+    {
+      "content": "Two-phase deploy: mint graph keys in phase one with enforcement off, then flip enforcement in phase two after the sandbox org runs on them for a week.",
+      "role": "user"
+    },
+    {
+      "content": "Phase one mints, phase two enforces, sandbox org exercises the full path in between. I can scaffold the phase flag now. Is there anything in lumen that still assumes a team token shape?",
+      "role": "assistant"
+    },
+    {
+      "content": "Only the admin screen, it renders the team token on the settings page. We will replace that with a per-graph key table, honestly it is overdue, I have been meaning to clean that page up for months.",
+      "role": "user"
+    },
+    {
+      "content": "Admin screen swap to the per-graph key table. Anything else before I write the migration plan?",
+      "role": "assistant"
+    }
+  ],
+  "harness": "codex",
+  "session_id": "wp02_lumen_refactor"
+}

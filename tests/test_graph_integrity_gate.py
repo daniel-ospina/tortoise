@@ -27,9 +27,12 @@ from pathlib import Path
 import pytest
 
 from tests.longmem_eval.test_vector_arm import _mini
+from tests.test_eval_report_integrity import _outcome
 from tools.longmem_eval import run as runner
+from tools.longmem_eval.dataset_audit import audit_dataset
 from tools.longmem_eval.judge import MockJudge
 from tools.longmem_eval.reader import MockReader
+from tools.longmem_eval.report import build_report
 from tools.longmem_eval.retrieve import (
     GATE_REASON_ANSWER_SESSION_ABSENT,
     GATE_REASON_CENSUS_ERROR,
@@ -182,9 +185,56 @@ def test_resolve_answer_session_indices_absent_id_fails_closed():
     assert err == GATE_REASON_DATASET_JOIN_ERROR
 
 
-def test_resolve_answer_session_indices_duplicate_haystack_fails_closed():
+def test_resolve_answer_session_indices_duplicate_haystack_maps_all_indices():
+    """#1900: a source-session id duplicated in the haystack is a BENIGN
+    dataset shape (13/500 dataset questions repeat an unrelated transcript
+    id — the old any-duplicate fail-closed check false-positived healthy
+    pools, reval3: 1e043500/58bf7951 at pool 1442/1678, session@20=1.0).
+    Even an ANSWER id that itself repeats maps to ALL its positions
+    (presence is red-on-any across the mapped set, never a silent
+    first-occurrence pick)."""
     q = dict(_q("mini_ie_user_001"))
     q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"], ["s1"]]
+    idxs, err = resolve_answer_session_indices(q)
+    assert err is None
+    assert idxs == [1, 2]
+
+
+def test_resolve_answer_session_indices_duplicate_unrelated_id_still_joins():
+    """#1900: the REAL reval3 shape — a duplicate that does not involve
+    any answer id (58bf7951's ``07b7a667_1``, 1e043500's ``d5d1f9c4``) is
+    irrelevant to the join: the answer ids are uniquely present and only
+    they are mapped. The old any-duplicate check fail-closed these."""
+    q = dict(_q("mini_ie_user_001"))
+    q["haystack_session_ids"] = ["mini-s0", "mini-s0", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s0"], ["s1"]]
+    idxs, err = resolve_answer_session_indices(q)
+    assert err is None
+    assert idxs == [2]
+
+
+def test_resolve_answer_session_indices_duplicate_multi_session_joins():
+    """#1900: multi-session answers join to ALL indices across every
+    answer session (each answer id maps to every haystack position
+    carrying it) — the join is red-on-any on presence, exactly like the
+    single-index multi-session semantics."""
+    q = dict(_q("mini_ie_user_001"))
+    q["answer_session_ids"] = ["mini-s0", "mini-s1"]
+    q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"], ["s1"]]
+    idxs, err = resolve_answer_session_indices(q)
+    assert err is None
+    assert idxs == [0, 1, 2]
+
+
+def test_resolve_answer_session_indices_duplicate_out_of_range_fails_closed():
+    """#1900: the per-index range check still applies to EVERY mapped
+    position — a duplicated answer id whose last occurrence exceeds the
+    session list still fails closed (never a partial join)."""
+    q = dict(_q("mini_ie_user_001"))
+    q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"]]  # idx 2 out of range
     _, err = resolve_answer_session_indices(q)
     assert err == GATE_REASON_DATASET_JOIN_ERROR
 
@@ -218,6 +268,36 @@ def test_gate_green_healthy_v2():
                       "evidence_points": 1})
     assert res["reasons"] == []
     assert res["ratio"] == 1.0
+
+
+def test_gate_green_duplicate_haystack_answer_session():
+    """#1900: a question whose haystack repeats the answer session's id
+    at two positions (identical transcript — benign dataset shape, 13/500
+    of longmemeval_s_cleaned) gates GREEN on a healthy graph — the answer
+    session exists at BOTH mapped indices (the ingest writes each
+    position under its own ``lme_session_index``), and presence is
+    red-on-any across the mapped set. The old fail-closed join flagged
+    this as ``dataset_join_error`` with HEALTHY pools (reval3:
+    1e043500/58bf7951, session@20=1.0)."""
+    q = dict(_q("mini_ie_user_001"))
+    q["haystack_session_ids"] = ["mini-s0", "mini-s1", "mini-s1"]
+    q["haystack_sessions"] = [["s0"], ["s1"], ["s1"]]
+    sdk = _fresh_sdk()
+    _seed_question(sdk._get_proj(), q["question_id"], {0: 3, 1: 3, 2: 3},
+                   marks={1: 1, 2: 1})
+    res = run_integrity_gate(
+        sdk._get_proj(), q, q["question_id"],
+        ingest_stats={"turns": 9, "chunks": 0, "points": 0,
+                      "evidence_points": 1})
+    assert res["reasons"] == []
+    assert res["ratio"] == 1.0
+    assert res["pool_size"] == 9
+    # folded membership is per-POINT — both mapped indices present, each
+    # carrying its evidence mark (presence red-on-any across the set).
+    assert len(res["members"]) == 6
+    assert sorted({si for si, _ in res["members"]}) == [1, 2]
+    assert all(any(has for si, has in res["members"] if si == target)
+               for target in (1, 2))
 
 
 def test_gate_green_healthy_legacy_no_points_key():
@@ -879,6 +959,33 @@ def test_legs_degraded_below_floor_is_observable():
     assert any(name == "fts" for name, _ in _legs_degraded(out, "single-session-user"))
 
 
+def test_legs_degraded_structural_empty_by_design_deterministic_ingest():
+    # #2105 W7: deterministic ingest writes no statement
+    # (EXTRACTION_POINT_KIND) points — the structural leg's kind-filtered
+    # scan is EMPTY BY DESIGN on every deterministic outcome (empty_results
+    # / count 0 = the graph's shape, never a dead backend). The exemption
+    # must not launder a real driver failure: a structural timeout stays
+    # degraded in deterministic mode too, and v2-mode empty scans stay armed.
+    det_out = {"legs": [
+        {"leg": "fts", "reason": "ok", "count": 25},
+        {"leg": "vector", "reason": "ok", "count": 240},
+        {"leg": "structural", "reason": "empty_results", "count": 0},
+    ]}
+    assert _legs_degraded(
+        det_out, "single-session-user",
+        structural_empty_by_design=True) == []
+    # a structural TIMEOUT is a real driver failure — still degraded
+    det_timeout = {"legs": [
+        {"leg": "structural", "reason": "timeout", "count": 0}]}
+    assert any(name == "structural" for name, _ in _legs_degraded(
+        det_timeout, "single-session-user",
+        structural_empty_by_design=True))
+    # without the exemption (v2/extraction graphs — statement points
+    # exist), an empty structural scan is a genuine signal
+    assert any(name == "structural" for name, _ in _legs_degraded(
+        det_out, "single-session-user"))
+
+
 def test_gate_red_union():
     out = {"gate_reasons": ["graph_truncated"],
            "post_retrieval_reasons": []}
@@ -952,6 +1059,26 @@ def _wd(n=50, revalidate=False):
     return _RunWatchdog(revalidate=revalidate, n_questions=n)
 
 
+def _gate_report(outcomes: list[dict]) -> dict:
+    """#1937: build the report over an outcome set for the whole-run
+    ``integrity.gated_outcomes`` readout — pure audit/report path (no
+    redis/FalkorDB needed), same construction as test_eval_report_integrity."""
+    return build_report(
+        outcomes,
+        dataset_id="xiaowu0162/longmemeval-cleaned", split="s",
+        reader_model="mock-reader", judge_model="mock-judge",
+        extraction_approach="deterministic session ingestion",
+        ingest_mode="deterministic", ks=(5,), top_k=5,
+        dataset_semantics_audit=audit_dataset([{
+            "question_id": "q-audit",
+            "haystack_session_ids": ["s0"],
+            "answer_session_ids": ["s0"],
+            "haystack_sessions": [[
+                {"role": "user", "content": "x", "has_answer": True}]],
+        }]),
+    )
+
+
 def test_watchdog_short_run_rolling_arms_inert():
     """Runs < 10 questions keep the rolling-window arms INERT (plan
     cycle2-P3) — a 5-Q smoke must not abort on a naturally-short small-
@@ -986,6 +1113,98 @@ def test_watchdog_revalidate_first_gate_red_aborts():
         qid="q", gate_reasons=[], post_retrieval_reasons=[],
         strategy_timeout=False, census_latency_ms=10.0,
         consec_census_error=0, legs_degraded=False) is None
+
+
+def test_watchdog_revalidate_dataset_join_error_does_not_abort():
+    """#1900: ``dataset_join_error`` is a DATA-AVAILABILITY signal (the
+    question's dataset cannot be joined — fail-closed exclusion from
+    aggregates), never graph degradation — the revalidate first-gate-red
+    arm must NOT abort on it (a healthy-pool false positive aborted reval3
+    at finalize). A genuine degradation gate-red still aborts."""
+    wd = _wd(revalidate=True)
+    for _ in range(5):
+        assert wd.record(
+            qid="q", gate_reasons=["dataset_join_error"],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False) is None
+    # genuine degradation still aborts on the first gate-red
+    assert wd.record(
+        qid="q2", gate_reasons=["graph_truncated"],
+        post_retrieval_reasons=[], strategy_timeout=False,
+        census_latency_ms=10.0, consec_census_error=0,
+        legs_degraded=False) == "gate_red"
+
+
+def test_watchdog_dataset_join_error_not_hard_census_abort():
+    """#1900: a ``dataset_join_error`` question is fail-closed EXCLUDED
+    from aggregates but is NOT a hard census class — the non-revalidate
+    hard-invalid arm must not abort a run whose only gate-reds are
+    data-availability. A real census fault still aborts."""
+    wd = _wd()
+    for _ in range(5):
+        assert wd.record(
+            qid="q", gate_reasons=["dataset_join_error"],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False) is None
+    assert wd._n_gated_total == 5  # still counted for the coverage bound
+    assert wd._n_hard_invalid == 0
+    # a real census fault still aborts
+    assert wd.record(
+        qid="q2", gate_reasons=["census_error"],
+        post_retrieval_reasons=[], strategy_timeout=False,
+        census_latency_ms=10.0, consec_census_error=0,
+        legs_degraded=False) == "census_error"
+
+
+def test_watchdog_dataset_join_error_counts_toward_gated_coverage_bound():
+    """#1900/#1937: ``dataset_join_error`` gate-reds ARE counted toward the
+    whole-run gated-coverage bound (the ``if gate_red: _n_gated_total += 1``
+    line) even though they never trip the degradation arms — a
+    data-availability-heavy run still cannot certify. 13 of 50 outcomes
+    (13/50 > 0.25) aborts with ``gated_fraction``; 12 of 50 (12/50 =
+    0.24 <= 0.25) does not abort. Pins the count under the gate-red
+    branch (not a degradation-only branch) so a future refactor can't
+    silently lose data-availability outcomes from the bound. The SAME
+    outcome set is then run through ``build_report``: the report's
+    ``integrity.gated_outcomes`` readout must mirror the watchdog count
+    (13 in the aborting case, 12 in the non-aborting case) — the
+    whole-run report field and the live counter agree (#1937)."""
+    # 13 of 50 (13/50 = 0.26 > 0.25) — the 13th crosses the bound
+    outcomes_13 = [_outcome(f"q{i}", gate_reasons=(
+        [GATE_REASON_DATASET_JOIN_ERROR] if i < 13 else []))
+        for i in range(50)]
+    wd = _wd(n=50)
+    reason = None
+    for o in outcomes_13:
+        reason = wd.record(
+            qid=o["question_id"],
+            gate_reasons=o.get("gate_reasons") or [],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False)
+        if reason:
+            break
+    assert wd._n_gated_total == 13  # the 13th dataset_join_error crosses it
+    assert reason == "gated_fraction"
+    assert wd._n_hard_invalid == 0  # data-availability is never hard
+    # report readout over the SAME outcomes mirrors the watchdog count
+    assert _gate_report(outcomes_13)["integrity"]["gated_outcomes"] == 13
+    # 12 of 50 (12/50 = 0.24 <= 0.25) never crosses the bound
+    outcomes_12 = [_outcome(f"q{i}", gate_reasons=(
+        [GATE_REASON_DATASET_JOIN_ERROR] if i < 12 else []))
+        for i in range(50)]
+    wd = _wd(n=50)
+    for o in outcomes_12:
+        assert wd.record(
+            qid=o["question_id"],
+            gate_reasons=o.get("gate_reasons") or [],
+            post_retrieval_reasons=[], strategy_timeout=False,
+            census_latency_ms=10.0, consec_census_error=0,
+            legs_degraded=False) is None
+    assert wd._n_gated_total == 12
+    assert _gate_report(outcomes_12)["integrity"]["gated_outcomes"] == 12
 
 
 def test_watchdog_revalidate_first_timeout_aborts():

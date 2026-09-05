@@ -24,6 +24,7 @@ os.environ.setdefault("FASTAPI_INTERNAL_KEY", "test-internal-shared-secret-xyz")
 
 import pytest  # noqa: I001
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.pack_state import (
     DEFAULT_STARTER_PACKS, ensure_tenant_packs, get_tenant_packs,
 )
@@ -409,22 +410,6 @@ class TestPackInstallLockSerialization:
 # ── Provisioning hooks ─────────────────────────────────────────────────────
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Force every TortoiseSDK construction in-process onto one embedded DB."""
-    import tortoise.hosted_api as ha_mod
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
 @pytest.fixture
 def registry_client(monkeypatch):
     """TestClient in REGISTRY control-plane mode (selfhost) with a temp
@@ -436,14 +421,13 @@ def registry_client(monkeypatch):
     monkeypatch.delenv("SUPABASE_SERVICE_ROLE_KEY", raising=False)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "reg.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+        # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+        # __init__ → deterministic anchor close → clear overrides at exit
+        # (the old restore was restore-init-only — no pin, no anchor close:
+        # the #1950 clear-without-close leak shape this wave fixes).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, db_path
 
 
 @pytest.fixture
@@ -467,14 +451,10 @@ def supabase_client(monkeypatch):
     monkeypatch.setattr(sc, "get_control_plane", lambda: fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "inv.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, fake, db_path
-        finally:
-            import tortoise.hosted_api as ha_mod
-            ha_mod.TortoiseSDK.__init__ = _orig
-            app.dependency_overrides.clear()
+        # #2127 wave 2: shared helper (see registry_client — same pin +
+        # deterministic-close upgrade over the old restore-only shape).
+        with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+            yield tc, fake, db_path
 
 
 _INTERNAL_HEADERS = {"Authorization": "Bearer test-internal-shared-secret-xyz"}
@@ -724,13 +704,13 @@ class TestBackfillScript:
         Runs the script IN-PROCESS (embedded FalkorDBLite is single-writer —
         a subprocess would hit EmbeddedStoreBusyError on the same DB).
         """
-        import tortoise.hosted_api as ha_mod  # noqa: I001
-        from fastapi.testclient import TestClient
-        from tortoise.hosted_api import app
-
         # Import the script from its path (graph-scripts is not a package).
         import importlib.machinery
         import importlib.util
+
+        from fastapi.testclient import TestClient
+
+        from tortoise.hosted_api import app
         _script = os.path.join(REPO_ROOT, "graph-scripts",
                                "backfill_pack_installs.py")
         _loader = importlib.machinery.SourceFileLoader(
@@ -749,20 +729,21 @@ class TestBackfillScript:
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = os.path.join(tmpdir, "bf.db")
             monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-            _orig = _patch_tortoise_sdk_init(db_path)
-            try:
-                with TestClient(app) as tc:
-                    # seed a team via the registry provision path (eager
-                    # activation writes the starter set)
-                    r = tc.post("/internal/provision",
-                                headers=_INTERNAL_HEADERS, json={
-                                    "team_id": "t-bf-1", "team_name": "BF",
-                                    "api_key_hash": "abc",
-                                    "created_by": "user-1"})
-                    assert r.status_code == 200, r.text
-            finally:
-                ha_mod.TortoiseSDK.__init__ = _orig
-                app.dependency_overrides.clear()
+            # #2127 wave 2: shared helper (see registry_client fixture).
+            # Scoped to the provision TestClient ONLY: the dry-run's bare
+            # tortoise.sdk constructions run AFTER init restore and resolve
+            # via the monkeypatch-set TORTOISE_DB_PATH pin — the helper's
+            # exit snapshot-RESTORES the pin (to the monkeypatch value, still
+            # db_path), so it stays set for bf.main() and the post-run reads.
+            with patched_tortoise_sdk(db_path), TestClient(app) as tc:
+                # seed a team via the registry provision path (eager
+                # activation writes the starter set)
+                r = tc.post("/internal/provision",
+                            headers=_INTERNAL_HEADERS, json={
+                                "team_id": "t-bf-1", "team_name": "BF",
+                                "api_key_hash": "abc",
+                                "created_by": "user-1"})
+                assert r.status_code == 200, r.text
 
             # dry-run: exit 0, prints per-team plans, writes nothing
             monkeypatch.setattr(sys, "argv", ["backfill_pack_installs.py",

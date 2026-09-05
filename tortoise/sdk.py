@@ -2,6 +2,12 @@
 
 Wraps FalkorProjection (Docker/server FalkorDB by default, embedded via path argument).
 Lazy-opens on first call. Returns structured dicts, never raw FalkorDB result sets.
+
+Builder capability catalog note (#2004 W8 / epic #1976 DM-5): this module is
+referenced in the builder capability catalog (onboarding) — catalog module
+'Session recorder' (``TortoiseSDK.capture_session`` is the SDK recorder
+facade) — tortoise/tool_registry.py CAPABILITY_CATALOG. If you add or rename
+an extractor/indexer, update the catalog reference.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -22,6 +28,7 @@ from .retrieval import DEFAULT_POOL_SIZE, resolve_pool_size
 from . import monitoring
 from . import file_indexer  # noqa: F401 — import-time sourceKind registration (§4.4)
 from .projection import FalkorProjection
+from .projection import is_missing_graph_error  # #2163: absent-graph family == success
 from .quota import MAX_EXTRACTIONS_PER_TURN, MAX_SESSION_TURNS
 from .canonical import derive_batch_id
 import threading
@@ -738,6 +745,126 @@ def _is_entity_id(s: str) -> bool:
 def _content_hash(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+
+def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
+                             warn=None) -> None:
+    """W5 Phase C (#2104, indicator 3): EP-on-ingest for one capture.
+
+    ROOT CAUSE (verified): capture wrote the extracted claims via the #131
+    draft default and wired their IMPL/NAND operator topology as draft
+    (#780 extraction operators, ``promote_source=False``); EP's BFS
+    expansion excludes draft subgraphs (``include_draft=False`` default), so
+    the ingest EP pass could never calibrate the captured claims
+    (``dream()`` total_affected 0 / coverage 0.0 / ``has_ep`` False —
+    structurally, until the claims are EP-able).
+
+    FIX — capture-scoped ONLY (create_point's global draft default, the
+    #780 draft-operator semantics of NON-capture extraction paths, EP
+    semantics, and global dream routing are all untouched):
+      1. every extracted (non-episodic) claim of THIS capture is promoted
+         draft->live (the DM-2/§4.4 status branch: draft -> live on the
+         capture write path; the episodic turn stream STAYS draft — it is
+         the turn stream, not beliefs);
+      2. the capture's operator topology (IMPL/NAND operator Points with an
+         edge to a captured claim) is promoted with its claims — a live
+         claim wired through a draft operator stays EP-inert (the #780
+         live-only selector never picks the draft operator), so claim-only
+         promotion cannot calibrate wired claims (verified empirically);
+      3. the claims are marked dirty (write-trigger, graph-persisted #1163)
+         so the bounded ingest pass below has a window to refresh (the v2
+         write path already marked via create_point; the M2 fold path does
+         not — the uniform mark here covers both lanes);
+      4. a BOUNDED ingest EP pass runs — mode="local" (write-triggered
+         refresh over the dirty roots, bounded by construction — never a
+         full-graph pass), require_calibration=False (EP topology on fresh
+         capture content), warm_start=False (from-scratch — no cached-edge
+         censoring for freshly promoted claims).
+
+    Fail-open (P1 #1529 posture): a promotion or EP hiccup never fails a
+    committed capture — every failure surfaces as an additive warning via
+    ``warn`` (never a raise after partial writes). Shared by
+    ``sdk.capture_session`` and hosted ``_capture_session_impl`` so the two
+    capture surfaces can never drift (byte-parity).
+    """
+    if not claim_ids:
+        return
+    try:
+        proj = sdk._get_proj()
+        # 1. Claims -> live (draft-only guard mirrors create_operator's
+        # promote_source clause — a terminal claim is never resurrected),
+        # then REBUILD-DURABLE via the PointPromoted event (review P1): the
+        # raw status flip alone would revert on JSONL replay (the #548 log
+        # snapshotted the draft state at PointAdded) — the projection's
+        # PointPromoted replay upserts the full live snapshot (projection/
+        # __init__.py:1074). Snapshot AFTER the SET so the event carries the
+        # live state. Capture auto-promotion is NOT reviewer-gated — the
+        # snapshot carries the point's own props (no fabricated reviewed).
+        # Candidate read FIRST (the SET below destroys the draft evidence):
+        # exact extracted ids, non-operator, draft-or-unset status.
+        cand_rows = proj.g.query(
+            "MATCH (n:Point) WHERE n.id IN $ids "
+            "AND (n.is_operator IS NULL OR n.is_operator = false) "
+            "AND (n.status IS NULL OR n.status = 'draft') "
+            "RETURN n.id",
+            params={"ids": list(claim_ids)},
+        ).result_set
+        promoted_claims = [r[0] for r in cand_rows]
+        if promoted_claims:
+            proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "SET n.status = 'live'",
+                params={"ids": promoted_claims},
+            )
+            for pid in promoted_claims:
+                sdk._emit_event("PointPromoted", point=sdk.get_point(pid))
+        # 2. Operators of the captured claims -> live (draft-only guard),
+        # then REBUILD-DURABLE via OperatorPromoted (the R16 shape —
+        # projection/__init__.py:1082 restores live on replay). Mirror
+        # promote_point's _promote_incident_operators event exactly.
+        op_rows = proj.g.query(
+            "MATCH (o:Point {is_operator:true})-[:IMPL|NAND]->(c:Point) "
+            "WHERE c.id IN $ids "
+            "AND (o.status IS NULL OR o.status = 'draft') "
+            "RETURN DISTINCT o.id",
+            params={"ids": list(claim_ids)},
+        ).result_set
+        promoted_ops = []
+        for (oid,) in op_rows:
+            proj.g.query(
+                "MATCH (o:Point {id:$oid}) "
+                "SET o.status = 'live'",
+                params={"oid": oid},
+            )
+            sdk._emit_event("OperatorPromoted", id=oid,
+                            point=sdk.get_point(oid))
+            promoted_ops.append(oid)
+        # 3. Write-trigger dirty-mark (claims + reverse-BFS neighbors).
+        sdk._mark_dirty(list(claim_ids))
+    except Exception as e:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "capture EP promotion failed (non-fatal) for %d claims: %s",
+            len(claim_ids), e, exc_info=True,
+        )
+        if warn is not None:
+            warn(f"capture EP promotion failed: {type(e).__name__}: {e}")
+        return
+    try:
+        # 4. BOUNDED ingest EP pass (local = dirty-root refresh; review P2:
+        # mode="local" hydrates ALL graph-persisted dirty roots #1163, so an
+        # explicit budget caps the request-time EP work — this capture's
+        # claims calibrate well within it; any overflow stays dirty for the
+        # scheduler's epoch-guarded sweep).
+        sdk.dream(mode="local", require_calibration=False,
+                  warm_start=False, budget=100)
+    except Exception as e:  # noqa: BLE001, RUF100
+        _logger.warning(
+            "capture ingest EP pass failed (non-fatal) for %d claims: %s",
+            len(claim_ids), e, exc_info=True,
+        )
+        if warn is not None:
+            warn(f"ingest EP pass failed: {type(e).__name__}: {e}")
+
+
 def _entity_name_id(label: str, name: str) -> str:
     """Deterministic entity id from name — mirrors create_point's content-hash
     dedup so the projection's MERGE-by-name is IDEMPOTENT: the same name
@@ -1103,7 +1230,8 @@ class TortoiseSDK:
     """
 
     def __init__(self, db_path: str | None = None, *, namespace: str | None = None,
-                 event_log_path: str | None = None):
+                 event_log_path: str | None = None,
+                 graph_name: str | None = None):
         import os, re  # noqa: E401, I001
         db_uri = os.environ.get("TORTOISE_DB_URI")
         if db_uri and db_path is None:
@@ -1138,6 +1266,22 @@ class TortoiseSDK:
                     "Use alphanumeric, hyphens, underscores; max 64 chars."
                 )
         self._namespace = namespace
+        # C5 #2114 (D-C5-1): explicit FULL graph-name override — the data-plane
+        # tenancy seam. Custom graphs (team_{tid}_{gid}) cannot be expressed
+        # through ``namespace`` (the _get_proj derivation would prepend
+        # ``team_`` → ``team_team_{tid}_{gid}``). When set, _get_proj binds the
+        # projection to ``graph_name`` VERBATIM (default-graph callers never
+        # pass it — they keep the namespace derivation, byte-identical).
+        # Charset mirrors the namespace rule (+128 len for team_{tid}_{gid});
+        # mutually exclusive with ``namespace`` by construction (the spine
+        # passes exactly one).
+        if graph_name is not None and not re.match(
+                r'^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$', graph_name):
+            raise ValueError(
+                f"Invalid graph_name {graph_name!r}. "
+                "Use alphanumeric, hyphens, underscores; max 128 chars."
+            )
+        self._graph_name = graph_name
         self._event_log_path = event_log_path
         self._event_log = None  # lazy-init EventLog (#548)
         # Epic #900 §5.3 (cycle-21): cross-process embedded overlap probe —
@@ -1254,6 +1398,11 @@ class TortoiseSDK:
             if self._namespace == "registry":
                 # Control-plane SDK: shared registry main graph.
                 graph_name = "registry_tortoise"
+            elif self._graph_name is not None:
+                # C5 #2114 (D-C5-1): explicit graph-name override (a custom
+                # team_{tid}_{gid} graph). Never a namespace derivation — the
+                # name is used verbatim.
+                graph_name = self._graph_name
             elif self._namespace:
                 if self._namespace.startswith(("test_", "tortoise_test")):
                     # Test namespace: isolate on a test-prefixed graph so the
@@ -2054,6 +2203,16 @@ class TortoiseSDK:
         edge). The deterministic regex loop is removed as a product
         path — LLM extraction is the default and no-key fails closed.
 
+        Supersession records are REAL-BACKEND-ONLY, by construction: the v2
+        extractor forms conversation-driven supersessions only when its S3
+        search resolves against the real graph — extractor_v2 skips the search
+        entirely when the active backend is not "real" (the ``mode != "real"``
+        degraded branch: embedded/FalkorDBLite — the real graph, FalkorDB via
+        docker/redis URI or hosted API, is required), so capture over
+        embedded/FalkorDBLite produces ZERO supersession records (structurally
+        — the supersedes refs never resolve). Not a bug; do not debug it as
+        one.
+
         ``conversation`` is a list of {"role", "content"} dicts. Returns
         {"session_id", "turns", "extracted", "points": [...],
         "extraction_mode", "extraction_provider", "ok", "errors",
@@ -2225,10 +2384,18 @@ class TortoiseSDK:
             )
             event_id = event.get("id") or event.get("eventId")
             if event_id:
+                # W5 (#2104, S1): the SDK mirror stamps the full write
+                # provenance alongside the ontology-compliant eventId —
+                # byte-parity with hosted_api's capture stamp (the W2
+                # benchmark grades provenance_accuracy over these fields).
+                source_harness = harness or "unknown"
                 proj.g.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids SET n.eventId=$eid",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "SET n.eventId=$eid, n.source_session=$sid, "
+                    "    n.source_harness=$harness, n.ingested_at=$ing",
                     params={"ids": [p["id"] for p in extracted],
-                            "eid": event_id},
+                            "eid": event_id, "sid": session_id,
+                            "harness": source_harness, "ing": now},
                 )
             else:
                 # P1 #1529 (D4): create_event returning no id/eventId silently
@@ -2301,6 +2468,20 @@ class TortoiseSDK:
         # route was resolved (the v2 path); the M2 path has no route/provider.
         if meta.get("route"):
             resp["extraction_provider"] = meta.get("provider")
+        # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
+        # capture write path (after provenance stamp + operators wired) the
+        # extracted claims are promoted draft→live and the BOUNDED ingest EP
+        # pass calibrates them (local = write-triggered refresh over the
+        # dirty roots — never a full-graph pass). Shared with the hosted
+        # impl via _apply_capture_ingest_ep (byte-parity; hosted reflects the
+        # post-EP state in the write-verb enrichment read). Fail-open: a
+        # promotion/EP hiccup never fails a committed capture — additive
+        # warning only.
+        if extracted:
+            _apply_capture_ingest_ep(
+                self, [p["id"] for p in extracted],
+                warn=extraction_warnings.append,
+            )
         return resp
 
     def _extract_session_llm(
@@ -2418,6 +2599,15 @@ class TortoiseSDK:
         graph — entities via create_entity, points via create_point with the
         content-addressed ids, events via create_event, IMPL/NAND via
         create_operator — then wires session CONTAINS + aboutObject edges.
+        Supersessions ride the payload's ``supersessions`` channel (#2164):
+        ``commit_ops.apply_supersessions`` applies each record AFTER the
+        entities/points it references exist (ordering contract) — ``pt_`` refs
+        → the canonical ``supersede()`` (CORRECTS + outdated + edge transfer);
+        entity refs → an ``ObjectSuperseded`` event (id-style, journaled with
+        full provenance) + the ``_fold_object_superseded`` status fold. Every
+        fold miss/skip/failure is surfaced through the shared meta
+        ``warnings`` channel — supersession application is best-effort and
+        never a silent drop (and never fails capture).
 
         Returns ``(extracted, meta)`` (#1530 D8 — shared contract, P1
         consumes it): ``extracted`` is the same [{id, kind, text}] contract
@@ -2486,16 +2676,33 @@ class TortoiseSDK:
         proj = self._get_proj()
 
         # ── entities ──
+        entity_failures: list[str] = []
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
                 continue
-            try:  # noqa: SIM105
+            try:
                 self.create_entity("object", name,
                                    objectKind=str(e.get("kind", "core:other")),
                                    is_episodic=False)
-            except Exception:  # noqa: BLE001, RUF100
-                pass
+            except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
+                # old `except: pass` was indicator-4 hygiene — a swallowed
+                # create_entity failure silently stranding an Object a
+                # supersession record then references. Per-item failures are
+                # surfaced as additive WARNINGS + a count line (never a
+                # silent drop) — warning-grade BY DESIGN, a DELIBERATE
+                # channel divergence from the points loop (:2581-2587),
+                # where a per-point write failure is an ERROR appended to
+                # meta errors (mode flips to 'error' and capture FAILS):
+                # lost point content is unrecoverable, while an entity
+                # write failure leaves recall-by-name intact for
+                # pre-existing Objects.
+                entity_failures.append(
+                    f"{type(exc).__name__}: entity write failed for {name}: {exc}")
+        if entity_failures:
+            warnings.extend(entity_failures)
+            warnings.append(
+                f"{len(entity_failures)} extracted entit(y/ies) failed to write")
 
         # ── points + aboutObject edges + session CONTAINS ──
         extracted: list[dict] = []
@@ -2568,6 +2775,17 @@ class TortoiseSDK:
                 proj, self, ops,
                 point_content_by_id=lambda pid: _payload_point_content_by_id(
                     payload, pid))
+        # #2164: supersessions — client-derived records (the deterministic
+        # channel for the Object status fold; §6b parity). pt_ → supersede()
+        # CORRECTS; entity-level → ObjectSuperseded + fold. Runs after points/
+        # entities exist (ordering contract). Warnings ride meta — never a
+        # silent drop. Best-effort — never fail capture (hosted §6b rule).
+        try:
+            from tortoise.commit_ops import apply_supersessions
+            apply_supersessions(proj, self, payload.get("supersessions") or [],
+                                session_id=session_id, warn=warnings.append)
+        except Exception as exc:  # pragma: no cover - defensive outer bound
+            _logger.warning("supersession apply failed: %s", exc, exc_info=True)
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.
@@ -4822,8 +5040,9 @@ class TortoiseSDK:
 
     def _check_refs(self, bundle: dict, violations: list[dict]) -> None:
         """Check 3 (ref-table half) — duplicate refs across the whole bundle
-        and ULID-shadowing rejection (a ref shaped like a real ULID would
-        make refs.get(x, x) silently address an existing node)."""
+        and node-id-shadowing rejection: a ref shaped like a real node id —
+        a bare ULID OR a prefixed entity id (e.g. ``sub-<hex26>``, #1553) —
+        would make refs.get(x, x) silently address an existing node."""
         seen: dict[str, str] = {}
         for section in ("sources", "points", "entities"):
             for i, item in enumerate(bundle.get(section) or []):
@@ -4832,12 +5051,13 @@ class TortoiseSDK:
                 ref = item.get("ref")
                 if not ref:
                     continue
-                if _is_ulid(str(ref)):
+                if _is_entity_id(str(ref)):
                     violations.append({
                         "section": section, "index": i,
                         "message": f"ingest: {section}[{i}] ref {ref!r} is "
-                                   f"shaped like a real ULID — refs are "
-                                   f"bundle-local labels, not node ids (a ULID-"
+                                   f"shaped like a real node id (ULID or "
+                                   f"prefixed entity id) — refs are bundle-"
+                                   f"local labels, not node ids (a node-id-"
                                    f"shaped ref would silently shadow an "
                                    f"existing node)",
                     })
@@ -5058,13 +5278,29 @@ class TortoiseSDK:
             "MATCH (n) WHERE n.id IN $vals OR n.url IN $vals "
             "OR n.eventId IN $vals "
             "RETURN coalesce(n.id, n.url, n.eventId) AS key, "
-            "head(labels(n)) AS label, n.is_operator, n.status",
+            "head(labels(n)) AS label, n.is_operator, n.status, "
+            "n.id, n.eventId",
             params={"vals": sorted(values)},
         ).result_set
+        # Key the result so a lookup by the raw endpoint value finds the
+        # node. The coalesce key covers the primary identifier; an Event may
+        # additionally be addressed by its eventId (its other canonical key,
+        # equal to id on SDK-created Events). A Point's provenance eventId
+        # (#1417 capture_session stamp) is NEVER registered as a resolvable
+        # endpoint key — a Point addressed by its eventId would pass the
+        # Point branch of the endpoint checks (which has no id-guard), then
+        # crash the id-keyed write primitives (create_operator /
+        # create_direct_edge) mid-write: partial mutation. Rows sharing a
+        # key resolve deterministically: an id-owner row (node_id == key)
+        # wins over a row matched by another property.
         out: dict[str, dict] = {}
-        for key, label, is_op, status in rows:
-            out[key] = {"label": label, "is_operator": bool(is_op),
-                        "status": status}
+        for key, label, is_op, status, node_id, event_id in rows:
+            entry = {"label": label, "is_operator": bool(is_op),
+                     "status": status, "id": node_id}
+            if key not in out or node_id == key:
+                out[key] = entry
+            if label == "Event" and event_id:
+                out[event_id] = entry
         return out
 
     def _find_terminal_dedup_hit(self, content: str, kind: str) -> str | None:
@@ -5083,11 +5319,14 @@ class TortoiseSDK:
     def _check_endpoints(self, bundle: dict, violations: list[dict]) -> None:
         """Check 3 (endpoint half) — typed endpoints (external + bundle-local,
         cycle-2) and the direct-edge terminal-status guard (cycle-3, refined
-        cycle-17/18). Operator/direct-edge connections require plain-Point
-        endpoints; direct-edge connections (plain IMPL/NAND) additionally
-        reject terminal (superseded/retracted) endpoints. Bundle-local refs
-        resolving to EXISTING (dedup-hit) terminal points are Phase-1
-        violations (never a Phase-2 raise)."""
+        cycle-17/18). Operator-ROUTED connections (reify:true / mitigation /
+        part-whole → create_operator) accept Point OR Event endpoints (A1b
+        #1272 parity — _find_operator's dedup key collects both); direct-edge
+        connections (plain IMPL/NAND → create_direct_edge, which guards plain
+        Points) require plain-Point endpoints AND additionally reject terminal
+        (superseded/retracted) endpoints (#2062). Bundle-local refs resolving
+        to EXISTING (dedup-hit) terminal points are Phase-1 violations (never
+        a Phase-2 raise)."""
         local: dict[str, tuple[str, dict]] = {}
         for section in ("sources", "points", "entities"):
             for item in bundle.get(section) or []:
@@ -5110,12 +5349,25 @@ class TortoiseSDK:
         entity_labels = {"subject": "Subject", "object": "Object",
                          "event": "Event", "document": "Document"}
         for i, conn, route, vals in conns:  # noqa: B007
+            # #2062: the operator route (reify/mitigation/part-whole →
+            # create_operator) accepts Point OR Event endpoints — the direct
+            # route (plain IMPL/NAND) stays plain-Point only. An Event is
+            # accepted only when the endpoint addresses the node BY ITS id
+            # (the create_operator write key): an Event that resolves only by
+            # eventId (the ingest_corpus DocumentCreated shape) would pass
+            # validation but crash create_operator mid-write — partial
+            # mutation — so it stays a Phase-1 violation.
+            op_route = route == "operator"
             for v in vals:
                 if not isinstance(v, str):
                     continue
                 if v in local:
                     section, item = local[v]
-                    if section != "points" or item.get("is_operator"):
+                    plain_point = section == "points" \
+                        and not item.get("is_operator")
+                    event_item = op_route and section == "entities" \
+                        and str(item.get("type") or "").strip().lower() == "event"
+                    if not (plain_point or event_item):
                         if section == "sources":
                             label = "Source"
                         elif section == "entities":
@@ -5138,7 +5390,9 @@ class TortoiseSDK:
                             "message": f"ingest: connections[{i}] external "
                                        f"endpoint {v!r} does not exist",
                         })
-                    elif info["label"] != "Point" or info["is_operator"]:
+                    elif info["is_operator"] or (info["label"] != "Point"
+                            and not (op_route and info["label"] == "Event"
+                                     and info.get("id") == v)):
                         got = ("operator Point" if info["is_operator"]
                                else info["label"] or "unknown node type")
                         violations.append({
@@ -5187,10 +5441,16 @@ class TortoiseSDK:
         """Phase-2 defense-in-depth (check 3): re-verify endpoints right
         before the connection write — a node deleted/superseded between
         Phase-1 validation and this write is the race class this exists for.
-        Reuses the SAME message shapes as Phase 1 (Phase-1/2 parity)."""
+        Reuses the SAME message shapes as Phase 1 on the external-endpoint
+        leg (bundle-local refs resolve to external ids in Phase-2; the
+        bundle-local '{label} item' template is Phase-1-only). #2062: the
+        operator route accepts Point OR Event endpoints when the endpoint
+        addresses the node BY ITS id (matching Phase-1 and create_operator's
+        A1b #1272 contract)."""
         if not isinstance(conn, dict) or "operator" not in conn:
             return
         route = self._connection_route(conn)
+        op_route = route == "operator"
         frm = conn.get("from")
         tos = conn.get("to")
         vals = []
@@ -5208,7 +5468,9 @@ class TortoiseSDK:
                     "message": f"ingest: connections[{index}] external "
                                f"endpoint {v!r} does not exist",
                 })
-            elif info_i["label"] != "Point" or info_i["is_operator"]:
+            elif info_i["is_operator"] or (info_i["label"] != "Point"
+                    and not (op_route and info_i["label"] == "Event"
+                             and info_i.get("id") == v)):
                 got = ("operator Point" if info_i["is_operator"]
                        else info_i["label"] or "unknown node type")
                 violations.append({
@@ -5401,6 +5663,20 @@ class TortoiseSDK:
           operator-less — routed to a DIRECT edge (no operator node, see
           INGEST_CONTRACT.md §8). A connection carrying ``relation`` stays a
           PLAIN structural edge (structural edges never reify).
+        - Endpoint typing (#2062): operator-ROUTED connections (reify:
+          true/mitigation/part-whole → create_operator) accept Point OR Event
+          endpoints (A1b #1272 parity — the dedup key in _find_operator
+          collects both); bundle-local refs may address point items or
+          ``type:"event"`` entity items. An external Event endpoint must
+          address the node BY ITS id (the create_operator write key — an
+          Event that resolves only by eventId, e.g. the ingest_corpus
+          DocumentCreated shape, is rejected at validation, never a mid-write
+          crash). NOTE: Event entity items are append-only — re-ingesting a
+          FULL bundle mints a new Event occurrence (new id) and thus a new
+          operator; dedup applies to id-stable external Event endpoints (or
+          re-ingesting connection-only against the resolved id). DIRECT-edge
+          connections (plain IMPL/NAND → create_direct_edge, which guards
+          plain Points) require plain-Point endpoints only.
         - granularity='bulk' (default): whole bundle in one coherent pass,
           returns aggregated {created, ids, nudges}. granularity='granular':
           additionally returns per-item ``results`` for agent step-by-step
@@ -9535,7 +9811,7 @@ class TortoiseSDK:
         # #25: optional graph-informed rerank (persisted EP confidence,
         # operator connectivity, recency). Off by default (backward compat).
         if graph_ranker is not None and results:
-            results = graph_ranker.rerank(results, entity_type="point")
+            results = graph_ranker.rerank(results, entity_type="point", query=q)
 
         return results
 
@@ -9829,6 +10105,11 @@ class TortoiseSDK:
         leg_trace: list[dict] | None = None,
         recency_field: str | None = None,
         recency_boost: float = 0.0,
+        keep_numeric: bool = False,
+        search_keys_prf: bool = False,
+        fusion_weights: dict | None = None,
+        fusion_k: int = 60,
+        w4_enrich: bool = True,
     ) -> list[dict]:
         """Hybrid search with RRF fusion + EP annotation.
 
@@ -9902,6 +10183,24 @@ class TortoiseSDK:
             error → fail-open to plain RRF (logged, never crashes).
         recency_boost (R5 #1544): multiplier strength, clamped 0.0–10.0.
             Default 0.0 = off (byte-identical output to pre-R5).
+        keep_numeric (A1 #2070): ask-lane numeric-token policy — all-digit
+            tokens (money/quantity amounts) survive the sparse tokenizer so
+            SAME-VALUE dollar turns become retrievable. Default False = the
+            search lane stays byte-identical (numeric tokens still dropped).
+        search_keys_prf (A4 #2070): pseudo-relevance-feedback expansion — a
+            bounded SECOND FTS pass whose OR-union is the original query's
+            tokens (slots reserved) PLUS additive aliases harvested from the
+            retrieved pool's top-5 hits' ``search_keys`` (never replacing
+            original tokens; bounded raise to 12 + 8 terms). Default False =
+            single pass, byte-identical. Ask lane passes True.
+        fusion_weights (A3 #2070): explicit per-strategy RRF weights
+            override. Default None = the shared global resolution
+            (TORTOISE_FUSION_WEIGHTS env → the shipped ``{"vector": 1.5}``)
+            unchanged. Ask lane passes its own TORTOISE_ASK_FUSION_WEIGHTS
+            knob through this slot.
+        fusion_k (A3 #2070): the RRF damping constant override (the
+            historical Cormack k=60). Default 60 = unchanged. Ask lane
+            threads its TORTOISE_ASK_FUSION_K knob through this slot.
         """
         from .search_engine import (  # noqa: I001
             classify_query, degradation_chain, rrf_fusion,
@@ -9912,6 +10211,12 @@ class TortoiseSDK:
             expand_structural_hops,
             _recency_factors,
             _trace_entry,
+        )
+        # W4 (#2101): the additive why-layer enrichment (shared assembly —
+        # DM-1; lazy import — why.py pulls search_engine helpers only).
+        from .why import (
+            enrich_items as w4_enrich_items,
+            w4_enrichment_enabled,
         )
 
         if entity_type not in ("point", "event", "subject", "document", "object", "operator", "source"):
@@ -10014,6 +10319,9 @@ class TortoiseSDK:
             vector_index_api=getattr(proj, "_vector_index_api", None),
             excluded_statuses=() if include_terminal else None,
             leg_trace=leg_trace,
+            # A1 (#2070): the ask-lane numeric-token policy threads into the
+            # sparse leg's OR-union (default False = search lane unchanged).
+            keep_numeric=keep_numeric,
         )
 
         if not raw_results:
@@ -10095,6 +10403,29 @@ class TortoiseSDK:
                         if pid not in seen)
                     raw_results["structural"] = merged
 
+        # A4 (#2070): search_keys pseudo-relevance-feedback expansion (ask
+        # lane, caller-gated). A bounded SECOND FTS pass whose OR-union is
+        # the original query's tokens (slots reserved per build_or_query's
+        # cap) PLUS additive aliases harvested from the retrieved pool's
+        # top-5 hits — never replacing original tokens. Fail-open: any fetch/
+        # query failure keeps the ORIGINAL fts leg (byte-identical); the
+        # expansion is additive recall only.
+        if search_keys_prf and raw_results.get("fts"):
+            expanded_fts = self._search_keys_prf_expansion(
+                query, raw_results["fts"],
+                str_limit=str_limit,
+                excluded_statuses=() if include_terminal else None,
+                leg_trace=leg_trace,
+                # P1-fix (#2070): the second pass respects the caller's A1
+                # keep_numeric — an operator who opted OUT of numeric tokens
+                # must not have them silently re-introduced by the PRF pass
+                # (the alias harvest stays numeric-aware; only the original
+                # query's re-tokenization honors the opt-out).
+                keep_numeric=keep_numeric,
+            )
+            if expanded_fts is not None:
+                raw_results["fts"] = expanded_fts
+
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:
             strat_name, ranked = next(iter(raw_results.items()))
@@ -10113,18 +10444,25 @@ class TortoiseSDK:
             # toward the stronger leg without abandoning the others. Env
             # override for tuning: TORTOISE_FUSION_WEIGHTS='{"vector": 2.0}'
             # (JSON; the LongMemEval-S re-burn later will refine this).
-            fusion_weights = {"vector": 1.5}
-            _fw = os.environ.get("TORTOISE_FUSION_WEIGHTS")
-            if _fw:
-                import json as _json
-                try:
-                    fusion_weights = _json.loads(_fw)
-                except (ValueError, TypeError):
-                    fusion_weights = {"vector": 1.5}
+            # A3 (#2070): the ASK lane threads its own
+            # TORTOISE_ASK_FUSION_WEIGHTS / TORTOISE_ASK_FUSION_K knobs via
+            # the ``fusion_weights``/``fusion_k`` kwargs — when the caller
+            # passes None/60 the shared resolution below is unchanged
+            # (search lane byte-identical).
+            if fusion_weights is None:
+                fusion_weights = {"vector": 1.5}
+                _fw = os.environ.get("TORTOISE_FUSION_WEIGHTS")
+                if _fw:
+                    import json as _json
+                    try:
+                        fusion_weights = _json.loads(_fw)
+                    except (ValueError, TypeError):
+                        fusion_weights = {"vector": 1.5}
             fused = rrf_fusion(
                 ranked_lists,
                 strategy_names=list(raw_results.keys()),
                 weights=fusion_weights,
+                k=fusion_k,
             )
             # Apply threshold filter to RRF scores
             if threshold > 0:
@@ -10258,7 +10596,9 @@ class TortoiseSDK:
         try:
             if entity_type == "point":
                 rows = graph.query(
-                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, n.content, n.pointKind",
+                    "MATCH (n:Point) WHERE n.id IN $ids "
+                    "RETURN n.id, n.content, n.pointKind, "
+                    "       coalesce(n.has_answer, false)",
                     params={"ids": result_ids},
                 ).result_set
                 for row in rows:
@@ -10266,6 +10606,10 @@ class TortoiseSDK:
                     entity_data[pid] = {
                         "content": row[1],
                         "kind": row[2],
+                        # A5 (#2070): the stored evidence mark rides the hit
+                        # payload (mirrors the eval's point_props_for_hits)
+                        # so the ask lane's evidence boost has material.
+                        "has_answer": bool(row[3]),
                     }
             elif entity_type == "event":
                 rows = graph.query(
@@ -10421,6 +10765,8 @@ class TortoiseSDK:
                 session_id=cap_session,
                 event_id=cap_event,
                 source_path=cap_source_path,
+                # A5 (#2070): stored evidence mark (additive in to_dict).
+                has_answer=pt.get("has_answer", False),
             )
             results.append(result)
 
@@ -10433,7 +10779,21 @@ class TortoiseSDK:
             from .ranking import GraphRanker
             ranker = graph_ranker or GraphRanker(proj)
             dicts = [r.to_dict() for r in results]
-            return ranker.rerank(dicts, entity_type=entity_type)[:limit]
+            # W4-b (#2102): thread the query for the contested-relevance boost
+            # ONLY when the caller opted into W4 enrichment — w4_enrich=False
+            # suppresses the why-layer keys AND the boost together (order and
+            # keys must never disagree).
+            ranked = ranker.rerank(
+                dicts, entity_type=entity_type,
+                query=(query if w4_enrich else None))[:limit]
+            # W4 (#2101): additive why-layer enrichment (flag-gated) — search
+            # surface; recall_state's pool and the ask lane inherit it through
+            # their own calls. Zero-LLM, bounded reads, fail-open (items
+            # unchanged on any assembly error).
+            if entity_type == "point" and w4_enrich \
+                    and w4_enrichment_enabled():
+                ranked = w4_enrich_items(proj, ranked)
+            return ranked
         if order_by == "confidence":
             # #25: sort by the PERSISTED EP confidence (n.confidence, written
             # by compute_confidence), not the structural impl/(impl+nand) proxy
@@ -10447,7 +10807,110 @@ class TortoiseSDK:
             )
         # Default: RRF relevance order (already in fused order)
 
-        return [r.to_dict() for r in results[:limit]]
+        out = [r.to_dict() for r in results[:limit]]
+        # W4 (#2101): additive why-layer enrichment (flag-gated) — see the
+        # order_by=graph branch above for the contract.
+        if entity_type == "point" and w4_enrich \
+                and w4_enrichment_enabled():
+            out = w4_enrich_items(proj, out)
+        return out
+
+    # ── A4 (#2070): search_keys PRF expansion (ask lane) ──────────────────
+
+    def _search_keys_prf_expansion(
+        self,
+        query: str,
+        fts_hits: list[tuple[str, float]],
+        *,
+        str_limit: int,
+        excluded_statuses: tuple | None,
+        leg_trace: list[dict] | None,
+        keep_numeric: bool = False,
+    ) -> list[tuple[str, float]] | None:
+        """A4 (#2070): bounded second FTS pass with ADDITIVE search_keys
+        expansion terms harvested from the retrieved pool's top-5 hits.
+
+        Pseudo-relevance feedback: the top hits of the FIRST pass are the
+        relevance seeds — their stored ``search_keys`` aliases (the E3
+        #1535 extractor-written vocabulary) become extra OR terms for a
+        second FTS pass, so turns that share the aliases but not the query's
+        literal tokens surface. Injection respects ``build_or_query``'s
+        OR-cap contract: the original query's tokens keep their slots
+        (``DEFAULT_MAX_OR_TERMS``) and the aliases fill ONLY the bounded
+        expansion tail (``DEFAULT_MAX_EXPANSION_TERMS``) — an alias can
+        never displace an original token, and the expansion is additive
+        recall only (never a replacement).
+
+        Fail-open contract (the pre-mortem's "budget-compatible" guard): any
+        fetch/query failure returns ``None`` and the caller keeps the
+        ORIGINAL fts leg — byte-identical behavior, and the A4 pass can
+        never turn a working lane into a broken one. Returns the MERGED fts
+        leg (expanded run first, first-pass-only ids appended in their
+        original order) when the expansion ran and returned hits; ``None``
+        when there is nothing to expand (no aliases / empty result).
+        """
+        if not fts_hits:
+            return None
+        top_ids = [pid for pid, _score in fts_hits[:5] if pid]
+        if not top_ids:
+            return None
+        proj = self._get_proj()
+        try:
+            rows = proj.g.query(
+                "MATCH (n:Point) WHERE n.id IN $ids "
+                "RETURN n.id, coalesce(n.search_keys, '')",
+                params={"ids": top_ids},
+            ).result_set
+        except Exception:
+            _logger.warning(
+                "A4 search_keys fetch failed — keeping the original fts "
+                "leg", exc_info=True)
+            return None
+        aliases: list[str] = []
+        for row in rows:
+            v = row[1]
+            if isinstance(v, (list, tuple)):
+                aliases.extend(str(x) for x in v if x)
+            elif v:
+                aliases.append(str(v))
+        aliases = [a.strip() for a in aliases if a and a.strip()]
+        if not aliases:
+            return None
+
+        from .search_engine import run_fts_query
+        _exp_trace: list[dict] = []
+        try:
+            expanded = run_fts_query(
+                proj.g, query, entity_type="point", limit=str_limit,
+                excluded_statuses=excluded_statuses,
+                # P1-fix: honor the caller's A1 opt-out for the original
+                # query's re-tokenization (the alias harvest below already
+                # runs numeric-aware via expansion_tokens' keep_numeric).
+                keep_numeric=keep_numeric,
+                expansion_terms=aliases,
+                leg_trace=_exp_trace,
+            )
+        except Exception:
+            _logger.warning(
+                "A4 expansion FTS pass failed — keeping the original fts "
+                "leg", exc_info=True)
+            return None
+        if not expanded:
+            # Empty second pass = fail-open: the ORIGINAL fts leg stays
+            # (byte-identical). P2-fix (#2070): do NOT ride the degraded
+            # entry into the shared trace — a healthy lane that got a
+            # transiently-empty expansion must not report
+            # retrieval_degraded (the A4 fail-open contract: an expansion
+            # can never turn a working lane into a broken one).
+            return None
+        if leg_trace is not None:
+            # the second pass's own per-leg entry rides the shared trace
+            # (the FIRST pass's entry was already merged by degradation_chain)
+            leg_trace.extend(_exp_trace)
+        seen = {pid for pid, _score in expanded}
+        merged = list(expanded)
+        merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
+        return merged
 
     # ── Ask lane (#1987 Task 5): the SDK answer surface ─────────────────────
 
@@ -10523,13 +10986,43 @@ class TortoiseSDK:
         the D8 supersession markers reach the reader; cost-bounded by the
         same 8k/40 caps) → ask-path annotation (session-date join + speaker)
         → ``dedup_pool`` (per-session cap 3, keyed on the annotated session)
-        → ``assemble_context`` (8000-token estimate cap AND 32 KiB byte cap,
-        whole-hit drop) → ``detect_question_type`` (or caller override) →
+        → A5 evidence-mark boost (default ON — reorders the deduped pool by
+        stored ``has_answer`` marks; zero marks = no-op) → A7 rerank
+        (env-gated OFF by default) → ``assemble_context`` (8000-token
+        estimate cap AND 32 KiB byte cap, whole-hit drop) →
+        ``detect_question_type`` (or caller override) →
         ONE reader call via ``build_reader_model()`` (never an
         LLM-skip pre-gate — exactly one model call incl. empty context) →
         ``_looks_abstained`` (blank → ``NO_EVIDENCE_TEXT``) → best-effort
         ``record_ask_usage`` (ONLY with an explicit ``team_id``; default
         None → no-op).
+
+        #2070 retrieval knobs (ask-lane only — the search lane is
+        untouched, both-not-either preserved):
+
+          * A1 numeric tokens — ``TORTOISE_ASK_NUMERIC_TOKENS`` (default ON):
+            all-digit money/quantity tokens survive the sparse tokenizer
+            (same-value dollar questions retrieve their turns).
+          * A2 vector leg — the ``embeddings`` extra is a DOCUMENTED runtime
+            requirement for ask quality (NEVER enforced): when the embedder
+            is absent the vector strategy is never submitted and
+            ``retrieval_degraded`` stays honest (no silent success).
+          * A3 fusion — ``TORTOISE_ASK_FUSION_WEIGHTS`` (JSON; default None
+            = the shared global 1.5) + ``TORTOISE_ASK_FUSION_K`` (default 60).
+          * A4 search_keys PRF — ``TORTOISE_ASK_SEARCH_KEYS_PRF`` (default
+            ON): additive expansion terms from the retrieved pool's
+            top-5 hits' ``search_keys`` (original tokens always keep their
+            OR-cap slots).
+          * A5 evidence boost — ``TORTOISE_ASK_EVIDENCE_BOOST`` (default
+            ON) + ``TORTOISE_ASK_EVIDENCE_BOOST_ANSWER_STRING/VERBATIM/SOURCE``.
+          * A6 caps — ``TORTOISE_ASK_RETRIEVAL_LIMIT`` /
+            ``TORTOISE_ASK_CONTEXT_ITEM_CAP`` /
+            ``TORTOISE_ASK_CONTEXT_TOKEN_CAP`` (default OFF = 40/40/8000;
+            the retrieval-window limit is threaded IN TANDEM with the
+            assembly caps — raising only the assemble cap changes nothing).
+          * A7 rerank — ``TORTOISE_ASK_RERANK`` (default OFF, phase 2):
+            cross-encoder + MMR port (tortoise/rerank.py), degrade-to-
+            current contract.
 
         Returns the 12-field response shape: ``{answer, abstained,
         question_type, question_date, evidence, context_tokens, model,
@@ -10546,13 +11039,15 @@ class TortoiseSDK:
         import time as _time  # noqa: I001
         from datetime import datetime as _dt2
         from tortoise.retrieval import (
-            DEFAULT_CONTEXT_ITEM_CAP,
-            DEFAULT_CONTEXT_TOKEN_CAP,
             DEFAULT_MAX_CHUNKS_PER_SESSION,
+            apply_evidence_boost,
+            ask_env_bool,
             assemble_context,
             dedup_pool,
             estimate_tokens_ask,
             render_context,
+            resolve_ask_boost_multipliers,
+            resolve_ask_retrieval_caps,
         )
         from tortoise.metering import estimate_ask_cost_usd, select_ask_meter_rates
         from tortoise.reader import (
@@ -10566,6 +11061,8 @@ class TortoiseSDK:
             AskReaderUnavailable,
             AskRetrievalUnavailable,
         )
+        # W4 (#2101): additive why-layer enrichment flag (shared resolver).
+        from .why import w4_enrichment_enabled
 
         if os.environ.get("TORTOISE_API_URL"):
             return self._post_ask(question, question_type=question_type,
@@ -10579,12 +11076,36 @@ class TortoiseSDK:
             question_date = _dt2.now(UTC).strftime("%Y-%m-%d")
 
         # 2. Retrieval (whole-retrieval raises → AskRetrievalUnavailable).
+        #    A1/A3/A4/A6 (#2070): the ask-lane retrieval knobs resolve ONCE
+        #    here (env-gated; defaults = historical behavior) and thread into
+        #    the one bounded RAG pass. A6's retrieval-window limit and the
+        #    assembly caps resolve IN TANDEM (``resolve_ask_retrieval_caps``)
+        #    — the gold is cut at ``result_ids[:limit]`` inside the retrieval
+        #    call BEFORE dedup/assemble, so a cap raise that does not also
+        #    raise the window changes nothing.
+        caps = resolve_ask_retrieval_caps()
+        keep_numeric = ask_env_bool(
+            "TORTOISE_ASK_NUMERIC_TOKENS", True)       # A1, default ON
+        search_keys_prf = ask_env_bool(
+            "TORTOISE_ASK_SEARCH_KEYS_PRF", True)      # A4, default ON
+        evidence_boost = ask_env_bool(
+            "TORTOISE_ASK_EVIDENCE_BOOST", True)       # A5, default ON
+        from tortoise.retrieval import (  # noqa: I001
+            ASK_FUSION_WEIGHTS_ENV, ASK_FUSION_K_ENV, ask_env_int,
+            ask_env_weights,
+        )
+        fusion_weights = ask_env_weights(ASK_FUSION_WEIGHTS_ENV, None)  # A3
+        fusion_k = ask_env_int(ASK_FUSION_K_ENV, 60)                    # A3
         leg_trace: list[dict] = []
         try:
             hits = self.tortoise_fts_query(
-                question, limit=DEFAULT_CONTEXT_ITEM_CAP,
+                question, limit=caps["limit"],
                 pool_size=DEFAULT_POOL_SIZE, include_terminal=True,
-                leg_trace=leg_trace)
+                leg_trace=leg_trace,
+                keep_numeric=keep_numeric,
+                search_keys_prf=search_keys_prf,
+                fusion_weights=fusion_weights,
+                fusion_k=fusion_k)
         except AskRetrievalUnavailable:
             raise
         except Exception as e:  # noqa: BLE001, RUF100 — map to the ask surface
@@ -10600,7 +11121,8 @@ class TortoiseSDK:
             raise AskRetrievalUnavailable(
                 f"annotation unavailable: {type(e).__name__}") from e
 
-        # 4. Dedup (annotated session key — P2-20) + assembly (8k/40/32KiB).
+        # 4. Dedup (annotated session key — P2-20) → A5 evidence boost → A7
+        #    rerank → assembly (8k/40/32KiB caps from ``caps``).
         try:
             def _ask_session_key(h: dict) -> str:
                 return (h.get("session_id")
@@ -10610,11 +11132,32 @@ class TortoiseSDK:
             deduped = dedup_pool(
                 annotated, max_chunks_per_session=DEFAULT_MAX_CHUNKS_PER_SESSION,
                 session_key=_ask_session_key)
+            # A5 (#2070): evidence-mark boost before assembly (mark_for=None =
+            # the stored-``has_answer`` fallback — source-session class,
+            # conservative). Zero marks → byte-identical order (all factors
+            # 1.0); the boost is a rank reorder, never a filter. Real product
+            # graphs carry zero marks until the extractor writes them
+            # (documented — the value is measured on seeded fixtures).
+            if evidence_boost:
+                boost_mult = resolve_ask_boost_multipliers()
+                deduped, _boost_stats = apply_evidence_boost(
+                    deduped,
+                    boost_answer_string=boost_mult["answer_string"],
+                    boost_verbatim=boost_mult["verbatim"],
+                    boost_source=boost_mult["source"],
+                )
+            # A7 (#2070): cross-encoder + MMR rerank (env-gated, default
+            # OFF — phase 2). Degrade-to-current: any failure keeps the
+            # deduped pool untouched; the rerank never raises.
+            from tortoise.rerank import ask_lane_rerank
+            deduped, _rerank_stats = ask_lane_rerank(
+                question, deduped, proj=self._get_proj(),
+                top_k=caps["context_item_cap"])
             assembled = assemble_context(
-                deduped, top_k=DEFAULT_CONTEXT_ITEM_CAP,
-                max_context_tokens=DEFAULT_CONTEXT_TOKEN_CAP,
+                deduped, top_k=caps["context_item_cap"],
+                max_context_tokens=caps["context_token_cap"],
                 question_date=question_date,
-                context_item_cap=DEFAULT_CONTEXT_ITEM_CAP,
+                context_item_cap=caps["context_item_cap"],
                 byte_cap=32768)
         except Exception as e:  # noqa: BLE001, RUF100
             raise AskRetrievalUnavailable(
@@ -10682,6 +11225,22 @@ class TortoiseSDK:
             except Exception:  # noqa: BLE001, RUF100 — degrade to False
                 degraded = False
 
+        # W4 (#2101): additive why-layer entries for the evidence pool the
+        # reader saw (flag-gated — the ``why`` key is ABSENT with the flag
+        # OFF, keeping the 12-field response byte-identical). The hits
+        # already carry the search-path enrichment; projection is a pure
+        # dict op (zero extra graph reads). Fail-open: any error → ``[]``.
+        why_entries: list[dict] = []
+        if w4_enrichment_enabled():
+            try:
+                from .why import item_to_why_entry
+                for _hit in assembled:
+                    _entry = item_to_why_entry(_hit)
+                    if _entry and _entry.get("point_id"):
+                        why_entries.append(_entry)
+            except Exception as e:  # noqa: BLE001, RUF100 — fail-open
+                _logger.warning("W4 why-layer enrichment failed (ask): %s", e)
+                why_entries = []
         serving = getattr(model, "last_route", None) or \
             getattr(model, "route", None)
         duration_ms = int((_time.monotonic() - t0) * 1000)
@@ -10698,7 +11257,7 @@ class TortoiseSDK:
                     getattr(model, "model", None) or ""))
         except Exception:  # noqa: BLE001, RUF100
             cost_estimate = 0.0
-        return {
+        resp = {
             "answer": answer,
             "abstained": abstained,
             "question_type": qtype,
@@ -10712,6 +11271,12 @@ class TortoiseSDK:
             "duration_ms": duration_ms,
             "retrieval_degraded": degraded,
         }
+        # W4 (#2101): additive why-layer entries — emitted ONLY with the W4
+        # flag ON (absent otherwise — the 12-field response stays
+        # byte-identical).
+        if w4_enrichment_enabled():
+            resp["why"] = why_entries
+        return resp
 
     @staticmethod
     def _ask_d8_decoration_unavailable(hits: list[dict]) -> bool:
@@ -11182,7 +11747,12 @@ class TortoiseSDK:
         point_results = self.tortoise_fts_query(
             query, kind=kind, entity_type="point", limit=pool,
             exclude_status=exclude_status,
-            include_terminal=include_superseded)
+            include_terminal=include_superseded,
+            # Sec-1 (code-review gate): the pool can reach ~30k ids — W4
+            # enrichment on the PRE-rerank pool would fold + project ~30k
+            # candidates that StateRanker then discards ~2/3 of. Enrich
+            # POST-rerank on the final top-limit list instead (see below).
+            w4_enrich=False)
         object_results = (
             self.tortoise_fts_query(
                 query, kind=kind, entity_type="object", limit=pool)
@@ -11211,7 +11781,7 @@ class TortoiseSDK:
 
         # 3. Multiplicative-gate ranking over the merged pool.
         merged = points + objects
-        ranked = ranker.rerank(merged, entity_type="point")
+        ranked = ranker.rerank(merged, entity_type="point", query=query)
 
         # 4. Explicit confidence floor (orthogonal to the multiplicative gate).
         ranked = [
@@ -11252,6 +11822,20 @@ class TortoiseSDK:
             contested = bool(ep.get("contested")) if isinstance(ep, dict) else False
             copy["contested"] = contested
             out.append(copy)
+        # Sec-1 (code-review gate): W4 enrichment POST-rerank on the final
+        # top-limit list (the pool call above passed w4_enrich=False) — the
+        # additive keys ride only the results the caller actually receives.
+        # Flag-gated + fail-open (unchanged on any assembly error).
+        try:
+            from .why import enrich_items as _w4_enrich_items
+            from .why import w4_enrichment_enabled as _w4_enabled
+            if _w4_enabled():
+                point_items = [i for i in out if i.get("entity_type") == "point"]
+                enriched = _w4_enrich_items(proj, point_items)
+                by_id = {i["id"]: i for i in enriched}
+                out = [by_id.get(i["id"], i) for i in out]
+        except Exception as e:  # noqa: BLE001, RUF100 — fail-open
+            _logger.warning("W4 enrichment failed (recall_state): %s", e)
         return out
 
     def _state_counter_evidence(self, point_ids: list[str]) -> dict[str, list[dict]]:
@@ -11792,13 +12376,15 @@ class TortoiseSDK:
 
         #765 (plan Task 8 — SDK control-plane backend env-gated): in
         Supabase control-plane mode (TORTOISE_CONTROL_PLANE=supabase / creds
-        configured) NO registry write happens — the plan data model
-        (0006-0009) has no graphs table, so team→graph metadata is not
-        persisted; the graph_id is derived deterministically from the
-        namespace and graph_list() derives the default graph from
-        teams.graph_name. Selfhost (registry mode) keeps the registry Graph
-        node. The zero-registry-writes cutover contract (registry node count
-        == 0) requires this gate.
+        configured) NO registry write happens. Since C1 (#2110) the hosted
+        SOR is the ``graphs`` table (20260901000001) — but the INSERT path
+        into it is C2/C3 (provisioning service, out of C1 scope), so this
+        method still returns the deterministic id WITHOUT persisting; the
+        registry-shaped list seam (graph_metadata/graph_list) derives the
+        default graph from teams.graph_name and reads custom rows once they
+        exist. Selfhost (registry mode) keeps the registry Graph node. The
+        zero-registry-writes cutover contract (registry node count == 0)
+        requires this gate.
         """
         import uuid as _uuid  # noqa: I001
         import hashlib as _hashlib
@@ -11816,9 +12402,12 @@ class TortoiseSDK:
         gid = f"g_{_uuid.uuid4().hex[:16]}"
         ns = namespace or f"team_{team_id}_{gid}"
         now = datetime.now(_tz.utc).isoformat()  # noqa: UP017
+        # C1 (#2110): Graph node gains status (v1 lifecycle: active only —
+        # delete = soft tombstone; no archive). recording stays absent =
+        # NULL = inherit team default (back-compat with pre-C1 nodes).
         reg.query(
             "CREATE (g:Graph {id:$gid, team_id:$tid, name:$name, kind:$kind, "
-            "namespace:$ns, created_at:$now})",
+            "namespace:$ns, status:'active', created_at:$now})",
             params={"gid": gid, "tid": team_id, "name": name,
                     "kind": kind, "ns": ns, "now": now},
         )
@@ -11829,10 +12418,10 @@ class TortoiseSDK:
 
         #765 (plan Task 8 reader inventory): in Supabase control-plane mode
         the default graph is derived from ``teams.graph_name`` via the seam
-        (no graphs table in the plan data model — see
-        supabase_control.graph_metadata); the registry Graph-node read stays
-        for selfhost. Registry-shaped rows (graph_id/team_id/name/kind/
-        namespace) so callers are mode-agnostic.
+        (graph_metadata — C1 now also lists custom graphs table rows); the
+        registry Graph-node read stays for selfhost. Registry-shaped rows
+        (graph_id/team_id/name/kind/namespace/status) so callers are
+        mode-agnostic.
         """
         from tortoise.supabase_control import (  # noqa: I001
             get_control_plane, graph_metadata, is_supabase_enabled,
@@ -11853,15 +12442,138 @@ class TortoiseSDK:
                 "name": props.get("name"),
                 "kind": props.get("kind", "custom"),
                 "namespace": props.get("namespace"),
+                # C1 (#2110): status/recording ride the seam. Pre-C1 nodes
+                # lack them → status coalesces to "active" (mode-agnostic
+                # with the Supabase seam, which always emits "active"; deep
+                # review P2: a consumer filtering status=='active' must not
+                # silently drop legacy selfhost graphs). recording None =
+                # inherit team default.
+                "status": props.get("status") or "active",
+                "recording": props.get("recording"),
             })
         return out
 
     def graph_count(self, team_id: str) -> int:
+        """Graph count for a team — the quota meter's source (C1 #2110).
+
+        Supabase mode: 1 (the default graph — always present, derived from
+        teams.graph_name) + count(custom active). Deleted rows excluded
+        (delete frees the slot; v1 has no archive). Registry mode: the
+        existing MATCH (team_create :12055 creates the kind='default' node,
+        so the registry count already includes the default). C2 (#2111):
+        registry branch now filters status <> 'deleted' (soft-delete must
+        free the slot — E2E-8; pre-C1 nodes without the prop count as
+        active) — parity with the Supabase branch (plan-review P1 #3).
+        """
+        from tortoise.supabase_control import (  # noqa: I001
+            get_control_plane, is_supabase_enabled,
+        )
+        if is_supabase_enabled():
+            cp = get_control_plane()
+            try:
+                rows = cp.query(
+                    "graphs", select=["id"],
+                    filters=[("team_id", "eq", team_id),
+                             ("kind", "eq", "custom"),
+                             ("status", "eq", "active")],
+                )
+            except Exception as e:
+                # Drift-safe: pre-C1 schema (no graphs table) → default-only.
+                _logger.warning(
+                    "graphs count read failed — counting default only "
+                    "(migration 20260901000001 applied?): %s", e)
+                return 1
+            return 1 + len(rows)
         reg = self._get_registry()
         return reg.query(
-            "MATCH (g:Graph {team_id:$tid}) RETURN count(g)",
+            "MATCH (g:Graph {team_id:$tid}) "
+            "WHERE g.status IS NULL OR g.status <> 'deleted' "
+            "RETURN count(g)",
             params={"tid": team_id},
         ).result_set[0][0]
+
+    def graph_delete(self, team_id: str, graph_id: str) -> bool:
+        """Soft-delete a Graph node (status='deleted' tombstone — the v1
+        lifecycle, C2 #2111). Returns True when a non-default node was
+        tombstoned; False when unknown OR the default (callers map to
+        404/403). Pre-C1 nodes without status gain it on delete."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) RETURN g.kind",
+            params={"gid": graph_id, "tid": team_id},
+        ).result_set
+        if not rows:
+            return False
+        if rows[0][0] == "default":
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) "
+            "SET g.status = 'deleted'",
+            params={"gid": graph_id, "tid": team_id},
+        )
+        return True
+
+    def graph_set_recording(self, team_id: str, graph_id: str,
+                            value: bool | None) -> bool:
+        """C6 #2115: set the session_recording override on a Graph node.
+
+        ``value`` True/False = explicit override; None = remove the override
+        (FalkorDB SET null removes the prop → inherit team default, #1927
+        default-ON preserved). Resolves the literal ``default`` id to the
+        team's kind='default' node (the default graph IS graph 0 — settable
+        per epic §6.3); real gids match directly. Returns True when the node
+        was found (override written/cleared), False on unknown graph —
+        callers map to 404."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (g:Graph {team_id:$tid}) RETURN g.id, g.kind, "
+            "coalesce(g.status, 'active')",
+            params={"tid": team_id},
+        ).result_set
+        # The literal ``default`` id maps to the team's kind='default' node
+        # (mode-agnostic callers use either); any other id must match a real
+        # node exactly. Soft-deleted nodes (status='deleted') are NOT
+        # patchable — treat as unknown (mirror list_graphs' tombstone skip).
+        if graph_id == "default":
+            node = next((r[0] for r in rows
+                         if r[1] == "default" and r[2] != "deleted"), None)
+        elif any(r[0] == graph_id and r[2] != "deleted" for r in rows):
+            node = graph_id
+        else:
+            node = None
+        if node is None:
+            return False
+        reg.query(
+            "MATCH (g:Graph {id:$gid, team_id:$tid}) SET g.recording = $v",
+            params={"gid": node, "tid": team_id, "v": value},
+        )
+        return True
+
+    def graph_key_ids(self, team_id: str, graph_id: str) -> list[str]:
+        """APIKey node ids bound to a graph — the delete-cascade source
+        (every key dies with the graph, E2E-8). Revoked or not — the
+        cascade must revoke rows that are somehow still active AND clean
+        up revoked ones (idempotent)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) RETURN k.id",
+            params={"tid": team_id, "gid": graph_id},
+        ).result_set
+        return [r[0] for r in rows]
+
+    def graph_active_key_count(self, team_id: str, graph_id: str) -> int:
+        """ACTIVE (non-revoked) APIKey nodes bound to a graph — the
+        key_count source for GET /v1/graphs (parity with the Supabase
+        count_graph_keys seam; C2 P2: graph_key_ids is the cascade source
+        and must NOT be reused for the meter — after C3's standalone
+        revoke, counting all keys would overcount vs Supabase)."""
+        reg = self._get_registry()
+        rows = reg.query(
+            "MATCH (k:APIKey {team_id:$tid, graph_id:$gid}) "
+            "WHERE k.revoked_at IS NULL RETURN count(k)",
+            params={"tid": team_id, "gid": graph_id},
+        ).result_set
+        return int(rows[0][0]) if rows else 0
 
     def team_get(self, team_id: str) -> dict | None:
         """Get a team by ID. Returns None if not found."""
@@ -11944,12 +12656,23 @@ class TortoiseSDK:
         graph_name = team.get("graph_name", f"team_{team.get('name', '')}")
         proj = self._get_proj()
         try:
-            if hasattr(proj.db, 'delete_graph'):
-                proj.db.delete_graph(graph_name)
+            # #2163: proj.db (falkordb.FalkorDB on every lane) has NO
+            # delete_graph attr on the pip client — the old hasattr probe
+            # skipped on FalkorDB Cloud and orphaned the graph after the
+            # registry rows were deleted. select_graph(...).delete() issues
+            # GRAPH.DELETE on embedded + server/cloud alike. An absent-graph
+            # raise (GRAPH.DELETE on a dropped/never-minted graph) is
+            # treated as success — the graph being gone is the desired end
+            # state; genuine failures still log and fall through to the
+            # best-effort swallow.
+            proj.db.select_graph(graph_name).delete()
+        except Exception as e:
+            if is_missing_graph_error(e):
+                _logger.debug("tenant graph %s already absent — skipping",
+                              graph_name)
             else:
-                _logger.debug("delete_graph not available (FalkorDBLite) — skipping")
-        except Exception:
-            _logger.debug("Failed to delete tenant graph %s — skipping", graph_name)
+                _logger.debug("Failed to delete tenant graph %s — skipping",
+                              graph_name)
 
         self._audit(team_id, None, "team_delete", resource_type="team",
                      resource_id=team_id)
@@ -12113,11 +12836,11 @@ class TortoiseSDK:
         Falls back to full scan for legacy provision_tenant keys whose
         key_prefix was set to team_id[:8] (which won't match token[:10]).
         """
-        from tortoise.auth import verify_api_key
+        from tortoise.auth import API_KEY_PREFIXES, verify_api_key
         reg = self._get_registry()
 
         # #687: indexed key_prefix lookup avoids O(keys) PBKDF2 scan
-        if label == "APIKey" and plaintext.startswith("tt_"):
+        if label == "APIKey" and plaintext.startswith(API_KEY_PREFIXES):
             prefix = plaintext[:10]
             rows = reg.query(
                 f"MATCH (n:{label}) WHERE n.key_prefix = $prefix "
@@ -12142,32 +12865,89 @@ class TortoiseSDK:
                 out.append(props)
         return out
 
-    def apikey_create(self, team_id: str, created_by: str) -> dict:
+    def apikey_create(self, team_id: str, created_by: str,
+                      *, graph_id: str | None = None,
+                      scopes: list | None = None,
+                      created_by_key_id: str | None = None,
+                      delegation_depth: int | None = None,
+                      prefix: str = "tt_",
+                      name: str | None = None,
+                      created_via: str | None = None) -> dict:
         """Generate an API key for a team.
 
         Stores SHA-256 hash (never plaintext). Plaintext returned once.
+
+        C1 (#2110) tenancy kwargs (all optional — absent = legacy shape,
+        back-compat for existing callers): graph_id (NULL = team-wide key
+        → default graph), scopes (FLAT allowlist, default []), mint lineage
+        (created_by_key_id + delegation_depth; 0 = minted cannot-escalate,
+        NULL = owner-minted). C2 (#2111): ``prefix`` (default "tt_") lets
+        the provisioning service mint tk_ per-graph keys (epic vocabulary);
+        existing callers unchanged. C3 (#2112): ``name`` (user-facing label,
+        20260825000001 parity — the hosted create_api_key lane passes it)
+        and ``created_via`` (mint-source classification — "provisioned" /
+        "agent_signup" etc.) ride the node as optional props; absent =
+        legacy nodes without them.
+
+        Registry-side invariant (code-review #2b, mirrors the Supabase DB
+        CHECK chk_minted_key_no_escalation): a MINTED key (delegation_depth
+        = 0) can never hold escalation scopes (graphs:create/delete,
+        keys:manage, team:manage) — only owner-minted keys may. The app
+        mint (_mint_graph_key) already ∩ _MINTABLE_SCOPES, but apikey_create
+        is a public SDK method (graph-scripts, C3 drift surface): the check
+        here keeps selfhost parity with the hosted DB invariant once C5
+        flips deleg=0 dormancy off and starts honoring scopes.
         """
         import uuid  # noqa: I001
         from datetime import datetime, timezone
         from tortoise.auth import hash_api_key
         from .exceptions import ControlPlaneError
 
+        _ESCALATION_SCOPES = {"graphs:create", "graphs:delete",
+                              "keys:manage", "team:manage"}
+        if delegation_depth == 0 and scopes and any(
+                s in _ESCALATION_SCOPES for s in scopes):
+            raise ControlPlaneError(
+                "Minted keys (delegation_depth=0) cannot hold escalation "
+                "scopes: " + ",".join(sorted(
+                    _ESCALATION_SCOPES & set(scopes))) + ".",
+            )
+
         team = self.team_get(team_id)
         if team is None:
             raise ControlPlaneError(f"Team {team_id!r} not found")
 
-        api_key = f"tt_{uuid.uuid4().hex}"
+        api_key = f"{prefix}{uuid.uuid4().hex}"
         key_hash = hash_api_key(api_key)
         key_prefix = api_key[:10]
         kid = ulid()
         now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
 
         reg = self._get_registry()
+        # C1 (#2110): include non-None tenancy props in the CREATE (absent =
+        # old callers unchanged; old registry nodes without the props resolve
+        # with safe defaults). C3 (#2112): name/created_via ride the same
+        # optional-props pattern.
+        extra = ""
+        params = {"id": kid, "tid": team_id, "kh": key_hash,
+                  "kp": key_prefix, "cb": created_by, "now": now}
+        if graph_id is not None:
+            extra += ", graph_id:$gid"; params["gid"] = graph_id  # noqa: E702 (baseline #1503)
+        if scopes:
+            extra += ", scopes:$sc"; params["sc"] = list(scopes)  # noqa: E702 (baseline #1503)
+        if created_by_key_id is not None:
+            extra += ", created_by_key_id:$cbk"; params["cbk"] = created_by_key_id  # noqa: E702 (baseline #1503)
+        if delegation_depth is not None:
+            extra += ", delegation_depth:$dd"; params["dd"] = delegation_depth  # noqa: E702 (baseline #1503)
+        if name is not None:
+            extra += ", name:$nm"; params["nm"] = name  # noqa: E702 (baseline #1503)
+        if created_via is not None:
+            extra += ", created_via:$cv"; params["cv"] = created_via  # noqa: E702 (baseline #1503)
         reg.query(
             "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
-            "key_prefix:$kp, created_by:$cb, created_at:$now})",
-            params={"id": kid, "tid": team_id, "kh": key_hash,
-                    "kp": key_prefix, "cb": created_by, "now": now},
+            "key_prefix:$kp, created_by:$cb, created_at:$now"
+            + (extra or "") + "})",
+            params=params,
         )
         # BELONGS_TO edge
         reg.query(
@@ -12182,12 +12962,18 @@ class TortoiseSDK:
                 "team_id": team_id, "created_at": now}
 
     def apikey_list(self, team_id: str) -> list[dict]:
-        """List API keys for a team (no plaintext or hashes)."""
+        """List API keys for a team (no plaintext or hashes).
+
+        C1 (#2110): rows gain the tenancy props (graph_id/scopes/
+        delegation_depth/created_by_key_id) — absent on pre-C1 nodes →
+        None-safe defaults (graph_id None = team-wide, scopes [] = legacy).
+        """
         reg = self._get_registry()
         rows = reg.query(
             "MATCH (k:APIKey {team_id:$tid}) "
             "RETURN k.id, k.key_prefix, k.created_by, k.created_at, "
-            "k.last_used_at, k.revoked_at",
+            "k.last_used_at, k.revoked_at, "
+            "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
             params={"tid": team_id},
         ).result_set
         keys = []
@@ -12195,6 +12981,8 @@ class TortoiseSDK:
             keys.append({
                 "id": r[0], "key_prefix": r[1], "created_by": r[2],
                 "created_at": r[3], "last_used_at": r[4], "revoked_at": r[5],
+                "graph_id": r[6], "scopes": r[7] or [],
+                "delegation_depth": r[8], "created_by_key_id": r[9],
             })
         return keys
 
@@ -12223,11 +13011,15 @@ class TortoiseSDK:
         """Verify an API key against stored hashes.
 
         Returns {team_id, key_id} if valid, None if not found or revoked.
-        Uses salted-hash verification (per-key salt means exact-hash lookup
-        never matches — see #130, #139). #1709: expires_at filtering with
-        NULL-as-never-expires semantics (mirrors the REST path #742 + the
-        agent_signup mint, which now writes expires_at:null) — a legacy
-        selfhost key without the prop must keep authenticating.
+        C2 (#2111): also returns delegation_depth + scopes when present on
+        the node (MCP's TeamResolutionMiddleware rejects deleg=0 minted
+        keys — the REST surface is gated; MCP must not be the fail-open
+        lane for handed-out per-graph keys). Uses salted-hash verification
+        (per-key salt means exact-hash lookup never matches — see #130,
+        #139). #1709: expires_at filtering with NULL-as-never-expires
+        semantics (mirrors the REST path #742 + the agent_signup mint,
+        which now writes expires_at:null) — a legacy selfhost key without
+        the prop must keep authenticating.
         """
         from datetime import datetime, timezone as _tz  # noqa: I001
         now_iso = datetime.now(_tz.utc).isoformat()  # noqa: UP017
@@ -12237,7 +13029,19 @@ class TortoiseSDK:
             and (p.get("expires_at") is None or p.get("expires_at") > now_iso)
         ]
         if matches:
-            return {"team_id": matches[0]["team_id"], "key_id": matches[0]["id"]}
+            m = matches[0]
+            delegation_depth = m.get("delegation_depth")
+            scopes = m.get("scopes") or []
+            # C5 #2114 (parity): REST's registry-lane resolution derives the
+            # D2 owner class (deleg NULL + scopes [] → legacy_full_access)
+            # at hosted_api.py:1560 — apikey_verify is the MCP registry lane
+            # and MUST carry the same field or the C5 scope gate 403s every
+            # tt_/legacy owner key on the selfhost MCP surface.
+            return {"team_id": m["team_id"], "key_id": m["id"],
+                    "delegation_depth": delegation_depth,
+                    "scopes": scopes,
+                    "legacy_full_access": (delegation_depth is None)
+                    and (scopes == [])}
         return None
 
     # ── Control Plane: Agent signup tokens (#1709, approach C) ────────
@@ -12322,6 +13126,12 @@ class TortoiseSDK:
             max_keys = int(team.get("max_api_keys")
                            or self._default_max_api_keys())
             kid = ulid()
+            # C1 (#2110) decision record: the recovery-mint is NOT extended
+            # with tenancy kwargs — recovery keys are the owner-level keyless
+            # path (created_via='recovery'), so by D2 they resolve as the
+            # legacy/owner full-access class (deleg NULL + no scopes). This is
+            # intended (E2E-5 zero behavior shift); C3 must NOT assume minted
+            # keys are all deleg=0 — recovery keys are owner-class.
             reg.query(
                 "CREATE (k:APIKey {id:$id, team_id:$tid, key_hash:$kh, "
                 "key_prefix:$kp, created_by:$cb, created_via:'recovery', "

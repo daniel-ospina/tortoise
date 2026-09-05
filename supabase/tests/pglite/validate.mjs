@@ -107,7 +107,8 @@ const files = ['0001_user_teams.sql','0002_audit_events.sql','0003_team_membersh
                '20260825214233_provision_team_keyless.sql',
                '20260826000001_revoke_signup_token.sql',
                '20260827000002_user_identity_profile.sql',
-               '20260827000001_blog_cms.sql'];  // appended last: timestamp prefix sorts after the 2026 batch (fresh-DB safe)
+               '20260827000001_blog_cms.sql',
+               '20260901000001_graphs_and_key_scopes.sql'];  // C1 #2110 — appended last: timestamp sorts after the 2026 batch (fresh-DB safe)
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
   try {
@@ -132,6 +133,7 @@ const suites = [
   '20260826000001_revoke_signup_token.sql',
   '20260827000001_blog_cms.sql',
   '20260827000002_user_identity_profile.sql',
+  '20260901000001_graphs_and_key_scopes.sql',  // C1 #2110
 ];
 for (const suite of suites) {
   const sql = readFileSync(`${TESTS_DIR}/${suite}`, 'utf8');
@@ -193,6 +195,80 @@ if (!(r.provision_team === 1 && r.update_user_team === 0 && r.reveal_api_key ===
   console.error('✗ spot checks failed — see JSON above');
   process.exit(1);
 }
+// ── C8 #2117 rollback drill (apply → rollback → re-apply) ──────────────────
+// The epic's reversibility invariant (R18): migration 20260901000001 (C1)
+// drops CLEANLY — dropping the graphs table + the api_keys graph columns
+// restores the pre-multi-graph shape (legacy keys resolve to the default
+// graph; graph_metadata derives the default from teams.graph_name — no
+// backfill, no forced action, E2E-5). This drill proves the round trip on
+// the SAME database the suites just verified:
+//   1. rollback: drop the C1 additions
+//   2. assert the pre-C1 shape (graphs gone; api_keys columns gone)
+//   3. re-apply migration 20260901000001
+//   4. re-run the C1 assertion suite → invariants hold after re-apply
+const C1_MIGRATION = '20260901000001_graphs_and_key_scopes.sql';
+const C1_SUITE = '20260901000001_graphs_and_key_scopes.sql';
+console.log('\n── C8 rollback drill (apply → rollback → re-apply) ──');
+
+// 1. rollback path — the documented drop-columns/drop-table restore.
+try {
+  await db.exec(`
+    ALTER TABLE public.api_keys
+      DROP COLUMN IF EXISTS graph_id,
+      DROP COLUMN IF EXISTS scopes,
+      DROP COLUMN IF EXISTS created_by_key_id,
+      DROP COLUMN IF EXISTS delegation_depth;
+    DROP INDEX IF EXISTS idx_api_keys_graph_id;
+    DROP TABLE IF EXISTS public.graphs CASCADE;
+  `);
+  console.log('✓ drill 1: C1 additions dropped (rollback path)');
+} catch (e) {
+  console.error(`✗ drill 1 (rollback drop) FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+// 2. assert the pre-C1 shape — legacy behavior restored (graph_metadata
+// derives the default from teams.graph_name; legacy api_keys rows have no
+// graph columns).
+try {
+  const afterDrop = await db.query(`SELECT
+    (SELECT count(*) FROM pg_tables WHERE schemaname='public' AND tablename='graphs') AS graphs_tbl,
+    (SELECT count(*) FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='api_keys'
+         AND column_name IN ('graph_id','scopes','delegation_depth','created_by_key_id')) AS graph_cols,
+    (SELECT count(*) FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='teams' AND column_name='graph_name') AS graph_name_col;`);
+  const d = afterDrop.rows[0];
+  if (!(d.graphs_tbl === 0 && d.graph_cols === 0 && d.graph_name_col === 1)) {
+    console.error(`✗ drill 2: pre-C1 shape NOT restored (graphs=${d.graphs_tbl} cols=${d.graph_cols}) — see JSON above`);
+    process.exit(1);
+  }
+  console.log('✓ drill 2: pre-C1 shape restored (graphs gone, api_keys columns gone, teams.graph_name intact)');
+} catch (e) {
+  console.error(`✗ drill 2 (shape assert) FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+// 3. re-apply the C1 migration.
+try {
+  await db.exec(readFileSync(`${MIG_DIR}/${C1_MIGRATION}`, 'utf8'));
+  console.log('✓ drill 3: C1 migration re-applied');
+} catch (e) {
+  console.error(`✗ drill 3 (re-apply) FAILED:\n  ${e.message.split('\n').slice(0, 4).join('\n  ')}`);
+  process.exit(1);
+}
+
+// 4. re-run the C1 assertion suite — invariants hold after re-apply.
+try {
+  await db.exec(readFileSync(`${TESTS_DIR}/${C1_SUITE}`, 'utf8'));
+  console.log('✓ drill 4: C1 assertion suite passes after re-apply');
+} catch (e) {
+  console.error(`✗ drill 4 (post-reapply suite) FAILED:\n  ${e.message.split('\n').slice(0, 8).join('\n  ')}`);
+  process.exit(1);
+}
+
+console.log('✅ ROLLBACK DRILL PASSED (apply → rollback → re-apply round trip)');
+
 console.log('✅ ALL MIGRATIONS + BOTH TEST SUITES + SPOT CHECKS PASSED');
 
 await db.close();

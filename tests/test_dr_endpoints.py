@@ -12,6 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import tortoise.hosted_api as ha_mod
+from tests._http_fixtures import patched_tortoise_sdk
 from tortoise.hosted_backup import MemoryStorage
 from tortoise.sdk import TortoiseSDK
 
@@ -48,22 +49,18 @@ def client():
     os.environ["FASTAPI_INTERNAL_KEY"] = _INTERNAL_KEY
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "test.db")
-        _orig_init = ha_mod.TortoiseSDK.__init__
-
-        def _patched_init(self, db_path_arg=None, *, namespace=None, **kwargs):
-            _orig_init(self, db_path, namespace=namespace)
-
-        ha_mod.TortoiseSDK.__init__ = _patched_init
-        # #1497: break the _make_sdk embedded fallback anchor — module-level
-        # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a
-        # prior test's temp DB leaks state / dies socket. Re-bind to THIS
-        # temp DB.
-        ha_mod._FALLBACK_KEEPALIVE.clear()
+        # #2127 wave 2: shared helper — patch __init__ → temp DB, #1950
+        # TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore
+        # __init__ → deterministic anchor close → clear overrides at exit.
+        # Supersedes the inline _patched_init/clear/restore trio (restore
+        # was restore-init-only — no pin, no anchor close). The _SEED_SDKS
+        # hold is DISJOINT from _FALLBACK_KEEPALIVE (seeded SDKs are held
+        # directly, never registered as anchors) so it composes with the
+        # helper unchanged — seeds still close at session end.
         try:
-            with TestClient(ha_mod.app) as tc:
+            with patched_tortoise_sdk(db_path), TestClient(ha_mod.app) as tc:
                 yield tc
         finally:
-            ha_mod.TortoiseSDK.__init__ = _orig_init
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
 
 

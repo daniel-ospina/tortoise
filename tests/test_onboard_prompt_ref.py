@@ -30,7 +30,7 @@ def test_onboard_completion_prints_prompt_url(capsys):
     assert rc == 0
     captured = capsys.readouterr()
     assert "Onboarding complete." in captured.out
-    assert "https://premiselabs.co/onboarding-prompt.md" in captured.out
+    assert "https://app.premiselabs.co/skills/tortoise-onboarding/SKILL.md" in captured.out
 
 
 @pytest.mark.embedded_only  # Epic #1647: tests the EMBEDDED install guidance (falkordblite) — under a URI the CLI correctly prefers URI mode and the embedded guidance is unreachable (D14-class)

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import warnings
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -30,12 +31,172 @@ import tortoise.hosted_api as ha_mod  # noqa: I001
 from tortoise.hosted_api import app, get_current_user
 from tortoise.sdk import TortoiseSDK
 
+from tests._http_fixtures import patched_tortoise_sdk
 from tests.fake_control_plane import FakeControlPlane
 from tests.test_supabase_control import (
     FREE_TEAM, TOKEN, _key_row, _membership_row,
 )
 
 TEAM_ID = "team-free-001"
+
+# ═══════════════════════════════════════════════════════════════════════
+# #2090 — keepalive-anchor churn instrumentation (Task 1, RED).
+# The fixture patches TortoiseSDK.__init__ to a per-test temp DB but never
+# pins TORTOISE_DB_PATH, so _anchor_usable (hosted_api.py:96) path-drifts on
+# every _make_sdk/_registry_anchor() call → the #1607 keepalive anchor is
+# evicted+closed per call (0-other-client windows) → a dropped seed SDK's
+# GC-NOSAVE (embedded_lifecycle.py:204-282, TORTOISE_FAST_ATEXIT=1) can kill
+# the redislite daemon → empty respawn → 403 "Requires owner role in team".
+# The counter asserts ZERO mid-test drift evictions post-fix (Task 2); pre-fix
+# it deterministically reads ≥1 — the churn-enabler demonstration (G1).
+# ═══════════════════════════════════════════════════════════════════════
+
+_EXPECTED_DRIFT_EVICTIONS = 0  # RED (Task 1): assert >= 1; GREEN (Task 2+): assert == 0
+
+# #2090 (Task 3) — held seed SDKs: never dropped, closed deterministically
+# per-test by _close_seed_sdks (function-scoped close collapses peak daemons;
+# session-scoped holding would raise the external-death resource class).
+_SEED_SDKS: list[TortoiseSDK] = []
+
+
+def _close_seed_sdks() -> None:
+    """Close held seed SDKs (per-test; runs in the fixture finally).
+
+    # mirrors tests/test_dr_endpoints.py:34-39 — keep in sync.
+    """
+    while _SEED_SDKS:
+        try:  # noqa: SIM105  (mirrors test_dr_endpoints.py:37)
+            _SEED_SDKS.pop().close()
+        except Exception:
+            pass
+
+
+def _computed_db_path() -> str:
+    """Replicate _make_sdk's env-path computation.
+
+    Mirrors tortoise/hosted_api.py:141-149 — keep in sync.
+    """
+    db_path = os.environ.get("TORTOISE_DB_PATH", "/data/tortoise.db")
+    try:
+        os.makedirs(os.path.dirname(db_path), exist_ok=True)
+    except OSError:
+        db_path = os.path.join(tempfile.gettempdir(), "tortoise.db")
+    return db_path
+
+
+def _paths_same(path_a: object, path_b: str) -> bool:
+    """Mirror _anchor_usable's path comparison (hosted_api.py:114-125)."""
+    return (str(path_a) == str(path_b)) or (
+        str(path_a) != ":memory:"
+        and os.path.abspath(str(path_a)) == os.path.abspath(path_b)
+    )
+
+
+class _DriftEvictionCounter(dict):
+    """Counting-dict replacement for ha_mod._FALLBACK_KEEPALIVE.
+
+    Counts path-drift evictions (the #2090 churn enabler) during the test
+    body. Restore-time pops are excluded by setting enabled=False BEFORE
+    _restore_sdk_init. A probe-failure pop (path equal but evicted anyway —
+    the enter-pin _get_proj()-failure class) is counted WARN-only: it never
+    fails the gate but is reported so the churn rate stays observable.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.drift_evictions = 0
+        self.probe_failures = 0
+        self.unclassified = 0
+        self.enabled = True
+
+    def pop(self, key, default=None):
+        if self.enabled:
+            value = dict.get(self, key)
+            if value is not None:
+                bound = getattr(value, "_db_path", None)
+                if bound is None:
+                    self.unclassified += 1  # never silently ignore (vacuity guard)
+                elif _paths_same(bound, _computed_db_path()):
+                    self.probe_failures += 1  # path matches → probe-failure/benign
+                else:
+                    self.drift_evictions += 1  # path drift → the churn enabler
+        return dict.pop(self, key, default)
+
+
+def _install_drift_counter() -> tuple[_DriftEvictionCounter, dict]:
+    """Swap the module keepalive dict for a counting dict (fresh per test)."""
+    _orig_dict = ha_mod._FALLBACK_KEEPALIVE
+    counter = _DriftEvictionCounter(_orig_dict)
+    ha_mod._FALLBACK_KEEPALIVE = counter
+    return counter, _orig_dict
+
+
+@pytest.mark.embedded_only
+class TestDriftCounterWiring:
+    """#2090 wiring negative control — pins the counter's install + the
+    drift classification against the REAL _make_sdk eviction path, so the
+    0-guard provably stays wired (removing the counter install, or a
+    production refactor away from .pop() eviction, would fail here).
+    Embedded-only: under a URI the keepalive branch never engages, so the
+    eviction path this test exercises does not exist on the docker lane.
+    """
+
+    def test_drift_counter_classifies_real_eviction(self, monkeypatch):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "wiring.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+            counter, _orig_dict = _install_drift_counter()
+            try:
+                # Deliberately drifted anchor (different path) — the next
+                # _make_sdk call must evict it (path drift) and count it.
+                other = os.path.join(tmpdir, "other.db")
+                anchor = TortoiseSDK(db_path=other, namespace="registry")
+                ha_mod._FALLBACK_KEEPALIVE["registry"] = anchor
+                ha_mod._make_sdk(namespace="registry")  # evict + close + pop
+                assert counter.drift_evictions >= 1, (
+                    f"drift eviction not counted (got {counter.drift_evictions}, "
+                    f"probe-failures: {counter.probe_failures})"
+                )
+                assert counter.probe_failures == 0
+            finally:
+                counter.enabled = False
+                # close any held anchors from the counter directly (uncounted)
+                for _ns in list(counter):
+                    _anchor = dict.pop(counter, _ns, None)
+                    if _anchor is not None:
+                        try:  # noqa: SIM105
+                            _anchor.close()
+                        except Exception:
+                            pass
+                ha_mod._FALLBACK_KEEPALIVE = _orig_dict
+
+    def test_drift_counter_ignores_same_path_pop(self, monkeypatch):
+        """A pop of a healthy same-path anchor must NOT count as drift
+        (the probe-failure/warn-only bucket)."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = os.path.join(tmpdir, "wiring.db")
+            monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
+            ha_mod._FALLBACK_KEEPALIVE.clear()
+            counter, _orig_dict = _install_drift_counter()
+            try:
+                ha_mod._FALLBACK_KEEPALIVE["registry"] = TortoiseSDK(
+                    db_path=db_path, namespace="registry"
+                )
+                ha_mod._FALLBACK_KEEPALIVE.pop("registry", None)
+                assert counter.drift_evictions == 0
+                assert counter.probe_failures == 1  # path equal → probe bucket
+            finally:
+                counter.enabled = False
+                # close the same-path anchor from the counter directly (uncounted)
+                for _ns in list(counter):
+                    _anchor = dict.pop(counter, _ns, None)
+                    if _anchor is not None:
+                        try:  # noqa: SIM105
+                            _anchor.close()
+                        except Exception:
+                            pass
+                ha_mod._FALLBACK_KEEPALIVE = _orig_dict
 
 # #1719 (Task 3): team_memberships.user_id is a uuid column — real JWT
 # subjects are UUIDs; non-UUID literals 22P02 (HTTP 400) under
@@ -58,41 +219,46 @@ def _enable_supabase(monkeypatch, cp) -> FakeControlPlane:
     return cp
 
 
-def _patch_tortoise_sdk_init(db_path: str):
-    """Make hosted_api's TortoiseSDK use a temp embedded DB (mirrors
-    test_hosted_api) so registry/team reads don't touch prod."""
-    _orig = ha_mod.TortoiseSDK.__init__
-
-    def _patched(self, db_path_arg=None, *, namespace=None, **kwargs):
-        _orig(self, db_path, namespace=namespace)
-
-    ha_mod.TortoiseSDK.__init__ = _patched
-    # #1497: break the _make_sdk embedded fallback anchor — module-level
-    # _FALLBACK_KEEPALIVE survives tests, so an anchored SDK bound to a prior
-    # test's temp DB leaks state / dies socket. Re-bind to THIS temp DB.
-    ha_mod._FALLBACK_KEEPALIVE.clear()
-    return _orig
-
-
-def _restore_sdk_init(_orig):
-    ha_mod.TortoiseSDK.__init__ = _orig
-    app.dependency_overrides.clear()
+# #2127: the local _patch_tortoise_sdk_init / _restore_sdk_init /
+# _close_keepalive_anchors copies are superseded by the shared helper
+# tests._http_fixtures.patched_tortoise_sdk (patch → temp DB, #1950
+# TORTOISE_DB_PATH pin, close-then-clear at enter; pop-env → restore __init__
+# → deterministic anchor close → clear overrides at exit). The file keeps its
+# #2090 counter/seed-hold machinery (Task 1-3 additions) and composes it
+# around the helper per the drain-linchpin trace in
+# docs/scoping/2026-09-02-2127-b-waves-scoping.md.
 
 
 @pytest.fixture
 def sb_client(monkeypatch):
-    """Supabase-mode TestClient with a fake control plane + temp DB."""
+    """Supabase-mode TestClient with a fake control plane + temp DB.
+
+    #2090: no drift counter here (reg_client only) — supabase-mode authz is
+    control-plane-only (no SDK/anchor op before the authz short-circuit in
+    the 401/403 tests), so a >=1 RED assert would spuriously red them. The
+    pin + close-at-restore still apply (anchors created mid-test via
+    _export_graph_snapshot are reused, not evicted).
+    """
     fake = FakeControlPlane({"teams": [], "api_keys": [],
                              "team_memberships": [], "invitations": []})
     _enable_supabase(monkeypatch, fake)
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, fake, db_path
-        finally:
-            _restore_sdk_init(_orig)
+        # #2127: shared helper — patch __init__ → temp DB, #1950 pin,
+        # close-then-clear at enter; pop-env → restore → close → clear
+        # overrides at exit. The #2090 counter is reg_client-only; the pin +
+        # close-at-restore still apply here.
+        with patched_tortoise_sdk(db_path):
+            try:
+                with TestClient(app) as tc:
+                    yield tc, fake, db_path
+            finally:
+                # sb tests never append to _SEED_SDKS (graph seeds are
+                # local-held) — keep for uniform per-test close discipline.
+                # Ordering note: seeds close here BEFORE the helper's exit-
+                # anchor-close (the helper closes last → still a deterministic
+                # SHUTDOWN SAVE; outcome-equivalent to the pre-#2127 order).
+                _close_seed_sdks()
 
 
 @pytest.fixture
@@ -101,12 +267,65 @@ def reg_client(monkeypatch):
     monkeypatch.setenv("TORTOISE_CONTROL_PLANE", "registry")
     with tempfile.TemporaryDirectory() as tmpdir:
         db_path = os.path.join(tmpdir, "export.db")
-        _orig = _patch_tortoise_sdk_init(db_path)
-        try:
-            with TestClient(app) as tc:
-                yield tc, db_path
-        finally:
-            _restore_sdk_init(_orig)
+        # #2127: shared helper (see sb_client) — the anchor is created pinned
+        # at TestClient enter (lifespan purge) and REUSED, not evicted.
+        with patched_tortoise_sdk(db_path):
+            counter, _orig_dict = _install_drift_counter()
+            try:
+                with TestClient(app) as tc:
+                    yield tc, db_path
+            finally:
+                # ══ #2090 teardown (pinned — runs on body-failure paths too) ══
+                try:
+                    # G3 (GREEN): zero mid-test drift evictions — the anchor
+                    # is reused (path pinned), never evicted, post-fix. ⚠️
+                    # This assert runs with the counter ENABLED — moving
+                    # enabled=False ahead of it would silently vacate the
+                    # #2090 proof (scope-verify P2-3).
+                    assert counter.drift_evictions == _EXPECTED_DRIFT_EVICTIONS, (
+                        f"expected {_EXPECTED_DRIFT_EVICTIONS} drift evictions, "
+                        f"got {counter.drift_evictions} "
+                        f"(probe-failures: {counter.probe_failures}, "
+                        f"unclassified: {counter.unclassified})"
+                    )
+                    # #2090: the enter-pin probe-failure churn rate must be
+                    # OBSERVABLE (warn-only — never fails the gate; a healthy
+                    # pinned run should read 0, but a transient probe failure
+                    # on a loaded runner must not red it). Surfaces in the
+                    # pytest warnings summary.
+                    if counter.probe_failures or counter.unclassified:
+                        warnings.warn(
+                            f"[#2090] keepalive probe-failure pops: "
+                            f"{counter.probe_failures}, unclassified: "
+                            f"{counter.unclassified} (drift: "
+                            f"{counter.drift_evictions})",
+                            UserWarning,
+                            stacklevel=2,
+                        )
+                finally:
+                    counter.enabled = False  # restore-time pops must never count
+                    # #2127 drain-linchpin: under counter composition the
+                    # helper's exit-close is a design no-op (it closes the
+                    # RESTORED real dict, which is empty — every in-test
+                    # anchor lives in the counter). The fixture owns the
+                    # deterministic close: drain + close counter-held anchors
+                    # (uncounted), verbatim mirror of TestDriftCounterWiring
+                    # :164-170. The (d) guard sits in an inner try so a RED
+                    # still restores the real dict + closes seeds (code-
+                    # review P2-2: an (a)/(d) assert RED must leave clean
+                    # module state).
+                    try:
+                        for _ns in list(counter):
+                            _anchor = dict.pop(counter, _ns, None)
+                            if _anchor is not None:
+                                try:  # noqa: SIM105
+                                    _anchor.close()
+                                except Exception:
+                                    pass
+                        assert not counter  # drain-completeness guard
+                    finally:
+                        ha_mod._FALLBACK_KEEPALIVE = _orig_dict
+                        _close_seed_sdks()  # after anchor close (last-client SAVE)
 
 
 @pytest.fixture
@@ -194,8 +413,15 @@ def _seed_graph(db_path: str, team_id: str = TEAM_ID, *,
 
 def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
                    deleted_at: str | None = None) -> None:
-    """Seed registry Team + owner Membership + APIKey (+ optional deleted_at)."""
+    """Seed registry Team + owner Membership + APIKey (+ optional deleted_at).
+
+    #2090: the SDK is appended to _SEED_SDKS (suspension_parity precedent) so
+    the #1475 close-on-GC finalizer can never SHUTDOWN NOSAVE the shared
+    embedded server when this helper returns (dropped-SDK data loss → empty
+    respawn → flaky registry-mode 403s).
+    """
     sdk = TortoiseSDK(db_path, namespace="registry")
+    _SEED_SDKS.append(sdk)
     reg = sdk._get_registry()
     reg.query("CREATE (t:Team {id:$id, name:$name, tier:'free'})",
               params={"id": team_id, "name": team_id})
@@ -218,9 +444,14 @@ def _seed_registry(db_path: str, team_id: str = "reg-team-1", *,
 
 def _registry_count(db_path: str, label: str, team_id: str) -> int:
     """Count registry nodes of `label` scoped to a team. Team nodes key on
-    `id`; Membership/APIKey/Invitation key on `team_id`."""
+    `id`; Membership/APIKey/Invitation key on `team_id`.
+
+    #2090: hold the read SDK in _SEED_SDKS (same dropped-SDK class as
+    _seed_registry) — closed deterministically by the fixture teardown.
+    """
     prop = "id" if label == "Team" else "team_id"
     sdk = TortoiseSDK(db_path, namespace="registry")
+    _SEED_SDKS.append(sdk)
     rows = sdk._get_registry().query(
         f"MATCH (n:{label} {{{prop}:$tid}}) RETURN count(n)",
         params={"tid": team_id},
@@ -478,9 +709,8 @@ class TestDashboardCreatedTeamRoundTrip:
     def test_dashboard_created_team_delete_drops_team_id_graph(self, sb_client, as_user, monkeypatch, capture_audit):
         """#1903 Indicator 3: delete of a dashboard-created team targets the
         team_{team_id} graph (the old team_{name} stored name orphaned it).
-        The _drop_team_graph_strict spy is the mechanism proof — embedded
-        FalkorDBLite has no delete_graph, so the assertion is on the CORRECT
-        TARGET passed to the drop."""
+        The _drop_team_graph_strict spy is the mechanism proof — the
+        assertion is on the CORRECT TARGET passed to the drop."""
         tc, fake, _ = sb_client
         as_user()
         # env must be 0 BEFORE delete — soft_delete stamps the STORED
@@ -528,6 +758,11 @@ class TestExportDeleteRegistry:
     def test_export_requires_owner_registry(self, reg_client, as_user):
         tc, db_path = reg_client
         _seed_registry(db_path)
+        # #2090: pin the seed — this test asserts 403 for a non-member and
+        # would pass VACUOUSLY on an empty registry (the seed silently lost
+        # to a daemon respawn). Fail loud if the seed didn't land (#1950
+        # self-verify pattern).
+        assert _registry_count(db_path, "Team", "reg-team-1") == 1
         as_user(user_id=_U3)  # no membership at all
         assert tc.get("/v1/teams/reg-team-1/export").status_code == 403
 
@@ -757,6 +992,90 @@ class TestPurge:
         assert all(r["id"] != TEAM_ID for r in fake.tables["teams"])
         ops = [e["operation"] for e in capture_audit]
         assert ops.count("team_delete_purged") == 2
+
+
+class TestDropTeamGraphImplCloudShape:
+    """#2163 regression: _drop_team_graph_impl must issue GRAPH.DELETE on a
+    cloud-shaped client (falkordb.FalkorDB — has select_graph, NO
+    delete_graph attr). The old hasattr(delete_graph) probe was false on
+    FalkorDB Cloud, so the purge sweep silently skipped every drop and
+    orphaned the graph after the teams row was deleted (no retry — the
+    #926 retry-anchor design broke)."""
+
+    def test_impl_drops_via_select_graph_when_delete_graph_absent(self, monkeypatch):
+        dropped = []
+
+        class FakeGraph:
+            def __init__(self, name):
+                self._name = name
+
+            def delete(self):
+                dropped.append(self._name)  # GRAPH.DELETE fires
+
+        class FakeDB:
+            """Cloud-shaped: select_graph present, delete_graph ABSENT."""
+
+            def select_graph(self, name):
+                return FakeGraph(name)
+
+        db = FakeDB()
+        proj = type("FakeProj", (), {"db": db})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        # graph_name wins; the default team_{team_id} fallback also drops
+        ha_mod._drop_team_graph_impl("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_team_graph_impl("team-xyz")
+
+        # the pre-#2163 code called NOTHING on this client (hasattr probe
+        # false) — the regression pin is that both drops actually fired
+        assert not hasattr(db, "delete_graph"), \
+            "fixture must mirror the pip falkordb client (no delete_graph)"
+        assert dropped == [
+            "team_abc000000000000000000000", "team_team-xyz"]
+
+    def test_strict_drop_raises_when_graph_delete_fails(self, monkeypatch):
+        """#926 retry-anchor contract: _drop_team_graph_strict propagates a
+        GENUINE GRAPH.DELETE failure (auth/connection) so the purge sweep
+        keeps the teams row — but treats an absent-graph raise as success
+        (#2163 re-review P0) so the anchor converges."""
+        class BoomDB:
+            def select_graph(self, name):
+                raise RuntimeError("GRAPH.DELETE failed (connection)")
+
+        proj = type("FakeProj", (), {"db": BoomDB()})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        with pytest.raises(RuntimeError, match=r"GRAPH\.DELETE failed"):
+            ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
+        # best-effort variant swallows the same failure
+        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
+
+    def test_strict_drop_converges_on_absent_graph(self, monkeypatch):
+        """#2163 re-review P0: GRAPH.DELETE on an already-dropped graph
+        raises 'Invalid graph operation on empty key' (v4.16.7) — the strict
+        drop must treat that as SUCCESS so the sweep's retry anchor does not
+        keep a team row poisoned forever after the graph is already gone."""
+        from redis.exceptions import ResponseError
+
+        class AbsentDB:
+            def select_graph(self, name):
+                g = type("G", (), {})()
+
+                def _delete():
+                    raise ResponseError("Invalid graph operation on empty key")
+
+                g.delete = _delete
+                return g
+
+        proj = type("FakeProj", (), {"db": AbsentDB()})()
+        fake_sdk = type("FakeSDK", (), {"_get_proj": lambda self: proj})()
+        monkeypatch.setattr(ha_mod, "_make_sdk", lambda namespace: fake_sdk)
+
+        # strict drop must NOT raise on the absent-graph family
+        ha_mod._drop_team_graph_strict("team-abc", "team_abc000000000000000000000")
+        ha_mod._drop_team_graph("team-abc", "team_abc000000000000000000000")
 
 
 # ═══════════════════════════════════════════════════════════════════════════

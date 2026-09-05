@@ -47,7 +47,10 @@ def client(tmp_path, monkeypatch):
     from tortoise.hosted_api import get_current_team
     app.dependency_overrides[get_current_team] = lambda: {
         "team_id": real_team_id, "tier": "free", "key_id": "k1",
-        "max_users": 1, "max_graphs": 1, "max_teams": 1,
+        # C5 #2114: C2 owner class (deleg-NULL + scopes [] → legacy full
+        # access) — the E2E journey uses the register-minted tt_ key.
+        "legacy_full_access": True, "max_users": 1, "max_graphs": 1,
+        "max_teams": 1,
         # #1922: /v1/demo is quota-gated — the auth override must carry the
         # fail-closed max_points cap or the seed path 500s.
         "max_points": 10000,
@@ -122,8 +125,12 @@ class TestOnboardingJourney:
         assert onboarding["prompt_pasted"] is True
         assert "github_connected" in onboarding  # other fields preserved
 
-    def test_e2e_onboarding_complete_flag(self, client):
-        """E2E-7: Setting onboarding_complete works (verification done)."""
+    def test_e2e_onboarding_complete_accept_and_drop(self, client):
+        """#1997 (W1): accept-and-drop. This fixture's org is NODE-ABSENT
+        (sdk.team_create — node init is hosted-provision-only) → the legacy
+        jsonb writer is kept and a client PATCH onboarding_complete still
+        lands (grandfathered pre-backfill fallback). The node-present drop
+        branch is covered in test_onboarding_state_split.py."""
         r = client.patch("/v1/onboarding/state", json={"onboarding_complete": True})
         assert r.status_code == 200
         assert r.json()["onboarding"]["onboarding_complete"] is True
