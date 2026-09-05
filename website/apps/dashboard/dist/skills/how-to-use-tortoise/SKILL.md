@@ -85,6 +85,21 @@ When a claim faces challenge, you have two tools. They address different things:
 
 **The golden rule:** Relevance lives on the OPERATOR, truth lives on the POINT.
 
+> **Mitigation strength semantics (single-sourced — #2199 knock-on decision 3):**
+> `strength` (default 0.5, relevance range 0.10–0.50) means how much the
+> reason REDUCES the edge — 0 = fully neutralized, 1 = fully intact. It is
+> NOT a statement of how true the reason is, and it is NOT fused into the
+> mitigation point's belief (that would invert the meaning). Strength is
+> currently ADVISORY metadata: EP does not read `mitigation_strength` /
+> `mitigated_by` yet — the number is auditable on the mitigation point, and
+> the mitigation POINT's own calibration (Beta prior) is what EP consumes.
+> Decision parts filed through the decide tooling are born LIVE with an
+> explicit starting belief (#2199): omit `credibility=` for the system
+> starting belief medium = Beta(3,1) (provenance `system-default`), or pass
+> `credibility="high|medium|low"` (ladder gold/high/medium/low/unverified)
+> for a `set-by-author` belief. The documented decide flow ranks on the first
+> attempt — no promote/calibrate chores, no CalibrationError.
+
 - An option IS an option (it's true that it's a candidate); a criterion IS a criterion — **never NAND an option or criterion for being a bad fit.** A bad fit is a relevance problem, not a truth problem.
 - If a FINDING is factually untrue → NAND the finding Point directly (truth attack).
 - If a finding is TRUE but IRRELEVANT to the option/criterion → NAND/IMPL the OPERATOR between them, or mitigate the operator (relevance attack, range 0.10–0.50).
