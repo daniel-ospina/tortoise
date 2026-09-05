@@ -75,6 +75,25 @@ if not os.environ.get("TORTOISE_DB_URI"):
     print(f"tortoise selfhost: {EMBEDDED_EVAL_BANNER}", file=sys.stderr)
     _logger.warning(EMBEDDED_EVAL_BANNER)
 
+# #2203: this module is the daemon entry point for BOTH the docker image CMD
+# (`uvicorn tortoise.selfhost:app`) and `python -m tortoise.selfhost` — neither
+# funnels through tortoise.__main__.main(), so the daemon must install the
+# terminating-signal guard itself. uvicorn replaces SIGTERM with its own
+# graceful handler while serving, then restores THIS guard as the original
+# disposition and re-raises the signal at the end of the drain — the guard's
+# handler closes every live embedded redis-server child before the final
+# death. SIGHUP is NOT handled by uvicorn, so a terminal/session death
+# (SIGHUP) fires the guard immediately mid-service: the embedded server is
+# closed under any live requests and the process dies — the desired
+# semantics for a session-death orphan (prompt child teardown, not a
+# graceful HTTP drain). See install_embedded_signal_cleanup. Idempotent;
+# no-op when the platform lacks the signal or a host handler is installed.
+from tortoise.embedded_lifecycle import (  # noqa: E402
+    install_embedded_signal_cleanup,
+)
+
+install_embedded_signal_cleanup()
+
 _ALLOWED_HOSTS = [o.split("//")[1].split("/")[0] for o in ALLOWED_ORIGINS if "//" in o]
 
 mcp_http_app = create_http_app(
@@ -232,4 +251,10 @@ if __name__ == "__main__":
     # `python -m tortoise.selfhost` (T1.4 smoke invocation)
     import uvicorn
 
-    uvicorn.run(app, host=HOST, port=PORT)
+    # #2203: bound the graceful drain so `docker stop`'s 10s-then-SIGKILL
+    # cannot preempt the termination teardown that closes the embedded
+    # redis-server child: a long-lived MCP SSE stream would otherwise hold
+    # the drain open until SIGKILL orphans the server (uvicorn re-raises
+    # the signal into the #2203 guard at the end of the drain; atexit is
+    # the interpreter-exit backstop).
+    uvicorn.run(app, host=HOST, port=PORT, timeout_graceful_shutdown=5)
