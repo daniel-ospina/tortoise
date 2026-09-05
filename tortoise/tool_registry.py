@@ -108,7 +108,12 @@ TOOL_REGISTRY: list[ToolDefinition] = [
     ),
     ToolDefinition(
         name="tortoise_summarize_structure",
-        description="Count points per Gate (by pointKind). Returns {gateN_*, total}.",
+        description="Structure summary — points on the graph across ALL point "
+                    "kinds (#2205). Returns {total, operators, gate0_jtbds.."
+                    "gate4_requirements, gate_total}: total counts non-operator "
+                    "Points of every kind (not just the product-strategy gates), "
+                    "operators is reported separately, gate keys stay the "
+                    "gate-kind breakdown, gate_total is the gate subtotal.",
         annotations=_ro(),
         http_policy=True,
         sdk_method="summarize_structure",

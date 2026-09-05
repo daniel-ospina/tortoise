@@ -922,8 +922,11 @@ def tortoise_audit(point_kinds: list[str] | None = None) -> dict:
 
 
 def tortoise_summarize_structure() -> dict:
-    """Count points per Gate (by pointKind). Returns {gateN_*, total}.
-    Alias → overview(section='structure') (epic #888 W3)."""
+    """Structure summary — points on the graph across ALL point kinds (#2205).
+    Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}.
+    total counts every non-operator kind (statements, observations, decisions,
+    ...), not just the product-strategy gates; operators is reported
+    separately. Alias → overview(section='structure') (epic #888 W3)."""
     return _safe(_get_team_sdk().summarize_structure)
 
 
@@ -1822,10 +1825,22 @@ def tortoise_status() -> dict:
 
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
-    Alias → overview(section='health') (epic #888 W3)."""
+    Alias → overview(section='health') (epic #888 W3).
+
+    #2202 (health-truthful): probes the SDK THIS server actually serves —
+    the request-scoped team SDK over HTTP (selfhost daemon: the team_selfhost
+    graph, the SAME namespace /health probes; hosted: the calling team's
+    graph on the SAME FalkorDB server /health deep-checks) and the base SDK
+    over stdio — so tool and /health can never disagree about DB reachability.
+    The pre-#2202 code probed monitoring's module-global handle, which ONLY
+    the stdio entrypoint (main()) registers: on the HTTP daemon/hosted
+    surfaces it stayed None and every call reported degraded/no_sdk_registered
+    while /health (fresh SDK probe) said ok — the first call every onboarding
+    script makes lied. graph_size likewise counts the SERVED graph, never an
+    empty unregistered handle."""
     # #236: route through _safe() so every tool is gated (defense-in-depth;
     # reachable only post-auth over HTTP).
-    return _safe(monitoring.metrics)
+    return _safe(lambda: monitoring.metrics(sdk=_get_team_sdk()))
 
 
 def tortoise_session_context() -> dict:

@@ -5395,12 +5395,37 @@ class TortoiseSDK:
         return audit_graph(proj, point_kinds=point_kinds).to_dict()
 
     def summarize_structure(self) -> dict:
-        """Count points per Gate (by pointKind). Returns {gate: count, ..., total}.
+        """Structure summary — counts over the WHOLE graph (#2205), not just
+        the product-strategy gate kinds.
 
-        P1 #49: re-keyed from context strings (tortoise-wf-gate0..4) to pointKind
-        (jobToBeDone, useCase, userJourney, workflow, requirement). Pre-existing
-        experimental points that had context but no matching pointKind may show 0
-        — expected under the #49 re-home (pointKind is the target vocabulary).
+        Pre-#2205 this tallied the five gate kinds only, so on evidence-heavy
+        graphs (statements/observations/hypotheses, decisions, events, pack
+        kinds, ...) the returned 'total' read 0 or near-0 while the graph was
+        full — 'Demo graph created — N points' and per-kind stats lied on real
+        graphs (self-host and hosted). Now returns flat {key: int} counts:
+
+          total      — non-operator Points across EVERY pointKind present
+                       ('N points' — the real graph size). Operators are
+                       reported separately (Tortoise surfaces treat operators
+                       as their own category, never as 'points').
+          operators  — operator Points ('M operators'): modern is_operator
+                       nodes AND legacy op_type-only bridges (the codebase's
+                       canonical operator predicate, #943 parity).
+          gate0_jtbds … gate4_requirements — the product-strategy gate-kind
+                       counts (keys unchanged; a SUBSET of total).
+          gate_total — the gate-kind subtotal (the pre-#2205 meaning of
+                       'total', kept under an honest label).
+
+        The non-operator predicate is absence-or-false PLUS op_type IS NULL:
+        plain Points may carry no is_operator property at all (only operators
+        set it) and legacy operators carry op_type without it — a bare
+        `n.is_operator = false` drops the first from every count and leaks the
+        second into 'total'. list_pointkinds() uses the SAME predicate, so the
+        per-kind stats add up to 'total' whenever every Point carries a
+        pointKind (untyped legacy Points are counted by total only).
+
+        P1 #49: gate keys are pointKind-based (jobToBeDone, useCase,
+        userJourney, workflow, requirement) after the context-string re-key.
         """
         proj = self._get_proj()
         gates = [
@@ -5410,15 +5435,30 @@ class TortoiseSDK:
             ("gate3_workflows", "workflow"),
             ("gate4_requirements", "requirement"),
         ]
+        # Canonical non-operator / operator predicates (parity with ep.py
+        # count_claims and the #943 legacy operator detection).
+        not_operator = ("(n.is_operator IS NULL OR n.is_operator = false) "
+                        "AND n.op_type IS NULL")
+        is_operator = "(n.is_operator = true OR n.op_type IS NOT NULL)"
         result: dict[str, int] = {}
         for key, kind in gates:
             result[key] = proj.g.query(
                 "MATCH (n:Point {pointKind:$k}) "
-                "WHERE n.is_operator = false "
+                f"WHERE {not_operator} "
                 "RETURN count(n)",
                 params={"k": kind},
             ).result_set[0][0]
-        result["total"] = sum(result.values())
+        result["total"] = proj.g.query(
+            "MATCH (n:Point) "
+            f"WHERE {not_operator} "
+            "RETURN count(n)",
+        ).result_set[0][0]
+        result["operators"] = proj.g.query(
+            "MATCH (n:Point) "
+            f"WHERE {is_operator} "
+            "RETURN count(n)",
+        ).result_set[0][0]
+        result["gate_total"] = sum(result[key] for key, _ in gates)
         return result
 
     # ── Taxonomy ─────────────────────────────────────────────────
@@ -5429,11 +5469,19 @@ class TortoiseSDK:
         return _taxonomy(self._get_proj())
 
     def list_pointkinds(self) -> list[dict]:
-        """All pointKinds present in the graph with counts. Returns [{kind, count, pack}]."""
+        """All pointKinds present in the graph with counts. Returns [{kind, count, pack}].
+
+        #2205: same non-operator predicate as summarize_structure (absence-or-
+        false + op_type IS NULL) so per-kind stats never drop legacy Points
+        that predate the is_operator property — a bare `n.is_operator = false`
+        made per-kind stats lie on imported graphs.
+        """
         proj = self._get_proj()
+        not_operator = ("(n.is_operator IS NULL OR n.is_operator = false) "
+                        "AND n.op_type IS NULL")
         rows = proj.g.query(
             "MATCH (n:Point) "
-            "WHERE n.is_operator = false "
+            f"WHERE {not_operator} "
             "AND n.pointKind IS NOT NULL "
             "RETURN n.pointKind, count(n) ORDER BY count(n) DESC"
         ).result_set
