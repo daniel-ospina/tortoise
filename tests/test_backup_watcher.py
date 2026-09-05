@@ -36,8 +36,12 @@ class _Channels:
     def close_issue(self, number, comment=None):
         self.issues.pop(number, None)
 
-    def search_open(self, kind):
-        return [n for n, t in self.issues.items() if f"[DR] {kind}" in t]
+    def search_open(self, kind, team_id=""):
+        return [
+            n for n, t in self.issues.items()
+            if f"[DR] {kind}" in t
+            and (team_id == "" or t.endswith(f" — {team_id}"))
+        ]
 
     def push_telegram(self, text):
         self.telegram.append(text)
@@ -143,12 +147,14 @@ def _seed_state(storage, team: str) -> None:
     )
 
 
-def _watcher(storage, ch, *, grace_min=0, teams=("team_a",), now_fn=None) -> BackupWatcher:
+def _watcher(storage, ch, *, grace_min=0, teams=("team_a",), now_fn=None,
+              graph_provider=None) -> BackupWatcher:
     store = _store(ch)
     return BackupWatcher(
         storage, store,
         team_provider=lambda: list(teams),
         state_reader=lambda t: {},
+        graph_provider=graph_provider,
         driver_heartbeat_reader=lambda: {},
         stale_threshold_min=90, driver_down_threshold_min=240,
         grace_min=grace_min, now=now_fn or (lambda: FIXED),
@@ -269,3 +275,158 @@ def test_watcher_production_key_parse():
     w = _watcher(storage, ch)
     status = w.poll()
     assert status["per_team"]["team_a"] == "ok"  # fresh (1h < 90min)
+
+
+# ── #2313 Task 4: per-graph freshness + watcher custom-graph surface ───────
+
+
+def _seed_graph_archive(storage, team: str, gid: str, hours_ago: float) -> None:
+    """Seed a per-graph (nested ``default``/custom segment) archive."""
+    ts = _ts(hours_ago)
+    key = f"{ts.strftime('%Y%m%dT%H%M%S')}{ts.microsecond // 1000:03d}Z_{secrets.token_hex(4)}"
+    backup_id = f"{team}/{gid}/{key}"
+    manifest = {"backup_id": backup_id, "team_id": team, "graph_id": gid,
+                "graph_name": f"g-{gid}", "created_at": ts.isoformat(),
+                "node_count": 1, "edge_count": 0, "sha256": "0" * 64}
+    storage.upload(f"backups/{backup_id}/manifest.json",
+                   json.dumps(manifest).encode())
+    storage.upload(f"backups/{backup_id}/dump.enc", b"x")
+
+
+def _seed_graph_state(storage, team: str, gid: str) -> None:
+    storage.upload(
+        f"ops/teams/{team}/graphs/{gid}/state.json",
+        json.dumps({"node_count": 1, "updated_at": FIXED.isoformat()}).encode(),
+    )
+
+
+def test_newest_backup_ts_reads_legacy_flat_and_nested_default():
+    """Team freshness = max over pre-#2313 flat dumps and the default graph's
+    nested (``default`` segment) dumps; custom nested keys excluded."""
+    from tortoise.backup_watcher import _newest_backup_ts
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 200)         # legacy flat — stale
+    _seed_graph_archive(storage, "team_a", "default", 0.5)  # nested default — fresh
+    _seed_graph_archive(storage, "team_a", "g_custom", 0.2)  # custom — NOT team-level
+    newest = _newest_backup_ts(storage, "team_a")
+    assert newest is not None
+    age_min = (FIXED - newest).total_seconds() / 60.0
+    assert 25 < age_min < 35  # the 0.5h nested default won, not the 200h flat
+
+
+def test_newest_graph_backup_ts_scoped():
+    from tortoise.backup_watcher import _newest_graph_backup_ts
+    storage = MemoryStorage()
+    _seed_graph_archive(storage, "team_a", "g_a", 200)
+    _seed_graph_archive(storage, "team_a", "g_b", 0.5)
+    assert _newest_graph_backup_ts(storage, "team_a", "g_a") is not None
+    oldest = _newest_graph_backup_ts(storage, "team_a", "g_a")
+    newest = _newest_graph_backup_ts(storage, "team_a", "g_b")
+    assert newest > oldest  # type: ignore[operator]
+    assert _newest_graph_backup_ts(storage, "team_a", "g_none") is None
+
+
+def test_watcher_custom_graph_stale_opens_incident_with_graph_subject():
+    ch = _Channels()
+    storage = MemoryStorage()
+    # Healthy default baseline (team-level ok) so ONLY the custom graph is
+    # the same-kind filer (the AlertStore mock's search_open matches kind
+    # only; the real GH search is subject-scoped).
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    _seed_graph_archive(storage, "team_a", "g_x", 200)  # stale (>90 min)
+    _seed_graph_state(storage, "team_a", "g_x")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_x"])
+    status = w.poll()
+    assert status["per_graph"]["team_a:g_x"] == "stale"
+    # incident subject carries the graph identity (issue + telegram)
+    assert any("STALE — team_a:g_x" in t for t in list(ch.issues.values()))
+    assert any("team_a:g_x" in t for t in ch.telegram)
+
+    # Fresh custom backup → resolved.
+    _seed_graph_archive(storage, "team_a", "g_x", 0.5)
+    w.poll()
+    assert ch.issues == {}
+
+
+def test_watcher_custom_never_and_stamp_missing():
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    # g_never: seam graph with no archives → NEVER_BACKED_UP (graph subject)
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_never", "g_stamp"])
+    status = w.poll()
+    assert status["per_graph"]["team_a:g_never"] == "never"
+    assert status["per_graph"]["team_a:g_stamp"] == "never"
+    tg = [t for t in ch.telegram]
+    assert any("NEVER_BACKED_UP" in t and "team_a:g_never" in t for t in tg)
+    assert any("NEVER_BACKED_UP" in t and "team_a:g_stamp" in t for t in tg)
+    ch2 = _Channels()
+    # g_stamp has archives but no per-graph state → METADATA_LOST
+    storage2 = MemoryStorage()
+    _seed_archive(storage2, "team_a", 0.5)
+    _seed_state(storage2, "team_a")
+    _seed_graph_archive(storage2, "team_a", "g_stamp", 0.5)
+    w2 = _watcher(storage2, ch2, graph_provider=lambda t: ["g_stamp"])
+    status2 = w2.poll()
+    assert status2["per_graph"]["team_a:g_stamp"] == "stamp_missing"
+    assert any("METADATA_LOST" in t and "team_a:g_stamp" in t for t in ch2.telegram)
+
+
+def test_watcher_custom_graph_removal_resolves_incidents():
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    _seed_graph_archive(storage, "team_a", "g_gone", 200)
+    _seed_graph_state(storage, "team_a", "g_gone")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_gone"])
+    w.poll()
+    assert any("STALE — team_a:g_gone" in t for t in list(ch.issues.values()))
+    # graph deleted from the control plane → provider drops it → resolved
+    w._graphs_for = lambda t: []  # noqa: SLF001
+    w.poll()
+    assert ch.issues == {}
+
+
+class _BoomListStorage(MemoryStorage):
+    """MemoryStorage whose ``list`` raises — simulates R2 read failure AFTER a
+    healthy poll so the watcher evaluates degraded-from-known-good."""
+
+    def list(self, prefix):
+        raise RuntimeError("r2 down")
+
+
+def test_watcher_degraded_never_fabrication_for_new_custom_graph():
+    """F1 regression (#2313 Task 4): NEVER_BACKED_UP requires a confirmed
+    listing. On a degraded poll (R2 down), a custom graph never seen in a
+    confirmed scan must NOT be classified never — stale at worst."""
+    ch = _Channels()
+    storage = MemoryStorage()
+    _seed_archive(storage, "team_a", 0.5)
+    _seed_state(storage, "team_a")
+    _seed_graph_archive(storage, "team_a", "g_old", 0.5)
+    _seed_graph_state(storage, "team_a", "g_old")
+    w = _watcher(storage, ch, graph_provider=lambda t: ["g_old"])
+    s1 = w.poll()
+    assert s1["per_graph"]["team_a:g_old"] == "ok"  # healthy baseline
+
+    # R2 dies; a NEW custom graph joins the seam surface mid-outage.
+    w._storage = _BoomListStorage()  # noqa: SLF001
+    w._graphs_for = lambda t: ["g_old", "g_new"]  # noqa: SLF001
+    s2 = w.poll()
+    # g_old from the cache stays ok; g_new (unconfirmed) is stale, never NEVER.
+    assert s2["per_graph"]["team_a:g_old"] == "ok"
+    assert s2["per_graph"]["team_a:g_new"] == "stale"
+    assert not any("NEVER_BACKED_UP" in t and "team_a:g_new" in t
+                   for t in ch.telegram)
+
+    # R2 recovers; the scan is now a CONFIRMED listing — g_new has no archives
+    # → never is legitimate again.
+    w._storage = MemoryStorage()  # noqa: SLF001
+    w._storage._objects = dict(storage._objects)  # noqa: SLF001
+    s3 = w.poll()
+    assert s3["per_graph"]["team_a:g_new"] == "never"
+    assert any("NEVER_BACKED_UP" in t and "team_a:g_new" in t
+               for t in ch.telegram)

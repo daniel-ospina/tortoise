@@ -16791,8 +16791,9 @@ def _alert_store_from(cfg) -> AlertStore:  # noqa: F821
     def close_issue(number: int, comment: str | None = None) -> None:
         gi.close_issue(cfg.gh_repo, cfg.github_issues_pat, number, comment)
 
-    def search_open(kind: str) -> list[int]:
-        return gi.search_open_incident(cfg.gh_repo, cfg.github_issues_pat, kind)
+    def search_open(kind: str, team_id: str = "") -> list[int]:
+        return gi.search_open_incident(
+            cfg.gh_repo, cfg.github_issues_pat, kind, team_id)
 
     def push_telegram(text: str) -> None:
         send_message(cfg.telegram_bot_token, cfg.telegram_chat_id, text)
