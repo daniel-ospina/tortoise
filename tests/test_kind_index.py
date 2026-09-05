@@ -103,9 +103,11 @@ class TestKindIndexBuild:
         points = {k: md for k, md in spec.items()
                   if md.get("section") == "points"}
         assert set(points) == {"statement"}
-        assert "dev:bug" not in spec
         assert "dev:technicalDebt" not in spec
         assert "pm:estimate" not in spec
+        # bug moved pointKind → objectKind (problem family): it IS classifiable
+        # now, as an object kind
+        assert spec["dev:bug"]["section"] == "objects"
 
     def test_declared_kinds_without_kinddefs_synthesized(self, spec):
         """FIX L: declared-but-kindDefs-less pack kinds (dev:apiSpec,

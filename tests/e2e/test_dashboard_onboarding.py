@@ -1,9 +1,9 @@
-"""#1643 onboarding wizard e2e (RUN_DASHBOARD_E2E opt-in, two-origin harness).
+"""#1997 (W1) onboarding wizard e2e (RUN_DASHBOARD_E2E opt-in, two-origin harness).
 
-Journey coverage: first-timer wizard steps (harness → skills → GitHub →
-seed → done), the harness copy, the STATE seed (Object + aboutObject point),
-completion (onboarding_complete), and the returning empty-graph re-entry
-card.
+Journey coverage: the 5 HUMAN wizard steps (orientation → org-create →
+fork card → connect-consent → done), the fork checkpoint (self + build /
+catalog-presented), the durable-key connect gate, and the re-entry card.
+The done step exits WITHOUT patching onboarding_complete (accept-and-drop).
 """
 from __future__ import annotations
 
@@ -152,14 +152,21 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     # step 0 (orientation — per the plan, orientation IS a wizard step).
     expect(page.locator("body")).to_contain_text("Continue setup", timeout=20_000)
     page.get_by_role("button", name="Continue setup").click()
-    # STEP 0: orientation.
+    # STEP 0: orientation. W1 (#1997) + W8 (#2004) rework: the orientation
+    # step renders the intro list (wizardFlow.js WIZARD_STEPS[0] + main.jsx
+    # ~4830) — 'Choose how you'll use it' is the orientation-unique item
+    # (the fork step's title is the non-matching 'Choose how you'll use
+    # Tortoise').
     expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
-    expect(page.locator("body")).to_contain_text("What you're setting up", timeout=5_000)
+    expect(page.locator("body")).to_contain_text("Choose how you'll use it", timeout=5_000)
     page.get_by_role("button", name="Continue →").click()
     # STEP 1: create/join org — name REQUIRED + editable prefill (DE2E-3);
+    # the current handler validates the wizardOrgName STATE (an untouched
+    # display prefill never commits), so the journey types the org name;
     # submit 409 (already created) → advance.
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
     expect(page.locator("body")).to_contain_text("Organization name", timeout=5_000)
+    page.get_by_label("Organization name").fill("onboarding-test")
     page.get_by_role("button", name="Create Organization").click()
     expect(page.locator("body")).to_contain_text("Choose how you'll use Tortoise", timeout=10_000)
     # STEP 2: fork card — self-use (presentation fork, once per org).
@@ -167,16 +174,24 @@ def test_first_timer_wizard_human_steps(page: Page) -> None:
     page.get_by_role("button", name="Use it for your own agents").click()
     expect(page.locator("body")).to_contain_text("Connect your agent", timeout=10_000)
     assert any(c.get("fork") == "self" for c in cap["checkpoint"]), f"fork not checkpointed: {cap['checkpoint']}"
-    # STEP 3: connect-consent — the universal command (harness tabs + copy).
-    expect(page.locator(".harness-tab")).to_have_count(4)
+    # STEP 3: connect-consent — the durable-key gate (#1998/#2195/#2246): a
+    # returning user without a mounted key sees the mint/paste surface first
+    # (HARNESS_ORDER is 6 self-install/teach harnesses). Paste the durable
+    # key → the universal command + copy render.
+    expect(page.locator(".harness-tab")).to_have_count(6)
     page.locator(".harness-tab", has_text="Claude Code").click()
+    page.get_by_label("Paste an API key").fill("tt_connect_abcdef0123456789")
+    page.get_by_role("button", name="Use this key").click()
+    expect(page.get_by_role("button", name="Copy setup")).to_be_visible(timeout=5_000)
     page.get_by_role("button", name="Copy setup").click()
     expect(page.locator("body")).to_contain_text("Copied", timeout=5_000)
     page.get_by_role("button", name="Skip for now").click()
     # STEP 4: done — agent takes over; NO onboarding_complete PATCH (the
     # node's gate owns completion; accept-and-drop).
     expect(page.locator("body")).to_contain_text("You're all set", timeout=10_000)
-    page.get_by_role("button", name="Open my dashboard →").click()
+    # the done step's exit (wizardComplete) — scoped: the header carries a
+    # same-named 'Open my dashboard →' escape.
+    page.locator(".wizard-actions").get_by_role("button", name="Open my dashboard →").click()
     assert not any("onboarding_complete" in p for p in cap["state"]), \
         f"done step must NOT patch onboarding_complete: {cap['state']}"
     # #2167: the whole wizard journey issues ZERO POST /v1/session/key (the
@@ -200,6 +215,9 @@ def test_first_timer_wizard_build_fork_marks_catalog(page: Page) -> None:
     expect(page.locator("body")).to_contain_text("Orientation", timeout=15_000)
     page.get_by_role("button", name="Continue →").click()
     expect(page.locator("body")).to_contain_text("Create your Organization", timeout=10_000)
+    # org-name state must be populated before the submit (see the human-steps
+    # journey above) — type it, then the one-shot guard 409s → fork card.
+    page.get_by_label("Organization name").fill("onboarding-test")
     page.get_by_role("button", name="Create Organization").click()
     # fork card — pick BUILD (the build branch renders the catalog)
     expect(page.locator("body")).to_contain_text("Build an application on top", timeout=10_000)
