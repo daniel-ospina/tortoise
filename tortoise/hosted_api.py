@@ -10187,11 +10187,21 @@ async def _accept_mismatch_v2(body: dict, request: Request, user: dict,
                                     user_email=user_email,
                                     mismatch_override=path, otp_code=otp_code)
         except _InvErr as e:
-            if e.status == 403 and "Verification code" in str(e):
+            # P2 (merge review): the seam's REACHABLE wrong/expired-code
+            # reject is "Invalid or expired verification code" (lowercase
+            # "verification") — the earlier capital-V matcher only caught
+            # the seam's "Verification code required" defense branch (which
+            # the HTTP layer pre-empts), so a supabase-hosted wrong code
+            # returned a plain-string 403 while the registry lane returned
+            # the documented invite_otp_invalid dict. Match case-insensitively
+            # so BOTH supabase OTP reject messages map to the documented
+            # error shape (same as the registry lane's invite_otp_invalid).
+            msg = str(e)
+            if e.status == 403 and "verification code" in msg.lower():
                 raise HTTPException(status_code=403, detail={
                     "error_code": "invite_otp_invalid",
-                    "message": str(e)}) from None
-            raise HTTPException(status_code=e.status, detail=str(e))  # noqa: B904
+                    "message": msg}) from None
+            raise HTTPException(status_code=e.status, detail=msg)  # noqa: B904
         _arm_invitee_member_progress(res["team_id"], user["user_id"])
         _forget_invite_accept(request, token)
         return {**res, "mismatch": {"invited_email": invite["email"],
