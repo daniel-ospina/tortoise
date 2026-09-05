@@ -386,38 +386,63 @@ def _load_report_inputs(args) -> tuple[dict, dict | None]:
     whose cells are all insufficient_n contributes a None value (reported
     as an insufficient_n cell — never a measured value, never vacuous).
 
-    Family-level value semantics (PR #2341 review round 2, P2): a family
-    payload carries its PRIMARY cal metric by construction — R1's
-    population split adds a SECOND cell (false-positive-rate, benign bct
-    verdicts) that must never be averaged into the family's surfaced-rate
-    headline. A payload with TWO measured metrics is refused loudly (the
-    metric-aware family-value selection lands with the Task-9 judge/
-    executor leg that makes bct verdicts measurable) — never a silent
-    mean-of-means conflating surfaced-rate with FP rate."""
+    Family-level value semantics (PR #2341 review rounds 2+3, P2): a family
+    payload stamps its PRIMARY cal metric (``payload["primary"]``) by
+    construction — R1's population split adds a SECOND cell
+    (false-positive-rate, benign bct verdicts) that must never be averaged
+    into the family's surfaced-rate headline. A payload with TWO measured
+    metrics is refused loudly, AND a payload whose ONLY measured metric is
+    not its declared primary (planted population sentinelled while the bct
+    control verdict measured — secondary-only-measured) gets the SAME
+    refusal (the metric-aware family-value selection lands with the Task-9
+    judge/executor leg that makes bct verdicts measurable) — never a
+    silent mean-of-means conflating surfaced-rate with FP rate, never a
+    silent secondary-mean headline. Pre-stamp (legacy) single-metric
+    payloads carry the primary by construction and stay readable."""
     base, is_attempt = _attempt_base(args)
     matrix: dict[str, dict[str, float | None]] = {}
     measured_cells = 0
     insufficient_cells = 0
     for payload in _family_payloads(base):
         arm = payload.get("arm", "?")
-        means: list[float] = []
+        primary = payload.get("primary")
+        measured: list[tuple[str, float]] = []
         cells = payload.get("cells") or {}
         for metric, vals in (payload.get("values") or {}).items():
             if cells.get(metric) == "measured" and vals:
-                means.append(sum(float(v) for v in vals) / len(vals))
+                measured.append(
+                    (metric, sum(float(v) for v in vals) / len(vals)))
             else:
                 insufficient_cells += 1
-        if len(means) > 1:
+        if len(measured) > 1:
             raise ValueError(
                 f"family {payload.get('family')!r} payload carries "
-                f"{len(means)} measured metrics {list(payload['values'])} — "
-                "the family-level report value is single-metric; metric-aware "
-                "family-value selection lands with the Task-9 judge/executor "
-                "leg (never a silent mean-of-means)")
-        if means:
-            measured_cells += len(means)
+                f"{len(measured)} measured metrics "
+                f"{[m for m, _ in measured]} — the family-level report "
+                "value is single-metric; metric-aware family-value "
+                "selection lands with the Task-9 judge/executor leg (never "
+                "a silent mean-of-means conflating the primary metric with "
+                "a secondary control metric)")
+        if measured and primary is not None and measured[0][0] != primary:
+            # Secondary-only-measured ⇒ same loud refusal as a two-measured
+            # payload: with the ONLY measured metric on the secondary/
+            # control cell (e.g. a bct false-positive-rate verdict while
+            # the planted surfaced-rate population sentinelled), the
+            # round-2 gate (len(means) > 1) did NOT fire — the FP mean
+            # silently became the family headline, classified against the
+            # primary metric's [cal] semantics.
+            raise ValueError(
+                f"family {payload.get('family')!r} payload's only measured "
+                f"metric {measured[0][0]!r} is not its declared primary "
+                f"metric {primary!r} (the primary cell is insufficient_n) — "
+                "a secondary-only-measured payload must never become the "
+                "family headline; metric-aware family-value selection "
+                "lands with the Task-9 judge/executor leg (never a silent "
+                "secondary-mean headline)")
+        if measured:
+            measured_cells += 1
         matrix.setdefault(payload["family"], {})[arm] = (
-            sum(means) / len(means) if means else None)
+            measured[0][1] if measured else None)
     if not is_attempt:
         # Legacy root fallback: family files at the out root carry no
         # summary/run artifacts — no run-level status context.

@@ -233,7 +233,7 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
             f"probe-scorer runs are single-arm in phase 1 (multi-arm probe "
             f"runs land with the Task 9 executor); got arms={list(config.arms)}")
 
-    # ── real-executor pre-flight (PR #2341 review round 2, P2) ───────────
+    # ── real-executor pre-flight (PR #2341 review rounds 2+3, P2) ────────
     #    run_mode derives from the EXECUTOR actually used, never from
     #    arms.yaml presence: until the real emitting executor is wired
     #    (Task 9), the stock episode-log seam is a no-op — a real label
@@ -242,18 +242,39 @@ def run_battery(config: RunConfig, *, stdout: Callable[[str], None] = print,
     #    active real emission seam fails closed BEFORE the attempt dir (no
     #    orphaned artifacts). Hermetic tests activate the seam by stubbing
     #    run._episode_log; the mock lane (the default) never needs it.
+    #    ROUND 3 (P2, both reviewers): the gate fails closed on the REQUEST,
+    #    never on the requested arm ids. A real request is refused whenever
+    #    (a) --mock is set (it forces every arm onto the MockArm), (b) NO
+    #    requested arm can resolve to a real-mode slot (default arms are
+    #    ["mock"]; an all-mock arm set is the mock lane by construction), or
+    #    (c) the emission seam is still the stock no-op. The round-2 gate
+    #    keyed on ``any(a != "mock")`` AND ``not config.mock``, so a real
+    #    request with default/all-mock arms (or mock=True) skipped the
+    #    ConfigError and silently ran the mock lane rc=0 — a bypass.
     if config.executor not in ("mock", "real"):
         raise ConfigError(f"unknown executor mode {config.executor!r} "
                           "(mock|real)")
-    if (config.executor == "real" and not config.mock
-            and any(a != "mock" for a in config.arms)
-            and _episode_log is _DEFAULT_EPISODE_LOG):
-        raise ConfigError(
-            "real executor requested but no real emitting executor seam is "
-            "active: the stock episode-log seam is a no-op (the real "
-            "emitting executor is Task-9 owned). Real mode without an "
-            "active real executor fails closed — run the mock lane "
-            "(default) or wire the executor seam.")
+    if config.executor == "real":
+        if config.mock:
+            raise ConfigError(
+                "real executor requested with --mock: --mock forces every "
+                "requested arm onto the MockArm (the mock lane) — a real "
+                "request over the mock executor fails closed; drop --mock "
+                "or run the mock lane (default).")
+        if not any(a != "mock" for a in config.arms):
+            raise ConfigError(
+                f"real executor requested but no requested arm can resolve "
+                f"to a real-mode slot (arms={list(config.arms)} are all "
+                "mock) — a real request over the mock lane fails closed; "
+                "request a non-mock arm (e.g. --arms a0) or run the mock "
+                "lane (default).")
+        if _episode_log is _DEFAULT_EPISODE_LOG:
+            raise ConfigError(
+                "real executor requested but no real emitting executor seam "
+                "is active: the stock episode-log seam is a no-op (the real "
+                "emitting executor is Task-9 owned). Real mode without an "
+                "active real executor fails closed — run the mock lane "
+                "(default) or wire the executor seam.")
     provenance = {
         "git_sha": _git_sha(),
         "config_files": [p.name for p in (config.config_dir).glob("*.yaml")],

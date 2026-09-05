@@ -280,6 +280,17 @@ class ProbeScorer:
     def score(self, episode, scenario,
               rubric_id: str | None = None) -> ScorerResult:
         run_mode = getattr(episode, "run_mode", "mock")
+        # Eligibility gate FIRST (PR #2341 review round 3, P2): a probe
+        # scores ONLY its own family's episodes. Foreign-family episodes are
+        # skipped entirely (no record, no sentinel, no expected terms) in
+        # ANY lane — a mock (or excluded-real) run over a foreign-family
+        # episode must never record a sentinel that claims the family was
+        # attempted (the pre-fix order ran the mock/!valid sentinel branch
+        # first, so an R1 probe over an R4 episode in a MOCK run recorded a
+        # surfaced-rate sentinel and family_R1.json claimed R1 was tried
+        # with zero real episodes).
+        if scenario.family not in probe_domain(self.family):
+            return ScorerResult(metrics=())
         if run_mode != "real" or not episode.valid:
             # Mock is never scored as real: no real log exists, nothing to
             # derive or measure — the sentinel record feeds the
@@ -289,13 +300,6 @@ class ProbeScorer:
             # is population-aware so a controls-only run surfaces the
             # FP-control cell, never a phantom surfaced-rate cell.
             self._record(None, episode, metric=self._metric_for(scenario))
-            return ScorerResult(metrics=())
-        # Eligibility gate: a probe scores ONLY its own family's episodes.
-        # Foreign-family episodes are skipped entirely (no record, no
-        # sentinel, no expected terms) — a probe never measures (or gaps)
-        # an episode its family does not own, and a mixed tier-1 slice
-        # cannot contaminate a family cell with foreign-family sentinels.
-        if scenario.family not in probe_domain(self.family):
             return ScorerResult(metrics=())
         expected = expected_coverage_for(scenario, run_mode="real",
                                          family=self.family)
@@ -370,14 +374,22 @@ class ProbeScorer:
         return self._last
 
     def family_report(self) -> dict | None:
-        """Per-family JSON payload (pinned Task-5 schema: family, n, values:
-        {metric: [v...]}, cells: {metric: measured|insufficient_n}). R1 may
-        carry TWO cells (population split, PR #2341 review P2): the primary
-        cal metric aggregates PLANTED episodes only; the FP-control metric
-        (false-positive-rate) aggregates benign bct episodes that carried a
-        control verdict (Task-9 executor-owned — absent verdicts keep the
-        cell at insufficient_n). None when no episode was scored (the
-        family was never attempted)."""
+        """Per-family JSON payload (pinned Task-5 schema: family, primary,
+        n, values: {metric: [v...]}, cells: {metric: measured|
+        insufficient_n}). R1 may carry TWO cells (population split, PR
+        #2341 review P2): the primary cal metric aggregates PLANTED
+        episodes only; the FP-control metric (false-positive-rate)
+        aggregates benign bct episodes that carried a control verdict
+        (Task-9 executor-owned — absent verdicts keep the cell at
+        insufficient_n).
+
+        ``primary`` stamps the payload's headline cal metric (PR #2341
+        review round 3, P2) — the family-level report value is the PRIMARY
+        metric by construction; a consumer can refuse a payload whose only
+        measured metric is NOT its declared primary (secondary-only-
+        measured ⇒ same refusal as a two-measured payload) instead of
+        silently promoting a control-metric mean to the family headline.
+        None when no episode was scored (the family was never attempted)."""
         if not self._records:
             return None
         arms = {r.arm for r in self._records}
@@ -398,6 +410,9 @@ class ProbeScorer:
                  for m in metrics}
         return {
             "family": self.family,
+            #: Headline cal metric (RC2/P2): the family-level report value
+            #: is the PRIMARY metric by construction.
+            "primary": self.probe.cal_metric,
             "arm": arm,
             "n": sum(len(v) for v in values.values()),
             "values": values,

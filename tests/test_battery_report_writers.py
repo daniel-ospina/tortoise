@@ -165,6 +165,23 @@ def run_battery_guard(config: RunConfig) -> ExitCode:
         return REFUSED
 
 
+def _plant_attempt(out: Path, payloads: list[dict], *,
+                   run_mode: str = "mock") -> Path:
+    """Create a completed attempt dir under ``out`` (summary.json = the
+    completion marker) and write the family payloads through the LIVE
+    writer (atomic + schema_version stamp) — the exact readable shape a
+    run-end family_report() produces for the report reader."""
+    out.mkdir(parents=True, exist_ok=True)
+    attempt = out / "99999999-999999-999998"
+    attempt.mkdir(parents=True, exist_ok=True)
+    write_family_files(attempt, payloads)
+    (attempt / "summary.json").write_text(json.dumps({
+        "schema_version": "1.1",
+        "run": {"run_mode": run_mode, "exit_code": 0, "run_ids": []},
+        "arms": []}), encoding="utf-8")
+    return attempt
+
+
 # ---------------------------------------------------------------------------
 # schema-v1.1 log fixtures (derived/gold/judge entries = post-derivation)
 # ---------------------------------------------------------------------------
@@ -280,18 +297,32 @@ class TestRunWriters:
         never inherited (no inheritance) and absence never vacuous-passes
         (report_status incomplete, not complete). attempt-2's own R2 row
         proves the source is attempt-2 (earliest/merge resolution would
-        surface R1 too; a root-level glob would surface neither)."""
+        surface R1 too; a root-level glob would surface neither).
+
+        attempt-2 targets an R2-FAMILY corpus: under the RC3 eligibility-
+        first rule the shared contradiction-family corpus is FOREIGN to R2
+        (domain {"R2"}), so a mock R2 run over it must record NOTHING (no
+        family_R2.json — the pre-RC3 sentinel-before-eligibility order
+        wrote a sentinelled "R2 attempted" file over foreign episodes)."""
         cfg = _config_dir(tmp_path)
         out = tmp_path / "out"
         attempt1 = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
                         monkeypatch=monkeypatch)
-        attempt2 = _run(out, cfg, families={"R2"}, mock=True,
+        cfg2 = _config_dir(tmp_path / "cfg2")
+        corpus = yaml.safe_load(
+            (cfg2 / "corpus.yaml").read_text(encoding="utf-8"))
+        for sc in corpus["scenarios"]:
+            sc["family"] = "R2"
+            sc["task_type"] = "decision"
+        (cfg2 / "corpus.yaml").write_text(yaml.safe_dump(corpus),
+                                           encoding="utf-8")
+        attempt2 = _run(out, cfg2, families={"R2"}, mock=True,
                         arms=["a0"], monkeypatch=monkeypatch)
         assert attempt1 != attempt2
         assert (attempt1 / "family_R1.json").is_file()      # attempt 1 measured R1
         assert not (attempt2 / "family_R1.json").exists()   # attempt 2 did NOT
         assert (attempt2 / "family_R2.json").is_file()      # attempt 2 measured R2
-        profile = invoke_report(out, cfg)
+        profile = invoke_report(out, cfg2)
         assert "R1" not in profile["matrix"]          # latest attempt: no R1 row
         assert "R2" in profile["matrix"]              # ...and attempt-2 IS the source
         assert profile["report_status"] == "incomplete_missing_metrics"  # no vacuous pass
@@ -478,6 +509,7 @@ class TestR1PopulationSplit:
         assert rep["n"] == 3
         assert rep["cells"]["false-positive-rate"] == "measured"
         assert rep["values"]["false-positive-rate"] == [1.0]
+        assert rep["primary"] == "surfaced-rate"  # headline stamp (RC2/P2)
 
     def test_bct_no_verdict_insufficient_and_never_surfaced(self):
         """bct controls with NO control verdict report the FP-control cell as
@@ -504,6 +536,115 @@ class TestR1PopulationSplit:
         assert rep["cells"]["false-positive-rate"] == "measured"
         assert rep["values"]["false-positive-rate"] == [0.0]
         assert "surfaced-rate" not in rep["values"]
+        # headline stamp rides even a secondary-only-measured payload (the
+        # report reader refuses it — never a silent FP-mean R1 headline)
+        assert rep["primary"] == "surfaced-rate"
+
+
+class TestPrimaryMetricHeadline:
+    """PR #2341 review round 3, P2 (both reviewers): the family payload
+    stamps its PRIMARY headline metric (family_report "primary" field), and
+    the CLI report refuses ANY payload whose only measured metric is not
+    that declared primary — a secondary-only-measured payload (planted
+    surfaced-rate population sentinelled, bct FP-control verdict measured)
+    must never have its false-positive-rate mean silently promoted to the
+    family R1 headline and classified against surfaced-rate [cal]
+    semantics (round 2 refused only TWO measured metrics; with the primary
+    cell insufficient_n the means list had length 1 and no refusal fired)."""
+
+    @staticmethod
+    def _r1_refusal_payload() -> dict:
+        """The asymmetric single-metric payload from the bug: planted
+        surfaced-rate population sentinelled (insufficient_n), one bct
+        control verdict False measured (FP 0.0)."""
+        return {
+            "family": "R1", "primary": "surfaced-rate", "arm": "a0",
+            "n": 1,
+            "values": {"surfaced-rate": [],
+                        "false-positive-rate": [0.0]},
+            "cells": {"surfaced-rate": "insufficient_n",
+                       "false-positive-rate": "measured"}}
+
+    def test_family_report_stamps_primary_metric(self):
+        """family_report stamps the probe's cal_metric as the payload
+        primary — the reader-side guard has a declared primary to compare
+        against."""
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        ct, bct = _r1_pop_scenarios()
+        scorer = ProbeScorer(
+            probe=R1ContradictionProbe(),
+            thresholds=ThresholdsConfig(
+                cal_rows=(("surfaced-rate", "a0", 0.90),)))
+        # planted episode in a gapped real log -> surfaced-rate sentinel
+        scorer.score(_real_episode(ct.id, gapped_log()), ct)
+        # bct control with a measured False verdict -> FP 0.0 (secondary)
+        log = covered_log()
+        log.append({"type": "derived", "event": "control_verdict",
+                    "at": 99, "field": "false_positive",
+                    "payload": {"value": False}})
+        scorer.score(_real_episode(bct.id, log), bct)
+        rep = scorer.family_report()
+        assert rep is not None
+        assert rep["primary"] == "surfaced-rate"
+        assert rep["cells"] == {"surfaced-rate": "insufficient_n",
+                                 "false-positive-rate": "measured"}
+
+    def test_secondary_only_measured_payload_refused(self, tmp_path, capsys):
+        """planted-sentineled + bct-control-verdict-False payload (only
+        false-positive-rate measured) → loud refusal; no profile is ever
+        written, so the FP mean can never surface as a measured R1 value."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        _plant_attempt(out, [self._r1_refusal_payload()])
+        rc = main(["report", "--config", str(cfg), "--out", str(out)])
+        assert rc is ExitCode.OPERATIONAL
+        err = capsys.readouterr().err
+        assert "only measured metric" in err
+        assert "not its declared primary" in err
+        assert not (out / "profile.json").exists()  # never a measured R1 value
+
+    def test_two_measured_metrics_still_refused(self, tmp_path, capsys):
+        """Round-2 refusal preserved: a payload with BOTH cells measured is
+        still refused loudly (never a silent mean-of-means)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        payload = self._r1_refusal_payload()
+        payload["values"] = {"surfaced-rate": [1.0],
+                              "false-positive-rate": [0.0]}
+        payload["cells"] = {"surfaced-rate": "measured",
+                             "false-positive-rate": "measured"}
+        _plant_attempt(out, [payload])
+        rc = main(["report", "--config", str(cfg), "--out", str(out)])
+        assert rc is ExitCode.OPERATIONAL
+        assert "2 measured metrics" in capsys.readouterr().err
+        assert not (out / "profile.json").exists()
+
+    def test_primary_only_measured_payload_reports_value(self, tmp_path):
+        """The normal single-primary lane is untouched: a payload whose only
+        measured metric IS its declared primary (surfaced-rate) reports the
+        primary mean as the family headline value."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        _plant_attempt(out, [{
+            "family": "R1", "primary": "surfaced-rate", "arm": "a0",
+            "n": 2, "values": {"surfaced-rate": [1.0, 1.0]},
+            "cells": {"surfaced-rate": "measured"}}])
+        profile = invoke_report(out, cfg)
+        assert profile["matrix"]["R1"]["a0"]["value"] == 1.0
+
+    def test_legacy_unstamped_single_metric_payload_readable(self, tmp_path):
+        """Pre-stamp (legacy) payloads carry no "primary" — their single
+        measured metric was the primary by construction (pre-population-
+        split payloads had exactly one metric), so they stay readable and
+        are never refused (back-compat)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        _plant_attempt(out, [{"family": "R1", "arm": "a0", "n": 1,
+                              "values": {"surfaced-rate": [0.9]},
+                              "cells": {"surfaced-rate": "measured"}}])
+        profile = invoke_report(out, cfg)
+        assert profile["matrix"]["R1"]["a0"]["value"] == 0.9
 
 
 class TestRunModeHonesty:
@@ -848,3 +989,75 @@ class TestFamilyThreadedScorerSeam:
         scorer.score(ep, ct)
         assert scorer.last_record() is None
         assert scorer.family_report() is None  # never attempted R4
+
+
+class TestEligibilityBeforeLaneSentinels:
+    """PR #2341 review round 3, P2 (both reviewers): domain eligibility runs
+    BEFORE the mock/excluded sentinel branch — a probe never records (not
+    even a sentinel) over a foreign-family episode in ANY lane. The pre-fix
+    order ran the ``run_mode != "real" or not valid`` sentinel branch first,
+    so a MOCK run of an R1 probe over an R4-family episode recorded a
+    surfaced-rate sentinel and family_R1.json claimed the family was
+    attempted with zero real episodes."""
+
+    @staticmethod
+    def _r1_scorer():
+        from battery.probes.r1_contradiction import R1ContradictionProbe
+        from battery.runner.probe_scorer import ProbeScorer
+        return ProbeScorer(probe=R1ContradictionProbe(), thresholds=())
+
+    def test_mock_foreign_family_episode_never_records(self, tmp_path):
+        """R1 probe over an R4-family episode in the MOCK lane: eligibility
+        gates before the mock-lane sentinel — no record at all, family
+        never attempted."""
+        sc = _mini_scenario(tmp_path, family="R4", task_type="decision")
+        scorer = self._r1_scorer()
+        ep = EpisodeResult(scenario_id=sc.id, seed=1, arm="a0",
+                           run_mode="mock")  # mock lane (pre-fix sentinelled)
+        scorer.score(ep, sc)
+        assert scorer.last_record() is None
+        assert scorer.family_report() is None  # R1 never attempted over R4
+
+    def test_real_excluded_foreign_family_episode_never_records(self, tmp_path):
+        """A REAL EXCLUDED foreign-family episode likewise records nothing
+        (eligibility precedes the !valid sentinel branch, too)."""
+        sc = _mini_scenario(tmp_path, family="R4", task_type="decision")
+        scorer = self._r1_scorer()
+        ep = EpisodeResult(scenario_id=sc.id, seed=1, arm="a0",
+                           model_call_outcomes={"failed": 1},
+                           run_mode="real")  # excluded real episode
+        assert not ep.valid
+        scorer.score(ep, sc)
+        assert scorer.last_record() is None
+        assert scorer.family_report() is None
+
+    def test_real_valid_foreign_family_episode_never_records(self, tmp_path):
+        """A real VALID foreign-family episode records nothing (unchanged
+        round-P1 lock — restated for the R1-probe-over-R4 direction)."""
+        sc = _mini_scenario(tmp_path, family="R4", task_type="decision")
+        scorer = self._r1_scorer()
+        ep = _real_episode(sc.id, covered_log())  # real, valid, full log
+        assert ep.valid
+        scorer.score(ep, sc)
+        assert scorer.last_record() is None
+        assert scorer.family_report() is None
+
+    def test_mock_foreign_family_run_writes_no_family_file(self, tmp_path,
+                                                           monkeypatch):
+        """End-to-end: a MOCK R1-probe run over an R4-family corpus writes
+        NO family_R1.json (no records → no run-end family payload) — the
+        pre-fix run recorded sentinels and emitted family_R1.json claiming
+        R1 was attempted."""
+        cfg = _config_dir(tmp_path)
+        corpus = yaml.safe_load(
+            (cfg / "corpus.yaml").read_text(encoding="utf-8"))
+        for sc in corpus["scenarios"]:
+            sc["family"] = "R4"
+            sc["task_type"] = "decision"
+        (cfg / "corpus.yaml").write_text(yaml.safe_dump(corpus),
+                                          encoding="utf-8")
+        out = tmp_path / "out"
+        attempt = _run(out, cfg, families={"R1"}, mock=True, arms=["a0"],
+                       monkeypatch=monkeypatch)
+        assert not (attempt / "family_R1.json").exists()
+        assert list(attempt.glob("family_*.json")) == []

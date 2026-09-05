@@ -248,3 +248,62 @@ class TestMockArmContract:
             a.name for a in _episode_artifacts(attempt))).read_text())
         assert art["metric_values"]["n_turns"] >= 1
         assert art["metric_values"]["total_tokens"] > 0
+
+
+class TestRealRequestFailClosed:
+    """PR #2341 review round 3, P2 (both reviewers): the real-executor
+    fail-closed gate keys on the REQUEST, not the requested arm ids. A real
+    request whose arms cannot resolve to a real-mode slot (default arms =
+    ["mock"], explicit all-mock arms) or that carries --mock raises
+    ConfigError BEFORE the attempt dir — never a silent mock-lane run rc=0
+    under a real label. (Round 2's gate required ``not mock AND any(a !=
+    "mock")``, so a real request with default arms or mock=True skipped the
+    refusal and ran the mock lane.)"""
+
+    def test_real_executor_default_arms_refused(self, tmp_path):
+        """RunConfig(executor="real") with DEFAULT arms (["mock"]) — no
+        requested arm can resolve to a real-mode slot → ConfigError before
+        the attempt dir (zero artifacts)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        with pytest.raises(ConfigError,
+                           match="no requested arm can resolve"):
+            run_battery(RunConfig(config_dir=cfg, out_dir=out,
+                                  executor="real"),
+                        stdout=lambda _: None)
+        assert not out.exists() or not [p for p in out.iterdir()]
+
+    def test_real_executor_explicit_all_mock_arms_refused(self, tmp_path):
+        """executor="real" with an EXPLICIT all-mock arm set is the mock
+        lane by construction → ConfigError (round 2 silently ran it rc=0)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        with pytest.raises(ConfigError,
+                           match="no requested arm can resolve"):
+            run_battery(RunConfig(config_dir=cfg, out_dir=out,
+                                  arms=["mock"], executor="real"),
+                        stdout=lambda _: None)
+        assert not out.exists() or not [p for p in out.iterdir()]
+
+    def test_real_executor_with_mock_flag_refused(self, tmp_path):
+        """executor="real" + mock=True → ConfigError: --mock forces every
+        arm onto the MockArm (the mock lane) — never a real-labeled run
+        over the mock executor (round 2 skipped this via ``not config.mock``
+        in the gate)."""
+        cfg = _config_dir(tmp_path)
+        out = tmp_path / "out"
+        with pytest.raises(ConfigError, match="--mock"):
+            run_battery(RunConfig(config_dir=cfg, out_dir=out,
+                                  executor="real", mock=True),
+                        stdout=lambda _: None)
+        assert not out.exists() or not [p for p in out.iterdir()]
+
+    def test_mock_executor_all_mock_arms_runs(self, tmp_path):
+        """Default lane unchanged: executor="mock" with all-mock arms runs
+        (exit OK, artifacts written, run_mode mock) — the real-request gate
+        never touches the mock lane."""
+        code, attempt, summary = _run(tmp_path, executor="mock",
+                                      arms=["mock"], mock=False)
+        assert code is ExitCode.OK
+        assert summary["run"]["run_mode"] == "mock"
+        assert len(_episode_artifacts(attempt)) == 2
