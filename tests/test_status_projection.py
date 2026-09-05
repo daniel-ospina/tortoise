@@ -227,7 +227,7 @@ class TestProjectionFold:
             # id (no live node exists yet — the id-branch fold must match the
             # node the later auto-registration recreates), then create_entity
             # auto-journals the registration AFTER the fold.
-            from tortoise.sdk import _entity_name_id  # noqa: I001
+            from tortoise.sdk import _entity_name_id
             oid = _entity_name_id("Object", "strategy-A")
             # FOLD FIRST — the adversarial journal order (a later journaled
             # producer re-creates the Object AFTER the supersession event).

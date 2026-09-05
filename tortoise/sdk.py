@@ -14051,9 +14051,9 @@ class TortoiseSDK:
                     "MATCH (o:Object {id:$cid, name:$name}) RETURN o.id",
                     params={"cid": id_val, "name": event["name"]},
                 ).result_set
-            except Exception:  # noqa: BLE001 — fail-open: journal (durable
-                # bias — a duplicate is replay-safe; skipping would silently
-                # re-open the node-loss bug).
+            except Exception:
+                # Fail-open to journaling: a duplicate registration line is
+                # replay-safe; a silent skip would re-open the node-loss bug.
                 _logger.warning(
                     "ObjectRegistered existence probe failed for %s — "
                     "journaling optimistically (id=%s)",
@@ -14067,7 +14067,7 @@ class TortoiseSDK:
             # stamps createdAt=now_iso()). Re-mentions (skip path) and
             # journal-less SDKs keep the projection's coalesce($now) behavior
             # byte-identical to pre-#2194.
-            from .ids import now_iso  # noqa: I001
+            from .ids import now_iso
             event["createdAt"] = now_iso()
         # Apply through projection (writes to FalkorDB)
         apply_result = proj.apply(event)

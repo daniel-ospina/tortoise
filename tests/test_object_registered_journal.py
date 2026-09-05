@@ -12,17 +12,15 @@ Test classes:
 from __future__ import annotations
 
 import os
-from pathlib import Path
-
-import pytest
 
 sys_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 import sys  # noqa: E402
-sys.path.insert(0, sys_path)  # noqa: E402
 
-from tortoise.ids import ulid  # noqa: E402, I001
-from tortoise.log import EventLog  # noqa: E402, I001
-from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402, I001
+sys.path.insert(0, sys_path)
+
+from tortoise.ids import ulid  # noqa: E402
+from tortoise.log import EventLog  # noqa: E402
+from tortoise.sdk import TortoiseSDK, _entity_name_id  # noqa: E402
 
 
 def _journaled(sdk, events_dir):
@@ -75,7 +73,7 @@ class TestCaptureFoldRoundTrip:
                               objectKind="core:strategy", is_episodic=False)
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
-            from tortoise.commit_ops import apply_supersessions  # noqa: I001
+            from tortoise.commit_ops import apply_supersessions
             applied = apply_supersessions(
                 proj, sdk,
                 [{"superseded": "strategy-A", "supersedes_by": "strategy-B",
@@ -126,7 +124,7 @@ class TestCaptureFoldRoundTrip:
             assert line["name"] == "acme"
             assert line["object_kind"] == "core:org"
             assert line["status"] == "live"
-            assert "createdAt" in line and line["createdAt"], line
+            assert line.get("createdAt"), line
             assert line["is_episodic"] == False  # noqa: E712
             proj.rebuild_all(str(events))
             rebuilt = _object_row(proj, "acme")
@@ -199,7 +197,7 @@ class TestOnlyOnCreate:
                               objectKind="core:strategy", is_episodic=False)
             sdk.create_entity("object", "strategy-A",
                               objectKind="core:strategy", is_episodic=False)
-            from tortoise.commit_ops import apply_supersessions  # noqa: I001
+            from tortoise.commit_ops import apply_supersessions
             assert apply_supersessions(
                 proj, sdk,
                 [{"superseded": "strategy-A", "supersedes_by": "strategy-B",
@@ -355,7 +353,7 @@ class TestFoldMissWarning:
             oid = _entity_name_id("Object", "ghost-name")
             sdk._emit_event("ObjectSuperseded", id=oid, name="ghost-name",
                             supersedes_by="successor-name")
-            import logging  # noqa: I001
+            import logging
             with caplog.at_level(logging.WARNING,
                                  logger="tortoise.projection"):
                 proj.rebuild_all(str(events))
@@ -412,7 +410,7 @@ class TestFailureInjection:
         """A probe-query raise must NOT fail the create: warning + optimistic
         journal (durable bias) — a regression to fail-closed (silent skip)
         would re-open the node-loss bug."""
-        import logging  # noqa: I001
+        import logging
 
         events = tmp_path / "events"
         events.mkdir()
@@ -451,9 +449,9 @@ class TestFailureInjection:
         """An EventLog.append raise must not crash the create: warning logged,
         node live; the accepted consequence — rebuild omits the Object (no
         registration line; #2296 backstop covers the loss)."""
-        import logging  # noqa: I001
+        import logging
 
-        from tortoise.log import EventLog  # noqa: I001
+        from tortoise.log import EventLog
 
         events = tmp_path / "events"
         events.mkdir()
@@ -487,10 +485,10 @@ class TestFailureInjection:
         """Fold-side append failure: live A is superseded but the journal
         holds only the registrations → rebuild restores A LIVE (journal-
         consistent), no phantom fold, no fold-miss warning."""
-        import logging  # noqa: I001
+        import logging
 
-        from tortoise.commit_ops import apply_supersessions  # noqa: I001
-        from tortoise.log import EventLog  # noqa: I001
+        from tortoise.commit_ops import apply_supersessions
+        from tortoise.log import EventLog
 
         events = tmp_path / "events"
         events.mkdir()
@@ -545,7 +543,7 @@ class TestLineOrder:
         the ObjectSuperseded line in a capture journal — load-bearing for the
         single-log chronological rebuild() path (NO deferred fold sweep),
         which would otherwise resurrect the superseded Object."""
-        from tortoise.commit_ops import apply_supersessions  # noqa: I001
+        from tortoise.commit_ops import apply_supersessions
 
         events = tmp_path / "events"
         events.mkdir()
@@ -570,7 +568,7 @@ class TestLineOrder:
                 "ObjectRegistered"), types
             # single-log chronological rebuild (no deferred sweep): with
             # [OR..., OS] order the fold applies — the Object stays superseded.
-            from tortoise.log import EventLog  # noqa: I001
+            from tortoise.log import EventLog
             proj.rebuild(EventLog(str(events / "events.jsonl")))
             rows = _object_row(proj, "strategy-A", "status", "supersededBy")
             assert rows and rows[0][0] == "superseded", rows
