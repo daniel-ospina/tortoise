@@ -53,10 +53,35 @@ TIER_ALIASES: dict = {
     "unverified": "T4", "T4": "T4", 4: "T4",
 }
 
+# Plain-language credibility ladder for HUMAN-AUTHORED points (decision parts,
+# direct claims) — the middle rung ``medium`` is the #2199 decide-part default
+# prior (Beta(3,1), mean 0.75): "reuse the ladder, do NOT invent a new number"
+# (knock-on decision 2, issue #2199). The Beta numbers live in TIER_PRIORS
+# only; the words live in TIER_ALIASES only — no parallel map to drift.
+CREDIBILITY_LADDER: tuple[str, ...] = (
+    "gold", "high", "medium", "low", "unverified",
+)
+
 
 def canonical_tier(value) -> str | None:
     """Map a tier value (T0-T4 or legacy alias gold/high/.../numeric) to canonical T0-T4."""
     return TIER_ALIASES.get(value)
+
+
+def credibility_prior(value) -> tuple[float, float] | None:
+    """Map a point-level credibility value to its Beta(alpha, beta) prior.
+
+    Accepts the plain-language ladder words (gold/high/medium/low/unverified),
+    the canonical T0-T4 forms, or the legacy numeric aliases 0-4 — the same
+    vocabulary ``canonical_tier`` accepts. Single-sourced: the words resolve
+    through TIER_ALIASES and the Beta tuples come from TIER_PRIORS, so a new
+    rung can never land with a stale number. Returns None for values outside
+    the ladder (callers decide whether to fail loud or default).
+    """
+    tier = canonical_tier(value)
+    if tier is None:
+        return None
+    return TIER_PRIORS[tier]
 
 # ── Source-kind registry (extensible vocabulary, issue O/I/T 4) ─────────────
 # T0-T4 identity + explicit None for ALL legacy/generic kinds. Legacy type
