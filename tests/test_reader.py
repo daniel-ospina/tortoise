@@ -197,6 +197,40 @@ def test_llmreader_answer_renders_product_context() -> None:
     assert f"Memory context:\n{expected_ctx}\n\nQuestion: how many days ago did we meet?\n\nAnswer:" == user
 
 
+def test_llmreader_answer_guards_none_completion() -> None:
+    """answer() must NOT crash when the model returns None (a provider
+    response with empty content — refusal/empty generation observed live
+    2026-09-02 on qwen via OpenRouter, question 830ce83f): the None-guard
+    mirrors the product ask()'s ``(raw or "").strip()`` so the eval's
+    direct LLMReader path surfaces "" instead of AttributeError on
+    None.strip()."""
+    class _NoneModel:
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, *, system: str, user: str):
+            self.calls.append((system, user))
+            return None
+
+    model = _NoneModel()
+    reader = LLMReader(model, model_id="stub")
+    out = reader.answer(context_hits=[{"content": "x", "has_answer": True}],
+                        question="q")
+    assert out == ""
+    assert len(model.calls) == 1
+
+
+def test_llmreader_ping_guards_none_completion() -> None:
+    """ping() mirrors answer()'s None-guard (same crash class: the probe
+    completion returning None must not AttributeError)."""
+    class _NoneModel:
+        def complete(self, *, system: str, user: str):
+            return None
+
+    reader = LLMReader(_NoneModel(), model_id="stub")
+    assert reader.ping("probe") == ""
+
+
 def test_llmreader_answer_strips_raw_completion() -> None:
     """answer() strips the raw completion (test-review re-review #2013): a
     padded non-blank reply through the product path — the strip regression
