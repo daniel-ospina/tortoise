@@ -14,6 +14,7 @@ import hmac as _hmac
 import logging
 import os
 import secrets
+import threading as _threading
 
 _logger = logging.getLogger(__name__)
 
@@ -34,13 +35,37 @@ if not _SECRET_PEPPER:
             "hashing; set a stable value, e.g. openssl rand -hex 32). "
             "API key hashes cannot be verified without a stable pepper value."
         )
-    _logger.warning(
-        "TORTOISE_SECRET_PEPPER not set — using dev-mode pepper. "
-        "DO NOT run in production without setting it."
-    )
     _SECRET_PEPPER = _DEV_PEPPER
 
 _PEPPER_BYTES = _SECRET_PEPPER.encode()
+
+# #2204: the dev-pepper fallback is NOISE at module import — most processes
+# (doctor/init/index, plain SDK use) never touch the pepper, and dev mode
+# (no TORTOISE_API_KEY) bypasses auth entirely, so the fallback is inert
+# there. The warning that matters is the one at first actual pepper USE
+# (hash_api_key / verify_api_key / lookup_hash) in a process that really
+# does key hashing with the dev fallback — emitted once per process via
+# _warn_dev_pepper_once(). Keeps `import tortoise.*` clean without masking
+# the production misconfig signal (missing TORTOISE_SECRET_PEPPER where keys
+# are actually hashed/verified).
+_DEV_PEPPER_WARNED = False
+_DEV_PEPPER_WARN_LOCK = _threading.Lock()
+
+
+def _warn_dev_pepper_once() -> None:
+    """Warn (once per process) when key hashing runs on the dev pepper."""
+    global _DEV_PEPPER_WARNED
+    if _SECRET_PEPPER != _DEV_PEPPER or _DEV_PEPPER_WARNED:
+        return
+    with _DEV_PEPPER_WARN_LOCK:
+        if _DEV_PEPPER_WARNED:
+            return
+        _logger.warning(
+            "TORTOISE_SECRET_PEPPER not set — hashing with dev-mode pepper. "
+            "Set TORTOISE_SECRET_PEPPER before minting/verifying keys in any "
+            "non-dev deployment."
+        )
+        _DEV_PEPPER_WARNED = True
 
 
 def require_auth(headers: dict | None = None) -> bool:
@@ -86,6 +111,7 @@ def hash_api_key(key: str) -> str:
     Returns "salt_hex:hash_hex" — store this full string; pass it to
     verify_api_key() which extracts the salt.
     """
+    _warn_dev_pepper_once()
     per_key_salt = secrets.token_bytes(32)
     # Pepper is mixed into the key material (not used as salt)
     key_material = key.encode() + _PEPPER_BYTES
@@ -101,6 +127,7 @@ def verify_api_key(key: str, stored: str) -> bool:
     Parses the per-key salt from the stored value, recomputes the hash,
     and compares in constant time via hashlib.compare_digest.
     """
+    _warn_dev_pepper_once()
     try:
         salt_hex, expected_hex = stored.split(":", 1)
         if len(salt_hex) != 64:
@@ -140,4 +167,5 @@ def lookup_hash(key: str) -> str:
     test vectors. Do NOT change the order here without updating the mirror
     and the parity vectors.
     """
+    _warn_dev_pepper_once()
     return hashlib.sha256(_PEPPER_BYTES + key.encode()).hexdigest()
