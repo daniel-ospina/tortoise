@@ -369,7 +369,9 @@ def _eligible(block: dict, *, min_confidence: float,
     """Canonical stage 4 — the confidence gate (EP + contentiousness).
 
     Eligibility is the canonical persisted posterior mean (α/(α+β), from the
-    why-block's dedicated ep read — NOT the search path's edge-ratio proxy).
+    why-block's dedicated ep read — post-#2206 identical to the search
+    path's ep.confidence_mean, which reads the same coalesce of
+    posterior_alpha/ep_alpha).
     Unmeasured points sit at the Beta(1,1) neutral 0.5 (``has_ep=False``) —
     below the 0.7 default → below-notability/silent, never fired.
 
@@ -637,7 +639,8 @@ def run_volunteer_pipeline(
         # ── Stage 3b: canonical EP read + why-block assembly (bounded batch,
         #    single-node α/β — S8 fast-path; never full EP propagation). The
         #    why-blocks ARE the gate's confidence source (canonical posterior
-        #    mean — not the search path's edge-ratio proxy).
+        #    mean — post-#2206 the same belief number the search path's
+        #    ep.confidence_mean carries).
         blocks = assemble_why_blocks(proj, order)
         if not blocks:
             # The pool was non-empty (ids came from the resolve search), so
