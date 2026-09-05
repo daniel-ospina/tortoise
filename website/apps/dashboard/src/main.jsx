@@ -2264,6 +2264,16 @@ function claimIntentInFlight() {
   async function provisionInApp(session, teamName = '') {
     setWelcomeProvisioning(true)
     setWelcomeProvisionError('')
+    // #2323 (code-review P2): use the LIVE session — the org-create submit
+    // can happen long after mount (an onboarding tab left open past token
+    // expiry), so the mount-captured token may no longer authenticate.
+    // supabase-js getSession() returns a fresh token transparently.
+    try {
+      const { data: live } = await supabaseClient.auth.getSession()
+      if (live && live.session && live.session.access_token && live.session.user) {
+        session = live.session
+      }
+    } catch { /* keep the passed session when getSession fails */ }
     // #1082 double-provision guard (fail-closed, mirrors welcome.html's
       // claimStatusGuard): a tt_claim_pending marker means a claimable anon
       // team may exist — never mint a stray team over it.
@@ -3067,6 +3077,12 @@ function claimIntentInFlight() {
     // #2246 (review, P1): hygiene — the shown-once welcome plaintext is
     // session-scoped; drop it with the other key state on logout.
     setWelcomeKey('')
+    // #2323 (code-review): the first-run provisioning labels are session-
+    // scoped too — a logout must not leak the previous session's org name
+    // into the next login's welcome header/step-1 summary.
+    setWelcomeTeamName('')
+    setWelcomeGraphName('')
+    setWelcomeTeamReady(false)
     // C7 #2116 (R1): the one-time reveal is session-scoped — a logout must
     // never leave plaintext mounted for the next login.
     setRevealKey(null)
@@ -3279,44 +3295,46 @@ function claimIntentInFlight() {
     if (Array.isArray(teams) && teams.length > 0) { setWizardStep(2); return }
     setWizardOrgBusy(true)
     setWizardOrgError('')
-    const session = sessionRef.current
-    if (!session || !session.access_token) {
-      setWizardOrgError('Your session ended — reload to sign in again.')
+    try {
+      const session = sessionRef.current
+      if (!session || !session.access_token) {
+        setWizardOrgError('Your session ended — reload to sign in again.')
+        return
+      }
+      const provisioned = await provisionInApp(session, name)
+      if (!provisioned) {
+        setWizardOrgError('Could not create your organization — try again.')
+        return
+      }
+      if (provisioned && provisioned.routedAway) {
+        // claim in flight / claimable anon team — the claim card owns the flow
+        return
+      }
+      // Success: the ONE org exists, named by the user. welcomeKey is the
+      // provisioned durable plaintext — shown once at the connect step (#2325),
+      // never on this card. In-memory only (ADR-010); a mid-wizard reload
+      // loses it and the connect step re-gates via the rows.
+      setWizardOrgName('')
+      setWelcomeKey(provisioned.api_key || '')
+      setWelcomeTeamName(provisioned.team_name || name)
+      setWelcomeGraphName(provisioned.graph_name || '')
+      setWelcomeTeamReady(true)
+      // Pin the new org so fork/connect checkpoints + key mint target it, and
+      // fetch alerts for the team row (parity with the pre-#2323 provisioned
+      // branch, #1860).
+      await loadTeams().catch(() => {})
+      refreshTeam('', undefined, teamRefreshSeqRef.current)
+        .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
+        .catch(() => {})
+      setWizardStep(2)
+    } catch (e) {
+      // #2323 (code-review): never leave the provisioning overlay + busy
+      // button stuck on an unexpected rejection — surface + recover.
+      setWizardOrgError((e && e.message) || 'Could not create your organization — try again.')
+    } finally {
       setWizardOrgBusy(false)
-      return
-    }
-    const provisioned = await provisionInApp(session, name)
-    if (!provisioned) {
       setWelcomeProvisioning(false)
-      setWizardOrgError(welcomeProvisionError || 'Could not create your organization — try again.')
-      setWizardOrgBusy(false)
-      return
     }
-    if (provisioned && provisioned.routedAway) {
-      // claim in flight / claimable anon team — the claim card owns the flow
-      setWelcomeProvisioning(false)
-      setWizardOrgBusy(false)
-      return
-    }
-    // Success: the ONE org exists, named by the user. welcomeKey is the
-    // provisioned durable plaintext — shown once at the connect step (#2325),
-    // never on this card. In-memory only (ADR-010); a mid-wizard reload
-    // loses it and the connect step re-gates via the rows.
-    setWizardOrgName('')
-    setWelcomeKey(provisioned.api_key || '')
-    setWelcomeTeamName(provisioned.team_name || name)
-    setWelcomeGraphName(provisioned.graph_name || '')
-    setWelcomeTeamReady(true)
-    setWelcomeProvisioning(false)
-    setWizardOrgBusy(false)
-    // Pin the new org so fork/connect checkpoints + key mint target it, and
-    // fetch alerts for the team row (parity with the pre-#2323 provisioned
-    // branch, #1860).
-    await loadTeams().catch(() => {})
-    refreshTeam('', undefined, teamRefreshSeqRef.current)
-      .then((t) => { if (t && t.team_id) loadAlerts(t.team_id) })
-      .catch(() => {})
-    setWizardStep(2)
   }
 
   // #1997 (W1): fork-card step handler — checkpoint fork (set-once). Build
@@ -3431,7 +3449,9 @@ function claimIntentInFlight() {
       // ?team_id= at call time); refresh the list so it shows there when the
       // user switches back, and re-gate this step.
       if (teamIdRef.current !== _teamAtCall) {
-        await loadAll('').catch(() => {})
+        // #2326 (code-review): a loadAll('') here would fetch the NEW team's
+        // keys — the mint landed on the PREVIOUS org, which reloads its own
+        // keys when the user switches back. Surface the error and re-gate.
         setWizardDurableError('The organization changed while the key was being created — the key was created on the previous organization. Switch back to it in the account menu to use it, or create another key here.')
         return
       }
@@ -3520,6 +3540,12 @@ function claimIntentInFlight() {
     // first-data cards, and the connect gate). Same convention as the
     // wizardDurableKey drop above.
     setWelcomeKey('')
+    // #2323 (code-review): drop the first-run labels with the team switch —
+    // welcomeTeamName must never label a DIFFERENT team's header/step-1
+    // summary after the user switches.
+    setWelcomeTeamName('')
+    setWelcomeGraphName('')
+    setWelcomeTeamReady(false)
     setError('')
     setCurrentTeamId(teamId)
     teamIdRef.current = teamId
@@ -4741,6 +4767,16 @@ function claimIntentInFlight() {
   // provisioned it (welcomeTeamReady) or the account already held one
   // (re-entry / invite-held paths). Drives the welcome exit gate + heading.
   const welcomeHasOrg = welcomeTeamReady || (Array.isArray(teams) && teams.length > 0)
+  // The org name shown in the welcome header/step-1 summary is the CURRENT
+  // team's name — welcomeTeamName (the first-run provision) only wins right
+  // after creation, before loadTeams pins `team` (code-review P2: a stale
+  // welcomeTeamName across a team switch must never label the wrong org).
+  const shownOrgName =
+    (welcomeTeamReady && welcomeTeamName) ||
+    (team && team.team_name) ||
+    (Array.isArray(teams)
+      ? ((teams.find((t) => t.team_id === teamIdRef.current) || teams[0] || {}).team_name || '')
+      : '') || ''
 
   if (welcomeMode && authed) {
     // #1566: first-timers are provisioned IN-APP — show the provisioning
@@ -4795,7 +4831,7 @@ function claimIntentInFlight() {
               <>
                 <h1 style={{ fontFamily: 'var(--serif, Georgia, serif)', fontWeight: 400, marginBottom: '0.5rem' }}>
                   {welcomeHasOrg
-                    ? (welcomeTeamName ? `${welcomeTeamName} is set up` : 'Your organization is set up')
+                    ? (shownOrgName ? `${shownOrgName} is set up` : 'Your organization is set up')
                     : 'Welcome to Tortoise'}
                 </h1>
                 <p className="dim" style={{ marginBottom: '1.25rem' }}>
@@ -4816,7 +4852,12 @@ function claimIntentInFlight() {
                   </div>
                   <p className="wizard-title">{WIZARD_STEPS[wizardStep].label}</p>
                   <p className="wizard-sub" style={{ marginBottom: '1rem' }}>
-                    {WIZARD_STEPS[wizardStep].sub}
+                    {wizardStep === 1 && welcomeHasOrg
+                      // #2323 (review P2): the shared step-1 sub ('Name your
+                      // organization…') is a contradiction for an org-holding
+                      // account on the read-only step — branch the copy.
+                      ? "You're already in an organization — you won't create another here. Pick how you'll use it next."
+                      : WIZARD_STEPS[wizardStep].sub}
                   </p>
 
                   {wizardStep === 0 && (
@@ -4844,7 +4885,7 @@ function claimIntentInFlight() {
                         // advances to the fork card.
                         <>
                           <p className="dim" style={{ marginBottom: '0.9rem' }}>
-                            You're set up in <strong>{welcomeTeamName || (team && team.team_name) || (Array.isArray(teams) && teams[0] ? teams[0].team_name : '') || 'your organization'}</strong>. Next, choose how you'll use Tortoise.
+                            You're set up in <strong>{shownOrgName || 'your organization'}</strong>. Next, choose how you'll use Tortoise.
                           </p>
                           <div className="wizard-nav">
                             <button type="button" className="ghost" onClick={() => setWizardStep(0)}>← Back</button>

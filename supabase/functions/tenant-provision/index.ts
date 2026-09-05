@@ -328,22 +328,25 @@ Deno.serve(async (req: Request) => {
     // no team_name.
     // The override is validated here with the same regex POST
     // /v1/onboarding/team enforces; an invalid/absent override falls back
-    // (never 500s) so a stale caller cannot regress.
+    // (never 500s) so a stale caller cannot regress. An override that passes
+    // the regex needs NO further sanitization and keeps its case ("Acme" stays
+    // "Acme" — code-review P3: the display-name fallback keeps lowercasing).
     const bodyTeamName =
       typeof body.team_name === "string" ? body.team_name.trim() : "";
     const TEAM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/;
-    const rawName =
-      (bodyTeamName && TEAM_NAME_RE.test(bodyTeamName))
-        ? bodyTeamName
-        : (display_name || email.split("@")[0]);
-    const teamName = rawName
-      .toLowerCase()
-      .replace(/[^a-zA-Z0-9_-]/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .substring(0, 64) || "user";
-
-    // Ensure starts with alphanumeric per Team.name regex
-    const safeName = /^[a-zA-Z0-9]/.test(teamName) ? teamName : `u-${teamName}`;
+    let safeName = "";
+    if (bodyTeamName && TEAM_NAME_RE.test(bodyTeamName)) {
+      safeName = bodyTeamName;
+    } else {
+      const rawName = display_name || email.split("@")[0];
+      const teamName = rawName
+        .toLowerCase()
+        .replace(/[^a-zA-Z0-9_-]/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .substring(0, 64) || "user";
+      // Ensure starts with alphanumeric per Team.name regex
+      safeName = /^[a-zA-Z0-9]/.test(teamName) ? teamName : `u-${teamName}`;
+    }
 
     // Generate a DETERMINISTIC team_id per user — SHA-256(user_id) truncated
     // to 26 hex chars. Retries (hook redelivery after a lost response, or a
