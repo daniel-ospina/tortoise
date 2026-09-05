@@ -1982,6 +1982,8 @@ def _hand_built_master() -> dict:
         "objects": {
             "core:Project": "A project",
             "core:WorkItem": "A unit of work",
+            "core:Problem": "A deviation between actual and desired state — "
+                            "problem-family parent (2026-08-31)",
             "core:document": "A document artifact",
             "core:tag": "A tag",
             "core:user": "A user",
@@ -2058,12 +2060,13 @@ def _hand_built_master() -> dict:
                           "and the reasoning that supports or undermines it. "
                           "Ephemeral: rule mechanics, approval logistics, "
                           "tool-specific workarounds.",
-            "dev": "Durable: root-cause analysis, the chosen fix approach vs "
-                   "rejected alternatives, durable constraints (e.g. preserve "
-                   "production semantics), and environment beliefs that affect "
-                   "future work (e.g. subagents stall under load). Ephemeral: "
+            "dev": "Durable: problem-family reasoning — incident root causes and "
+                   "the chosen vs rejected mitigations; debt items with "
+                   "cost-of-delay framing (velocity tax, incident risk, owner); "
+                   "theme/epic allocation decisions; the delivery flow shape "
+                   "(theme → epic → issue → PR → deployment). Ephemeral: "
                    "issue/PR numbers, CI status, test counts, commit hashes, "
-                   "tool workarounds.",
+                   "tool workarounds, sprint mechanics.",
             "marketing": "Durable: campaign strategy — which "
                           "campaigns/channels/audiences are being pursued and "
                           "why, the positioning decisions, the reasoning, the "
@@ -2203,7 +2206,7 @@ class TestClassifyStage:
                   if md.get("section") == "points"}
         assert points == {"statement"}
         assert "dev:requirement" not in spec
-        assert "dev:bug" not in spec
+        assert "dev:technicalDebt" not in spec
 
     def test_flag_off_byte_identical_no_telemetry_growth(self, monkeypatch):
         """kind_classifier=None + env unset → the pipeline is byte-
