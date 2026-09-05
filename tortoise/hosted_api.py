@@ -6424,11 +6424,22 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                     params={"sid": session_id, "ids": point_ids},
                 )
         if minted_event and event_id:
-            # no session guard needed — a minted eventId is a per-capture ULID
+            # W5 Phase F (#2104, review r3): the session guard is REQUIRED —
+            # the minted eventId is now DETERMINISTIC
+            # (ev_<sha256("sessionCaptured:"+session_id)>) and shared by every
+            # capture of the same session. Under the delete-during-capture race
+            # a concurrent same-session re-capture (which re-MERGEs a fresh
+            # Session and mints the SAME eventId) must NOT have its Event
+            # deleted by this sweep — the re-capture's extracted Points would
+            # dangle with no live Event for their eventId provenance and the
+            # EventRecorded journal entry would point at a deleted node (the
+            # per-capture ULID premise the old comment relied on is gone).
             with suppress(Exception):
                 proj.g.query(
+                    "OPTIONAL MATCH (s:Session {id:$sid}) WITH s "
+                    "WHERE s IS NULL "
                     "MATCH (e:Event) WHERE e.eventId = $eid DETACH DELETE e",
-                    params={"eid": event_id},
+                    params={"sid": session_id, "eid": event_id},
                 )
         with suppress(Exception):
             proj.g.query(

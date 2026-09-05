@@ -2480,6 +2480,12 @@ class TortoiseSDK:
         # the _emit_event journal would append a duplicate EventRecorded). The
         # Session MERGE + turn loop above stay unconditional (idempotent
         # no-ops for an identical-payload re-POST — 0 new nodes).
+        # Known limitation (review r3, accepted — hosted #1727 mirrors it): a
+        # GENUINE capture whose mint/stamp failed mid-write (non-fatal catch
+        # below) leaves the Session with an un-stamped Event gap; a same-
+        # session retry observes session_existed=True and replays (never
+        # re-mints), so the gap does not self-heal. Byte-parity with hosted;
+        # heal-on-replay would diverge the two surfaces.
         if not session_existed:
             try:
                 # W5 Phase F (#2104): the mint uses the DETERMINISTIC id
@@ -5294,6 +5300,17 @@ class TortoiseSDK:
             violations.append({
                 "section": section, "index": index,
                 "message": f"ingest: {section}[{index}] is_episodic is "
+                           f"server-managed and cannot be set on bundle items",
+            })
+        # W5 Phase F (#2104, review r3): _server_id is the server-ONLY
+        # explicit Event-id channel (capture mints) — a tenant bundle item
+        # carrying it would splat-bind create_event's keyword-only param below
+        # (the _coerce_props reject never sees it: the key binds the param, it
+        # never lands in props). Same shape-time reject as batch_id/is_episodic.
+        if "_server_id" in item:
+            violations.append({
+                "section": section, "index": index,
+                "message": f"ingest: {section}[{index}] _server_id is "
                            f"server-managed and cannot be set on bundle items",
             })
         if section == "points":

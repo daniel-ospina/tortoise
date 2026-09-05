@@ -3627,6 +3627,22 @@ def test_phase_f_event_id_is_server_only_channel(tmp_path):
         # The EXPLICIT internal param stays the one working channel.
         ev3 = sdk.create_event("x", "meeting", _server_id="ev_internal_ok")
         assert ev3.get("id") == "ev_internal_ok", ev3
+        # The ingest-bundle surface (Phase-2 **item splat into create_event)
+        # must also reject _server_id at shape time — a tenant entity item
+        # would otherwise bind the keyword-only param directly (it never lands
+        # in props, so the post-coerce reject cannot see it).
+        from tortoise.exceptions import BundleValidationError
+        try:
+            sdk.ingest({"entities": [{"type": "event", "name": "ing",
+                                      "eventKind": "meeting",
+                                      "_server_id": "ev_forced_ingest"}]})
+            raise AssertionError("ingest _server_id item must be rejected")
+        except BundleValidationError as ex:
+            assert "_server_id" in str(ex), ex
+        n_events = sdk._get_proj().g.query(
+            "MATCH (e:Event {eventId:'ev_forced_ingest'}) RETURN count(e)"
+        ).result_set[0][0]
+        assert n_events == 0, "a rejected ingest must mint nothing"
         # A fresh ULID is still minted when no _server_id is supplied.
         ev2 = sdk.create_event("x", "meeting", is_episodic=False)
         assert ev2.get("id"), ev2
